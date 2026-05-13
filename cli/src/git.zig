@@ -245,16 +245,24 @@ pub fn printGitConfigValue(allocator: Allocator, key: []const u8, label: []const
 }
 
 pub fn gitChecked(allocator: Allocator, git_args: []const []const u8) ![]u8 {
-    return gitCheckedInput(allocator, git_args, null);
+    return gitCheckedInputMax(allocator, git_args, null, max_git_output);
 }
 
 pub fn gitCheckedInput(allocator: Allocator, git_args: []const []const u8, input: ?[]const u8) ![]u8 {
+    return gitCheckedInputMax(allocator, git_args, input, max_git_output);
+}
+
+pub fn gitCheckedMax(allocator: Allocator, git_args: []const []const u8, max_output_bytes: usize) ![]u8 {
+    return gitCheckedInputMax(allocator, git_args, null, max_output_bytes);
+}
+
+pub fn gitCheckedInputMax(allocator: Allocator, git_args: []const []const u8, input: ?[]const u8, max_output_bytes: usize) ![]u8 {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
     try argv.append(allocator, "git");
     for (git_args) |arg| try argv.append(allocator, arg);
 
-    var result = try runCommand(allocator, argv.items, input, max_git_output);
+    var result = try runCommand(allocator, argv.items, input, max_output_bytes);
     if (result.exitCode() == 0) {
         const stdout = result.stdout;
         allocator.free(result.stderr);

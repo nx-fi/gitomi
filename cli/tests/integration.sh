@@ -145,6 +145,43 @@ init_repo "$reducer"
   gt fsck >/dev/null
 )
 
+echo "integration: index snapshots restore cache and enforce retention count"
+snapshots="$ROOT/snapshots"
+init_repo "$snapshots"
+(
+  cd "$snapshots"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  gt issue open --title "Snapshot base" >/dev/null
+  first_event="$(gt events list --json)"
+  issue_id="$(json_field "$first_event" object_id)"
+  [[ -n "$issue_id" ]] || fail "expected issue id from event list"
+  issue_ref="#${issue_id:0:7}"
+
+  gt index rebuild >/dev/null
+  snapshot_refs="$(git for-each-ref '--format=%(refname)' refs/gitomi/snapshots)"
+  [[ -n "$snapshot_refs" ]] || fail "expected at least one snapshot ref"
+  snapshot_ref="$(git for-each-ref --sort=-committerdate '--format=%(refname)' refs/gitomi/snapshots | head -n 1)"
+  manifest="$(git show "$snapshot_ref:manifest.json")"
+  assert_contains "$manifest" '"$schema":"urn:gitomi:snapshot:v1"'
+  assert_contains "$manifest" '"index_schema_version":"1"'
+  assert_contains "$manifest" '"covered_refs"'
+
+  rm -f .git/gitomi/index.sqlite
+  events="$(gt events list --json)"
+  assert_line_count "$events" 1
+  assert_contains "$events" '"event_type":"issue.opened"'
+  issues="$(gt issue list --json)"
+  assert_contains "$issues" '"title":"Snapshot base"'
+
+  for n in $(seq 1 33); do
+    gt issue title "$issue_ref" --title "Snapshot title $n" >/dev/null
+    gt index rebuild >/dev/null
+  done
+  snapshot_refs="$(git for-each-ref '--format=%(refname)' refs/gitomi/snapshots)"
+  assert_line_count "$snapshot_refs" 32
+  gt fsck >/dev/null
+)
+
 echo "integration: issue edit batches multiple updates"
 issue_edit="$ROOT/issue-edit"
 init_repo "$issue_edit"
@@ -282,6 +319,34 @@ init_repo "$pull_edit"
   gt fsck >/dev/null
 )
 
+echo "integration: data commit references are derived"
+derived_refs="$ROOT/derived-refs"
+init_repo "$derived_refs"
+(
+  cd "$derived_refs"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  gt issue open --title "Referenced issue" >/dev/null
+  issues_json="$(gt issue list --json)"
+  issue_id="$(json_field "$issues_json" id)"
+  [[ -n "$issue_id" ]] || fail "expected issue id from issue list"
+  gt pr create --title "Referenced pull" --base main --head feature >/dev/null
+  pulls_json="$(gt pr list --json)"
+  pull_id="$(json_field "$pulls_json" id)"
+  [[ -n "$pull_id" ]] || fail "expected pull id from pull list"
+
+  mkdir -p src
+  printf 'referenced\n' > src/app.txt
+  git add src/app.txt
+  git commit -m "Connect #$issue_id and #$pull_id" >/dev/null
+  code_commit="$(git rev-parse HEAD)"
+
+  issue_show_json="$(gt issue show "#${issue_id:0:7}" --json)"
+  assert_contains "$issue_show_json" '"commit_references":["'"$code_commit"'"]'
+  pull_show_json="$(gt pr view "#${pull_id:0:7}" --json)"
+  assert_contains "$pull_show_json" '"commit_references":["'"$code_commit"'"]'
+  gt fsck >/dev/null
+)
+
 echo "integration: invalid signed event is not projected"
 invalid="$ROOT/invalid"
 init_repo "$invalid"
@@ -345,6 +410,62 @@ init_repo "$duplicate_open"
   gt fsck >/dev/null
 )
 
+echo "integration: collection cardinality overflows are audited without projection"
+collection_limits="$ROOT/collection-limits"
+init_repo "$collection_limits"
+(
+  cd "$collection_limits"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+
+  open_args=(issue open --title "Bounded issue")
+  for n in $(seq 1 128); do
+    open_args+=(--label "label$n" --assignee "user$n")
+  done
+  gt "${open_args[@]}" >/dev/null
+
+  issue_json="$(gt issue list --json)"
+  issue_id="$(json_field "$issue_json" id)"
+  [[ -n "$issue_id" ]] || fail "expected bounded issue id"
+  issue_ref="#${issue_id:0:7}"
+
+  add_labels=(issue edit "$issue_ref")
+  for n in $(seq 129 256); do
+    add_labels+=(--label "label$n")
+  done
+  gt "${add_labels[@]}" >/dev/null
+
+  gt issue edit "$issue_ref" --title "Overflow issue title" --label label257 --assignee user129 >/dev/null
+  events="$(gt events list --json)"
+  assert_contains "$events" '"domain_status":"rejected"'
+  assert_contains "$events" '"rejection_reason":"collection_limit_exceeded"'
+  issue_show="$(gt issue show "$issue_ref")"
+  assert_contains "$issue_show" "Bounded issue"
+  assert_not_contains "$issue_show" "Overflow issue title"
+  assert_not_contains "$issue_show" "label257"
+  assert_not_contains "$issue_show" "user129"
+
+  gt pr create --title "Bounded pull" --base main --head feature >/dev/null
+  pull_json="$(gt pr list --json)"
+  pull_id="$(json_field "$pull_json" id)"
+  [[ -n "$pull_id" ]] || fail "expected bounded pull id"
+  pull_ref="#${pull_id:0:7}"
+
+  add_reviewers=(pr edit "$pull_ref")
+  for n in $(seq 1 128); do
+    add_reviewers+=(--add-reviewer "reviewer$n")
+  done
+  gt "${add_reviewers[@]}" >/dev/null
+
+  gt pr edit "$pull_ref" --title "Overflow pull title" --add-reviewer reviewer129 >/dev/null
+  events="$(gt events list --json)"
+  assert_contains "$events" '"rejection_reason":"collection_limit_exceeded"'
+  pull_show="$(gt pr view "$pull_ref")"
+  assert_contains "$pull_show" "Bounded pull"
+  assert_not_contains "$pull_show" "Overflow pull title"
+  assert_not_contains "$pull_show" "reviewer129"
+  gt fsck >/dev/null
+)
+
 echo "integration: RBAC projections and CLI preflight"
 rbac_repo="$ROOT/rbac"
 init_repo "$rbac_repo"
@@ -372,6 +493,60 @@ init_repo "$rbac_repo"
     fail "expected reader issue open to fail authorization"
   fi
   assert_contains "$(cat preflight.out)" "insufficient_role"
+)
+
+echo "integration: concurrent RBAC events resolve by hash and remove-wins"
+concurrent_rbac="$ROOT/concurrent-rbac"
+init_repo "$concurrent_rbac"
+(
+  cd "$concurrent_rbac"
+  gt init --repo-id "$REPO_ID" --principal alice --device anchor >/dev/null
+  empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
+
+  gt identity add-device alice m >/dev/null
+  gt identity add-device alice z >/dev/null
+  write_gt_config "$REPO_ID" alice m 0
+  gt issue open --title "M anchor" >/dev/null
+  m_base="$(git rev-parse refs/gitomi/inbox/alice/m)"
+  write_gt_config "$REPO_ID" alice z 0
+  gt issue open --title "Z anchor" >/dev/null
+  z_base="$(git rev-parse refs/gitomi/inbox/alice/z)"
+  write_gt_config "$REPO_ID" alice anchor 2
+  gt acl grant bob reader >/dev/null
+  anchor_base="$(git rev-parse refs/gitomi/inbox/alice/anchor)"
+
+  acl_grant_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000000501","event_type":"acl.role_granted","object":{"kind":"acl","id":"acl:bob"},"idempotency_key":"018f0000-0000-7000-8000-000000000502","actor":{"principal":"alice","device":"z"},"seq":2,"occurred_at":"2026-05-13T18:31:00Z","parent_hashes":{"log":"'"$z_base"'","causal":["'"$anchor_base"'"],"related":["'"$anchor_base"'"]},"legacy":{},"payload":{"principal":"bob","role":"reporter"}}'
+  acl_grant_commit="$(git commit-tree -S -m "acl.role_granted bob reporter" -m "$acl_grant_body" "$empty_tree" -p "$z_base" -p "$anchor_base")"
+  acl_revoke_commit=""
+  for n in $(seq 1 200); do
+    event_uuid="$(printf '018f0000-0000-7000-8000-%012d' $((600 + n)))"
+    idem="$(printf '018f0000-0000-7000-8000-%012d' $((800 + n)))"
+    acl_revoke_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"'"$event_uuid"'","event_type":"acl.role_revoked","object":{"kind":"acl","id":"acl:bob"},"idempotency_key":"'"$idem"'","actor":{"principal":"alice","device":"m"},"seq":2,"occurred_at":"2026-05-13T18:31:01Z","parent_hashes":{"log":"'"$m_base"'","causal":["'"$anchor_base"'"],"related":["'"$anchor_base"'"]},"legacy":{},"payload":{"principal":"bob","role":"reader"}}'
+    acl_revoke_commit="$(git commit-tree -S -m "acl.role_revoked bob reader $n" -m "$acl_revoke_body" "$empty_tree" -p "$m_base" -p "$anchor_base")"
+    [[ "$acl_revoke_commit" > "$acl_grant_commit" ]] && break
+  done
+  [[ "$acl_revoke_commit" > "$acl_grant_commit" ]] || fail "expected to generate ACL revoke hash greater than grant hash"
+  git update-ref refs/gitomi/inbox/alice/m "$acl_revoke_commit" "$m_base"
+  git update-ref refs/gitomi/inbox/alice/z "$acl_grant_commit" "$z_base"
+  acl_json="$(gt acl list --json)"
+  assert_not_contains "$acl_json" '"principal":"bob"'
+
+  write_gt_config "$REPO_ID" alice anchor 3
+  gt identity add-device alice phone >/dev/null
+  phone_base="$(git rev-parse refs/gitomi/inbox/alice/anchor)"
+  m_head="$(git rev-parse refs/gitomi/inbox/alice/m)"
+  z_head="$(git rev-parse refs/gitomi/inbox/alice/z)"
+
+  phone_revoke_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000001001","event_type":"identity.device_revoked","object":{"kind":"identity","id":"identity:alice:phone"},"idempotency_key":"018f0000-0000-7000-8000-000000001002","actor":{"principal":"alice","device":"m"},"seq":3,"occurred_at":"2026-05-13T18:32:00Z","parent_hashes":{"log":"'"$m_head"'","causal":["'"$phone_base"'"],"related":["'"$phone_base"'"]},"legacy":{},"payload":{"principal":"alice","device":"phone"}}'
+  phone_revoke_commit="$(git commit-tree -S -m "identity.device_revoked alice/phone" -m "$phone_revoke_body" "$empty_tree" -p "$m_head" -p "$phone_base")"
+  phone_add_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000001003","event_type":"identity.device_added","object":{"kind":"identity","id":"identity:alice:phone"},"idempotency_key":"018f0000-0000-7000-8000-000000001004","actor":{"principal":"alice","device":"z"},"seq":3,"occurred_at":"2026-05-13T18:32:01Z","parent_hashes":{"log":"'"$z_head"'","causal":["'"$phone_base"'"],"related":["'"$phone_base"'"]},"legacy":{},"payload":{"principal":"alice","device":"phone","signing_key":{"scheme":"ssh","public_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIrotate","fingerprint":"phone-rotate"}}}'
+  phone_add_commit="$(git commit-tree -S -m "identity.device_added alice/phone" -m "$phone_add_body" "$empty_tree" -p "$z_head" -p "$phone_base")"
+  git update-ref refs/gitomi/inbox/alice/m "$phone_revoke_commit" "$m_head"
+  git update-ref refs/gitomi/inbox/alice/z "$phone_add_commit" "$z_head"
+  identity_json="$(gt identity list --json)"
+  assert_contains "$identity_json" '"device":"phone"'
+  assert_contains "$identity_json" '"active":false'
+  gt fsck >/dev/null
 )
 
 echo "integration: unauthorized remote event is audited and not projected"

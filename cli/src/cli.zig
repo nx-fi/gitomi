@@ -1,4 +1,5 @@
 const std = @import("std");
+const actions = @import("actions.zig");
 const comment = @import("comment.zig");
 const errors = @import("errors.zig");
 const event_mod = @import("event.zig");
@@ -67,6 +68,8 @@ fn realMain() !void {
         try cmdAcl(allocator, args[2..]);
     } else if (std.mem.eql(u8, cmd, "identity")) {
         try cmdIdentity(allocator, args[2..]);
+    } else if (std.mem.eql(u8, cmd, "actions") or std.mem.eql(u8, cmd, "action")) {
+        try cmdActions(allocator, args[2..], if (std.mem.eql(u8, cmd, "action")) "gt action" else "gt actions");
     } else if (std.mem.eql(u8, cmd, "runs")) {
         try cmdRuns(allocator, args[2..]);
     } else if (std.mem.eql(u8, cmd, "sync")) {
@@ -122,6 +125,11 @@ fn printUsage() !void {
         \\  gt identity add-device PRINCIPAL DEVICE [--public-key KEY] [--fingerprint FP] [--scheme ssh]
         \\  gt identity revoke-device PRINCIPAL DEVICE
         \\  gt identity list [--json]
+        \\  gt actions workflows [--json] [--ref REF|--oid OID]
+        \\  gt actions request --workflow WORKFLOW [--ref REF|--oid OID] [--event EVENT]
+        \\  gt actions complete RUN --conclusion CONCLUSION [--workflow WORKFLOW] [--ref REF|--oid OID] [--event EVENT]
+        \\  gt actions run --event EVENT [--ref REF|--oid OID] [--object-id ID] [--dry-run] [--act PATH] [-- ACT_ARGS...]
+        \\  gt actions run-requested [RUN] [--dry-run] [--act PATH] [-- ACT_ARGS...]
         \\  gt runs prune [--dry-run] [--max-age-days N] [--max-count N] [--max-bytes N]
         \\  gt sync [--remote REMOTE] [--pull-only|--push-only]
         \\  gt web [--host 127.0.0.1] [--port 8080]
@@ -1277,6 +1285,181 @@ fn cmdIdentity(allocator: Allocator, args: []const []const u8) !void {
     }
 
     try io.eprint("gt identity: expected subcommand 'add-device', 'revoke-device', or 'list'\n", .{});
+    return CliError.UserError;
+}
+
+fn cmdActions(allocator: Allocator, args: []const []const u8, command_name: []const u8) !void {
+    if (args.len == 0) {
+        try io.eprint("{s}: expected subcommand 'workflows', 'request', 'complete', 'run', or 'run-requested'\n", .{command_name});
+        return CliError.UserError;
+    }
+
+    if (std.mem.eql(u8, args[0], "workflows") or std.mem.eql(u8, args[0], "list")) {
+        var json = false;
+        var target_ref: ?[]const u8 = null;
+        var target_oid: ?[]const u8 = null;
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            const arg = args[i];
+            if (std.mem.eql(u8, arg, "--json")) {
+                json = true;
+            } else if (std.mem.eql(u8, arg, "--ref")) {
+                target_ref = try util.requireValue(args, &i, "--ref");
+            } else if (std.mem.eql(u8, arg, "--oid")) {
+                target_oid = try util.requireValue(args, &i, "--oid");
+            } else {
+                try io.eprint("{s} workflows: unknown option '{s}'\n", .{ command_name, arg });
+                return CliError.UserError;
+            }
+        }
+        try actions.printWorkflows(allocator, target_ref, target_oid, json);
+        return;
+    }
+
+    if (std.mem.eql(u8, args[0], "request")) {
+        var workflow: ?[]const u8 = null;
+        var target_ref: ?[]const u8 = null;
+        var target_oid: ?[]const u8 = null;
+        var event_name: ?[]const u8 = null;
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            const arg = args[i];
+            if (std.mem.eql(u8, arg, "--workflow") or std.mem.eql(u8, arg, "-W")) {
+                workflow = try util.requireValue(args, &i, "--workflow");
+            } else if (std.mem.eql(u8, arg, "--ref")) {
+                target_ref = try util.requireValue(args, &i, "--ref");
+            } else if (std.mem.eql(u8, arg, "--oid")) {
+                target_oid = try util.requireValue(args, &i, "--oid");
+            } else if (std.mem.eql(u8, arg, "--event")) {
+                event_name = try util.requireValue(args, &i, "--event");
+            } else {
+                try io.eprint("{s} request: unknown option '{s}'\n", .{ command_name, arg });
+                return CliError.UserError;
+            }
+        }
+        if (workflow == null or std.mem.trim(u8, workflow.?, " \t\r\n").len == 0) {
+            try io.eprint("{s} request: --workflow is required\n", .{command_name});
+            return CliError.UserError;
+        }
+        var result = try actions.requestWorkflow(allocator, workflow.?, target_ref, target_oid, event_name, null);
+        defer result.deinit();
+        return;
+    }
+
+    if (std.mem.eql(u8, args[0], "complete")) {
+        if (args.len < 2) {
+            try io.eprint("{s} complete: RUN is required\n", .{command_name});
+            return CliError.UserError;
+        }
+        var conclusion: ?[]const u8 = null;
+        var target_ref: ?[]const u8 = null;
+        var target_oid: ?[]const u8 = null;
+        var workflow: ?[]const u8 = null;
+        var event_name: ?[]const u8 = null;
+        var i: usize = 2;
+        while (i < args.len) : (i += 1) {
+            const arg = args[i];
+            if (std.mem.eql(u8, arg, "--conclusion")) {
+                conclusion = try util.requireValue(args, &i, "--conclusion");
+            } else if (std.mem.eql(u8, arg, "--ref")) {
+                target_ref = try util.requireValue(args, &i, "--ref");
+            } else if (std.mem.eql(u8, arg, "--oid")) {
+                target_oid = try util.requireValue(args, &i, "--oid");
+            } else if (std.mem.eql(u8, arg, "--workflow") or std.mem.eql(u8, arg, "-W")) {
+                workflow = try util.requireValue(args, &i, "--workflow");
+            } else if (std.mem.eql(u8, arg, "--event")) {
+                event_name = try util.requireValue(args, &i, "--event");
+            } else {
+                try io.eprint("{s} complete: unknown option '{s}'\n", .{ command_name, arg });
+                return CliError.UserError;
+            }
+        }
+        if (conclusion == null) {
+            try io.eprint("{s} complete: --conclusion is required\n", .{command_name});
+            return CliError.UserError;
+        }
+        var result = try actions.completeRun(allocator, args[1], conclusion.?, target_ref, target_oid, workflow, event_name);
+        defer result.deinit();
+        return;
+    }
+
+    if (std.mem.eql(u8, args[0], "run") or std.mem.eql(u8, args[0], "schedule")) {
+        var event_type: ?[]const u8 = null;
+        var target_ref: ?[]const u8 = null;
+        var target_oid: ?[]const u8 = null;
+        var object_id: ?[]const u8 = null;
+        var act_path: []const u8 = "act";
+        var dry_run = false;
+        var extra_args: []const []const u8 = &.{};
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            const arg = args[i];
+            if (std.mem.eql(u8, arg, "--")) {
+                extra_args = args[i + 1 ..];
+                break;
+            } else if (std.mem.eql(u8, arg, "--event")) {
+                event_type = try util.requireValue(args, &i, "--event");
+            } else if (std.mem.eql(u8, arg, "--ref")) {
+                target_ref = try util.requireValue(args, &i, "--ref");
+            } else if (std.mem.eql(u8, arg, "--oid")) {
+                target_oid = try util.requireValue(args, &i, "--oid");
+            } else if (std.mem.eql(u8, arg, "--object-id")) {
+                object_id = try util.requireValue(args, &i, "--object-id");
+            } else if (std.mem.eql(u8, arg, "--act")) {
+                act_path = try util.requireValue(args, &i, "--act");
+            } else if (std.mem.eql(u8, arg, "--dry-run")) {
+                dry_run = true;
+            } else {
+                try io.eprint("{s} run: unknown option '{s}'\n", .{ command_name, arg });
+                return CliError.UserError;
+            }
+        }
+        if (event_type == null or std.mem.trim(u8, event_type.?, " \t\r\n").len == 0) {
+            try io.eprint("{s} run: --event is required\n", .{command_name});
+            return CliError.UserError;
+        }
+        try actions.scheduleEvent(allocator, event_type.?, target_ref, target_oid, object_id, .{
+            .act_path = act_path,
+            .dry_run = dry_run,
+            .extra_args = extra_args,
+        });
+        return;
+    }
+
+    if (std.mem.eql(u8, args[0], "run-requested")) {
+        var run_filter: ?[]const u8 = null;
+        var act_path: []const u8 = "act";
+        var dry_run = false;
+        var extra_args: []const []const u8 = &.{};
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            const arg = args[i];
+            if (std.mem.eql(u8, arg, "--")) {
+                extra_args = args[i + 1 ..];
+                break;
+            } else if (std.mem.eql(u8, arg, "--act")) {
+                act_path = try util.requireValue(args, &i, "--act");
+            } else if (std.mem.eql(u8, arg, "--dry-run")) {
+                dry_run = true;
+            } else if (std.mem.startsWith(u8, arg, "-")) {
+                try io.eprint("{s} run-requested: unknown option '{s}'\n", .{ command_name, arg });
+                return CliError.UserError;
+            } else if (run_filter == null) {
+                run_filter = arg;
+            } else {
+                try io.eprint("{s} run-requested: unexpected argument '{s}'\n", .{ command_name, arg });
+                return CliError.UserError;
+            }
+        }
+        try actions.runRequested(allocator, run_filter, .{
+            .act_path = act_path,
+            .dry_run = dry_run,
+            .extra_args = extra_args,
+        });
+        return;
+    }
+
+    try io.eprint("{s}: expected subcommand 'workflows', 'request', 'complete', 'run', or 'run-requested'\n", .{command_name});
     return CliError.UserError;
 }
 

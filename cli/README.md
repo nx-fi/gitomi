@@ -64,6 +64,11 @@ gt comment list issue|pr OBJECT [--json]
 gt comment add issue|pr OBJECT --body BODY
 gt comment edit COMMENT --body BODY
 gt comment redact COMMENT [--reason REASON]
+gt actions workflows [--json] [--ref REF|--oid OID]
+gt actions request --workflow WORKFLOW [--ref REF|--oid OID] [--event EVENT]
+gt actions complete RUN --conclusion CONCLUSION [--workflow WORKFLOW] [--ref REF|--oid OID] [--event EVENT]
+gt actions run --event EVENT [--ref REF|--oid OID] [--object-id ID] [--dry-run] [--act PATH] [-- ACT_ARGS...]
+gt actions run-requested [RUN] [--dry-run] [--act PATH] [-- ACT_ARGS...]
 gt runs prune [--dry-run] [--max-age-days N] [--max-count N] [--max-bytes N]
 gt sync [--remote REMOTE] [--pull-only|--push-only]
 gt web [--host 127.0.0.1] [--port 8080]
@@ -98,6 +103,15 @@ ref, not every locally replicated inbox ref.
 commits, native Git signatures, v1 event envelopes, matching repo IDs, unique
 and strictly increasing `(principal, device, seq)` tuples, and first-parent
 inbox-chain shape.
+
+`gt actions workflows` reads GitHub Actions-compatible workflow definitions from
+`.github/workflows/*.yml` and `.github/workflows/*.yaml` in the selected commit.
+`gt actions run` schedules matching workflows for a Gitomi or data-plane event,
+emits a signed `action.run_requested` event, executes the workflow through
+`nektos/act`, then emits a signed `action.run_completed` event. `gt actions
+request` and `gt actions complete` expose the same event emission manually, and
+`gt actions run-requested` executes accepted pending run requests from the local
+event projection. Extra act flags can be passed after `--`.
 
 `gt index rebuild` writes a disposable SQLite event projection to
 `.git/gitomi/index.sqlite`, including the inbox ref heads used to decide

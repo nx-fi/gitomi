@@ -476,6 +476,71 @@ pub fn buildIdentityDeviceRevokedJson(
     return try buf.toOwnedSlice(allocator);
 }
 
+pub fn buildActionRunRequestedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    run_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    workflow: []const u8,
+    target_ref: ?[]const u8,
+    target_oid: ?[]const u8,
+    event_name: ?[]const u8,
+    gitomi_event_type: ?[]const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, run_id, event_uuid, idem, occurred_at, parents, "action.run_requested", "action");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "workflow", workflow, true);
+    if (target_ref) |value| try appendJsonFieldString(&buf, allocator, "target_ref", value, true);
+    if (target_oid) |value| try appendJsonFieldString(&buf, allocator, "target_oid", value, true);
+    if (event_name) |value| try appendJsonFieldString(&buf, allocator, "event_name", value, true);
+    if (gitomi_event_type) |value| try appendJsonFieldString(&buf, allocator, "gitomi_event_type", value, true);
+    if (buf.items[buf.items.len - 1] == ',') {
+        buf.items.len -= 1;
+    }
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildActionRunCompletedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    run_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    conclusion: []const u8,
+    target_ref: ?[]const u8,
+    target_oid: ?[]const u8,
+    workflow: ?[]const u8,
+    event_name: ?[]const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, run_id, event_uuid, idem, occurred_at, parents, "action.run_completed", "action");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "run_id", run_id, true);
+    try appendJsonFieldString(&buf, allocator, "conclusion", conclusion, true);
+    if (target_ref) |value| try appendJsonFieldString(&buf, allocator, "target_ref", value, true);
+    if (target_oid) |value| try appendJsonFieldString(&buf, allocator, "target_oid", value, true);
+    if (workflow) |value| try appendJsonFieldString(&buf, allocator, "workflow", value, true);
+    if (event_name) |value| try appendJsonFieldString(&buf, allocator, "event_name", value, true);
+    if (buf.items[buf.items.len - 1] == ',') {
+        buf.items.len -= 1;
+    }
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
 fn appendEnvelopePrefix(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
