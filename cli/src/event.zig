@@ -13,6 +13,7 @@ const looksLikeUuid = util.looksLikeUuid;
 const appendJsonFieldString = json_writer.appendJsonFieldString;
 const appendJsonFieldUnsigned = json_writer.appendJsonFieldUnsigned;
 const appendJsonFieldStringArray = json_writer.appendJsonFieldStringArray;
+const appendJsonFieldBool = json_writer.appendJsonFieldBool;
 
 pub const event_schema = "urn:gitomi:event:v1";
 
@@ -161,6 +162,183 @@ pub fn buildIssueStringPayloadJson(
     try buf.appendSlice(allocator, "}}");
 
     return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildCommentAddedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    comment_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parent_kind: []const u8,
+    parent_id: []const u8,
+    body: []const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, comment_id, event_uuid, idem, occurred_at, "comment.added", "comment");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "parent_kind", parent_kind, true);
+    try appendJsonFieldString(&buf, allocator, "parent_id", parent_id, true);
+    try appendJsonFieldString(&buf, allocator, "body", body, false);
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildCommentBodySetJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    comment_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    body: []const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, comment_id, event_uuid, idem, occurred_at, "comment.body_set", "comment");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "body", body, false);
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildCommentRedactedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    comment_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    reason: ?[]const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, comment_id, event_uuid, idem, occurred_at, "comment.redacted", "comment");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    if (reason) |value| try appendJsonFieldString(&buf, allocator, "reason", value, false);
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildPullOpenedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    pull_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    title: []const u8,
+    body: []const u8,
+    base_ref: []const u8,
+    head_ref: []const u8,
+    draft: bool,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, pull_id, event_uuid, idem, occurred_at, "pull.opened", "pull");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "title", title, true);
+    if (body.len != 0) {
+        try appendJsonFieldString(&buf, allocator, "body", body, true);
+    }
+    try appendJsonFieldString(&buf, allocator, "base_ref", base_ref, true);
+    try appendJsonFieldString(&buf, allocator, "head_ref", head_ref, true);
+    if (draft) {
+        try appendJsonFieldBool(&buf, allocator, "draft", true, true);
+    }
+    if (buf.items[buf.items.len - 1] == ',') {
+        buf.items.len -= 1;
+    }
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildPullStringPayloadJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    pull_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    event_type: []const u8,
+    payload_key: []const u8,
+    payload_value: []const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, pull_id, event_uuid, idem, occurred_at, event_type, "pull");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, payload_key, payload_value, false);
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildPullMergedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    pull_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    merge_oid: ?[]const u8,
+    target_oid: ?[]const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, pull_id, event_uuid, idem, occurred_at, "pull.merged", "pull");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    if (merge_oid) |value| try appendJsonFieldString(&buf, allocator, "merge_oid", value, true);
+    if (target_oid) |value| try appendJsonFieldString(&buf, allocator, "target_oid", value, true);
+    if (buf.items[buf.items.len - 1] == ',') {
+        buf.items.len -= 1;
+    }
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn appendEnvelopePrefix(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    object_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    event_type: []const u8,
+    object_kind: []const u8,
+) !void {
+    try buf.append(allocator, '{');
+    try appendJsonFieldString(buf, allocator, "$schema", event_schema, true);
+    try appendJsonFieldString(buf, allocator, "repo_id", cfg.repo_id, true);
+    try appendJsonFieldString(buf, allocator, "event_uuid", event_uuid, true);
+    try appendJsonFieldString(buf, allocator, "event_type", event_type, true);
+    try buf.appendSlice(allocator, "\"object\":{");
+    try appendJsonFieldString(buf, allocator, "kind", object_kind, true);
+    try appendJsonFieldString(buf, allocator, "id", object_id, false);
+    try buf.appendSlice(allocator, "},");
+    try appendJsonFieldString(buf, allocator, "idempotency_key", idem, true);
+    try buf.appendSlice(allocator, "\"actor\":{");
+    try appendJsonFieldString(buf, allocator, "principal", cfg.principal, true);
+    try appendJsonFieldString(buf, allocator, "device", cfg.device, false);
+    try buf.appendSlice(allocator, "},");
+    try appendJsonFieldUnsigned(buf, allocator, "seq", seq, true);
+    try appendJsonFieldString(buf, allocator, "occurred_at", occurred_at, true);
+    try buf.appendSlice(allocator, "\"legacy\":{},");
 }
 
 pub fn validateEventEnvelope(allocator: Allocator, commit: []const u8, body: []const u8) !void {

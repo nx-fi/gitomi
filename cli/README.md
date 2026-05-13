@@ -44,6 +44,21 @@ gt issue body ISSUE --body BODY
 gt issue close|reopen ISSUE
 gt issue label add|remove ISSUE LABEL
 gt issue assignee add|remove ISSUE PRINCIPAL
+gt pull list [--json]
+gt pull open --title TITLE --base BASE --head HEAD [--body BODY] [--draft]
+gt pull title PULL --title TITLE
+gt pull body PULL --body BODY
+gt pull close|reopen PULL
+gt pull base PULL --base BASE
+gt pull head PULL --head HEAD
+gt pull label add|remove PULL LABEL
+gt pull assignee add|remove PULL PRINCIPAL
+gt pull reviewer add|remove PULL PRINCIPAL
+gt pull merge PULL [--merge-oid OID] [--target-oid OID]
+gt comment list issue ISSUE [--json]
+gt comment add issue ISSUE --body BODY
+gt comment edit COMMENT --body BODY
+gt comment redact COMMENT [--reason REASON]
 gt sync [--remote REMOTE] [--pull-only|--push-only]
 gt web [--host 127.0.0.1] [--port 8080]
 ```
