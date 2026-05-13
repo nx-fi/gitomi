@@ -14,6 +14,13 @@ Run from this package:
 zig build run -- --help
 ```
 
+Tests:
+
+```sh
+zig build test
+zig build integration-test
+```
+
 Installed binary name:
 
 ```sh
@@ -32,6 +39,7 @@ gt refs
 gt events list [--json] [--limit N] [--ref REF]
 gt issue open --title TITLE [--body BODY] [--label LABEL] [--assignee PRINCIPAL]
 gt sync [--remote REMOTE] [--pull-only|--push-only]
+gt web [--host 127.0.0.1] [--port 8080]
 ```
 
 `gt issue open` writes a signed Git commit to the configured inbox ref under
@@ -48,7 +56,12 @@ inspection instead of clobbering local authoritative refs.
 commits, native Git signatures, v1 event envelopes, matching repo IDs, unique
 `(principal, device, seq)` tuples, and first-parent inbox-chain shape.
 
-`gt index rebuild` writes a disposable event projection to
-`.git/gitomi/index.jsonl` with ref heads in `.git/gitomi/index.refs`.
-`gt events list` and `gt status` rebuild it automatically when inbox heads
-change, then read from the index instead of running `git show` for every event.
+`gt index rebuild` writes a disposable SQLite event projection to
+`.git/gitomi/index.sqlite`, including the inbox ref heads used to decide
+freshness. `gt events list`, `gt status`, and the web UI rebuild it
+automatically when inbox heads change, then query the cache instead of running
+`git show` for every event.
+
+`gt web` starts a local-only GitHub-like web UI for the current repository. It
+binds to loopback by default, serves overview/issues/events/refs pages, and can
+create signed issue events through the same storage path as `gt issue open`.
