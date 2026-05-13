@@ -1228,6 +1228,76 @@ test "validated envelope rejects known event with missing required payload" {
     try std.testing.expectError(error.InvalidEventEnvelope, parseValidatedEnvelope(std.testing.allocator, body));
 }
 
+test "acl object id targets principal instead of uuid" {
+    const body =
+        \\{
+        \\  "$schema": "urn:gitomi:event:v1",
+        \\  "repo_id": "018f0000-0000-7000-8000-000000000001",
+        \\  "event_uuid": "018f0000-0000-7000-8000-000000000002",
+        \\  "event_type": "acl.role_granted",
+        \\  "object": {
+        \\    "kind": "acl",
+        \\    "id": "acl:bob"
+        \\  },
+        \\  "idempotency_key": "018f0000-0000-7000-8000-000000000004",
+        \\  "actor": {
+        \\    "principal": "alice",
+        \\    "device": "laptop"
+        \\  },
+        \\  "parent_hashes": {
+        \\    "log": "",
+        \\    "causal": [],
+        \\    "related": []
+        \\  },
+        \\  "seq": 1,
+        \\  "occurred_at": "2026-05-13T18:30:59Z",
+        \\  "legacy": {},
+        \\  "payload": {
+        \\    "principal": "bob",
+        \\    "role": "maintainer"
+        \\  }
+        \\}
+    ;
+
+    var envelope = try parseValidatedEnvelope(std.testing.allocator, body);
+    defer envelope.deinit();
+    try std.testing.expectEqualStrings("acl:bob", envelope.object_id);
+}
+
+test "identity object id must match principal and device payload" {
+    const body =
+        \\{
+        \\  "$schema": "urn:gitomi:event:v1",
+        \\  "repo_id": "018f0000-0000-7000-8000-000000000001",
+        \\  "event_uuid": "018f0000-0000-7000-8000-000000000002",
+        \\  "event_type": "identity.device_revoked",
+        \\  "object": {
+        \\    "kind": "identity",
+        \\    "id": "identity:bob:phone"
+        \\  },
+        \\  "idempotency_key": "018f0000-0000-7000-8000-000000000004",
+        \\  "actor": {
+        \\    "principal": "alice",
+        \\    "device": "laptop"
+        \\  },
+        \\  "parent_hashes": {
+        \\    "log": "",
+        \\    "causal": [],
+        \\    "related": []
+        \\  },
+        \\  "seq": 1,
+        \\  "occurred_at": "2026-05-13T18:30:59Z",
+        \\  "legacy": {},
+        \\  "payload": {
+        \\    "principal": "bob",
+        \\    "device": "laptop"
+        \\  }
+        \\}
+    ;
+
+    try std.testing.expectError(error.InvalidEventEnvelope, parseValidatedEnvelope(std.testing.allocator, body));
+}
+
 test "validated envelope rejects pull state_set merged" {
     const body =
         \\{

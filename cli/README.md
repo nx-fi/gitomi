@@ -88,13 +88,16 @@ chain-invalid staged inbox refs are moved under `refs/gitomi/quarantine/*`.
 
 `gt fsck` verifies authoritative inbox refs for ref-safe names, empty-tree event
 commits, native Git signatures, v1 event envelopes, matching repo IDs, unique
-`(principal, device, seq)` tuples, and first-parent inbox-chain shape.
+and strictly increasing `(principal, device, seq)` tuples, and first-parent
+inbox-chain shape.
 
 `gt index rebuild` writes a disposable SQLite event projection to
 `.git/gitomi/index.sqlite`, including the inbox ref heads used to decide
-freshness. `gt events list`, `gt status`, and the web UI rebuild it
-automatically when inbox heads change, then query the cache instead of running
-`git show` for every event.
+freshness. Structurally valid but domain-rejected events remain visible with a
+rejection reason and do not affect issue, pull, or comment projections. `gt
+events list`, `gt status`, and the web UI rebuild the cache automatically when
+inbox heads change, then query it instead of running `git show` for every
+event.
 
 `gt runs prune` deletes auxiliary refs under `refs/gitomi/runs/*` according to
 age, count, and byte limits. Run refs are not fetched or pushed by default sync;
