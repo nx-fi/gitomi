@@ -14,6 +14,34 @@ Initial authorization state is seeded from the signed genesis manifest at
 
 The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in RFC 2119.
 
+### 1.2. Security Model Limitations
+
+Gitomi RBAC is an admission and projection policy for signed Control Plane
+events. It decides whether an event is allowed to change the local materialized
+state.
+
+Gitomi RBAC does protect:
+
+*   whether accepted `issue.*`, `pull.*`, `comment.*`, `action.*`, `acl.*`, and
+    `identity.*` events affect the projection;
+*   whether a signing key is authorized for `actor.principal` and
+    `actor.device` at the event's causal frontier; and
+*   whether owners can grant or revoke roles and device bindings without
+    violating the self-protection and privilege-escalation rules below.
+
+Gitomi RBAC does not protect:
+
+*   Git objects, packs, bundles, or working-tree bytes that have already reached
+    another replica;
+*   Data Plane refs exposed by the underlying Git transport;
+*   ref-name ownership on ordinary Git remotes; or
+*   auxiliary snapshot and run refs when they conflict with accepted inbox
+    history.
+
+Read permissions are therefore cooperative policy signals for future UI and
+sync-server access. Confidentiality requires hosting, transport, or encryption
+controls outside the v1 RBAC reducer.
+
 ## 2. Roles
 
 ### 2.1. Role Definitions
@@ -242,18 +270,27 @@ different effective role than `payload.role`, MUST be rejected.
 The identity projection MUST maintain a mapping:
 
 ```
-principal → set of { device, key_fingerprint, public_key, added_event_hash }
+principal → device → active { key_fingerprint, public_key, added_event_hash }
 ```
+
+Implementations MUST also retain historical public keys and revocation metadata
+needed to verify already accepted commits.
 
 ### 6.2. Reduction Rules
 
-*   **`identity.device_added`**: Adds `payload.device` and its signing key to the device set of `payload.principal`.
-*   **`identity.device_revoked`**: Removes `payload.device` from the device set of `payload.principal`.
+*   **`identity.device_added`**: Adds or rotates `payload.device` and its signing key for `payload.principal`.
+*   **`identity.device_revoked`**: Removes `payload.device` from the active device set of `payload.principal`.
 
-Device sets are remove-wins causal sets keyed by
-`(principal, device, key_fingerprint)`. A re-add after revocation MUST causally
-descend from the revocation and SHOULD use fresh key material. Concurrent add
-and remove of the same device/key MUST resolve to revoked.
+For each `(principal, device)`, the active key is a causal last-writer-wins
+register. A causally later `identity.device_added` for the same device rotates
+the active key to the new `signing_key`. Concurrent `identity.device_added`
+events for the same device are resolved by deterministic event-hash order, and
+the non-winning key MUST NOT be considered active after both events are observed.
+
+Device revocation is remove-wins. A revocation for `(principal, device)` disables
+the device regardless of the active key fingerprint. A re-add after revocation
+MUST causally descend from the revocation and SHOULD use fresh key material.
+Concurrent add and remove for the same device MUST resolve to revoked.
 
 ### 6.3. Self-Device Bootstrap
 
@@ -261,7 +298,25 @@ The genesis device is established by the genesis manifest. All later device
 management for any principal requires the `identity.manage` permission (i.e.,
 the `owner` role).
 
-### 6.4. Device Revocation Effects
+### 6.4. Key Rotation Workflow
+
+To rotate a signing key on an existing device without changing the device id:
+
+1.  Emit `identity.device_added` for the same `principal` and `device` with fresh
+    `signing_key.public_key` and `signing_key.fingerprint`.
+2.  Sign that rotation event with a key that is active at the event's causal
+    frontier. This MAY be the old key being replaced.
+3.  Rebuild the verifier's allowed-signers cache from genesis plus accepted
+    identity events. The cache MUST include historical keys needed for old
+    commits and MUST mark only the projected active key as authorizing future
+    events for that device.
+
+Multiple active keys for the same `(principal, device)` are not valid in the v1
+projection. Operators that need an overlap window SHOULD add a second device id,
+publish events from the new device, and then revoke the old device id after the
+new path is verified.
+
+### 6.5. Device Revocation Effects
 
 When a device is revoked, events from that device that were accepted before the revocation remain in the projection. Only new events signed by the revoked device MUST be rejected.
 

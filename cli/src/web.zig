@@ -17,6 +17,7 @@ const out = io.out;
 const eprint = io.eprint;
 
 const max_http_request = 64 * 1024;
+const default_worker_count = 8;
 pub const default_host = "127.0.0.1";
 pub const default_port = 8080;
 
@@ -24,6 +25,7 @@ pub const Options = struct {
     host: []const u8 = default_host,
     port: u16 = default_port,
     once: bool = false,
+    worker_count: usize = default_worker_count,
 };
 
 pub const HttpRequest = struct {
@@ -37,7 +39,7 @@ pub fn serve(allocator: Allocator, repo: Repo, options: Options) !void {
     const bind_host: []const u8 = if (std.mem.eql(u8, options.host, "localhost")) default_host else options.host;
     const address = std.net.Address.parseIp(bind_host, options.port) catch {
         try eprint("gt web: invalid host or port {s}:{d}\n", .{ options.host, options.port });
-        return CliError.UserError;
+        return CliError.InvalidArgument;
     };
 
     var server = try address.listen(.{ .reuse_address = true, .kernel_backlog = 32 });
@@ -49,15 +51,45 @@ pub fn serve(allocator: Allocator, repo: Repo, options: Options) !void {
         try out("Press Ctrl-C to stop.\n", .{});
     }
 
-    while (true) {
+    if (options.once) {
         const connection = try server.accept();
-        handleWebConnection(allocator, repo, connection.stream) catch |err| {
-            try eprint("gt web: request failed: {s}\n", .{@errorName(err)});
-        };
-        connection.stream.close();
-
-        if (options.once) break;
+        defer connection.stream.close();
+        try handleWebConnectionLogged(allocator, repo, connection.stream);
+        return;
     }
+
+    var pool: std.Thread.Pool = undefined;
+    try pool.init(.{
+        .allocator = allocator,
+        .n_jobs = @max(options.worker_count, 1),
+    });
+    defer pool.deinit();
+
+    var permits = std.Thread.Semaphore{ .permits = @max(options.worker_count, 1) };
+    while (true) {
+        permits.wait();
+        const connection = server.accept() catch |err| {
+            permits.post();
+            return err;
+        };
+        pool.spawn(handleWebConnectionTask, .{ allocator, repo, connection, &permits }) catch |err| {
+            connection.stream.close();
+            permits.post();
+            return err;
+        };
+    }
+}
+
+fn handleWebConnectionTask(allocator: Allocator, repo: Repo, connection: std.net.Server.Connection, permits: *std.Thread.Semaphore) void {
+    defer permits.post();
+    defer connection.stream.close();
+    handleWebConnectionLogged(allocator, repo, connection.stream) catch {};
+}
+
+fn handleWebConnectionLogged(allocator: Allocator, repo: Repo, stream: std.net.Stream) !void {
+    handleWebConnection(allocator, repo, stream) catch |err| {
+        try eprint("gt web: request failed: {s}\n", .{@errorName(err)});
+    };
 }
 
 pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Stream) !void {
@@ -74,8 +106,12 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
 
     if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/style.css")) {
         try shared.sendResponse(allocator, stream, 200, "OK", "text/css", web_css, null);
+    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/logo.svg")) {
+        try shared.sendResponse(allocator, stream, 200, "OK", "image/svg+xml", logo_svg, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/theme.js")) {
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", theme_js, null);
+    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/tree.js")) {
+        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", tree_js, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/highlight.js")) {
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", highlight_js, null);
     } else if (std.mem.eql(u8, request.method, "GET") and (std.mem.eql(u8, request.path, "/") or std.mem.eql(u8, request.path, "/code"))) {
@@ -202,7 +238,9 @@ pub fn isLoopbackHost(host: []const u8) bool {
 }
 
 const web_css = @embedFile("web/style.css");
+const logo_svg = @embedFile("web/logo.svg");
 const theme_js = @embedFile("web/theme.js");
+const tree_js = @embedFile("web/tree.js");
 const highlight_js = @embedFile("web/highlight.js");
 
 test "web request parser separates method path and body" {

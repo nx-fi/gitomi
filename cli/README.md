@@ -85,6 +85,8 @@ then admits only compatible genesis refs and new or fast-forward inbox refs into
 the authoritative namespace after checking the event commit chain, empty-tree
 rule, native Git signature, parent hashes, and v1 JSON envelope. Diverged or
 chain-invalid staged inbox refs are moved under `refs/gitomi/quarantine/*`.
+Default push publishes only local genesis and the configured actor's own inbox
+ref, not every locally replicated inbox ref.
 
 `gt fsck` verifies authoritative inbox refs for ref-safe names, empty-tree event
 commits, native Git signatures, v1 event envelopes, matching repo IDs, unique

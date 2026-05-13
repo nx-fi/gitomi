@@ -26,6 +26,29 @@ Gitomi v1 deliberately avoids a single shared writable control-plane branch. The
 
 Under stock Git, ref names are not an enforceable authorization boundary. `refs/gitomi/inbox/*` partitions replication state, but trust MUST be derived from signed-event validation and reducer admission rules rather than from assumptions about who was able to update a ref on a remote.
 
+### 2.1. Security Model Limitations
+
+Gitomi RBAC protects the Control Plane projection. It determines which signed
+events affect issues, pull requests, comments, workflow requests, ACL state, and
+identity state.
+
+Gitomi RBAC does not, by itself, provide all repository security boundaries:
+
+*   It does not make Git ref names an ownership boundary. A remote may receive a
+    write to any visible ref; compliant replicas MUST still validate signatures,
+    actor identity, causal ancestry, and RBAC before admitting effects.
+*   It does not revoke bytes already distributed through Git objects, packs,
+    bundles, working trees, or another replica's cache.
+*   It does not hide Data Plane refs or blobs from a party that can fetch them
+    through the underlying Git transport.
+*   It does not protect auxiliary run or snapshot refs as authoritative state.
+    Those refs are optional caches or diagnostics and MUST be ignored when they
+    conflict with accepted inbox events.
+
+Operators that require confidentiality or server-enforced read isolation MUST
+combine Gitomi with hosting policy, transport authorization, narrow fetch
+refspecs, or encryption outside the v1 event format.
+
 ## 3. Storage Layout
 
 ### 3.1. Ref Namespaces
@@ -216,6 +239,21 @@ Past signatures remain verifiable after key rotation or device revocation. A
 revocation changes authorization for later events; it MUST NOT require deleting
 historical public keys needed to verify already accepted commits.
 
+Same-device key rotation is expressed by a later `identity.device_added` event
+for the same `(principal, device)` with fresh `signing_key` material. That event
+MUST be signed by a device that is authorized at the event's causal frontier,
+which can be the old key being rotated out. The new key supersedes the previous
+active key for future events whose causal frontier includes the rotation event.
+Historical key material remains in the verifier cache for old commits.
+
+Gitomi v1 exposes at most one active signing key per `(principal, device)` in the
+identity projection. Concurrent rotations for the same device are resolved by
+causal order, then deterministic event-hash order; the non-winning key is not an
+active key after both events are observed. `identity.device_revoked` disables the
+device as a signing endpoint. A later re-add of the same device after revocation
+MUST causally descend from the revocation and normally requires another active
+owner device to sign it.
+
 ### 5.2. Actor and Device Model
 
 An actor principal is a stable human or bot identity. A device is a concrete signing endpoint for that principal.
@@ -330,6 +368,11 @@ single-field event had been emitted at the same event hash. Implementations
 SHOULD prefer `issue.updated` for user-facing edit flows that change multiple
 fields, to avoid one signed commit per small UI mutation.
 
+The visible issue projection MUST be bounded. A v1 implementation MUST NOT
+project more than 256 labels or more than 128 assignees on one issue. An event
+that would exceed those limits after reduction MUST be domain-rejected with
+reason `collection_limit_exceeded`.
+
 Reducers MUST preserve all accepted events in the issue timeline, even when the visible projection only shows the latest scalar values.
 
 ### 6.3. Pull Requests
@@ -365,6 +408,11 @@ For `pull.updated`, each scalar and collection member is reduced as if the
 corresponding single-field event had been emitted at the same event hash.
 Implementations SHOULD prefer `pull.updated` for user-facing edit flows that
 change multiple fields.
+
+The visible pull-request projection MUST be bounded. A v1 implementation MUST
+NOT project more than 256 labels, 128 assignees, or 128 reviewers on one pull
+request. An event that would exceed those limits after reduction MUST be
+domain-rejected with reason `collection_limit_exceeded`.
 
 `pull.merged` MUST record enough payload to identify the resulting merge outcome, typically a merge commit OID or a fast-forward target OID.
 `pull.state_set` MUST NOT set `state` to `merged`; the merged state is derived
@@ -428,6 +476,10 @@ If missing or corrupted, a compliant implementation MUST rebuild state by:
 
 Synchronization MUST use standard Git transport and refs. Implementations MUST be able to fetch and push Gitomi refs over normal Git protocol v2 transports such as SSH, HTTPS, or bundles.
 
+Default push MUST publish only `refs/gitomi/genesis` and the configured local
+actor's own inbox ref. It MUST NOT republish other locally replicated inbox refs
+unless the operator selects an explicit mirror or backup mode.
+
 ### 7.2. `repo_id` Discovery and Forks
 
 The canonical `repo_id` is learned from the signed manifest at
@@ -485,6 +537,11 @@ A snapshot manifest SHOULD record:
 *   any preserved legacy alias mappings.
 
 Snapshots MAY accelerate clone, bootstrap, or cache rebuild, but v1 does not define destructive compaction of shared inbox history. Repository-wide history rewriting is out of scope for this version.
+
+Implementations that fetch, retain, or load snapshots MUST apply explicit size
+and count limits. The v1 default maximum snapshot tree size SHOULD be no more
+than 64 MiB, and the default retained snapshot count SHOULD be no more than 32
+per repository unless the operator explicitly configures larger values.
 
 ## 8. Actions Engine
 

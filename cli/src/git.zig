@@ -18,6 +18,12 @@ pub const max_event_subject_bytes = 512;
 pub const max_related_parents = 256;
 pub const max_default_inbox_refs = 10_000;
 pub const max_default_admit_commits = 100_000;
+pub const max_payload_title_bytes = 512;
+pub const max_payload_text_bytes = 64 * 1024;
+pub const max_payload_key_bytes = 16 * 1024;
+pub const max_payload_atom_bytes = 256;
+pub const max_payload_ref_bytes = 512;
+pub const max_payload_collection_items = 128;
 
 pub fn currentBranch(allocator: Allocator) ![]u8 {
     var branch_argv = [_][]const u8{ "git", "branch", "--show-current" };

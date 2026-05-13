@@ -321,6 +321,55 @@ init_repo "$duplicate_open"
   gt fsck >/dev/null
 )
 
+echo "integration: RBAC projections and CLI preflight"
+rbac_repo="$ROOT/rbac"
+init_repo "$rbac_repo"
+(
+  cd "$rbac_repo"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  acl_json="$(gt acl list --json)"
+  assert_contains "$acl_json" '"principal":"alice"'
+  assert_contains "$acl_json" '"role":"owner"'
+  identity_json="$(gt identity list --json)"
+  assert_contains "$identity_json" '"principal":"alice"'
+  assert_contains "$identity_json" '"device":"laptop"'
+  assert_contains "$identity_json" '"active":true'
+  if gt acl revoke alice >last-owner.out 2>&1; then
+    fail "expected last owner revoke to fail authorization"
+  fi
+  assert_contains "$(cat last-owner.out)" "last owner"
+  gt acl grant bob reader >/dev/null
+  gt identity add-device bob desktop >/dev/null
+  acl_json="$(gt acl list --json)"
+  assert_contains "$acl_json" '"principal":"bob"'
+  assert_contains "$acl_json" '"role":"reader"'
+  write_gt_config "$REPO_ID" bob desktop 0
+  if gt issue open --title "Reader cannot open" >preflight.out 2>&1; then
+    fail "expected reader issue open to fail authorization"
+  fi
+  assert_contains "$(cat preflight.out)" "insufficient_role"
+)
+
+echo "integration: unauthorized remote event is audited and not projected"
+unauthorized="$ROOT/unauthorized"
+init_repo "$unauthorized"
+(
+  cd "$unauthorized"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
+  issue_id="018f0000-0000-7000-8000-000000000311"
+  bad_body='{"$schema":"urn:gitomi:event:v1","repo_id":"018f0000-0000-7000-8000-000000000001","event_uuid":"018f0000-0000-7000-8000-000000000312","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000000311"},"idempotency_key":"018f0000-0000-7000-8000-000000000313","actor":{"principal":"mallory","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:30:59Z","parent_hashes":{"log":"","causal":[],"related":[]},"legacy":{},"payload":{"title":"Unauthorized"}}'
+  bad_commit="$(git commit-tree -S -m "issue.opened #${issue_id:0:7} Unauthorized" -m "$bad_body" "$empty_tree")"
+  git update-ref refs/gitomi/inbox/mallory/laptop "$bad_commit"
+  events="$(gt events list --json)"
+  assert_line_count "$events" 1
+  assert_contains "$events" '"domain_status":"rejected"'
+  assert_contains "$events" '"rejection_reason":"unauthorized_principal"'
+  issues="$(gt issue list --json)"
+  assert_line_count "$issues" 0
+  gt fsck >/dev/null
+)
+
 echo "integration: stale config seq is recovered before writing"
 seq_recovery="$ROOT/seq-recovery"
 init_repo "$seq_recovery"
@@ -370,6 +419,33 @@ assert_not_contains "$remote_refs" "refs/gitomi/staging"
   gt fsck >/dev/null
 )
 
+echo "integration: default push only publishes local actor inbox"
+scope_root="$ROOT/sync-push-scope"
+mkdir -p "$scope_root"
+git -C "$scope_root" init --bare upstream.git >/dev/null
+git -C "$scope_root" init --bare backup.git >/dev/null
+init_repo "$scope_root/source"
+init_repo "$scope_root/replica"
+git -C "$scope_root/source" remote add origin "$scope_root/upstream.git"
+git -C "$scope_root/replica" remote add origin "$scope_root/upstream.git"
+git -C "$scope_root/replica" remote add backup "$scope_root/backup.git"
+(
+  cd "$scope_root/source"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  gt issue open --title "Alice upstream issue" >/dev/null
+  gt sync --push-only >/dev/null
+)
+(
+  cd "$scope_root/replica"
+  gt init --repo-id "$REPO_ID" --principal bob --device desktop >/dev/null
+  gt sync --pull-only >/dev/null
+  gt issue open --title "Bob backup issue" >/dev/null
+  gt sync --remote backup --push-only >/dev/null
+)
+backup_refs="$(git --git-dir="$scope_root/backup.git" for-each-ref '--format=%(refname)' refs/gitomi)"
+assert_contains "$backup_refs" "refs/gitomi/inbox/bob/desktop"
+assert_not_contains "$backup_refs" "refs/gitomi/inbox/alice/laptop"
+
 echo "integration: causal parents are capped"
 cap_repo="$ROOT/causal-cap"
 init_repo "$cap_repo"
@@ -378,8 +454,12 @@ init_repo "$cap_repo"
   gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
   gt issue open --title "Laptop root" >/dev/null
   for n in $(seq 1 40); do
+    gt identity add-device alice "device$n" >/dev/null
+  done
+  for n in $(seq 1 40); do
     write_gt_config "$REPO_ID" alice "device$n" 0
     gt issue open --title "Device $n root" >/dev/null
+    write_gt_config "$REPO_ID" alice laptop 0
   done
   write_gt_config "$REPO_ID" alice laptop 1
   first_event="$(gt events list --json --ref refs/gitomi/inbox/alice/laptop)"

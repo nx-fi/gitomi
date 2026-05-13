@@ -9,25 +9,8 @@ const runCommand = git.runCommand;
 const max_git_output = git.max_git_output;
 const isRefSafeSegment = util.isRefSafeSegment;
 const looksLikeUuid = util.looksLikeUuid;
-const event_schema = event_mod.event_schema;
-const isKnownObjectKind = event_mod.isKnownObjectKind;
-const payloadRequirementError = event_mod.payloadRequirementError;
-const objectIdRequirementError = event_mod.objectIdRequirementError;
 const eprint = @import("io.zig").eprint;
-
-const Envelope = struct {
-    allocator: Allocator,
-    repo_id: []u8,
-    actor_principal: []u8,
-    actor_device: []u8,
-    seq: u64,
-
-    fn deinit(self: Envelope) void {
-        self.allocator.free(self.repo_id);
-        self.allocator.free(self.actor_principal);
-        self.allocator.free(self.actor_device);
-    }
-};
+const Envelope = event_mod.ValidatedEnvelope;
 
 pub const State = struct {
     allocator: Allocator,
@@ -186,7 +169,7 @@ fn checkInboxCommit(
     if (envelope) |parsed| {
         defer parsed.deinit();
         try fsck.checkRepoId(commit, parsed.repo_id);
-        try fsck.checkActorSeq(commit, parsed.actor_principal, parsed.actor_device, parsed.seq);
+        try fsck.checkActorSeq(commit, parsed.actor_principal, parsed.actor_device, @intCast(parsed.seq));
     }
 }
 
@@ -297,8 +280,7 @@ fn parseEnvelope(
     ref: []const u8,
     commit: []const u8,
     body: []const u8,
-) !?Envelope {
-    var ok = true;
+) !?event_mod.ValidatedEnvelope {
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch {
         try fsck.fail("{s}: {s}: event body is not valid JSON", .{ ref, commit });
         return null;
@@ -313,242 +295,14 @@ fn parseEnvelope(
         },
     };
 
-    const schema = try requireString(fsck, ref, commit, root, "$schema", &ok);
-    if (schema) |value| {
-        if (!std.mem.eql(u8, value, event_schema)) {
-            try fsck.fail("{s}: {s}: $schema must be {s}", .{ ref, commit, event_schema });
-            ok = false;
-        }
-    }
-
-    const repo_id = try requireUuid(fsck, ref, commit, root, "repo_id", &ok);
-    _ = try requireUuid(fsck, ref, commit, root, "event_uuid", &ok);
-    const event_type = try requireString(fsck, ref, commit, root, "event_type", &ok);
-    _ = try requireUuid(fsck, ref, commit, root, "idempotency_key", &ok);
-    _ = try requireObject(fsck, ref, commit, root, "legacy", &ok);
-    const payload = try requireObject(fsck, ref, commit, root, "payload", &ok);
-
-    const seq = try requireSeq(fsck, ref, commit, root, &ok);
-
-    const occurred_at = try requireString(fsck, ref, commit, root, "occurred_at", &ok);
-    if (occurred_at) |value| {
-        if (value.len == 0 or value[value.len - 1] != 'Z') {
-            try fsck.fail("{s}: {s}: occurred_at must be a UTC RFC3339 timestamp", .{ ref, commit });
-            ok = false;
-        }
-    }
-
-    const parent_hashes = try requireObject(fsck, ref, commit, root, "parent_hashes", &ok);
-    if (parent_hashes) |parents_map| {
-        _ = try requireStringAllowEmpty(fsck, ref, commit, parents_map, "log", &ok);
-        try requireStringArray(fsck, ref, commit, parents_map, "causal", &ok);
-        try requireStringArray(fsck, ref, commit, parents_map, "related", &ok);
-    }
-
-    const object = try requireObject(fsck, ref, commit, root, "object", &ok);
-    if (object) |object_map| {
-        const kind = try requireString(fsck, ref, commit, object_map, "kind", &ok);
-        const object_id = try requireString(fsck, ref, commit, object_map, "id", &ok);
-        if (kind) |value| {
-            if (!isKnownObjectKind(value)) {
-                try fsck.fail("{s}: {s}: unknown object kind '{s}'", .{ ref, commit, value });
-                ok = false;
-            } else if (event_type != null and payload != null) {
-                if (payloadRequirementError(event_type.?, value, payload.?)) |message| {
-                    try fsck.fail("{s}: {s}: {s}", .{ ref, commit, message });
-                    ok = false;
-                }
-                if (object_id != null) {
-                    if (objectIdRequirementError(event_type.?, value, object_id.?, payload.?)) |message| {
-                        try fsck.fail("{s}: {s}: {s}", .{ ref, commit, message });
-                        ok = false;
-                    }
-                }
-            }
-        }
-    }
-
-    const actor = try requireObject(fsck, ref, commit, root, "actor", &ok);
-    var actor_principal: ?[]const u8 = null;
-    var actor_device: ?[]const u8 = null;
-    if (actor) |actor_map| {
-        actor_principal = try requireString(fsck, ref, commit, actor_map, "principal", &ok);
-        actor_device = try requireString(fsck, ref, commit, actor_map, "device", &ok);
-    }
-
-    if (!ok or repo_id == null or actor_principal == null or actor_device == null or seq == null) {
+    if (try event_mod.validateEnvelopeObject(allocator, root)) |message| {
+        defer allocator.free(message);
+        try fsck.fail("{s}: {s}: {s}", .{ ref, commit, message });
         return null;
     }
 
-    var repo_id_owned: ?[]u8 = try allocator.dupe(u8, repo_id.?);
-    errdefer if (repo_id_owned) |value| allocator.free(value);
-    var principal_owned: ?[]u8 = try allocator.dupe(u8, actor_principal.?);
-    errdefer if (principal_owned) |value| allocator.free(value);
-    var device_owned: ?[]u8 = try allocator.dupe(u8, actor_device.?);
-    errdefer if (device_owned) |value| allocator.free(value);
-
-    const envelope = Envelope{
-        .allocator = allocator,
-        .repo_id = repo_id_owned.?,
-        .actor_principal = principal_owned.?,
-        .actor_device = device_owned.?,
-        .seq = seq.?,
-    };
-    repo_id_owned = null;
-    principal_owned = null;
-    device_owned = null;
-    return envelope;
-}
-
-fn requireObject(
-    fsck: *State,
-    ref: []const u8,
-    commit: []const u8,
-    object: std.json.ObjectMap,
-    key: []const u8,
-    ok: *bool,
-) !?std.json.ObjectMap {
-    const value = object.get(key) orelse {
-        try fsck.fail("{s}: {s}: missing {s}", .{ ref, commit, key });
-        ok.* = false;
+    return event_mod.parseValidatedEnvelopeObject(allocator, root) catch {
+        try fsck.fail("{s}: {s}: invalid event envelope", .{ ref, commit });
         return null;
-    };
-    return switch (value) {
-        .object => |child| child,
-        else => {
-            try fsck.fail("{s}: {s}: {s} must be an object", .{ ref, commit, key });
-            ok.* = false;
-            return null;
-        },
-    };
-}
-
-fn requireString(
-    fsck: *State,
-    ref: []const u8,
-    commit: []const u8,
-    object: std.json.ObjectMap,
-    key: []const u8,
-    ok: *bool,
-) !?[]const u8 {
-    const value = object.get(key) orelse {
-        try fsck.fail("{s}: {s}: missing {s}", .{ ref, commit, key });
-        ok.* = false;
-        return null;
-    };
-    const string = switch (value) {
-        .string => |s| s,
-        else => {
-            try fsck.fail("{s}: {s}: {s} must be a string", .{ ref, commit, key });
-            ok.* = false;
-            return null;
-        },
-    };
-    if (string.len == 0) {
-        try fsck.fail("{s}: {s}: {s} must not be empty", .{ ref, commit, key });
-        ok.* = false;
-        return null;
-    }
-    return string;
-}
-
-fn requireStringAllowEmpty(
-    fsck: *State,
-    ref: []const u8,
-    commit: []const u8,
-    object: std.json.ObjectMap,
-    key: []const u8,
-    ok: *bool,
-) !?[]const u8 {
-    const value = object.get(key) orelse {
-        try fsck.fail("{s}: {s}: missing {s}", .{ ref, commit, key });
-        ok.* = false;
-        return null;
-    };
-    return switch (value) {
-        .string => |string| string,
-        else => {
-            try fsck.fail("{s}: {s}: {s} must be a string", .{ ref, commit, key });
-            ok.* = false;
-            return null;
-        },
-    };
-}
-
-fn requireStringArray(
-    fsck: *State,
-    ref: []const u8,
-    commit: []const u8,
-    object: std.json.ObjectMap,
-    key: []const u8,
-    ok: *bool,
-) !void {
-    const value = object.get(key) orelse {
-        try fsck.fail("{s}: {s}: missing {s}", .{ ref, commit, key });
-        ok.* = false;
-        return;
-    };
-    const array = switch (value) {
-        .array => |items| items,
-        else => {
-            try fsck.fail("{s}: {s}: {s} must be an array", .{ ref, commit, key });
-            ok.* = false;
-            return;
-        },
-    };
-    for (array.items) |item| {
-        if (item != .string) {
-            try fsck.fail("{s}: {s}: {s} must contain only strings", .{ ref, commit, key });
-            ok.* = false;
-            return;
-        }
-    }
-}
-
-fn requireUuid(
-    fsck: *State,
-    ref: []const u8,
-    commit: []const u8,
-    object: std.json.ObjectMap,
-    key: []const u8,
-    ok: *bool,
-) !?[]const u8 {
-    const value = try requireString(fsck, ref, commit, object, key, ok);
-    if (value) |string| {
-        if (!looksLikeUuid(string)) {
-            try fsck.fail("{s}: {s}: {s} must be a UUID", .{ ref, commit, key });
-            ok.* = false;
-            return null;
-        }
-    }
-    return value;
-}
-
-fn requireSeq(
-    fsck: *State,
-    ref: []const u8,
-    commit: []const u8,
-    object: std.json.ObjectMap,
-    ok: *bool,
-) !?u64 {
-    const value = object.get("seq") orelse {
-        try fsck.fail("{s}: {s}: missing seq", .{ ref, commit });
-        ok.* = false;
-        return null;
-    };
-    return switch (value) {
-        .integer => |seq| {
-            if (seq < 0) {
-                try fsck.fail("{s}: {s}: seq must be a non-negative integer", .{ ref, commit });
-                ok.* = false;
-                return null;
-            }
-            return @as(u64, @intCast(seq));
-        },
-        else => {
-            try fsck.fail("{s}: {s}: seq must be a non-negative integer", .{ ref, commit });
-            ok.* = false;
-            return null;
-        },
     };
 }

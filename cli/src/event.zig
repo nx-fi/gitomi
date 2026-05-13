@@ -1,5 +1,6 @@
 const std = @import("std");
 const errors = @import("errors.zig");
+const git = @import("git.zig");
 const io = @import("io.zig");
 const json_writer = @import("json_writer.zig");
 const repo_mod = @import("repo.zig");
@@ -135,29 +136,7 @@ pub fn buildIssueOpenedJson(
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
-    try buf.append(allocator, '{');
-    try appendJsonFieldString(&buf, allocator, "$schema", event_schema, true);
-    try appendJsonFieldString(&buf, allocator, "repo_id", cfg.repo_id, true);
-    try appendJsonFieldString(&buf, allocator, "event_uuid", event_uuid, true);
-    try appendJsonFieldString(&buf, allocator, "event_type", "issue.opened", true);
-
-    try buf.appendSlice(allocator, "\"object\":{");
-    try appendJsonFieldString(&buf, allocator, "kind", "issue", true);
-    try appendJsonFieldString(&buf, allocator, "id", issue_id, false);
-    try buf.appendSlice(allocator, "},");
-
-    try appendJsonFieldString(&buf, allocator, "idempotency_key", idem, true);
-
-    try buf.appendSlice(allocator, "\"actor\":{");
-    try appendJsonFieldString(&buf, allocator, "principal", cfg.principal, true);
-    try appendJsonFieldString(&buf, allocator, "device", cfg.device, false);
-    try buf.appendSlice(allocator, "},");
-
-    try appendJsonFieldUnsigned(&buf, allocator, "seq", seq, true);
-    try appendJsonFieldString(&buf, allocator, "occurred_at", occurred_at, true);
-    try appendParentHashes(&buf, allocator, parents);
-    try buf.appendSlice(allocator, "\"legacy\":{},");
-
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, issue_id, event_uuid, idem, occurred_at, parents, "issue.opened", "issue");
     try buf.appendSlice(allocator, "\"payload\":{");
     try appendJsonFieldString(&buf, allocator, "title", title, true);
     if (body.len != 0) {
@@ -193,29 +172,7 @@ pub fn buildIssueStringPayloadJson(
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
-    try buf.append(allocator, '{');
-    try appendJsonFieldString(&buf, allocator, "$schema", event_schema, true);
-    try appendJsonFieldString(&buf, allocator, "repo_id", cfg.repo_id, true);
-    try appendJsonFieldString(&buf, allocator, "event_uuid", event_uuid, true);
-    try appendJsonFieldString(&buf, allocator, "event_type", event_type, true);
-
-    try buf.appendSlice(allocator, "\"object\":{");
-    try appendJsonFieldString(&buf, allocator, "kind", "issue", true);
-    try appendJsonFieldString(&buf, allocator, "id", issue_id, false);
-    try buf.appendSlice(allocator, "},");
-
-    try appendJsonFieldString(&buf, allocator, "idempotency_key", idem, true);
-
-    try buf.appendSlice(allocator, "\"actor\":{");
-    try appendJsonFieldString(&buf, allocator, "principal", cfg.principal, true);
-    try appendJsonFieldString(&buf, allocator, "device", cfg.device, false);
-    try buf.appendSlice(allocator, "},");
-
-    try appendJsonFieldUnsigned(&buf, allocator, "seq", seq, true);
-    try appendJsonFieldString(&buf, allocator, "occurred_at", occurred_at, true);
-    try appendParentHashes(&buf, allocator, parents);
-    try buf.appendSlice(allocator, "\"legacy\":{},");
-
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, issue_id, event_uuid, idem, occurred_at, parents, event_type, "issue");
     try buf.appendSlice(allocator, "\"payload\":{");
     try appendJsonFieldString(&buf, allocator, payload_key, payload_value, false);
     try buf.appendSlice(allocator, "}}");
@@ -439,6 +396,86 @@ pub fn buildPullMergedJson(
     return try buf.toOwnedSlice(allocator);
 }
 
+pub fn buildAclRoleJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    principal: []const u8,
+    role: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    grant: bool,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    const object_id = try std.fmt.allocPrint(allocator, "acl:{s}", .{principal});
+    defer allocator.free(object_id);
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, object_id, event_uuid, idem, occurred_at, parents, if (grant) "acl.role_granted" else "acl.role_revoked", "acl");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "principal", principal, true);
+    try appendJsonFieldString(&buf, allocator, "role", role, false);
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildIdentityDeviceAddedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    principal: []const u8,
+    device: []const u8,
+    public_key: []const u8,
+    fingerprint: []const u8,
+    scheme: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    const object_id = try std.fmt.allocPrint(allocator, "identity:{s}:{s}", .{ principal, device });
+    defer allocator.free(object_id);
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, object_id, event_uuid, idem, occurred_at, parents, "identity.device_added", "identity");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "principal", principal, true);
+    try appendJsonFieldString(&buf, allocator, "device", device, true);
+    try buf.appendSlice(allocator, "\"signing_key\":{");
+    try appendJsonFieldString(&buf, allocator, "scheme", scheme, true);
+    try appendJsonFieldString(&buf, allocator, "public_key", public_key, true);
+    try appendJsonFieldString(&buf, allocator, "fingerprint", fingerprint, false);
+    try buf.appendSlice(allocator, "}}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildIdentityDeviceRevokedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    principal: []const u8,
+    device: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    const object_id = try std.fmt.allocPrint(allocator, "identity:{s}:{s}", .{ principal, device });
+    defer allocator.free(object_id);
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, object_id, event_uuid, idem, occurred_at, parents, "identity.device_revoked", "identity");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "principal", principal, true);
+    try appendJsonFieldString(&buf, allocator, "device", device, false);
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
 fn appendEnvelopePrefix(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -495,65 +532,9 @@ pub fn validateEventEnvelope(allocator: Allocator, commit: []const u8, body: []c
         },
     };
 
-    try requireJsonStringEq(commit, root, "$schema", event_schema);
-    try requireJsonUuid(commit, root, "repo_id");
-    try requireJsonUuid(commit, root, "event_uuid");
-    const event_type = try requireJsonString(commit, root, "event_type");
-    try requireJsonUuid(commit, root, "idempotency_key");
-    _ = try requireJsonObject(commit, root, "legacy");
-    const payload = try requireJsonObject(commit, root, "payload");
-
-    const seq_value = root.get("seq") orelse {
-        try eprint("gt sync: rejecting {s}: missing seq\n", .{commit});
-        return CliError.UserError;
-    };
-    if (seq_value != .integer or seq_value.integer < 0) {
-        try eprint("gt sync: rejecting {s}: seq must be a non-negative integer\n", .{commit});
-        return CliError.UserError;
-    }
-
-    const occurred_at = try requireJsonString(commit, root, "occurred_at");
-    if (occurred_at.len == 0 or occurred_at[occurred_at.len - 1] != 'Z') {
-        try eprint("gt sync: rejecting {s}: occurred_at must be a UTC RFC3339 timestamp\n", .{commit});
-        return CliError.UserError;
-    }
-
-    const parent_hashes = try requireJsonObject(commit, root, "parent_hashes");
-    _ = try requireJsonStringAllowEmpty(commit, parent_hashes, "log");
-    if (!stringArray(parent_hashes, "causal")) {
-        try eprint("gt sync: rejecting {s}: parent_hashes.causal must be an array of strings\n", .{commit});
-        return CliError.UserError;
-    }
-    if (!stringArray(parent_hashes, "related")) {
-        try eprint("gt sync: rejecting {s}: parent_hashes.related must be an array of strings\n", .{commit});
-        return CliError.UserError;
-    }
-    if (arrayLen(parent_hashes, "related") > max_related_parents) {
-        try eprint("gt sync: rejecting {s}: parent_hashes.related exceeds v1 related parent cap\n", .{commit});
-        return CliError.UserError;
-    }
-
-    const object = try requireJsonObject(commit, root, "object");
-    const kind = try requireJsonString(commit, object, "kind");
-    if (!isKnownObjectKind(kind)) {
-        try eprint("gt sync: rejecting {s}: unknown object kind '{s}'\n", .{ commit, kind });
-        return CliError.UserError;
-    }
-    const object_id = try requireJsonString(commit, object, "id");
-    if (payloadRequirementError(event_type, kind, payload)) |message| {
+    if (try validateEnvelopeObject(allocator, root)) |message| {
+        defer allocator.free(message);
         try eprint("gt sync: rejecting {s}: {s}\n", .{ commit, message });
-        return CliError.UserError;
-    }
-    if (objectIdRequirementError(event_type, kind, object_id, payload)) |message| {
-        try eprint("gt sync: rejecting {s}: {s}\n", .{ commit, message });
-        return CliError.UserError;
-    }
-
-    const actor = try requireJsonObject(commit, root, "actor");
-    const principal = try requireJsonString(commit, actor, "principal");
-    const device = try requireJsonString(commit, actor, "device");
-    if (principal.len == 0 or device.len == 0) {
-        try eprint("gt sync: rejecting {s}: actor principal and device are required\n", .{commit});
         return CliError.UserError;
     }
 }
@@ -567,44 +548,29 @@ pub fn parseValidatedEnvelope(allocator: Allocator, body: []const u8) !Validated
         else => return error.InvalidEventEnvelope,
     };
 
-    const schema = requiredString(root, "$schema") orelse return error.InvalidEventEnvelope;
-    if (!std.mem.eql(u8, schema, event_schema)) return error.InvalidEventEnvelope;
+    return try parseValidatedEnvelopeObject(allocator, root);
+}
 
-    const repo_id = requiredUuid(root, "repo_id") orelse return error.InvalidEventEnvelope;
-    const event_uuid = requiredUuid(root, "event_uuid") orelse return error.InvalidEventEnvelope;
-    const event_type = requiredString(root, "event_type") orelse return error.InvalidEventEnvelope;
-    const idempotency_key = requiredUuid(root, "idempotency_key") orelse return error.InvalidEventEnvelope;
-    _ = requiredObject(root, "legacy") orelse return error.InvalidEventEnvelope;
-    const payload = requiredObject(root, "payload") orelse return error.InvalidEventEnvelope;
+pub fn parseValidatedEnvelopeObject(allocator: Allocator, root: std.json.ObjectMap) !ValidatedEnvelope {
+    if (try validateEnvelopeObject(allocator, root)) |message| {
+        allocator.free(message);
+        return error.InvalidEventEnvelope;
+    }
 
-    const seq_value = root.get("seq") orelse return error.InvalidEventEnvelope;
-    const seq = switch (seq_value) {
-        .integer => |value| blk: {
-            if (value < 0) return error.InvalidEventEnvelope;
-            break :blk value;
-        },
-        else => return error.InvalidEventEnvelope,
-    };
+    const repo_id = requiredString(root, "repo_id").?;
+    const event_uuid = requiredString(root, "event_uuid").?;
+    const event_type = requiredString(root, "event_type").?;
+    const idempotency_key = requiredString(root, "idempotency_key").?;
+    const seq = root.get("seq").?.integer;
+    const occurred_at = requiredString(root, "occurred_at").?;
 
-    const occurred_at = requiredString(root, "occurred_at") orelse return error.InvalidEventEnvelope;
-    if (occurred_at.len == 0 or occurred_at[occurred_at.len - 1] != 'Z') return error.InvalidEventEnvelope;
+    const object = requiredObject(root, "object").?;
+    const object_kind = requiredString(object, "kind").?;
+    const object_id = requiredString(object, "id").?;
 
-    const parent_hashes = requiredObject(root, "parent_hashes") orelse return error.InvalidEventEnvelope;
-    _ = optionalStringAllowEmpty(parent_hashes, "log") orelse return error.InvalidEventEnvelope;
-    if (!stringArray(parent_hashes, "causal")) return error.InvalidEventEnvelope;
-    if (!stringArray(parent_hashes, "related")) return error.InvalidEventEnvelope;
-    if (arrayLen(parent_hashes, "related") > max_related_parents) return error.InvalidEventEnvelope;
-
-    const object = requiredObject(root, "object") orelse return error.InvalidEventEnvelope;
-    const object_kind = requiredString(object, "kind") orelse return error.InvalidEventEnvelope;
-    if (!isKnownObjectKind(object_kind)) return error.InvalidEventEnvelope;
-    const object_id = requiredString(object, "id") orelse return error.InvalidEventEnvelope;
-    if (payloadRequirementError(event_type, object_kind, payload) != null) return error.InvalidEventEnvelope;
-    if (objectIdRequirementError(event_type, object_kind, object_id, payload) != null) return error.InvalidEventEnvelope;
-
-    const actor = requiredObject(root, "actor") orelse return error.InvalidEventEnvelope;
-    const actor_principal = requiredString(actor, "principal") orelse return error.InvalidEventEnvelope;
-    const actor_device = requiredString(actor, "device") orelse return error.InvalidEventEnvelope;
+    const actor = requiredObject(root, "actor").?;
+    const actor_principal = requiredString(actor, "principal").?;
+    const actor_device = requiredString(actor, "device").?;
 
     var repo_id_owned: ?[]u8 = try allocator.dupe(u8, repo_id);
     errdefer if (repo_id_owned) |value| allocator.free(value);
@@ -650,67 +616,172 @@ pub fn parseValidatedEnvelope(allocator: Allocator, body: []const u8) !Validated
     return envelope;
 }
 
-pub fn requireJsonObject(commit: []const u8, object: std.json.ObjectMap, key: []const u8) !std.json.ObjectMap {
-    const value = object.get(key) orelse {
-        try eprint("gt sync: rejecting {s}: missing {s}\n", .{ commit, key });
-        return CliError.UserError;
+pub fn validateEnvelopeObject(allocator: Allocator, root: std.json.ObjectMap) !?[]u8 {
+    const schema = switch (try requiredEnvelopeString(allocator, root, "$schema", "$schema", false)) {
+        .value => |value| value,
+        .message => |message| return message,
     };
-    return switch (value) {
-        .object => |child| child,
-        else => {
-            try eprint("gt sync: rejecting {s}: {s} must be an object\n", .{ commit, key });
-            return CliError.UserError;
-        },
+    if (!std.mem.eql(u8, schema, event_schema)) {
+        return try validationMessage(allocator, "$schema must be {s}", .{event_schema});
+    }
+
+    _ = switch (try requiredEnvelopeUuid(allocator, root, "repo_id", "repo_id")) {
+        .value => |value| value,
+        .message => |message| return message,
+    };
+    _ = switch (try requiredEnvelopeUuid(allocator, root, "event_uuid", "event_uuid")) {
+        .value => |value| value,
+        .message => |message| return message,
+    };
+    const event_type = switch (try requiredEnvelopeString(allocator, root, "event_type", "event_type", false)) {
+        .value => |value| value,
+        .message => |message| return message,
+    };
+    _ = switch (try requiredEnvelopeUuid(allocator, root, "idempotency_key", "idempotency_key")) {
+        .value => |value| value,
+        .message => |message| return message,
+    };
+    _ = switch (try requiredEnvelopeObject(allocator, root, "legacy", "legacy")) {
+        .value => |value| value,
+        .message => |message| return message,
+    };
+    const payload = switch (try requiredEnvelopeObject(allocator, root, "payload", "payload")) {
+        .value => |value| value,
+        .message => |message| return message,
+    };
+    _ = switch (try requiredEnvelopeSeq(allocator, root)) {
+        .value => |value| value,
+        .message => |message| return message,
+    };
+
+    const occurred_at = switch (try requiredEnvelopeString(allocator, root, "occurred_at", "occurred_at", false)) {
+        .value => |value| value,
+        .message => |message| return message,
+    };
+    if (occurred_at[occurred_at.len - 1] != 'Z') {
+        return try validationMessage(allocator, "occurred_at must be a UTC RFC3339 timestamp", .{});
+    }
+
+    const parent_hashes = switch (try requiredEnvelopeObject(allocator, root, "parent_hashes", "parent_hashes")) {
+        .value => |value| value,
+        .message => |message| return message,
+    };
+    _ = switch (try requiredEnvelopeString(allocator, parent_hashes, "log", "parent_hashes.log", true)) {
+        .value => |value| value,
+        .message => |message| return message,
+    };
+    if (try validateEnvelopeStringArray(allocator, parent_hashes, "causal", "parent_hashes.causal")) |message| return message;
+    if (try validateEnvelopeStringArray(allocator, parent_hashes, "related", "parent_hashes.related")) |message| return message;
+    if (arrayLen(parent_hashes, "related") > max_related_parents) {
+        return try validationMessage(allocator, "parent_hashes.related exceeds v1 related parent cap", .{});
+    }
+
+    const object = switch (try requiredEnvelopeObject(allocator, root, "object", "object")) {
+        .value => |value| value,
+        .message => |message| return message,
+    };
+    const kind = switch (try requiredEnvelopeString(allocator, object, "kind", "object.kind", false)) {
+        .value => |value| value,
+        .message => |message| return message,
+    };
+    if (!isKnownObjectKind(kind)) {
+        return try validationMessage(allocator, "unknown object kind '{s}'", .{kind});
+    }
+    const object_id = switch (try requiredEnvelopeString(allocator, object, "id", "object.id", false)) {
+        .value => |value| value,
+        .message => |message| return message,
+    };
+    if (payloadRequirementError(event_type, kind, payload)) |message| {
+        return try allocator.dupe(u8, message);
+    }
+    if (objectIdRequirementError(event_type, kind, object_id, payload)) |message| {
+        return try allocator.dupe(u8, message);
+    }
+
+    const actor = switch (try requiredEnvelopeObject(allocator, root, "actor", "actor")) {
+        .value => |value| value,
+        .message => |message| return message,
+    };
+    _ = switch (try requiredEnvelopeString(allocator, actor, "principal", "actor.principal", false)) {
+        .value => |value| value,
+        .message => |message| return message,
+    };
+    _ = switch (try requiredEnvelopeString(allocator, actor, "device", "actor.device", false)) {
+        .value => |value| value,
+        .message => |message| return message,
+    };
+
+    return null;
+}
+
+fn EnvelopeField(comptime T: type) type {
+    return union(enum) {
+        value: T,
+        message: []u8,
     };
 }
 
-pub fn requireJsonString(commit: []const u8, object: std.json.ObjectMap, key: []const u8) ![]const u8 {
+fn validationMessage(allocator: Allocator, comptime fmt: []const u8, args: anytype) ![]u8 {
+    return std.fmt.allocPrint(allocator, fmt, args);
+}
+
+fn requiredEnvelopeObject(allocator: Allocator, object: std.json.ObjectMap, key: []const u8, label: []const u8) !EnvelopeField(std.json.ObjectMap) {
     const value = object.get(key) orelse {
-        try eprint("gt sync: rejecting {s}: missing {s}\n", .{ commit, key });
-        return CliError.UserError;
+        return .{ .message = try validationMessage(allocator, "missing {s}", .{label}) };
+    };
+    return switch (value) {
+        .object => |child| .{ .value = child },
+        else => .{ .message = try validationMessage(allocator, "{s} must be an object", .{label}) },
+    };
+}
+
+fn requiredEnvelopeString(allocator: Allocator, object: std.json.ObjectMap, key: []const u8, label: []const u8, allow_empty: bool) !EnvelopeField([]const u8) {
+    const value = object.get(key) orelse {
+        return .{ .message = try validationMessage(allocator, "missing {s}", .{label}) };
     };
     const string = switch (value) {
         .string => |s| s,
-        else => {
-            try eprint("gt sync: rejecting {s}: {s} must be a string\n", .{ commit, key });
-            return CliError.UserError;
-        },
+        else => return .{ .message = try validationMessage(allocator, "{s} must be a string", .{label}) },
     };
-    if (string.len == 0) {
-        try eprint("gt sync: rejecting {s}: {s} must not be empty\n", .{ commit, key });
-        return CliError.UserError;
+    if (!allow_empty and string.len == 0) {
+        return .{ .message = try validationMessage(allocator, "{s} must not be empty", .{label}) };
     }
-    return string;
+    return .{ .value = string };
 }
 
-pub fn requireJsonStringAllowEmpty(commit: []const u8, object: std.json.ObjectMap, key: []const u8) ![]const u8 {
-    const value = object.get(key) orelse {
-        try eprint("gt sync: rejecting {s}: missing {s}\n", .{ commit, key });
-        return CliError.UserError;
+fn requiredEnvelopeUuid(allocator: Allocator, object: std.json.ObjectMap, key: []const u8, label: []const u8) !EnvelopeField([]const u8) {
+    const field = try requiredEnvelopeString(allocator, object, key, label, false);
+    const value = switch (field) {
+        .value => |string| string,
+        .message => |message| return .{ .message = message },
     };
-    return switch (value) {
-        .string => |s| s,
-        else => {
-            try eprint("gt sync: rejecting {s}: {s} must be a string\n", .{ commit, key });
-            return CliError.UserError;
-        },
-    };
-}
-
-pub fn requireJsonStringEq(commit: []const u8, object: std.json.ObjectMap, key: []const u8, expected: []const u8) !void {
-    const value = try requireJsonString(commit, object, key);
-    if (!std.mem.eql(u8, value, expected)) {
-        try eprint("gt sync: rejecting {s}: {s} must be {s}\n", .{ commit, key, expected });
-        return CliError.UserError;
-    }
-}
-
-pub fn requireJsonUuid(commit: []const u8, object: std.json.ObjectMap, key: []const u8) !void {
-    const value = try requireJsonString(commit, object, key);
     if (!looksLikeUuid(value)) {
-        try eprint("gt sync: rejecting {s}: {s} must be a UUID\n", .{ commit, key });
-        return CliError.UserError;
+        return .{ .message = try validationMessage(allocator, "{s} must be a UUID", .{label}) };
     }
+    return .{ .value = value };
+}
+
+fn requiredEnvelopeSeq(allocator: Allocator, object: std.json.ObjectMap) !EnvelopeField(i64) {
+    const value = object.get("seq") orelse return .{ .message = try validationMessage(allocator, "missing seq", .{}) };
+    return switch (value) {
+        .integer => |seq| if (seq >= 0)
+            .{ .value = seq }
+        else
+            .{ .message = try validationMessage(allocator, "seq must be a non-negative integer", .{}) },
+        else => .{ .message = try validationMessage(allocator, "seq must be a non-negative integer", .{}) },
+    };
+}
+
+fn validateEnvelopeStringArray(allocator: Allocator, object: std.json.ObjectMap, key: []const u8, label: []const u8) !?[]u8 {
+    const value = object.get(key) orelse return try validationMessage(allocator, "missing {s}", .{label});
+    const array = switch (value) {
+        .array => |items| items,
+        else => return try validationMessage(allocator, "{s} must be an array of strings", .{label}),
+    };
+    for (array.items) |item| {
+        if (item != .string) return try validationMessage(allocator, "{s} must be an array of strings", .{label});
+    }
+    return null;
 }
 
 pub fn isKnownObjectKind(kind: []const u8) bool {
@@ -720,6 +791,14 @@ pub fn isKnownObjectKind(kind: []const u8) bool {
         std.mem.eql(u8, kind, "acl") or
         std.mem.eql(u8, kind, "identity") or
         std.mem.eql(u8, kind, "action");
+}
+
+pub fn isKnownRole(role: []const u8) bool {
+    return std.mem.eql(u8, role, "reader") or
+        std.mem.eql(u8, role, "reporter") or
+        std.mem.eql(u8, role, "contributor") or
+        std.mem.eql(u8, role, "maintainer") or
+        std.mem.eql(u8, role, "owner");
 }
 
 pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, payload: std.json.ObjectMap) ?[]const u8 {
@@ -744,113 +823,159 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
 
     if (std.mem.eql(u8, event_type, "issue.opened")) {
         if (!hasString(payload, "title")) return "issue.opened payload.title must be a string";
+        if (!stringWithin(payload, "title", git.max_payload_title_bytes)) return "issue.opened payload.title exceeds v1 title size limit";
         if (!optionalString(payload, "body")) return "issue.opened payload.body must be a string";
+        if (!optionalStringWithin(payload, "body", git.max_payload_text_bytes)) return "issue.opened payload.body exceeds v1 text size limit";
         if (!optionalStringArray(payload, "labels")) return "issue.opened payload.labels must be an array of strings";
+        if (!optionalStringArrayWithin(payload, "labels", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "issue.opened payload.labels exceeds v1 collection limits";
         if (!optionalStringArray(payload, "assignees")) return "issue.opened payload.assignees must be an array of strings";
+        if (!optionalStringArrayWithin(payload, "assignees", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "issue.opened payload.assignees exceeds v1 collection limits";
         return null;
     }
     if (std.mem.eql(u8, event_type, "issue.updated")) {
         if (!optionalString(payload, "title")) return "issue.updated payload.title must be a string";
+        if (!optionalStringWithin(payload, "title", git.max_payload_title_bytes)) return "issue.updated payload.title exceeds v1 title size limit";
         if (!optionalString(payload, "body")) return "issue.updated payload.body must be a string";
+        if (!optionalStringWithin(payload, "body", git.max_payload_text_bytes)) return "issue.updated payload.body exceeds v1 text size limit";
         if (!optionalState(payload, "state", &.{ "open", "closed" })) return "issue.updated payload.state must be open or closed";
         if (!optionalStringArray(payload, "labels_added")) return "issue.updated payload.labels_added must be an array of strings";
+        if (!optionalStringArrayWithin(payload, "labels_added", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "issue.updated payload.labels_added exceeds v1 collection limits";
         if (!optionalStringArray(payload, "labels_removed")) return "issue.updated payload.labels_removed must be an array of strings";
+        if (!optionalStringArrayWithin(payload, "labels_removed", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "issue.updated payload.labels_removed exceeds v1 collection limits";
         if (!optionalStringArray(payload, "assignees_added")) return "issue.updated payload.assignees_added must be an array of strings";
+        if (!optionalStringArrayWithin(payload, "assignees_added", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "issue.updated payload.assignees_added exceeds v1 collection limits";
         if (!optionalStringArray(payload, "assignees_removed")) return "issue.updated payload.assignees_removed must be an array of strings";
+        if (!optionalStringArrayWithin(payload, "assignees_removed", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "issue.updated payload.assignees_removed exceeds v1 collection limits";
         if (!hasAnyKey(payload, &.{ "title", "body", "state", "labels_added", "labels_removed", "assignees_added", "assignees_removed" })) return "issue.updated payload must contain at least one update field";
         return null;
     }
-    if (std.mem.eql(u8, event_type, "issue.title_set")) return requirePayloadString(payload, "issue.title_set", "title");
-    if (std.mem.eql(u8, event_type, "issue.body_set")) return requirePayloadString(payload, "issue.body_set", "body");
+    if (std.mem.eql(u8, event_type, "issue.title_set")) return requirePayloadStringWithin(payload, "issue.title_set", "title", git.max_payload_title_bytes);
+    if (std.mem.eql(u8, event_type, "issue.body_set")) return requirePayloadStringWithin(payload, "issue.body_set", "body", git.max_payload_text_bytes);
     if (std.mem.eql(u8, event_type, "issue.state_set")) {
         if (!hasState(payload, "state", &.{ "open", "closed" })) return "issue.state_set payload.state must be open or closed";
         return null;
     }
-    if (std.mem.eql(u8, event_type, "issue.label_added") or std.mem.eql(u8, event_type, "issue.label_removed")) return requirePayloadString(payload, event_type, "label");
-    if (std.mem.eql(u8, event_type, "issue.assignee_added") or std.mem.eql(u8, event_type, "issue.assignee_removed")) return requirePayloadString(payload, event_type, "assignee");
+    if (std.mem.eql(u8, event_type, "issue.label_added") or std.mem.eql(u8, event_type, "issue.label_removed")) return requirePayloadStringWithin(payload, event_type, "label", git.max_payload_atom_bytes);
+    if (std.mem.eql(u8, event_type, "issue.assignee_added") or std.mem.eql(u8, event_type, "issue.assignee_removed")) return requirePayloadStringWithin(payload, event_type, "assignee", git.max_payload_atom_bytes);
 
     if (std.mem.eql(u8, event_type, "pull.opened")) {
         if (!hasString(payload, "title")) return "pull.opened payload.title must be a string";
+        if (!stringWithin(payload, "title", git.max_payload_title_bytes)) return "pull.opened payload.title exceeds v1 title size limit";
         if (!hasString(payload, "base_ref")) return "pull.opened payload.base_ref must be a string";
+        if (!stringWithin(payload, "base_ref", git.max_payload_ref_bytes)) return "pull.opened payload.base_ref exceeds v1 ref size limit";
         if (!hasString(payload, "head_ref")) return "pull.opened payload.head_ref must be a string";
+        if (!stringWithin(payload, "head_ref", git.max_payload_ref_bytes)) return "pull.opened payload.head_ref exceeds v1 ref size limit";
         if (!optionalString(payload, "body")) return "pull.opened payload.body must be a string";
+        if (!optionalStringWithin(payload, "body", git.max_payload_text_bytes)) return "pull.opened payload.body exceeds v1 text size limit";
         if (!optionalBool(payload, "draft")) return "pull.opened payload.draft must be a boolean";
         return null;
     }
     if (std.mem.eql(u8, event_type, "pull.updated")) {
         if (!optionalString(payload, "title")) return "pull.updated payload.title must be a string";
+        if (!optionalStringWithin(payload, "title", git.max_payload_title_bytes)) return "pull.updated payload.title exceeds v1 title size limit";
         if (!optionalString(payload, "body")) return "pull.updated payload.body must be a string";
+        if (!optionalStringWithin(payload, "body", git.max_payload_text_bytes)) return "pull.updated payload.body exceeds v1 text size limit";
         if (!optionalState(payload, "state", &.{ "open", "closed" })) return "pull.updated payload.state must be open or closed";
         if (!optionalString(payload, "base_ref")) return "pull.updated payload.base_ref must be a string";
+        if (!optionalStringWithin(payload, "base_ref", git.max_payload_ref_bytes)) return "pull.updated payload.base_ref exceeds v1 ref size limit";
         if (!optionalString(payload, "head_ref")) return "pull.updated payload.head_ref must be a string";
+        if (!optionalStringWithin(payload, "head_ref", git.max_payload_ref_bytes)) return "pull.updated payload.head_ref exceeds v1 ref size limit";
         if (!optionalStringArray(payload, "labels_added")) return "pull.updated payload.labels_added must be an array of strings";
+        if (!optionalStringArrayWithin(payload, "labels_added", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "pull.updated payload.labels_added exceeds v1 collection limits";
         if (!optionalStringArray(payload, "labels_removed")) return "pull.updated payload.labels_removed must be an array of strings";
+        if (!optionalStringArrayWithin(payload, "labels_removed", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "pull.updated payload.labels_removed exceeds v1 collection limits";
         if (!optionalStringArray(payload, "assignees_added")) return "pull.updated payload.assignees_added must be an array of strings";
+        if (!optionalStringArrayWithin(payload, "assignees_added", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "pull.updated payload.assignees_added exceeds v1 collection limits";
         if (!optionalStringArray(payload, "assignees_removed")) return "pull.updated payload.assignees_removed must be an array of strings";
+        if (!optionalStringArrayWithin(payload, "assignees_removed", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "pull.updated payload.assignees_removed exceeds v1 collection limits";
         if (!optionalStringArray(payload, "reviewers_added")) return "pull.updated payload.reviewers_added must be an array of strings";
+        if (!optionalStringArrayWithin(payload, "reviewers_added", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "pull.updated payload.reviewers_added exceeds v1 collection limits";
         if (!optionalStringArray(payload, "reviewers_removed")) return "pull.updated payload.reviewers_removed must be an array of strings";
+        if (!optionalStringArrayWithin(payload, "reviewers_removed", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "pull.updated payload.reviewers_removed exceeds v1 collection limits";
         if (!hasAnyKey(payload, &.{ "title", "body", "state", "base_ref", "head_ref", "labels_added", "labels_removed", "assignees_added", "assignees_removed", "reviewers_added", "reviewers_removed" })) return "pull.updated payload must contain at least one update field";
         return null;
     }
-    if (std.mem.eql(u8, event_type, "pull.title_set")) return requirePayloadString(payload, "pull.title_set", "title");
-    if (std.mem.eql(u8, event_type, "pull.body_set")) return requirePayloadString(payload, "pull.body_set", "body");
+    if (std.mem.eql(u8, event_type, "pull.title_set")) return requirePayloadStringWithin(payload, "pull.title_set", "title", git.max_payload_title_bytes);
+    if (std.mem.eql(u8, event_type, "pull.body_set")) return requirePayloadStringWithin(payload, "pull.body_set", "body", git.max_payload_text_bytes);
     if (std.mem.eql(u8, event_type, "pull.state_set")) {
         if (!hasState(payload, "state", &.{ "open", "closed" })) return "pull.state_set payload.state must be open or closed";
         return null;
     }
-    if (std.mem.eql(u8, event_type, "pull.base_set")) return requirePayloadString(payload, "pull.base_set", "base_ref");
-    if (std.mem.eql(u8, event_type, "pull.head_set")) return requirePayloadString(payload, "pull.head_set", "head_ref");
-    if (std.mem.eql(u8, event_type, "pull.label_added") or std.mem.eql(u8, event_type, "pull.label_removed")) return requirePayloadString(payload, event_type, "label");
-    if (std.mem.eql(u8, event_type, "pull.assignee_added") or std.mem.eql(u8, event_type, "pull.assignee_removed")) return requirePayloadString(payload, event_type, "assignee");
-    if (std.mem.eql(u8, event_type, "pull.reviewer_added") or std.mem.eql(u8, event_type, "pull.reviewer_removed")) return requirePayloadString(payload, event_type, "reviewer");
+    if (std.mem.eql(u8, event_type, "pull.base_set")) return requirePayloadStringWithin(payload, "pull.base_set", "base_ref", git.max_payload_ref_bytes);
+    if (std.mem.eql(u8, event_type, "pull.head_set")) return requirePayloadStringWithin(payload, "pull.head_set", "head_ref", git.max_payload_ref_bytes);
+    if (std.mem.eql(u8, event_type, "pull.label_added") or std.mem.eql(u8, event_type, "pull.label_removed")) return requirePayloadStringWithin(payload, event_type, "label", git.max_payload_atom_bytes);
+    if (std.mem.eql(u8, event_type, "pull.assignee_added") or std.mem.eql(u8, event_type, "pull.assignee_removed")) return requirePayloadStringWithin(payload, event_type, "assignee", git.max_payload_atom_bytes);
+    if (std.mem.eql(u8, event_type, "pull.reviewer_added") or std.mem.eql(u8, event_type, "pull.reviewer_removed")) return requirePayloadStringWithin(payload, event_type, "reviewer", git.max_payload_atom_bytes);
     if (std.mem.eql(u8, event_type, "pull.merged")) {
         if (!hasString(payload, "merge_oid") and !hasString(payload, "target_oid")) return "pull.merged payload.merge_oid or payload.target_oid must be a string";
+        if (!optionalStringWithin(payload, "merge_oid", git.max_payload_ref_bytes)) return "pull.merged payload.merge_oid exceeds v1 ref size limit";
+        if (!optionalStringWithin(payload, "target_oid", git.max_payload_ref_bytes)) return "pull.merged payload.target_oid exceeds v1 ref size limit";
         return null;
     }
 
     if (std.mem.eql(u8, event_type, "comment.added")) {
         if (!hasString(payload, "parent_kind")) return "comment.added payload.parent_kind must be a string";
+        if (!stringWithin(payload, "parent_kind", git.max_payload_atom_bytes)) return "comment.added payload.parent_kind exceeds v1 field size limit";
         if (!hasString(payload, "parent_id")) return "comment.added payload.parent_id must be a string";
+        if (!stringWithin(payload, "parent_id", git.max_payload_ref_bytes)) return "comment.added payload.parent_id exceeds v1 field size limit";
         if (!hasString(payload, "body")) return "comment.added payload.body must be a string";
+        if (!stringWithin(payload, "body", git.max_payload_text_bytes)) return "comment.added payload.body exceeds v1 text size limit";
         return null;
     }
-    if (std.mem.eql(u8, event_type, "comment.body_set")) return requirePayloadString(payload, "comment.body_set", "body");
+    if (std.mem.eql(u8, event_type, "comment.body_set")) return requirePayloadStringWithin(payload, "comment.body_set", "body", git.max_payload_text_bytes);
     if (std.mem.eql(u8, event_type, "comment.redacted")) {
         if (!optionalString(payload, "reason")) return "comment.redacted payload.reason must be a string";
+        if (!optionalStringWithin(payload, "reason", git.max_payload_text_bytes)) return "comment.redacted payload.reason exceeds v1 text size limit";
         return null;
     }
 
     if (std.mem.eql(u8, event_type, "acl.role_granted") or std.mem.eql(u8, event_type, "acl.role_revoked")) {
         if (!hasString(payload, "principal")) return "acl role event payload.principal must be a string";
+        if (!stringWithin(payload, "principal", git.max_payload_atom_bytes)) return "acl role event payload.principal exceeds v1 field size limit";
         if (!hasString(payload, "role")) return "acl role event payload.role must be a string";
+        if (!stringWithin(payload, "role", git.max_payload_atom_bytes)) return "acl role event payload.role exceeds v1 field size limit";
         return null;
     }
 
     if (std.mem.eql(u8, event_type, "identity.device_added")) {
         if (!hasString(payload, "principal")) return "identity device event payload.principal must be a string";
+        if (!stringWithin(payload, "principal", git.max_payload_atom_bytes)) return "identity device event payload.principal exceeds v1 field size limit";
         if (!hasString(payload, "device")) return "identity device event payload.device must be a string";
+        if (!stringWithin(payload, "device", git.max_payload_atom_bytes)) return "identity device event payload.device exceeds v1 field size limit";
         const signing_key = objectValue(payload, "signing_key") orelse return "identity.device_added payload.signing_key must be an object";
         if (!hasString(signing_key, "public_key")) return "identity.device_added payload.signing_key.public_key must be a string";
+        if (!stringWithin(signing_key, "public_key", git.max_payload_key_bytes)) return "identity.device_added payload.signing_key.public_key exceeds v1 key size limit";
         if (!hasString(signing_key, "fingerprint")) return "identity.device_added payload.signing_key.fingerprint must be a string";
+        if (!stringWithin(signing_key, "fingerprint", git.max_payload_atom_bytes)) return "identity.device_added payload.signing_key.fingerprint exceeds v1 field size limit";
         if (!optionalString(signing_key, "scheme")) return "identity.device_added payload.signing_key.scheme must be a string";
+        if (!optionalStringWithin(signing_key, "scheme", git.max_payload_atom_bytes)) return "identity.device_added payload.signing_key.scheme exceeds v1 field size limit";
         return null;
     }
 
     if (std.mem.eql(u8, event_type, "identity.device_revoked")) {
         if (!hasString(payload, "principal")) return "identity device event payload.principal must be a string";
+        if (!stringWithin(payload, "principal", git.max_payload_atom_bytes)) return "identity device event payload.principal exceeds v1 field size limit";
         if (!hasString(payload, "device")) return "identity device event payload.device must be a string";
+        if (!stringWithin(payload, "device", git.max_payload_atom_bytes)) return "identity device event payload.device exceeds v1 field size limit";
         return null;
     }
 
     if (std.mem.eql(u8, event_type, "action.run_requested")) {
         if (!hasString(payload, "workflow")) return "action.run_requested payload.workflow must be a string";
+        if (!stringWithin(payload, "workflow", git.max_payload_atom_bytes)) return "action.run_requested payload.workflow exceeds v1 field size limit";
         if (!hasString(payload, "target_ref") and !hasString(payload, "target_oid")) return "action.run_requested payload.target_ref or payload.target_oid must be a string";
+        if (!optionalStringWithin(payload, "target_ref", git.max_payload_ref_bytes)) return "action.run_requested payload.target_ref exceeds v1 ref size limit";
+        if (!optionalStringWithin(payload, "target_oid", git.max_payload_ref_bytes)) return "action.run_requested payload.target_oid exceeds v1 ref size limit";
         return null;
     }
     if (std.mem.eql(u8, event_type, "action.run_completed")) {
         if (!hasString(payload, "run_id")) return "action.run_completed payload.run_id must be a string";
+        if (!stringWithin(payload, "run_id", git.max_payload_ref_bytes)) return "action.run_completed payload.run_id exceeds v1 field size limit";
         if (!hasString(payload, "conclusion")) return "action.run_completed payload.conclusion must be a string";
+        if (!stringWithin(payload, "conclusion", git.max_payload_atom_bytes)) return "action.run_completed payload.conclusion exceeds v1 field size limit";
         if (!hasString(payload, "target_ref") and !hasString(payload, "target_oid")) return "action.run_completed payload.target_ref or payload.target_oid must be a string";
+        if (!optionalStringWithin(payload, "target_ref", git.max_payload_ref_bytes)) return "action.run_completed payload.target_ref exceeds v1 ref size limit";
+        if (!optionalStringWithin(payload, "target_oid", git.max_payload_ref_bytes)) return "action.run_completed payload.target_oid exceeds v1 ref size limit";
         return null;
     }
 
@@ -917,19 +1042,6 @@ fn requiredString(object: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     return string;
 }
 
-fn optionalStringAllowEmpty(object: std.json.ObjectMap, key: []const u8) ?[]const u8 {
-    const value = object.get(key) orelse return null;
-    return switch (value) {
-        .string => |s| s,
-        else => null,
-    };
-}
-
-fn requiredUuid(object: std.json.ObjectMap, key: []const u8) ?[]const u8 {
-    const value = requiredString(object, key) orelse return null;
-    return if (looksLikeUuid(value)) value else null;
-}
-
 fn requirePayloadString(payload: std.json.ObjectMap, event_type: []const u8, key: []const u8) ?[]const u8 {
     if (hasString(payload, key)) return null;
     if (std.mem.eql(u8, key, "title")) {
@@ -944,9 +1056,20 @@ fn requirePayloadString(payload: std.json.ObjectMap, event_type: []const u8, key
     return "event payload is missing a required string field";
 }
 
+fn requirePayloadStringWithin(payload: std.json.ObjectMap, event_type: []const u8, key: []const u8, max_bytes: usize) ?[]const u8 {
+    if (requirePayloadString(payload, event_type, key)) |message| return message;
+    if (!stringWithin(payload, key, max_bytes)) return "event payload string exceeds v1 field size limit";
+    return null;
+}
+
 fn hasString(object: std.json.ObjectMap, key: []const u8) bool {
     const value = object.get(key) orelse return false;
     return value == .string;
+}
+
+fn stringWithin(object: std.json.ObjectMap, key: []const u8, max_bytes: usize) bool {
+    const value = jsonString(object.get(key)) orelse return false;
+    return value.len <= max_bytes;
 }
 
 fn objectValue(object: std.json.ObjectMap, key: []const u8) ?std.json.ObjectMap {
@@ -960,6 +1083,15 @@ fn objectValue(object: std.json.ObjectMap, key: []const u8) ?std.json.ObjectMap 
 fn optionalString(object: std.json.ObjectMap, key: []const u8) bool {
     const value = object.get(key) orelse return true;
     return value == .string;
+}
+
+fn optionalStringWithin(object: std.json.ObjectMap, key: []const u8, max_bytes: usize) bool {
+    const value = object.get(key) orelse return true;
+    const string = switch (value) {
+        .string => |s| s,
+        else => return false,
+    };
+    return string.len <= max_bytes;
 }
 
 fn optionalBool(object: std.json.ObjectMap, key: []const u8) bool {
@@ -979,6 +1111,19 @@ fn optionalStringArray(object: std.json.ObjectMap, key: []const u8) bool {
     return true;
 }
 
+fn optionalStringArrayWithin(object: std.json.ObjectMap, key: []const u8, max_items: usize, max_item_bytes: usize) bool {
+    const value = object.get(key) orelse return true;
+    const array = switch (value) {
+        .array => |items| items,
+        else => return false,
+    };
+    if (array.items.len > max_items) return false;
+    for (array.items) |item| {
+        if (item != .string or item.string.len > max_item_bytes) return false;
+    }
+    return true;
+}
+
 fn optionalState(object: std.json.ObjectMap, key: []const u8, allowed: []const []const u8) bool {
     if (object.get(key) == null) return true;
     return hasState(object, key, allowed);
@@ -989,18 +1134,6 @@ fn hasAnyKey(object: std.json.ObjectMap, keys: []const []const u8) bool {
         if (object.get(key) != null) return true;
     }
     return false;
-}
-
-fn stringArray(object: std.json.ObjectMap, key: []const u8) bool {
-    const value = object.get(key) orelse return false;
-    const array = switch (value) {
-        .array => |items| items,
-        else => return false,
-    };
-    for (array.items) |item| {
-        if (item != .string) return false;
-    }
-    return true;
 }
 
 fn arrayLen(object: std.json.ObjectMap, key: []const u8) usize {
@@ -1195,6 +1328,59 @@ test "issue opened event json passes envelope validation" {
     defer std.testing.allocator.free(body);
 
     try validateEventEnvelope(std.testing.allocator, "test-commit", body);
+}
+
+test "validated envelope rejects oversized payload fields and arrays" {
+    var cfg = Config{
+        .allocator = std.testing.allocator,
+        .repo_id = try std.testing.allocator.dupe(u8, "018f0000-0000-7000-8000-000000000001"),
+        .principal = try std.testing.allocator.dupe(u8, "alice"),
+        .device = try std.testing.allocator.dupe(u8, "laptop"),
+        .seq = 0,
+    };
+    defer cfg.deinit();
+
+    const oversized_title = try std.testing.allocator.alloc(u8, git.max_payload_title_bytes + 1);
+    defer std.testing.allocator.free(oversized_title);
+    @memset(oversized_title, 'a');
+
+    const oversized_body = try buildIssueOpenedJson(
+        std.testing.allocator,
+        cfg,
+        1,
+        "018f0000-0000-7000-8000-000000000002",
+        "018f0000-0000-7000-8000-000000000003",
+        "018f0000-0000-7000-8000-000000000004",
+        "2026-05-13T18:30:59Z",
+        .{},
+        oversized_title,
+        "",
+        &.{},
+        &.{},
+    );
+    defer std.testing.allocator.free(oversized_body);
+    try std.testing.expectError(error.InvalidEventEnvelope, parseValidatedEnvelope(std.testing.allocator, oversized_body));
+
+    const labels = try std.testing.allocator.alloc([]const u8, git.max_payload_collection_items + 1);
+    defer std.testing.allocator.free(labels);
+    for (labels) |*label| label.* = "bug";
+
+    const oversized_array_body = try buildIssueOpenedJson(
+        std.testing.allocator,
+        cfg,
+        1,
+        "018f0000-0000-7000-8000-000000000002",
+        "018f0000-0000-7000-8000-000000000003",
+        "018f0000-0000-7000-8000-000000000004",
+        "2026-05-13T18:30:59Z",
+        .{},
+        "Smoke",
+        "",
+        labels,
+        &.{},
+    );
+    defer std.testing.allocator.free(oversized_array_body);
+    try std.testing.expectError(error.InvalidEventEnvelope, parseValidatedEnvelope(std.testing.allocator, oversized_array_body));
 }
 
 test "validated envelope rejects known event with missing required payload" {
