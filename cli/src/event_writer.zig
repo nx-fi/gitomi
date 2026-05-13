@@ -18,8 +18,23 @@ pub const EventWriter = struct {
     inbox_ref: []u8,
     prepared_parents: git.PreparedEventParents,
     related_heads: [][]const u8,
+    persist_config: bool,
 
     pub fn init(allocator: Allocator, command_context: []const u8) !EventWriter {
+        return initInternal(allocator, command_context, null, null, true);
+    }
+
+    pub fn initForActor(allocator: Allocator, command_context: []const u8, principal: []const u8, device: []const u8) !EventWriter {
+        return initInternal(allocator, command_context, principal, device, false);
+    }
+
+    fn initInternal(
+        allocator: Allocator,
+        command_context: []const u8,
+        actor_principal: ?[]const u8,
+        actor_device: ?[]const u8,
+        persist_config: bool,
+    ) !EventWriter {
         var repo = try repo_mod.discoverRepo(allocator);
         errdefer repo.deinit();
 
@@ -31,6 +46,20 @@ pub const EventWriter = struct {
             else => return err,
         };
         errdefer cfg.deinit();
+
+        if (actor_principal) |principal| {
+            const checked_principal = try util.checkedRefSegment(allocator, principal, "principal");
+            errdefer allocator.free(checked_principal);
+            const checked_device = try util.checkedRefSegment(allocator, actor_device.?, "device");
+            errdefer allocator.free(checked_device);
+
+            allocator.free(cfg.principal);
+            allocator.free(cfg.device);
+            cfg.principal = checked_principal;
+            cfg.device = checked_device;
+            cfg.seq = 0;
+            try repo_mod.recoverConfigSeq(allocator, &cfg);
+        }
 
         const inbox_ref = try repo_mod.inboxRef(allocator, cfg);
         errdefer allocator.free(inbox_ref);
@@ -49,6 +78,7 @@ pub const EventWriter = struct {
             .inbox_ref = inbox_ref,
             .prepared_parents = prepared_parents,
             .related_heads = related_heads,
+            .persist_config = persist_config,
         };
     }
 
@@ -87,7 +117,9 @@ pub const EventWriter = struct {
         errdefer self.allocator.free(commit_oid);
 
         self.cfg.seq = committed_seq;
-        try repo_mod.writeConfig(self.repo.config_path, self.cfg);
+        if (self.persist_config) {
+            try repo_mod.writeConfig(self.repo.config_path, self.cfg);
+        }
         return commit_oid;
     }
 };

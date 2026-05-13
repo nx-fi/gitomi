@@ -12,7 +12,6 @@ const gitChecked = git.gitChecked;
 const gitConfigValue = git.gitConfigValue;
 const sanitizeRefSegment = util.sanitizeRefSegment;
 const newUuidV7 = util.newUuidV7;
-const sha256Hex = util.sha256Hex;
 const trimOwned = util.trimOwned;
 const appendJsonFieldString = json_writer.appendJsonFieldString;
 
@@ -27,6 +26,7 @@ pub const Repo = struct {
     gitomi_dir: []u8,
     config_path: []u8,
     index_path: []u8,
+    cursors_path: []u8,
 
     pub fn deinit(self: *Repo) void {
         self.allocator.free(self.root);
@@ -34,6 +34,7 @@ pub const Repo = struct {
         self.allocator.free(self.gitomi_dir);
         self.allocator.free(self.config_path);
         self.allocator.free(self.index_path);
+        self.allocator.free(self.cursors_path);
     }
 };
 
@@ -96,6 +97,8 @@ pub fn discoverRepo(allocator: Allocator) !Repo {
     errdefer allocator.free(config_path);
     const index_path = try std.fs.path.join(allocator, &.{ gitomi_dir, "index.sqlite" });
     errdefer allocator.free(index_path);
+    const cursors_path = try std.fs.path.join(allocator, &.{ gitomi_dir, "cursors.sqlite" });
+    errdefer allocator.free(cursors_path);
 
     return .{
         .allocator = allocator,
@@ -104,6 +107,7 @@ pub fn discoverRepo(allocator: Allocator) !Repo {
         .gitomi_dir = gitomi_dir,
         .config_path = config_path,
         .index_path = index_path,
+        .cursors_path = cursors_path,
     };
 }
 
@@ -443,17 +447,19 @@ pub fn recoverConfigSeq(allocator: Allocator, cfg: *Config) !void {
     const log = try git.gitChecked(allocator, &.{ "log", "--first-parent", "--reverse", "--format=%b%x1e", ref });
     defer allocator.free(log);
 
-    var max_seq = cfg.seq;
+    var max_seq: u64 = 0;
+    var found = false;
     var records = std.mem.splitScalar(u8, log, 0x1e);
     while (records.next()) |record_raw| {
         const body = std.mem.trim(u8, record_raw, " \t\r\n");
         if (body.len == 0) continue;
         const seq = parseSeqForActor(allocator, body, cfg.principal, cfg.device) catch null;
         if (seq) |value| {
+            found = true;
             if (value > max_seq) max_seq = value;
         }
     }
-    cfg.seq = max_seq;
+    if (found) cfg.seq = max_seq;
 }
 
 fn genesisRepoId(allocator: Allocator, commit: []const u8) ![]u8 {
@@ -516,9 +522,25 @@ pub fn signingPublicKey(allocator: Allocator) ![]u8 {
 
 pub fn signingKeyFingerprint(allocator: Allocator, public_key: []const u8) ![]u8 {
     if (public_key.len == 0) return allocator.dupe(u8, "");
-    const hash = try sha256Hex(allocator, public_key);
-    defer allocator.free(hash);
-    return std.fmt.allocPrint(allocator, "sha256:{s}", .{hash});
+    const trimmed = std.mem.trim(u8, public_key, " \t\r\n");
+    var fields = std.mem.tokenizeAny(u8, trimmed, " \t\r\n");
+    _ = fields.next() orelse return error.InvalidSigningPublicKey;
+    const encoded_key = fields.next() orelse return error.InvalidSigningPublicKey;
+
+    const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(encoded_key);
+    const decoded = try allocator.alloc(u8, decoded_len);
+    defer allocator.free(decoded);
+    try std.base64.standard.Decoder.decode(decoded, encoded_key);
+
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(decoded, &digest, .{});
+
+    const prefix = "SHA256:";
+    const encoded_len = std.base64.standard_no_pad.Encoder.calcSize(digest.len);
+    const fingerprint = try allocator.alloc(u8, prefix.len + encoded_len);
+    @memcpy(fingerprint[0..prefix.len], prefix);
+    _ = std.base64.standard_no_pad.Encoder.encode(fingerprint[prefix.len..], digest[0..]);
+    return fingerprint;
 }
 
 pub fn buildGenesisManifestJson(

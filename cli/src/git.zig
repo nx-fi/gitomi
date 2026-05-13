@@ -244,6 +244,25 @@ pub fn printGitConfigValue(allocator: Allocator, key: []const u8, label: []const
     }
 }
 
+pub fn verifiedCommitSigningKeyFingerprint(allocator: Allocator, commit: []const u8) !?[]u8 {
+    var argv = [_][]const u8{ "git", "verify-commit", commit };
+    var result = try runCommand(allocator, &argv, null, max_git_output);
+    defer result.deinit();
+    if (result.exitCode() != 0) return null;
+
+    if (try signingKeyFingerprintFromVerifyOutput(allocator, result.stderr)) |fingerprint| return fingerprint;
+    return try signingKeyFingerprintFromVerifyOutput(allocator, result.stdout);
+}
+
+pub fn signingKeyFingerprintFromVerifyOutput(allocator: Allocator, output: []const u8) !?[]u8 {
+    const prefix = "SHA256:";
+    const start = std.mem.indexOf(u8, output, prefix) orelse return null;
+    var end = start + prefix.len;
+    while (end < output.len and !std.ascii.isWhitespace(output[end])) : (end += 1) {}
+    if (end == start + prefix.len) return null;
+    return try allocator.dupe(u8, output[start..end]);
+}
+
 pub fn gitChecked(allocator: Allocator, git_args: []const []const u8) ![]u8 {
     return gitCheckedInputMax(allocator, git_args, null, max_git_output);
 }
