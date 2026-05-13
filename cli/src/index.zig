@@ -29,7 +29,7 @@ const appendJsonFieldBool = json_writer.appendJsonFieldBool;
 const appendJsonFieldInteger = json_writer.appendJsonFieldInteger;
 const appendJsonString = json_writer.appendJsonString;
 
-const index_schema_version = "2";
+const index_schema_version = "4";
 pub const index_event_columns = "ref, \"commit\", tree, subject, empty_tree, valid_json, event_type, object_kind, object_id, actor_principal, actor_device, seq, occurred_at";
 
 pub const IndexStats = struct {
@@ -370,6 +370,11 @@ pub fn rebuildIndex(allocator: Allocator, repo: Repo) !IndexStats {
         \\DROP TABLE IF EXISTS issues;
         \\DROP TABLE IF EXISTS issue_labels;
         \\DROP TABLE IF EXISTS issue_assignees;
+        \\DROP TABLE IF EXISTS pulls;
+        \\DROP TABLE IF EXISTS pull_labels;
+        \\DROP TABLE IF EXISTS pull_assignees;
+        \\DROP TABLE IF EXISTS pull_reviewers;
+        \\DROP TABLE IF EXISTS comments;
     );
     try createIndexSchema(&db);
 
@@ -473,6 +478,68 @@ pub fn createIndexSchema(db: *SqliteDb) !void {
         \\  assignee TEXT NOT NULL,
         \\  PRIMARY KEY(issue_id, assignee)
         \\);
+        \\CREATE TABLE pulls (
+        \\  id TEXT PRIMARY KEY,
+        \\  title TEXT NOT NULL,
+        \\  title_occurred_at TEXT NOT NULL,
+        \\  title_actor_principal TEXT NOT NULL,
+        \\  title_event_uuid TEXT NOT NULL,
+        \\  body TEXT NOT NULL,
+        \\  body_occurred_at TEXT NOT NULL,
+        \\  body_actor_principal TEXT NOT NULL,
+        \\  body_event_uuid TEXT NOT NULL,
+        \\  state TEXT NOT NULL,
+        \\  state_occurred_at TEXT NOT NULL,
+        \\  state_actor_principal TEXT NOT NULL,
+        \\  state_event_uuid TEXT NOT NULL,
+        \\  base_ref TEXT NOT NULL,
+        \\  base_occurred_at TEXT NOT NULL,
+        \\  base_actor_principal TEXT NOT NULL,
+        \\  base_event_uuid TEXT NOT NULL,
+        \\  head_ref TEXT NOT NULL,
+        \\  head_occurred_at TEXT NOT NULL,
+        \\  head_actor_principal TEXT NOT NULL,
+        \\  head_event_uuid TEXT NOT NULL,
+        \\  draft INTEGER NOT NULL,
+        \\  merge_oid TEXT NOT NULL,
+        \\  target_oid TEXT NOT NULL,
+        \\  opened_at TEXT NOT NULL,
+        \\  author_principal TEXT NOT NULL,
+        \\  author_device TEXT NOT NULL
+        \\);
+        \\CREATE INDEX pulls_state_opened_idx ON pulls(state, opened_at);
+        \\CREATE TABLE pull_labels (
+        \\  pull_id TEXT NOT NULL,
+        \\  label TEXT NOT NULL,
+        \\  PRIMARY KEY(pull_id, label)
+        \\);
+        \\CREATE TABLE pull_assignees (
+        \\  pull_id TEXT NOT NULL,
+        \\  assignee TEXT NOT NULL,
+        \\  PRIMARY KEY(pull_id, assignee)
+        \\);
+        \\CREATE TABLE pull_reviewers (
+        \\  pull_id TEXT NOT NULL,
+        \\  reviewer TEXT NOT NULL,
+        \\  PRIMARY KEY(pull_id, reviewer)
+        \\);
+        \\CREATE TABLE comments (
+        \\  id TEXT PRIMARY KEY,
+        \\  parent_kind TEXT NOT NULL,
+        \\  parent_id TEXT NOT NULL,
+        \\  body TEXT NOT NULL,
+        \\  body_occurred_at TEXT NOT NULL,
+        \\  body_actor_principal TEXT NOT NULL,
+        \\  body_event_uuid TEXT NOT NULL,
+        \\  redacted INTEGER NOT NULL,
+        \\  redacted_at TEXT NOT NULL,
+        \\  redacted_actor_principal TEXT NOT NULL,
+        \\  redacted_event_uuid TEXT NOT NULL,
+        \\  created_at TEXT NOT NULL,
+        \\  author_principal TEXT NOT NULL,
+        \\  author_device TEXT NOT NULL
+        \\);
+        \\CREATE INDEX comments_parent_created_idx ON comments(parent_kind, parent_id, created_at);
     );
 }
 
@@ -556,6 +623,8 @@ fn indexRefEvents(
 
         try insertValidatedIndexedEvent(event_stmt, ref, commit, tree, subject, envelope);
         try applyIssueProjection(allocator, db, envelope, body);
+        try applyPullProjection(allocator, db, envelope, body);
+        try applyCommentProjection(allocator, db, envelope, body);
         count += 1;
     }
 
@@ -784,6 +853,313 @@ fn deleteIssueCollectionValue(db: *SqliteDb, comptime sql_text: []const u8, issu
     try stmt.stepDone();
 }
 
+fn applyPullProjection(allocator: Allocator, db: *SqliteDb, envelope: ValidatedEnvelope, body: []const u8) !void {
+    if (!std.mem.startsWith(u8, envelope.event_type, "pull.")) return;
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return,
+    };
+    const payload_value = root.get("payload") orelse return;
+    const payload = switch (payload_value) {
+        .object => |object| object,
+        else => return,
+    };
+
+    if (std.mem.eql(u8, envelope.event_type, "pull.opened")) {
+        const title = event_mod.jsonString(payload.get("title")) orelse return;
+        const base_ref = event_mod.jsonString(payload.get("base_ref")) orelse return;
+        const head_ref = event_mod.jsonString(payload.get("head_ref")) orelse return;
+        const body_value = event_mod.jsonString(payload.get("body")) orelse "";
+        const draft = event_mod.jsonBool(payload.get("draft")) orelse false;
+        try insertPullOpened(db, envelope, title, body_value, base_ref, head_ref, draft);
+        return;
+    }
+
+    if (!(try pullExists(db, envelope.object_id))) return;
+
+    if (std.mem.eql(u8, envelope.event_type, "pull.title_set")) {
+        const title = event_mod.jsonString(payload.get("title")) orelse return;
+        try updatePullScalar(allocator, db, envelope.object_id, title, envelope, "title", "title_occurred_at", "title_actor_principal", "title_event_uuid");
+    } else if (std.mem.eql(u8, envelope.event_type, "pull.body_set")) {
+        const body_value = event_mod.jsonString(payload.get("body")) orelse return;
+        try updatePullScalar(allocator, db, envelope.object_id, body_value, envelope, "body", "body_occurred_at", "body_actor_principal", "body_event_uuid");
+    } else if (std.mem.eql(u8, envelope.event_type, "pull.state_set")) {
+        const state = event_mod.jsonString(payload.get("state")) orelse return;
+        try updatePullScalar(allocator, db, envelope.object_id, state, envelope, "state", "state_occurred_at", "state_actor_principal", "state_event_uuid");
+    } else if (std.mem.eql(u8, envelope.event_type, "pull.base_set")) {
+        const base_ref = event_mod.jsonString(payload.get("base_ref")) orelse return;
+        try updatePullScalar(allocator, db, envelope.object_id, base_ref, envelope, "base_ref", "base_occurred_at", "base_actor_principal", "base_event_uuid");
+    } else if (std.mem.eql(u8, envelope.event_type, "pull.head_set")) {
+        const head_ref = event_mod.jsonString(payload.get("head_ref")) orelse return;
+        try updatePullScalar(allocator, db, envelope.object_id, head_ref, envelope, "head_ref", "head_occurred_at", "head_actor_principal", "head_event_uuid");
+    } else if (std.mem.eql(u8, envelope.event_type, "pull.label_added")) {
+        const label = event_mod.jsonString(payload.get("label")) orelse return;
+        try insertPullCollectionValue(db, insert_pull_label_sql, envelope.object_id, label);
+    } else if (std.mem.eql(u8, envelope.event_type, "pull.label_removed")) {
+        const label = event_mod.jsonString(payload.get("label")) orelse return;
+        try deletePullCollectionValue(db, "DELETE FROM pull_labels WHERE pull_id = ? AND label = ?", envelope.object_id, label);
+    } else if (std.mem.eql(u8, envelope.event_type, "pull.assignee_added")) {
+        const assignee = event_mod.jsonString(payload.get("assignee")) orelse return;
+        try insertPullCollectionValue(db, insert_pull_assignee_sql, envelope.object_id, assignee);
+    } else if (std.mem.eql(u8, envelope.event_type, "pull.assignee_removed")) {
+        const assignee = event_mod.jsonString(payload.get("assignee")) orelse return;
+        try deletePullCollectionValue(db, "DELETE FROM pull_assignees WHERE pull_id = ? AND assignee = ?", envelope.object_id, assignee);
+    } else if (std.mem.eql(u8, envelope.event_type, "pull.reviewer_added")) {
+        const reviewer = event_mod.jsonString(payload.get("reviewer")) orelse return;
+        try insertPullCollectionValue(db, insert_pull_reviewer_sql, envelope.object_id, reviewer);
+    } else if (std.mem.eql(u8, envelope.event_type, "pull.reviewer_removed")) {
+        const reviewer = event_mod.jsonString(payload.get("reviewer")) orelse return;
+        try deletePullCollectionValue(db, "DELETE FROM pull_reviewers WHERE pull_id = ? AND reviewer = ?", envelope.object_id, reviewer);
+    } else if (std.mem.eql(u8, envelope.event_type, "pull.merged")) {
+        try applyPullMerged(allocator, db, envelope.object_id, event_mod.jsonString(payload.get("merge_oid")) orelse "", event_mod.jsonString(payload.get("target_oid")) orelse "", envelope);
+    }
+}
+
+const insert_pull_label_sql = "INSERT OR IGNORE INTO pull_labels(pull_id, label) VALUES (?, ?)";
+const insert_pull_assignee_sql = "INSERT OR IGNORE INTO pull_assignees(pull_id, assignee) VALUES (?, ?)";
+const insert_pull_reviewer_sql = "INSERT OR IGNORE INTO pull_reviewers(pull_id, reviewer) VALUES (?, ?)";
+
+fn insertPullOpened(
+    db: *SqliteDb,
+    envelope: ValidatedEnvelope,
+    title: []const u8,
+    body: []const u8,
+    base_ref: []const u8,
+    head_ref: []const u8,
+    draft: bool,
+) !void {
+    var stmt = try db.prepare(
+        \\INSERT OR IGNORE INTO pulls(
+        \\  id,
+        \\  title, title_occurred_at, title_actor_principal, title_event_uuid,
+        \\  body, body_occurred_at, body_actor_principal, body_event_uuid,
+        \\  state, state_occurred_at, state_actor_principal, state_event_uuid,
+        \\  base_ref, base_occurred_at, base_actor_principal, base_event_uuid,
+        \\  head_ref, head_occurred_at, head_actor_principal, head_event_uuid,
+        \\  draft, merge_oid, target_oid,
+        \\  opened_at, author_principal, author_device
+        \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, envelope.object_id);
+    try stmt.bindText(2, title);
+    try stmt.bindText(3, envelope.occurred_at);
+    try stmt.bindText(4, envelope.actor_principal);
+    try stmt.bindText(5, envelope.event_uuid);
+    try stmt.bindText(6, body);
+    try stmt.bindText(7, envelope.occurred_at);
+    try stmt.bindText(8, envelope.actor_principal);
+    try stmt.bindText(9, envelope.event_uuid);
+    try stmt.bindText(10, "open");
+    try stmt.bindText(11, envelope.occurred_at);
+    try stmt.bindText(12, envelope.actor_principal);
+    try stmt.bindText(13, envelope.event_uuid);
+    try stmt.bindText(14, base_ref);
+    try stmt.bindText(15, envelope.occurred_at);
+    try stmt.bindText(16, envelope.actor_principal);
+    try stmt.bindText(17, envelope.event_uuid);
+    try stmt.bindText(18, head_ref);
+    try stmt.bindText(19, envelope.occurred_at);
+    try stmt.bindText(20, envelope.actor_principal);
+    try stmt.bindText(21, envelope.event_uuid);
+    try stmt.bindInt(22, if (draft) 1 else 0);
+    try stmt.bindText(23, "");
+    try stmt.bindText(24, "");
+    try stmt.bindText(25, envelope.occurred_at);
+    try stmt.bindText(26, envelope.actor_principal);
+    try stmt.bindText(27, envelope.actor_device);
+    try stmt.stepDone();
+}
+
+fn pullExists(db: *SqliteDb, pull_id: []const u8) !bool {
+    var stmt = try db.prepare("SELECT 1 FROM pulls WHERE id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, pull_id);
+    return try stmt.step();
+}
+
+fn updatePullScalar(
+    allocator: Allocator,
+    db: *SqliteDb,
+    pull_id: []const u8,
+    value: []const u8,
+    envelope: ValidatedEnvelope,
+    comptime value_col: []const u8,
+    comptime occurred_at_col: []const u8,
+    comptime actor_col: []const u8,
+    comptime event_uuid_col: []const u8,
+) !void {
+    var select = try db.prepare("SELECT " ++ occurred_at_col ++ ", " ++ actor_col ++ ", " ++ event_uuid_col ++ " FROM pulls WHERE id = ?");
+    defer select.deinit();
+    try select.bindText(1, pull_id);
+    if (!(try select.step())) return;
+    const old_occurred_at = try select.columnTextDup(allocator, 0);
+    defer allocator.free(old_occurred_at);
+    const old_actor = try select.columnTextDup(allocator, 1);
+    defer allocator.free(old_actor);
+    const old_event_uuid = try select.columnTextDup(allocator, 2);
+    defer allocator.free(old_event_uuid);
+
+    if (!lwwWins(envelope.occurred_at, envelope.actor_principal, envelope.event_uuid, old_occurred_at, old_actor, old_event_uuid)) {
+        return;
+    }
+
+    var update = try db.prepare("UPDATE pulls SET " ++ value_col ++ " = ?, " ++ occurred_at_col ++ " = ?, " ++ actor_col ++ " = ?, " ++ event_uuid_col ++ " = ? WHERE id = ?");
+    defer update.deinit();
+    try update.bindText(1, value);
+    try update.bindText(2, envelope.occurred_at);
+    try update.bindText(3, envelope.actor_principal);
+    try update.bindText(4, envelope.event_uuid);
+    try update.bindText(5, pull_id);
+    try update.stepDone();
+}
+
+fn applyPullMerged(
+    allocator: Allocator,
+    db: *SqliteDb,
+    pull_id: []const u8,
+    merge_oid: []const u8,
+    target_oid: []const u8,
+    envelope: ValidatedEnvelope,
+) !void {
+    try updatePullScalar(allocator, db, pull_id, "merged", envelope, "state", "state_occurred_at", "state_actor_principal", "state_event_uuid");
+    var update = try db.prepare("UPDATE pulls SET merge_oid = ?, target_oid = ? WHERE id = ?");
+    defer update.deinit();
+    try update.bindText(1, merge_oid);
+    try update.bindText(2, target_oid);
+    try update.bindText(3, pull_id);
+    try update.stepDone();
+}
+
+fn insertPullCollectionValue(db: *SqliteDb, comptime sql_text: []const u8, pull_id: []const u8, value: []const u8) !void {
+    var stmt = try db.prepare(sql_text);
+    defer stmt.deinit();
+    try stmt.bindText(1, pull_id);
+    try stmt.bindText(2, value);
+    try stmt.stepDone();
+}
+
+fn deletePullCollectionValue(db: *SqliteDb, comptime sql_text: []const u8, pull_id: []const u8, value: []const u8) !void {
+    var stmt = try db.prepare(sql_text);
+    defer stmt.deinit();
+    try stmt.bindText(1, pull_id);
+    try stmt.bindText(2, value);
+    try stmt.stepDone();
+}
+
+fn applyCommentProjection(allocator: Allocator, db: *SqliteDb, envelope: ValidatedEnvelope, body: []const u8) !void {
+    if (!std.mem.startsWith(u8, envelope.event_type, "comment.")) return;
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return,
+    };
+    const payload_value = root.get("payload") orelse return;
+    const payload = switch (payload_value) {
+        .object => |object| object,
+        else => return,
+    };
+
+    if (std.mem.eql(u8, envelope.event_type, "comment.added")) {
+        const parent_kind = event_mod.jsonString(payload.get("parent_kind")) orelse return;
+        const parent_id = event_mod.jsonString(payload.get("parent_id")) orelse return;
+        const comment_body = event_mod.jsonString(payload.get("body")) orelse return;
+        try insertCommentAdded(db, envelope, parent_kind, parent_id, comment_body);
+    } else if (std.mem.eql(u8, envelope.event_type, "comment.body_set")) {
+        if (!(try commentExists(db, envelope.object_id))) return;
+        const comment_body = event_mod.jsonString(payload.get("body")) orelse return;
+        try updateCommentBody(allocator, db, envelope.object_id, comment_body, envelope);
+    } else if (std.mem.eql(u8, envelope.event_type, "comment.redacted")) {
+        if (!(try commentExists(db, envelope.object_id))) return;
+        try redactComment(db, envelope.object_id, envelope);
+    }
+}
+
+fn insertCommentAdded(
+    db: *SqliteDb,
+    envelope: ValidatedEnvelope,
+    parent_kind: []const u8,
+    parent_id: []const u8,
+    body: []const u8,
+) !void {
+    var stmt = try db.prepare(
+        \\INSERT OR IGNORE INTO comments(
+        \\  id, parent_kind, parent_id,
+        \\  body, body_occurred_at, body_actor_principal, body_event_uuid,
+        \\  redacted, redacted_at, redacted_actor_principal, redacted_event_uuid,
+        \\  created_at, author_principal, author_device
+        \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, envelope.object_id);
+    try stmt.bindText(2, parent_kind);
+    try stmt.bindText(3, parent_id);
+    try stmt.bindText(4, body);
+    try stmt.bindText(5, envelope.occurred_at);
+    try stmt.bindText(6, envelope.actor_principal);
+    try stmt.bindText(7, envelope.event_uuid);
+    try stmt.bindInt(8, 0);
+    try stmt.bindText(9, "");
+    try stmt.bindText(10, "");
+    try stmt.bindText(11, "");
+    try stmt.bindText(12, envelope.occurred_at);
+    try stmt.bindText(13, envelope.actor_principal);
+    try stmt.bindText(14, envelope.actor_device);
+    try stmt.stepDone();
+}
+
+fn commentExists(db: *SqliteDb, comment_id: []const u8) !bool {
+    var stmt = try db.prepare("SELECT 1 FROM comments WHERE id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, comment_id);
+    return try stmt.step();
+}
+
+fn updateCommentBody(allocator: Allocator, db: *SqliteDb, comment_id: []const u8, body: []const u8, envelope: ValidatedEnvelope) !void {
+    var select = try db.prepare("SELECT body_occurred_at, body_actor_principal, body_event_uuid FROM comments WHERE id = ?");
+    defer select.deinit();
+    try select.bindText(1, comment_id);
+    if (!(try select.step())) return;
+    const old_occurred_at = try select.columnTextDup(allocator, 0);
+    defer allocator.free(old_occurred_at);
+    const old_actor = try select.columnTextDup(allocator, 1);
+    defer allocator.free(old_actor);
+    const old_event_uuid = try select.columnTextDup(allocator, 2);
+    defer allocator.free(old_event_uuid);
+
+    if (!lwwWins(envelope.occurred_at, envelope.actor_principal, envelope.event_uuid, old_occurred_at, old_actor, old_event_uuid)) {
+        return;
+    }
+
+    var update = try db.prepare("UPDATE comments SET body = ?, body_occurred_at = ?, body_actor_principal = ?, body_event_uuid = ? WHERE id = ?");
+    defer update.deinit();
+    try update.bindText(1, body);
+    try update.bindText(2, envelope.occurred_at);
+    try update.bindText(3, envelope.actor_principal);
+    try update.bindText(4, envelope.event_uuid);
+    try update.bindText(5, comment_id);
+    try update.stepDone();
+}
+
+fn redactComment(db: *SqliteDb, comment_id: []const u8, envelope: ValidatedEnvelope) !void {
+    var update = try db.prepare(
+        \\UPDATE comments
+        \\SET redacted = 1, redacted_at = ?, redacted_actor_principal = ?, redacted_event_uuid = ?
+        \\WHERE id = ?
+    );
+    defer update.deinit();
+    try update.bindText(1, envelope.occurred_at);
+    try update.bindText(2, envelope.actor_principal);
+    try update.bindText(3, envelope.event_uuid);
+    try update.bindText(4, comment_id);
+    try update.stepDone();
+}
+
 pub fn insertIndexedEvent(
     allocator: Allocator,
     stmt: *SqliteStmt,
@@ -890,6 +1266,80 @@ pub fn resolveIssueId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]
     return first;
 }
 
+pub fn resolvePullId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
+    const prefix = if (std.mem.startsWith(u8, raw_ref, "#")) raw_ref[1..] else raw_ref;
+    if (prefix.len < 7) {
+        try eprint("gt pull: pull reference must be at least 7 hex characters\n", .{});
+        return CliError.UserError;
+    }
+    for (prefix) |c| {
+        if (!std.ascii.isHex(c) and c != '-') {
+            try eprint("gt pull: pull reference must be a UUID or UUID prefix\n", .{});
+            return CliError.UserError;
+        }
+    }
+
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
+    const pattern = try std.fmt.allocPrint(allocator, "{s}%", .{prefix});
+    defer allocator.free(pattern);
+    var stmt = try db.prepare("SELECT id FROM pulls WHERE id LIKE ? ORDER BY id LIMIT 2");
+    defer stmt.deinit();
+    try stmt.bindText(1, pattern);
+
+    if (!(try stmt.step())) {
+        try eprint("gt pull: no pull matches #{s}\n", .{prefix});
+        return CliError.UserError;
+    }
+    const first = try stmt.columnTextDup(allocator, 0);
+    errdefer allocator.free(first);
+    if (try stmt.step()) {
+        const second = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(second);
+        try eprint("gt pull: ambiguous pull reference #{s} matches {s} and {s}\n", .{ prefix, first, second });
+        return CliError.UserError;
+    }
+    return first;
+}
+
+pub fn resolveCommentId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
+    const prefix = if (std.mem.startsWith(u8, raw_ref, "#")) raw_ref[1..] else raw_ref;
+    if (prefix.len < 7) {
+        try eprint("gt comment: comment reference must be at least 7 hex characters\n", .{});
+        return CliError.UserError;
+    }
+    for (prefix) |c| {
+        if (!std.ascii.isHex(c) and c != '-') {
+            try eprint("gt comment: comment reference must be a UUID or UUID prefix\n", .{});
+            return CliError.UserError;
+        }
+    }
+
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
+    const pattern = try std.fmt.allocPrint(allocator, "{s}%", .{prefix});
+    defer allocator.free(pattern);
+    var stmt = try db.prepare("SELECT id FROM comments WHERE id LIKE ? ORDER BY id LIMIT 2");
+    defer stmt.deinit();
+    try stmt.bindText(1, pattern);
+
+    if (!(try stmt.step())) {
+        try eprint("gt comment: no comment matches #{s}\n", .{prefix});
+        return CliError.UserError;
+    }
+    const first = try stmt.columnTextDup(allocator, 0);
+    errdefer allocator.free(first);
+    if (try stmt.step()) {
+        const second = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(second);
+        try eprint("gt comment: ambiguous comment reference #{s} matches {s} and {s}\n", .{ prefix, first, second });
+        return CliError.UserError;
+    }
+    return first;
+}
+
 pub fn listIssuesFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
     if (!fileExists(repo.index_path)) return;
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
@@ -928,6 +1378,126 @@ pub fn listIssuesFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
             try out("{s}\n", .{line.items});
         } else {
             try out("#{s} {s} {s}\n", .{ id[0..@min(id.len, 7)], state, title });
+        }
+    }
+}
+
+pub fn listPullsFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
+    if (!fileExists(repo.index_path)) return;
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
+    var stmt = try db.prepare(
+        \\SELECT id, title, state, author_principal, opened_at, body, base_ref, head_ref, draft, merge_oid, target_oid
+        \\FROM pulls
+        \\ORDER BY opened_at DESC, id DESC
+    );
+    defer stmt.deinit();
+
+    while (try stmt.step()) {
+        const id = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(id);
+        const title = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(title);
+        const state = try stmt.columnTextDup(allocator, 2);
+        defer allocator.free(state);
+        const author = try stmt.columnTextDup(allocator, 3);
+        defer allocator.free(author);
+        const opened_at = try stmt.columnTextDup(allocator, 4);
+        defer allocator.free(opened_at);
+        const body = try stmt.columnTextDup(allocator, 5);
+        defer allocator.free(body);
+        const base_ref = try stmt.columnTextDup(allocator, 6);
+        defer allocator.free(base_ref);
+        const head_ref = try stmt.columnTextDup(allocator, 7);
+        defer allocator.free(head_ref);
+        const draft = stmt.columnInt(8) != 0;
+        const merge_oid = try stmt.columnTextDup(allocator, 9);
+        defer allocator.free(merge_oid);
+        const target_oid = try stmt.columnTextDup(allocator, 10);
+        defer allocator.free(target_oid);
+
+        if (json) {
+            var line: std.ArrayList(u8) = .empty;
+            defer line.deinit(allocator);
+            try line.append(allocator, '{');
+            try appendJsonFieldString(&line, allocator, "id", id, true);
+            try appendJsonFieldString(&line, allocator, "state", state, true);
+            try appendJsonFieldString(&line, allocator, "title", title, true);
+            try appendJsonFieldString(&line, allocator, "body", body, true);
+            try appendJsonFieldString(&line, allocator, "base_ref", base_ref, true);
+            try appendJsonFieldString(&line, allocator, "head_ref", head_ref, true);
+            try appendJsonFieldBool(&line, allocator, "draft", draft, true);
+            try appendJsonFieldString(&line, allocator, "merge_oid", merge_oid, true);
+            try appendJsonFieldString(&line, allocator, "target_oid", target_oid, true);
+            try appendJsonFieldString(&line, allocator, "author_principal", author, true);
+            try appendJsonFieldString(&line, allocator, "opened_at", opened_at, true);
+            try appendIssueCollectionJsonField(&line, allocator, &db, "labels", "SELECT label FROM pull_labels WHERE pull_id = ? ORDER BY label", id, true);
+            try appendIssueCollectionJsonField(&line, allocator, &db, "assignees", "SELECT assignee FROM pull_assignees WHERE pull_id = ? ORDER BY assignee", id, true);
+            try appendIssueCollectionJsonField(&line, allocator, &db, "reviewers", "SELECT reviewer FROM pull_reviewers WHERE pull_id = ? ORDER BY reviewer", id, false);
+            try line.append(allocator, '}');
+            try out("{s}\n", .{line.items});
+        } else {
+            try out("#{s} {s} {s}->{s} {s}\n", .{
+                id[0..@min(id.len, 7)],
+                state,
+                head_ref,
+                base_ref,
+                title,
+            });
+        }
+    }
+}
+
+pub fn listCommentsFromIndex(
+    allocator: Allocator,
+    repo: Repo,
+    parent_kind: []const u8,
+    parent_id: []const u8,
+    json: bool,
+) !void {
+    if (!fileExists(repo.index_path)) return;
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
+    var stmt = try db.prepare(
+        \\SELECT id, body, redacted, author_principal, created_at
+        \\FROM comments
+        \\WHERE parent_kind = ? AND parent_id = ?
+        \\ORDER BY created_at, id
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, parent_kind);
+    try stmt.bindText(2, parent_id);
+
+    while (try stmt.step()) {
+        const id = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(id);
+        const body = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(body);
+        const redacted = stmt.columnInt(2) != 0;
+        const author = try stmt.columnTextDup(allocator, 3);
+        defer allocator.free(author);
+        const created_at = try stmt.columnTextDup(allocator, 4);
+        defer allocator.free(created_at);
+
+        if (json) {
+            var line: std.ArrayList(u8) = .empty;
+            defer line.deinit(allocator);
+            try line.append(allocator, '{');
+            try appendJsonFieldString(&line, allocator, "id", id, true);
+            try appendJsonFieldBool(&line, allocator, "redacted", redacted, true);
+            try appendJsonFieldString(&line, allocator, "body", if (redacted) "" else body, true);
+            try appendJsonFieldString(&line, allocator, "author_principal", author, true);
+            try appendJsonFieldString(&line, allocator, "created_at", created_at, false);
+            try line.append(allocator, '}');
+            try out("{s}\n", .{line.items});
+        } else {
+            try out("#{s} {s}: {s}\n", .{
+                id[0..@min(id.len, 7)],
+                author,
+                if (redacted) "[redacted]" else body,
+            });
         }
     }
 }

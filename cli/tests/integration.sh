@@ -121,6 +121,71 @@ init_repo "$reducer"
   gt fsck >/dev/null
 )
 
+echo "integration: comments are signed and projected"
+comments="$ROOT/comments"
+init_repo "$comments"
+(
+  cd "$comments"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  gt issue open --title "Commented issue" >/dev/null
+  first_event="$(gt events list --json)"
+  issue_id="$(json_field "$first_event" object_id)"
+  [[ -n "$issue_id" ]] || fail "expected issue id from event list"
+  issue_ref="#${issue_id:0:7}"
+  gt comment add issue "$issue_ref" --body "Initial comment" >/dev/null
+  comments_json="$(gt comment list issue "$issue_ref" --json)"
+  assert_line_count "$comments_json" 1
+  assert_contains "$comments_json" '"body":"Initial comment"'
+  assert_contains "$comments_json" '"redacted":false'
+  comment_id="$(json_field "$comments_json" id)"
+  [[ -n "$comment_id" ]] || fail "expected comment id from comment list"
+  comment_ref="#${comment_id:0:7}"
+  sleep 1
+  gt comment edit "$comment_ref" --body "Edited comment" >/dev/null
+  comments_json="$(gt comment list issue "$issue_ref" --json)"
+  assert_contains "$comments_json" '"body":"Edited comment"'
+  gt comment redact "$comment_ref" --reason "cleanup" >/dev/null
+  comments_json="$(gt comment list issue "$issue_ref" --json)"
+  assert_contains "$comments_json" '"redacted":true'
+  assert_contains "$comments_json" '"body":""'
+  gt fsck >/dev/null
+)
+
+echo "integration: pulls are signed and projected"
+pulls_repo="$ROOT/pulls"
+init_repo "$pulls_repo"
+(
+  cd "$pulls_repo"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  gt pull open --title "First pull" --base main --head feature --body "Pull body" --draft >/dev/null
+  pulls_json="$(gt pull list --json)"
+  assert_line_count "$pulls_json" 1
+  assert_contains "$pulls_json" '"state":"open"'
+  assert_contains "$pulls_json" '"title":"First pull"'
+  assert_contains "$pulls_json" '"body":"Pull body"'
+  assert_contains "$pulls_json" '"base_ref":"main"'
+  assert_contains "$pulls_json" '"head_ref":"feature"'
+  assert_contains "$pulls_json" '"draft":true'
+  pull_id="$(json_field "$pulls_json" id)"
+  [[ -n "$pull_id" ]] || fail "expected pull id from pull list"
+  pull_ref="#${pull_id:0:7}"
+  sleep 1
+  gt pull title "$pull_ref" --title "Updated pull" >/dev/null
+  gt pull base "$pull_ref" --base trunk >/dev/null
+  gt pull label add "$pull_ref" review >/dev/null
+  gt pull reviewer add "$pull_ref" alice >/dev/null
+  gt pull merge "$pull_ref" --target-oid 0123456789abcdef0123456789abcdef01234567 >/dev/null
+  pulls_json="$(gt pull list --json)"
+  assert_line_count "$pulls_json" 1
+  assert_contains "$pulls_json" '"state":"merged"'
+  assert_contains "$pulls_json" '"title":"Updated pull"'
+  assert_contains "$pulls_json" '"base_ref":"trunk"'
+  assert_contains "$pulls_json" '"labels":["review"]'
+  assert_contains "$pulls_json" '"reviewers":["alice"]'
+  assert_contains "$pulls_json" '"target_oid":"0123456789abcdef0123456789abcdef01234567"'
+  gt fsck >/dev/null
+)
+
 echo "integration: invalid signed event is not projected"
 invalid="$ROOT/invalid"
 init_repo "$invalid"
