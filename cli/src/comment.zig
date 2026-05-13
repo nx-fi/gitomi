@@ -11,14 +11,11 @@ const CliError = errors.CliError;
 const out = io.out;
 const eprint = io.eprint;
 const discoverRepo = repo_mod.discoverRepo;
-const loadConfig = repo_mod.loadConfig;
 const writeConfig = repo_mod.writeConfig;
 const inboxRef = repo_mod.inboxRef;
 const gitChecked = git.gitChecked;
 const emptyTreeOid = git.emptyTreeOid;
-const resolveOptionalRef = git.resolveOptionalRef;
-const inboxHeads = git.inboxHeads;
-const freeStringList = git.freeStringList;
+const prepareEventParents = git.prepareEventParents;
 const newUuidV7 = util.newUuidV7;
 const rfc3339Now = util.rfc3339Now;
 const trimOwned = util.trimOwned;
@@ -32,7 +29,7 @@ pub fn createCommentAddedEvent(
     var repo = try discoverRepo(allocator);
     defer repo.deinit();
 
-    var cfg = loadConfig(allocator, repo.config_path) catch |err| switch (err) {
+    var cfg = repo_mod.loadConfigForWrite(allocator, repo) catch |err| switch (err) {
         CliError.ConfigNotFound => {
             try eprint("gt comment: Gitomi is not initialized; run `gt init`\n", .{});
             return CliError.UserError;
@@ -51,6 +48,13 @@ pub fn createCommentAddedEvent(
     defer allocator.free(idem);
     const occurred_at = try rfc3339Now(allocator);
     defer allocator.free(occurred_at);
+    var prepared_parents = try prepareEventParents(allocator, inbox_ref);
+    defer prepared_parents.deinit();
+    const event_parents = event_mod.EventParents{
+        .log = prepared_parents.old_head,
+        .causal = prepared_parents.causal_heads,
+        .related = if (prepared_parents.old_head) |head| &.{head} else &.{},
+    };
 
     const next_seq = cfg.seq + 1;
     const event_body = try event_mod.buildCommentAddedJson(
@@ -61,6 +65,7 @@ pub fn createCommentAddedEvent(
         event_uuid,
         idem,
         occurred_at,
+        event_parents,
         parent_kind,
         parent_id,
         body,
@@ -69,7 +74,7 @@ pub fn createCommentAddedEvent(
 
     const subject = try std.fmt.allocPrint(allocator, "comment.added #{s}", .{comment_id[0..7]});
     defer allocator.free(subject);
-    const commit_oid = try writeSignedCommentEvent(allocator, inbox_ref, subject, event_body);
+    const commit_oid = try writeSignedCommentEvent(allocator, inbox_ref, subject, event_body, prepared_parents.old_head, prepared_parents.causal_heads);
     defer allocator.free(commit_oid);
 
     cfg.seq = next_seq;
@@ -104,7 +109,7 @@ fn createCommentUpdateEvent(
     var repo = try discoverRepo(allocator);
     defer repo.deinit();
 
-    var cfg = loadConfig(allocator, repo.config_path) catch |err| switch (err) {
+    var cfg = repo_mod.loadConfigForWrite(allocator, repo) catch |err| switch (err) {
         CliError.ConfigNotFound => {
             try eprint("gt comment: Gitomi is not initialized; run `gt init`\n", .{});
             return CliError.UserError;
@@ -121,11 +126,18 @@ fn createCommentUpdateEvent(
     defer allocator.free(idem);
     const occurred_at = try rfc3339Now(allocator);
     defer allocator.free(occurred_at);
+    var prepared_parents = try prepareEventParents(allocator, inbox_ref);
+    defer prepared_parents.deinit();
+    const event_parents = event_mod.EventParents{
+        .log = prepared_parents.old_head,
+        .causal = prepared_parents.causal_heads,
+        .related = if (prepared_parents.old_head) |head| &.{head} else &.{},
+    };
 
     const next_seq = cfg.seq + 1;
     const event_body = switch (kind) {
-        .body_set => try event_mod.buildCommentBodySetJson(allocator, cfg, next_seq, comment_id, event_uuid, idem, occurred_at, body),
-        .redacted => try event_mod.buildCommentRedactedJson(allocator, cfg, next_seq, comment_id, event_uuid, idem, occurred_at, reason),
+        .body_set => try event_mod.buildCommentBodySetJson(allocator, cfg, next_seq, comment_id, event_uuid, idem, occurred_at, event_parents, body),
+        .redacted => try event_mod.buildCommentRedactedJson(allocator, cfg, next_seq, comment_id, event_uuid, idem, occurred_at, event_parents, reason),
     };
     defer allocator.free(event_body);
 
@@ -135,7 +147,7 @@ fn createCommentUpdateEvent(
     };
     const subject = try std.fmt.allocPrint(allocator, "{s} #{s}", .{ event_type, comment_id[0..@min(comment_id.len, 7)] });
     defer allocator.free(subject);
-    const commit_oid = try writeSignedCommentEvent(allocator, inbox_ref, subject, event_body);
+    const commit_oid = try writeSignedCommentEvent(allocator, inbox_ref, subject, event_body, prepared_parents.old_head, prepared_parents.causal_heads);
     defer allocator.free(commit_oid);
 
     cfg.seq = next_seq;
@@ -151,13 +163,11 @@ fn writeSignedCommentEvent(
     inbox_ref: []const u8,
     subject: []const u8,
     event_body: []const u8,
+    old_head: ?[]const u8,
+    causal_heads: []const []const u8,
 ) ![]u8 {
     const empty_tree = try emptyTreeOid(allocator);
     defer allocator.free(empty_tree);
-    const old_head = try resolveOptionalRef(allocator, inbox_ref);
-    defer if (old_head) |head| allocator.free(head);
-    const all_heads = try inboxHeads(allocator);
-    defer freeStringList(allocator, all_heads);
 
     var commit_args: std.ArrayList([]const u8) = .empty;
     defer commit_args.deinit(allocator);
@@ -172,8 +182,7 @@ fn writeSignedCommentEvent(
     if (old_head) |head| {
         try commit_args.append(allocator, "-p");
         try commit_args.append(allocator, head);
-        for (all_heads) |known_head| {
-            if (std.mem.eql(u8, known_head, head)) continue;
+        for (causal_heads) |known_head| {
             try commit_args.append(allocator, "-p");
             try commit_args.append(allocator, known_head);
         }

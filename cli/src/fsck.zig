@@ -12,6 +12,7 @@ const looksLikeUuid = util.looksLikeUuid;
 const event_schema = event_mod.event_schema;
 const isKnownObjectKind = event_mod.isKnownObjectKind;
 const payloadRequirementError = event_mod.payloadRequirementError;
+const objectIdRequirementError = event_mod.objectIdRequirementError;
 const eprint = @import("io.zig").eprint;
 
 const Envelope = struct {
@@ -33,6 +34,7 @@ pub const State = struct {
     config_repo_id: ?[]const u8,
     observed_repo_id: ?[]u8 = null,
     actor_seqs: std.BufSet,
+    actor_last_seq: std.StringHashMap(u64),
     refs: usize = 0,
     commits: usize = 0,
     errors: usize = 0,
@@ -42,12 +44,16 @@ pub const State = struct {
             .allocator = allocator,
             .config_repo_id = config_repo_id,
             .actor_seqs = std.BufSet.init(allocator),
+            .actor_last_seq = std.StringHashMap(u64).init(allocator),
         };
     }
 
     pub fn deinit(self: *State) void {
         if (self.observed_repo_id) |repo_id| self.allocator.free(repo_id);
         self.actor_seqs.deinit();
+        var keys = self.actor_last_seq.keyIterator();
+        while (keys.next()) |key| self.allocator.free(key.*);
+        self.actor_last_seq.deinit();
     }
 
     pub fn fail(self: *State, comptime fmt: []const u8, args: anytype) !void {
@@ -81,6 +87,20 @@ pub const State = struct {
             return;
         }
         try self.actor_seqs.insert(key);
+
+        const actor_key = try std.fmt.allocPrint(self.allocator, "{d}:{s}\x1f{d}:{s}", .{ principal.len, principal, device.len, device });
+        errdefer self.allocator.free(actor_key);
+        const entry = try self.actor_last_seq.getOrPut(actor_key);
+        if (entry.found_existing) {
+            self.allocator.free(actor_key);
+            if (seq <= entry.value_ptr.*) {
+                try self.fail("{s}: actor sequence ({s}, {s}, {d}) is not strictly greater than previous sequence {d}", .{ commit, principal, device, seq, entry.value_ptr.* });
+                return;
+            }
+        } else {
+            entry.key_ptr.* = actor_key;
+        }
+        entry.value_ptr.* = seq;
     }
 };
 
@@ -147,15 +167,91 @@ fn checkInboxCommit(
     try checkFirstParent(allocator, fsck, ref, commit, expected_first_parent);
     try verifyCommitSignature(allocator, fsck, ref, commit);
 
+    const subject_raw = try gitChecked(allocator, &.{ "show", "-s", "--format=%s", commit });
+    defer allocator.free(subject_raw);
+    const subject = std.mem.trim(u8, subject_raw, " \t\r\n");
+    if (subject.len > git.max_event_subject_bytes) {
+        try fsck.fail("{s}: {s}: subject exceeds v1 subject size limit", .{ ref, commit });
+    }
+
     const body_raw = try gitChecked(allocator, &.{ "show", "-s", "--format=%b", commit });
     defer allocator.free(body_raw);
     const body = std.mem.trim(u8, body_raw, " \t\r\n");
+    if (body.len > git.max_event_body_bytes) {
+        try fsck.fail("{s}: {s}: event body exceeds v1 body size limit", .{ ref, commit });
+    }
+    try checkParentHashes(allocator, fsck, ref, commit, body);
 
     const envelope = try parseEnvelope(allocator, fsck, ref, commit, body);
     if (envelope) |parsed| {
         defer parsed.deinit();
         try fsck.checkRepoId(commit, parsed.repo_id);
         try fsck.checkActorSeq(commit, parsed.actor_principal, parsed.actor_device, parsed.seq);
+    }
+}
+
+fn checkParentHashes(
+    allocator: Allocator,
+    fsck: *State,
+    ref: []const u8,
+    commit: []const u8,
+    body: []const u8,
+) !void {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return;
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return,
+    };
+    const parent_hashes_value = root.get("parent_hashes") orelse return;
+    const parent_hashes = switch (parent_hashes_value) {
+        .object => |object| object,
+        else => return,
+    };
+    const log_hash = switch (parent_hashes.get("log") orelse return) {
+        .string => |value| value,
+        else => return,
+    };
+    const causal = switch (parent_hashes.get("causal") orelse return) {
+        .array => |array| array,
+        else => return,
+    };
+    const related = switch (parent_hashes.get("related") orelse return) {
+        .array => |array| array,
+        else => return,
+    };
+
+    const parents_raw = try gitChecked(allocator, &.{ "show", "-s", "--format=%P", commit });
+    defer allocator.free(parents_raw);
+    const parents = std.mem.trim(u8, parents_raw, " \t\r\n");
+    var parent_list: std.ArrayList([]const u8) = .empty;
+    defer parent_list.deinit(allocator);
+    var it = std.mem.tokenizeScalar(u8, parents, ' ');
+    while (it.next()) |parent| try parent_list.append(allocator, parent);
+
+    const expected_log = if (parent_list.items.len == 0) "" else parent_list.items[0];
+    if (!std.mem.eql(u8, log_hash, expected_log)) {
+        try fsck.fail("{s}: {s}: parent_hashes.log does not match first parent", .{ ref, commit });
+    }
+
+    const expected_causal_len = if (parent_list.items.len == 0) 0 else parent_list.items.len - 1;
+    if (causal.items.len != expected_causal_len) {
+        try fsck.fail("{s}: {s}: parent_hashes.causal does not match parent count", .{ ref, commit });
+        return;
+    }
+    if (causal.items.len > git.max_causal_parents) {
+        try fsck.fail("{s}: {s}: parent_hashes.causal exceeds v1 causal parent cap", .{ ref, commit });
+        return;
+    }
+    if (related.items.len > git.max_related_parents) {
+        try fsck.fail("{s}: {s}: parent_hashes.related exceeds v1 related parent cap", .{ ref, commit });
+        return;
+    }
+    for (causal.items, 0..) |item, idx| {
+        if (item != .string or !std.mem.eql(u8, item.string, parent_list.items[idx + 1])) {
+            try fsck.fail("{s}: {s}: parent_hashes.causal does not match Git parents", .{ ref, commit });
+            return;
+        }
     }
 }
 
@@ -242,9 +338,17 @@ fn parseEnvelope(
         }
     }
 
+    const parent_hashes = try requireObject(fsck, ref, commit, root, "parent_hashes", &ok);
+    if (parent_hashes) |parents_map| {
+        _ = try requireStringAllowEmpty(fsck, ref, commit, parents_map, "log", &ok);
+        try requireStringArray(fsck, ref, commit, parents_map, "causal", &ok);
+        try requireStringArray(fsck, ref, commit, parents_map, "related", &ok);
+    }
+
     const object = try requireObject(fsck, ref, commit, root, "object", &ok);
     if (object) |object_map| {
         const kind = try requireString(fsck, ref, commit, object_map, "kind", &ok);
+        const object_id = try requireString(fsck, ref, commit, object_map, "id", &ok);
         if (kind) |value| {
             if (!isKnownObjectKind(value)) {
                 try fsck.fail("{s}: {s}: unknown object kind '{s}'", .{ ref, commit, value });
@@ -254,9 +358,14 @@ fn parseEnvelope(
                     try fsck.fail("{s}: {s}: {s}", .{ ref, commit, message });
                     ok = false;
                 }
+                if (object_id != null) {
+                    if (objectIdRequirementError(event_type.?, value, object_id.?, payload.?)) |message| {
+                        try fsck.fail("{s}: {s}: {s}", .{ ref, commit, message });
+                        ok = false;
+                    }
+                }
             }
         }
-        _ = try requireUuid(fsck, ref, commit, object_map, "id", &ok);
     }
 
     const actor = try requireObject(fsck, ref, commit, root, "actor", &ok);
@@ -341,6 +450,59 @@ fn requireString(
         return null;
     }
     return string;
+}
+
+fn requireStringAllowEmpty(
+    fsck: *State,
+    ref: []const u8,
+    commit: []const u8,
+    object: std.json.ObjectMap,
+    key: []const u8,
+    ok: *bool,
+) !?[]const u8 {
+    const value = object.get(key) orelse {
+        try fsck.fail("{s}: {s}: missing {s}", .{ ref, commit, key });
+        ok.* = false;
+        return null;
+    };
+    return switch (value) {
+        .string => |string| string,
+        else => {
+            try fsck.fail("{s}: {s}: {s} must be a string", .{ ref, commit, key });
+            ok.* = false;
+            return null;
+        },
+    };
+}
+
+fn requireStringArray(
+    fsck: *State,
+    ref: []const u8,
+    commit: []const u8,
+    object: std.json.ObjectMap,
+    key: []const u8,
+    ok: *bool,
+) !void {
+    const value = object.get(key) orelse {
+        try fsck.fail("{s}: {s}: missing {s}", .{ ref, commit, key });
+        ok.* = false;
+        return;
+    };
+    const array = switch (value) {
+        .array => |items| items,
+        else => {
+            try fsck.fail("{s}: {s}: {s} must be an array", .{ ref, commit, key });
+            ok.* = false;
+            return;
+        },
+    };
+    for (array.items) |item| {
+        if (item != .string) {
+            try fsck.fail("{s}: {s}: {s} must contain only strings", .{ ref, commit, key });
+            ok.* = false;
+            return;
+        }
+    }
 }
 
 fn requireUuid(

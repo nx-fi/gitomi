@@ -12,6 +12,12 @@ const trimOwned = util.trimOwned;
 const trimDup = util.trimDup;
 
 pub const max_git_output = 16 * 1024 * 1024;
+pub const max_causal_parents = 32;
+pub const max_event_body_bytes = 1024 * 1024;
+pub const max_event_subject_bytes = 512;
+pub const max_related_parents = 256;
+pub const max_default_inbox_refs = 10_000;
+pub const max_default_admit_commits = 100_000;
 
 pub fn currentBranch(allocator: Allocator) ![]u8 {
     var branch_argv = [_][]const u8{ "git", "branch", "--show-current" };
@@ -119,6 +125,7 @@ pub fn resolveOptionalRef(allocator: Allocator, ref: []const u8) !?[]u8 {
 pub fn inboxHeads(allocator: Allocator) ![][]u8 {
     const raw = try gitChecked(allocator, &.{
         "for-each-ref",
+        "--sort=refname",
         "--format=%(objectname)",
         "refs/gitomi/inbox",
     });
@@ -135,6 +142,54 @@ pub fn inboxHeads(allocator: Allocator) ![][]u8 {
         try list.append(allocator, try allocator.dupe(u8, std.mem.trim(u8, line, " \t\r\n")));
     }
     return try list.toOwnedSlice(allocator);
+}
+
+pub const PreparedEventParents = struct {
+    allocator: Allocator,
+    old_head: ?[]u8,
+    all_heads: [][]u8,
+    causal_heads: [][]const u8,
+
+    pub fn deinit(self: *PreparedEventParents) void {
+        if (self.old_head) |head| self.allocator.free(head);
+        freeStringList(self.allocator, self.all_heads);
+        self.allocator.free(self.causal_heads);
+    }
+};
+
+pub fn prepareEventParents(allocator: Allocator, inbox_ref: []const u8) !PreparedEventParents {
+    const old_head = try resolveOptionalRef(allocator, inbox_ref);
+    errdefer if (old_head) |head| allocator.free(head);
+
+    const all_heads = try inboxHeads(allocator);
+    errdefer freeStringList(allocator, all_heads);
+
+    var causal: std.ArrayList([]const u8) = .empty;
+    errdefer causal.deinit(allocator);
+
+    if (old_head) |head| {
+        for (all_heads) |known_head| {
+            if (std.mem.eql(u8, known_head, head)) continue;
+            if (try isAncestor(allocator, known_head, head)) continue;
+            if (containsString(causal.items, known_head)) continue;
+            if (causal.items.len >= max_causal_parents) break;
+            try causal.append(allocator, known_head);
+        }
+    }
+
+    return .{
+        .allocator = allocator,
+        .old_head = old_head,
+        .all_heads = all_heads,
+        .causal_heads = try causal.toOwnedSlice(allocator),
+    };
+}
+
+fn containsString(values: []const []const u8, needle: []const u8) bool {
+    for (values) |value| {
+        if (std.mem.eql(u8, value, needle)) return true;
+    }
+    return false;
 }
 
 pub fn freeStringList(allocator: Allocator, values: [][]u8) void {

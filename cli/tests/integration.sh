@@ -46,6 +46,19 @@ json_field() {
   printf '%s\n' "$json" | sed -n 's/.*"'"$field"'":"\([^"]*\)".*/\1/p' | head -n 1
 }
 
+write_gt_config() {
+  local repo_id="$1"
+  local principal="$2"
+  local device="$3"
+  local seq="$4"
+  cat > .git/gitomi/config.toml <<EOF
+repo_id = "$repo_id"
+principal = "$principal"
+device = "$device"
+seq = $seq
+EOF
+}
+
 configure_signing() {
   local repo="$1"
   git -C "$repo" config user.name "Alice"
@@ -121,6 +134,32 @@ init_repo "$reducer"
   gt fsck >/dev/null
 )
 
+echo "integration: issue edit batches multiple updates"
+issue_edit="$ROOT/issue-edit"
+init_repo "$issue_edit"
+(
+  cd "$issue_edit"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  gt issue open --title "Batch original" --body "Old body" --label bug --assignee alice >/dev/null
+  first_event="$(gt events list --json)"
+  issue_id="$(json_field "$first_event" object_id)"
+  [[ -n "$issue_id" ]] || fail "expected issue id from event list"
+  issue_ref="#${issue_id:0:7}"
+  sleep 1
+  gt issue edit "$issue_ref" --title "Batch title" --body "Batch body" --state closed --unlabel bug --label regression --unassign alice --assignee bob >/dev/null
+  issues="$(gt issue list --json)"
+  assert_line_count "$issues" 1
+  assert_contains "$issues" '"state":"closed"'
+  assert_contains "$issues" '"title":"Batch title"'
+  assert_contains "$issues" '"body":"Batch body"'
+  assert_contains "$issues" '"labels":["regression"]'
+  assert_contains "$issues" '"assignees":["bob"]'
+  events="$(gt events list --json)"
+  assert_line_count "$events" 2
+  assert_contains "$events" '"event_type":"issue.updated"'
+  gt fsck >/dev/null
+)
+
 echo "integration: comments are signed and projected"
 comments="$ROOT/comments"
 init_repo "$comments"
@@ -169,6 +208,10 @@ init_repo "$pulls_repo"
   pull_id="$(json_field "$pulls_json" id)"
   [[ -n "$pull_id" ]] || fail "expected pull id from pull list"
   pull_ref="#${pull_id:0:7}"
+  gt comment add pull "$pull_ref" --body "Pull comment" >/dev/null
+  pull_comments="$(gt comment list pull "$pull_ref" --json)"
+  assert_line_count "$pull_comments" 1
+  assert_contains "$pull_comments" '"body":"Pull comment"'
   sleep 1
   gt pull title "$pull_ref" --title "Updated pull" >/dev/null
   gt pull base "$pull_ref" --base trunk >/dev/null
@@ -186,6 +229,35 @@ init_repo "$pulls_repo"
   gt fsck >/dev/null
 )
 
+echo "integration: pull edit batches multiple updates"
+pull_edit="$ROOT/pull-edit"
+init_repo "$pull_edit"
+(
+  cd "$pull_edit"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  gt pull open --title "Batch pull" --base main --head feature --body "Old body" >/dev/null
+  pulls_json="$(gt pull list --json)"
+  pull_id="$(json_field "$pulls_json" id)"
+  [[ -n "$pull_id" ]] || fail "expected pull id from pull list"
+  pull_ref="#${pull_id:0:7}"
+  sleep 1
+  gt pull edit "$pull_ref" --title "Batch pull updated" --body "New body" --state closed --base trunk --head feature-v2 --label review --assignee bob --reviewer alice >/dev/null
+  pulls_json="$(gt pull list --json)"
+  assert_line_count "$pulls_json" 1
+  assert_contains "$pulls_json" '"state":"closed"'
+  assert_contains "$pulls_json" '"title":"Batch pull updated"'
+  assert_contains "$pulls_json" '"body":"New body"'
+  assert_contains "$pulls_json" '"base_ref":"trunk"'
+  assert_contains "$pulls_json" '"head_ref":"feature-v2"'
+  assert_contains "$pulls_json" '"labels":["review"]'
+  assert_contains "$pulls_json" '"assignees":["bob"]'
+  assert_contains "$pulls_json" '"reviewers":["alice"]'
+  events="$(gt events list --json)"
+  assert_line_count "$events" 2
+  assert_contains "$events" '"event_type":"pull.updated"'
+  gt fsck >/dev/null
+)
+
 echo "integration: invalid signed event is not projected"
 invalid="$ROOT/invalid"
 init_repo "$invalid"
@@ -193,7 +265,7 @@ init_repo "$invalid"
   cd "$invalid"
   gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
   empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
-  bad_body='{"$schema":"urn:gitomi:event:v1","repo_id":"018f0000-0000-7000-8000-000000000001","event_uuid":"018f0000-0000-7000-8000-000000000002","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000000003"},"idempotency_key":"018f0000-0000-7000-8000-000000000004","actor":{"principal":"alice","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:30:59Z","legacy":{},"payload":{}}'
+  bad_body='{"$schema":"urn:gitomi:event:v1","repo_id":"018f0000-0000-7000-8000-000000000001","event_uuid":"018f0000-0000-7000-8000-000000000002","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000000003"},"idempotency_key":"018f0000-0000-7000-8000-000000000004","actor":{"principal":"alice","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:30:59Z","parent_hashes":{"log":"","causal":[],"related":[]},"legacy":{},"payload":{}}'
   bad_commit="$(git commit-tree -S -m "bad issue" -m "$bad_body" "$empty_tree")"
   git update-ref refs/gitomi/inbox/alice/laptop "$bad_commit"
   json="$(gt events list --json)"
@@ -236,6 +308,47 @@ assert_not_contains "$remote_refs" "refs/gitomi/staging"
   assert_line_count "$json" 1
   assert_contains "$json" '"actor_device":"laptop"'
   gt fsck >/dev/null
+)
+
+echo "integration: causal parents are capped"
+cap_repo="$ROOT/causal-cap"
+init_repo "$cap_repo"
+(
+  cd "$cap_repo"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  gt issue open --title "Laptop root" >/dev/null
+  for n in $(seq 1 40); do
+    write_gt_config "$REPO_ID" alice "device$n" 0
+    gt issue open --title "Device $n root" >/dev/null
+  done
+  write_gt_config "$REPO_ID" alice laptop 1
+  first_event="$(gt events list --json --ref refs/gitomi/inbox/alice/laptop)"
+  issue_id="$(json_field "$first_event" object_id)"
+  [[ -n "$issue_id" ]] || fail "expected laptop issue id"
+  gt issue title "$issue_id" --title "Laptop capped update" >/dev/null
+  laptop_head="$(git rev-parse refs/gitomi/inbox/alice/laptop)"
+  parents="$(git show -s --format=%P "$laptop_head")"
+  parent_count="$(printf '%s\n' "$parents" | awk '{ print NF }')"
+  [[ "$parent_count" == "33" ]] || fail "expected 33 parents (1 log + 32 causal), got $parent_count: $parents"
+  gt fsck >/dev/null
+)
+
+echo "integration: run refs prune by retention count"
+runs_repo="$ROOT/runs"
+init_repo "$runs_repo"
+(
+  cd "$runs_repo"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
+  run1="$(git commit-tree -S -m "run one" "$empty_tree")"
+  git update-ref refs/gitomi/runs/local/run1 "$run1"
+  sleep 1
+  run2="$(git commit-tree -S -m "run two" "$empty_tree")"
+  git update-ref refs/gitomi/runs/local/run2 "$run2"
+  gt runs prune --max-count 1 --max-age-days 0 --max-bytes 0 >/dev/null
+  run_refs="$(git for-each-ref '--format=%(refname)' refs/gitomi/runs)"
+  assert_line_count "$run_refs" 1
+  assert_contains "$run_refs" "refs/gitomi/runs/local/run2"
 )
 
 echo "integration: two-device divergence"

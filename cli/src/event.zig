@@ -16,6 +16,61 @@ const appendJsonFieldStringArray = json_writer.appendJsonFieldStringArray;
 const appendJsonFieldBool = json_writer.appendJsonFieldBool;
 
 pub const event_schema = "urn:gitomi:event:v1";
+pub const max_related_parents = 256;
+
+pub const EventParents = struct {
+    log: ?[]const u8 = null,
+    causal: []const []const u8 = &.{},
+    related: []const []const u8 = &.{},
+};
+
+pub const IssueUpdate = struct {
+    title: ?[]const u8 = null,
+    body: ?[]const u8 = null,
+    state: ?[]const u8 = null,
+    labels_added: []const []const u8 = &.{},
+    labels_removed: []const []const u8 = &.{},
+    assignees_added: []const []const u8 = &.{},
+    assignees_removed: []const []const u8 = &.{},
+
+    pub fn hasChanges(self: IssueUpdate) bool {
+        return self.title != null or
+            self.body != null or
+            self.state != null or
+            self.labels_added.len != 0 or
+            self.labels_removed.len != 0 or
+            self.assignees_added.len != 0 or
+            self.assignees_removed.len != 0;
+    }
+};
+
+pub const PullUpdate = struct {
+    title: ?[]const u8 = null,
+    body: ?[]const u8 = null,
+    state: ?[]const u8 = null,
+    base_ref: ?[]const u8 = null,
+    head_ref: ?[]const u8 = null,
+    labels_added: []const []const u8 = &.{},
+    labels_removed: []const []const u8 = &.{},
+    assignees_added: []const []const u8 = &.{},
+    assignees_removed: []const []const u8 = &.{},
+    reviewers_added: []const []const u8 = &.{},
+    reviewers_removed: []const []const u8 = &.{},
+
+    pub fn hasChanges(self: PullUpdate) bool {
+        return self.title != null or
+            self.body != null or
+            self.state != null or
+            self.base_ref != null or
+            self.head_ref != null or
+            self.labels_added.len != 0 or
+            self.labels_removed.len != 0 or
+            self.assignees_added.len != 0 or
+            self.assignees_removed.len != 0 or
+            self.reviewers_added.len != 0 or
+            self.reviewers_removed.len != 0;
+    }
+};
 
 pub const EventSummary = struct {
     allocator: Allocator,
@@ -71,6 +126,7 @@ pub fn buildIssueOpenedJson(
     event_uuid: []const u8,
     idem: []const u8,
     occurred_at: []const u8,
+    parents: EventParents,
     title: []const u8,
     body: []const u8,
     labels: []const []const u8,
@@ -99,6 +155,7 @@ pub fn buildIssueOpenedJson(
 
     try appendJsonFieldUnsigned(&buf, allocator, "seq", seq, true);
     try appendJsonFieldString(&buf, allocator, "occurred_at", occurred_at, true);
+    try appendParentHashes(&buf, allocator, parents);
     try buf.appendSlice(allocator, "\"legacy\":{},");
 
     try buf.appendSlice(allocator, "\"payload\":{");
@@ -128,6 +185,7 @@ pub fn buildIssueStringPayloadJson(
     event_uuid: []const u8,
     idem: []const u8,
     occurred_at: []const u8,
+    parents: EventParents,
     event_type: []const u8,
     payload_key: []const u8,
     payload_value: []const u8,
@@ -155,12 +213,43 @@ pub fn buildIssueStringPayloadJson(
 
     try appendJsonFieldUnsigned(&buf, allocator, "seq", seq, true);
     try appendJsonFieldString(&buf, allocator, "occurred_at", occurred_at, true);
+    try appendParentHashes(&buf, allocator, parents);
     try buf.appendSlice(allocator, "\"legacy\":{},");
 
     try buf.appendSlice(allocator, "\"payload\":{");
     try appendJsonFieldString(&buf, allocator, payload_key, payload_value, false);
     try buf.appendSlice(allocator, "}}");
 
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildIssueUpdatedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    issue_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    update: IssueUpdate,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, issue_id, event_uuid, idem, occurred_at, parents, "issue.updated", "issue");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    if (update.title) |value| try appendJsonFieldString(&buf, allocator, "title", value, true);
+    if (update.body) |value| try appendJsonFieldString(&buf, allocator, "body", value, true);
+    if (update.state) |value| try appendJsonFieldString(&buf, allocator, "state", value, true);
+    if (update.labels_added.len != 0) try appendJsonFieldStringArray(&buf, allocator, "labels_added", update.labels_added, true);
+    if (update.labels_removed.len != 0) try appendJsonFieldStringArray(&buf, allocator, "labels_removed", update.labels_removed, true);
+    if (update.assignees_added.len != 0) try appendJsonFieldStringArray(&buf, allocator, "assignees_added", update.assignees_added, true);
+    if (update.assignees_removed.len != 0) try appendJsonFieldStringArray(&buf, allocator, "assignees_removed", update.assignees_removed, true);
+    if (buf.items[buf.items.len - 1] == ',') {
+        buf.items.len -= 1;
+    }
+    try buf.appendSlice(allocator, "}}");
     return try buf.toOwnedSlice(allocator);
 }
 
@@ -172,6 +261,7 @@ pub fn buildCommentAddedJson(
     event_uuid: []const u8,
     idem: []const u8,
     occurred_at: []const u8,
+    parents: EventParents,
     parent_kind: []const u8,
     parent_id: []const u8,
     body: []const u8,
@@ -179,7 +269,7 @@ pub fn buildCommentAddedJson(
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
-    try appendEnvelopePrefix(&buf, allocator, cfg, seq, comment_id, event_uuid, idem, occurred_at, "comment.added", "comment");
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, comment_id, event_uuid, idem, occurred_at, parents, "comment.added", "comment");
     try buf.appendSlice(allocator, "\"payload\":{");
     try appendJsonFieldString(&buf, allocator, "parent_kind", parent_kind, true);
     try appendJsonFieldString(&buf, allocator, "parent_id", parent_id, true);
@@ -196,12 +286,13 @@ pub fn buildCommentBodySetJson(
     event_uuid: []const u8,
     idem: []const u8,
     occurred_at: []const u8,
+    parents: EventParents,
     body: []const u8,
 ) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
-    try appendEnvelopePrefix(&buf, allocator, cfg, seq, comment_id, event_uuid, idem, occurred_at, "comment.body_set", "comment");
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, comment_id, event_uuid, idem, occurred_at, parents, "comment.body_set", "comment");
     try buf.appendSlice(allocator, "\"payload\":{");
     try appendJsonFieldString(&buf, allocator, "body", body, false);
     try buf.appendSlice(allocator, "}}");
@@ -216,12 +307,13 @@ pub fn buildCommentRedactedJson(
     event_uuid: []const u8,
     idem: []const u8,
     occurred_at: []const u8,
+    parents: EventParents,
     reason: ?[]const u8,
 ) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
-    try appendEnvelopePrefix(&buf, allocator, cfg, seq, comment_id, event_uuid, idem, occurred_at, "comment.redacted", "comment");
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, comment_id, event_uuid, idem, occurred_at, parents, "comment.redacted", "comment");
     try buf.appendSlice(allocator, "\"payload\":{");
     if (reason) |value| try appendJsonFieldString(&buf, allocator, "reason", value, false);
     try buf.appendSlice(allocator, "}}");
@@ -236,6 +328,7 @@ pub fn buildPullOpenedJson(
     event_uuid: []const u8,
     idem: []const u8,
     occurred_at: []const u8,
+    parents: EventParents,
     title: []const u8,
     body: []const u8,
     base_ref: []const u8,
@@ -245,7 +338,7 @@ pub fn buildPullOpenedJson(
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
-    try appendEnvelopePrefix(&buf, allocator, cfg, seq, pull_id, event_uuid, idem, occurred_at, "pull.opened", "pull");
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, pull_id, event_uuid, idem, occurred_at, parents, "pull.opened", "pull");
     try buf.appendSlice(allocator, "\"payload\":{");
     try appendJsonFieldString(&buf, allocator, "title", title, true);
     if (body.len != 0) {
@@ -271,6 +364,7 @@ pub fn buildPullStringPayloadJson(
     event_uuid: []const u8,
     idem: []const u8,
     occurred_at: []const u8,
+    parents: EventParents,
     event_type: []const u8,
     payload_key: []const u8,
     payload_value: []const u8,
@@ -278,9 +372,43 @@ pub fn buildPullStringPayloadJson(
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
-    try appendEnvelopePrefix(&buf, allocator, cfg, seq, pull_id, event_uuid, idem, occurred_at, event_type, "pull");
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, pull_id, event_uuid, idem, occurred_at, parents, event_type, "pull");
     try buf.appendSlice(allocator, "\"payload\":{");
     try appendJsonFieldString(&buf, allocator, payload_key, payload_value, false);
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildPullUpdatedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    pull_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    update: PullUpdate,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, pull_id, event_uuid, idem, occurred_at, parents, "pull.updated", "pull");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    if (update.title) |value| try appendJsonFieldString(&buf, allocator, "title", value, true);
+    if (update.body) |value| try appendJsonFieldString(&buf, allocator, "body", value, true);
+    if (update.state) |value| try appendJsonFieldString(&buf, allocator, "state", value, true);
+    if (update.base_ref) |value| try appendJsonFieldString(&buf, allocator, "base_ref", value, true);
+    if (update.head_ref) |value| try appendJsonFieldString(&buf, allocator, "head_ref", value, true);
+    if (update.labels_added.len != 0) try appendJsonFieldStringArray(&buf, allocator, "labels_added", update.labels_added, true);
+    if (update.labels_removed.len != 0) try appendJsonFieldStringArray(&buf, allocator, "labels_removed", update.labels_removed, true);
+    if (update.assignees_added.len != 0) try appendJsonFieldStringArray(&buf, allocator, "assignees_added", update.assignees_added, true);
+    if (update.assignees_removed.len != 0) try appendJsonFieldStringArray(&buf, allocator, "assignees_removed", update.assignees_removed, true);
+    if (update.reviewers_added.len != 0) try appendJsonFieldStringArray(&buf, allocator, "reviewers_added", update.reviewers_added, true);
+    if (update.reviewers_removed.len != 0) try appendJsonFieldStringArray(&buf, allocator, "reviewers_removed", update.reviewers_removed, true);
+    if (buf.items[buf.items.len - 1] == ',') {
+        buf.items.len -= 1;
+    }
     try buf.appendSlice(allocator, "}}");
     return try buf.toOwnedSlice(allocator);
 }
@@ -293,13 +421,14 @@ pub fn buildPullMergedJson(
     event_uuid: []const u8,
     idem: []const u8,
     occurred_at: []const u8,
+    parents: EventParents,
     merge_oid: ?[]const u8,
     target_oid: ?[]const u8,
 ) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
-    try appendEnvelopePrefix(&buf, allocator, cfg, seq, pull_id, event_uuid, idem, occurred_at, "pull.merged", "pull");
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, pull_id, event_uuid, idem, occurred_at, parents, "pull.merged", "pull");
     try buf.appendSlice(allocator, "\"payload\":{");
     if (merge_oid) |value| try appendJsonFieldString(&buf, allocator, "merge_oid", value, true);
     if (target_oid) |value| try appendJsonFieldString(&buf, allocator, "target_oid", value, true);
@@ -319,6 +448,7 @@ fn appendEnvelopePrefix(
     event_uuid: []const u8,
     idem: []const u8,
     occurred_at: []const u8,
+    parents: EventParents,
     event_type: []const u8,
     object_kind: []const u8,
 ) !void {
@@ -338,7 +468,16 @@ fn appendEnvelopePrefix(
     try buf.appendSlice(allocator, "},");
     try appendJsonFieldUnsigned(buf, allocator, "seq", seq, true);
     try appendJsonFieldString(buf, allocator, "occurred_at", occurred_at, true);
+    try appendParentHashes(buf, allocator, parents);
     try buf.appendSlice(allocator, "\"legacy\":{},");
+}
+
+fn appendParentHashes(buf: *std.ArrayList(u8), allocator: Allocator, parents: EventParents) !void {
+    try buf.appendSlice(allocator, "\"parent_hashes\":{");
+    try appendJsonFieldString(buf, allocator, "log", parents.log orelse "", true);
+    try appendJsonFieldStringArray(buf, allocator, "causal", parents.causal, true);
+    try appendJsonFieldStringArray(buf, allocator, "related", parents.related, false);
+    try buf.appendSlice(allocator, "},");
 }
 
 pub fn validateEventEnvelope(allocator: Allocator, commit: []const u8, body: []const u8) !void {
@@ -379,14 +518,33 @@ pub fn validateEventEnvelope(allocator: Allocator, commit: []const u8, body: []c
         return CliError.UserError;
     }
 
+    const parent_hashes = try requireJsonObject(commit, root, "parent_hashes");
+    _ = try requireJsonStringAllowEmpty(commit, parent_hashes, "log");
+    if (!stringArray(parent_hashes, "causal")) {
+        try eprint("gt sync: rejecting {s}: parent_hashes.causal must be an array of strings\n", .{commit});
+        return CliError.UserError;
+    }
+    if (!stringArray(parent_hashes, "related")) {
+        try eprint("gt sync: rejecting {s}: parent_hashes.related must be an array of strings\n", .{commit});
+        return CliError.UserError;
+    }
+    if (arrayLen(parent_hashes, "related") > max_related_parents) {
+        try eprint("gt sync: rejecting {s}: parent_hashes.related exceeds v1 related parent cap\n", .{commit});
+        return CliError.UserError;
+    }
+
     const object = try requireJsonObject(commit, root, "object");
     const kind = try requireJsonString(commit, object, "kind");
     if (!isKnownObjectKind(kind)) {
         try eprint("gt sync: rejecting {s}: unknown object kind '{s}'\n", .{ commit, kind });
         return CliError.UserError;
     }
-    try requireJsonUuid(commit, object, "id");
+    const object_id = try requireJsonString(commit, object, "id");
     if (payloadRequirementError(event_type, kind, payload)) |message| {
+        try eprint("gt sync: rejecting {s}: {s}\n", .{ commit, message });
+        return CliError.UserError;
+    }
+    if (objectIdRequirementError(event_type, kind, object_id, payload)) |message| {
         try eprint("gt sync: rejecting {s}: {s}\n", .{ commit, message });
         return CliError.UserError;
     }
@@ -431,11 +589,18 @@ pub fn parseValidatedEnvelope(allocator: Allocator, body: []const u8) !Validated
     const occurred_at = requiredString(root, "occurred_at") orelse return error.InvalidEventEnvelope;
     if (occurred_at.len == 0 or occurred_at[occurred_at.len - 1] != 'Z') return error.InvalidEventEnvelope;
 
+    const parent_hashes = requiredObject(root, "parent_hashes") orelse return error.InvalidEventEnvelope;
+    _ = optionalStringAllowEmpty(parent_hashes, "log") orelse return error.InvalidEventEnvelope;
+    if (!stringArray(parent_hashes, "causal")) return error.InvalidEventEnvelope;
+    if (!stringArray(parent_hashes, "related")) return error.InvalidEventEnvelope;
+    if (arrayLen(parent_hashes, "related") > max_related_parents) return error.InvalidEventEnvelope;
+
     const object = requiredObject(root, "object") orelse return error.InvalidEventEnvelope;
     const object_kind = requiredString(object, "kind") orelse return error.InvalidEventEnvelope;
     if (!isKnownObjectKind(object_kind)) return error.InvalidEventEnvelope;
-    const object_id = requiredUuid(object, "id") orelse return error.InvalidEventEnvelope;
+    const object_id = requiredString(object, "id") orelse return error.InvalidEventEnvelope;
     if (payloadRequirementError(event_type, object_kind, payload) != null) return error.InvalidEventEnvelope;
+    if (objectIdRequirementError(event_type, object_kind, object_id, payload) != null) return error.InvalidEventEnvelope;
 
     const actor = requiredObject(root, "actor") orelse return error.InvalidEventEnvelope;
     const actor_principal = requiredString(actor, "principal") orelse return error.InvalidEventEnvelope;
@@ -518,6 +683,20 @@ pub fn requireJsonString(commit: []const u8, object: std.json.ObjectMap, key: []
     return string;
 }
 
+pub fn requireJsonStringAllowEmpty(commit: []const u8, object: std.json.ObjectMap, key: []const u8) ![]const u8 {
+    const value = object.get(key) orelse {
+        try eprint("gt sync: rejecting {s}: missing {s}\n", .{ commit, key });
+        return CliError.UserError;
+    };
+    return switch (value) {
+        .string => |s| s,
+        else => {
+            try eprint("gt sync: rejecting {s}: {s} must be a string\n", .{ commit, key });
+            return CliError.UserError;
+        },
+    };
+}
+
 pub fn requireJsonStringEq(commit: []const u8, object: std.json.ObjectMap, key: []const u8, expected: []const u8) !void {
     const value = try requireJsonString(commit, object, key);
     if (!std.mem.eql(u8, value, expected)) {
@@ -570,6 +749,17 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!optionalStringArray(payload, "assignees")) return "issue.opened payload.assignees must be an array of strings";
         return null;
     }
+    if (std.mem.eql(u8, event_type, "issue.updated")) {
+        if (!optionalString(payload, "title")) return "issue.updated payload.title must be a string";
+        if (!optionalString(payload, "body")) return "issue.updated payload.body must be a string";
+        if (!optionalState(payload, "state", &.{ "open", "closed" })) return "issue.updated payload.state must be open or closed";
+        if (!optionalStringArray(payload, "labels_added")) return "issue.updated payload.labels_added must be an array of strings";
+        if (!optionalStringArray(payload, "labels_removed")) return "issue.updated payload.labels_removed must be an array of strings";
+        if (!optionalStringArray(payload, "assignees_added")) return "issue.updated payload.assignees_added must be an array of strings";
+        if (!optionalStringArray(payload, "assignees_removed")) return "issue.updated payload.assignees_removed must be an array of strings";
+        if (!hasAnyKey(payload, &.{ "title", "body", "state", "labels_added", "labels_removed", "assignees_added", "assignees_removed" })) return "issue.updated payload must contain at least one update field";
+        return null;
+    }
     if (std.mem.eql(u8, event_type, "issue.title_set")) return requirePayloadString(payload, "issue.title_set", "title");
     if (std.mem.eql(u8, event_type, "issue.body_set")) return requirePayloadString(payload, "issue.body_set", "body");
     if (std.mem.eql(u8, event_type, "issue.state_set")) {
@@ -587,10 +777,25 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!optionalBool(payload, "draft")) return "pull.opened payload.draft must be a boolean";
         return null;
     }
+    if (std.mem.eql(u8, event_type, "pull.updated")) {
+        if (!optionalString(payload, "title")) return "pull.updated payload.title must be a string";
+        if (!optionalString(payload, "body")) return "pull.updated payload.body must be a string";
+        if (!optionalState(payload, "state", &.{ "open", "closed" })) return "pull.updated payload.state must be open or closed";
+        if (!optionalString(payload, "base_ref")) return "pull.updated payload.base_ref must be a string";
+        if (!optionalString(payload, "head_ref")) return "pull.updated payload.head_ref must be a string";
+        if (!optionalStringArray(payload, "labels_added")) return "pull.updated payload.labels_added must be an array of strings";
+        if (!optionalStringArray(payload, "labels_removed")) return "pull.updated payload.labels_removed must be an array of strings";
+        if (!optionalStringArray(payload, "assignees_added")) return "pull.updated payload.assignees_added must be an array of strings";
+        if (!optionalStringArray(payload, "assignees_removed")) return "pull.updated payload.assignees_removed must be an array of strings";
+        if (!optionalStringArray(payload, "reviewers_added")) return "pull.updated payload.reviewers_added must be an array of strings";
+        if (!optionalStringArray(payload, "reviewers_removed")) return "pull.updated payload.reviewers_removed must be an array of strings";
+        if (!hasAnyKey(payload, &.{ "title", "body", "state", "base_ref", "head_ref", "labels_added", "labels_removed", "assignees_added", "assignees_removed", "reviewers_added", "reviewers_removed" })) return "pull.updated payload must contain at least one update field";
+        return null;
+    }
     if (std.mem.eql(u8, event_type, "pull.title_set")) return requirePayloadString(payload, "pull.title_set", "title");
     if (std.mem.eql(u8, event_type, "pull.body_set")) return requirePayloadString(payload, "pull.body_set", "body");
     if (std.mem.eql(u8, event_type, "pull.state_set")) {
-        if (!hasState(payload, "state", &.{ "open", "closed", "merged" })) return "pull.state_set payload.state must be open, closed, or merged";
+        if (!hasState(payload, "state", &.{ "open", "closed" })) return "pull.state_set payload.state must be open or closed";
         return null;
     }
     if (std.mem.eql(u8, event_type, "pull.base_set")) return requirePayloadString(payload, "pull.base_set", "base_ref");
@@ -621,7 +826,17 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         return null;
     }
 
-    if (std.mem.eql(u8, event_type, "identity.device_added") or std.mem.eql(u8, event_type, "identity.device_revoked")) {
+    if (std.mem.eql(u8, event_type, "identity.device_added")) {
+        if (!hasString(payload, "principal")) return "identity device event payload.principal must be a string";
+        if (!hasString(payload, "device")) return "identity device event payload.device must be a string";
+        const signing_key = objectValue(payload, "signing_key") orelse return "identity.device_added payload.signing_key must be an object";
+        if (!hasString(signing_key, "public_key")) return "identity.device_added payload.signing_key.public_key must be a string";
+        if (!hasString(signing_key, "fingerprint")) return "identity.device_added payload.signing_key.fingerprint must be a string";
+        if (!optionalString(signing_key, "scheme")) return "identity.device_added payload.signing_key.scheme must be a string";
+        return null;
+    }
+
+    if (std.mem.eql(u8, event_type, "identity.device_revoked")) {
         if (!hasString(payload, "principal")) return "identity device event payload.principal must be a string";
         if (!hasString(payload, "device")) return "identity device event payload.device must be a string";
         return null;
@@ -642,6 +857,48 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
     return null;
 }
 
+pub fn objectIdRequirementError(event_type: []const u8, object_kind: []const u8, object_id: []const u8, payload: std.json.ObjectMap) ?[]const u8 {
+    if (std.mem.startsWith(u8, event_type, "issue.") and std.mem.eql(u8, object_kind, "issue")) {
+        if (!looksLikeUuid(object_id)) return "issue event object.id must be a UUID";
+        return null;
+    }
+    if (std.mem.startsWith(u8, event_type, "pull.") and std.mem.eql(u8, object_kind, "pull")) {
+        if (!looksLikeUuid(object_id)) return "pull event object.id must be a UUID";
+        return null;
+    }
+    if (std.mem.startsWith(u8, event_type, "comment.") and std.mem.eql(u8, object_kind, "comment")) {
+        if (!looksLikeUuid(object_id)) return "comment event object.id must be a UUID";
+        return null;
+    }
+    if (std.mem.startsWith(u8, event_type, "acl.") and std.mem.eql(u8, object_kind, "acl")) {
+        const principal = jsonString(payload.get("principal")) orelse return "acl event payload.principal must be a string";
+        if (!std.mem.startsWith(u8, object_id, "acl:")) return "acl event object.id must be acl:<principal>";
+        if (!std.mem.eql(u8, object_id["acl:".len..], principal)) return "acl event object.id must match payload.principal";
+        return null;
+    }
+    if (std.mem.startsWith(u8, event_type, "identity.") and std.mem.eql(u8, object_kind, "identity")) {
+        const principal = jsonString(payload.get("principal")) orelse return "identity event payload.principal must be a string";
+        const device = jsonString(payload.get("device")) orelse return "identity event payload.device must be a string";
+        if (!std.mem.startsWith(u8, object_id, "identity:")) return "identity event object.id must be identity:<principal>:<device>";
+        const rest = object_id["identity:".len..];
+        const colon = std.mem.indexOfScalar(u8, rest, ':') orelse return "identity event object.id must be identity:<principal>:<device>";
+        if (!std.mem.eql(u8, rest[0..colon], principal)) return "identity event object.id must match payload.principal";
+        if (!std.mem.eql(u8, rest[colon + 1 ..], device)) return "identity event object.id must match payload.device";
+        return null;
+    }
+    if (std.mem.eql(u8, event_type, "action.run_requested") and std.mem.eql(u8, object_kind, "action")) {
+        if (!looksLikeUuid(object_id)) return "action.run_requested object.id must be a run UUID";
+        return null;
+    }
+    if (std.mem.eql(u8, event_type, "action.run_completed") and std.mem.eql(u8, object_kind, "action")) {
+        if (!looksLikeUuid(object_id)) return "action.run_completed object.id must be a run UUID";
+        const run_id = jsonString(payload.get("run_id")) orelse return "action.run_completed payload.run_id must be a string";
+        if (!std.mem.eql(u8, object_id, run_id)) return "action.run_completed object.id must equal payload.run_id";
+        return null;
+    }
+    return null;
+}
+
 fn requiredObject(object: std.json.ObjectMap, key: []const u8) ?std.json.ObjectMap {
     const value = object.get(key) orelse return null;
     return switch (value) {
@@ -658,6 +915,14 @@ fn requiredString(object: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     };
     if (string.len == 0) return null;
     return string;
+}
+
+fn optionalStringAllowEmpty(object: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    const value = object.get(key) orelse return null;
+    return switch (value) {
+        .string => |s| s,
+        else => null,
+    };
 }
 
 fn requiredUuid(object: std.json.ObjectMap, key: []const u8) ?[]const u8 {
@@ -684,6 +949,14 @@ fn hasString(object: std.json.ObjectMap, key: []const u8) bool {
     return value == .string;
 }
 
+fn objectValue(object: std.json.ObjectMap, key: []const u8) ?std.json.ObjectMap {
+    const value = object.get(key) orelse return null;
+    return switch (value) {
+        .object => |child| child,
+        else => null,
+    };
+}
+
 fn optionalString(object: std.json.ObjectMap, key: []const u8) bool {
     const value = object.get(key) orelse return true;
     return value == .string;
@@ -704,6 +977,38 @@ fn optionalStringArray(object: std.json.ObjectMap, key: []const u8) bool {
         if (item != .string) return false;
     }
     return true;
+}
+
+fn optionalState(object: std.json.ObjectMap, key: []const u8, allowed: []const []const u8) bool {
+    if (object.get(key) == null) return true;
+    return hasState(object, key, allowed);
+}
+
+fn hasAnyKey(object: std.json.ObjectMap, keys: []const []const u8) bool {
+    for (keys) |key| {
+        if (object.get(key) != null) return true;
+    }
+    return false;
+}
+
+fn stringArray(object: std.json.ObjectMap, key: []const u8) bool {
+    const value = object.get(key) orelse return false;
+    const array = switch (value) {
+        .array => |items| items,
+        else => return false,
+    };
+    for (array.items) |item| {
+        if (item != .string) return false;
+    }
+    return true;
+}
+
+fn arrayLen(object: std.json.ObjectMap, key: []const u8) usize {
+    const value = object.get(key) orelse return 0;
+    return switch (value) {
+        .array => |items| items.items.len,
+        else => 0,
+    };
 }
 
 fn hasState(object: std.json.ObjectMap, key: []const u8, allowed: []const []const u8) bool {
@@ -845,6 +1150,7 @@ test "issue opened event json contains required envelope fields" {
         "018f0000-0000-7000-8000-000000000003",
         "018f0000-0000-7000-8000-000000000004",
         "2026-05-13T18:30:59Z",
+        .{},
         "Smoke",
         "Body",
         &labels,
@@ -880,6 +1186,7 @@ test "issue opened event json passes envelope validation" {
         "018f0000-0000-7000-8000-000000000003",
         "018f0000-0000-7000-8000-000000000004",
         "2026-05-13T18:30:59Z",
+        .{},
         "Smoke",
         "",
         &.{},
@@ -906,10 +1213,48 @@ test "validated envelope rejects known event with missing required payload" {
         \\    "principal": "alice",
         \\    "device": "laptop"
         \\  },
+        \\  "parent_hashes": {
+        \\    "log": "",
+        \\    "causal": [],
+        \\    "related": []
+        \\  },
         \\  "seq": 1,
         \\  "occurred_at": "2026-05-13T18:30:59Z",
         \\  "legacy": {},
         \\  "payload": {}
+        \\}
+    ;
+
+    try std.testing.expectError(error.InvalidEventEnvelope, parseValidatedEnvelope(std.testing.allocator, body));
+}
+
+test "validated envelope rejects pull state_set merged" {
+    const body =
+        \\{
+        \\  "$schema": "urn:gitomi:event:v1",
+        \\  "repo_id": "018f0000-0000-7000-8000-000000000001",
+        \\  "event_uuid": "018f0000-0000-7000-8000-000000000002",
+        \\  "event_type": "pull.state_set",
+        \\  "object": {
+        \\    "kind": "pull",
+        \\    "id": "018f0000-0000-7000-8000-000000000003"
+        \\  },
+        \\  "idempotency_key": "018f0000-0000-7000-8000-000000000004",
+        \\  "actor": {
+        \\    "principal": "alice",
+        \\    "device": "laptop"
+        \\  },
+        \\  "parent_hashes": {
+        \\    "log": "",
+        \\    "causal": [],
+        \\    "related": []
+        \\  },
+        \\  "seq": 1,
+        \\  "occurred_at": "2026-05-13T18:30:59Z",
+        \\  "legacy": {},
+        \\  "payload": {
+        \\    "state": "merged"
+        \\  }
         \\}
     ;
 

@@ -11,14 +11,11 @@ const CliError = errors.CliError;
 const out = io.out;
 const eprint = io.eprint;
 const discoverRepo = repo_mod.discoverRepo;
-const loadConfig = repo_mod.loadConfig;
 const writeConfig = repo_mod.writeConfig;
 const inboxRef = repo_mod.inboxRef;
 const gitChecked = git.gitChecked;
 const emptyTreeOid = git.emptyTreeOid;
-const resolveOptionalRef = git.resolveOptionalRef;
-const inboxHeads = git.inboxHeads;
-const freeStringList = git.freeStringList;
+const prepareEventParents = git.prepareEventParents;
 const newUuidV7 = util.newUuidV7;
 const rfc3339Now = util.rfc3339Now;
 const trimOwned = util.trimOwned;
@@ -34,7 +31,7 @@ pub fn createPullOpenedEvent(
     var repo = try discoverRepo(allocator);
     defer repo.deinit();
 
-    var cfg = loadConfig(allocator, repo.config_path) catch |err| switch (err) {
+    var cfg = repo_mod.loadConfigForWrite(allocator, repo) catch |err| switch (err) {
         CliError.ConfigNotFound => {
             try eprint("gt pull open: Gitomi is not initialized; run `gt init`\n", .{});
             return CliError.UserError;
@@ -53,6 +50,13 @@ pub fn createPullOpenedEvent(
     defer allocator.free(idem);
     const occurred_at = try rfc3339Now(allocator);
     defer allocator.free(occurred_at);
+    var prepared_parents = try prepareEventParents(allocator, inbox_ref);
+    defer prepared_parents.deinit();
+    const event_parents = event_mod.EventParents{
+        .log = prepared_parents.old_head,
+        .causal = prepared_parents.causal_heads,
+        .related = if (prepared_parents.old_head) |head| &.{head} else &.{},
+    };
 
     const next_seq = cfg.seq + 1;
     const event_body = try event_mod.buildPullOpenedJson(
@@ -63,6 +67,7 @@ pub fn createPullOpenedEvent(
         event_uuid,
         idem,
         occurred_at,
+        event_parents,
         title,
         body,
         base_ref,
@@ -73,7 +78,7 @@ pub fn createPullOpenedEvent(
 
     const subject = try std.fmt.allocPrint(allocator, "pull.opened #{s} {s}", .{ pull_id[0..7], title });
     defer allocator.free(subject);
-    const commit_oid = try writeSignedPullEvent(allocator, inbox_ref, subject, event_body);
+    const commit_oid = try writeSignedPullEvent(allocator, inbox_ref, subject, event_body, prepared_parents.old_head, prepared_parents.causal_heads);
     defer allocator.free(commit_oid);
 
     cfg.seq = next_seq;
@@ -95,7 +100,7 @@ pub fn createPullStringEvent(
     var repo = try discoverRepo(allocator);
     defer repo.deinit();
 
-    var cfg = loadConfig(allocator, repo.config_path) catch |err| switch (err) {
+    var cfg = repo_mod.loadConfigForWrite(allocator, repo) catch |err| switch (err) {
         CliError.ConfigNotFound => {
             try eprint("gt pull: Gitomi is not initialized; run `gt init`\n", .{});
             return CliError.UserError;
@@ -112,6 +117,13 @@ pub fn createPullStringEvent(
     defer allocator.free(idem);
     const occurred_at = try rfc3339Now(allocator);
     defer allocator.free(occurred_at);
+    var prepared_parents = try prepareEventParents(allocator, inbox_ref);
+    defer prepared_parents.deinit();
+    const event_parents = event_mod.EventParents{
+        .log = prepared_parents.old_head,
+        .causal = prepared_parents.causal_heads,
+        .related = if (prepared_parents.old_head) |head| &.{head} else &.{},
+    };
 
     const next_seq = cfg.seq + 1;
     const event_body = try event_mod.buildPullStringPayloadJson(
@@ -122,6 +134,7 @@ pub fn createPullStringEvent(
         event_uuid,
         idem,
         occurred_at,
+        event_parents,
         event_type,
         payload_key,
         payload_value,
@@ -130,7 +143,7 @@ pub fn createPullStringEvent(
 
     const subject = try std.fmt.allocPrint(allocator, "{s} #{s} {s}", .{ event_type, pull_id[0..@min(pull_id.len, 7)], payload_value });
     defer allocator.free(subject);
-    const commit_oid = try writeSignedPullEvent(allocator, inbox_ref, subject, event_body);
+    const commit_oid = try writeSignedPullEvent(allocator, inbox_ref, subject, event_body, prepared_parents.old_head, prepared_parents.causal_heads);
     defer allocator.free(commit_oid);
 
     cfg.seq = next_seq;
@@ -150,7 +163,7 @@ pub fn createPullMergedEvent(
     var repo = try discoverRepo(allocator);
     defer repo.deinit();
 
-    var cfg = loadConfig(allocator, repo.config_path) catch |err| switch (err) {
+    var cfg = repo_mod.loadConfigForWrite(allocator, repo) catch |err| switch (err) {
         CliError.ConfigNotFound => {
             try eprint("gt pull: Gitomi is not initialized; run `gt init`\n", .{});
             return CliError.UserError;
@@ -167,6 +180,13 @@ pub fn createPullMergedEvent(
     defer allocator.free(idem);
     const occurred_at = try rfc3339Now(allocator);
     defer allocator.free(occurred_at);
+    var prepared_parents = try prepareEventParents(allocator, inbox_ref);
+    defer prepared_parents.deinit();
+    const event_parents = event_mod.EventParents{
+        .log = prepared_parents.old_head,
+        .causal = prepared_parents.causal_heads,
+        .related = if (prepared_parents.old_head) |head| &.{head} else &.{},
+    };
 
     const next_seq = cfg.seq + 1;
     const event_body = try event_mod.buildPullMergedJson(
@@ -177,6 +197,7 @@ pub fn createPullMergedEvent(
         event_uuid,
         idem,
         occurred_at,
+        event_parents,
         merge_oid,
         target_oid,
     );
@@ -184,7 +205,7 @@ pub fn createPullMergedEvent(
 
     const subject = try std.fmt.allocPrint(allocator, "pull.merged #{s}", .{pull_id[0..@min(pull_id.len, 7)]});
     defer allocator.free(subject);
-    const commit_oid = try writeSignedPullEvent(allocator, inbox_ref, subject, event_body);
+    const commit_oid = try writeSignedPullEvent(allocator, inbox_ref, subject, event_body, prepared_parents.old_head, prepared_parents.causal_heads);
     defer allocator.free(commit_oid);
 
     cfg.seq = next_seq;
@@ -195,18 +216,81 @@ pub fn createPullMergedEvent(
     try out("  ref:    {s}\n", .{inbox_ref});
 }
 
+pub fn createPullUpdatedEvent(
+    allocator: Allocator,
+    pull_id: []const u8,
+    update: event_mod.PullUpdate,
+) !void {
+    if (!update.hasChanges()) {
+        try eprint("gt pull edit: at least one update option is required\n", .{});
+        return CliError.UserError;
+    }
+
+    var repo = try discoverRepo(allocator);
+    defer repo.deinit();
+
+    var cfg = repo_mod.loadConfigForWrite(allocator, repo) catch |err| switch (err) {
+        CliError.ConfigNotFound => {
+            try eprint("gt pull edit: Gitomi is not initialized; run `gt init`\n", .{});
+            return CliError.UserError;
+        },
+        else => return err,
+    };
+    defer cfg.deinit();
+
+    const inbox_ref = try inboxRef(allocator, cfg);
+    defer allocator.free(inbox_ref);
+    const event_uuid = try newUuidV7(allocator);
+    defer allocator.free(event_uuid);
+    const idem = try newUuidV7(allocator);
+    defer allocator.free(idem);
+    const occurred_at = try rfc3339Now(allocator);
+    defer allocator.free(occurred_at);
+    var prepared_parents = try prepareEventParents(allocator, inbox_ref);
+    defer prepared_parents.deinit();
+    const event_parents = event_mod.EventParents{
+        .log = prepared_parents.old_head,
+        .causal = prepared_parents.causal_heads,
+        .related = if (prepared_parents.old_head) |head| &.{head} else &.{},
+    };
+
+    const next_seq = cfg.seq + 1;
+    const event_body = try event_mod.buildPullUpdatedJson(
+        allocator,
+        cfg,
+        next_seq,
+        pull_id,
+        event_uuid,
+        idem,
+        occurred_at,
+        event_parents,
+        update,
+    );
+    defer allocator.free(event_body);
+
+    const subject = try std.fmt.allocPrint(allocator, "pull.updated #{s}", .{pull_id[0..@min(pull_id.len, 7)]});
+    defer allocator.free(subject);
+    const commit_oid = try writeSignedPullEvent(allocator, inbox_ref, subject, event_body, prepared_parents.old_head, prepared_parents.causal_heads);
+    defer allocator.free(commit_oid);
+
+    cfg.seq = next_seq;
+    try writeConfig(repo.config_path, cfg);
+
+    try out("pull.updated #{s}\n", .{pull_id[0..@min(pull_id.len, 7)]});
+    try out("  commit: {s}\n", .{commit_oid});
+    try out("  ref:    {s}\n", .{inbox_ref});
+}
+
 fn writeSignedPullEvent(
     allocator: Allocator,
     inbox_ref: []const u8,
     subject: []const u8,
     event_body: []const u8,
+    old_head: ?[]const u8,
+    causal_heads: []const []const u8,
 ) ![]u8 {
     const empty_tree = try emptyTreeOid(allocator);
     defer allocator.free(empty_tree);
-    const old_head = try resolveOptionalRef(allocator, inbox_ref);
-    defer if (old_head) |head| allocator.free(head);
-    const all_heads = try inboxHeads(allocator);
-    defer freeStringList(allocator, all_heads);
 
     var commit_args: std.ArrayList([]const u8) = .empty;
     defer commit_args.deinit(allocator);
@@ -221,8 +305,7 @@ fn writeSignedPullEvent(
     if (old_head) |head| {
         try commit_args.append(allocator, "-p");
         try commit_args.append(allocator, head);
-        for (all_heads) |known_head| {
-            if (std.mem.eql(u8, known_head, head)) continue;
+        for (causal_heads) |known_head| {
             try commit_args.append(allocator, "-p");
             try commit_args.append(allocator, known_head);
         }

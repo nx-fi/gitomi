@@ -32,16 +32,20 @@ Under stock Git, ref names are not an enforceable authorization boundary. `refs/
 
 Implementations MUST manage the following ref namespaces:
 
+*   `refs/gitomi/genesis`: The signed repository bootstrap manifest that pins the initial `repo_id`, owner, device, and device signing key.
 *   `refs/gitomi/inbox/<principal-id>/<device-id>`: The authoritative append-only event logs. `<principal-id>` and `<device-id>` MUST be ref-safe path segments, typically lowercase hex or base32 encodings of the actor principal and device identifiers. This path is a naming convention, not a server-enforced ownership boundary.
+*   `refs/gitomi/quarantine/<remote>/inbox/...`: Local diagnostic refs for fetched inbox heads that failed chain or signature admission. These refs are not authoritative.
 *   `refs/gitomi/main`: OPTIONAL synthesized merge ref for inspection, bootstrap, or checkpointing. It MUST NOT be treated as the sole source of truth.
 *   `refs/gitomi/snapshots/<snapshot-id>`: OPTIONAL additive checkpoints containing projection manifests and compact bootstrap state.
-*   `refs/gitomi/runs/<runner-id>/<run-id>`: OPTIONAL workflow run streams for incremental logs, traces, or artifacts.
+*   `refs/gitomi/runs/<runner-id>/<run-id>`: OPTIONAL workflow run streams for incremental logs, traces, or artifacts. These refs are retention-managed diagnostics, not authoritative state.
 
 ### 3.2. Empty-Tree Rule
 
 All commits written to `refs/gitomi/inbox/*` and `refs/gitomi/main` MUST reference the repository's empty tree object.
 
-Commits written to `refs/gitomi/snapshots/*` or `refs/gitomi/runs/*` MAY reference non-empty trees or blobs when storing manifests, logs, or compacted state.
+Commits written to `refs/gitomi/genesis`, `refs/gitomi/snapshots/*`, or
+`refs/gitomi/runs/*` MAY reference non-empty trees or blobs when storing
+manifests, logs, or compacted state.
 
 ### 3.3. Local Device State
 
@@ -57,7 +61,9 @@ The local cache is disposable. A compliant implementation MUST be able to rebuil
 
 ## 4. Event Model
 
-The authoritative source of truth is the set of all valid commits reachable from `refs/gitomi/inbox/*`.
+The bootstrap source of trust is the signed manifest at `refs/gitomi/genesis`.
+The authoritative event source of truth after bootstrap is the set of all valid
+commits reachable from `refs/gitomi/inbox/*`.
 
 Valid snapshot and run refs are auxiliary bootstrap or trace data. They MAY accelerate reconstruction, but they MUST NOT override accepted inbox events.
 
@@ -70,9 +76,11 @@ Every event commit in `refs/gitomi/inbox/*` MUST satisfy the following:
 *   **Subject line**: SHOULD be a short human-readable summary.
 *   **Body**: MUST contain exactly one UTF-8 JSON object.
 *   **First parent**: MUST be the previous commit on the same inbox ref, except for the root event on that ref.
-*   **Additional parents**: SHOULD encode the latest Gitomi commits known to the writer when the event was created. These extra parents define cross-device causal knowledge.
+*   **Additional parents**: SHOULD encode a bounded set of latest Gitomi commits known to the writer when the event was created. These extra parents define cross-device causal knowledge.
+*   **Event hash**: The event's authoritative identity is the signed commit OID.
+*   **Parent hashes**: The event envelope MUST record the first-parent and additional-parent event hashes.
 
-Reducers MUST tolerate missing additional parents. When no cross-device parent exists, events from different inbox refs are treated as concurrent.
+Reducers MUST tolerate missing additional parents. When no cross-device parent exists, or when observed heads are omitted because the bounded parent set is full, events from different inbox refs are treated as concurrent unless an object-specific rule is satisfied by explicit payload fields.
 
 ### 4.2. Event Envelope
 
@@ -93,6 +101,11 @@ Every event body MUST conform to the following envelope:
     "principal": "string",
     "device": "string"
   },
+  "parent_hashes": {
+    "log": "string, previous commit OID or empty string",
+    "causal": ["string, observed commit OID, bounded by v1 parent policy"],
+    "related": ["string, domain-related commit OID"]
+  },
   "seq": "integer, monotonic per actor/device",
   "occurred_at": "string, RFC 3339 timestamp in UTC",
   "legacy": {
@@ -103,11 +116,24 @@ Every event body MUST conform to the following envelope:
 }
 ```
 
-The `(actor.principal, actor.device, seq)` tuple MUST be unique within a repository.
+The `(actor.principal, actor.device, seq)` tuple MUST be unique within a
+repository. `event_uuid` is user generated and MUST NOT be used as the
+authoritative event identity, security tie-breaker, or collection add tag. Use
+the derived event hash for those purposes.
 
 ### 4.3. Object Identifiers and Human References
 
-Logical object identifiers MUST be UUIDv7.
+Issue, pull request, comment, and action run identifiers MUST be UUIDv7. ACL
+and identity events target stable system objects rather than user-facing
+content objects:
+
+*   `acl.*`: `object.id` MUST be `acl:<principal>`, where `<principal>` is the
+    canonical target principal in `payload.principal`.
+*   `identity.*`: `object.id` MUST be `identity:<principal>:<device>`, where
+    the components match `payload.principal` and `payload.device`.
+*   `action.run_requested` and `action.run_completed`: `object.id` MUST be the
+    run UUID. For `action.run_completed`, `payload.run_id` MUST equal
+    `object.id`.
 
 Gitomi v1 does not require a native repo-wide integer allocator. The canonical human reference form is a unique UUID prefix:
 
@@ -123,12 +149,16 @@ Clients MUST generate an `idempotency_key` for every logical action.
 
 Reducers MUST suppress duplicate effects when the same logical action is replayed or retried. At minimum, duplicate `idempotency_key` values for the same `repo_id` MUST be ignored after the first accepted event.
 
+Suppressed duplicate idempotency keys MUST NOT change projections. They SHOULD
+remain inspectable as rejected domain events when the implementation can
+preserve them without admitting malformed history.
+
 ### 4.5. Minimum v1 Event Families
 
 Compliant implementations MUST understand the following event families:
 
-*   `issue.opened`, `issue.title_set`, `issue.body_set`, `issue.state_set`, `issue.label_added`, `issue.label_removed`, `issue.assignee_added`, `issue.assignee_removed`
-*   `pull.opened`, `pull.title_set`, `pull.body_set`, `pull.state_set`, `pull.base_set`, `pull.head_set`, `pull.label_added`, `pull.label_removed`, `pull.assignee_added`, `pull.assignee_removed`, `pull.reviewer_added`, `pull.reviewer_removed`, `pull.merged`
+*   `issue.opened`, `issue.updated`, `issue.title_set`, `issue.body_set`, `issue.state_set`, `issue.label_added`, `issue.label_removed`, `issue.assignee_added`, `issue.assignee_removed`
+*   `pull.opened`, `pull.updated`, `pull.title_set`, `pull.body_set`, `pull.state_set`, `pull.base_set`, `pull.head_set`, `pull.label_added`, `pull.label_removed`, `pull.assignee_added`, `pull.assignee_removed`, `pull.reviewer_added`, `pull.reviewer_removed`, `pull.merged`
 *   `comment.added`, `comment.body_set`, `comment.redacted`
 *   `acl.role_granted`, `acl.role_revoked`
 *   `identity.device_added`, `identity.device_revoked`
@@ -141,15 +171,17 @@ Implementations MAY support additional event types. Unknown event types MUST be 
 The following payload members are REQUIRED for interoperable v1 implementations:
 
 *   `issue.opened`: `title`; OPTIONAL `body`, `labels`, `assignees`
+*   `issue.updated`: OPTIONAL `title`, `body`, `state`, `labels_added`, `labels_removed`, `assignees_added`, `assignees_removed`; at least one field MUST be present
 *   `issue.title_set`: `title`
 *   `issue.body_set`: `body`
 *   `issue.state_set`: `state`
 *   `issue.label_added` / `issue.label_removed`: `label`
 *   `issue.assignee_added` / `issue.assignee_removed`: `assignee`
 *   `pull.opened`: `title`, `base_ref`, `head_ref`; OPTIONAL `body`, `draft`
+*   `pull.updated`: OPTIONAL `title`, `body`, `state`, `base_ref`, `head_ref`, `labels_added`, `labels_removed`, `assignees_added`, `assignees_removed`, `reviewers_added`, `reviewers_removed`; at least one field MUST be present
 *   `pull.title_set`: `title`
 *   `pull.body_set`: `body`
-*   `pull.state_set`: `state`
+*   `pull.state_set`: `state` (`open` or `closed`)
 *   `pull.base_set`: `base_ref`
 *   `pull.head_set`: `head_ref`
 *   `pull.label_added` / `pull.label_removed`: `label`
@@ -160,7 +192,8 @@ The following payload members are REQUIRED for interoperable v1 implementations:
 *   `comment.body_set`: `body`
 *   `comment.redacted`: OPTIONAL `reason`
 *   `acl.role_granted` / `acl.role_revoked`: `principal`, `role`
-*   `identity.device_added` / `identity.device_revoked`: `principal`, `device`
+*   `identity.device_added`: `principal`, `device`, `signing_key.public_key`, `signing_key.fingerprint`
+*   `identity.device_revoked`: `principal`, `device`
 *   `action.run_requested`: `workflow`, `target_ref` or `target_oid`
 *   `action.run_completed`: `run_id`, `conclusion`, `target_ref` or `target_oid`
 
@@ -172,6 +205,17 @@ Events MUST be signed using native Git commit signing.
 
 Implementations MUST support SSH signing (`gpg.format=ssh`) and verification against an `allowedSignersFile`. OpenPGP or Sigstore-based signing MAY be supported as additional backends.
 
+The normative signing-key registry is the accepted genesis manifest plus
+accepted `identity.device_added` and `identity.device_revoked` events. An SSH
+`allowedSignersFile` is an implementation cache derived from that registry, not
+the source of truth. Implementations SHOULD generate a repository-local
+allowed-signers file from `.git/gitomi/` state and MAY point Git at it for
+verification.
+
+Past signatures remain verifiable after key rotation or device revocation. A
+revocation changes authorization for later events; it MUST NOT require deleting
+historical public keys needed to verify already accepted commits.
+
 ### 5.2. Actor and Device Model
 
 An actor principal is a stable human or bot identity. A device is a concrete signing endpoint for that principal.
@@ -182,6 +226,8 @@ The event payload identity and the commit signature MUST agree:
 *   the active device record MUST authorize `actor.device`
 
 `identity.device_added` and `identity.device_revoked` events define the valid device set for each principal.
+`identity.device_added` MUST bind the device identifier to public signing key
+material and a key fingerprint so a clone can rebuild trust from refs alone.
 
 ### 5.3. ACL Model
 
@@ -194,7 +240,16 @@ Compliant implementations MUST derive effective permissions by replaying:
 *   `identity.device_added`
 *   `identity.device_revoked`
 
-Permissions are role-based. The precise role-to-permission matrix is implementation-defined, but a repository MUST apply the same matrix consistently for all replicas.
+Permissions are role-based. The built-in role-to-permission matrix is defined
+normatively by the RBAC specification (`03_RBAC.md`) and MUST be applied
+consistently by all compliant replicas. Implementations MAY add custom roles or
+permissions, but they MUST NOT weaken the built-in role semantics.
+
+Read permissions are not cryptographic revocation. A replica that has already
+cloned refs, bundles, packs, or working-tree data can retain and copy that data
+after its role is revoked. Gitomi `*.read` permissions are cooperative UI and
+sync-server policy for future access; they do not claw back data already
+distributed.
 
 ### 5.4. Validation Pipeline
 
@@ -210,6 +265,18 @@ Authorization MUST be evaluated from causal ancestry, not from wall-clock timest
 
 Invalid, unverifiable, or unauthorized events MUST NOT affect the materialized projection.
 
+Implementations MUST distinguish:
+
+*   **structural admission failures**, such as malformed JSON, invalid parent
+    hashes, unverifiable signatures, wrong `repo_id`, duplicate `(principal,
+    device, seq)`, or oversized event bodies. These events are not admitted into
+    the projection input.
+*   **domain rejection**, where an event is structurally valid and signed but
+    fails an object-level rule such as a missing creation precondition,
+    duplicate object creation, unauthorized actor, or invalid ACL/identity
+    transition. These events MUST remain auditable by event hash and rejection
+    reason, but MUST NOT affect current projections.
+
 ## 6. Reducers and Conflict Resolution
 
 Clients materialize current state by reducing the valid event DAG. The log acts as an operation-based CRDT.
@@ -220,15 +287,27 @@ Reducers MUST apply the following rules:
 
 *   Causal ancestry takes precedence over presentation order.
 *   Concurrent events MUST be resolved by the object-specific CRDT rules below.
-*   `occurred_at` is the primary LWW timestamp for concurrent scalar updates.
-*   Ties in LWW resolution MUST be broken deterministically by `(actor.principal, event_uuid)`.
+*   For scalar registers, a causally later event wins over its ancestor.
+*   Concurrent scalar events MUST be resolved by deterministic event-hash order.
+*   `occurred_at` is for display and import provenance only; it MUST NOT decide security state or reducer precedence.
 *   All accepted events MUST remain auditable even when their current visible effect is superseded.
 
 ### 6.2. Issues
 
 An issue is created by `issue.opened`.
 
-The following issue fields MUST be modeled as last-writer-wins registers:
+An issue event other than `issue.opened` has a creation precondition: the target
+issue MUST already have an accepted `issue.opened` event in the event's
+effective replay history. If not, the event MUST be domain-rejected with reason
+`object_not_created` and MUST NOT begin applying later if an `issue.opened`
+event for the same UUID is subsequently observed.
+
+If more than one structurally valid `issue.opened` event targets the same
+`object.id`, one creation event wins by the implementation's deterministic
+reducer order; all other creation events for that ID MUST be domain-rejected
+with reason `duplicate_object_id`.
+
+The following issue fields MUST be modeled as causal scalar registers:
 
 *   `title`
 *   `body`
@@ -240,13 +319,34 @@ The following issue collections MUST be modeled as Observed-Remove Sets:
 *   labels
 *   assignees
 
+The add tag for an OR-Set member is the add event hash. A remove affects only
+add tags reachable from the remove event's causal frontier or explicitly listed
+in the remove payload. A concurrent add whose event hash is not observed by the
+remove MUST remain visible.
+
+For `issue.updated`, each array member in `labels_added`, `labels_removed`,
+`assignees_added`, and `assignees_removed` is reduced as if the corresponding
+single-field event had been emitted at the same event hash. Implementations
+SHOULD prefer `issue.updated` for user-facing edit flows that change multiple
+fields, to avoid one signed commit per small UI mutation.
+
 Reducers MUST preserve all accepted events in the issue timeline, even when the visible projection only shows the latest scalar values.
 
 ### 6.3. Pull Requests
 
 A pull request is created by `pull.opened`.
 
-The following pull-request fields MUST be modeled as last-writer-wins registers:
+A pull request event other than `pull.opened` has a creation precondition: the
+target pull request MUST already have an accepted `pull.opened` event in the
+event's effective replay history. If not, the event MUST be domain-rejected with
+reason `object_not_created`.
+
+If more than one structurally valid `pull.opened` event targets the same
+`object.id`, one creation event wins by the implementation's deterministic
+reducer order; all other creation events for that ID MUST be domain-rejected
+with reason `duplicate_object_id`.
+
+The following pull-request fields MUST be modeled as causal scalar registers:
 
 *   `title`
 *   `body`
@@ -261,17 +361,47 @@ The following pull-request collections MUST be modeled as Observed-Remove Sets:
 *   assignees
 *   reviewers
 
+For `pull.updated`, each scalar and collection member is reduced as if the
+corresponding single-field event had been emitted at the same event hash.
+Implementations SHOULD prefer `pull.updated` for user-facing edit flows that
+change multiple fields.
+
 `pull.merged` MUST record enough payload to identify the resulting merge outcome, typically a merge commit OID or a fast-forward target OID.
+`pull.state_set` MUST NOT set `state` to `merged`; the merged state is derived
+only from an accepted `pull.merged` event so merge metadata and state cannot
+diverge.
+
+`pull.merged` has the same creation precondition as other pull events. A merge
+event before an accepted `pull.opened` event MUST be domain-rejected with reason
+`object_not_created`.
 
 ### 6.4. Comments
 
 Comments are append-only event histories attached to a stable comment UUID.
 
 *   `comment.added` creates the comment object and attaches it to an issue or pull request.
-*   `comment.body_set` updates the current rendered body using LWW semantics on the comment UUID.
+*   `comment.body_set` updates the current rendered body using causal order,
+    with event-hash order for concurrent body updates.
 *   `comment.redacted` marks the comment as semantically removed while preserving audit history.
 
-Implementations MAY retain prior comment bodies as explicit history, but the current visible body MUST be derived from the latest accepted `comment.body_set` or the initial `comment.added` payload.
+`comment.body_set` and `comment.redacted` require an accepted `comment.added`
+event for the target comment. If no accepted creation event exists, the update
+or redaction MUST be domain-rejected with reason `object_not_created`.
+
+If more than one structurally valid `comment.added` event targets the same
+`object.id`, one creation event wins by the implementation's deterministic
+reducer order; all other creation events for that ID MUST be domain-rejected
+with reason `duplicate_object_id`.
+
+Redaction is a tombstone in v1. Once an accepted `comment.redacted` event
+applies to a comment, the current visible projection MUST remain redacted
+regardless of later or concurrent `comment.body_set` events. Implementations MAY
+retain prior and later comment bodies as explicit history, but they MUST NOT use
+`comment.body_set` to restore visible content after redaction.
+
+For a comment that has not been redacted, the current visible body MUST be
+derived from the latest accepted `comment.body_set` or the initial
+`comment.added` payload.
 
 ### 6.5. Derived References From Code Commits
 
@@ -298,7 +428,39 @@ If missing or corrupted, a compliant implementation MUST rebuild state by:
 
 Synchronization MUST use standard Git transport and refs. Implementations MUST be able to fetch and push Gitomi refs over normal Git protocol v2 transports such as SSH, HTTPS, or bundles.
 
-### 7.2. Append-Only Rule
+### 7.2. `repo_id` Discovery and Forks
+
+The canonical `repo_id` is learned from the signed manifest at
+`refs/gitomi/genesis`. Local `.git/gitomi/config.toml` stores the current actor
+configuration and a cached `repo_id`; it is not authoritative. If local config
+conflicts with a valid local genesis manifest, implementations MUST report the
+conflict and refuse to write new events until the operator resolves it.
+
+A fresh clone discovers `repo_id` by fetching and validating
+`refs/gitomi/genesis` before admitting inbox events. A fetched genesis that
+differs from an existing local genesis is a trust-root conflict and MUST NOT be
+auto-merged.
+
+A normal Git fork that preserves `refs/gitomi/genesis` is the same logical
+Gitomi repository and keeps the same `repo_id`. A detached fork that wants an
+independent control plane MUST create a new genesis with a new `repo_id` and
+MUST NOT replay the old repository's inbox refs as authoritative history except
+through an explicit import process.
+
+### 7.3. Sequence Numbers
+
+`seq` is scoped to `(actor.principal, actor.device)`. It MUST be unique and
+strictly increasing along that principal-device inbox history. It is not
+required to be gap-free.
+
+Writers SHOULD emit the previous accepted local sequence plus one. If local
+configuration is missing or stale only with respect to `seq`, an implementation
+MUST recover by scanning the local authoritative inbox ref for the configured
+principal/device and continuing from the largest structurally valid sequence it
+can observe. A corrupted `repo_id`, principal, or device remains a configuration
+error and MUST NOT be guessed.
+
+### 7.4. Append-Only Rule
 
 Shared inbox refs are immutable after publication.
 
@@ -306,7 +468,12 @@ Shared inbox refs are immutable after publication.
 *   A device MAY rewrite its own unpublished local inbox ref before first publication.
 *   Once published, corrections MUST be expressed as new events, not history edits.
 
-### 7.3. Snapshots
+Implementations SHOULD debounce local UI edits, batch logically-related edits
+into `issue.updated` or `pull.updated`, and MAY rewrite a device's unpublished
+local outbox before first publication. These mechanisms reduce event volume
+without weakening the append-only rule for shared inbox refs.
+
+### 7.5. Snapshots
 
 Snapshots are additive bootstrap aids, not replacements for the authoritative event history.
 
@@ -347,6 +514,19 @@ Workflow execution results MUST be summarized by a signed `action.run_completed`
 Implementations MAY additionally stream incremental logs, traces, or artifacts into `refs/gitomi/runs/<runner-id>/<run-id>` or external object storage.
 
 When external storage is used, the final event payload MUST contain a stable content reference such as a Git OID or SHA-256 digest.
+
+Run refs are auxiliary diagnostics. They MUST NOT be replayed by reducers, MUST
+NOT be pushed or fetched by default sync, and MAY be deleted according to local
+or server retention policy without changing repository state. Implementations
+SHOULD provide retention controls for maximum age, maximum retained run count,
+and maximum retained bytes. The signed `action.run_completed` event is the
+durable workflow result; logs and artifacts SHOULD be content-addressed or
+externally stored when they are large.
+
+Implementations MUST bound diagnostic storage. v1 implementations SHOULD cap
+default retained run diagnostics to 256 MiB total, SHOULD reject or externalize
+large individual artifacts, and MUST require an explicit diagnostic path to
+fetch or push run refs.
 
 ## 9. Migration Compatibility
 

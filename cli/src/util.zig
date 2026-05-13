@@ -140,6 +140,18 @@ pub fn rfc3339Now(allocator: Allocator) ![]u8 {
     );
 }
 
+pub fn sha256Hex(allocator: Allocator, bytes: []const u8) ![]u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    const out_buf = try allocator.alloc(u8, digest.len * 2);
+    const hex = "0123456789abcdef";
+    for (digest, 0..) |b, i| {
+        out_buf[i * 2] = hex[b >> 4];
+        out_buf[i * 2 + 1] = hex[b & 0x0f];
+    }
+    return out_buf;
+}
+
 pub fn requireValue(args: []const []const u8, index: *usize, name: []const u8) ![]const u8 {
     if (index.* + 1 >= args.len) {
         try eprint("{s} requires a value\n", .{name});
