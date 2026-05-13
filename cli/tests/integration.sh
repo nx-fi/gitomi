@@ -46,27 +46,6 @@ json_field() {
   printf '%s\n' "$json" | sed -n 's/.*"'"$field"'":"\([^"]*\)".*/\1/p' | head -n 1
 }
 
-append_issue_event() {
-  local event_type="$1"
-  local issue_id="$2"
-  local payload="$3"
-  local seq="$4"
-  local event_uuid
-  local idem
-  local empty_tree
-  local head
-  local body
-  local commit
-
-  printf -v event_uuid '018f0000-0000-7000-8000-%012d' "$((100 + seq))"
-  printf -v idem '018f0000-0000-7000-8000-%012d' "$((200 + seq))"
-  empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
-  head="$(git rev-parse refs/gitomi/inbox/alice/laptop)"
-  body="$(printf '{"$schema":"urn:gitomi:event:v1","repo_id":"%s","event_uuid":"%s","event_type":"%s","object":{"kind":"issue","id":"%s"},"idempotency_key":"%s","actor":{"principal":"alice","device":"laptop"},"seq":%s,"occurred_at":"2026-05-13T18:31:%02dZ","legacy":{},"payload":%s}' "$REPO_ID" "$event_uuid" "$event_type" "$issue_id" "$idem" "$seq" "$seq" "$payload")"
-  commit="$(git commit-tree -S -p "$head" -m "$event_type" -m "$body" "$empty_tree")"
-  git update-ref refs/gitomi/inbox/alice/laptop "$commit" "$head"
-}
-
 configure_signing() {
   local repo="$1"
   git -C "$repo" config user.name "Alice"
@@ -124,15 +103,19 @@ init_repo "$reducer"
   first_event="$(gt events list --json)"
   issue_id="$(json_field "$first_event" object_id)"
   [[ -n "$issue_id" ]] || fail "expected issue id from event list"
-  append_issue_event "issue.title_set" "$issue_id" '{"title":"Updated title"}' 2
-  append_issue_event "issue.state_set" "$issue_id" '{"state":"closed"}' 3
-  append_issue_event "issue.label_removed" "$issue_id" '{"label":"bug"}' 4
-  append_issue_event "issue.assignee_removed" "$issue_id" '{"assignee":"alice"}' 5
-  append_issue_event "issue.label_added" "$issue_id" '{"label":"regression"}' 6
+  issue_ref="#${issue_id:0:7}"
+  sleep 1
+  gt issue title "$issue_ref" --title "Updated title" >/dev/null
+  gt issue body "$issue_ref" --body "Updated body" >/dev/null
+  gt issue close "$issue_ref" >/dev/null
+  gt issue label remove "$issue_ref" bug >/dev/null
+  gt issue assignee remove "$issue_ref" alice >/dev/null
+  gt issue label add "$issue_ref" regression >/dev/null
   issues="$(gt issue list --json)"
   assert_line_count "$issues" 1
   assert_contains "$issues" '"state":"closed"'
   assert_contains "$issues" '"title":"Updated title"'
+  assert_contains "$issues" '"body":"Updated body"'
   assert_contains "$issues" '"labels":["regression"]'
   assert_contains "$issues" '"assignees":[]'
   gt fsck >/dev/null

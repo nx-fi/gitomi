@@ -119,6 +119,50 @@ pub fn buildIssueOpenedJson(
     return try buf.toOwnedSlice(allocator);
 }
 
+pub fn buildIssueStringPayloadJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    issue_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    event_type: []const u8,
+    payload_key: []const u8,
+    payload_value: []const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try buf.append(allocator, '{');
+    try appendJsonFieldString(&buf, allocator, "$schema", event_schema, true);
+    try appendJsonFieldString(&buf, allocator, "repo_id", cfg.repo_id, true);
+    try appendJsonFieldString(&buf, allocator, "event_uuid", event_uuid, true);
+    try appendJsonFieldString(&buf, allocator, "event_type", event_type, true);
+
+    try buf.appendSlice(allocator, "\"object\":{");
+    try appendJsonFieldString(&buf, allocator, "kind", "issue", true);
+    try appendJsonFieldString(&buf, allocator, "id", issue_id, false);
+    try buf.appendSlice(allocator, "},");
+
+    try appendJsonFieldString(&buf, allocator, "idempotency_key", idem, true);
+
+    try buf.appendSlice(allocator, "\"actor\":{");
+    try appendJsonFieldString(&buf, allocator, "principal", cfg.principal, true);
+    try appendJsonFieldString(&buf, allocator, "device", cfg.device, false);
+    try buf.appendSlice(allocator, "},");
+
+    try appendJsonFieldUnsigned(&buf, allocator, "seq", seq, true);
+    try appendJsonFieldString(&buf, allocator, "occurred_at", occurred_at, true);
+    try buf.appendSlice(allocator, "\"legacy\":{},");
+
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, payload_key, payload_value, false);
+    try buf.appendSlice(allocator, "}}");
+
+    return try buf.toOwnedSlice(allocator);
+}
+
 pub fn validateEventEnvelope(allocator: Allocator, commit: []const u8, body: []const u8) !void {
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch {
         try eprint("gt sync: rejecting {s}: event body is not valid JSON\n", .{commit});
