@@ -39,6 +39,11 @@ gt refs
 gt events list [--json] [--limit N] [--ref REF]
 gt issue list [--json]
 gt issue open --title TITLE [--body BODY] [--label LABEL] [--assignee PRINCIPAL]
+gt issue title ISSUE --title TITLE
+gt issue body ISSUE --body BODY
+gt issue close|reopen ISSUE
+gt issue label add|remove ISSUE LABEL
+gt issue assignee add|remove ISSUE PRINCIPAL
 gt sync [--remote REMOTE] [--pull-only|--push-only]
 gt web [--host 127.0.0.1] [--port 8080]
 ```

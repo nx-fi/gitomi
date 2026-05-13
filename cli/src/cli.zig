@@ -76,6 +76,11 @@ fn printUsage() !void {
         \\  gt events list [--json] [--limit N] [--ref REF]
         \\  gt issue list [--json]
         \\  gt issue open --title TITLE [--body BODY] [--label LABEL] [--assignee PRINCIPAL]
+        \\  gt issue title ISSUE --title TITLE
+        \\  gt issue body ISSUE --body BODY
+        \\  gt issue close|reopen ISSUE
+        \\  gt issue label add|remove ISSUE LABEL
+        \\  gt issue assignee add|remove ISSUE PRINCIPAL
         \\  gt sync [--remote REMOTE] [--pull-only|--push-only]
         \\  gt web [--host 127.0.0.1] [--port 8080]
         \\
@@ -359,7 +364,7 @@ fn cmdEvents(allocator: Allocator, args: []const []const u8) !void {
 
 fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
     if (args.len == 0) {
-        try io.eprint("gt issue: expected subcommand 'list' or 'open'\n", .{});
+        try io.eprint("gt issue: expected subcommand 'list', 'open', or an issue update command\n", .{});
         return CliError.UserError;
     }
 
@@ -383,8 +388,73 @@ fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
         return;
     }
 
+    if (std.mem.eql(u8, args[0], "title") or std.mem.eql(u8, args[0], "body")) {
+        const payload_key: []const u8 = if (std.mem.eql(u8, args[0], "title")) "title" else "body";
+        const event_type: []const u8 = if (std.mem.eql(u8, args[0], "title")) "issue.title_set" else "issue.body_set";
+        const option_name: []const u8 = if (std.mem.eql(u8, args[0], "title")) "--title" else "--body";
+        if (args.len < 2) {
+            try io.eprint("gt issue {s}: ISSUE is required\n", .{args[0]});
+            return CliError.UserError;
+        }
+        var value: ?[]const u8 = null;
+        var i: usize = 2;
+        while (i < args.len) : (i += 1) {
+            const arg = args[i];
+            if (std.mem.eql(u8, arg, option_name)) {
+                value = try util.requireValue(args, &i, option_name);
+            } else {
+                try io.eprint("gt issue {s}: unknown option '{s}'\n", .{ args[0], arg });
+                return CliError.UserError;
+            }
+        }
+        if (value == null or std.mem.trim(u8, value.?, " \t\r\n").len == 0) {
+            try io.eprint("gt issue {s}: {s} is required\n", .{ args[0], option_name });
+            return CliError.UserError;
+        }
+        const issue_id = try resolveIssueIdForCommand(allocator, args[1]);
+        defer allocator.free(issue_id);
+        try issue.createIssueStringEvent(allocator, issue_id, event_type, payload_key, value.?);
+        return;
+    }
+
+    if (std.mem.eql(u8, args[0], "close") or std.mem.eql(u8, args[0], "reopen")) {
+        if (args.len != 2) {
+            try io.eprint("gt issue {s}: expected ISSUE\n", .{args[0]});
+            return CliError.UserError;
+        }
+        const issue_id = try resolveIssueIdForCommand(allocator, args[1]);
+        defer allocator.free(issue_id);
+        const state: []const u8 = if (std.mem.eql(u8, args[0], "close")) "closed" else "open";
+        try issue.createIssueStringEvent(allocator, issue_id, "issue.state_set", "state", state);
+        return;
+    }
+
+    if (std.mem.eql(u8, args[0], "label") or std.mem.eql(u8, args[0], "assignee")) {
+        if (args.len != 4) {
+            try io.eprint("gt issue {s}: expected add|remove ISSUE VALUE\n", .{args[0]});
+            return CliError.UserError;
+        }
+        const collection = args[0];
+        const op = args[1];
+        if (!std.mem.eql(u8, op, "add") and !std.mem.eql(u8, op, "remove")) {
+            try io.eprint("gt issue {s}: expected add or remove\n", .{collection});
+            return CliError.UserError;
+        }
+        if (std.mem.trim(u8, args[3], " \t\r\n").len == 0) {
+            try io.eprint("gt issue {s}: value must not be empty\n", .{collection});
+            return CliError.UserError;
+        }
+        const issue_id = try resolveIssueIdForCommand(allocator, args[2]);
+        defer allocator.free(issue_id);
+        const event_type = try std.fmt.allocPrint(allocator, "issue.{s}_{s}", .{ collection, if (std.mem.eql(u8, op, "add")) "added" else "removed" });
+        defer allocator.free(event_type);
+        const payload_key: []const u8 = if (std.mem.eql(u8, collection, "label")) "label" else "assignee";
+        try issue.createIssueStringEvent(allocator, issue_id, event_type, payload_key, args[3]);
+        return;
+    }
+
     if (!std.mem.eql(u8, args[0], "open")) {
-        try io.eprint("gt issue: expected subcommand 'list' or 'open'\n", .{});
+        try io.eprint("gt issue: expected subcommand 'list', 'open', or an issue update command\n", .{});
         return CliError.UserError;
     }
 
@@ -418,6 +488,13 @@ fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
     }
 
     try issue.createIssueOpenedEvent(allocator, title.?, body, labels.items, assignees.items);
+}
+
+fn resolveIssueIdForCommand(allocator: Allocator, raw_ref: []const u8) ![]u8 {
+    var repo = try repo_mod.discoverRepo(allocator);
+    defer repo.deinit();
+    try index.ensureIndex(allocator, repo);
+    return try index.resolveIssueId(allocator, repo, raw_ref);
 }
 
 fn cmdSync(allocator: Allocator, args: []const []const u8) !void {

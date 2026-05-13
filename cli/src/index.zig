@@ -853,12 +853,49 @@ pub fn countIndexedEventsInDb(db: *SqliteDb) !usize {
     return if (count <= 0) 0 else @as(usize, @intCast(count));
 }
 
+pub fn resolveIssueId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
+    const prefix = if (std.mem.startsWith(u8, raw_ref, "#")) raw_ref[1..] else raw_ref;
+    if (prefix.len < 7) {
+        try eprint("gt issue: issue reference must be at least 7 hex characters\n", .{});
+        return CliError.UserError;
+    }
+    for (prefix) |c| {
+        if (!std.ascii.isHex(c) and c != '-') {
+            try eprint("gt issue: issue reference must be a UUID or UUID prefix\n", .{});
+            return CliError.UserError;
+        }
+    }
+
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
+    const pattern = try std.fmt.allocPrint(allocator, "{s}%", .{prefix});
+    defer allocator.free(pattern);
+    var stmt = try db.prepare("SELECT id FROM issues WHERE id LIKE ? ORDER BY id LIMIT 2");
+    defer stmt.deinit();
+    try stmt.bindText(1, pattern);
+
+    if (!(try stmt.step())) {
+        try eprint("gt issue: no issue matches #{s}\n", .{prefix});
+        return CliError.UserError;
+    }
+    const first = try stmt.columnTextDup(allocator, 0);
+    errdefer allocator.free(first);
+    if (try stmt.step()) {
+        const second = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(second);
+        try eprint("gt issue: ambiguous issue reference #{s} matches {s} and {s}\n", .{ prefix, first, second });
+        return CliError.UserError;
+    }
+    return first;
+}
+
 pub fn listIssuesFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
     if (!fileExists(repo.index_path)) return;
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
 
-    var stmt = try db.prepare("SELECT id, title, state, author_principal, opened_at FROM issues ORDER BY opened_at DESC, id DESC");
+    var stmt = try db.prepare("SELECT id, title, state, author_principal, opened_at, body FROM issues ORDER BY opened_at DESC, id DESC");
     defer stmt.deinit();
 
     while (try stmt.step()) {
@@ -872,6 +909,8 @@ pub fn listIssuesFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
         defer allocator.free(author);
         const opened_at = try stmt.columnTextDup(allocator, 4);
         defer allocator.free(opened_at);
+        const body = try stmt.columnTextDup(allocator, 5);
+        defer allocator.free(body);
 
         if (json) {
             var line: std.ArrayList(u8) = .empty;
@@ -880,6 +919,7 @@ pub fn listIssuesFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
             try appendJsonFieldString(&line, allocator, "id", id, true);
             try appendJsonFieldString(&line, allocator, "state", state, true);
             try appendJsonFieldString(&line, allocator, "title", title, true);
+            try appendJsonFieldString(&line, allocator, "body", body, true);
             try appendJsonFieldString(&line, allocator, "author_principal", author, true);
             try appendJsonFieldString(&line, allocator, "opened_at", opened_at, true);
             try appendIssueCollectionJsonField(&line, allocator, &db, "labels", "SELECT label FROM issue_labels WHERE issue_id = ? ORDER BY label", id, true);
