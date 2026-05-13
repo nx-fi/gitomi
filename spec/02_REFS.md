@@ -139,6 +139,13 @@ refs/gitomi/snapshots/<snapshot-id>
 
 Additive checkpoint refs containing projection manifests and compact bootstrap state. Snapshot commits MAY reference non-empty trees containing serialized projections.
 
+Snapshots are auxiliary bootstrap data, not reducer input. Implementations that
+fetch, retain, or load snapshots MUST apply explicit limits to individual
+snapshot tree size, total retained snapshot bytes, and retained snapshot count.
+The v1 default maximum snapshot tree size SHOULD be no more than 64 MiB, and the
+v1 default retained snapshot count SHOULD be no more than 32 unless the operator
+explicitly configures larger values.
+
 ### 2.8. Run Refs (OPTIONAL)
 
 ```
@@ -395,6 +402,39 @@ Events with an invalid object id for their family MUST be rejected.
 
 Implementations MUST preserve events with unrecognized `event_type` values in the log. Unknown events SHOULD be ignored by reducers unless the implementation explicitly understands them. They MUST NOT cause rejection of the entire inbox ref.
 
+### 5.5. v1 Resource Limits
+
+Implementations MUST enforce these default v1 limits during sync admission,
+fsck, and index rebuild:
+
+| Resource | v1 default limit |
+|----------|------------------|
+| Authoritative inbox refs per repository | 10,000 |
+| New inbox commits admitted by one default pull | 100,000 |
+| Inbox commit subject line | 512 bytes |
+| Inbox event JSON body | 1 MiB before Git object compression |
+| Additional Git parents / `parent_hashes.causal` | 32 |
+| `parent_hashes.related` entries | 256 |
+| Title fields | 512 bytes |
+| Issue, pull request, and comment body fields | 64 KiB |
+| Public signing key payload fields | 16 KiB |
+| Principal, device, label, assignee, reviewer, workflow, and conclusion strings | 256 bytes each |
+| Data Plane ref or object-id payload strings | 512 bytes each |
+| Collection delta arrays in one event | 128 entries |
+| Visible labels on one issue or pull request | 256 |
+| Visible assignees or reviewers on one issue or pull request | 128 |
+| Snapshot tree size | 64 MiB |
+| Retained snapshot refs per repository | 32 |
+
+These are structural or domain limits, not serialization recommendations. An
+event that exceeds a structural envelope limit MUST fail admission. An event that
+is structurally valid but would exceed a per-object projection cardinality limit
+MUST be domain-rejected and MUST NOT change the projection.
+
+Implementations MAY expose explicit administrative flags to raise repository,
+pull-admission, snapshot, or projection limits. They MUST NOT silently raise
+defaults during normal sync.
+
 ## 6. Sync Protocol
 
 ### 6.1. Transport
@@ -452,8 +492,9 @@ For each staging inbox ref, the implementation MUST:
 
 4.  If all commits pass, atomically update the local inbox ref.
 
-A default pull MUST reject or defer admission when more than 10,000 inbox refs
-or more than 100,000 new inbox commits would be admitted in one operation.
+A default pull MUST reject or defer admission when the local repository would
+exceed 10,000 authoritative inbox refs after admission, or when more than 100,000
+new inbox commits would be admitted in one operation.
 Implementations MAY expose explicit administrative flags to raise these limits.
 
 #### 6.2.3. Non-Fast-Forward Rejection
@@ -471,10 +512,19 @@ git push <remote> \
   refs/gitomi/inbox/<principal>/<device>:refs/gitomi/inbox/<principal>/<device>
 ```
 
-Implementations MUST push the local genesis ref, when present, and each local
-inbox ref to the matching remote ref. Force-push MUST NOT be used; if the remote
-rejects a non-fast-forward push, the implementation MUST report the conflict.
-Quarantine refs MUST NOT be pushed by default.
+Default push MUST push the local genesis ref when present and the configured
+local actor's own inbox ref, if that ref exists. It MUST NOT push locally
+replicated inbox refs for other principals or other devices by default. This
+prevents a replica from publishing third-party inbox heads to a remote that did
+not already choose to receive them.
+
+Implementations MAY expose an explicit administrative mirror or backup mode that
+pushes additional inbox refs. Such a mode MUST be opt-in and SHOULD report the
+exact ref set before pushing.
+
+Force-push MUST NOT be used; if the remote rejects a non-fast-forward push, the
+implementation MUST report the conflict. Quarantine refs MUST NOT be pushed by
+default.
 
 Default push MUST NOT include `refs/gitomi/runs/*`. Run diagnostics require an
 explicit push path and remain subject to retention policy on both sides.

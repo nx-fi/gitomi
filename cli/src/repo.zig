@@ -51,6 +51,27 @@ pub const Config = struct {
     }
 };
 
+pub const GenesisManifest = struct {
+    allocator: Allocator,
+    repo_id: []u8,
+    owner_principal: []u8,
+    owner_role: []u8,
+    device_principal: []u8,
+    device_id: []u8,
+    public_key: []u8,
+    fingerprint: []u8,
+
+    pub fn deinit(self: *GenesisManifest) void {
+        self.allocator.free(self.repo_id);
+        self.allocator.free(self.owner_principal);
+        self.allocator.free(self.owner_role);
+        self.allocator.free(self.device_principal);
+        self.allocator.free(self.device_id);
+        self.allocator.free(self.public_key);
+        self.allocator.free(self.fingerprint);
+    }
+};
+
 pub fn discoverRepo(allocator: Allocator) !Repo {
     const root_raw = gitChecked(allocator, &.{ "rev-parse", "--show-toplevel" }) catch |err| {
         if (err == CliError.GitFailed) {
@@ -106,26 +127,30 @@ pub fn parseConfig(allocator: Allocator, bytes: []const u8) !Config {
         if (device) |v| allocator.free(v);
     }
 
-    var lines = std.mem.splitScalar(u8, bytes, '\n');
-    while (lines.next()) |line_raw| {
-        const line = std.mem.trim(u8, line_raw, " \t\r\n");
-        if (line.len == 0 or line[0] == '#') continue;
-        const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
-        const key = std.mem.trim(u8, line[0..eq], " \t");
-        const raw_value = std.mem.trim(u8, line[eq + 1 ..], " \t");
-        const value = stripTomlString(raw_value) catch return CliError.ConfigInvalid;
+    var parser = ConfigParser{
+        .allocator = allocator,
+        .bytes = bytes,
+    };
+    while (try parser.next()) |entry| {
+        const value = entry.value.bytes;
+        var moved = false;
+        defer if (!moved) allocator.free(value);
 
-        if (std.mem.eql(u8, key, "repo_id")) {
+        if (std.mem.eql(u8, entry.key, "repo_id")) {
             if (repo_id) |old| allocator.free(old);
-            repo_id = try allocator.dupe(u8, value);
-        } else if (std.mem.eql(u8, key, "principal")) {
+            repo_id = value;
+            moved = true;
+        } else if (std.mem.eql(u8, entry.key, "principal")) {
             if (principal) |old| allocator.free(old);
-            principal = try allocator.dupe(u8, value);
-        } else if (std.mem.eql(u8, key, "device")) {
+            principal = value;
+            moved = true;
+        } else if (std.mem.eql(u8, entry.key, "device")) {
             if (device) |old| allocator.free(old);
-            device = try allocator.dupe(u8, value);
-        } else if (std.mem.eql(u8, key, "seq")) {
-            seq = std.fmt.parseUnsigned(u64, raw_value, 10) catch null;
+            device = value;
+            moved = true;
+        } else if (std.mem.eql(u8, entry.key, "seq")) {
+            if (entry.value.kind != .bare) return CliError.ConfigInvalid;
+            seq = std.fmt.parseUnsigned(u64, value, 10) catch return CliError.ConfigInvalid;
         }
     }
 
@@ -142,11 +167,235 @@ pub fn parseConfig(allocator: Allocator, bytes: []const u8) !Config {
     };
 }
 
-pub fn stripTomlString(raw: []const u8) ![]const u8 {
-    if (raw.len >= 2 and raw[0] == '"' and raw[raw.len - 1] == '"') {
-        return raw[1 .. raw.len - 1];
+const TomlValueKind = enum { string, bare };
+
+const ParsedTomlValue = struct {
+    bytes: []u8,
+    kind: TomlValueKind,
+};
+
+const ConfigEntry = struct {
+    key: []const u8,
+    value: ParsedTomlValue,
+};
+
+const ConfigParser = struct {
+    allocator: Allocator,
+    bytes: []const u8,
+    pos: usize = 0,
+
+    fn next(self: *ConfigParser) !?ConfigEntry {
+        self.skipTrivia();
+        if (self.pos >= self.bytes.len) return null;
+
+        const key_start = self.pos;
+        while (self.pos < self.bytes.len and isTomlBareKeyChar(self.bytes[self.pos])) {
+            self.pos += 1;
+        }
+        if (self.pos == key_start) return CliError.ConfigInvalid;
+        const key = self.bytes[key_start..self.pos];
+
+        self.skipHorizontalWhitespace();
+        if (self.pos >= self.bytes.len or self.bytes[self.pos] != '=') return CliError.ConfigInvalid;
+        self.pos += 1;
+        self.skipHorizontalWhitespace();
+
+        const value = try self.parseValue();
+        errdefer self.allocator.free(value.bytes);
+
+        self.skipHorizontalWhitespace();
+        if (self.pos < self.bytes.len) {
+            if (self.bytes[self.pos] == '#') {
+                self.skipRestOfLine();
+            } else if (!self.consumeNewline()) {
+                return CliError.ConfigInvalid;
+            }
+        }
+
+        return .{ .key = key, .value = value };
     }
-    return raw;
+
+    fn parseValue(self: *ConfigParser) !ParsedTomlValue {
+        if (self.pos >= self.bytes.len) return CliError.ConfigInvalid;
+        if (self.startsWith("\"\"\"")) return .{ .bytes = try self.parseBasicString(true), .kind = .string };
+        if (self.startsWith("'''")) return .{ .bytes = try self.parseLiteralString(true), .kind = .string };
+        if (self.bytes[self.pos] == '"') return .{ .bytes = try self.parseBasicString(false), .kind = .string };
+        if (self.bytes[self.pos] == '\'') return .{ .bytes = try self.parseLiteralString(false), .kind = .string };
+        return .{ .bytes = try self.parseBareValue(), .kind = .bare };
+    }
+
+    fn parseBareValue(self: *ConfigParser) ![]u8 {
+        const start = self.pos;
+        while (self.pos < self.bytes.len and self.bytes[self.pos] != '#' and self.bytes[self.pos] != '\r' and self.bytes[self.pos] != '\n') {
+            self.pos += 1;
+        }
+        const value = std.mem.trim(u8, self.bytes[start..self.pos], " \t");
+        if (value.len == 0) return CliError.ConfigInvalid;
+        return self.allocator.dupe(u8, value);
+    }
+
+    fn parseBasicString(self: *ConfigParser, multiline: bool) ![]u8 {
+        self.pos += if (multiline) 3 else 1;
+        if (multiline) _ = self.consumeNewline();
+
+        var out_buf: std.ArrayList(u8) = .empty;
+        errdefer out_buf.deinit(self.allocator);
+
+        while (self.pos < self.bytes.len) {
+            if (multiline) {
+                if (self.startsWith("\"\"\"")) {
+                    self.pos += 3;
+                    return out_buf.toOwnedSlice(self.allocator);
+                }
+            } else if (self.bytes[self.pos] == '"') {
+                self.pos += 1;
+                return out_buf.toOwnedSlice(self.allocator);
+            } else if (self.bytes[self.pos] == '\r' or self.bytes[self.pos] == '\n') {
+                return CliError.ConfigInvalid;
+            }
+
+            if (self.bytes[self.pos] == '\\') {
+                try self.appendBasicEscape(&out_buf, multiline);
+            } else {
+                try out_buf.append(self.allocator, self.bytes[self.pos]);
+                self.pos += 1;
+            }
+        }
+
+        return CliError.ConfigInvalid;
+    }
+
+    fn appendBasicEscape(self: *ConfigParser, out_buf: *std.ArrayList(u8), multiline: bool) !void {
+        self.pos += 1;
+        if (self.pos >= self.bytes.len) return CliError.ConfigInvalid;
+
+        const escaped = self.bytes[self.pos];
+        switch (escaped) {
+            'b' => try out_buf.append(self.allocator, 0x08),
+            't' => try out_buf.append(self.allocator, '\t'),
+            'n' => try out_buf.append(self.allocator, '\n'),
+            'f' => try out_buf.append(self.allocator, 0x0c),
+            'r' => try out_buf.append(self.allocator, '\r'),
+            '"' => try out_buf.append(self.allocator, '"'),
+            '\\' => try out_buf.append(self.allocator, '\\'),
+            'u' => {
+                try self.appendUnicodeEscape(out_buf, 4);
+                return;
+            },
+            'U' => {
+                try self.appendUnicodeEscape(out_buf, 8);
+                return;
+            },
+            '\r', '\n' => {
+                if (!multiline) return CliError.ConfigInvalid;
+                _ = self.consumeNewline();
+                self.skipMultilineContinuationWhitespace();
+                return;
+            },
+            else => return CliError.ConfigInvalid,
+        }
+        self.pos += 1;
+    }
+
+    fn appendUnicodeEscape(self: *ConfigParser, out_buf: *std.ArrayList(u8), digits: usize) !void {
+        if (self.pos + 1 + digits > self.bytes.len) return CliError.ConfigInvalid;
+        var codepoint: u32 = 0;
+        for (self.bytes[self.pos + 1 .. self.pos + 1 + digits]) |c| {
+            const digit = std.fmt.charToDigit(c, 16) catch return CliError.ConfigInvalid;
+            codepoint = codepoint * 16 + digit;
+        }
+
+        if (codepoint > std.math.maxInt(u21)) return CliError.ConfigInvalid;
+        var encoded: [4]u8 = undefined;
+        const len = std.unicode.utf8Encode(@as(u21, @intCast(codepoint)), &encoded) catch return CliError.ConfigInvalid;
+        try out_buf.appendSlice(self.allocator, encoded[0..len]);
+        self.pos += 1 + digits;
+    }
+
+    fn parseLiteralString(self: *ConfigParser, multiline: bool) ![]u8 {
+        self.pos += if (multiline) 3 else 1;
+        if (multiline) _ = self.consumeNewline();
+        const start = self.pos;
+
+        while (self.pos < self.bytes.len) {
+            if (multiline) {
+                if (self.startsWith("'''")) {
+                    const value = self.bytes[start..self.pos];
+                    self.pos += 3;
+                    return self.allocator.dupe(u8, value);
+                }
+            } else if (self.bytes[self.pos] == '\'') {
+                const value = self.bytes[start..self.pos];
+                self.pos += 1;
+                return self.allocator.dupe(u8, value);
+            } else if (self.bytes[self.pos] == '\r' or self.bytes[self.pos] == '\n') {
+                return CliError.ConfigInvalid;
+            }
+            self.pos += 1;
+        }
+
+        return CliError.ConfigInvalid;
+    }
+
+    fn startsWith(self: *const ConfigParser, needle: []const u8) bool {
+        return self.pos + needle.len <= self.bytes.len and std.mem.eql(u8, self.bytes[self.pos .. self.pos + needle.len], needle);
+    }
+
+    fn skipTrivia(self: *ConfigParser) void {
+        while (self.pos < self.bytes.len) {
+            self.skipHorizontalWhitespace();
+            if (self.pos >= self.bytes.len) return;
+            if (self.bytes[self.pos] == '#') {
+                self.skipRestOfLine();
+            } else if (!self.consumeNewline()) {
+                return;
+            }
+        }
+    }
+
+    fn skipHorizontalWhitespace(self: *ConfigParser) void {
+        while (self.pos < self.bytes.len and (self.bytes[self.pos] == ' ' or self.bytes[self.pos] == '\t')) {
+            self.pos += 1;
+        }
+    }
+
+    fn skipRestOfLine(self: *ConfigParser) void {
+        while (self.pos < self.bytes.len and self.bytes[self.pos] != '\r' and self.bytes[self.pos] != '\n') {
+            self.pos += 1;
+        }
+        _ = self.consumeNewline();
+    }
+
+    fn consumeNewline(self: *ConfigParser) bool {
+        if (self.pos >= self.bytes.len) return false;
+        if (self.bytes[self.pos] == '\n') {
+            self.pos += 1;
+            return true;
+        }
+        if (self.bytes[self.pos] == '\r') {
+            self.pos += 1;
+            if (self.pos < self.bytes.len and self.bytes[self.pos] == '\n') self.pos += 1;
+            return true;
+        }
+        return false;
+    }
+
+    fn skipMultilineContinuationWhitespace(self: *ConfigParser) void {
+        while (self.pos < self.bytes.len) {
+            if (self.bytes[self.pos] == ' ' or self.bytes[self.pos] == '\t') {
+                self.pos += 1;
+            } else if (!self.consumeNewline()) {
+                return;
+            }
+        }
+    }
+};
+
+fn isTomlBareKeyChar(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or
+        (c >= 'A' and c <= 'Z') or
+        (c >= '0' and c <= '9') or
+        c == '_' or c == '-' or c == '.';
 }
 
 pub fn writeConfig(path: []const u8, cfg: Config) !void {
@@ -340,6 +589,11 @@ pub fn writeGenesisRef(allocator: Allocator, manifest_json: []const u8, force: b
 }
 
 pub fn validateGenesisManifest(allocator: Allocator, commit: []const u8) !void {
+    var manifest = try loadGenesisManifest(allocator, commit);
+    defer manifest.deinit();
+}
+
+pub fn loadGenesisManifest(allocator: Allocator, commit: []const u8) !GenesisManifest {
     const spec = try std.fmt.allocPrint(allocator, "{s}:.gitomi/genesis.json", .{commit});
     defer allocator.free(spec);
     const raw = git.gitChecked(allocator, &.{ "show", spec }) catch |err| {
@@ -367,15 +621,49 @@ pub fn validateGenesisManifest(allocator: Allocator, commit: []const u8) !void {
     const repo_id = jsonString(root.get("repo_id")) orelse return invalidGenesis(commit, "repo_id must be a string");
     if (!util.looksLikeUuid(repo_id)) return invalidGenesis(commit, "repo_id must be a UUID");
     const owner = jsonObject(root.get("owner")) orelse return invalidGenesis(commit, "owner must be an object");
-    _ = jsonString(owner.get("principal")) orelse return invalidGenesis(commit, "owner.principal must be a string");
+    const owner_principal = jsonString(owner.get("principal")) orelse return invalidGenesis(commit, "owner.principal must be a string");
     const role = jsonString(owner.get("role")) orelse return invalidGenesis(commit, "owner.role must be a string");
     if (!std.mem.eql(u8, role, "owner")) return invalidGenesis(commit, "owner.role must be owner");
     const device = jsonObject(root.get("device")) orelse return invalidGenesis(commit, "device must be an object");
-    _ = jsonString(device.get("principal")) orelse return invalidGenesis(commit, "device.principal must be a string");
-    _ = jsonString(device.get("id")) orelse return invalidGenesis(commit, "device.id must be a string");
+    const device_principal = jsonString(device.get("principal")) orelse return invalidGenesis(commit, "device.principal must be a string");
+    const device_id = jsonString(device.get("id")) orelse return invalidGenesis(commit, "device.id must be a string");
     const signing_key = jsonObject(device.get("signing_key")) orelse return invalidGenesis(commit, "device.signing_key must be an object");
-    _ = jsonString(signing_key.get("public_key")) orelse return invalidGenesis(commit, "signing_key.public_key must be a string");
-    _ = jsonString(signing_key.get("fingerprint")) orelse return invalidGenesis(commit, "signing_key.fingerprint must be a string");
+    const public_key = jsonString(signing_key.get("public_key")) orelse return invalidGenesis(commit, "signing_key.public_key must be a string");
+    const fingerprint = jsonString(signing_key.get("fingerprint")) orelse return invalidGenesis(commit, "signing_key.fingerprint must be a string");
+
+    var repo_id_owned: ?[]u8 = try allocator.dupe(u8, repo_id);
+    errdefer if (repo_id_owned) |value| allocator.free(value);
+    var owner_principal_owned: ?[]u8 = try allocator.dupe(u8, owner_principal);
+    errdefer if (owner_principal_owned) |value| allocator.free(value);
+    var owner_role_owned: ?[]u8 = try allocator.dupe(u8, role);
+    errdefer if (owner_role_owned) |value| allocator.free(value);
+    var device_principal_owned: ?[]u8 = try allocator.dupe(u8, device_principal);
+    errdefer if (device_principal_owned) |value| allocator.free(value);
+    var device_id_owned: ?[]u8 = try allocator.dupe(u8, device_id);
+    errdefer if (device_id_owned) |value| allocator.free(value);
+    var public_key_owned: ?[]u8 = try allocator.dupe(u8, public_key);
+    errdefer if (public_key_owned) |value| allocator.free(value);
+    var fingerprint_owned: ?[]u8 = try allocator.dupe(u8, fingerprint);
+    errdefer if (fingerprint_owned) |value| allocator.free(value);
+
+    const manifest = GenesisManifest{
+        .allocator = allocator,
+        .repo_id = repo_id_owned.?,
+        .owner_principal = owner_principal_owned.?,
+        .owner_role = owner_role_owned.?,
+        .device_principal = device_principal_owned.?,
+        .device_id = device_id_owned.?,
+        .public_key = public_key_owned.?,
+        .fingerprint = fingerprint_owned.?,
+    };
+    repo_id_owned = null;
+    owner_principal_owned = null;
+    owner_role_owned = null;
+    device_principal_owned = null;
+    device_id_owned = null;
+    public_key_owned = null;
+    fingerprint_owned = null;
+    return manifest;
 }
 
 fn invalidGenesis(commit: []const u8, message: []const u8) CliError {
@@ -446,4 +734,39 @@ test "config parser accepts minimal config" {
     try std.testing.expectEqualStrings("alice", cfg.principal);
     try std.testing.expectEqualStrings("laptop", cfg.device);
     try std.testing.expectEqual(@as(u64, 42), cfg.seq);
+}
+
+test "config parser accepts inline comments and escaped strings" {
+    var cfg = try parseConfig(std.testing.allocator,
+        \\# local edits should not break config loading
+        \\repo_id = "018f0000-0000-7000-8000-000000000001" # generated id
+        \\principal = "alice\nops"
+        \\device = "lap\u0074op" # escaped t
+        \\seq = 43 # recovered after writes
+        \\
+    );
+    defer cfg.deinit();
+    try std.testing.expectEqualStrings("018f0000-0000-7000-8000-000000000001", cfg.repo_id);
+    try std.testing.expectEqualStrings("alice\nops", cfg.principal);
+    try std.testing.expectEqualStrings("laptop", cfg.device);
+    try std.testing.expectEqual(@as(u64, 43), cfg.seq);
+}
+
+test "config parser accepts multiline strings" {
+    var cfg = try parseConfig(std.testing.allocator,
+        \\repo_id = "018f0000-0000-7000-8000-000000000001"
+        \\principal = """
+        \\alice
+        \\ops
+        \\"""
+        \\device = '''
+        \\laptop
+        \\'''
+        \\seq = 0
+        \\
+    );
+    defer cfg.deinit();
+    try std.testing.expectEqualStrings("alice\nops\n", cfg.principal);
+    try std.testing.expectEqualStrings("laptop\n", cfg.device);
+    try std.testing.expectEqual(@as(u64, 0), cfg.seq);
 }

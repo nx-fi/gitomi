@@ -15,7 +15,6 @@ const listRefs = git.listRefs;
 const freeStringList = git.freeStringList;
 const emptyTreeOid = git.emptyTreeOid;
 const resolveOptionalRef = git.resolveOptionalRef;
-const revListRange = git.revListRange;
 const isAncestor = git.isAncestor;
 const runCommand = git.runCommand;
 const max_git_output = git.max_git_output;
@@ -43,46 +42,60 @@ pub fn syncPull(allocator: Allocator, remote: []const u8) !void {
 }
 
 pub fn syncPush(allocator: Allocator, remote: []const u8) !void {
-    const refs = try listRefs(allocator, "refs/gitomi/inbox");
-    defer freeStringList(allocator, refs);
+    const actor_ref = try configuredActorInboxRef(allocator);
+    defer if (actor_ref) |ref| allocator.free(ref);
+
+    const actor_oid = if (actor_ref) |ref| try resolveOptionalRef(allocator, ref) else null;
+    defer if (actor_oid) |oid| allocator.free(oid);
 
     const genesis_oid = try resolveOptionalRef(allocator, repo_mod.genesis_ref);
     defer if (genesis_oid) |oid| allocator.free(oid);
 
-    if (refs.len == 0 and genesis_oid == null) {
-        try out("no local Gitomi inbox refs to push\n", .{});
+    if (actor_oid == null and genesis_oid == null) {
+        try out("no local Gitomi refs to push\n", .{});
         return;
-    }
-
-    var push_args: std.ArrayList([]const u8) = .empty;
-    defer push_args.deinit(allocator);
-    var refspecs: std.ArrayList([]u8) = .empty;
-    defer {
-        for (refspecs.items) |refspec| allocator.free(refspec);
-        refspecs.deinit(allocator);
     }
 
     if (genesis_oid != null) {
         try pushGenesisRef(allocator, remote);
     }
 
-    if (refs.len == 0) {
-        try out("no local Gitomi inbox refs to push\n", .{});
+    const ref = actor_ref orelse {
+        try out("no local Gitomi actor configured; no inbox ref pushed\n", .{});
+        return;
+    };
+
+    if (actor_oid == null) {
+        try out("no local actor inbox ref to push\n", .{});
         return;
     }
 
-    try push_args.append(allocator, "push");
-    try push_args.append(allocator, remote);
-    for (refs) |ref| {
-        const refspec = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ ref, ref });
-        try refspecs.append(allocator, refspec);
-        try push_args.append(allocator, refspec);
-    }
+    const refspec = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ ref, ref });
+    defer allocator.free(refspec);
+    const push_args = [_][]const u8{ "push", remote, refspec };
 
-    try out("pushing {d} Gitomi inbox ref{s} to {s}\n", .{ refs.len, if (refs.len == 1) "" else "s", remote });
-    const pushed = try gitChecked(allocator, push_args.items);
+    try out("pushing local actor Gitomi inbox ref to {s}\n", .{remote});
+    const pushed = try gitChecked(allocator, &push_args);
     defer allocator.free(pushed);
     if (pushed.len != 0) try out("{s}", .{pushed});
+}
+
+fn configuredActorInboxRef(allocator: Allocator) !?[]u8 {
+    var repo = try repo_mod.discoverRepo(allocator);
+    defer repo.deinit();
+
+    var cfg = repo_mod.loadConfig(allocator, repo.config_path) catch |err| switch (err) {
+        CliError.ConfigNotFound => return null,
+        CliError.ConfigInvalid => {
+            try eprint("gt sync: invalid Gitomi config; run `gt init` or fix .git/gitomi/config.toml\n", .{});
+            return err;
+        },
+        else => return err,
+    };
+    defer cfg.deinit();
+
+    try repo_mod.validateConfigRepoId(allocator, cfg);
+    return try repo_mod.inboxRef(allocator, cfg);
 }
 
 fn pushGenesisRef(allocator: Allocator, remote: []const u8) !void {
@@ -145,12 +158,40 @@ pub fn admitStagedInboxRefs(allocator: Allocator, staging_prefix: []const u8) !v
         return CliError.UserError;
     }
 
+    const local_refs = try listRefs(allocator, "refs/gitomi/inbox");
+    defer freeStringList(allocator, local_refs);
+    if (local_refs.len > git.max_default_inbox_refs) {
+        try eprint("gt sync: refusing to admit inbox refs; local repository already has {d}, v1 default limit is {d}\n", .{ local_refs.len, git.max_default_inbox_refs });
+        return CliError.UserError;
+    }
+
+    const new_ref_count = try countNewStagedInboxRefs(allocator, staging_prefix, refs);
+    if (local_refs.len + new_ref_count > git.max_default_inbox_refs) {
+        try eprint("gt sync: refusing to admit {d} new inbox refs; local repository would exceed v1 default limit {d}\n", .{ new_ref_count, git.max_default_inbox_refs });
+        return CliError.UserError;
+    }
+
     const empty_tree = try emptyTreeOid(allocator);
     defer allocator.free(empty_tree);
 
     for (refs) |staged_ref| {
         try admitStagedInboxRef(allocator, staging_prefix, staged_ref, empty_tree);
     }
+}
+
+fn countNewStagedInboxRefs(allocator: Allocator, staging_prefix: []const u8, refs: []const []const u8) !usize {
+    var count: usize = 0;
+    for (refs) |staged_ref| {
+        const local_ref = try localRefFromStaged(allocator, staging_prefix, staged_ref);
+        defer allocator.free(local_ref);
+        const local_oid = try resolveOptionalRef(allocator, local_ref);
+        if (local_oid) |oid| {
+            allocator.free(oid);
+        } else {
+            count += 1;
+        }
+    }
+    return count;
 }
 
 pub fn admitStagedInboxRef(
@@ -176,7 +217,7 @@ pub fn admitStagedInboxRef(
 
         if (try isAncestor(allocator, old_oid, staged_oid)) {
             const admitted = validateInboxRange(allocator, staged_ref, old_oid, empty_tree) catch |err| {
-                if (err == CliError.UserError) {
+                if (errors.isUserError(err)) {
                     try quarantineStagedRef(allocator, staging_prefix, staged_ref, staged_oid);
                     return;
                 }
@@ -199,7 +240,7 @@ pub fn admitStagedInboxRef(
     }
 
     const admitted = validateInboxRange(allocator, staged_ref, null, empty_tree) catch |err| {
-        if (err == CliError.UserError) {
+        if (errors.isUserError(err)) {
             try quarantineStagedRef(allocator, staging_prefix, staged_ref, staged_oid);
             return;
         }
@@ -248,36 +289,76 @@ pub fn validateInboxRange(
     local_base: ?[]const u8,
     empty_tree: []const u8,
 ) !usize {
-    const commits = if (local_base) |base|
-        try revListRange(allocator, base, ref)
-    else
-        try gitChecked(allocator, &.{ "rev-list", "--first-parent", "--reverse", ref });
-    defer allocator.free(commits);
+    const log = try inboxCommitLog(allocator, ref, local_base);
+    defer allocator.free(log);
 
     var count: usize = 0;
     var expected_first_parent = local_base;
     var last_seq = try seqForCommit(allocator, local_base);
-    var it = std.mem.tokenizeScalar(u8, commits, '\n');
-    while (it.next()) |commit_raw| {
-        const commit = std.mem.trim(u8, commit_raw, " \t\r\n");
-        if (commit.len == 0) continue;
+    var records = std.mem.splitScalar(u8, log, 0x1e);
+    while (records.next()) |record_raw| {
+        const record = parseInboxCommitRecord(record_raw) orelse {
+            if (std.mem.trim(u8, record_raw, " \t\r\n").len == 0) continue;
+            try eprint("gt sync: git log returned malformed inbox commit metadata\n", .{});
+            return CliError.GitFailed;
+        };
         if (count >= git.max_default_admit_commits) {
             try eprint("gt sync: refusing to admit more than {d} new inbox commits in one pull\n", .{git.max_default_admit_commits});
             return CliError.UserError;
         }
-        var envelope = try validateInboxCommit(allocator, commit, expected_first_parent, empty_tree);
+        var envelope = try validateInboxRecord(allocator, record, expected_first_parent, empty_tree);
         defer envelope.deinit();
         if (last_seq) |previous_seq| {
             if (envelope.seq <= previous_seq) {
-                try eprint("gt sync: rejecting {s}: seq {d} is not strictly greater than previous sequence {d}\n", .{ commit, envelope.seq, previous_seq });
+                try eprint("gt sync: rejecting {s}: seq {d} is not strictly greater than previous sequence {d}\n", .{ record.commit, envelope.seq, previous_seq });
                 return CliError.UserError;
             }
         }
         last_seq = envelope.seq;
-        expected_first_parent = commit;
+        expected_first_parent = record.commit;
         count += 1;
     }
     return count;
+}
+
+const inbox_commit_log_format = "--format=%H%x00%T%x00%P%x00%s%x00%b%x1e";
+
+const InboxCommitRecord = struct {
+    commit: []const u8,
+    tree: []const u8,
+    parents: []const u8,
+    subject: []const u8,
+    body: []const u8,
+};
+
+fn inboxCommitLog(allocator: Allocator, ref: []const u8, local_base: ?[]const u8) ![]u8 {
+    if (local_base) |base| {
+        const range = try std.fmt.allocPrint(allocator, "{s}..{s}", .{ base, ref });
+        defer allocator.free(range);
+        return gitChecked(allocator, &.{ "log", "--first-parent", "--reverse", inbox_commit_log_format, range });
+    }
+    return gitChecked(allocator, &.{ "log", "--first-parent", "--reverse", inbox_commit_log_format, ref });
+}
+
+fn parseInboxCommitRecord(record_raw: []const u8) ?InboxCommitRecord {
+    const record = std.mem.trim(u8, record_raw, "\r\n");
+    if (record.len == 0) return null;
+
+    const first = std.mem.indexOfScalar(u8, record, 0) orelse return null;
+    const second_rel = std.mem.indexOfScalar(u8, record[first + 1 ..], 0) orelse return null;
+    const second = first + 1 + second_rel;
+    const third_rel = std.mem.indexOfScalar(u8, record[second + 1 ..], 0) orelse return null;
+    const third = second + 1 + third_rel;
+    const fourth_rel = std.mem.indexOfScalar(u8, record[third + 1 ..], 0) orelse return null;
+    const fourth = third + 1 + fourth_rel;
+
+    return .{
+        .commit = std.mem.trim(u8, record[0..first], " \t\r\n"),
+        .tree = std.mem.trim(u8, record[first + 1 .. second], " \t\r\n"),
+        .parents = std.mem.trim(u8, record[second + 1 .. third], " \t\r\n"),
+        .subject = std.mem.trim(u8, record[third + 1 .. fourth], " \t\r\n"),
+        .body = std.mem.trim(u8, record[fourth + 1 ..], " \t\r\n"),
+    };
 }
 
 pub fn validateInboxCommit(
@@ -286,35 +367,49 @@ pub fn validateInboxCommit(
     expected_first_parent: ?[]const u8,
     empty_tree: []const u8,
 ) !event_mod.ValidatedEnvelope {
-    const tree_raw = try gitChecked(allocator, &.{ "show", "-s", "--format=%T", commit });
-    defer allocator.free(tree_raw);
-    const tree = std.mem.trim(u8, tree_raw, " \t\r\n");
-    if (!std.mem.eql(u8, tree, empty_tree)) {
-        try eprint("gt sync: rejecting {s}: inbox event does not use the empty tree\n", .{commit});
+    const log = try gitChecked(allocator, &.{ "log", "-1", inbox_commit_log_format, commit });
+    defer allocator.free(log);
+
+    var records = std.mem.splitScalar(u8, log, 0x1e);
+    while (records.next()) |record_raw| {
+        const record = parseInboxCommitRecord(record_raw) orelse {
+            if (std.mem.trim(u8, record_raw, " \t\r\n").len == 0) continue;
+            try eprint("gt sync: git log returned malformed inbox commit metadata\n", .{});
+            return CliError.GitFailed;
+        };
+        return try validateInboxRecord(allocator, record, expected_first_parent, empty_tree);
+    }
+
+    try eprint("gt sync: rejecting {s}: commit metadata not found\n", .{commit});
+    return CliError.UserError;
+}
+
+fn validateInboxRecord(
+    allocator: Allocator,
+    record: InboxCommitRecord,
+    expected_first_parent: ?[]const u8,
+    empty_tree: []const u8,
+) !event_mod.ValidatedEnvelope {
+    if (!std.mem.eql(u8, record.tree, empty_tree)) {
+        try eprint("gt sync: rejecting {s}: inbox event does not use the empty tree\n", .{record.commit});
         return CliError.UserError;
     }
 
-    try validateFirstParent(allocator, commit, expected_first_parent);
-    try verifyCommitSignature(allocator, commit);
+    try validateFirstParentList(record.commit, record.parents, expected_first_parent);
+    try verifyCommitSignature(allocator, record.commit);
 
-    const subject_raw = try gitChecked(allocator, &.{ "show", "-s", "--format=%s", commit });
-    defer allocator.free(subject_raw);
-    const subject = std.mem.trim(u8, subject_raw, " \t\r\n");
-    if (subject.len > git.max_event_subject_bytes) {
-        try eprint("gt sync: rejecting {s}: subject exceeds v1 subject size limit\n", .{commit});
+    if (record.subject.len > git.max_event_subject_bytes) {
+        try eprint("gt sync: rejecting {s}: subject exceeds v1 subject size limit\n", .{record.commit});
         return CliError.UserError;
     }
 
-    const body_raw = try gitChecked(allocator, &.{ "show", "-s", "--format=%b", commit });
-    defer allocator.free(body_raw);
-    const body = std.mem.trim(u8, body_raw, " \t\r\n");
-    if (body.len > git.max_event_body_bytes) {
-        try eprint("gt sync: rejecting {s}: event body exceeds v1 body size limit\n", .{commit});
+    if (record.body.len > git.max_event_body_bytes) {
+        try eprint("gt sync: rejecting {s}: event body exceeds v1 body size limit\n", .{record.commit});
         return CliError.UserError;
     }
-    try validateEventEnvelope(allocator, commit, body);
-    try validateEnvelopeParentHashes(allocator, commit, body);
-    return try parseValidatedEnvelope(allocator, body);
+    try validateEventEnvelope(allocator, record.commit, record.body);
+    try validateEnvelopeParentHashes(allocator, record.commit, record.parents, record.body);
+    return try parseValidatedEnvelope(allocator, record.body);
 }
 
 fn seqForCommit(allocator: Allocator, commit_opt: ?[]const u8) !?i64 {
@@ -331,6 +426,10 @@ pub fn validateFirstParent(allocator: Allocator, commit: []const u8, expected_fi
     const parents_raw = try gitChecked(allocator, &.{ "show", "-s", "--format=%P", commit });
     defer allocator.free(parents_raw);
     const parents = std.mem.trim(u8, parents_raw, " \t\r\n");
+    return validateFirstParentList(commit, parents, expected_first_parent);
+}
+
+fn validateFirstParentList(commit: []const u8, parents: []const u8, expected_first_parent: ?[]const u8) !void {
     var it = std.mem.tokenizeScalar(u8, parents, ' ');
     const first_parent = it.next();
 
@@ -360,11 +459,7 @@ pub fn verifyCommitSignature(allocator: Allocator, commit: []const u8) !void {
     return CliError.UserError;
 }
 
-fn validateEnvelopeParentHashes(allocator: Allocator, commit: []const u8, body: []const u8) !void {
-    const parents_raw = try gitChecked(allocator, &.{ "show", "-s", "--format=%P", commit });
-    defer allocator.free(parents_raw);
-    const parents = std.mem.trim(u8, parents_raw, " \t\r\n");
-
+fn validateEnvelopeParentHashes(allocator: Allocator, commit: []const u8, parents: []const u8, body: []const u8) !void {
     var parent_list: std.ArrayList([]const u8) = .empty;
     defer parent_list.deinit(allocator);
     var parent_it = std.mem.tokenizeScalar(u8, parents, ' ');

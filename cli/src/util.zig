@@ -20,7 +20,7 @@ pub fn splitCommaFields(allocator: Allocator, raw: []const u8) !std.ArrayList([]
 pub fn checkedRefSegment(allocator: Allocator, raw: []const u8, label: []const u8) ![]u8 {
     if (!isRefSafeSegment(raw)) {
         try eprint("gt init: {s} must be a ref-safe segment using letters, digits, '.', '_' or '-'\n", .{label});
-        return CliError.UserError;
+        return CliError.InvalidArgument;
     }
     return allocator.dupe(u8, raw);
 }
@@ -155,7 +155,7 @@ pub fn sha256Hex(allocator: Allocator, bytes: []const u8) ![]u8 {
 pub fn requireValue(args: []const []const u8, index: *usize, name: []const u8) ![]const u8 {
     if (index.* + 1 >= args.len) {
         try eprint("{s} requires a value\n", .{name});
-        return CliError.UserError;
+        return CliError.MissingArgument;
     }
     index.* += 1;
     return args[index.*];

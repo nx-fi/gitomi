@@ -8,6 +8,7 @@ const index = @import("index.zig");
 const io = @import("io.zig");
 const issue = @import("issue.zig");
 const pull_mod = @import("pull.zig");
+const rbac = @import("rbac.zig");
 const repo_mod = @import("repo.zig");
 const runs = @import("runs.zig");
 const sync = @import("sync.zig");
@@ -19,7 +20,7 @@ const CliError = errors.CliError;
 
 pub fn main() void {
     realMain() catch |err| {
-        if (err != CliError.UserError and err != CliError.GitFailed and err != CliError.SqliteFailed) {
+        if (!errors.isReported(err)) {
             io.eprint("gt: {s}\n", .{@errorName(err)}) catch {};
         }
         std.process.exit(1);
@@ -62,6 +63,10 @@ fn realMain() !void {
         try cmdPull(allocator, args[2..]);
     } else if (std.mem.eql(u8, cmd, "comment")) {
         try cmdComment(allocator, args[2..]);
+    } else if (std.mem.eql(u8, cmd, "acl")) {
+        try cmdAcl(allocator, args[2..]);
+    } else if (std.mem.eql(u8, cmd, "identity")) {
+        try cmdIdentity(allocator, args[2..]);
     } else if (std.mem.eql(u8, cmd, "runs")) {
         try cmdRuns(allocator, args[2..]);
     } else if (std.mem.eql(u8, cmd, "sync")) {
@@ -71,7 +76,7 @@ fn realMain() !void {
     } else {
         try io.eprint("gt: unknown command '{s}'\n\n", .{cmd});
         try printUsage();
-        return CliError.UserError;
+        return CliError.InvalidArgument;
     }
 }
 
@@ -108,6 +113,12 @@ fn printUsage() !void {
         \\  gt comment add issue|pull OBJECT --body BODY
         \\  gt comment edit COMMENT --body BODY
         \\  gt comment redact COMMENT [--reason REASON]
+        \\  gt acl grant PRINCIPAL ROLE
+        \\  gt acl revoke PRINCIPAL
+        \\  gt acl list [--json]
+        \\  gt identity add-device PRINCIPAL DEVICE [--public-key KEY] [--fingerprint FP] [--scheme ssh]
+        \\  gt identity revoke-device PRINCIPAL DEVICE
+        \\  gt identity list [--json]
         \\  gt runs prune [--dry-run] [--max-age-days N] [--max-count N] [--max-bytes N]
         \\  gt sync [--remote REMOTE] [--pull-only|--push-only]
         \\  gt web [--host 127.0.0.1] [--port 8080]
@@ -288,6 +299,9 @@ fn cmdFsck(allocator: Allocator, args: []const []const u8) !void {
 
     const refs = try git.listRefs(allocator, "refs/gitomi/inbox");
     defer git.freeStringList(allocator, refs);
+    if (refs.len > git.max_default_inbox_refs) {
+        try checker.fail("refs/gitomi/inbox: {d} inbox refs exceeds v1 default limit {d}", .{ refs.len, git.max_default_inbox_refs });
+    }
 
     const empty_tree = try git.emptyTreeOid(allocator);
     defer allocator.free(empty_tree);
@@ -1036,6 +1050,118 @@ fn cmdComment(allocator: Allocator, args: []const []const u8) !void {
     return CliError.UserError;
 }
 
+fn cmdAcl(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len == 0) {
+        try io.eprint("gt acl: expected subcommand 'grant', 'revoke', or 'list'\n", .{});
+        return CliError.UserError;
+    }
+
+    if (std.mem.eql(u8, args[0], "list")) {
+        var json = false;
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--json")) {
+                json = true;
+            } else {
+                try io.eprint("gt acl list: unknown option '{s}'\n", .{args[i]});
+                return CliError.UserError;
+            }
+        }
+        var repo = try repo_mod.discoverRepo(allocator);
+        defer repo.deinit();
+        try index.ensureIndex(allocator, repo);
+        try index.listAclFromIndex(allocator, repo, json);
+        return;
+    }
+
+    if (std.mem.eql(u8, args[0], "grant")) {
+        if (args.len != 3) {
+            try io.eprint("gt acl grant: expected PRINCIPAL ROLE\n", .{});
+            return CliError.UserError;
+        }
+        try rbac.createAclGrantEvent(allocator, args[1], args[2]);
+        return;
+    }
+
+    if (std.mem.eql(u8, args[0], "revoke")) {
+        if (args.len != 2) {
+            try io.eprint("gt acl revoke: expected PRINCIPAL\n", .{});
+            return CliError.UserError;
+        }
+        try rbac.createAclRevokeEvent(allocator, args[1]);
+        return;
+    }
+
+    try io.eprint("gt acl: expected subcommand 'grant', 'revoke', or 'list'\n", .{});
+    return CliError.UserError;
+}
+
+fn cmdIdentity(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len == 0) {
+        try io.eprint("gt identity: expected subcommand 'add-device', 'revoke-device', or 'list'\n", .{});
+        return CliError.UserError;
+    }
+
+    if (std.mem.eql(u8, args[0], "list")) {
+        var json = false;
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--json")) {
+                json = true;
+            } else {
+                try io.eprint("gt identity list: unknown option '{s}'\n", .{args[i]});
+                return CliError.UserError;
+            }
+        }
+        var repo = try repo_mod.discoverRepo(allocator);
+        defer repo.deinit();
+        try index.ensureIndex(allocator, repo);
+        try index.listIdentityFromIndex(allocator, repo, json);
+        return;
+    }
+
+    if (std.mem.eql(u8, args[0], "add-device")) {
+        if (args.len < 3) {
+            try io.eprint("gt identity add-device: expected PRINCIPAL DEVICE\n", .{});
+            return CliError.UserError;
+        }
+        var public_key: ?[]const u8 = null;
+        var fingerprint: ?[]const u8 = null;
+        var scheme: []const u8 = "ssh";
+        var i: usize = 3;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--public-key")) {
+                public_key = try util.requireValue(args, &i, "--public-key");
+            } else if (std.mem.eql(u8, args[i], "--fingerprint")) {
+                fingerprint = try util.requireValue(args, &i, "--fingerprint");
+            } else if (std.mem.eql(u8, args[i], "--scheme")) {
+                scheme = try util.requireValue(args, &i, "--scheme");
+            } else {
+                try io.eprint("gt identity add-device: unknown option '{s}'\n", .{args[i]});
+                return CliError.UserError;
+            }
+        }
+        if (std.mem.trim(u8, scheme, " \t\r\n").len == 0) {
+            try io.eprint("gt identity add-device: --scheme must not be empty\n", .{});
+            return CliError.UserError;
+        }
+        try rbac.createIdentityDeviceAddedEvent(allocator, args[1], args[2], public_key, fingerprint, scheme);
+        return;
+    }
+
+    if (std.mem.eql(u8, args[0], "revoke-device")) {
+        if (args.len != 3) {
+            try io.eprint("gt identity revoke-device: expected PRINCIPAL DEVICE\n", .{});
+            return CliError.UserError;
+        }
+        try rbac.createIdentityDeviceRevokedEvent(allocator, args[1], args[2]);
+        return;
+    }
+
+    try io.eprint("gt identity: expected subcommand 'add-device', 'revoke-device', or 'list'\n", .{});
+    return CliError.UserError;
+}
+
 fn cmdRuns(allocator: Allocator, args: []const []const u8) !void {
     if (args.len == 0 or !std.mem.eql(u8, args[0], "prune")) {
         try io.eprint("gt runs: expected subcommand 'prune'\n", .{});
@@ -1115,19 +1241,19 @@ fn cmdWeb(allocator: Allocator, args: []const []const u8) !void {
             const raw = try util.requireValue(args, &i, "--port");
             options.port = std.fmt.parseUnsigned(u16, raw, 10) catch {
                 try io.eprint("gt web: --port must be an integer from 1 to 65535\n", .{});
-                return CliError.UserError;
+                return CliError.InvalidArgument;
             };
         } else if (std.mem.eql(u8, arg, "--once")) {
             options.once = true;
         } else {
             try io.eprint("gt web: unknown option '{s}'\n", .{arg});
-            return CliError.UserError;
+            return CliError.InvalidArgument;
         }
     }
 
     if (!web.isLoopbackHost(options.host)) {
         try io.eprint("gt web: refusing to bind non-loopback host '{s}' for local-only mode\n", .{options.host});
-        return CliError.UserError;
+        return CliError.Unauthorized;
     }
 
     var repo = try repo_mod.discoverRepo(allocator);

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">Gitomi logo</title>
+  <desc id="desc">An eye-shaped mark with a Git branch motif in the pupil.</desc>
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="#1f883d"/>
+  <path d="M24 64c10.4-17.5 24.1-26 40-26s29.6 8.5 40 26c-10.4 17.5-24.1 26-40 26S34.4 81.5 24 64Z" fill="#ffffff"/>
+  <circle cx="64" cy="64" r="24" fill="#0d1117"/>
+  <circle cx="64" cy="64" r="12" fill="#2da44e"/>
+  <path d="M64 52v24m0-12h18" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="64" cy="52" r="5.5" fill="#ffffff"/>
+  <circle cx="64" cy="76" r="5.5" fill="#ffffff"/>
+  <circle cx="82" cy="64" r="5.5" fill="#ffffff"/>
+  <circle cx="64" cy="64" r="3.5" fill="#0d1117"/>
+</svg>

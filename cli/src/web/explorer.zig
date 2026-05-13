@@ -213,8 +213,12 @@ fn appendRepoHeader(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, r
 }
 
 fn appendCodeLayoutStart(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8, active_path: []const u8) !void {
-    try buf.appendSlice(allocator, "<div class=\"code-layout\">");
-    try appendTreeSidebar(buf, allocator, repo, ref, active_path);
+    if (active_path.len == 0) {
+        try buf.appendSlice(allocator, "<div class=\"code-layout no-sidebar\">");
+    } else {
+        try buf.appendSlice(allocator, "<div class=\"code-layout\">");
+        try appendTreeSidebar(buf, allocator, repo, ref, active_path);
+    }
     try buf.appendSlice(allocator, "<div class=\"code-main\">");
 }
 
@@ -229,34 +233,66 @@ fn appendTreeSidebar(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, 
     try buf.appendSlice(allocator,
         \\<aside class="panel tree-sidebar">
         \\  <div class="tree-sidebar-head">Files</div>
-        \\  <nav class="tree-nav">
-        \\    <a class="tree-link
+        \\  <nav class="tree-nav" data-tree-nav>
+        \\    <div class="tree-node expanded" data-tree-path="" data-tree-depth="0" data-tree-kind="tree">
+        \\      <button class="tree-toggle" type="button" aria-label="Collapse repository" aria-expanded="true" data-tree-toggle></button>
+        \\      <a class="tree-link
     );
     if (active_path.len == 0) try buf.appendSlice(allocator, " active");
-    try buf.appendSlice(allocator, "\" style=\"--depth: 0\" href=\"");
+    try buf.appendSlice(allocator, "\" href=\"");
     try appendCodeHref(buf, allocator, ref, "");
-    try buf.appendSlice(allocator, "\"><span class=\"file-icon dir\" aria-hidden=\"true\"></span><span class=\"tree-name\">");
+    try buf.appendSlice(allocator, "\">");
+    try appendFileIcon(buf, allocator, "", "tree");
+    try buf.appendSlice(allocator, "<span class=\"tree-name\">");
     try appendHtml(buf, allocator, std.fs.path.basename(repo.root));
-    try buf.appendSlice(allocator, "</span></a>");
+    try buf.appendSlice(allocator, "</span></a></div>");
 
     if (entries_opt) |entries| {
         for (entries) |entry| {
             const depth = pathDepth(entry.path) + 1;
             const active = std.mem.eql(u8, active_path, entry.path);
             const ancestor = std.mem.eql(u8, entry.kind, "tree") and isAncestorPath(entry.path, active_path);
+            const is_tree = std.mem.eql(u8, entry.kind, "tree");
+            const expanded = is_tree and isAncestorOrSelfPath(entry.path, active_path);
+            const visible = treeEntryInitiallyVisible(entry.path, active_path);
+
+            try buf.appendSlice(allocator, "<div class=\"tree-node");
+            if (active) try buf.appendSlice(allocator, " active");
+            if (ancestor) try buf.appendSlice(allocator, " ancestor");
+            if (expanded) try buf.appendSlice(allocator, " expanded");
+            if (!visible) try buf.appendSlice(allocator, " collapsed-child");
+            try buf.appendSlice(allocator, "\" data-tree-path=\"");
+            try appendHtml(buf, allocator, entry.path);
+            try buf.appendSlice(allocator, "\" data-tree-parent=\"");
+            try appendHtml(buf, allocator, parentPath(entry.path));
+            try buf.appendSlice(allocator, "\" data-tree-depth=\"");
+            try appendFmt(buf, allocator, "{d}", .{depth});
+            try buf.appendSlice(allocator, "\" data-tree-kind=\"");
+            try appendHtml(buf, allocator, entry.kind);
+            try buf.appendSlice(allocator, "\" style=\"--depth: ");
+            try appendFmt(buf, allocator, "{d}", .{depth});
+            try buf.appendSlice(allocator, "\">");
+
+            if (is_tree) {
+                try buf.appendSlice(allocator, "<button class=\"tree-toggle\" type=\"button\" aria-label=\"");
+                try appendHtml(buf, allocator, if (expanded) "Collapse folder" else "Expand folder");
+                try buf.appendSlice(allocator, "\" aria-expanded=\"");
+                try appendHtml(buf, allocator, if (expanded) "true" else "false");
+                try buf.appendSlice(allocator, "\" data-tree-toggle></button>");
+            } else {
+                try buf.appendSlice(allocator, "<span class=\"tree-toggle-spacer\" aria-hidden=\"true\"></span>");
+            }
 
             try buf.appendSlice(allocator, "<a class=\"tree-link");
             if (active) try buf.appendSlice(allocator, " active");
             if (ancestor) try buf.appendSlice(allocator, " ancestor");
-            try buf.appendSlice(allocator, "\" style=\"--depth: ");
-            try appendFmt(buf, allocator, "{d}", .{depth});
             try buf.appendSlice(allocator, "\" href=\"");
             try appendCodeHref(buf, allocator, ref, entry.path);
-            try buf.appendSlice(allocator, "\"><span class=\"file-icon ");
-            try appendHtml(buf, allocator, if (std.mem.eql(u8, entry.kind, "tree")) "dir" else "file");
-            try buf.appendSlice(allocator, "\" aria-hidden=\"true\"></span><span class=\"tree-name\">");
+            try buf.appendSlice(allocator, "\">");
+            try appendFileIcon(buf, allocator, entry.path, entry.kind);
+            try buf.appendSlice(allocator, "<span class=\"tree-name\">");
             try appendHtml(buf, allocator, baseName(entry.path));
-            try buf.appendSlice(allocator, "</span></a>");
+            try buf.appendSlice(allocator, "</span></a></div>");
         }
 
         if (entries.len == max_tree_sidebar_entries) {
@@ -284,7 +320,9 @@ fn appendTreeListing(
     if (path.len != 0) {
         try buf.appendSlice(allocator, "<div class=\"file-row\"><a class=\"file-name\" href=\"");
         try appendCodeHref(buf, allocator, ref, parentPath(path));
-        try buf.appendSlice(allocator, "\"><span class=\"file-icon dir\" aria-hidden=\"true\"></span>..</a><span></span><span></span></div>");
+        try buf.appendSlice(allocator, "\">");
+        try appendFileIcon(buf, allocator, "", "tree");
+        try buf.appendSlice(allocator, "..</a><span></span><span></span></div>");
     }
 
     for (entries) |entry| {
@@ -293,9 +331,8 @@ fn appendTreeListing(
 
         try buf.appendSlice(allocator, "<div class=\"file-row\"><a class=\"file-name\" href=\"");
         try appendCodeHref(buf, allocator, ref, child_path);
-        try buf.appendSlice(allocator, "\"><span class=\"file-icon ");
-        try appendHtml(buf, allocator, if (std.mem.eql(u8, entry.kind, "tree")) "dir" else "file");
-        try buf.appendSlice(allocator, "\" aria-hidden=\"true\"></span>");
+        try buf.appendSlice(allocator, "\">");
+        try appendFileIcon(buf, allocator, child_path, entry.kind);
         try appendHtml(buf, allocator, entry.name);
         try buf.appendSlice(allocator, "</a><span><code>");
         try appendHtml(buf, allocator, entry.mode);
@@ -834,6 +871,41 @@ fn pathDepth(path: []const u8) usize {
 fn isAncestorPath(parent: []const u8, path: []const u8) bool {
     if (parent.len == 0 or path.len <= parent.len) return false;
     return std.mem.startsWith(u8, path, parent) and path[parent.len] == '/';
+}
+
+fn isAncestorOrSelfPath(parent: []const u8, path: []const u8) bool {
+    return std.mem.eql(u8, parent, path) or isAncestorPath(parent, path);
+}
+
+fn treeEntryInitiallyVisible(path: []const u8, active_path: []const u8) bool {
+    const parent = parentPath(path);
+    return parent.len == 0 or isAncestorOrSelfPath(parent, active_path);
+}
+
+fn appendFileIcon(buf: *std.ArrayList(u8), allocator: Allocator, path: []const u8, kind: []const u8) !void {
+    try buf.appendSlice(allocator, "<span class=\"file-icon ");
+    try appendHtml(buf, allocator, fileIconClass(path, kind));
+    try buf.appendSlice(allocator, "\" aria-hidden=\"true\"></span>");
+}
+
+fn fileIconClass(path: []const u8, kind: []const u8) []const u8 {
+    if (std.mem.eql(u8, kind, "tree")) return "dir";
+    const language = languageForPath(path);
+    if (std.mem.eql(u8, language, "zig")) return "file lang-zig";
+    if (std.mem.eql(u8, language, "javascript")) return "file lang-js";
+    if (std.mem.eql(u8, language, "typescript")) return "file lang-ts";
+    if (std.mem.eql(u8, language, "bash")) return "file lang-sh";
+    if (std.mem.eql(u8, language, "json")) return "file lang-json";
+    if (std.mem.eql(u8, language, "toml")) return "file lang-toml";
+    if (std.mem.eql(u8, language, "yaml")) return "file lang-yaml";
+    if (std.mem.eql(u8, language, "css")) return "file lang-css";
+    if (std.mem.eql(u8, language, "html")) return "file lang-html";
+    if (std.mem.eql(u8, language, "xml")) return "file lang-xml";
+    if (std.mem.eql(u8, language, "sql")) return "file lang-sql";
+    if (std.mem.eql(u8, language, "rust")) return "file lang-rs";
+    if (std.mem.eql(u8, language, "python")) return "file lang-py";
+    if (std.mem.eql(u8, language, "markdown")) return "file lang-md";
+    return "file";
 }
 
 fn findReadme(entries: []const TreeEntry) ?[]const u8 {

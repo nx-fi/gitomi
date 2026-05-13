@@ -58,23 +58,24 @@ pub fn appendShellStart(
     try appendHtml(buf, allocator, title);
     try buf.appendSlice(allocator,
         \\ - Gitomi</title>
+        \\  <link rel="icon" href="/logo.svg" type="image/svg+xml">
         \\  <link rel="stylesheet" href="/style.css">
         \\</head>
         \\<body>
         \\<header class="topbar">
-        \\  <a class="brand" href="/"><span class="brand-mark">gt</span><span>
+        \\  <a class="brand" href="/"><img class="brand-logo" src="/logo.svg" alt="" width="32" height="32"><span>
     );
     try appendHtml(buf, allocator, std.fs.path.basename(repo.root));
     try buf.appendSlice(allocator,
         \\</span></a>
         \\  <nav>
     );
-    try appendNavLink(buf, allocator, active, "code", "/", "Code");
-    try appendNavLink(buf, allocator, active, "commits", "/commits", "Commits");
-    try appendNavLink(buf, allocator, active, "issues", "/issues", "Issues");
-    try appendNavLink(buf, allocator, active, "events", "/events", "Events");
-    try appendNavLink(buf, allocator, active, "refs", "/refs", "Refs");
-    try appendNavLink(buf, allocator, active, "overview", "/overview", "Overview");
+    try appendNavLink(buf, allocator, active, "code", "/", "Code", null);
+    try appendNavLink(buf, allocator, active, "commits", "/commits", "Commits", null);
+    try appendNavLink(buf, allocator, active, "issues", "/issues", "Issues", stats.issues);
+    try appendNavLink(buf, allocator, active, "events", "/events", "Events", stats.events);
+    try appendNavLink(buf, allocator, active, "refs", "/refs", "Refs", stats.inbox_refs + stats.staged_refs);
+    try appendNavLink(buf, allocator, active, "overview", "/overview", "Overview", null);
     try buf.appendSlice(allocator,
         \\  </nav>
         \\  <button class="theme-toggle" type="button" data-theme-toggle aria-pressed="false" aria-label="Toggle dark mode" title="Toggle dark mode">
@@ -83,13 +84,7 @@ pub fn appendShellStart(
         \\  </button>
         \\</header>
         \\<main>
-        \\<section class="stats">
     );
-    try appendStat(buf, allocator, "Issues", stats.issues);
-    try appendStat(buf, allocator, "Events", stats.events);
-    try appendStat(buf, allocator, "Inbox refs", stats.inbox_refs);
-    try appendStat(buf, allocator, "Staged refs", stats.staged_refs);
-    try buf.appendSlice(allocator, "</section>");
 
     if (cfg_opt) |cfg| {
         try buf.appendSlice(allocator, "<section class=\"init-banner ready\"><strong>");
@@ -113,6 +108,7 @@ pub fn appendShellEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
     try buf.appendSlice(allocator,
         \\</main>
         \\<script src="/theme.js"></script>
+        \\<script src="/tree.js"></script>
         \\<script src="/highlight.js"></script>
         \\</body>
         \\</html>
@@ -126,6 +122,7 @@ pub fn appendNavLink(
     id: []const u8,
     href: []const u8,
     label: []const u8,
+    count: ?usize,
 ) !void {
     try buf.appendSlice(allocator, "<a");
     if (std.mem.eql(u8, active, id)) try buf.appendSlice(allocator, " class=\"active\"");
@@ -133,15 +130,14 @@ pub fn appendNavLink(
     try appendHtml(buf, allocator, href);
     try buf.appendSlice(allocator, "\">");
     try appendHtml(buf, allocator, label);
+    if (count) |value| {
+        if (value > 0) {
+            try buf.appendSlice(allocator, "<span class=\"nav-badge\">");
+            try appendFmt(buf, allocator, "{d}", .{value});
+            try buf.appendSlice(allocator, "</span>");
+        }
+    }
     try buf.appendSlice(allocator, "</a>");
-}
-
-pub fn appendStat(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, value: usize) !void {
-    try buf.appendSlice(allocator, "<div><strong>");
-    try appendFmt(buf, allocator, "{d}", .{value});
-    try buf.appendSlice(allocator, "</strong><span>");
-    try appendHtml(buf, allocator, label);
-    try buf.appendSlice(allocator, "</span></div>");
 }
 
 pub fn appendEmptyState(buf: *std.ArrayList(u8), allocator: Allocator, title: []const u8, detail: []const u8) !void {
