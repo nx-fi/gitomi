@@ -8,6 +8,7 @@ trap 'rm -rf "$ROOT"' EXIT
 
 REPO_ID="018f0000-0000-7000-8000-000000000001"
 KEY="$ROOT/signing_key"
+BOB_KEY="$ROOT/bob_signing_key"
 ALLOWED_SIGNERS="$ROOT/allowed_signers"
 
 fail() {
@@ -80,7 +81,13 @@ gt() {
 }
 
 ssh-keygen -q -t ed25519 -N "" -C "alice@example.com" -f "$KEY"
-awk '{ print "alice@example.com " $1 " " $2 }' "$KEY.pub" > "$ALLOWED_SIGNERS"
+ssh-keygen -q -t ed25519 -N "" -C "bob@example.com" -f "$BOB_KEY"
+BOB_PUBLIC_KEY="$(awk '{ print $1 " " $2 }' "$BOB_KEY.pub")"
+BOB_FINGERPRINT="$(ssh-keygen -lf "$BOB_KEY.pub" -E sha256 | awk '{ print $2 }')"
+{
+  awk '{ print "alice@example.com " $1 " " $2 }' "$KEY.pub"
+  awk '{ print "bob@example.com " $1 " " $2 }' "$BOB_KEY.pub"
+} > "$ALLOWED_SIGNERS"
 
 echo "integration: init, issue open, events list --json"
 single="$ROOT/single"
@@ -163,7 +170,7 @@ init_repo "$snapshots"
   snapshot_ref="$(git for-each-ref --sort=-committerdate '--format=%(refname)' refs/gitomi/snapshots | head -n 1)"
   manifest="$(git show "$snapshot_ref:manifest.json")"
   assert_contains "$manifest" '"$schema":"urn:gitomi:snapshot:v1"'
-  assert_contains "$manifest" '"index_schema_version":"1"'
+  assert_contains "$manifest" '"index_schema_version":"2"'
   assert_contains "$manifest" '"covered_refs"'
 
   rm -f .git/gitomi/index.sqlite
@@ -561,10 +568,16 @@ init_repo "$frontier_auth"
   anchor_a_commit="$(git commit-tree -S -m "issue.opened frontier anchor A" -m "$anchor_a_body" "$empty_tree")"
   grant_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002002","event_type":"acl.role_granted","object":{"kind":"acl","id":"acl:bob"},"idempotency_key":"018f0000-0000-7000-8000-000000002202","actor":{"principal":"alice","device":"laptop"},"seq":2,"occurred_at":"2026-05-13T18:33:01Z","parent_hashes":{"log":"'"$anchor_a_commit"'","causal":[],"related":[]},"legacy":{},"payload":{"principal":"bob","role":"reporter"}}'
   grant_commit="$(git commit-tree -S -m "acl.role_granted bob reporter frontier" -m "$grant_body" "$empty_tree" -p "$anchor_a_commit")"
-  identity_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002003","event_type":"identity.device_added","object":{"kind":"identity","id":"identity:bob:desktop"},"idempotency_key":"018f0000-0000-7000-8000-000000002203","actor":{"principal":"alice","device":"laptop"},"seq":3,"occurred_at":"2026-05-13T18:33:02Z","parent_hashes":{"log":"'"$grant_commit"'","causal":[],"related":[]},"legacy":{},"payload":{"principal":"bob","device":"desktop","signing_key":{"scheme":"ssh","public_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIbobdesktop","fingerprint":"bob-desktop"}}}'
+  identity_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002003","event_type":"identity.device_added","object":{"kind":"identity","id":"identity:bob:desktop"},"idempotency_key":"018f0000-0000-7000-8000-000000002203","actor":{"principal":"alice","device":"laptop"},"seq":3,"occurred_at":"2026-05-13T18:33:02Z","parent_hashes":{"log":"'"$grant_commit"'","causal":[],"related":[]},"legacy":{},"payload":{"principal":"bob","device":"desktop","signing_key":{"scheme":"ssh","public_key":"'"$BOB_PUBLIC_KEY"'","fingerprint":"'"$BOB_FINGERPRINT"'"}}}'
   identity_commit="$(git commit-tree -S -m "identity.device_added bob/desktop frontier" -m "$identity_body" "$empty_tree" -p "$grant_commit")"
   bob_issue_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002004","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000002102"},"idempotency_key":"018f0000-0000-7000-8000-000000002204","actor":{"principal":"bob","device":"desktop"},"seq":1,"occurred_at":"2026-05-13T18:33:03Z","parent_hashes":{"log":"'"$identity_commit"'","causal":[],"related":[]},"legacy":{},"payload":{"title":"Bob concurrent issue"}}'
+  git config user.name "Bob"
+  git config user.email "bob@example.com"
+  git config user.signingkey "$BOB_KEY"
   bob_issue_commit="$(git commit-tree -S -m "issue.opened bob concurrent frontier" -m "$bob_issue_body" "$empty_tree" -p "$identity_commit")"
+  git config user.name "Alice"
+  git config user.email "alice@example.com"
+  git config user.signingkey "$KEY"
 
   anchor_b_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002005","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000002103"},"idempotency_key":"018f0000-0000-7000-8000-000000002205","actor":{"principal":"alice","device":"laptop"},"seq":4,"occurred_at":"2026-05-13T18:33:04Z","parent_hashes":{"log":"","causal":[],"related":[]},"legacy":{},"payload":{"title":"Frontier anchor B"}}'
   anchor_b_commit="$(git commit-tree -S -m "issue.opened frontier anchor B" -m "$anchor_b_body" "$empty_tree")"
@@ -581,6 +594,28 @@ init_repo "$frontier_auth"
   acl_json="$(gt acl list --json)"
   assert_not_contains "$acl_json" '"principal":"bob"'
   gt fsck >/dev/null
+)
+
+echo "integration: signing key must match actor device"
+signature_binding="$ROOT/signature-binding"
+init_repo "$signature_binding"
+(
+  cd "$signature_binding"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
+  git config user.name "Bob"
+  git config user.email "bob@example.com"
+  git config user.signingkey "$BOB_KEY"
+  issue_id="018f0000-0000-7000-8000-000000002301"
+  bad_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002302","event_type":"issue.opened","object":{"kind":"issue","id":"'"$issue_id"'"},"idempotency_key":"018f0000-0000-7000-8000-000000002303","actor":{"principal":"alice","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:34:00Z","parent_hashes":{"log":"","causal":[],"related":[]},"legacy":{},"payload":{"title":"Wrong signer"}}'
+  bad_commit="$(git commit-tree -S -m "issue.opened #${issue_id:0:7} Wrong signer" -m "$bad_body" "$empty_tree")"
+  git update-ref refs/gitomi/inbox/alice/laptop "$bad_commit"
+  events="$(gt events list --json)"
+  assert_line_count "$events" 1
+  assert_contains "$events" '"domain_status":"rejected"'
+  assert_contains "$events" '"rejection_reason":"signing_key_mismatch"'
+  issues="$(gt issue list --json)"
+  assert_line_count "$issues" 0
 )
 
 echo "integration: unauthorized remote event is audited and not projected"

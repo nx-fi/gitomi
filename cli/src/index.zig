@@ -31,7 +31,7 @@ const appendJsonFieldInteger = json_writer.appendJsonFieldInteger;
 const appendJsonFieldUnsigned = json_writer.appendJsonFieldUnsigned;
 const appendJsonString = json_writer.appendJsonString;
 
-const index_schema_version = "1";
+const index_schema_version = "2";
 pub const index_event_columns = "ref, \"commit\", event_hash, tree, subject, empty_tree, valid_json, event_type, object_kind, object_id, actor_principal, actor_device, seq, occurred_at, domain_status, rejection_reason";
 const max_projected_labels: usize = 256;
 const max_projected_participants: usize = 128;
@@ -648,6 +648,7 @@ fn rebuildIndexFromScratch(
         \\DROP TABLE IF EXISTS pull_reviewers;
         \\DROP TABLE IF EXISTS comments;
         \\DROP TABLE IF EXISTS commit_references;
+        \\DROP TABLE IF EXISTS legacy_aliases;
         \\DROP TABLE IF EXISTS acl_roles;
         \\DROP TABLE IF EXISTS acl_role_events;
         \\DROP TABLE IF EXISTS identity_devices;
@@ -904,6 +905,15 @@ pub fn createIndexSchema(db: *SqliteDb) !void {
         \\  PRIMARY KEY(commit_oid, object_kind, object_id)
         \\);
         \\CREATE INDEX commit_references_object_idx ON commit_references(object_kind, object_id, commit_oid);
+        \\CREATE TABLE legacy_aliases (
+        \\  provider TEXT NOT NULL,
+        \\  object_kind TEXT NOT NULL,
+        \\  object_id TEXT NOT NULL,
+        \\  number INTEGER NOT NULL,
+        \\  PRIMARY KEY(provider, object_kind, number),
+        \\  UNIQUE(provider, object_kind, object_id)
+        \\);
+        \\CREATE INDEX legacy_aliases_object_idx ON legacy_aliases(provider, object_kind, object_id);
         \\CREATE TABLE acl_roles (
         \\  principal TEXT PRIMARY KEY,
         \\  role TEXT NOT NULL,
@@ -1482,11 +1492,56 @@ fn projectEventQuery(allocator: Allocator, db: *SqliteDb, comptime sql_text: []c
         try event_hashes.append(allocator, try stmt.columnTextDup(allocator, 0));
     }
 
+    try orderEventHashesTopologically(allocator, &event_hashes);
+
     for (event_hashes.items) |event_hash| {
         const body = try eventBodyByHash(allocator, db, event_hash);
         defer allocator.free(body);
         try projectStoredEvent(allocator, db, event_hash, body, auth_phase);
     }
+}
+
+fn orderEventHashesTopologically(allocator: Allocator, event_hashes: *std.ArrayList([]u8)) !void {
+    if (event_hashes.items.len < 2) return;
+
+    var input: std.ArrayList(u8) = .empty;
+    defer input.deinit(allocator);
+    for (event_hashes.items) |event_hash| {
+        try input.appendSlice(allocator, event_hash);
+        try input.append(allocator, '\n');
+    }
+
+    const ordered_raw = try git.gitCheckedInput(allocator, &.{ "rev-list", "--topo-order", "--reverse", "--stdin" }, input.items);
+    defer allocator.free(ordered_raw);
+
+    var indexes = std.StringHashMap(usize).init(allocator);
+    defer indexes.deinit();
+    for (event_hashes.items, 0..) |event_hash, index| {
+        try indexes.put(event_hash, index);
+    }
+
+    const ordered = try allocator.alloc([]u8, event_hashes.items.len);
+    defer allocator.free(ordered);
+    const used = try allocator.alloc(bool, event_hashes.items.len);
+    defer allocator.free(used);
+    @memset(used, false);
+
+    var count: usize = 0;
+    var it = std.mem.tokenizeScalar(u8, ordered_raw, '\n');
+    while (it.next()) |line_raw| {
+        const line = std.mem.trim(u8, line_raw, " \t\r\n");
+        const index = indexes.get(line) orelse continue;
+        if (used[index]) continue;
+        ordered[count] = event_hashes.items[index];
+        used[index] = true;
+        count += 1;
+    }
+    for (event_hashes.items, 0..) |event_hash, index| {
+        if (used[index]) continue;
+        ordered[count] = event_hash;
+        count += 1;
+    }
+    @memcpy(event_hashes.items, ordered);
 }
 
 fn eventBodyByHash(allocator: Allocator, db: *SqliteDb, event_hash: []const u8) ![]u8 {
@@ -1743,11 +1798,15 @@ fn authorizationRejection(allocator: Allocator, db: *SqliteDb, event_hash: ?[]co
     else
         (try currentRole(allocator, db, envelope.actor_principal)) orelse return "unauthorized_principal";
     defer allocator.free(role);
-    const device_active = if (event_hash) |hash|
-        try identityDeviceActiveAtFrontier(allocator, db, envelope.actor_principal, envelope.actor_device, hash)
-    else
-        try currentDeviceActive(db, envelope.actor_principal, envelope.actor_device);
-    if (!device_active) return "unauthorized_device";
+    if (event_hash) |hash| {
+        const expected_fingerprint = (try identityDeviceFingerprintAtFrontier(allocator, db, envelope.actor_principal, envelope.actor_device, hash)) orelse return "unauthorized_device";
+        defer allocator.free(expected_fingerprint);
+        const signer_fingerprint = (try git.verifiedCommitSigningKeyFingerprint(allocator, hash)) orelse return "signing_key_mismatch";
+        defer allocator.free(signer_fingerprint);
+        if (!std.mem.eql(u8, expected_fingerprint, signer_fingerprint)) return "signing_key_mismatch";
+    } else if (!(try currentDeviceActive(db, envelope.actor_principal, envelope.actor_device))) {
+        return "unauthorized_device";
+    }
 
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
     defer parsed.deinit();
@@ -2285,6 +2344,13 @@ fn identityDeviceActiveAtFrontier(allocator: Allocator, db: *SqliteDb, principal
     var events = try loadIdentityDeviceEvents(allocator, db, principal, device, event_hash);
     defer freeIdentityDeviceEvents(allocator, &events);
     return (try activeIdentityAddIndex(allocator, events.items)) != null;
+}
+
+fn identityDeviceFingerprintAtFrontier(allocator: Allocator, db: *SqliteDb, principal: []const u8, device: []const u8, event_hash: []const u8) !?[]u8 {
+    var events = try loadIdentityDeviceEvents(allocator, db, principal, device, event_hash);
+    defer freeIdentityDeviceEvents(allocator, &events);
+    const active_index = (try activeIdentityAddIndex(allocator, events.items)) orelse return null;
+    return try allocator.dupe(u8, events.items[active_index].key_fingerprint);
 }
 
 fn loadIdentityDeviceEvents(
