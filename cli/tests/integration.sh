@@ -40,6 +40,33 @@ assert_line_count() {
   [[ "$count" == "$expected" ]] || fail "expected $expected non-empty line(s), got $count"$'\n'"$text"
 }
 
+json_field() {
+  local json="$1"
+  local field="$2"
+  printf '%s\n' "$json" | sed -n 's/.*"'"$field"'":"\([^"]*\)".*/\1/p' | head -n 1
+}
+
+append_issue_event() {
+  local event_type="$1"
+  local issue_id="$2"
+  local payload="$3"
+  local seq="$4"
+  local event_uuid
+  local idem
+  local empty_tree
+  local head
+  local body
+  local commit
+
+  printf -v event_uuid '018f0000-0000-7000-8000-%012d' "$((100 + seq))"
+  printf -v idem '018f0000-0000-7000-8000-%012d' "$((200 + seq))"
+  empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
+  head="$(git rev-parse refs/gitomi/inbox/alice/laptop)"
+  body="$(printf '{"$schema":"urn:gitomi:event:v1","repo_id":"%s","event_uuid":"%s","event_type":"%s","object":{"kind":"issue","id":"%s"},"idempotency_key":"%s","actor":{"principal":"alice","device":"laptop"},"seq":%s,"occurred_at":"2026-05-13T18:31:%02dZ","legacy":{},"payload":%s}' "$REPO_ID" "$event_uuid" "$event_type" "$issue_id" "$idem" "$seq" "$seq" "$payload")"
+  commit="$(git commit-tree -S -p "$head" -m "$event_type" -m "$body" "$empty_tree")"
+  git update-ref refs/gitomi/inbox/alice/laptop "$commit" "$head"
+}
+
 configure_signing() {
   local repo="$1"
   git -C "$repo" config user.name "Alice"
@@ -78,7 +105,58 @@ init_repo "$single"
   assert_contains "$json" '"actor_principal":"alice"'
   assert_contains "$json" '"actor_device":"laptop"'
   assert_contains "$json" '"seq":1'
+  issues="$(gt issue list --json)"
+  assert_line_count "$issues" 1
+  assert_contains "$issues" '"state":"open"'
+  assert_contains "$issues" '"title":"First issue"'
+  assert_contains "$issues" '"labels":["bug"]'
+  assert_contains "$issues" '"assignees":["alice"]'
   gt fsck >/dev/null
+)
+
+echo "integration: issue reducer applies signed updates"
+reducer="$ROOT/reducer"
+init_repo "$reducer"
+(
+  cd "$reducer"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  gt issue open --title "Original title" --body "Old body" --label bug --assignee alice >/dev/null
+  first_event="$(gt events list --json)"
+  issue_id="$(json_field "$first_event" object_id)"
+  [[ -n "$issue_id" ]] || fail "expected issue id from event list"
+  append_issue_event "issue.title_set" "$issue_id" '{"title":"Updated title"}' 2
+  append_issue_event "issue.state_set" "$issue_id" '{"state":"closed"}' 3
+  append_issue_event "issue.label_removed" "$issue_id" '{"label":"bug"}' 4
+  append_issue_event "issue.assignee_removed" "$issue_id" '{"assignee":"alice"}' 5
+  append_issue_event "issue.label_added" "$issue_id" '{"label":"regression"}' 6
+  issues="$(gt issue list --json)"
+  assert_line_count "$issues" 1
+  assert_contains "$issues" '"state":"closed"'
+  assert_contains "$issues" '"title":"Updated title"'
+  assert_contains "$issues" '"labels":["regression"]'
+  assert_contains "$issues" '"assignees":[]'
+  gt fsck >/dev/null
+)
+
+echo "integration: invalid signed event is not projected"
+invalid="$ROOT/invalid"
+init_repo "$invalid"
+(
+  cd "$invalid"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
+  bad_body='{"$schema":"urn:gitomi:event:v1","repo_id":"018f0000-0000-7000-8000-000000000001","event_uuid":"018f0000-0000-7000-8000-000000000002","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000000003"},"idempotency_key":"018f0000-0000-7000-8000-000000000004","actor":{"principal":"alice","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:30:59Z","legacy":{},"payload":{}}'
+  bad_commit="$(git commit-tree -S -m "bad issue" -m "$bad_body" "$empty_tree")"
+  git update-ref refs/gitomi/inbox/alice/laptop "$bad_commit"
+  json="$(gt events list --json)"
+  assert_file ".git/gitomi/index.sqlite"
+  assert_line_count "$json" 0
+  issues="$(gt issue list --json)"
+  assert_line_count "$issues" 0
+  if gt fsck >fsck.out 2>&1; then
+    fail "expected fsck to reject invalid signed event"
+  fi
+  assert_contains "$(cat fsck.out)" "issue.opened payload.title"
 )
 
 echo "integration: bare-remote sync"

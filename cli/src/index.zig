@@ -19,17 +19,78 @@ const out = io.out;
 const fileExists = util.fileExists;
 const gitChecked = git.gitChecked;
 const emptyTreeOid = git.emptyTreeOid;
+const runCommand = git.runCommand;
+const max_git_output = git.max_git_output;
 const parseEventSummary = event_mod.parseEventSummary;
+const parseValidatedEnvelope = event_mod.parseValidatedEnvelope;
+const ValidatedEnvelope = event_mod.ValidatedEnvelope;
 const appendJsonFieldString = json_writer.appendJsonFieldString;
 const appendJsonFieldBool = json_writer.appendJsonFieldBool;
 const appendJsonFieldInteger = json_writer.appendJsonFieldInteger;
+const appendJsonString = json_writer.appendJsonString;
 
-const index_schema_version = "1";
+const index_schema_version = "2";
 pub const index_event_columns = "ref, \"commit\", tree, subject, empty_tree, valid_json, event_type, object_kind, object_id, actor_principal, actor_device, seq, occurred_at";
 
 pub const IndexStats = struct {
     refs: usize = 0,
     events: usize = 0,
+};
+
+const IndexAdmission = struct {
+    allocator: Allocator,
+    expected_repo_id: ?[]const u8,
+    observed_repo_id: ?[]u8 = null,
+    actor_seqs: std.BufSet,
+    idempotency_keys: std.BufSet,
+
+    fn init(allocator: Allocator, expected_repo_id: ?[]const u8) IndexAdmission {
+        return .{
+            .allocator = allocator,
+            .expected_repo_id = expected_repo_id,
+            .actor_seqs = std.BufSet.init(allocator),
+            .idempotency_keys = std.BufSet.init(allocator),
+        };
+    }
+
+    fn deinit(self: *IndexAdmission) void {
+        if (self.observed_repo_id) |repo_id| self.allocator.free(repo_id);
+        self.actor_seqs.deinit();
+        self.idempotency_keys.deinit();
+    }
+
+    fn accept(self: *IndexAdmission, envelope: ValidatedEnvelope) !bool {
+        if (self.expected_repo_id) |expected| {
+            if (!std.mem.eql(u8, envelope.repo_id, expected)) return false;
+        } else if (self.observed_repo_id) |expected| {
+            if (!std.mem.eql(u8, envelope.repo_id, expected)) return false;
+        } else {
+            self.observed_repo_id = try self.allocator.dupe(u8, envelope.repo_id);
+        }
+
+        const seq_key = try std.fmt.allocPrint(self.allocator, "{d}:{s}\x1f{d}:{s}\x1f{d}", .{
+            envelope.actor_principal.len,
+            envelope.actor_principal,
+            envelope.actor_device.len,
+            envelope.actor_device,
+            envelope.seq,
+        });
+        defer self.allocator.free(seq_key);
+        if (self.actor_seqs.contains(seq_key)) return false;
+        try self.actor_seqs.insert(seq_key);
+
+        const idem_key = try std.fmt.allocPrint(self.allocator, "{d}:{s}\x1f{d}:{s}", .{
+            envelope.repo_id.len,
+            envelope.repo_id,
+            envelope.idempotency_key.len,
+            envelope.idempotency_key,
+        });
+        defer self.allocator.free(idem_key);
+        if (self.idempotency_keys.contains(idem_key)) return false;
+        try self.idempotency_keys.insert(idem_key);
+
+        return true;
+    }
 };
 
 pub fn ensureIndex(allocator: Allocator, repo: Repo) !void {
@@ -263,14 +324,22 @@ pub fn isIndexFresh(allocator: Allocator, repo: Repo) !bool {
     var db = SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, true) catch return false;
     defer db.deinit();
 
+    if (!(try isSchemaFresh(allocator, &db))) return false;
+
     const indexed_refs = indexedRefsRaw(allocator, &db) catch return false;
     defer allocator.free(indexed_refs);
 
     if (!std.mem.eql(u8, current_refs, indexed_refs)) return false;
-    if (std.mem.trim(u8, current_refs, " \t\r\n").len != 0 and (countIndexedEventsInDb(&db) catch return false) == 0) {
-        return false;
-    }
     return true;
+}
+
+fn isSchemaFresh(allocator: Allocator, db: *SqliteDb) !bool {
+    var stmt = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'") catch return false;
+    defer stmt.deinit();
+    if (!(stmt.step() catch return false)) return false;
+    const value = stmt.columnTextDup(allocator, 0) catch return false;
+    defer allocator.free(value);
+    return std.mem.eql(u8, value, index_schema_version);
 }
 
 pub fn rebuildIndex(allocator: Allocator, repo: Repo) !IndexStats {
@@ -278,6 +347,14 @@ pub fn rebuildIndex(allocator: Allocator, repo: Repo) !IndexStats {
 
     const refs_raw = try currentIndexRefsRaw(allocator);
     defer allocator.free(refs_raw);
+
+    var cfg_opt: ?repo_mod.Config = repo_mod.loadConfig(allocator, repo.config_path) catch |err| switch (err) {
+        CliError.ConfigNotFound, CliError.ConfigInvalid => null,
+        else => return err,
+    };
+    defer if (cfg_opt) |*cfg| cfg.deinit();
+    var admission = IndexAdmission.init(allocator, if (cfg_opt) |cfg| cfg.repo_id else null);
+    defer admission.deinit();
 
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READWRITE | sqlite.SQLITE_OPEN_CREATE, false);
     defer db.deinit();
@@ -290,6 +367,9 @@ pub fn rebuildIndex(allocator: Allocator, repo: Repo) !IndexStats {
         \\DROP TABLE IF EXISTS meta;
         \\DROP TABLE IF EXISTS ref_heads;
         \\DROP TABLE IF EXISTS events;
+        \\DROP TABLE IF EXISTS issues;
+        \\DROP TABLE IF EXISTS issue_labels;
+        \\DROP TABLE IF EXISTS issue_assignees;
     );
     try createIndexSchema(&db);
 
@@ -326,7 +406,7 @@ pub fn rebuildIndex(allocator: Allocator, repo: Repo) !IndexStats {
         try ref_stmt.bindText(2, oid);
         try ref_stmt.stepDone();
         stats.refs += 1;
-        stats.events += try indexRefEvents(allocator, &event_stmt, ref, empty_tree);
+        stats.events += try indexRefEvents(allocator, &db, &event_stmt, &admission, ref, empty_tree);
     }
 
     try db.exec("COMMIT");
@@ -364,6 +444,35 @@ pub fn createIndexSchema(db: *SqliteDb) !void {
         \\);
         \\CREATE INDEX events_ref_ordinal_idx ON events(ref, ordinal);
         \\CREATE INDEX events_type_ordinal_idx ON events(event_type, ordinal);
+        \\CREATE TABLE issues (
+        \\  id TEXT PRIMARY KEY,
+        \\  title TEXT NOT NULL,
+        \\  title_occurred_at TEXT NOT NULL,
+        \\  title_actor_principal TEXT NOT NULL,
+        \\  title_event_uuid TEXT NOT NULL,
+        \\  body TEXT NOT NULL,
+        \\  body_occurred_at TEXT NOT NULL,
+        \\  body_actor_principal TEXT NOT NULL,
+        \\  body_event_uuid TEXT NOT NULL,
+        \\  state TEXT NOT NULL,
+        \\  state_occurred_at TEXT NOT NULL,
+        \\  state_actor_principal TEXT NOT NULL,
+        \\  state_event_uuid TEXT NOT NULL,
+        \\  opened_at TEXT NOT NULL,
+        \\  author_principal TEXT NOT NULL,
+        \\  author_device TEXT NOT NULL
+        \\);
+        \\CREATE INDEX issues_state_opened_idx ON issues(state, opened_at);
+        \\CREATE TABLE issue_labels (
+        \\  issue_id TEXT NOT NULL,
+        \\  label TEXT NOT NULL,
+        \\  PRIMARY KEY(issue_id, label)
+        \\);
+        \\CREATE TABLE issue_assignees (
+        \\  issue_id TEXT NOT NULL,
+        \\  assignee TEXT NOT NULL,
+        \\  PRIMARY KEY(issue_id, assignee)
+        \\);
     );
 }
 
@@ -395,17 +504,25 @@ pub fn indexedRefsRaw(allocator: Allocator, db: *SqliteDb) ![]u8 {
     return buf.toOwnedSlice(allocator);
 }
 
-pub fn indexRefEvents(allocator: Allocator, event_stmt: *SqliteStmt, ref: []const u8, empty_tree: []const u8) !usize {
+fn indexRefEvents(
+    allocator: Allocator,
+    db: *SqliteDb,
+    event_stmt: *SqliteStmt,
+    admission: *IndexAdmission,
+    ref: []const u8,
+    empty_tree: []const u8,
+) !usize {
     const log = try gitChecked(allocator, &.{
         "log",
         "--first-parent",
         "--reverse",
-        "--format=%H%x00%T%x00%s%x00%b%x1e",
+        "--format=%H%x00%T%x00%P%x00%s%x00%b%x1e",
         ref,
     });
     defer allocator.free(log);
 
     var count: usize = 0;
+    var expected_first_parent: ?[]const u8 = null;
     var records = std.mem.splitScalar(u8, log, 0x1e);
     while (records.next()) |record_raw| {
         const record = std.mem.trim(u8, record_raw, "\r\n");
@@ -416,18 +533,255 @@ pub fn indexRefEvents(allocator: Allocator, event_stmt: *SqliteStmt, ref: []cons
         const second = first + 1 + second_rel;
         const third_rel = std.mem.indexOfScalar(u8, record[second + 1 ..], 0) orelse continue;
         const third = second + 1 + third_rel;
+        const fourth_rel = std.mem.indexOfScalar(u8, record[third + 1 ..], 0) orelse continue;
+        const fourth = third + 1 + fourth_rel;
 
         const commit = std.mem.trim(u8, record[0..first], " \t\r\n");
         const tree = std.mem.trim(u8, record[first + 1 .. second], " \t\r\n");
-        const subject = record[second + 1 .. third];
-        const body = std.mem.trim(u8, record[third + 1 ..], " \t\r\n");
+        const parents = std.mem.trim(u8, record[second + 1 .. third], " \t\r\n");
+        const subject = record[third + 1 .. fourth];
+        const body = std.mem.trim(u8, record[fourth + 1 ..], " \t\r\n");
 
         if (commit.len == 0) continue;
-        try insertIndexedEvent(allocator, event_stmt, ref, commit, tree, subject, body, std.mem.eql(u8, tree, empty_tree));
+        defer expected_first_parent = commit;
+
+        const empty_tree_ok = std.mem.eql(u8, tree, empty_tree);
+        if (!empty_tree_ok) continue;
+        if (!firstParentMatches(parents, expected_first_parent)) continue;
+        if (!(try verifyCommitSignatureQuiet(allocator, commit))) continue;
+
+        var envelope = parseValidatedEnvelope(allocator, body) catch continue;
+        defer envelope.deinit();
+        if (!(try admission.accept(envelope))) continue;
+
+        try insertValidatedIndexedEvent(event_stmt, ref, commit, tree, subject, envelope);
+        try applyIssueProjection(allocator, db, envelope, body);
         count += 1;
     }
 
     return count;
+}
+
+fn firstParentMatches(parents: []const u8, expected_first_parent: ?[]const u8) bool {
+    var it = std.mem.tokenizeScalar(u8, parents, ' ');
+    const first_parent = it.next();
+    if (expected_first_parent) |expected| {
+        return first_parent != null and std.mem.eql(u8, first_parent.?, expected);
+    }
+    return first_parent == null;
+}
+
+fn verifyCommitSignatureQuiet(allocator: Allocator, commit: []const u8) !bool {
+    var argv = [_][]const u8{ "git", "verify-commit", commit };
+    var result = try runCommand(allocator, &argv, null, max_git_output);
+    defer result.deinit();
+    return result.exitCode() == 0;
+}
+
+fn insertValidatedIndexedEvent(
+    stmt: *SqliteStmt,
+    ref: []const u8,
+    commit: []const u8,
+    tree: []const u8,
+    subject: []const u8,
+    envelope: ValidatedEnvelope,
+) !void {
+    try stmt.reset();
+    try stmt.bindText(1, ref);
+    try stmt.bindText(2, commit);
+    try stmt.bindText(3, tree);
+    try stmt.bindText(4, subject);
+    try stmt.bindInt(5, 1);
+    try stmt.bindInt(6, 1);
+    try stmt.bindText(7, envelope.event_type);
+    try stmt.bindText(8, envelope.object_kind);
+    try stmt.bindText(9, envelope.object_id);
+    try stmt.bindText(10, envelope.actor_principal);
+    try stmt.bindText(11, envelope.actor_device);
+    try stmt.bindInt64(12, envelope.seq);
+    try stmt.bindText(13, envelope.occurred_at);
+    try stmt.stepDone();
+}
+
+fn applyIssueProjection(allocator: Allocator, db: *SqliteDb, envelope: ValidatedEnvelope, body: []const u8) !void {
+    if (!std.mem.startsWith(u8, envelope.event_type, "issue.")) return;
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return,
+    };
+    const payload_value = root.get("payload") orelse return;
+    const payload = switch (payload_value) {
+        .object => |object| object,
+        else => return,
+    };
+
+    if (std.mem.eql(u8, envelope.event_type, "issue.opened")) {
+        const title = event_mod.jsonString(payload.get("title")) orelse return;
+        const body_value = event_mod.jsonString(payload.get("body")) orelse "";
+        try insertIssueOpened(db, envelope, title, body_value);
+        try insertPayloadStringArray(db, payload, "labels", insert_issue_label_sql, envelope.object_id);
+        try insertPayloadStringArray(db, payload, "assignees", insert_issue_assignee_sql, envelope.object_id);
+        return;
+    }
+
+    if (!(try issueExists(db, envelope.object_id))) return;
+
+    if (std.mem.eql(u8, envelope.event_type, "issue.title_set")) {
+        const title = event_mod.jsonString(payload.get("title")) orelse return;
+        try updateIssueScalar(allocator, db, envelope.object_id, title, envelope, "title", "title_occurred_at", "title_actor_principal", "title_event_uuid");
+    } else if (std.mem.eql(u8, envelope.event_type, "issue.body_set")) {
+        const body_value = event_mod.jsonString(payload.get("body")) orelse return;
+        try updateIssueScalar(allocator, db, envelope.object_id, body_value, envelope, "body", "body_occurred_at", "body_actor_principal", "body_event_uuid");
+    } else if (std.mem.eql(u8, envelope.event_type, "issue.state_set")) {
+        const state = event_mod.jsonString(payload.get("state")) orelse return;
+        try updateIssueScalar(allocator, db, envelope.object_id, state, envelope, "state", "state_occurred_at", "state_actor_principal", "state_event_uuid");
+    } else if (std.mem.eql(u8, envelope.event_type, "issue.label_added")) {
+        const label = event_mod.jsonString(payload.get("label")) orelse return;
+        try insertIssueCollectionValue(db, insert_issue_label_sql, envelope.object_id, label);
+    } else if (std.mem.eql(u8, envelope.event_type, "issue.label_removed")) {
+        const label = event_mod.jsonString(payload.get("label")) orelse return;
+        try deleteIssueCollectionValue(db, "DELETE FROM issue_labels WHERE issue_id = ? AND label = ?", envelope.object_id, label);
+    } else if (std.mem.eql(u8, envelope.event_type, "issue.assignee_added")) {
+        const assignee = event_mod.jsonString(payload.get("assignee")) orelse return;
+        try insertIssueCollectionValue(db, insert_issue_assignee_sql, envelope.object_id, assignee);
+    } else if (std.mem.eql(u8, envelope.event_type, "issue.assignee_removed")) {
+        const assignee = event_mod.jsonString(payload.get("assignee")) orelse return;
+        try deleteIssueCollectionValue(db, "DELETE FROM issue_assignees WHERE issue_id = ? AND assignee = ?", envelope.object_id, assignee);
+    }
+}
+
+const insert_issue_label_sql = "INSERT OR IGNORE INTO issue_labels(issue_id, label) VALUES (?, ?)";
+const insert_issue_assignee_sql = "INSERT OR IGNORE INTO issue_assignees(issue_id, assignee) VALUES (?, ?)";
+
+fn insertIssueOpened(db: *SqliteDb, envelope: ValidatedEnvelope, title: []const u8, body: []const u8) !void {
+    var stmt = try db.prepare(
+        \\INSERT OR IGNORE INTO issues(
+        \\  id,
+        \\  title, title_occurred_at, title_actor_principal, title_event_uuid,
+        \\  body, body_occurred_at, body_actor_principal, body_event_uuid,
+        \\  state, state_occurred_at, state_actor_principal, state_event_uuid,
+        \\  opened_at, author_principal, author_device
+        \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, envelope.object_id);
+    try stmt.bindText(2, title);
+    try stmt.bindText(3, envelope.occurred_at);
+    try stmt.bindText(4, envelope.actor_principal);
+    try stmt.bindText(5, envelope.event_uuid);
+    try stmt.bindText(6, body);
+    try stmt.bindText(7, envelope.occurred_at);
+    try stmt.bindText(8, envelope.actor_principal);
+    try stmt.bindText(9, envelope.event_uuid);
+    try stmt.bindText(10, "open");
+    try stmt.bindText(11, envelope.occurred_at);
+    try stmt.bindText(12, envelope.actor_principal);
+    try stmt.bindText(13, envelope.event_uuid);
+    try stmt.bindText(14, envelope.occurred_at);
+    try stmt.bindText(15, envelope.actor_principal);
+    try stmt.bindText(16, envelope.actor_device);
+    try stmt.stepDone();
+}
+
+fn issueExists(db: *SqliteDb, issue_id: []const u8) !bool {
+    var stmt = try db.prepare("SELECT 1 FROM issues WHERE id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    return try stmt.step();
+}
+
+fn updateIssueScalar(
+    allocator: Allocator,
+    db: *SqliteDb,
+    issue_id: []const u8,
+    value: []const u8,
+    envelope: ValidatedEnvelope,
+    comptime value_col: []const u8,
+    comptime occurred_at_col: []const u8,
+    comptime actor_col: []const u8,
+    comptime event_uuid_col: []const u8,
+) !void {
+    var select = try db.prepare("SELECT " ++ occurred_at_col ++ ", " ++ actor_col ++ ", " ++ event_uuid_col ++ " FROM issues WHERE id = ?");
+    defer select.deinit();
+    try select.bindText(1, issue_id);
+    if (!(try select.step())) return;
+    const old_occurred_at = try select.columnTextDup(allocator, 0);
+    defer allocator.free(old_occurred_at);
+    const old_actor = try select.columnTextDup(allocator, 1);
+    defer allocator.free(old_actor);
+    const old_event_uuid = try select.columnTextDup(allocator, 2);
+    defer allocator.free(old_event_uuid);
+
+    if (!lwwWins(envelope.occurred_at, envelope.actor_principal, envelope.event_uuid, old_occurred_at, old_actor, old_event_uuid)) {
+        return;
+    }
+
+    var update = try db.prepare("UPDATE issues SET " ++ value_col ++ " = ?, " ++ occurred_at_col ++ " = ?, " ++ actor_col ++ " = ?, " ++ event_uuid_col ++ " = ? WHERE id = ?");
+    defer update.deinit();
+    try update.bindText(1, value);
+    try update.bindText(2, envelope.occurred_at);
+    try update.bindText(3, envelope.actor_principal);
+    try update.bindText(4, envelope.event_uuid);
+    try update.bindText(5, issue_id);
+    try update.stepDone();
+}
+
+fn lwwWins(
+    new_occurred_at: []const u8,
+    new_actor: []const u8,
+    new_event_uuid: []const u8,
+    old_occurred_at: []const u8,
+    old_actor: []const u8,
+    old_event_uuid: []const u8,
+) bool {
+    switch (std.mem.order(u8, new_occurred_at, old_occurred_at)) {
+        .gt => return true,
+        .lt => return false,
+        .eq => {},
+    }
+    switch (std.mem.order(u8, new_actor, old_actor)) {
+        .gt => return true,
+        .lt => return false,
+        .eq => {},
+    }
+    return std.mem.order(u8, new_event_uuid, old_event_uuid) == .gt;
+}
+
+fn insertPayloadStringArray(
+    db: *SqliteDb,
+    payload: std.json.ObjectMap,
+    key: []const u8,
+    comptime sql_text: []const u8,
+    issue_id: []const u8,
+) !void {
+    const value = payload.get(key) orelse return;
+    const array = switch (value) {
+        .array => |items| items,
+        else => return,
+    };
+    for (array.items) |item| {
+        if (item != .string) continue;
+        try insertIssueCollectionValue(db, sql_text, issue_id, item.string);
+    }
+}
+
+fn insertIssueCollectionValue(db: *SqliteDb, comptime sql_text: []const u8, issue_id: []const u8, value: []const u8) !void {
+    var stmt = try db.prepare(sql_text);
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    try stmt.bindText(2, value);
+    try stmt.stepDone();
+}
+
+fn deleteIssueCollectionValue(db: *SqliteDb, comptime sql_text: []const u8, issue_id: []const u8, value: []const u8) !void {
+    var stmt = try db.prepare(sql_text);
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    try stmt.bindText(2, value);
+    try stmt.stepDone();
 }
 
 pub fn insertIndexedEvent(
@@ -484,7 +838,7 @@ pub fn countIssueOpenedEvents(allocator: Allocator, repo: Repo) !usize {
     if (!fileExists(repo.index_path)) return 0;
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
-    var stmt = try db.prepare("SELECT COUNT(*) FROM events WHERE event_type = 'issue.opened'");
+    var stmt = try db.prepare("SELECT COUNT(*) FROM issues");
     defer stmt.deinit();
     if (!try stmt.step()) return 0;
     const count = stmt.columnInt64(0);
@@ -497,6 +851,72 @@ pub fn countIndexedEventsInDb(db: *SqliteDb) !usize {
     if (!try stmt.step()) return 0;
     const count = stmt.columnInt64(0);
     return if (count <= 0) 0 else @as(usize, @intCast(count));
+}
+
+pub fn listIssuesFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
+    if (!fileExists(repo.index_path)) return;
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
+    var stmt = try db.prepare("SELECT id, title, state, author_principal, opened_at FROM issues ORDER BY opened_at DESC, id DESC");
+    defer stmt.deinit();
+
+    while (try stmt.step()) {
+        const id = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(id);
+        const title = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(title);
+        const state = try stmt.columnTextDup(allocator, 2);
+        defer allocator.free(state);
+        const author = try stmt.columnTextDup(allocator, 3);
+        defer allocator.free(author);
+        const opened_at = try stmt.columnTextDup(allocator, 4);
+        defer allocator.free(opened_at);
+
+        if (json) {
+            var line: std.ArrayList(u8) = .empty;
+            defer line.deinit(allocator);
+            try line.append(allocator, '{');
+            try appendJsonFieldString(&line, allocator, "id", id, true);
+            try appendJsonFieldString(&line, allocator, "state", state, true);
+            try appendJsonFieldString(&line, allocator, "title", title, true);
+            try appendJsonFieldString(&line, allocator, "author_principal", author, true);
+            try appendJsonFieldString(&line, allocator, "opened_at", opened_at, true);
+            try appendIssueCollectionJsonField(&line, allocator, &db, "labels", "SELECT label FROM issue_labels WHERE issue_id = ? ORDER BY label", id, true);
+            try appendIssueCollectionJsonField(&line, allocator, &db, "assignees", "SELECT assignee FROM issue_assignees WHERE issue_id = ? ORDER BY assignee", id, false);
+            try line.append(allocator, '}');
+            try out("{s}\n", .{line.items});
+        } else {
+            try out("#{s} {s} {s}\n", .{ id[0..@min(id.len, 7)], state, title });
+        }
+    }
+}
+
+fn appendIssueCollectionJsonField(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    key: []const u8,
+    comptime sql_text: []const u8,
+    issue_id: []const u8,
+    comma: bool,
+) !void {
+    try appendJsonString(buf, allocator, key);
+    try buf.appendSlice(allocator, ":[");
+    var stmt = try db.prepare(sql_text);
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+
+    var first = true;
+    while (try stmt.step()) {
+        const value = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(value);
+        if (!first) try buf.append(allocator, ',');
+        first = false;
+        try appendJsonString(buf, allocator, value);
+    }
+    try buf.append(allocator, ']');
+    if (comma) try buf.append(allocator, ',');
 }
 
 pub fn listEventsFromIndex(
