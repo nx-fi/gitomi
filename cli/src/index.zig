@@ -1,15 +1,27 @@
 const std = @import("std");
-pub const sqlite = @cImport({
-    @cInclude("sqlite3.h");
-});
 
 const errors = @import("errors.zig");
 const event_mod = @import("event.zig");
 const git = @import("git.zig");
+const index_event_row = @import("index/event_row.zig");
+const index_schema = @import("index/schema.zig");
+const index_sqlite = @import("index/sqlite_db.zig");
 const io = @import("io.zig");
 const json_writer = @import("json_writer.zig");
 const repo_mod = @import("repo.zig");
 const util = @import("util.zig");
+
+pub const sqlite = index_sqlite.sqlite;
+pub const SqliteDb = index_sqlite.SqliteDb;
+pub const SqliteStmt = index_sqlite.SqliteStmt;
+pub const sqliteFail = index_sqlite.sqliteFail;
+pub const IndexedEvent = index_event_row.IndexedEvent;
+pub const indexedEventFromStmt = index_event_row.indexedEventFromStmt;
+pub const freeIndexedEvent = index_event_row.freeIndexedEvent;
+pub const appendIndexedEventJson = index_event_row.appendIndexedEventJson;
+pub const printIndexedEvent = index_event_row.printIndexedEvent;
+pub const createCursorsSchema = index_schema.createCursorsSchema;
+pub const createIndexSchema = index_schema.createIndexSchema;
 
 const Allocator = std.mem.Allocator;
 const CliError = errors.CliError;
@@ -220,241 +232,6 @@ pub fn ensureIndex(allocator: Allocator, repo: Repo) !void {
     _ = try rebuildIndex(allocator, repo);
 }
 
-pub const SqliteDb = struct {
-    allocator: Allocator,
-    db: *sqlite.sqlite3,
-    quiet: bool,
-
-    pub fn open(allocator: Allocator, path: []const u8, flags: c_int, quiet: bool) !SqliteDb {
-        const path_z = try allocator.dupeZ(u8, path);
-        defer allocator.free(path_z);
-
-        var db_opt: ?*sqlite.sqlite3 = null;
-        const rc = sqlite.sqlite3_open_v2(path_z.ptr, &db_opt, flags, null);
-        if (rc != sqlite.SQLITE_OK) {
-            const db = db_opt;
-            if (!quiet) {
-                if (db) |handle| {
-                    try eprint("gt index: sqlite open {s}: {s}\n", .{ path, std.mem.span(sqlite.sqlite3_errmsg(handle)) });
-                } else {
-                    try eprint("gt index: sqlite open {s}: failed to allocate handle\n", .{path});
-                }
-            }
-            if (db) |handle| _ = sqlite.sqlite3_close(handle);
-            return CliError.SqliteFailed;
-        }
-
-        return .{
-            .allocator = allocator,
-            .db = db_opt.?,
-            .quiet = quiet,
-        };
-    }
-
-    pub fn deinit(self: *SqliteDb) void {
-        _ = sqlite.sqlite3_close(self.db);
-    }
-
-    pub fn exec(self: *SqliteDb, sql_text: []const u8) !void {
-        const sql_z = try self.allocator.dupeZ(u8, sql_text);
-        defer self.allocator.free(sql_z);
-        const rc = sqlite.sqlite3_exec(self.db, sql_z.ptr, null, null, null);
-        if (rc != sqlite.SQLITE_OK) return sqliteFail(self.db, self.quiet, "exec");
-    }
-
-    pub fn prepare(self: *SqliteDb, sql_text: []const u8) !SqliteStmt {
-        const sql_z = try self.allocator.dupeZ(u8, sql_text);
-        defer self.allocator.free(sql_z);
-        var stmt_opt: ?*sqlite.sqlite3_stmt = null;
-        const rc = sqlite.sqlite3_prepare_v2(self.db, sql_z.ptr, -1, &stmt_opt, null);
-        if (rc != sqlite.SQLITE_OK) return sqliteFail(self.db, self.quiet, "prepare");
-        return .{
-            .db = self.db,
-            .stmt = stmt_opt.?,
-            .quiet = self.quiet,
-        };
-    }
-};
-
-pub const SqliteStmt = struct {
-    db: *sqlite.sqlite3,
-    stmt: *sqlite.sqlite3_stmt,
-    quiet: bool,
-
-    pub fn deinit(self: *SqliteStmt) void {
-        _ = sqlite.sqlite3_finalize(self.stmt);
-    }
-
-    pub fn reset(self: *SqliteStmt) !void {
-        var rc = sqlite.sqlite3_reset(self.stmt);
-        if (rc != sqlite.SQLITE_OK) return sqliteFail(self.db, self.quiet, "reset");
-        rc = sqlite.sqlite3_clear_bindings(self.stmt);
-        if (rc != sqlite.SQLITE_OK) return sqliteFail(self.db, self.quiet, "clear bindings");
-    }
-
-    pub fn step(self: *SqliteStmt) !bool {
-        const rc = sqlite.sqlite3_step(self.stmt);
-        if (rc == sqlite.SQLITE_ROW) return true;
-        if (rc == sqlite.SQLITE_DONE) return false;
-        return sqliteFail(self.db, self.quiet, "step");
-    }
-
-    pub fn stepDone(self: *SqliteStmt) !void {
-        if (try self.step()) return sqliteFail(self.db, self.quiet, "expected done");
-    }
-
-    pub fn bindText(self: *SqliteStmt, index: c_int, value: []const u8) !void {
-        if (value.len > std.math.maxInt(c_int)) return error.ValueTooLarge;
-        const len: c_int = @intCast(value.len);
-        const rc = sqlite.sqlite3_bind_text(self.stmt, index, value.ptr, len, null);
-        if (rc != sqlite.SQLITE_OK) return sqliteFail(self.db, self.quiet, "bind text");
-    }
-
-    pub fn bindInt(self: *SqliteStmt, index: c_int, value: c_int) !void {
-        const rc = sqlite.sqlite3_bind_int(self.stmt, index, value);
-        if (rc != sqlite.SQLITE_OK) return sqliteFail(self.db, self.quiet, "bind int");
-    }
-
-    pub fn bindInt64(self: *SqliteStmt, index: c_int, value: i64) !void {
-        const rc = sqlite.sqlite3_bind_int64(self.stmt, index, value);
-        if (rc != sqlite.SQLITE_OK) return sqliteFail(self.db, self.quiet, "bind int64");
-    }
-
-    pub fn bindNull(self: *SqliteStmt, index: c_int) !void {
-        const rc = sqlite.sqlite3_bind_null(self.stmt, index);
-        if (rc != sqlite.SQLITE_OK) return sqliteFail(self.db, self.quiet, "bind null");
-    }
-
-    pub fn columnTextDup(self: *SqliteStmt, allocator: Allocator, index: c_int) ![]u8 {
-        const len_raw = sqlite.sqlite3_column_bytes(self.stmt, index);
-        if (len_raw <= 0) return allocator.dupe(u8, "");
-        const text_ptr = sqlite.sqlite3_column_text(self.stmt, index);
-        if (text_ptr == null) return allocator.dupe(u8, "");
-        const ptr: [*]const u8 = @ptrCast(text_ptr);
-        return allocator.dupe(u8, ptr[0..@as(usize, @intCast(len_raw))]);
-    }
-
-    pub fn columnInt(self: *SqliteStmt, index: c_int) c_int {
-        return sqlite.sqlite3_column_int(self.stmt, index);
-    }
-
-    pub fn columnInt64(self: *SqliteStmt, index: c_int) i64 {
-        return sqlite.sqlite3_column_int64(self.stmt, index);
-    }
-
-    pub fn columnIsNull(self: *SqliteStmt, index: c_int) bool {
-        return sqlite.sqlite3_column_type(self.stmt, index) == sqlite.SQLITE_NULL;
-    }
-};
-
-pub fn sqliteFail(db: ?*sqlite.sqlite3, quiet: bool, context: []const u8) CliError {
-    if (!quiet) {
-        if (db) |handle| {
-            eprint("gt index: sqlite {s}: {s}\n", .{ context, std.mem.span(sqlite.sqlite3_errmsg(handle)) }) catch {};
-        } else {
-            eprint("gt index: sqlite {s} failed\n", .{context}) catch {};
-        }
-    }
-    return CliError.SqliteFailed;
-}
-
-pub const IndexedEvent = struct {
-    ref: []const u8,
-    commit: []const u8,
-    event_hash: []const u8,
-    tree: []const u8,
-    subject: []const u8,
-    empty_tree: bool,
-    valid_json: bool,
-    event_type: []const u8,
-    object_kind: []const u8,
-    object_id: []const u8,
-    actor_principal: []const u8,
-    actor_device: []const u8,
-    seq: ?i64,
-    occurred_at: []const u8,
-    domain_status: []const u8,
-    rejection_reason: []const u8,
-};
-
-pub fn indexedEventFromStmt(allocator: Allocator, stmt: *SqliteStmt) !IndexedEvent {
-    var ref: ?[]u8 = try stmt.columnTextDup(allocator, 0);
-    errdefer if (ref) |value| allocator.free(value);
-    var commit: ?[]u8 = try stmt.columnTextDup(allocator, 1);
-    errdefer if (commit) |value| allocator.free(value);
-    var event_hash: ?[]u8 = try stmt.columnTextDup(allocator, 2);
-    errdefer if (event_hash) |value| allocator.free(value);
-    var tree: ?[]u8 = try stmt.columnTextDup(allocator, 3);
-    errdefer if (tree) |value| allocator.free(value);
-    var subject: ?[]u8 = try stmt.columnTextDup(allocator, 4);
-    errdefer if (subject) |value| allocator.free(value);
-    var event_type: ?[]u8 = try stmt.columnTextDup(allocator, 7);
-    errdefer if (event_type) |value| allocator.free(value);
-    var object_kind: ?[]u8 = try stmt.columnTextDup(allocator, 8);
-    errdefer if (object_kind) |value| allocator.free(value);
-    var object_id: ?[]u8 = try stmt.columnTextDup(allocator, 9);
-    errdefer if (object_id) |value| allocator.free(value);
-    var actor_principal: ?[]u8 = try stmt.columnTextDup(allocator, 10);
-    errdefer if (actor_principal) |value| allocator.free(value);
-    var actor_device: ?[]u8 = try stmt.columnTextDup(allocator, 11);
-    errdefer if (actor_device) |value| allocator.free(value);
-    var occurred_at: ?[]u8 = try stmt.columnTextDup(allocator, 13);
-    errdefer if (occurred_at) |value| allocator.free(value);
-    var domain_status: ?[]u8 = try stmt.columnTextDup(allocator, 14);
-    errdefer if (domain_status) |value| allocator.free(value);
-    var rejection_reason: ?[]u8 = try stmt.columnTextDup(allocator, 15);
-    errdefer if (rejection_reason) |value| allocator.free(value);
-
-    const event = IndexedEvent{
-        .ref = ref.?,
-        .commit = commit.?,
-        .event_hash = event_hash.?,
-        .tree = tree.?,
-        .subject = subject.?,
-        .empty_tree = stmt.columnInt(5) != 0,
-        .valid_json = stmt.columnInt(6) != 0,
-        .event_type = event_type.?,
-        .object_kind = object_kind.?,
-        .object_id = object_id.?,
-        .actor_principal = actor_principal.?,
-        .actor_device = actor_device.?,
-        .seq = if (stmt.columnIsNull(12)) null else stmt.columnInt64(12),
-        .occurred_at = occurred_at.?,
-        .domain_status = domain_status.?,
-        .rejection_reason = rejection_reason.?,
-    };
-    ref = null;
-    commit = null;
-    event_hash = null;
-    tree = null;
-    subject = null;
-    event_type = null;
-    object_kind = null;
-    object_id = null;
-    actor_principal = null;
-    actor_device = null;
-    occurred_at = null;
-    domain_status = null;
-    rejection_reason = null;
-    return event;
-}
-
-pub fn freeIndexedEvent(allocator: Allocator, event: IndexedEvent) void {
-    allocator.free(event.ref);
-    allocator.free(event.commit);
-    allocator.free(event.event_hash);
-    allocator.free(event.tree);
-    allocator.free(event.subject);
-    allocator.free(event.event_type);
-    allocator.free(event.object_kind);
-    allocator.free(event.object_id);
-    allocator.free(event.actor_principal);
-    allocator.free(event.actor_device);
-    allocator.free(event.occurred_at);
-    allocator.free(event.domain_status);
-    allocator.free(event.rejection_reason);
-}
-
 pub fn isIndexFresh(allocator: Allocator, repo: Repo) !bool {
     if (!fileExists(repo.index_path)) return false;
 
@@ -537,27 +314,6 @@ fn createCursorsDb(allocator: Allocator, repo: Repo) !void {
     var db = try SqliteDb.open(allocator, repo.cursors_path, sqlite.SQLITE_OPEN_READWRITE | sqlite.SQLITE_OPEN_CREATE, false);
     defer db.deinit();
     try createCursorsSchema(&db);
-}
-
-pub fn createCursorsSchema(db: *SqliteDb) !void {
-    try db.exec(
-        \\CREATE TABLE IF NOT EXISTS meta (
-        \\  key TEXT PRIMARY KEY,
-        \\  value TEXT NOT NULL
-        \\);
-        \\CREATE TABLE IF NOT EXISTS ref_cursors (
-        \\  ref TEXT PRIMARY KEY,
-        \\  oid TEXT NOT NULL,
-        \\  event_count INTEGER NOT NULL
-        \\);
-        \\CREATE TABLE IF NOT EXISTS snapshot_meta (
-        \\  snapshot_id TEXT PRIMARY KEY,
-        \\  ref TEXT NOT NULL,
-        \\  created_at TEXT NOT NULL,
-        \\  inbox_heads TEXT NOT NULL,
-        \\  tree_size INTEGER NOT NULL DEFAULT 0
-        \\);
-    );
 }
 
 pub fn updateRefCursor(allocator: Allocator, repo: Repo, ref: []const u8, oid: []const u8, event_count: usize) !void {
@@ -765,189 +521,6 @@ fn rebuildIndexFromSnapshot(
 
     stats.events = try countIndexedEventsInDb(&db);
     return stats;
-}
-
-pub fn createIndexSchema(db: *SqliteDb) !void {
-    try db.exec(
-        \\CREATE TABLE meta (
-        \\  key TEXT PRIMARY KEY,
-        \\  value TEXT NOT NULL
-        \\);
-        \\CREATE TABLE ref_heads (
-        \\  ref TEXT PRIMARY KEY,
-        \\  oid TEXT NOT NULL
-        \\);
-        \\CREATE TABLE events (
-        \\  ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
-        \\  ref TEXT NOT NULL,
-        \\  "commit" TEXT NOT NULL,
-        \\  event_hash TEXT NOT NULL,
-        \\  tree TEXT NOT NULL,
-        \\  subject TEXT NOT NULL,
-        \\  body TEXT NOT NULL,
-        \\  empty_tree INTEGER NOT NULL,
-        \\  valid_json INTEGER NOT NULL,
-        \\  event_type TEXT NOT NULL,
-        \\  object_kind TEXT NOT NULL,
-        \\  object_id TEXT NOT NULL,
-        \\  actor_principal TEXT NOT NULL,
-        \\  actor_device TEXT NOT NULL,
-        \\  seq INTEGER,
-        \\  occurred_at TEXT NOT NULL,
-        \\  domain_status TEXT NOT NULL,
-        \\  rejection_reason TEXT NOT NULL,
-        \\  UNIQUE(ref, "commit"),
-        \\  UNIQUE(event_hash)
-        \\);
-        \\CREATE INDEX events_ref_ordinal_idx ON events(ref, ordinal);
-        \\CREATE INDEX events_type_ordinal_idx ON events(event_type, ordinal);
-        \\CREATE TABLE issues (
-        \\  id TEXT PRIMARY KEY,
-        \\  title TEXT NOT NULL,
-        \\  title_occurred_at TEXT NOT NULL,
-        \\  title_actor_principal TEXT NOT NULL,
-        \\  title_event_hash TEXT NOT NULL,
-        \\  body TEXT NOT NULL,
-        \\  body_occurred_at TEXT NOT NULL,
-        \\  body_actor_principal TEXT NOT NULL,
-        \\  body_event_hash TEXT NOT NULL,
-        \\  state TEXT NOT NULL,
-        \\  state_occurred_at TEXT NOT NULL,
-        \\  state_actor_principal TEXT NOT NULL,
-        \\  state_event_hash TEXT NOT NULL,
-        \\  opened_at TEXT NOT NULL,
-        \\  author_principal TEXT NOT NULL,
-        \\  author_device TEXT NOT NULL
-        \\);
-        \\CREATE INDEX issues_state_opened_idx ON issues(state, opened_at);
-        \\CREATE TABLE issue_labels (
-        \\  issue_id TEXT NOT NULL,
-        \\  label TEXT NOT NULL,
-        \\  add_hash TEXT NOT NULL,
-        \\  PRIMARY KEY(issue_id, label, add_hash)
-        \\);
-        \\CREATE TABLE issue_assignees (
-        \\  issue_id TEXT NOT NULL,
-        \\  assignee TEXT NOT NULL,
-        \\  add_hash TEXT NOT NULL,
-        \\  PRIMARY KEY(issue_id, assignee, add_hash)
-        \\);
-        \\CREATE TABLE pulls (
-        \\  id TEXT PRIMARY KEY,
-        \\  title TEXT NOT NULL,
-        \\  title_occurred_at TEXT NOT NULL,
-        \\  title_actor_principal TEXT NOT NULL,
-        \\  title_event_hash TEXT NOT NULL,
-        \\  body TEXT NOT NULL,
-        \\  body_occurred_at TEXT NOT NULL,
-        \\  body_actor_principal TEXT NOT NULL,
-        \\  body_event_hash TEXT NOT NULL,
-        \\  state TEXT NOT NULL,
-        \\  state_occurred_at TEXT NOT NULL,
-        \\  state_actor_principal TEXT NOT NULL,
-        \\  state_event_hash TEXT NOT NULL,
-        \\  base_ref TEXT NOT NULL,
-        \\  base_occurred_at TEXT NOT NULL,
-        \\  base_actor_principal TEXT NOT NULL,
-        \\  base_event_hash TEXT NOT NULL,
-        \\  head_ref TEXT NOT NULL,
-        \\  head_occurred_at TEXT NOT NULL,
-        \\  head_actor_principal TEXT NOT NULL,
-        \\  head_event_hash TEXT NOT NULL,
-        \\  draft INTEGER NOT NULL,
-        \\  merge_oid TEXT NOT NULL,
-        \\  target_oid TEXT NOT NULL,
-        \\  opened_at TEXT NOT NULL,
-        \\  author_principal TEXT NOT NULL,
-        \\  author_device TEXT NOT NULL
-        \\);
-        \\CREATE INDEX pulls_state_opened_idx ON pulls(state, opened_at);
-        \\CREATE TABLE pull_labels (
-        \\  pull_id TEXT NOT NULL,
-        \\  label TEXT NOT NULL,
-        \\  add_hash TEXT NOT NULL,
-        \\  PRIMARY KEY(pull_id, label, add_hash)
-        \\);
-        \\CREATE TABLE pull_assignees (
-        \\  pull_id TEXT NOT NULL,
-        \\  assignee TEXT NOT NULL,
-        \\  add_hash TEXT NOT NULL,
-        \\  PRIMARY KEY(pull_id, assignee, add_hash)
-        \\);
-        \\CREATE TABLE pull_reviewers (
-        \\  pull_id TEXT NOT NULL,
-        \\  reviewer TEXT NOT NULL,
-        \\  add_hash TEXT NOT NULL,
-        \\  PRIMARY KEY(pull_id, reviewer, add_hash)
-        \\);
-        \\CREATE TABLE comments (
-        \\  id TEXT PRIMARY KEY,
-        \\  parent_kind TEXT NOT NULL,
-        \\  parent_id TEXT NOT NULL,
-        \\  body TEXT NOT NULL,
-        \\  body_occurred_at TEXT NOT NULL,
-        \\  body_actor_principal TEXT NOT NULL,
-        \\  body_event_hash TEXT NOT NULL,
-        \\  redacted INTEGER NOT NULL,
-        \\  redacted_at TEXT NOT NULL,
-        \\  redacted_actor_principal TEXT NOT NULL,
-        \\  redacted_event_hash TEXT NOT NULL,
-        \\  created_at TEXT NOT NULL,
-        \\  author_principal TEXT NOT NULL,
-        \\  author_device TEXT NOT NULL
-        \\);
-        \\CREATE INDEX comments_parent_created_idx ON comments(parent_kind, parent_id, created_at);
-        \\CREATE TABLE commit_references (
-        \\  commit_oid TEXT NOT NULL,
-        \\  object_kind TEXT NOT NULL,
-        \\  object_id TEXT NOT NULL,
-        \\  prefix TEXT NOT NULL,
-        \\  PRIMARY KEY(commit_oid, object_kind, object_id)
-        \\);
-        \\CREATE INDEX commit_references_object_idx ON commit_references(object_kind, object_id, commit_oid);
-        \\CREATE TABLE legacy_aliases (
-        \\  provider TEXT NOT NULL,
-        \\  object_kind TEXT NOT NULL,
-        \\  object_id TEXT NOT NULL,
-        \\  number INTEGER NOT NULL,
-        \\  PRIMARY KEY(provider, object_kind, number),
-        \\  UNIQUE(provider, object_kind, object_id)
-        \\);
-        \\CREATE INDEX legacy_aliases_object_idx ON legacy_aliases(provider, object_kind, object_id);
-        \\CREATE TABLE acl_roles (
-        \\  principal TEXT PRIMARY KEY,
-        \\  role TEXT NOT NULL,
-        \\  grant_event_hash TEXT NOT NULL
-        \\);
-        \\CREATE TABLE acl_role_events (
-        \\  principal TEXT NOT NULL,
-        \\  role TEXT NOT NULL,
-        \\  event_hash TEXT NOT NULL,
-        \\  event_type TEXT NOT NULL,
-        \\  PRIMARY KEY(principal, event_hash)
-        \\);
-        \\CREATE INDEX acl_role_events_principal_idx ON acl_role_events(principal);
-        \\CREATE TABLE identity_devices (
-        \\  principal TEXT NOT NULL,
-        \\  device TEXT NOT NULL,
-        \\  key_fingerprint TEXT NOT NULL,
-        \\  public_key TEXT NOT NULL,
-        \\  added_event_hash TEXT NOT NULL,
-        \\  revoked_event_hash TEXT,
-        \\  PRIMARY KEY(principal, device, key_fingerprint)
-        \\);
-        \\CREATE INDEX identity_devices_principal_idx ON identity_devices(principal);
-        \\CREATE TABLE identity_device_events (
-        \\  principal TEXT NOT NULL,
-        \\  device TEXT NOT NULL,
-        \\  key_fingerprint TEXT NOT NULL,
-        \\  public_key TEXT NOT NULL,
-        \\  event_hash TEXT NOT NULL,
-        \\  event_type TEXT NOT NULL,
-        \\  PRIMARY KEY(principal, device, event_hash)
-        \\);
-        \\CREATE INDEX identity_device_events_device_idx ON identity_device_events(principal, device);
-    );
 }
 
 pub fn currentIndexRefsRaw(allocator: Allocator) ![]u8 {
@@ -2495,12 +2068,17 @@ fn applyIssueProjection(allocator: Allocator, db: *SqliteDb, event_hash: []const
         .object => |object| object,
         else => return "invalid_event_envelope",
     };
+    const legacy = switch (root.get("legacy") orelse return "invalid_event_envelope") {
+        .object => |object| object,
+        else => return "invalid_event_envelope",
+    };
 
     if (std.mem.eql(u8, envelope.event_type, "issue.opened")) {
         if (!(try creationEventWins(db, "issue.opened", envelope.object_id, event_hash))) return "duplicate_object_id";
         const title = event_mod.jsonString(payload.get("title")) orelse return "invalid_event_envelope";
         const body_value = event_mod.jsonString(payload.get("body")) orelse "";
         try insertIssueOpened(db, event_hash, envelope, title, body_value);
+        try insertLegacyAliasFromEnvelope(db, "issue", envelope.object_id, legacy);
         try insertPayloadStringArray(db, payload, "labels", insert_issue_label_sql, envelope.object_id, event_hash);
         try insertPayloadStringArray(db, payload, "assignees", insert_issue_assignee_sql, envelope.object_id, event_hash);
         return try issueCollectionLimitRejection(db, envelope.object_id);
@@ -2773,6 +2351,10 @@ fn applyPullProjection(allocator: Allocator, db: *SqliteDb, event_hash: []const 
         .object => |object| object,
         else => return "invalid_event_envelope",
     };
+    const legacy = switch (root.get("legacy") orelse return "invalid_event_envelope") {
+        .object => |object| object,
+        else => return "invalid_event_envelope",
+    };
 
     if (std.mem.eql(u8, envelope.event_type, "pull.opened")) {
         if (!(try creationEventWins(db, "pull.opened", envelope.object_id, event_hash))) return "duplicate_object_id";
@@ -2782,6 +2364,7 @@ fn applyPullProjection(allocator: Allocator, db: *SqliteDb, event_hash: []const 
         const body_value = event_mod.jsonString(payload.get("body")) orelse "";
         const draft = event_mod.jsonBool(payload.get("draft")) orelse false;
         try insertPullOpened(db, event_hash, envelope, title, body_value, base_ref, head_ref, draft);
+        try insertLegacyAliasFromEnvelope(db, "pull", envelope.object_id, legacy);
         return null;
     }
 
@@ -4084,84 +3667,6 @@ pub fn sqliteLimitValue(limit: ?usize) !i64 {
         return @intCast(max);
     }
     return -1;
-}
-
-pub fn appendIndexedEventJson(buf: *std.ArrayList(u8), allocator: Allocator, event: IndexedEvent) !void {
-    try buf.append(allocator, '{');
-    try appendJsonFieldString(buf, allocator, "ref", event.ref, true);
-    try appendJsonFieldString(buf, allocator, "commit", event.commit, true);
-    try appendJsonFieldString(buf, allocator, "event_hash", event.event_hash, true);
-    try appendJsonFieldString(buf, allocator, "tree", event.tree, true);
-    try appendJsonFieldString(buf, allocator, "subject", event.subject, true);
-    try appendJsonFieldBool(buf, allocator, "empty_tree", event.empty_tree, true);
-    try appendJsonFieldBool(buf, allocator, "valid_json", event.valid_json, true);
-    try appendJsonFieldString(buf, allocator, "domain_status", event.domain_status, event.rejection_reason.len != 0 or event.valid_json);
-    if (event.rejection_reason.len != 0) {
-        try appendJsonFieldString(buf, allocator, "rejection_reason", event.rejection_reason, event.valid_json);
-    }
-    if (event.valid_json) {
-        try appendJsonFieldString(buf, allocator, "event_type", event.event_type, true);
-        try appendJsonFieldString(buf, allocator, "object_kind", event.object_kind, true);
-        try appendJsonFieldString(buf, allocator, "object_id", event.object_id, true);
-        try appendJsonFieldString(buf, allocator, "actor_principal", event.actor_principal, true);
-        try appendJsonFieldString(buf, allocator, "actor_device", event.actor_device, true);
-        if (event.seq) |seq| try appendJsonFieldInteger(buf, allocator, "seq", seq, true);
-        try appendJsonFieldString(buf, allocator, "occurred_at", event.occurred_at, false);
-    }
-    try buf.append(allocator, '}');
-}
-
-pub fn printIndexedEvent(event: IndexedEvent) !void {
-    const short = event.commit[0..@min(event.commit.len, 12)];
-
-    if (event.valid_json) {
-        try out("{s} {s} {s} #{s} {s}{s}{s}\n", .{
-            short,
-            event.ref,
-            event.event_type,
-            event.object_id[0..@min(event.object_id.len, 7)],
-            event.subject,
-            if (std.mem.eql(u8, event.domain_status, "rejected")) " rejected:" else "",
-            if (std.mem.eql(u8, event.domain_status, "rejected")) event.rejection_reason else "",
-        });
-    } else {
-        try out("{s} {s} invalid-event {s}\n", .{ short, event.ref, event.subject });
-    }
-}
-
-test "indexed event json carries projection fields" {
-    const event = IndexedEvent{
-        .ref = "refs/gitomi/inbox/alice/laptop",
-        .commit = "0123456789abcdef0123456789abcdef01234567",
-        .event_hash = "0123456789abcdef0123456789abcdef01234567",
-        .tree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
-        .subject = "issue.opened #018f000 Indexed",
-        .empty_tree = true,
-        .valid_json = true,
-        .event_type = "issue.opened",
-        .object_kind = "issue",
-        .object_id = "018f0000-0000-7000-8000-000000000002",
-        .actor_principal = "alice",
-        .actor_device = "laptop",
-        .seq = 7,
-        .occurred_at = "2026-05-13T18:30:59Z",
-        .domain_status = "accepted",
-        .rejection_reason = "",
-    };
-
-    var line: std.ArrayList(u8) = .empty;
-    defer line.deinit(std.testing.allocator);
-    try appendIndexedEventJson(&line, std.testing.allocator, event);
-
-    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, line.items, .{});
-    defer parsed.deinit();
-    const root = parsed.value.object;
-    try std.testing.expectEqualStrings("refs/gitomi/inbox/alice/laptop", root.get("ref").?.string);
-    try std.testing.expectEqual(true, root.get("empty_tree").?.bool);
-    try std.testing.expectEqual(true, root.get("valid_json").?.bool);
-    try std.testing.expectEqualStrings("accepted", root.get("domain_status").?.string);
-    try std.testing.expectEqualStrings("issue.opened", root.get("event_type").?.string);
-    try std.testing.expectEqual(@as(i64, 7), root.get("seq").?.integer);
 }
 
 test "data commit reference parser extracts unique uuid prefixes" {

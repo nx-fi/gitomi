@@ -244,7 +244,7 @@ fn ensureImportBot(allocator: Allocator, principal: []const u8, device: []const 
     const role = try index.roleForPrincipal(allocator, repo, checked_principal);
     defer if (role) |value| allocator.free(value);
     if (role == null or !roleAtLeastMaintainer(role.?)) {
-        try writeImportBotRole(allocator, checked_principal);
+        try writeImportBotRole(allocator, checked_principal, checked_device);
         try index.ensureIndex(allocator, repo);
     }
 }
@@ -254,7 +254,7 @@ fn roleAtLeastMaintainer(role: []const u8) bool {
 }
 
 fn writeImportBotIdentity(allocator: Allocator, principal: []const u8, device: []const u8) !void {
-    var writer = try EventWriter.init(allocator, "gt github import");
+    var writer = try EventWriter.initForInboxRef(allocator, "gt github import", principal, device);
     defer writer.deinit();
 
     const public_key = try repo_mod.signingPublicKey(allocator);
@@ -280,8 +280,8 @@ fn writeImportBotIdentity(allocator: Allocator, principal: []const u8, device: [
     allocator.free(commit);
 }
 
-fn writeImportBotRole(allocator: Allocator, principal: []const u8) !void {
-    var writer = try EventWriter.init(allocator, "gt github import");
+fn writeImportBotRole(allocator: Allocator, principal: []const u8, device: []const u8) !void {
+    var writer = try EventWriter.initForInboxRef(allocator, "gt github import", principal, device);
     defer writer.deinit();
 
     const event_uuid = try util.newUuidV7(allocator);
