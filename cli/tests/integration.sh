@@ -152,6 +152,66 @@ init_repo "$reducer"
   gt fsck >/dev/null
 )
 
+echo "integration: github import preserves legacy numbers and export replays API calls"
+github_io="$ROOT/github-io"
+init_repo "$github_io"
+(
+  cd "$github_io"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  cat > github-fixture.json <<'JSON'
+{
+  "issues": [
+    {
+      "number": 42,
+      "title": "Legacy bug",
+      "body": "Imported issue body",
+      "state": "closed",
+      "created_at": "2026-01-01T00:00:00Z",
+      "closed_at": "2026-01-02T00:00:00Z",
+      "labels": [{ "name": "bug" }],
+      "assignees": [{ "login": "alice" }]
+    }
+  ],
+  "pulls": [
+    {
+      "number": 7,
+      "title": "Legacy PR",
+      "body": "Imported pull body",
+      "state": "closed",
+      "created_at": "2026-01-03T00:00:00Z",
+      "merged_at": "2026-01-04T00:00:00Z",
+      "merge_commit_sha": "0123456789abcdef0123456789abcdef01234567",
+      "base": { "ref": "main" },
+      "head": { "ref": "feature" },
+      "draft": false
+    }
+  ],
+  "comments": {
+    "issue:42": [{ "body": "Imported issue comment", "created_at": "2026-01-02T01:00:00Z" }],
+    "pull:7": [{ "body": "Imported pull comment", "created_at": "2026-01-04T01:00:00Z" }]
+  }
+}
+JSON
+  gt github import --from-file github-fixture.json >/dev/null
+  issues="$(gt issue list --json)"
+  assert_contains "$issues" '"title":"Legacy bug"'
+  assert_contains "$issues" '"legacy_github_issue_number":42'
+  issue_show="$(gt issue show '#42')"
+  assert_contains "$issue_show" "github:    #42"
+  pulls="$(gt pr list --json)"
+  assert_contains "$pulls" '"title":"Legacy PR"'
+  assert_contains "$pulls" '"legacy_github_pull_number":7'
+  events="$(gt events list --json)"
+  assert_contains "$events" '"actor_principal":"import-bot"'
+  assert_contains "$events" '"event_type":"comment.added"'
+  replay="$(gt github export --repo acme/project --dry-run --reuse-legacy)"
+  assert_contains "$replay" "PATCH /repos/acme/project/issues/42"
+  assert_contains "$replay" "PUT /repos/acme/project/pulls/7/merge"
+  assert_contains "$replay" "POST /repos/acme/project/issues/42/comments"
+  assert_contains "$replay" "POST /repos/acme/project/issues/7/comments"
+  gt fsck >/dev/null
+)
+
 echo "integration: index snapshots restore cache and enforce retention count"
 snapshots="$ROOT/snapshots"
 init_repo "$snapshots"

@@ -21,11 +21,15 @@ pub const EventWriter = struct {
     persist_config: bool,
 
     pub fn init(allocator: Allocator, command_context: []const u8) !EventWriter {
-        return initInternal(allocator, command_context, null, null, true);
+        return initInternal(allocator, command_context, null, null, null, null, true);
     }
 
     pub fn initForActor(allocator: Allocator, command_context: []const u8, principal: []const u8, device: []const u8) !EventWriter {
-        return initInternal(allocator, command_context, principal, device, false);
+        return initInternal(allocator, command_context, principal, device, null, null, false);
+    }
+
+    pub fn initForInboxRef(allocator: Allocator, command_context: []const u8, principal: []const u8, device: []const u8) !EventWriter {
+        return initInternal(allocator, command_context, null, null, principal, device, true);
     }
 
     fn initInternal(
@@ -33,6 +37,8 @@ pub const EventWriter = struct {
         command_context: []const u8,
         actor_principal: ?[]const u8,
         actor_device: ?[]const u8,
+        inbox_principal: ?[]const u8,
+        inbox_device: ?[]const u8,
         persist_config: bool,
     ) !EventWriter {
         var repo = try repo_mod.discoverRepo(allocator);
@@ -61,7 +67,13 @@ pub const EventWriter = struct {
             try repo_mod.recoverConfigSeq(allocator, &cfg);
         }
 
-        const inbox_ref = try repo_mod.inboxRef(allocator, cfg);
+        const inbox_ref = if (inbox_principal) |principal| blk: {
+            const checked_principal = try util.checkedRefSegment(allocator, principal, "principal");
+            defer allocator.free(checked_principal);
+            const checked_device = try util.checkedRefSegment(allocator, inbox_device.?, "device");
+            defer allocator.free(checked_device);
+            break :blk try std.fmt.allocPrint(allocator, "refs/gitomi/inbox/{s}/{s}", .{ checked_principal, checked_device });
+        } else try repo_mod.inboxRef(allocator, cfg);
         errdefer allocator.free(inbox_ref);
 
         var prepared_parents = try git.prepareEventParents(allocator, inbox_ref);
