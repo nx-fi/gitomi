@@ -1,13 +1,15 @@
 const std = @import("std");
 const comment = @import("comment.zig");
 const errors = @import("errors.zig");
+const event_mod = @import("event.zig");
 const fsck = @import("fsck.zig");
 const git = @import("git.zig");
 const index = @import("index.zig");
 const io = @import("io.zig");
 const issue = @import("issue.zig");
-const pull = @import("pull.zig");
+const pull_mod = @import("pull.zig");
 const repo_mod = @import("repo.zig");
+const runs = @import("runs.zig");
 const sync = @import("sync.zig");
 const util = @import("util.zig");
 const web = @import("web.zig");
@@ -60,6 +62,8 @@ fn realMain() !void {
         try cmdPull(allocator, args[2..]);
     } else if (std.mem.eql(u8, cmd, "comment")) {
         try cmdComment(allocator, args[2..]);
+    } else if (std.mem.eql(u8, cmd, "runs")) {
+        try cmdRuns(allocator, args[2..]);
     } else if (std.mem.eql(u8, cmd, "sync")) {
         try cmdSync(allocator, args[2..]);
     } else if (std.mem.eql(u8, cmd, "web")) {
@@ -82,6 +86,7 @@ fn printUsage() !void {
         \\  gt events list [--json] [--limit N] [--ref REF]
         \\  gt issue list [--json]
         \\  gt issue open --title TITLE [--body BODY] [--label LABEL] [--assignee PRINCIPAL]
+        \\  gt issue edit ISSUE [--title TITLE] [--body BODY] [--state open|closed] [--label LABEL] [--unlabel LABEL] [--assignee PRINCIPAL] [--unassign PRINCIPAL]
         \\  gt issue title ISSUE --title TITLE
         \\  gt issue body ISSUE --body BODY
         \\  gt issue close|reopen ISSUE
@@ -89,6 +94,7 @@ fn printUsage() !void {
         \\  gt issue assignee add|remove ISSUE PRINCIPAL
         \\  gt pull list [--json]
         \\  gt pull open --title TITLE --base BASE --head HEAD [--body BODY] [--draft]
+        \\  gt pull edit PULL [--title TITLE] [--body BODY] [--state open|closed] [--base BASE] [--head HEAD] [--label LABEL] [--unlabel LABEL] [--assignee PRINCIPAL] [--unassign PRINCIPAL] [--reviewer PRINCIPAL] [--unreviewer PRINCIPAL]
         \\  gt pull title PULL --title TITLE
         \\  gt pull body PULL --body BODY
         \\  gt pull close|reopen PULL
@@ -98,10 +104,11 @@ fn printUsage() !void {
         \\  gt pull assignee add|remove PULL PRINCIPAL
         \\  gt pull reviewer add|remove PULL PRINCIPAL
         \\  gt pull merge PULL [--merge-oid OID] [--target-oid OID]
-        \\  gt comment list issue ISSUE [--json]
-        \\  gt comment add issue ISSUE --body BODY
+        \\  gt comment list issue|pull OBJECT [--json]
+        \\  gt comment add issue|pull OBJECT --body BODY
         \\  gt comment edit COMMENT --body BODY
         \\  gt comment redact COMMENT [--reason REASON]
+        \\  gt runs prune [--dry-run] [--max-age-days N] [--max-count N] [--max-bytes N]
         \\  gt sync [--remote REMOTE] [--pull-only|--push-only]
         \\  gt web [--host 127.0.0.1] [--port 8080]
         \\
@@ -172,12 +179,21 @@ fn cmdInit(allocator: Allocator, args: []const []const u8) !void {
     defer cfg.deinit();
 
     try repo_mod.writeConfig(repo.config_path, cfg);
+    const public_key = try repo_mod.signingPublicKey(allocator);
+    defer allocator.free(public_key);
+    const fingerprint = try repo_mod.signingKeyFingerprint(allocator, public_key);
+    defer allocator.free(fingerprint);
+    const genesis_manifest = try repo_mod.buildGenesisManifestJson(allocator, cfg, public_key, fingerprint);
+    defer allocator.free(genesis_manifest);
+    const genesis_oid = try repo_mod.writeGenesisRef(allocator, genesis_manifest, force);
+    defer allocator.free(genesis_oid);
 
     try io.out("initialized Gitomi repository\n", .{});
     try io.out("  repo:      {s}\n", .{repo.root});
     try io.out("  config:    {s}\n", .{repo.config_path});
     try io.out("  repo_id:   {s}\n", .{cfg.repo_id});
     try io.out("  actor:     {s}/{s}\n", .{ cfg.principal, cfg.device });
+    try io.out("  genesis:   {s}\n", .{genesis_oid});
     const ref = try repo_mod.inboxRef(allocator, cfg);
     defer allocator.free(ref);
     try io.out("  inbox ref: {s}\n", .{ref});
@@ -187,7 +203,7 @@ fn cmdStatus(allocator: Allocator) !void {
     var repo = try repo_mod.discoverRepo(allocator);
     defer repo.deinit();
 
-    var cfg = repo_mod.loadConfig(allocator, repo.config_path) catch |err| switch (err) {
+    var cfg = repo_mod.loadConfigForWrite(allocator, repo) catch |err| switch (err) {
         CliError.ConfigNotFound => {
             try io.eprint("gt status: Gitomi is not initialized; run `gt init`\n", .{});
             return CliError.UserError;
@@ -212,6 +228,8 @@ fn cmdStatus(allocator: Allocator) !void {
         "refs/gitomi/staging",
     });
     defer allocator.free(staged_refs);
+    const genesis_oid = try git.resolveOptionalRef(allocator, repo_mod.genesis_ref);
+    defer if (genesis_oid) |oid| allocator.free(oid);
 
     try index.ensureIndex(allocator, repo);
     const event_count = try index.countIndexedEvents(allocator, repo);
@@ -222,6 +240,7 @@ fn cmdStatus(allocator: Allocator) !void {
     try io.out("actor:      {s}/{s}\n", .{ cfg.principal, cfg.device });
     try io.out("seq:        {d}\n", .{cfg.seq});
     try io.out("inbox_ref:  {s}\n", .{inbox_ref});
+    try io.out("genesis:    {s}\n", .{if (genesis_oid) |oid| oid else "missing"});
     try io.out("inbox_refs: {d}\n", .{util.countNonEmptyLines(inbox_refs)});
     try io.out("staged:     {d}\n", .{util.countNonEmptyLines(staged_refs)});
     try io.out("events:     {d}\n", .{event_count});
@@ -256,6 +275,15 @@ fn cmdFsck(allocator: Allocator, args: []const []const u8) !void {
 
     if (config_invalid) {
         try checker.fail("{s}: invalid Gitomi config", .{repo.config_path});
+    }
+
+    const genesis_oid = try git.resolveOptionalRef(allocator, repo_mod.genesis_ref);
+    defer if (genesis_oid) |oid| allocator.free(oid);
+    if (genesis_oid) |oid| {
+        sync.verifyCommitSignature(allocator, oid) catch try checker.fail("{s}: signature verification failed", .{repo_mod.genesis_ref});
+        repo_mod.validateGenesisManifest(allocator, oid) catch try checker.fail("{s}: invalid genesis manifest", .{repo_mod.genesis_ref});
+    } else {
+        try checker.fail("{s}: missing genesis ref", .{repo_mod.genesis_ref});
     }
 
     const refs = try git.listRefs(allocator, "refs/gitomi/inbox");
@@ -409,6 +437,76 @@ fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
         return;
     }
 
+    if (std.mem.eql(u8, args[0], "edit")) {
+        if (args.len < 2) {
+            try io.eprint("gt issue edit: ISSUE is required\n", .{});
+            return CliError.UserError;
+        }
+
+        var update = event_mod.IssueUpdate{};
+        var labels_added: std.ArrayList([]const u8) = .empty;
+        defer labels_added.deinit(allocator);
+        var labels_removed: std.ArrayList([]const u8) = .empty;
+        defer labels_removed.deinit(allocator);
+        var assignees_added: std.ArrayList([]const u8) = .empty;
+        defer assignees_added.deinit(allocator);
+        var assignees_removed: std.ArrayList([]const u8) = .empty;
+        defer assignees_removed.deinit(allocator);
+
+        var i: usize = 2;
+        while (i < args.len) : (i += 1) {
+            const arg = args[i];
+            if (std.mem.eql(u8, arg, "--title")) {
+                update.title = try util.requireValue(args, &i, "--title");
+            } else if (std.mem.eql(u8, arg, "--body")) {
+                update.body = try util.requireValue(args, &i, "--body");
+            } else if (std.mem.eql(u8, arg, "--state")) {
+                const state = try util.requireValue(args, &i, "--state");
+                if (!isIssueState(state)) {
+                    try io.eprint("gt issue edit: --state must be open or closed\n", .{});
+                    return CliError.UserError;
+                }
+                update.state = state;
+            } else if (std.mem.eql(u8, arg, "--label")) {
+                const value = try util.requireValue(args, &i, "--label");
+                try requireNonEmptyOption("gt issue edit", "--label", value);
+                try labels_added.append(allocator, value);
+            } else if (std.mem.eql(u8, arg, "--unlabel")) {
+                const value = try util.requireValue(args, &i, "--unlabel");
+                try requireNonEmptyOption("gt issue edit", "--unlabel", value);
+                try labels_removed.append(allocator, value);
+            } else if (std.mem.eql(u8, arg, "--assignee")) {
+                const value = try util.requireValue(args, &i, "--assignee");
+                try requireNonEmptyOption("gt issue edit", "--assignee", value);
+                try assignees_added.append(allocator, value);
+            } else if (std.mem.eql(u8, arg, "--unassign")) {
+                const value = try util.requireValue(args, &i, "--unassign");
+                try requireNonEmptyOption("gt issue edit", "--unassign", value);
+                try assignees_removed.append(allocator, value);
+            } else {
+                try io.eprint("gt issue edit: unknown option '{s}'\n", .{arg});
+                return CliError.UserError;
+            }
+        }
+
+        update.labels_added = labels_added.items;
+        update.labels_removed = labels_removed.items;
+        update.assignees_added = assignees_added.items;
+        update.assignees_removed = assignees_removed.items;
+        if (!update.hasChanges()) {
+            try io.eprint("gt issue edit: at least one update option is required\n", .{});
+            return CliError.UserError;
+        }
+        if (update.title) |title| {
+            try requireNonEmptyOption("gt issue edit", "--title", title);
+        }
+
+        const issue_id = try resolveIssueIdForCommand(allocator, args[1]);
+        defer allocator.free(issue_id);
+        try issue.createIssueUpdatedEvent(allocator, issue_id, update);
+        return;
+    }
+
     if (std.mem.eql(u8, args[0], "title") or std.mem.eql(u8, args[0], "body")) {
         const payload_key: []const u8 = if (std.mem.eql(u8, args[0], "title")) "title" else "body";
         const event_type: []const u8 = if (std.mem.eql(u8, args[0], "title")) "issue.title_set" else "issue.body_set";
@@ -532,6 +630,16 @@ fn resolveCommentIdForCommand(allocator: Allocator, raw_ref: []const u8) ![]u8 {
     return try index.resolveCommentId(allocator, repo, raw_ref);
 }
 
+fn requireNonEmptyOption(context: []const u8, option: []const u8, value: []const u8) !void {
+    if (std.mem.trim(u8, value, " \t\r\n").len != 0) return;
+    try io.eprint("{s}: {s} must not be empty\n", .{ context, option });
+    return CliError.UserError;
+}
+
+fn isIssueState(value: []const u8) bool {
+    return std.mem.eql(u8, value, "open") or std.mem.eql(u8, value, "closed");
+}
+
 fn cmdPull(allocator: Allocator, args: []const []const u8) !void {
     if (args.len == 0) {
         try io.eprint("gt pull: expected subcommand 'list', 'open', or a pull update command\n", .{});
@@ -555,6 +663,94 @@ fn cmdPull(allocator: Allocator, args: []const []const u8) !void {
         defer repo.deinit();
         try index.ensureIndex(allocator, repo);
         try index.listPullsFromIndex(allocator, repo, json);
+        return;
+    }
+
+    if (std.mem.eql(u8, args[0], "edit")) {
+        if (args.len < 2) {
+            try io.eprint("gt pull edit: PULL is required\n", .{});
+            return CliError.UserError;
+        }
+
+        var update = event_mod.PullUpdate{};
+        var labels_added: std.ArrayList([]const u8) = .empty;
+        defer labels_added.deinit(allocator);
+        var labels_removed: std.ArrayList([]const u8) = .empty;
+        defer labels_removed.deinit(allocator);
+        var assignees_added: std.ArrayList([]const u8) = .empty;
+        defer assignees_added.deinit(allocator);
+        var assignees_removed: std.ArrayList([]const u8) = .empty;
+        defer assignees_removed.deinit(allocator);
+        var reviewers_added: std.ArrayList([]const u8) = .empty;
+        defer reviewers_added.deinit(allocator);
+        var reviewers_removed: std.ArrayList([]const u8) = .empty;
+        defer reviewers_removed.deinit(allocator);
+
+        var i: usize = 2;
+        while (i < args.len) : (i += 1) {
+            const arg = args[i];
+            if (std.mem.eql(u8, arg, "--title")) {
+                update.title = try util.requireValue(args, &i, "--title");
+            } else if (std.mem.eql(u8, arg, "--body")) {
+                update.body = try util.requireValue(args, &i, "--body");
+            } else if (std.mem.eql(u8, arg, "--state")) {
+                const state = try util.requireValue(args, &i, "--state");
+                if (!isIssueState(state)) {
+                    try io.eprint("gt pull edit: --state must be open or closed\n", .{});
+                    return CliError.UserError;
+                }
+                update.state = state;
+            } else if (std.mem.eql(u8, arg, "--base")) {
+                update.base_ref = try util.requireValue(args, &i, "--base");
+            } else if (std.mem.eql(u8, arg, "--head")) {
+                update.head_ref = try util.requireValue(args, &i, "--head");
+            } else if (std.mem.eql(u8, arg, "--label")) {
+                const value = try util.requireValue(args, &i, "--label");
+                try requireNonEmptyOption("gt pull edit", "--label", value);
+                try labels_added.append(allocator, value);
+            } else if (std.mem.eql(u8, arg, "--unlabel")) {
+                const value = try util.requireValue(args, &i, "--unlabel");
+                try requireNonEmptyOption("gt pull edit", "--unlabel", value);
+                try labels_removed.append(allocator, value);
+            } else if (std.mem.eql(u8, arg, "--assignee")) {
+                const value = try util.requireValue(args, &i, "--assignee");
+                try requireNonEmptyOption("gt pull edit", "--assignee", value);
+                try assignees_added.append(allocator, value);
+            } else if (std.mem.eql(u8, arg, "--unassign")) {
+                const value = try util.requireValue(args, &i, "--unassign");
+                try requireNonEmptyOption("gt pull edit", "--unassign", value);
+                try assignees_removed.append(allocator, value);
+            } else if (std.mem.eql(u8, arg, "--reviewer")) {
+                const value = try util.requireValue(args, &i, "--reviewer");
+                try requireNonEmptyOption("gt pull edit", "--reviewer", value);
+                try reviewers_added.append(allocator, value);
+            } else if (std.mem.eql(u8, arg, "--unreviewer")) {
+                const value = try util.requireValue(args, &i, "--unreviewer");
+                try requireNonEmptyOption("gt pull edit", "--unreviewer", value);
+                try reviewers_removed.append(allocator, value);
+            } else {
+                try io.eprint("gt pull edit: unknown option '{s}'\n", .{arg});
+                return CliError.UserError;
+            }
+        }
+
+        update.labels_added = labels_added.items;
+        update.labels_removed = labels_removed.items;
+        update.assignees_added = assignees_added.items;
+        update.assignees_removed = assignees_removed.items;
+        update.reviewers_added = reviewers_added.items;
+        update.reviewers_removed = reviewers_removed.items;
+        if (!update.hasChanges()) {
+            try io.eprint("gt pull edit: at least one update option is required\n", .{});
+            return CliError.UserError;
+        }
+        if (update.title) |title| try requireNonEmptyOption("gt pull edit", "--title", title);
+        if (update.base_ref) |base_ref| try requireNonEmptyOption("gt pull edit", "--base", base_ref);
+        if (update.head_ref) |head_ref| try requireNonEmptyOption("gt pull edit", "--head", head_ref);
+
+        const pull_id = try resolvePullIdForCommand(allocator, args[1]);
+        defer allocator.free(pull_id);
+        try pull_mod.createPullUpdatedEvent(allocator, pull_id, update);
         return;
     }
 
@@ -608,7 +804,7 @@ fn cmdPull(allocator: Allocator, args: []const []const u8) !void {
         }
         const pull_id = try resolvePullIdForCommand(allocator, args[1]);
         defer allocator.free(pull_id);
-        try pull.createPullStringEvent(allocator, pull_id, event_type, payload_key, value.?);
+        try pull_mod.createPullStringEvent(allocator, pull_id, event_type, payload_key, value.?);
         return;
     }
 
@@ -620,7 +816,7 @@ fn cmdPull(allocator: Allocator, args: []const []const u8) !void {
         const pull_id = try resolvePullIdForCommand(allocator, args[1]);
         defer allocator.free(pull_id);
         const state: []const u8 = if (std.mem.eql(u8, args[0], "close")) "closed" else "open";
-        try pull.createPullStringEvent(allocator, pull_id, "pull.state_set", "state", state);
+        try pull_mod.createPullStringEvent(allocator, pull_id, "pull.state_set", "state", state);
         return;
     }
 
@@ -646,7 +842,7 @@ fn cmdPull(allocator: Allocator, args: []const []const u8) !void {
         defer allocator.free(pull_id);
         const event_type = try std.fmt.allocPrint(allocator, "pull.{s}_{s}", .{ collection, if (std.mem.eql(u8, op, "add")) "added" else "removed" });
         defer allocator.free(event_type);
-        try pull.createPullStringEvent(allocator, pull_id, event_type, collection, args[3]);
+        try pull_mod.createPullStringEvent(allocator, pull_id, event_type, collection, args[3]);
         return;
     }
 
@@ -677,7 +873,7 @@ fn cmdPull(allocator: Allocator, args: []const []const u8) !void {
         }
         const pull_id = try resolvePullIdForCommand(allocator, args[1]);
         defer allocator.free(pull_id);
-        try pull.createPullMergedEvent(allocator, pull_id, merge_oid, target_oid);
+        try pull_mod.createPullMergedEvent(allocator, pull_id, merge_oid, target_oid);
         return;
     }
 
@@ -724,7 +920,7 @@ fn cmdPull(allocator: Allocator, args: []const []const u8) !void {
         return CliError.UserError;
     }
 
-    try pull.createPullOpenedEvent(allocator, title.?, body, base_ref.?, head_ref.?, draft);
+    try pull_mod.createPullOpenedEvent(allocator, title.?, body, base_ref.?, head_ref.?, draft);
 }
 
 fn cmdComment(allocator: Allocator, args: []const []const u8) !void {
@@ -734,10 +930,11 @@ fn cmdComment(allocator: Allocator, args: []const []const u8) !void {
     }
 
     if (std.mem.eql(u8, args[0], "list")) {
-        if (args.len < 3 or !std.mem.eql(u8, args[1], "issue")) {
-            try io.eprint("gt comment list: expected issue ISSUE [--json]\n", .{});
+        if (args.len < 3 or (!std.mem.eql(u8, args[1], "issue") and !std.mem.eql(u8, args[1], "pull"))) {
+            try io.eprint("gt comment list: expected issue ISSUE or pull PULL [--json]\n", .{});
             return CliError.UserError;
         }
+        const parent_kind = args[1];
         var json = false;
         var i: usize = 3;
         while (i < args.len) : (i += 1) {
@@ -748,20 +945,24 @@ fn cmdComment(allocator: Allocator, args: []const []const u8) !void {
                 return CliError.UserError;
             }
         }
-        const issue_id = try resolveIssueIdForCommand(allocator, args[2]);
-        defer allocator.free(issue_id);
+        const parent_id = if (std.mem.eql(u8, parent_kind, "issue"))
+            try resolveIssueIdForCommand(allocator, args[2])
+        else
+            try resolvePullIdForCommand(allocator, args[2]);
+        defer allocator.free(parent_id);
         var repo = try repo_mod.discoverRepo(allocator);
         defer repo.deinit();
         try index.ensureIndex(allocator, repo);
-        try index.listCommentsFromIndex(allocator, repo, "issue", issue_id, json);
+        try index.listCommentsFromIndex(allocator, repo, parent_kind, parent_id, json);
         return;
     }
 
     if (std.mem.eql(u8, args[0], "add")) {
-        if (args.len < 3 or !std.mem.eql(u8, args[1], "issue")) {
-            try io.eprint("gt comment add: expected issue ISSUE --body BODY\n", .{});
+        if (args.len < 3 or (!std.mem.eql(u8, args[1], "issue") and !std.mem.eql(u8, args[1], "pull"))) {
+            try io.eprint("gt comment add: expected issue ISSUE or pull PULL --body BODY\n", .{});
             return CliError.UserError;
         }
+        const parent_kind = args[1];
         var body: ?[]const u8 = null;
         var i: usize = 3;
         while (i < args.len) : (i += 1) {
@@ -776,9 +977,12 @@ fn cmdComment(allocator: Allocator, args: []const []const u8) !void {
             try io.eprint("gt comment add: --body is required\n", .{});
             return CliError.UserError;
         }
-        const issue_id = try resolveIssueIdForCommand(allocator, args[2]);
-        defer allocator.free(issue_id);
-        try comment.createCommentAddedEvent(allocator, "issue", issue_id, body.?);
+        const parent_id = if (std.mem.eql(u8, parent_kind, "issue"))
+            try resolveIssueIdForCommand(allocator, args[2])
+        else
+            try resolvePullIdForCommand(allocator, args[2]);
+        defer allocator.free(parent_id);
+        try comment.createCommentAddedEvent(allocator, parent_kind, parent_id, body.?);
         return;
     }
 
@@ -830,6 +1034,39 @@ fn cmdComment(allocator: Allocator, args: []const []const u8) !void {
 
     try io.eprint("gt comment: expected subcommand 'list', 'add', 'edit', or 'redact'\n", .{});
     return CliError.UserError;
+}
+
+fn cmdRuns(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len == 0 or !std.mem.eql(u8, args[0], "prune")) {
+        try io.eprint("gt runs: expected subcommand 'prune'\n", .{});
+        return CliError.UserError;
+    }
+
+    var options = runs.PruneOptions{};
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--dry-run")) {
+            options.dry_run = true;
+        } else if (std.mem.eql(u8, arg, "--max-age-days")) {
+            options.max_age_days = try runs.parsePruneNumber(try util.requireValue(args, &i, "--max-age-days"), "--max-age-days");
+        } else if (std.mem.eql(u8, arg, "--max-count")) {
+            const value = try runs.parsePruneNumber(try util.requireValue(args, &i, "--max-count"), "--max-count");
+            options.max_count = std.math.cast(usize, value) orelse {
+                try io.eprint("gt runs prune: --max-count is too large\n", .{});
+                return CliError.UserError;
+            };
+        } else if (std.mem.eql(u8, arg, "--max-bytes")) {
+            options.max_bytes = try runs.parsePruneNumber(try util.requireValue(args, &i, "--max-bytes"), "--max-bytes");
+        } else {
+            try io.eprint("gt runs prune: unknown option '{s}'\n", .{arg});
+            return CliError.UserError;
+        }
+    }
+
+    var repo = try repo_mod.discoverRepo(allocator);
+    defer repo.deinit();
+    try runs.prune(allocator, options);
 }
 
 fn cmdSync(allocator: Allocator, args: []const []const u8) !void {

@@ -4,7 +4,11 @@
 
 This document defines the normative role-based access control (RBAC) system for Gitomi. It specifies the role hierarchy, the permission matrix, the bootstrap trust model, and the reducer rules that derive effective permissions from the event DAG.
 
-All authorization state is event-sourced from `acl.role_granted`, `acl.role_revoked`, `identity.device_added`, and `identity.device_revoked` events as required by the product specification (§5.3).
+Initial authorization state is seeded from the signed genesis manifest at
+`refs/gitomi/genesis`. Subsequent authorization state is event-sourced from
+`acl.role_granted`, `acl.role_revoked`, `identity.device_added`, and
+`identity.device_revoked` events as required by the product specification
+(§5.3).
 
 ### 1.1. Conformance Keywords
 
@@ -55,6 +59,7 @@ The following table defines the minimum permission set and the lowest role requi
 | `pull.edit_own`             |        |          | ✓           | ✓          | ✓     |
 | `issue.edit_any`            |        |          |             | ✓          | ✓     |
 | `pull.edit_any`             |        |          |             | ✓          | ✓     |
+| `comment.edit_any`          |        |          |             | ✓          | ✓     |
 | `comment.redact_any`        |        |          |             | ✓          | ✓     |
 | `issue.manage_labels`       |        |          |             | ✓          | ✓     |
 | `issue.manage_assignees`    |        |          |             | ✓          | ✓     |
@@ -67,15 +72,24 @@ The following table defines the minimum permission set and the lowest role requi
 | `acl.revoke`                |        |          |             |            | ✓     |
 | `identity.manage`           |        |          |             |            | ✓     |
 
+The `*.read` permissions are cooperative access-control signals for Gitomi
+servers and user interfaces. They cannot revoke bytes already cloned through
+Git, copied from a bundle, or retained in another replica. Operators that need
+confidentiality MUST combine Gitomi with transport, hosting, or encryption
+controls outside the v1 event format.
+
 ### 3.2. Own-Object Scope
 
 Permissions suffixed with `_own` apply only when the actor principal matches the principal that created the object (the actor on the opening event). For `contributor`-level actors:
 
 *   `issue.edit_own` permits `issue.title_set`, `issue.body_set`, and `issue.state_set` on issues the actor opened.
 *   `pull.edit_own` permits `pull.title_set`, `pull.body_set`, `pull.state_set`, `pull.base_set`, and `pull.head_set` on pull requests the actor opened.
-*   `comment.edit_own` permits `comment.body_set` on comments the actor authored.
+*   `comment.edit_own` permits `comment.body_set` and `comment.redacted` on comments the actor authored.
 
 A `maintainer` or `owner` MAY edit any object regardless of authorship via the `_any` permissions.
+`comment.edit_any` permits rewriting another principal's comment body.
+`comment.redact_any` permits redacting another principal's comment, but it does
+not imply permission to rewrite that comment body.
 
 ### 3.3. Event-to-Permission Mapping
 
@@ -105,7 +119,7 @@ Every event type MUST map to a required permission. The following defines the ma
 | `pull.reviewer_removed`   | `pull.manage_reviewers`   | —       |
 | `pull.merged`             | `pull.merge`              | —       |
 | `comment.added`           | `comment.add`             | —       |
-| `comment.body_set`        | `comment.edit_own` or `comment.redact_any` | object |
+| `comment.body_set`        | `comment.edit_own` or `comment.edit_any` | object |
 | `comment.redacted`        | `comment.edit_own` or `comment.redact_any` | object |
 | `acl.role_granted`        | `acl.grant`               | —       |
 | `acl.role_revoked`        | `acl.revoke`              | —       |
@@ -116,34 +130,57 @@ Every event type MUST map to a required permission. The following defines the ma
 
 When the scope column says "object", the reducer MUST check whether `_own` is sufficient (actor authored the object) or whether `_any` is required.
 
+An `issue.opened` event that includes `payload.labels` MUST also require
+`issue.manage_labels`. An `issue.opened` event that includes
+`payload.assignees` MUST also require `issue.manage_assignees`. These
+collection additions cannot bypass RBAC by being batched into the issue creation
+event.
+
 ## 4. Bootstrap Trust
 
-### 4.1. Repository Initializer
+### 4.1. Genesis Manifest
 
-A repository has no ACL state before its first event. The principal that creates the first `acl.role_granted` event in the repository is the **initializer**.
+A repository MUST bootstrap from the signed genesis manifest at
+`refs/gitomi/genesis`. The manifest grants the initial `owner` role and binds the
+initial owner device to public signing key material.
 
-The initializer's first ACL event MUST grant the `owner` role to itself. This is a self-bootstrap: no prior authorization is required for this single event.
+The genesis manifest is equivalent to these accepted facts at causal frontier
+zero:
 
-Formally:
+*   `acl.role_granted` for `owner.principal` with role `owner`;
+*   `identity.device_added` for the owner's initial device; and
+*   a signing-key binding for that `(principal, device)`.
 
-1.  If the repository contains zero accepted `acl.role_granted` or `acl.role_revoked` events, the next valid `acl.role_granted` event is the **genesis grant**.
-2.  The genesis grant MUST have `payload.principal` equal to `actor.principal`.
-3.  The genesis grant MUST have `payload.role` equal to `owner`.
-4.  If the genesis grant violates rule 2 or 3, it MUST be rejected.
+No inbox event is allowed to create the initial owner or initial device from an
+empty ACL state. This removes the circular dependency where
+`acl.role_granted` required an authorized device before any device existed.
 
-### 4.2. Post-Bootstrap State
+### 4.2. First Inbox Events
 
-After the genesis grant is accepted, all subsequent events MUST satisfy the standard authorization rules (§5). There is no further special-casing.
+After genesis is accepted, the first inbox event from the genesis device MUST be
+signed by the genesis key and MUST use `parent_hashes.log` equal to the empty
+string. It is authorized against the genesis ACL and identity state.
 
-### 4.3. Implicit Permissions Before Bootstrap
+### 4.3. Post-Bootstrap State
 
-Before the genesis grant is accepted, implementations MUST treat all principals as having no permissions. Events other than the genesis grant that arrive before bootstrap MUST be rejected.
+After genesis is accepted, all inbox events MUST satisfy the standard
+authorization rules (§5). There is no self-authorizing ACL grant special case.
 
-This means the very first event in a Gitomi repository MUST be a valid genesis `acl.role_granted`.
+### 4.4. Missing or Conflicting Genesis
 
-### 4.4. `gt init` Behavior
+Before genesis is accepted, implementations MUST treat all principals and
+devices as unauthorized. If a repository has inbox refs but no valid genesis ref,
+those inbox events MUST NOT be admitted into the projection.
 
-When a user runs `gt init`, the implementation SHOULD automatically emit the genesis `acl.role_granted` event granting `owner` to the configured principal. This ensures the repository is immediately usable.
+A fetched genesis ref that conflicts with an existing local genesis ref is a
+trust-root conflict and MUST NOT be auto-merged.
+
+### 4.5. `gt init` Behavior
+
+When a user runs `gt init`, the implementation SHOULD create and sign
+`refs/gitomi/genesis`, then initialize the configured principal and device from
+that manifest. It SHOULD NOT emit a self-authorizing genesis
+`acl.role_granted` event.
 
 ## 5. ACL Reducer
 
@@ -152,22 +189,26 @@ When a user runs `gt init`, the implementation SHOULD automatically emit the gen
 The ACL projection MUST maintain a mapping:
 
 ```
-principal → { role, grant_event_uuid, occurred_at }
+principal → { role, grant_event_hash }
 ```
 
 Each principal has at most one effective role at any point in time.
 
 ### 5.2. Reduction Rules
 
-The ACL reducer MUST process `acl.role_granted` and `acl.role_revoked` events using last-writer-wins semantics, consistent with the general reducer rules in the product specification (§6.1):
+The ACL reducer MUST process `acl.role_granted` and `acl.role_revoked` events
+using causal order first, then deterministic event-hash order for concurrent
+events, consistent with the general reducer rules in the product specification
+(§6.1):
 
 *   **`acl.role_granted`**: Sets the effective role of `payload.principal` to `payload.role`.
-*   **`acl.role_revoked`**: Removes the effective role of `payload.principal` (the principal becomes unauthorized).
+*   **`acl.role_revoked`**: Requires `payload.role` to match the target principal's effective role at the event's causal frontier, then removes that effective role (the principal becomes unauthorized).
 
 When concurrent `acl.role_granted` and `acl.role_revoked` events target the same principal:
 
-1.  The event with the later `occurred_at` wins.
-2.  Ties MUST be broken by `(actor.principal, event_uuid)` as specified in §6.1 of the product specification.
+1.  A causally later event wins over its ancestor.
+2.  If the events are concurrent, the event with the lexicographically larger
+    event hash wins.
 
 ### 5.3. Self-Protection Rules
 
@@ -185,7 +226,14 @@ To prevent accidental lockout:
 
 ### 5.5. Role Validation
 
-The `payload.role` in `acl.role_granted` MUST be one of the five built-in role names. Events with an unrecognized role name MUST be rejected by the reducer.
+The `payload.role` in `acl.role_granted` and `acl.role_revoked` MUST be one of
+the five built-in role names. Events with an unrecognized role name MUST be
+rejected by the reducer.
+
+For `acl.role_revoked`, `payload.role` is a required audit assertion. It MUST
+equal the target principal's effective role at the event's causal frontier.
+Events that attempt to revoke a principal with no effective role, or with a
+different effective role than `payload.role`, MUST be rejected.
 
 ## 6. Identity Reducer
 
@@ -194,25 +242,33 @@ The `payload.role` in `acl.role_granted` MUST be one of the five built-in role n
 The identity projection MUST maintain a mapping:
 
 ```
-principal → set of { device, added_event_uuid, occurred_at }
+principal → set of { device, key_fingerprint, public_key, added_event_hash }
 ```
 
 ### 6.2. Reduction Rules
 
-*   **`identity.device_added`**: Adds `payload.device` to the device set of `payload.principal`.
+*   **`identity.device_added`**: Adds `payload.device` and its signing key to the device set of `payload.principal`.
 *   **`identity.device_revoked`**: Removes `payload.device` from the device set of `payload.principal`.
 
-Device sets are Observed-Remove Sets. Concurrent add and remove of the same device MUST be resolved using the same LWW rules as ACL events (§5.2).
+Device sets are remove-wins causal sets keyed by
+`(principal, device, key_fingerprint)`. A re-add after revocation MUST causally
+descend from the revocation and SHOULD use fresh key material. Concurrent add
+and remove of the same device/key MUST resolve to revoked.
 
 ### 6.3. Self-Device Bootstrap
 
-A principal's first `identity.device_added` event for its own device is self-attesting: it establishes the initial device binding. This event MUST still be signed, and the signing key MUST map to the claimed principal.
-
-Subsequent device management for any principal requires the `identity.manage` permission (i.e., the `owner` role).
+The genesis device is established by the genesis manifest. All later device
+management for any principal requires the `identity.manage` permission (i.e.,
+the `owner` role).
 
 ### 6.4. Device Revocation Effects
 
 When a device is revoked, events from that device that were accepted before the revocation remain in the projection. Only new events signed by the revoked device MUST be rejected.
+
+Historical public keys MUST remain available to verifiers so old signed commits
+can be checked after rotation or revocation. Implementations SHOULD rebuild
+their SSH `allowedSignersFile` cache from genesis plus accepted identity events
+instead of manually editing it as the authorization source of truth.
 
 Authorization for a new event MUST be evaluated against the identity and ACL state at the event's causal frontier, not at the wall-clock time of ingestion.
 
@@ -222,8 +278,8 @@ Authorization for a new event MUST be evaluated against the identity and ACL sta
 
 When ingesting an event, the authorization check (product specification §5.4, step 4) MUST proceed as follows:
 
-1.  **Resolve effective role**: Look up `actor.principal` in the ACL projection at the event's causal frontier. If the principal has no role, reject the event (except during bootstrap per §4).
-2.  **Resolve device authorization**: Verify `actor.device` is in the identity projection for `actor.principal` at the causal frontier. If not, reject the event (except for self-device bootstrap per §6.3).
+1.  **Resolve effective role**: Look up `actor.principal` in the ACL projection at the event's causal frontier, seeded by genesis. If the principal has no role, reject the event.
+2.  **Resolve device authorization**: Verify `actor.device` is in the identity projection for `actor.principal` at the causal frontier, seeded by genesis. If not, reject the event.
 3.  **Map event type to required permission**: Use the table in §3.3.
 4.  **Check own-object scope**: For scoped permissions, look up the creating event of the target object to determine authorship.
 5.  **Evaluate**: Accept if the effective role satisfies the required permission per the matrix in §3.1. Reject otherwise.
@@ -233,6 +289,13 @@ When ingesting an event, the authorization check (product specification §5.4, s
 The "causal frontier" of an event is the set of accepted events reachable through its parent commits. Authorization MUST be evaluated against the projection state derived from this frontier, not from the global latest state.
 
 This ensures that an actor who was authorized when they created the event is not retroactively rejected by a concurrent revocation they could not have observed.
+
+Because v1 bounds cross-device additional parents, an event is not required to
+name every observed inbox head. Security-sensitive events MUST still make the
+latest observed related ACL or identity event for the same target reachable
+through their bounded parent set when such an event exists, and SHOULD also
+record that event in `parent_hashes.related`. Omitted unrelated heads are
+treated as concurrent and MUST NOT expand or shrink the authorization frontier.
 
 ### 7.3. Rejection Behavior
 
@@ -252,16 +315,17 @@ The following tables are REQUIRED:
 CREATE TABLE acl_roles (
     principal TEXT PRIMARY KEY,
     role TEXT NOT NULL,
-    grant_event_uuid TEXT NOT NULL,
-    occurred_at TEXT NOT NULL
+    grant_event_hash TEXT NOT NULL
 );
 
 CREATE TABLE identity_devices (
     principal TEXT NOT NULL,
     device TEXT NOT NULL,
-    added_event_uuid TEXT NOT NULL,
-    occurred_at TEXT NOT NULL,
-    PRIMARY KEY (principal, device)
+    key_fingerprint TEXT NOT NULL,
+    public_key TEXT NOT NULL,
+    added_event_hash TEXT NOT NULL,
+    revoked_event_hash TEXT,
+    PRIMARY KEY (principal, device, key_fingerprint)
 );
 ```
 
@@ -290,15 +354,25 @@ In practice, since the event log is a DAG, implementations SHOULD topologically 
 }
 ```
 
+The corresponding event envelope uses `object.kind = "acl"` and
+`object.id = "acl:bob"`.
+
 `acl.role_revoked`:
 
 ```json
 {
-    "principal": "bob"
+    "principal": "bob",
+    "role": "maintainer"
 }
 ```
 
-Note: `acl.role_revoked` removes whatever role the principal currently holds. The `role` field from the product specification's minimum payload (§4.6) is included for auditability but MUST NOT be used to selectively revoke — there is only one role per principal.
+The corresponding event envelope uses `object.kind = "acl"` and
+`object.id = "acl:bob"`.
+
+Note: `acl.role_revoked` removes the target principal's single effective role.
+The required `role` field records the role the actor intended to revoke and MUST
+match the target's effective role at the causal frontier; it is not a selective
+partial revoke mechanism.
 
 ### 9.2. Identity Event Payloads
 
@@ -307,9 +381,17 @@ Note: `acl.role_revoked` removes whatever role the principal currently holds. Th
 ```json
 {
     "principal": "bob",
-    "device": "workstation"
+    "device": "workstation",
+    "signing_key": {
+        "scheme": "ssh",
+        "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...",
+        "fingerprint": "SHA256:..."
+    }
 }
 ```
+
+The corresponding event envelope uses `object.kind = "identity"` and
+`object.id = "identity:bob:workstation"`.
 
 `identity.device_revoked`:
 
@@ -320,6 +402,9 @@ Note: `acl.role_revoked` removes whatever role the principal currently holds. Th
 }
 ```
 
+The corresponding event envelope uses `object.kind = "identity"` and
+`object.id = "identity:bob:workstation"`.
+
 ## 10. CLI Surface
 
 ### 10.1. Commands
@@ -327,7 +412,7 @@ Note: `acl.role_revoked` removes whatever role the principal currently holds. Th
 Implementations SHOULD provide the following commands:
 
 *   `gt acl grant <principal> <role>`: Emit an `acl.role_granted` event.
-*   `gt acl revoke <principal>`: Emit an `acl.role_revoked` event.
+*   `gt acl revoke <principal>`: Emit an `acl.role_revoked` event containing the principal's current effective role.
 *   `gt acl list`: Display the current ACL projection.
 *   `gt identity add-device <principal> <device>`: Emit an `identity.device_added` event.
 *   `gt identity revoke-device <principal> <device>`: Emit an `identity.device_revoked` event.

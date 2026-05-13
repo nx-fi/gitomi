@@ -12,6 +12,7 @@ test {
     _ = @import("index.zig");
     _ = @import("comment.zig");
     _ = @import("pull.zig");
+    _ = @import("runs.zig");
     _ = @import("sync.zig");
     _ = @import("web.zig");
 }
