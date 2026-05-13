@@ -11,6 +11,7 @@ const isRefSafeSegment = util.isRefSafeSegment;
 const looksLikeUuid = util.looksLikeUuid;
 const event_schema = event_mod.event_schema;
 const isKnownObjectKind = event_mod.isKnownObjectKind;
+const payloadRequirementError = event_mod.payloadRequirementError;
 const eprint = @import("io.zig").eprint;
 
 const Envelope = struct {
@@ -226,10 +227,10 @@ fn parseEnvelope(
 
     const repo_id = try requireUuid(fsck, ref, commit, root, "repo_id", &ok);
     _ = try requireUuid(fsck, ref, commit, root, "event_uuid", &ok);
-    _ = try requireString(fsck, ref, commit, root, "event_type", &ok);
+    const event_type = try requireString(fsck, ref, commit, root, "event_type", &ok);
     _ = try requireUuid(fsck, ref, commit, root, "idempotency_key", &ok);
     _ = try requireObject(fsck, ref, commit, root, "legacy", &ok);
-    _ = try requireObject(fsck, ref, commit, root, "payload", &ok);
+    const payload = try requireObject(fsck, ref, commit, root, "payload", &ok);
 
     const seq = try requireSeq(fsck, ref, commit, root, &ok);
 
@@ -248,6 +249,11 @@ fn parseEnvelope(
             if (!isKnownObjectKind(value)) {
                 try fsck.fail("{s}: {s}: unknown object kind '{s}'", .{ ref, commit, value });
                 ok = false;
+            } else if (event_type != null and payload != null) {
+                if (payloadRequirementError(event_type.?, value, payload.?)) |message| {
+                    try fsck.fail("{s}: {s}: {s}", .{ ref, commit, message });
+                    ok = false;
+                }
             }
         }
         _ = try requireUuid(fsck, ref, commit, object_map, "id", &ok);

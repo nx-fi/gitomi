@@ -74,6 +74,7 @@ fn printUsage() !void {
         \\  gt index rebuild|status
         \\  gt refs
         \\  gt events list [--json] [--limit N] [--ref REF]
+        \\  gt issue list [--json]
         \\  gt issue open --title TITLE [--body BODY] [--label LABEL] [--assignee PRINCIPAL]
         \\  gt sync [--remote REMOTE] [--pull-only|--push-only]
         \\  gt web [--host 127.0.0.1] [--port 8080]
@@ -357,8 +358,33 @@ fn cmdEvents(allocator: Allocator, args: []const []const u8) !void {
 }
 
 fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
-    if (args.len == 0 or !std.mem.eql(u8, args[0], "open")) {
-        try io.eprint("gt issue: expected subcommand 'open'\n", .{});
+    if (args.len == 0) {
+        try io.eprint("gt issue: expected subcommand 'list' or 'open'\n", .{});
+        return CliError.UserError;
+    }
+
+    if (std.mem.eql(u8, args[0], "list")) {
+        var json = false;
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            const arg = args[i];
+            if (std.mem.eql(u8, arg, "--json")) {
+                json = true;
+            } else {
+                try io.eprint("gt issue list: unknown option '{s}'\n", .{arg});
+                return CliError.UserError;
+            }
+        }
+
+        var repo = try repo_mod.discoverRepo(allocator);
+        defer repo.deinit();
+        try index.ensureIndex(allocator, repo);
+        try index.listIssuesFromIndex(allocator, repo, json);
+        return;
+    }
+
+    if (!std.mem.eql(u8, args[0], "open")) {
+        try io.eprint("gt issue: expected subcommand 'list' or 'open'\n", .{});
         return CliError.UserError;
     }
 

@@ -37,6 +37,7 @@ gt fsck
 gt index rebuild|status
 gt refs
 gt events list [--json] [--limit N] [--ref REF]
+gt issue list [--json]
 gt issue open --title TITLE [--body BODY] [--label LABEL] [--assignee PRINCIPAL]
 gt sync [--remote REMOTE] [--pull-only|--push-only]
 gt web [--host 127.0.0.1] [--port 8080]

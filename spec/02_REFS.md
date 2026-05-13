@@ -1,0 +1,381 @@
+# Gitomi Ref and Commit Format Specification v1.0
+
+## 1. Introduction
+
+This document defines the normative on-disk format for Gitomi's control-plane data stored inside a standard Git repository. It specifies ref naming, commit structure, parent linkage, the staging area used during sync, and the rules that make the event history a valid append-only DAG.
+
+All Gitomi state lives in ordinary Git refs and commits. No custom object types, packfile extensions, or non-standard transport features are required.
+
+### 1.1. Conformance Keywords
+
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in RFC 2119.
+
+## 2. Ref Namespace Map
+
+### 2.1. Overview
+
+Gitomi partitions its refs under a single top-level prefix:
+
+```
+refs/gitomi/
+├── inbox/<principal>/<device>     # authoritative event logs
+├── staging/<remote>/inbox/…       # transient fetch targets
+├── main                           # optional synthesized merge
+├── snapshots/<snapshot-id>        # optional bootstrap checkpoints
+└── runs/<runner-id>/<run-id>      # optional workflow traces
+```
+
+Implementations MUST NOT write Gitomi data outside `refs/gitomi/`.
+
+### 2.2. Inbox Refs
+
+```
+refs/gitomi/inbox/<principal>/<device>
+```
+
+Each inbox ref is the append-only event log for one principal–device pair. These refs are the sole authoritative source of control-plane events.
+
+*   `<principal>` identifies the actor (human or bot).
+*   `<device>` identifies the signing endpoint for that principal.
+*   Both segments MUST be ref-safe path components (§3).
+*   The ref path MUST contain exactly two segments after `inbox/`. Additional nesting (e.g., `inbox/alice/laptop/extra`) is invalid.
+
+Every repository participant owns one inbox ref per device. A principal with multiple devices (e.g., laptop, phone) has multiple inbox refs.
+
+### 2.3. Staging Refs
+
+```
+refs/gitomi/staging/<remote-name>/inbox/<principal>/<device>
+```
+
+Staging refs are transient intermediaries used during `gt sync pull`. They hold fetched remote inbox state before admission into the local `refs/gitomi/inbox/` namespace.
+
+*   `<remote-name>` is derived from the Git remote name by sanitizing it into a ref-safe segment (§3.3).
+*   The subtree under `<remote-name>/` mirrors the `inbox/<principal>/<device>` structure.
+*   Staging refs MUST NOT be treated as authoritative. They exist only to allow validation before promotion.
+*   Implementations MAY delete staging refs after successful admission.
+
+### 2.4. Main Ref (OPTIONAL)
+
+```
+refs/gitomi/main
+```
+
+An optional synthesized merge ref for inspection, bootstrap, or tooling convenience. It MUST NOT be treated as the sole source of truth. Implementations MAY update this ref as a merge of all inbox heads after sync.
+
+### 2.5. Snapshot Refs (OPTIONAL)
+
+```
+refs/gitomi/snapshots/<snapshot-id>
+```
+
+Additive checkpoint refs containing projection manifests and compact bootstrap state. Snapshot commits MAY reference non-empty trees containing serialized projections.
+
+### 2.6. Run Refs (OPTIONAL)
+
+```
+refs/gitomi/runs/<runner-id>/<run-id>
+```
+
+Workflow execution trace refs for incremental logs, artifacts, or diagnostics. Run commits MAY reference non-empty trees.
+
+## 3. Ref-Safe Segments
+
+### 3.1. Character Set
+
+A ref-safe segment MUST satisfy all of the following:
+
+*   Non-empty.
+*   Contains only lowercase and uppercase ASCII letters (`a-z`, `A-Z`), digits (`0-9`), underscore (`_`), hyphen (`-`), or period (`.`).
+*   Does not equal `.` or `..`.
+*   Does not end with `.lock`.
+*   Does not contain consecutive periods (`..`).
+
+These rules are a subset of the Git refname constraints (see `git-check-ref-format(1)`), scoped to single path segments.
+
+### 3.2. Case Sensitivity
+
+Implementations SHOULD treat ref segments as case-sensitive. However, since some filesystems and Git hosting platforms are case-insensitive, implementations SHOULD use lowercase segments for new principals and devices.
+
+### 3.3. Sanitization
+
+When deriving a ref segment from external input (e.g., a Git remote name, email address, or hostname), implementations SHOULD apply the following normalization:
+
+1.  Convert to lowercase.
+2.  Replace any character outside the allowed set with a hyphen (`-`). Collapse consecutive hyphens into one.
+3.  Strip leading and trailing hyphens and periods.
+4.  If the result is empty or invalid, generate a fallback (e.g., a UUID-prefix-based segment).
+
+## 4. Inbox Commit Format
+
+### 4.1. Tree Object
+
+Every commit on an inbox ref MUST reference the repository's empty tree object.
+
+The empty tree OID is the well-known SHA-1 `4b825dc642cb6eb9a060e54bf8d69288fbee4904` (or the equivalent under SHA-256 repositories). Implementations MUST compute it via `git hash-object -w -t tree --stdin < /dev/null` rather than hardcoding, to support both hash algorithms.
+
+Rationale: inbox commits carry data exclusively in commit messages, not in tracked files. The empty-tree constraint ensures that Gitomi never pollutes the working tree and that `git diff` between inbox commits is always empty.
+
+### 4.2. Commit Signature
+
+Every inbox commit MUST be signed using Git's native commit signing mechanism (`-S` flag to `git commit-tree`).
+
+Implementations MUST support SSH signing (`gpg.format=ssh`) with verification against an `allowedSignersFile`. OpenPGP and Sigstore signing MAY be supported additionally.
+
+The signature binds the event content to a specific cryptographic identity. Unsigned or unverifiable inbox commits MUST be rejected during sync admission and fsck.
+
+### 4.3. Commit Message Structure
+
+An inbox commit message has two parts separated by a blank line, following standard Git conventions:
+
+```
+<subject line>\n
+\n
+<body: JSON event envelope>
+```
+
+*   **Subject line**: A short human-readable summary. SHOULD follow the pattern `<event_type> #<object-id-prefix> <title-or-summary>`. Example: `issue.opened #018f000 Fix login bug`.
+*   **Body**: MUST contain exactly one UTF-8 JSON object conforming to the event envelope schema (see §5). The body MUST NOT contain any text before or after the JSON object.
+
+### 4.4. Parent Linkage
+
+Inbox commits use Git's multi-parent mechanism to encode both sequential ordering and cross-device causal knowledge.
+
+#### 4.4.1. First Parent (Chain Link)
+
+*   The first parent MUST be the immediately preceding commit on the same inbox ref.
+*   The root commit (first event on an inbox ref) MUST have no first parent (it is a parentless commit).
+*   This forms a strict linear chain when traversed with `--first-parent`.
+
+#### 4.4.2. Additional Parents (Causal Knowledge)
+
+*   After the first parent, a commit SHOULD include additional parents referencing the latest known heads of other inbox refs at the time the event was created.
+*   These additional parents encode the actor's causal knowledge: "when I created this event, I had observed these other inbox states."
+*   Additional parents MUST be commit OIDs that exist in the repository. Implementations MUST tolerate missing additional parents during validation (the remote commits may not have arrived yet).
+*   When no cross-device knowledge exists (e.g., the actor has never synced), the commit has only its first parent (or no parents for root commits).
+
+#### 4.4.3. Parent Order
+
+```
+parent 1: previous commit on this inbox ref (chain link)
+parent 2: latest known head of inbox ref A
+parent 3: latest known head of inbox ref B
+...
+```
+
+The order of additional parents (2, 3, …) is not semantically significant but SHOULD be stable (e.g., sorted by refname) for reproducibility.
+
+### 4.5. Commit Construction
+
+To create a new inbox event commit, an implementation MUST:
+
+1.  Compute the empty tree OID.
+2.  Resolve the current head of the actor's inbox ref (if it exists) as the first parent.
+3.  Resolve the current heads of all other known inbox refs as additional parents.
+4.  Format the subject line and JSON event body.
+5.  Run `git commit-tree -S` with the empty tree, the formatted message, and the parent flags.
+6.  Atomically update the inbox ref using `git update-ref` with the expected old value (compare-and-swap).
+
+Step 6 ensures that concurrent local writes are detected. If the CAS fails, the implementation MUST retry from step 2.
+
+## 5. Event Envelope (Wire Format)
+
+### 5.1. Schema
+
+Every event body MUST be a single JSON object conforming to:
+
+```json
+{
+    "$schema": "urn:gitomi:event:v1",
+    "repo_id": "<UUIDv7>",
+    "event_uuid": "<UUIDv7>",
+    "event_type": "<family>.<action>",
+    "object": {
+        "kind": "<issue|pull|comment|acl|identity|action>",
+        "id": "<UUIDv7>"
+    },
+    "idempotency_key": "<UUIDv7>",
+    "actor": {
+        "principal": "<string>",
+        "device": "<string>"
+    },
+    "seq": <non-negative integer>,
+    "occurred_at": "<RFC 3339 UTC timestamp ending in Z>",
+    "legacy": {},
+    "payload": {}
+}
+```
+
+### 5.2. Field Semantics
+
+| Field               | Type    | Description |
+|---------------------|---------|-------------|
+| `$schema`           | string  | MUST be `"urn:gitomi:event:v1"`. |
+| `repo_id`           | UUIDv7  | Identifies the logical repository. All events in a repo MUST share the same `repo_id`. |
+| `event_uuid`        | UUIDv7  | Globally unique identifier for this event. |
+| `event_type`        | string  | Dot-separated family and action (e.g., `issue.opened`). |
+| `object.kind`       | string  | Object type this event targets. MUST match the event family prefix. |
+| `object.id`         | UUIDv7  | Stable identifier for the logical object (issue, PR, etc.). |
+| `idempotency_key`   | UUIDv7  | Deduplication key. Duplicate keys within the same `repo_id` MUST be suppressed. |
+| `actor.principal`   | string  | The acting principal. MUST match the commit signature identity. |
+| `actor.device`      | string  | The device that created the event. MUST be ref-safe. |
+| `seq`               | integer | Monotonically increasing per `(principal, device)`. The tuple `(principal, device, seq)` MUST be unique within a repository. |
+| `occurred_at`       | string  | RFC 3339 UTC timestamp (MUST end with `Z`). Used for LWW conflict resolution. |
+| `legacy`            | object  | Container for import-compatibility fields (e.g., `github_issue_number`). MAY be empty. |
+| `payload`           | object  | Event-specific data. Required fields depend on `event_type`. |
+
+### 5.3. Object Kind Constraints
+
+The `object.kind` MUST agree with the `event_type` prefix:
+
+| Event prefix    | Required `object.kind` |
+|-----------------|------------------------|
+| `issue.*`       | `issue`                |
+| `pull.*`        | `pull`                 |
+| `comment.*`     | `comment`              |
+| `acl.*`         | `acl`                  |
+| `identity.*`    | `identity`             |
+| `action.*`      | `action`               |
+
+Events with a mismatch MUST be rejected.
+
+### 5.4. Unknown Event Types
+
+Implementations MUST preserve events with unrecognized `event_type` values in the log. Unknown events SHOULD be ignored by reducers unless the implementation explicitly understands them. They MUST NOT cause rejection of the entire inbox ref.
+
+## 6. Sync Protocol
+
+### 6.1. Transport
+
+Sync uses standard Git fetch and push over any Git protocol v2 transport (SSH, HTTPS, local path, bundles).
+
+No custom protocol extensions are required.
+
+### 6.2. Pull (Fetch + Admit)
+
+A pull operation proceeds in two phases:
+
+#### 6.2.1. Fetch Phase
+
+```
+git fetch <remote> +refs/gitomi/inbox/*:refs/gitomi/staging/<remote>/inbox/*
+```
+
+The `+` prefix enables forced updates of staging refs. This is safe because staging refs are transient and not authoritative.
+
+#### 6.2.2. Admission Phase
+
+For each staging ref, the implementation MUST:
+
+1.  Resolve the corresponding local inbox ref.
+2.  Determine the relationship between the staged OID and the local OID:
+
+    | Relationship          | Action |
+    |-----------------------|--------|
+    | Same OID              | Skip (already up to date). |
+    | Staged is descendant  | Fast-forward: validate new commits, then update local ref. |
+    | Local is descendant   | Skip (local is ahead; stale remote). |
+    | Diverged              | Leave staging ref in place; report divergence. |
+    | Local ref absent      | Create: validate all staged commits, then create local ref. |
+
+3.  **Validate new commits**: For each new commit in first-parent order from the local base to the staged head:
+    *   Verify the tree is the empty tree.
+    *   Verify first-parent linkage (each commit's first parent is the preceding commit; root has no parent).
+    *   Verify the commit signature.
+    *   Parse and validate the event envelope.
+
+4.  If all commits pass, atomically update the local inbox ref.
+
+#### 6.2.3. Non-Fast-Forward Rejection
+
+Inbox refs are append-only. A pull MUST NOT accept a staged ref that is not a fast-forward of the local ref. Diverged staging refs MUST be left in place for manual resolution.
+
+### 6.3. Push
+
+```
+git push <remote> refs/gitomi/inbox/<principal>/<device>:refs/gitomi/inbox/<principal>/<device>
+```
+
+Implementations MUST push each local inbox ref to the matching remote ref. Force-push MUST NOT be used; if the remote rejects a non-fast-forward push, the implementation MUST report the conflict.
+
+### 6.4. Bidirectional Sync
+
+The default `gt sync` operation MUST perform pull then push, in that order. This ensures the local actor's inbox incorporates awareness of remote state (via additional parents) before pushing.
+
+Command-line flags `--pull-only` and `--push-only` MUST be supported to run only one phase.
+
+## 7. Append-Only Invariant
+
+### 7.1. Rule
+
+Once an inbox ref has been published (pushed to any remote or fetched by any other replica), its history is immutable.
+
+*   Implementations MUST NOT force-push or rewrite `refs/gitomi/inbox/*` after publication.
+*   A device MAY rewrite its own unpublished local inbox ref before first publication (e.g., to fix a signing error before the first push).
+*   After publication, corrections MUST be expressed as new compensating events, not as history rewrites.
+
+### 7.2. Enforcement
+
+Implementations SHOULD detect non-fast-forward updates to inbox refs during pull and reject them. During push, the remote's built-in fast-forward check provides enforcement.
+
+The `gt fsck` command MUST verify first-parent chain integrity for all inbox refs.
+
+## 8. Validation Pipeline
+
+### 8.1. Commit-Level Checks
+
+When validating an inbox commit (during sync admission, fsck, or index rebuild), the following checks MUST be performed in order:
+
+1.  **Empty tree**: The commit's tree OID MUST equal the empty tree.
+2.  **First parent**: The commit's first parent MUST be the previous commit on the same inbox ref (or absent for root).
+3.  **Signature**: The commit MUST have a valid Git signature verifiable against the configured signing backend.
+4.  **Envelope**: The commit body MUST parse as valid JSON conforming to the event envelope schema (§5).
+5.  **Repo ID**: The `repo_id` MUST match the repository's configured or observed `repo_id`.
+6.  **Sequence uniqueness**: The `(actor.principal, actor.device, seq)` tuple MUST not duplicate any previously accepted event.
+7.  **Idempotency**: The `(repo_id, idempotency_key)` pair MUST not duplicate any previously accepted event.
+
+### 8.2. Rejection Behavior
+
+A commit that fails any check MUST be rejected. For sync admission, a rejected commit halts admission of the entire ref update (the local ref is not advanced). For fsck, the error is reported but scanning continues.
+
+## 9. Local State Layout
+
+### 9.1. Directory Structure
+
+```
+.git/gitomi/
+├── config.toml       # repo-local Gitomi configuration
+└── index.sqlite      # materialized projection cache
+```
+
+This directory and its contents are local, disposable caches. They MUST NOT be committed to Git or shared between replicas.
+
+### 9.2. Config File
+
+The config file uses TOML syntax with the following keys:
+
+| Key         | Type    | Description |
+|-------------|---------|-------------|
+| `repo_id`   | string  | UUIDv7 identifying the logical repository. |
+| `principal` | string  | The local actor's principal identity. |
+| `device`    | string  | The local actor's device identifier. |
+| `seq`       | integer | The last sequence number used by this device. |
+
+Example:
+
+```toml
+repo_id = "018f0000-0000-7000-8000-000000000001"
+principal = "alice"
+device = "laptop"
+seq = 42
+```
+
+### 9.3. Index Database
+
+The SQLite index materializes event data from inbox refs for fast querying. Its schema includes:
+
+*   `meta`: Key-value table for schema version tracking.
+*   `ref_heads`: Current OID for each indexed inbox ref (used for staleness detection).
+*   `events`: Ordered event records extracted from inbox commits.
+
+The index is rebuilt from scratch when the ref heads diverge from the stored snapshot. See the product specification (§6.6) for rebuild rules.

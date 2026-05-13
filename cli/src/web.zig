@@ -310,25 +310,36 @@ pub fn renderIssuesPage(allocator: Allocator, repo: Repo) ![]u8 {
     try ensureIndex(allocator, repo);
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
-    var stmt = try db.prepare("SELECT " ++ index_event_columns ++ " FROM events WHERE event_type = 'issue.opened' ORDER BY ordinal");
+    var stmt = try db.prepare("SELECT id, title, state, author_principal, opened_at FROM issues ORDER BY opened_at DESC, id DESC");
     defer stmt.deinit();
 
     var shown: usize = 0;
     while (try stmt.step()) {
-        const event = try indexedEventFromStmt(allocator, &stmt);
-        defer freeIndexedEvent(allocator, event);
-        const title = issueTitleFromSubject(event.subject);
+        const id = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(id);
+        const title = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(title);
+        const state = try stmt.columnTextDup(allocator, 2);
+        defer allocator.free(state);
+        const author = try stmt.columnTextDup(allocator, 3);
+        defer allocator.free(author);
+        const opened_at = try stmt.columnTextDup(allocator, 4);
+        defer allocator.free(opened_at);
 
-        try buf.appendSlice(allocator, "<article class=\"issue-row\"><div class=\"issue-main\"><div class=\"issue-title\"><span class=\"state open\">Open</span><a href=\"/events#");
-        try appendHtml(&buf, allocator, event.object_id[0..@min(event.object_id.len, 7)]);
+        try buf.appendSlice(allocator, "<article class=\"issue-row\"><div class=\"issue-main\"><div class=\"issue-title\"><span class=\"state ");
+        try appendHtml(&buf, allocator, state);
+        try buf.appendSlice(allocator, "\">");
+        try appendHtml(&buf, allocator, state);
+        try buf.appendSlice(allocator, "</span><a href=\"/events#");
+        try appendHtml(&buf, allocator, id[0..@min(id.len, 7)]);
         try buf.appendSlice(allocator, "\">");
         try appendHtml(&buf, allocator, title);
         try buf.appendSlice(allocator, "</a></div><p class=\"muted\">#");
-        try appendHtml(&buf, allocator, event.object_id[0..@min(event.object_id.len, 7)]);
+        try appendHtml(&buf, allocator, id[0..@min(id.len, 7)]);
         try buf.appendSlice(allocator, " opened by ");
-        try appendHtml(&buf, allocator, event.actor_principal);
+        try appendHtml(&buf, allocator, author);
         try buf.appendSlice(allocator, " at ");
-        try appendHtml(&buf, allocator, event.occurred_at);
+        try appendHtml(&buf, allocator, opened_at);
         try buf.appendSlice(allocator, "</p></div></article>");
         shown += 1;
     }
@@ -1112,6 +1123,10 @@ const web_css =
     \\.state.open {
     \\  color: var(--green);
     \\  background: var(--green-bg);
+    \\}
+    \\.state.closed {
+    \\  color: var(--red);
+    \\  background: var(--red-bg);
     \\}
     \\.button {
     \\  display: inline-flex;
