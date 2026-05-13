@@ -1,0 +1,18 @@
+# Zig build artifacts
+.zig-cache/
+zig-out/
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Local agent state
+/.claude
+/.codex
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
