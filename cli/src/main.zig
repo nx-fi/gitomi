@@ -17,5 +17,6 @@ test {
     _ = @import("actions.zig");
     _ = @import("runs.zig");
     _ = @import("sync.zig");
+    _ = @import("github.zig");
     _ = @import("web.zig");
 }

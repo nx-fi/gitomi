@@ -527,10 +527,14 @@ pub fn signingKeyFingerprint(allocator: Allocator, public_key: []const u8) ![]u8
     _ = fields.next() orelse return error.InvalidSigningPublicKey;
     const encoded_key = fields.next() orelse return error.InvalidSigningPublicKey;
 
-    const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(encoded_key);
+    const decoder = if (std.mem.indexOfScalar(u8, encoded_key, '=') == null)
+        std.base64.standard_no_pad.Decoder
+    else
+        std.base64.standard.Decoder;
+    const decoded_len = try decoder.calcSizeForSlice(encoded_key);
     const decoded = try allocator.alloc(u8, decoded_len);
     defer allocator.free(decoded);
-    try std.base64.standard.Decoder.decode(decoded, encoded_key);
+    try decoder.decode(decoded, encoded_key);
 
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(decoded, &digest, .{});
@@ -791,4 +795,11 @@ test "config parser accepts multiline strings" {
     try std.testing.expectEqualStrings("alice\nops\n", cfg.principal);
     try std.testing.expectEqualStrings("laptop\n", cfg.device);
     try std.testing.expectEqual(@as(u64, 0), cfg.seq);
+}
+
+test "signing key fingerprint uses OpenSSH SHA256 form" {
+    const public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBzDcgcRLK0dOuLZ/Gl37fAKM3xVHKPSkQakRGwpthnx test@example.com";
+    const fingerprint = try signingKeyFingerprint(std.testing.allocator, public_key);
+    defer std.testing.allocator.free(fingerprint);
+    try std.testing.expectEqualStrings("SHA256:UPzoeVtlEpSaFm0nmnPA5RVCLxms2/NEgO5uHEitDgk", fingerprint);
 }

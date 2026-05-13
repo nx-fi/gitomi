@@ -5,6 +5,7 @@ const errors = @import("errors.zig");
 const event_mod = @import("event.zig");
 const fsck = @import("fsck.zig");
 const git = @import("git.zig");
+const github = @import("github.zig");
 const index = @import("index.zig");
 const io = @import("io.zig");
 const issue = @import("issue.zig");
@@ -74,6 +75,8 @@ fn realMain() !void {
         try cmdRuns(allocator, args[2..]);
     } else if (std.mem.eql(u8, cmd, "sync")) {
         try cmdSync(allocator, args[2..]);
+    } else if (std.mem.eql(u8, cmd, "github")) {
+        try github.cmdGithub(allocator, args[2..]);
     } else if (std.mem.eql(u8, cmd, "web")) {
         try cmdWeb(allocator, args[2..]);
     } else {
@@ -132,6 +135,8 @@ fn printUsage() !void {
         \\  gt actions run-requested [RUN] [--dry-run] [--act PATH] [-- ACT_ARGS...]
         \\  gt runs prune [--dry-run] [--max-age-days N] [--max-count N] [--max-bytes N]
         \\  gt sync [--remote REMOTE] [--pull-only|--push-only]
+        \\  gt github import --repo OWNER/REPO [--token TOKEN] [--from-file PATH] [--no-comments]
+        \\  gt github export --repo OWNER/REPO [--token TOKEN] [--dry-run] [--map-file PATH] [--reuse-legacy]
         \\  gt web [--host 127.0.0.1] [--port 8080]
         \\
         \\Gitomi stores local state in .git/gitomi and signed events in refs/gitomi/inbox/*.

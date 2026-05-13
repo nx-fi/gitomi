@@ -341,3 +341,13 @@ pub fn gitConfigValue(allocator: Allocator, key: []const u8) ![]u8 {
     if (result.exitCode() != 0) return CliError.GitFailed;
     return trimDup(allocator, result.stdout);
 }
+
+test "verify-commit output parser extracts SSH signing key fingerprint" {
+    const output =
+        \\Good "git" signature for alice@example.com with ED25519 key SHA256:mNB85dy2QSJT677iHmnJzFXcYQWJatF8y3EUrFuHNYA
+        \\
+    ;
+    const fingerprint = (try signingKeyFingerprintFromVerifyOutput(std.testing.allocator, output)).?;
+    defer std.testing.allocator.free(fingerprint);
+    try std.testing.expectEqualStrings("SHA256:mNB85dy2QSJT677iHmnJzFXcYQWJatF8y3EUrFuHNYA", fingerprint);
+}
