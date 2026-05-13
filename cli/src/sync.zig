@@ -165,6 +165,36 @@ pub fn admitStagedGenesisRef(allocator: Allocator, staging_prefix: []const u8) !
     const updated = try gitChecked(allocator, &.{ "update-ref", repo_mod.genesis_ref, staged_oid, "" });
     defer allocator.free(updated);
     try out("created {s}\n", .{repo_mod.genesis_ref});
+    try autoInitConfigFromGenesis(allocator, staged_oid);
+}
+
+fn autoInitConfigFromGenesis(allocator: Allocator, genesis_oid: []const u8) !void {
+    var repo = try repo_mod.discoverRepo(allocator);
+    defer repo.deinit();
+
+    if (util.fileExists(repo.config_path)) return;
+
+    var manifest = repo_mod.loadGenesisManifest(allocator, genesis_oid) catch return;
+    defer manifest.deinit();
+
+    try std.fs.cwd().makePath(repo.gitomi_dir);
+
+    const principal = try repo_mod.defaultPrincipal(allocator);
+    defer allocator.free(principal);
+    const device = try repo_mod.defaultDevice(allocator);
+    defer allocator.free(device);
+
+    var cfg = repo_mod.Config{
+        .allocator = allocator,
+        .repo_id = try allocator.dupe(u8, manifest.repo_id),
+        .principal = try allocator.dupe(u8, principal),
+        .device = try allocator.dupe(u8, device),
+        .seq = 0,
+    };
+    defer cfg.deinit();
+
+    try repo_mod.writeConfig(repo.config_path, cfg);
+    try out("auto-configured from genesis: {s}/{s}\n", .{ principal, device });
 }
 
 pub fn stagingRemoteSegment(allocator: Allocator, remote: []const u8) ![]u8 {

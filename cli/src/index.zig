@@ -522,7 +522,103 @@ pub fn rebuildIndex(allocator: Allocator, repo: Repo) !IndexStats {
         enforceSnapshotRetention(allocator, limits) catch {};
     }
 
+    try writeCursorsAfterRebuild(allocator, repo);
+
     return stats;
+}
+
+pub fn ensureCursors(allocator: Allocator, repo: Repo) !void {
+    if (fileExists(repo.cursors_path)) return;
+    try std.fs.cwd().makePath(repo.gitomi_dir);
+    try createCursorsDb(allocator, repo);
+}
+
+fn createCursorsDb(allocator: Allocator, repo: Repo) !void {
+    var db = try SqliteDb.open(allocator, repo.cursors_path, sqlite.SQLITE_OPEN_READWRITE | sqlite.SQLITE_OPEN_CREATE, false);
+    defer db.deinit();
+    try createCursorsSchema(&db);
+}
+
+pub fn createCursorsSchema(db: *SqliteDb) !void {
+    try db.exec(
+        \\CREATE TABLE IF NOT EXISTS meta (
+        \\  key TEXT PRIMARY KEY,
+        \\  value TEXT NOT NULL
+        \\);
+        \\CREATE TABLE IF NOT EXISTS ref_cursors (
+        \\  ref TEXT PRIMARY KEY,
+        \\  oid TEXT NOT NULL,
+        \\  event_count INTEGER NOT NULL
+        \\);
+        \\CREATE TABLE IF NOT EXISTS snapshot_meta (
+        \\  snapshot_id TEXT PRIMARY KEY,
+        \\  ref TEXT NOT NULL,
+        \\  created_at TEXT NOT NULL,
+        \\  inbox_heads TEXT NOT NULL,
+        \\  tree_size INTEGER NOT NULL DEFAULT 0
+        \\);
+    );
+}
+
+pub fn updateRefCursor(allocator: Allocator, repo: Repo, ref: []const u8, oid: []const u8, event_count: usize) !void {
+    try ensureCursors(allocator, repo);
+    var db = try SqliteDb.open(allocator, repo.cursors_path, sqlite.SQLITE_OPEN_READWRITE, false);
+    defer db.deinit();
+    var stmt = try db.prepare(
+        \\INSERT INTO ref_cursors(ref, oid, event_count)
+        \\VALUES (?, ?, ?)
+        \\ON CONFLICT(ref) DO UPDATE SET oid = excluded.oid, event_count = excluded.event_count
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, ref);
+    try stmt.bindText(2, oid);
+    try stmt.bindInt64(3, @intCast(event_count));
+    try stmt.stepDone();
+}
+
+pub fn refCursorOid(allocator: Allocator, repo: Repo, ref: []const u8) !?[]u8 {
+    if (!fileExists(repo.cursors_path)) return null;
+    var db = SqliteDb.open(allocator, repo.cursors_path, sqlite.SQLITE_OPEN_READONLY, true) catch return null;
+    defer db.deinit();
+    var stmt = db.prepare("SELECT oid FROM ref_cursors WHERE ref = ?") catch return null;
+    defer stmt.deinit();
+    stmt.bindText(1, ref) catch return null;
+    if (!(stmt.step() catch return null)) return null;
+    return stmt.columnTextDup(allocator, 0) catch null;
+}
+
+fn writeCursorsAfterRebuild(allocator: Allocator, repo: Repo) !void {
+    try ensureCursors(allocator, repo);
+    var db = try SqliteDb.open(allocator, repo.cursors_path, sqlite.SQLITE_OPEN_READWRITE, false);
+    defer db.deinit();
+    try db.exec("DELETE FROM ref_cursors");
+
+    const refs_raw = try gitChecked(allocator, &.{
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname) %(objectname)",
+        "refs/gitomi/inbox",
+    });
+    defer allocator.free(refs_raw);
+
+    var stmt = try db.prepare(
+        \\INSERT INTO ref_cursors(ref, oid, event_count)
+        \\VALUES (?, ?, 0)
+    );
+    defer stmt.deinit();
+
+    var it = std.mem.tokenizeScalar(u8, refs_raw, '\n');
+    while (it.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        const space = std.mem.indexOfScalar(u8, trimmed, ' ') orelse continue;
+        const ref = trimmed[0..space];
+        const oid = trimmed[space + 1 ..];
+        if (ref.len == 0 or oid.len == 0) continue;
+        try stmt.reset();
+        try stmt.bindText(1, ref);
+        try stmt.bindText(2, oid);
+        try stmt.stepDone();
+    }
 }
 
 fn rebuildIndexFromScratch(
@@ -1588,7 +1684,7 @@ fn projectStoredEvent(allocator: Allocator, db: *SqliteDb, event_hash: []const u
     };
     defer envelope.deinit();
 
-    if (try authorizationRejection(allocator, db, envelope, body)) |reason| {
+    if (try authorizationRejection(allocator, db, event_hash, envelope, body)) |reason| {
         try markDomainRejected(db, event_hash, reason);
         return;
     }
@@ -1641,10 +1737,17 @@ fn seedGenesisAuthorization(allocator: Allocator, db: *SqliteDb) !void {
     try insertIdentityHistory(db, manifest.device_principal, manifest.device_id, manifest.fingerprint, manifest.public_key, "", "identity.device_added");
 }
 
-fn authorizationRejection(allocator: Allocator, db: *SqliteDb, envelope: ValidatedEnvelope, body: []const u8) !?[]const u8 {
-    const role = (try currentRole(allocator, db, envelope.actor_principal)) orelse return "unauthorized_principal";
+fn authorizationRejection(allocator: Allocator, db: *SqliteDb, event_hash: ?[]const u8, envelope: ValidatedEnvelope, body: []const u8) !?[]const u8 {
+    const role = if (event_hash) |hash|
+        (try aclRoleAtFrontier(allocator, db, envelope.actor_principal, hash)) orelse return "unauthorized_principal"
+    else
+        (try currentRole(allocator, db, envelope.actor_principal)) orelse return "unauthorized_principal";
     defer allocator.free(role);
-    if (!(try currentDeviceActive(db, envelope.actor_principal, envelope.actor_device))) return "unauthorized_device";
+    const device_active = if (event_hash) |hash|
+        try identityDeviceActiveAtFrontier(allocator, db, envelope.actor_principal, envelope.actor_device, hash)
+    else
+        try currentDeviceActive(db, envelope.actor_principal, envelope.actor_device);
+    if (!device_active) return "unauthorized_device";
 
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
     defer parsed.deinit();
@@ -2424,6 +2527,27 @@ fn insertIssueOpened(db: *SqliteDb, event_hash: []const u8, envelope: ValidatedE
     try stmt.stepDone();
 }
 
+fn insertLegacyAliasFromEnvelope(db: *SqliteDb, object_kind: []const u8, object_id: []const u8, legacy: std.json.ObjectMap) !void {
+    const key = if (std.mem.eql(u8, object_kind, "issue"))
+        "github_issue_number"
+    else if (std.mem.eql(u8, object_kind, "pull"))
+        "github_pull_number"
+    else
+        return;
+    const number = event_mod.jsonInteger(legacy.get(key)) orelse return;
+    if (number <= 0) return;
+
+    var stmt = try db.prepare(
+        \\INSERT OR IGNORE INTO legacy_aliases(provider, object_kind, object_id, number)
+        \\VALUES ('github', ?, ?, ?)
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, object_kind);
+    try stmt.bindText(2, object_id);
+    try stmt.bindInt64(3, number);
+    try stmt.stepDone();
+}
+
 fn issueExists(db: *SqliteDb, issue_id: []const u8) !bool {
     var stmt = try db.prepare("SELECT 1 FROM issues WHERE id = ?");
     defer stmt.deinit();
@@ -3107,7 +3231,7 @@ pub fn requireAuthorizedWrite(allocator: Allocator, repo: Repo, event_body: []co
     };
     defer envelope.deinit();
 
-    if (try authorizationRejection(allocator, &db, envelope, event_body)) |reason| {
+    if (try authorizationRejection(allocator, &db, null, envelope, event_body)) |reason| {
         try eprint("gt: refusing to create unauthorized event: {s}\n", .{reason});
         return CliError.Unauthorized;
     }
@@ -3208,6 +3332,12 @@ pub fn listIdentityFromIndex(allocator: Allocator, repo: Repo, json: bool) !void
 }
 
 pub fn resolveIssueId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
+    if (parseLegacyGithubNumber(raw_ref)) |number| {
+        if (try lookupLegacyGithubObjectId(allocator, repo, "issue", number)) |id| return id;
+        try eprint("gt issue: no issue has GitHub legacy number #{d}\n", .{number});
+        return CliError.NotFound;
+    }
+
     const prefix = if (std.mem.startsWith(u8, raw_ref, "#")) raw_ref[1..] else raw_ref;
     if (prefix.len < 7) {
         try eprint("gt issue: issue reference must be at least 7 hex characters\n", .{});
@@ -3245,6 +3375,12 @@ pub fn resolveIssueId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]
 }
 
 pub fn resolvePullId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
+    if (parseLegacyGithubNumber(raw_ref)) |number| {
+        if (try lookupLegacyGithubObjectId(allocator, repo, "pull", number)) |id| return id;
+        try eprint("gt pr: no PR has GitHub legacy number #{d}\n", .{number});
+        return CliError.NotFound;
+    }
+
     const prefix = if (std.mem.startsWith(u8, raw_ref, "#")) raw_ref[1..] else raw_ref;
     if (prefix.len < 7) {
         try eprint("gt pr: PR reference must be at least 7 hex characters\n", .{});
@@ -3279,6 +3415,68 @@ pub fn resolvePullId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u
         return CliError.AmbiguousReference;
     }
     return first;
+}
+
+fn parseLegacyGithubNumber(raw_ref: []const u8) ?i64 {
+    const trimmed = std.mem.trim(u8, raw_ref, " \t\r\n");
+    const value = if (std.mem.startsWith(u8, trimmed, "github#"))
+        trimmed["github#".len..]
+    else if (std.mem.startsWith(u8, trimmed, "github:"))
+        trimmed["github:".len..]
+    else if (std.mem.startsWith(u8, trimmed, "gh#"))
+        trimmed["gh#".len..]
+    else if (std.mem.startsWith(u8, trimmed, "gh:"))
+        trimmed["gh:".len..]
+    else if (std.mem.startsWith(u8, trimmed, "#"))
+        trimmed[1..]
+    else
+        trimmed;
+    if (value.len == 0) return null;
+    for (value) |c| {
+        if (!std.ascii.isDigit(c)) return null;
+    }
+    const number = std.fmt.parseInt(i64, value, 10) catch return null;
+    return if (number > 0) number else null;
+}
+
+pub fn lookupLegacyGithubObjectId(allocator: Allocator, repo: Repo, object_kind: []const u8, number: i64) !?[]u8 {
+    try ensureIndex(allocator, repo);
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    return try lookupLegacyGithubObjectIdInDb(allocator, &db, object_kind, number);
+}
+
+fn lookupLegacyGithubObjectIdInDb(allocator: Allocator, db: *SqliteDb, object_kind: []const u8, number: i64) !?[]u8 {
+    var stmt = try db.prepare(
+        \\SELECT object_id
+        \\FROM legacy_aliases
+        \\WHERE provider = 'github' AND object_kind = ? AND number = ?
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, object_kind);
+    try stmt.bindInt64(2, number);
+    if (!(try stmt.step())) return null;
+    return try stmt.columnTextDup(allocator, 0);
+}
+
+pub fn legacyGithubNumberForObject(allocator: Allocator, repo: Repo, object_kind: []const u8, object_id: []const u8) !?i64 {
+    try ensureIndex(allocator, repo);
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    return try legacyGithubNumberForObjectInDb(&db, object_kind, object_id);
+}
+
+fn legacyGithubNumberForObjectInDb(db: *SqliteDb, object_kind: []const u8, object_id: []const u8) !?i64 {
+    var stmt = try db.prepare(
+        \\SELECT number
+        \\FROM legacy_aliases
+        \\WHERE provider = 'github' AND object_kind = ? AND object_id = ?
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, object_kind);
+    try stmt.bindText(2, object_id);
+    if (!(try stmt.step())) return null;
+    return stmt.columnInt64(0);
 }
 
 pub fn resolveCommentId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
@@ -3350,6 +3548,9 @@ pub fn listIssuesFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
             try appendJsonFieldString(&line, allocator, "body", body, true);
             try appendJsonFieldString(&line, allocator, "author_principal", author, true);
             try appendJsonFieldString(&line, allocator, "opened_at", opened_at, true);
+            if (try legacyGithubNumberForObjectInDb(&db, "issue", id)) |number| {
+                try appendJsonFieldInteger(&line, allocator, "legacy_github_issue_number", number, true);
+            }
             try appendIssueCollectionJsonField(&line, allocator, &db, "labels", "SELECT DISTINCT label FROM issue_labels WHERE issue_id = ? ORDER BY label", id, true);
             try appendIssueCollectionJsonField(&line, allocator, &db, "assignees", "SELECT DISTINCT assignee FROM issue_assignees WHERE issue_id = ? ORDER BY assignee", id, false);
             try line.append(allocator, '}');
@@ -3404,6 +3605,9 @@ pub fn showIssueFromIndex(allocator: Allocator, repo: Repo, issue_id: []const u8
         try appendJsonFieldString(&line, allocator, "author_principal", author_principal, true);
         try appendJsonFieldString(&line, allocator, "author_device", author_device, true);
         try appendJsonFieldString(&line, allocator, "opened_at", opened_at, true);
+        if (try legacyGithubNumberForObjectInDb(&db, "issue", id)) |number| {
+            try appendJsonFieldInteger(&line, allocator, "legacy_github_issue_number", number, true);
+        }
         try appendIssueCollectionJsonField(&line, allocator, &db, "labels", "SELECT DISTINCT label FROM issue_labels WHERE issue_id = ? ORDER BY label", id, true);
         try appendIssueCollectionJsonField(&line, allocator, &db, "assignees", "SELECT DISTINCT assignee FROM issue_assignees WHERE issue_id = ? ORDER BY assignee", id, true);
         try appendCommitReferencesJsonField(&line, allocator, &db, "commit_references", "issue", id, false);
@@ -3424,6 +3628,9 @@ pub fn showIssueFromIndex(allocator: Allocator, repo: Repo, issue_id: []const u8
     try out("title:     {s}\n", .{title});
     try out("author:    {s}/{s}\n", .{ author_principal, author_device });
     try out("opened_at: {s}\n", .{opened_at});
+    if (try legacyGithubNumberForObjectInDb(&db, "issue", id)) |number| {
+        try out("github:    #{d}\n", .{number});
+    }
     try out("labels:    {s}\n", .{labels});
     try out("assignees: {s}\n", .{assignees});
     try out("commits:   {s}\n", .{commit_references});
@@ -3480,6 +3687,9 @@ pub fn listPullsFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
             try appendJsonFieldString(&line, allocator, "target_oid", target_oid, true);
             try appendJsonFieldString(&line, allocator, "author_principal", author, true);
             try appendJsonFieldString(&line, allocator, "opened_at", opened_at, true);
+            if (try legacyGithubNumberForObjectInDb(&db, "pull", id)) |number| {
+                try appendJsonFieldInteger(&line, allocator, "legacy_github_pull_number", number, true);
+            }
             try appendIssueCollectionJsonField(&line, allocator, &db, "labels", "SELECT DISTINCT label FROM pull_labels WHERE pull_id = ? ORDER BY label", id, true);
             try appendIssueCollectionJsonField(&line, allocator, &db, "assignees", "SELECT DISTINCT assignee FROM pull_assignees WHERE pull_id = ? ORDER BY assignee", id, true);
             try appendIssueCollectionJsonField(&line, allocator, &db, "reviewers", "SELECT DISTINCT reviewer FROM pull_reviewers WHERE pull_id = ? ORDER BY reviewer", id, false);
@@ -3555,6 +3765,9 @@ pub fn showPullFromIndex(allocator: Allocator, repo: Repo, pull_id: []const u8, 
         try appendJsonFieldString(&line, allocator, "author_principal", author_principal, true);
         try appendJsonFieldString(&line, allocator, "author_device", author_device, true);
         try appendJsonFieldString(&line, allocator, "opened_at", opened_at, true);
+        if (try legacyGithubNumberForObjectInDb(&db, "pull", id)) |number| {
+            try appendJsonFieldInteger(&line, allocator, "legacy_github_pull_number", number, true);
+        }
         try appendIssueCollectionJsonField(&line, allocator, &db, "labels", "SELECT DISTINCT label FROM pull_labels WHERE pull_id = ? ORDER BY label", id, true);
         try appendIssueCollectionJsonField(&line, allocator, &db, "assignees", "SELECT DISTINCT assignee FROM pull_assignees WHERE pull_id = ? ORDER BY assignee", id, true);
         try appendIssueCollectionJsonField(&line, allocator, &db, "reviewers", "SELECT DISTINCT reviewer FROM pull_reviewers WHERE pull_id = ? ORDER BY reviewer", id, true);
@@ -3578,6 +3791,9 @@ pub fn showPullFromIndex(allocator: Allocator, repo: Repo, pull_id: []const u8, 
     try out("title:      {s}\n", .{title});
     try out("author:     {s}/{s}\n", .{ author_principal, author_device });
     try out("opened_at:  {s}\n", .{opened_at});
+    if (try legacyGithubNumberForObjectInDb(&db, "pull", id)) |number| {
+        try out("github:     #{d}\n", .{number});
+    }
     try out("base:       {s}\n", .{base_ref});
     try out("head:       {s}\n", .{head_ref});
     try out("draft:      {s}\n", .{if (draft) "true" else "false"});

@@ -25,6 +25,15 @@ pub const EventParents = struct {
     related: []const []const u8 = &.{},
 };
 
+pub const LegacyInfo = struct {
+    github_issue_number: ?u64 = null,
+    github_pull_number: ?u64 = null,
+
+    pub fn isEmpty(self: LegacyInfo) bool {
+        return self.github_issue_number == null and self.github_pull_number == null;
+    }
+};
+
 pub const IssueUpdate = struct {
     title: ?[]const u8 = null,
     body: ?[]const u8 = null,
@@ -133,10 +142,42 @@ pub fn buildIssueOpenedJson(
     labels: []const []const u8,
     assignees: []const []const u8,
 ) ![]u8 {
+    return buildIssueOpenedJsonWithLegacy(
+        allocator,
+        cfg,
+        seq,
+        issue_id,
+        event_uuid,
+        idem,
+        occurred_at,
+        parents,
+        title,
+        body,
+        labels,
+        assignees,
+        .{},
+    );
+}
+
+pub fn buildIssueOpenedJsonWithLegacy(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    issue_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    title: []const u8,
+    body: []const u8,
+    labels: []const []const u8,
+    assignees: []const []const u8,
+    legacy: LegacyInfo,
+) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
-    try appendEnvelopePrefix(&buf, allocator, cfg, seq, issue_id, event_uuid, idem, occurred_at, parents, "issue.opened", "issue");
+    try appendEnvelopePrefixWithLegacy(&buf, allocator, cfg, seq, issue_id, event_uuid, idem, occurred_at, parents, "issue.opened", "issue", legacy);
     try buf.appendSlice(allocator, "\"payload\":{");
     try appendJsonFieldString(&buf, allocator, "title", title, true);
     if (body.len != 0) {
@@ -292,10 +333,44 @@ pub fn buildPullOpenedJson(
     head_ref: []const u8,
     draft: bool,
 ) ![]u8 {
+    return buildPullOpenedJsonWithLegacy(
+        allocator,
+        cfg,
+        seq,
+        pull_id,
+        event_uuid,
+        idem,
+        occurred_at,
+        parents,
+        title,
+        body,
+        base_ref,
+        head_ref,
+        draft,
+        .{},
+    );
+}
+
+pub fn buildPullOpenedJsonWithLegacy(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    pull_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    title: []const u8,
+    body: []const u8,
+    base_ref: []const u8,
+    head_ref: []const u8,
+    draft: bool,
+    legacy: LegacyInfo,
+) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
-    try appendEnvelopePrefix(&buf, allocator, cfg, seq, pull_id, event_uuid, idem, occurred_at, parents, "pull.opened", "pull");
+    try appendEnvelopePrefixWithLegacy(&buf, allocator, cfg, seq, pull_id, event_uuid, idem, occurred_at, parents, "pull.opened", "pull", legacy);
     try buf.appendSlice(allocator, "\"payload\":{");
     try appendJsonFieldString(&buf, allocator, "title", title, true);
     if (body.len != 0) {
@@ -554,6 +629,23 @@ fn appendEnvelopePrefix(
     event_type: []const u8,
     object_kind: []const u8,
 ) !void {
+    try appendEnvelopePrefixWithLegacy(buf, allocator, cfg, seq, object_id, event_uuid, idem, occurred_at, parents, event_type, object_kind, .{});
+}
+
+fn appendEnvelopePrefixWithLegacy(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    object_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    event_type: []const u8,
+    object_kind: []const u8,
+    legacy: LegacyInfo,
+) !void {
     try buf.append(allocator, '{');
     try appendJsonFieldString(buf, allocator, "$schema", event_schema, true);
     try appendJsonFieldString(buf, allocator, "repo_id", cfg.repo_id, true);
@@ -571,7 +663,19 @@ fn appendEnvelopePrefix(
     try appendJsonFieldUnsigned(buf, allocator, "seq", seq, true);
     try appendJsonFieldString(buf, allocator, "occurred_at", occurred_at, true);
     try appendParentHashes(buf, allocator, parents);
-    try buf.appendSlice(allocator, "\"legacy\":{},");
+    try appendLegacyInfo(buf, allocator, legacy);
+}
+
+fn appendLegacyInfo(buf: *std.ArrayList(u8), allocator: Allocator, legacy: LegacyInfo) !void {
+    if (legacy.isEmpty()) {
+        try buf.appendSlice(allocator, "\"legacy\":{},");
+        return;
+    }
+
+    try buf.appendSlice(allocator, "\"legacy\":{");
+    if (legacy.github_issue_number) |number| try appendJsonFieldUnsigned(buf, allocator, "github_issue_number", number, legacy.github_pull_number != null);
+    if (legacy.github_pull_number) |number| try appendJsonFieldUnsigned(buf, allocator, "github_pull_number", number, false);
+    try buf.appendSlice(allocator, "},");
 }
 
 fn appendParentHashes(buf: *std.ArrayList(u8), allocator: Allocator, parents: EventParents) !void {

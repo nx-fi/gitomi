@@ -549,6 +549,40 @@ init_repo "$concurrent_rbac"
   gt fsck >/dev/null
 )
 
+echo "integration: authorization uses event causal frontier"
+frontier_auth="$ROOT/frontier-auth"
+init_repo "$frontier_auth"
+(
+  cd "$frontier_auth"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
+
+  anchor_a_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002001","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000002101"},"idempotency_key":"018f0000-0000-7000-8000-000000002201","actor":{"principal":"alice","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:33:00Z","parent_hashes":{"log":"","causal":[],"related":[]},"legacy":{},"payload":{"title":"Frontier anchor A"}}'
+  anchor_a_commit="$(git commit-tree -S -m "issue.opened frontier anchor A" -m "$anchor_a_body" "$empty_tree")"
+  grant_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002002","event_type":"acl.role_granted","object":{"kind":"acl","id":"acl:bob"},"idempotency_key":"018f0000-0000-7000-8000-000000002202","actor":{"principal":"alice","device":"laptop"},"seq":2,"occurred_at":"2026-05-13T18:33:01Z","parent_hashes":{"log":"'"$anchor_a_commit"'","causal":[],"related":[]},"legacy":{},"payload":{"principal":"bob","role":"reporter"}}'
+  grant_commit="$(git commit-tree -S -m "acl.role_granted bob reporter frontier" -m "$grant_body" "$empty_tree" -p "$anchor_a_commit")"
+  identity_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002003","event_type":"identity.device_added","object":{"kind":"identity","id":"identity:bob:desktop"},"idempotency_key":"018f0000-0000-7000-8000-000000002203","actor":{"principal":"alice","device":"laptop"},"seq":3,"occurred_at":"2026-05-13T18:33:02Z","parent_hashes":{"log":"'"$grant_commit"'","causal":[],"related":[]},"legacy":{},"payload":{"principal":"bob","device":"desktop","signing_key":{"scheme":"ssh","public_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIbobdesktop","fingerprint":"bob-desktop"}}}'
+  identity_commit="$(git commit-tree -S -m "identity.device_added bob/desktop frontier" -m "$identity_body" "$empty_tree" -p "$grant_commit")"
+  bob_issue_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002004","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000002102"},"idempotency_key":"018f0000-0000-7000-8000-000000002204","actor":{"principal":"bob","device":"desktop"},"seq":1,"occurred_at":"2026-05-13T18:33:03Z","parent_hashes":{"log":"'"$identity_commit"'","causal":[],"related":[]},"legacy":{},"payload":{"title":"Bob concurrent issue"}}'
+  bob_issue_commit="$(git commit-tree -S -m "issue.opened bob concurrent frontier" -m "$bob_issue_body" "$empty_tree" -p "$identity_commit")"
+
+  anchor_b_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002005","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000002103"},"idempotency_key":"018f0000-0000-7000-8000-000000002205","actor":{"principal":"alice","device":"laptop"},"seq":4,"occurred_at":"2026-05-13T18:33:04Z","parent_hashes":{"log":"","causal":[],"related":[]},"legacy":{},"payload":{"title":"Frontier anchor B"}}'
+  anchor_b_commit="$(git commit-tree -S -m "issue.opened frontier anchor B" -m "$anchor_b_body" "$empty_tree")"
+  revoke_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002006","event_type":"acl.role_revoked","object":{"kind":"acl","id":"acl:bob"},"idempotency_key":"018f0000-0000-7000-8000-000000002206","actor":{"principal":"alice","device":"laptop"},"seq":5,"occurred_at":"2026-05-13T18:33:05Z","parent_hashes":{"log":"'"$anchor_b_commit"'","causal":["'"$identity_commit"'"],"related":["'"$identity_commit"'"]},"legacy":{},"payload":{"principal":"bob","role":"reporter"}}'
+  revoke_commit="$(git commit-tree -S -m "acl.role_revoked bob reporter frontier" -m "$revoke_body" "$empty_tree" -p "$anchor_b_commit" -p "$identity_commit")"
+
+  git update-ref refs/gitomi/inbox/alice/a "$bob_issue_commit"
+  git update-ref refs/gitomi/inbox/alice/b "$revoke_commit"
+  events="$(gt events list --json)"
+  bob_line="$(printf '%s\n' "$events" | grep '"actor_principal":"bob"')"
+  assert_contains "$bob_line" '"domain_status":"accepted"'
+  issues="$(gt issue list --json)"
+  assert_contains "$issues" '"title":"Bob concurrent issue"'
+  acl_json="$(gt acl list --json)"
+  assert_not_contains "$acl_json" '"principal":"bob"'
+  gt fsck >/dev/null
+)
+
 echo "integration: unauthorized remote event is audited and not projected"
 unauthorized="$ROOT/unauthorized"
 init_repo "$unauthorized"
