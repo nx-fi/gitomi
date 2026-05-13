@@ -279,6 +279,66 @@ init_repo "$invalid"
   assert_contains "$(cat fsck.out)" "issue.opened payload.title"
 )
 
+echo "integration: domain-invalid issue update is audited and not projected"
+domain_invalid="$ROOT/domain-invalid"
+init_repo "$domain_invalid"
+(
+  cd "$domain_invalid"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
+  missing_issue="018f0000-0000-7000-8000-000000000111"
+  bad_body='{"$schema":"urn:gitomi:event:v1","repo_id":"018f0000-0000-7000-8000-000000000001","event_uuid":"018f0000-0000-7000-8000-000000000112","event_type":"issue.title_set","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000000111"},"idempotency_key":"018f0000-0000-7000-8000-000000000113","actor":{"principal":"alice","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:30:59Z","parent_hashes":{"log":"","causal":[],"related":[]},"legacy":{},"payload":{"title":"No opener"}}'
+  bad_commit="$(git commit-tree -S -m "issue.title_set #${missing_issue:0:7}" -m "$bad_body" "$empty_tree")"
+  git update-ref refs/gitomi/inbox/alice/laptop "$bad_commit"
+  events="$(gt events list --json)"
+  assert_line_count "$events" 1
+  assert_contains "$events" '"domain_status":"rejected"'
+  assert_contains "$events" '"rejection_reason":"object_not_created"'
+  issues="$(gt issue list --json)"
+  assert_line_count "$issues" 0
+  gt fsck >/dev/null
+)
+
+echo "integration: duplicate opened event is audited and only one object projects"
+duplicate_open="$ROOT/duplicate-open"
+init_repo "$duplicate_open"
+(
+  cd "$duplicate_open"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
+  issue_id="018f0000-0000-7000-8000-000000000211"
+  body1='{"$schema":"urn:gitomi:event:v1","repo_id":"018f0000-0000-7000-8000-000000000001","event_uuid":"018f0000-0000-7000-8000-000000000212","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000000211"},"idempotency_key":"018f0000-0000-7000-8000-000000000213","actor":{"principal":"alice","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:30:59Z","parent_hashes":{"log":"","causal":[],"related":[]},"legacy":{},"payload":{"title":"First open"}}'
+  first_commit="$(git commit-tree -S -m "issue.opened #${issue_id:0:7} First open" -m "$body1" "$empty_tree")"
+  body2='{"$schema":"urn:gitomi:event:v1","repo_id":"018f0000-0000-7000-8000-000000000001","event_uuid":"018f0000-0000-7000-8000-000000000214","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000000211"},"idempotency_key":"018f0000-0000-7000-8000-000000000215","actor":{"principal":"alice","device":"laptop"},"seq":2,"occurred_at":"2026-05-13T18:31:00Z","parent_hashes":{"log":"'"$first_commit"'","causal":[],"related":["'"$first_commit"'"]},"legacy":{},"payload":{"title":"Second open"}}'
+  second_commit="$(git commit-tree -S -m "issue.opened #${issue_id:0:7} Second open" -m "$body2" -p "$first_commit" "$empty_tree")"
+  git update-ref refs/gitomi/inbox/alice/laptop "$second_commit"
+  events="$(gt events list --json)"
+  assert_line_count "$events" 2
+  assert_contains "$events" '"domain_status":"accepted"'
+  assert_contains "$events" '"rejection_reason":"duplicate_object_id"'
+  issues="$(gt issue list --json)"
+  assert_line_count "$issues" 1
+  gt fsck >/dev/null
+)
+
+echo "integration: stale config seq is recovered before writing"
+seq_recovery="$ROOT/seq-recovery"
+init_repo "$seq_recovery"
+(
+  cd "$seq_recovery"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  gt issue open --title "Seq base" >/dev/null
+  first_event="$(gt events list --json)"
+  issue_id="$(json_field "$first_event" object_id)"
+  [[ -n "$issue_id" ]] || fail "expected issue id"
+  write_gt_config "$REPO_ID" alice laptop 0
+  gt issue title "#${issue_id:0:7}" --title "Recovered seq" >/dev/null
+  events="$(gt events list --json)"
+  assert_line_count "$events" 2
+  assert_contains "$events" '"seq":2'
+  gt fsck >/dev/null
+)
+
 echo "integration: bare-remote sync"
 sync_root="$ROOT/sync"
 mkdir -p "$sync_root"

@@ -106,7 +106,7 @@ Every event body MUST conform to the following envelope:
     "causal": ["string, observed commit OID, bounded by v1 parent policy"],
     "related": ["string, domain-related commit OID"]
   },
-  "seq": "integer, monotonic per actor/device",
+  "seq": "integer, strictly increasing per actor/device; gaps allowed",
   "occurred_at": "string, RFC 3339 timestamp in UTC",
   "legacy": {
     "github_issue_number": "integer (OPTIONAL)",
