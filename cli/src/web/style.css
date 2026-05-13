@@ -38,6 +38,7 @@
   --accent-soft: #edf8f2;
   --shadow: 0 10px 30px rgba(31, 35, 40, 0.06), 0 1px 2px rgba(31, 35, 40, 0.08);
   --shadow-subtle: 0 1px 2px rgba(31, 35, 40, 0.06);
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
@@ -79,6 +80,7 @@
   --accent-soft: #12291c;
   --shadow: 0 14px 34px rgba(1, 4, 9, 0.32), 0 1px 2px rgba(1, 4, 9, 0.55);
   --shadow-subtle: 0 1px 2px rgba(1, 4, 9, 0.45);
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 * { box-sizing: border-box; }
 body {
@@ -90,7 +92,7 @@ body {
 a { color: var(--blue); text-decoration: none; }
 a:hover { text-decoration: underline; }
 code {
-  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font: 12px/1.4 var(--mono);
   background: var(--code-bg);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -137,7 +139,7 @@ code {
   border-radius: 7px;
   background: var(--brand-mark-bg);
   color: var(--brand-mark-text);
-  font: 700 13px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font: 700 13px/1 var(--mono);
   box-shadow: var(--shadow-subtle);
 }
 .topbar nav {
@@ -500,7 +502,7 @@ tbody tr:hover {
   background: var(--panel-strong);
   border: 1px solid var(--border);
   border-radius: 6px;
-  font: 600 13px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font: 600 13px/1.2 var(--mono);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -756,7 +758,7 @@ tbody tr:hover {
   border: 0;
   border-radius: 5px;
   color: #ffffff;
-  font: 800 9px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font: 800 9px/1 var(--mono);
 }
 .file-icon[class*="lang-"]::before {
   content: none;
@@ -802,7 +804,7 @@ tbody tr:hover {
   padding: 0;
   overflow-x: auto;
   list-style: none;
-  font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font: 12px/1.55 var(--mono);
   background: var(--panel);
 }
 .blob-lines li {
@@ -851,6 +853,36 @@ tbody tr:hover {
 .readme-body {
   padding: 18px;
   background: var(--panel);
+}
+.markdown-preview {
+  border-top: 1px solid var(--border);
+}
+.view-tabs {
+  display: inline-flex;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--button-secondary-bg);
+}
+.view-tabs a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 10px;
+  color: var(--muted);
+  font-weight: 700;
+}
+.view-tabs a + a {
+  border-left: 1px solid var(--border);
+}
+.view-tabs a.active {
+  color: var(--text);
+  background: var(--panel);
+}
+.view-tabs a:hover {
+  color: var(--text);
+  text-decoration: none;
 }
 .commits-panel,
 .commit-detail {
@@ -903,7 +935,7 @@ tbody tr:hover {
 .commit-full-hash {
   margin: 8px 0 0;
   color: var(--muted);
-  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font: 12px/1.4 var(--mono);
   overflow-wrap: anywhere;
 }
 .commit-meta {
@@ -925,37 +957,95 @@ tbody tr:hover {
   overflow: hidden;
 }
 .diff-file-head {
-  padding: 10px 18px;
+  padding: 8px 14px;
   background: var(--panel-strong);
   border-bottom: 1px solid var(--border);
-  font: 600 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font: 600 13px/1.4 var(--mono);
   overflow-wrap: anywhere;
 }
 .diff-lines {
   margin: 0;
   overflow-x: auto;
   background: var(--panel);
-  font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font: 12px/1.45 var(--mono);
 }
-.diff-line {
-  display: block;
-  min-height: 20px;
-  padding: 0 12px;
+.diff-row {
+  display: grid;
+  grid-template-columns: 56px 56px minmax(max-content, 1fr);
+  min-height: 19px;
   white-space: pre;
 }
-.diff-line.meta {
+.diff-num {
+  padding: 0 8px;
+  color: var(--muted);
+  background: var(--panel-strong);
+  border-right: 1px solid var(--border);
+  text-align: right;
+  user-select: none;
+}
+.diff-code {
+  display: block;
+  min-width: max-content;
+  padding: 0 10px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  font: inherit;
+  white-space: pre;
+}
+.diff-row.meta {
   color: var(--muted);
   background: var(--subtle);
 }
-.diff-line.hunk {
+.diff-row.meta .diff-num,
+.diff-row.hunk .diff-num,
+.diff-row.diff-expand .diff-num {
+  background: inherit;
+}
+.diff-row.hunk {
   color: var(--blue);
   background: var(--info-bg);
 }
-.diff-line.add {
+.diff-row.add {
   background: var(--green-bg);
 }
-.diff-line.del {
+.diff-row.del {
   background: var(--red-bg);
+}
+.diff-row.add .diff-num {
+  background: color-mix(in srgb, var(--green-bg) 82%, var(--panel-strong));
+}
+.diff-row.del .diff-num {
+  background: color-mix(in srgb, var(--red-bg) 82%, var(--panel-strong));
+}
+.diff-expand {
+  min-height: 26px;
+  background: var(--subtle);
+}
+.diff-expand a,
+.diff-expand span {
+  align-self: center;
+  width: fit-content;
+  min-height: 22px;
+  margin-left: 8px;
+  padding: 2px 8px;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: 700 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.diff-file:hover .diff-expand a,
+.diff-file:hover .diff-expand span,
+.diff-expand:focus-within a {
+  opacity: 1;
+}
+.diff-expand a:hover {
+  color: var(--text);
+  text-decoration: none;
+  border-color: var(--border-strong);
 }
 .markdown-body {
   font-size: 15px;
@@ -1016,7 +1106,7 @@ tbody tr:hover {
   background: transparent;
   border: 0;
   border-radius: 0;
-  font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font: 13px/1.55 var(--mono);
   white-space: pre;
 }
 .markdown-body code {
@@ -1057,7 +1147,7 @@ textarea:focus,
 }
 textarea {
   resize: vertical;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--mono);
 }
 .form-actions {
   display: flex;

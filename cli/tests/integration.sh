@@ -103,6 +103,17 @@ init_repo "$single"
   assert_contains "$issues" '"title":"First issue"'
   assert_contains "$issues" '"labels":["bug"]'
   assert_contains "$issues" '"assignees":["alice"]'
+  issue_id="$(json_field "$issues" id)"
+  [[ -n "$issue_id" ]] || fail "expected issue id from issue list"
+  issue_show="$(gt issue show "#${issue_id:0:7}")"
+  assert_contains "$issue_show" "id:        $issue_id"
+  assert_contains "$issue_show" "labels:    bug"
+  assert_contains "$issue_show" "assignees: alice"
+  assert_contains "$issue_show" "Body text"
+  issue_show_json="$(gt issue show "#${issue_id:0:7}" --json)"
+  assert_line_count "$issue_show_json" 1
+  assert_contains "$issue_show_json" '"id":"'"$issue_id"'"'
+  assert_contains "$issue_show_json" '"body":"Body text"'
   gt fsck >/dev/null
 )
 
@@ -121,9 +132,9 @@ init_repo "$reducer"
   gt issue title "$issue_ref" --title "Updated title" >/dev/null
   gt issue body "$issue_ref" --body "Updated body" >/dev/null
   gt issue close "$issue_ref" >/dev/null
-  gt issue label remove "$issue_ref" bug >/dev/null
-  gt issue assignee remove "$issue_ref" alice >/dev/null
-  gt issue label add "$issue_ref" regression >/dev/null
+  gt issue label "$issue_ref" remove bug >/dev/null
+  gt issue assignee "$issue_ref" remove alice >/dev/null
+  gt issue label "$issue_ref" add regression >/dev/null
   issues="$(gt issue list --json)"
   assert_line_count "$issues" 1
   assert_contains "$issues" '"state":"closed"'
@@ -196,8 +207,8 @@ init_repo "$pulls_repo"
 (
   cd "$pulls_repo"
   gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
-  gt pull open --title "First pull" --base main --head feature --body "Pull body" --draft >/dev/null
-  pulls_json="$(gt pull list --json)"
+  gt pr create --title "First pull" -B main -H feature --body "Pull body" -d >/dev/null
+  pulls_json="$(gt pr list --json)"
   assert_line_count "$pulls_json" 1
   assert_contains "$pulls_json" '"state":"open"'
   assert_contains "$pulls_json" '"title":"First pull"'
@@ -208,17 +219,30 @@ init_repo "$pulls_repo"
   pull_id="$(json_field "$pulls_json" id)"
   [[ -n "$pull_id" ]] || fail "expected pull id from pull list"
   pull_ref="#${pull_id:0:7}"
-  gt comment add pull "$pull_ref" --body "Pull comment" >/dev/null
-  pull_comments="$(gt comment list pull "$pull_ref" --json)"
+  legacy_pulls_json="$(gt pull list --json)"
+  assert_contains "$legacy_pulls_json" '"id":"'"$pull_id"'"'
+  pull_show="$(gt pr view "$pull_ref")"
+  assert_contains "$pull_show" "id:         $pull_id"
+  assert_contains "$pull_show" "base:       main"
+  assert_contains "$pull_show" "head:       feature"
+  assert_contains "$pull_show" "draft:      true"
+  assert_contains "$pull_show" "Pull body"
+  pull_show_json="$(gt pr view "$pull_ref" --json)"
+  assert_line_count "$pull_show_json" 1
+  assert_contains "$pull_show_json" '"id":"'"$pull_id"'"'
+  assert_contains "$pull_show_json" '"base_ref":"main"'
+  assert_contains "$pull_show_json" '"head_ref":"feature"'
+  gt pr comment "$pull_ref" --body "Pull comment" >/dev/null
+  pull_comments="$(gt comment list pr "$pull_ref" --json)"
   assert_line_count "$pull_comments" 1
   assert_contains "$pull_comments" '"body":"Pull comment"'
   sleep 1
-  gt pull title "$pull_ref" --title "Updated pull" >/dev/null
-  gt pull base "$pull_ref" --base trunk >/dev/null
-  gt pull label add "$pull_ref" review >/dev/null
-  gt pull reviewer add "$pull_ref" alice >/dev/null
-  gt pull merge "$pull_ref" --target-oid 0123456789abcdef0123456789abcdef01234567 >/dev/null
-  pulls_json="$(gt pull list --json)"
+  gt pr title "$pull_ref" --title "Updated pull" >/dev/null
+  gt pr base "$pull_ref" --base trunk >/dev/null
+  gt pr label "$pull_ref" add review >/dev/null
+  gt pr reviewer "$pull_ref" add alice >/dev/null
+  gt pr merge "$pull_ref" --target-oid 0123456789abcdef0123456789abcdef01234567 >/dev/null
+  pulls_json="$(gt pr list --json)"
   assert_line_count "$pulls_json" 1
   assert_contains "$pulls_json" '"state":"merged"'
   assert_contains "$pulls_json" '"title":"Updated pull"'
@@ -235,14 +259,14 @@ init_repo "$pull_edit"
 (
   cd "$pull_edit"
   gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
-  gt pull open --title "Batch pull" --base main --head feature --body "Old body" >/dev/null
-  pulls_json="$(gt pull list --json)"
+  gt pr create --title "Batch pull" --base main --head feature --body "Old body" >/dev/null
+  pulls_json="$(gt pr list --json)"
   pull_id="$(json_field "$pulls_json" id)"
   [[ -n "$pull_id" ]] || fail "expected pull id from pull list"
   pull_ref="#${pull_id:0:7}"
   sleep 1
-  gt pull edit "$pull_ref" --title "Batch pull updated" --body "New body" --state closed --base trunk --head feature-v2 --label review --assignee bob --reviewer alice >/dev/null
-  pulls_json="$(gt pull list --json)"
+  gt pr edit "$pull_ref" -t "Batch pull updated" -b "New body" --state closed -B trunk --head feature-v2 --add-label review --add-assignee bob --add-reviewer alice >/dev/null
+  pulls_json="$(gt pr list --json)"
   assert_line_count "$pulls_json" 1
   assert_contains "$pulls_json" '"state":"closed"'
   assert_contains "$pulls_json" '"title":"Batch pull updated"'
@@ -400,7 +424,7 @@ git -C "$sync_root/b" remote add origin "$sync_root/remote.git"
   cd "$sync_root/a"
   gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
   gt issue open --title "Synced issue" >/dev/null
-  gt sync --push-only >/dev/null
+  gt sync >/dev/null
 )
 remote_refs="$(git --git-dir="$sync_root/remote.git" for-each-ref '--format=%(refname)' refs/gitomi)"
 assert_contains "$remote_refs" "refs/gitomi/inbox/alice/laptop"

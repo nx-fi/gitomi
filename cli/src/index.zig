@@ -2136,12 +2136,12 @@ pub fn resolveIssueId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]
 pub fn resolvePullId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
     const prefix = if (std.mem.startsWith(u8, raw_ref, "#")) raw_ref[1..] else raw_ref;
     if (prefix.len < 7) {
-        try eprint("gt pull: pull reference must be at least 7 hex characters\n", .{});
+        try eprint("gt pr: PR reference must be at least 7 hex characters\n", .{});
         return CliError.InvalidReference;
     }
     for (prefix) |c| {
         if (!std.ascii.isHex(c) and c != '-') {
-            try eprint("gt pull: pull reference must be a UUID or UUID prefix\n", .{});
+            try eprint("gt pr: PR reference must be a UUID or UUID prefix\n", .{});
             return CliError.InvalidReference;
         }
     }
@@ -2156,7 +2156,7 @@ pub fn resolvePullId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u
     try stmt.bindText(1, pattern);
 
     if (!(try stmt.step())) {
-        try eprint("gt pull: no pull matches #{s}\n", .{prefix});
+        try eprint("gt pr: no PR matches #{s}\n", .{prefix});
         return CliError.NotFound;
     }
     const first = try stmt.columnTextDup(allocator, 0);
@@ -2164,7 +2164,7 @@ pub fn resolvePullId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u
     if (try stmt.step()) {
         const second = try stmt.columnTextDup(allocator, 0);
         defer allocator.free(second);
-        try eprint("gt pull: ambiguous pull reference #{s} matches {s} and {s}\n", .{ prefix, first, second });
+        try eprint("gt pr: ambiguous PR reference #{s} matches {s} and {s}\n", .{ prefix, first, second });
         return CliError.AmbiguousReference;
     }
     return first;
@@ -2249,6 +2249,72 @@ pub fn listIssuesFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
     }
 }
 
+pub fn showIssueFromIndex(allocator: Allocator, repo: Repo, issue_id: []const u8, json: bool) !void {
+    if (!fileExists(repo.index_path)) return;
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
+    var stmt = try db.prepare(
+        \\SELECT id, title, state, author_principal, author_device, opened_at, body
+        \\FROM issues
+        \\WHERE id = ?
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+
+    if (!(try stmt.step())) {
+        try eprint("gt issue: no issue matches {s}\n", .{issue_id});
+        return CliError.NotFound;
+    }
+
+    const id = try stmt.columnTextDup(allocator, 0);
+    defer allocator.free(id);
+    const title = try stmt.columnTextDup(allocator, 1);
+    defer allocator.free(title);
+    const state = try stmt.columnTextDup(allocator, 2);
+    defer allocator.free(state);
+    const author_principal = try stmt.columnTextDup(allocator, 3);
+    defer allocator.free(author_principal);
+    const author_device = try stmt.columnTextDup(allocator, 4);
+    defer allocator.free(author_device);
+    const opened_at = try stmt.columnTextDup(allocator, 5);
+    defer allocator.free(opened_at);
+    const body = try stmt.columnTextDup(allocator, 6);
+    defer allocator.free(body);
+
+    if (json) {
+        var line: std.ArrayList(u8) = .empty;
+        defer line.deinit(allocator);
+        try line.append(allocator, '{');
+        try appendJsonFieldString(&line, allocator, "id", id, true);
+        try appendJsonFieldString(&line, allocator, "state", state, true);
+        try appendJsonFieldString(&line, allocator, "title", title, true);
+        try appendJsonFieldString(&line, allocator, "body", body, true);
+        try appendJsonFieldString(&line, allocator, "author_principal", author_principal, true);
+        try appendJsonFieldString(&line, allocator, "author_device", author_device, true);
+        try appendJsonFieldString(&line, allocator, "opened_at", opened_at, true);
+        try appendIssueCollectionJsonField(&line, allocator, &db, "labels", "SELECT DISTINCT label FROM issue_labels WHERE issue_id = ? ORDER BY label", id, true);
+        try appendIssueCollectionJsonField(&line, allocator, &db, "assignees", "SELECT DISTINCT assignee FROM issue_assignees WHERE issue_id = ? ORDER BY assignee", id, false);
+        try line.append(allocator, '}');
+        try out("{s}\n", .{line.items});
+        return;
+    }
+
+    const labels = try collectionText(allocator, &db, "SELECT DISTINCT label FROM issue_labels WHERE issue_id = ? ORDER BY label", id);
+    defer allocator.free(labels);
+    const assignees = try collectionText(allocator, &db, "SELECT DISTINCT assignee FROM issue_assignees WHERE issue_id = ? ORDER BY assignee", id);
+    defer allocator.free(assignees);
+
+    try out("id:        {s}\n", .{id});
+    try out("state:     {s}\n", .{state});
+    try out("title:     {s}\n", .{title});
+    try out("author:    {s}/{s}\n", .{ author_principal, author_device });
+    try out("opened_at: {s}\n", .{opened_at});
+    try out("labels:    {s}\n", .{labels});
+    try out("assignees: {s}\n", .{assignees});
+    try out("\n{s}\n", .{body});
+}
+
 pub fn listPullsFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
     if (!fileExists(repo.index_path)) return;
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
@@ -2314,6 +2380,95 @@ pub fn listPullsFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
             });
         }
     }
+}
+
+pub fn showPullFromIndex(allocator: Allocator, repo: Repo, pull_id: []const u8, json: bool) !void {
+    if (!fileExists(repo.index_path)) return;
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
+    var stmt = try db.prepare(
+        \\SELECT id, title, state, author_principal, author_device, opened_at, body, base_ref, head_ref, draft, merge_oid, target_oid
+        \\FROM pulls
+        \\WHERE id = ?
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, pull_id);
+
+    if (!(try stmt.step())) {
+        try eprint("gt pr: no PR matches {s}\n", .{pull_id});
+        return CliError.NotFound;
+    }
+
+    const id = try stmt.columnTextDup(allocator, 0);
+    defer allocator.free(id);
+    const title = try stmt.columnTextDup(allocator, 1);
+    defer allocator.free(title);
+    const state = try stmt.columnTextDup(allocator, 2);
+    defer allocator.free(state);
+    const author_principal = try stmt.columnTextDup(allocator, 3);
+    defer allocator.free(author_principal);
+    const author_device = try stmt.columnTextDup(allocator, 4);
+    defer allocator.free(author_device);
+    const opened_at = try stmt.columnTextDup(allocator, 5);
+    defer allocator.free(opened_at);
+    const body = try stmt.columnTextDup(allocator, 6);
+    defer allocator.free(body);
+    const base_ref = try stmt.columnTextDup(allocator, 7);
+    defer allocator.free(base_ref);
+    const head_ref = try stmt.columnTextDup(allocator, 8);
+    defer allocator.free(head_ref);
+    const draft = stmt.columnInt(9) != 0;
+    const merge_oid = try stmt.columnTextDup(allocator, 10);
+    defer allocator.free(merge_oid);
+    const target_oid = try stmt.columnTextDup(allocator, 11);
+    defer allocator.free(target_oid);
+
+    if (json) {
+        var line: std.ArrayList(u8) = .empty;
+        defer line.deinit(allocator);
+        try line.append(allocator, '{');
+        try appendJsonFieldString(&line, allocator, "id", id, true);
+        try appendJsonFieldString(&line, allocator, "state", state, true);
+        try appendJsonFieldString(&line, allocator, "title", title, true);
+        try appendJsonFieldString(&line, allocator, "body", body, true);
+        try appendJsonFieldString(&line, allocator, "base_ref", base_ref, true);
+        try appendJsonFieldString(&line, allocator, "head_ref", head_ref, true);
+        try appendJsonFieldBool(&line, allocator, "draft", draft, true);
+        try appendJsonFieldString(&line, allocator, "merge_oid", merge_oid, true);
+        try appendJsonFieldString(&line, allocator, "target_oid", target_oid, true);
+        try appendJsonFieldString(&line, allocator, "author_principal", author_principal, true);
+        try appendJsonFieldString(&line, allocator, "author_device", author_device, true);
+        try appendJsonFieldString(&line, allocator, "opened_at", opened_at, true);
+        try appendIssueCollectionJsonField(&line, allocator, &db, "labels", "SELECT DISTINCT label FROM pull_labels WHERE pull_id = ? ORDER BY label", id, true);
+        try appendIssueCollectionJsonField(&line, allocator, &db, "assignees", "SELECT DISTINCT assignee FROM pull_assignees WHERE pull_id = ? ORDER BY assignee", id, true);
+        try appendIssueCollectionJsonField(&line, allocator, &db, "reviewers", "SELECT DISTINCT reviewer FROM pull_reviewers WHERE pull_id = ? ORDER BY reviewer", id, false);
+        try line.append(allocator, '}');
+        try out("{s}\n", .{line.items});
+        return;
+    }
+
+    const labels = try collectionText(allocator, &db, "SELECT DISTINCT label FROM pull_labels WHERE pull_id = ? ORDER BY label", id);
+    defer allocator.free(labels);
+    const assignees = try collectionText(allocator, &db, "SELECT DISTINCT assignee FROM pull_assignees WHERE pull_id = ? ORDER BY assignee", id);
+    defer allocator.free(assignees);
+    const reviewers = try collectionText(allocator, &db, "SELECT DISTINCT reviewer FROM pull_reviewers WHERE pull_id = ? ORDER BY reviewer", id);
+    defer allocator.free(reviewers);
+
+    try out("id:         {s}\n", .{id});
+    try out("state:      {s}\n", .{state});
+    try out("title:      {s}\n", .{title});
+    try out("author:     {s}/{s}\n", .{ author_principal, author_device });
+    try out("opened_at:  {s}\n", .{opened_at});
+    try out("base:       {s}\n", .{base_ref});
+    try out("head:       {s}\n", .{head_ref});
+    try out("draft:      {s}\n", .{if (draft) "true" else "false"});
+    try out("merge_oid:  {s}\n", .{if (merge_oid.len == 0) "(none)" else merge_oid});
+    try out("target_oid: {s}\n", .{if (target_oid.len == 0) "(none)" else target_oid});
+    try out("labels:     {s}\n", .{labels});
+    try out("assignees:  {s}\n", .{assignees});
+    try out("reviewers:  {s}\n", .{reviewers});
+    try out("\n{s}\n", .{body});
 }
 
 pub fn listCommentsFromIndex(
@@ -2394,6 +2549,31 @@ fn appendIssueCollectionJsonField(
     }
     try buf.append(allocator, ']');
     if (comma) try buf.append(allocator, ',');
+}
+
+fn collectionText(
+    allocator: Allocator,
+    db: *SqliteDb,
+    comptime sql_text: []const u8,
+    object_id: []const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    var stmt = try db.prepare(sql_text);
+    defer stmt.deinit();
+    try stmt.bindText(1, object_id);
+
+    var first = true;
+    while (try stmt.step()) {
+        const value = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(value);
+        if (!first) try buf.appendSlice(allocator, ", ");
+        first = false;
+        try buf.appendSlice(allocator, value);
+    }
+    if (first) try buf.appendSlice(allocator, "(none)");
+    return buf.toOwnedSlice(allocator);
 }
 
 pub fn listEventsFromIndex(
