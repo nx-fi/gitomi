@@ -14,6 +14,7 @@ test {
     _ = @import("comment.zig");
     _ = @import("pull.zig");
     _ = @import("rbac.zig");
+    _ = @import("actions.zig");
     _ = @import("runs.zig");
     _ = @import("sync.zig");
     _ = @import("web.zig");

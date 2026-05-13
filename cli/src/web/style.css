@@ -1078,7 +1078,10 @@ tbody tr:hover {
 .markdown-body ul,
 .markdown-body ol,
 .markdown-body blockquote,
-.markdown-body pre {
+.markdown-body pre,
+.markdown-table-wrap,
+.math-block,
+.mermaid-diagram {
   margin: 0 0 16px;
 }
 .markdown-body ul,
@@ -1111,6 +1114,112 @@ tbody tr:hover {
 }
 .markdown-body code {
   color: var(--text);
+}
+.markdown-table-wrap {
+  overflow-x: auto;
+}
+.markdown-table {
+  width: max-content;
+  min-width: min(100%, 520px);
+  border-collapse: collapse;
+  font-size: 14px;
+}
+.markdown-table th,
+.markdown-table td {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+.markdown-table th {
+  background: var(--panel-strong);
+  font-weight: 700;
+}
+.markdown-table tr:nth-child(even) td {
+  background: var(--subtle);
+}
+.math-inline,
+.math-block {
+  font-family: "Cambria Math", "STIX Two Math", "Times New Roman", serif;
+}
+.math-inline {
+  padding: 0 2px;
+  color: var(--text);
+  white-space: nowrap;
+}
+.math-block {
+  overflow-x: auto;
+  padding: 12px 14px;
+  color: var(--text);
+  background: var(--subtle);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 18px;
+  text-align: center;
+}
+.math-frac {
+  display: inline-grid;
+  grid-template-rows: auto auto;
+  align-items: center;
+  margin: 0 2px;
+  vertical-align: middle;
+}
+.math-frac span {
+  min-width: 18px;
+  padding: 0 4px;
+  text-align: center;
+}
+.math-frac span:first-child {
+  border-bottom: 1px solid currentColor;
+}
+.math-sqrt::before {
+  content: "\221A";
+  margin-right: 2px;
+}
+.math-sqrt {
+  display: inline-block;
+  padding: 0 4px 0 2px;
+  border-top: 1px solid currentColor;
+}
+.mermaid-source {
+  color: var(--muted);
+}
+.mermaid-diagram {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  padding: 12px;
+  overflow: visible;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.mermaid-edge {
+  stroke: var(--muted);
+  stroke-width: 1.7;
+}
+.mermaid-edge.dashed {
+  stroke-dasharray: 5 4;
+}
+.mermaid-arrow {
+  fill: var(--muted);
+}
+.mermaid-node {
+  fill: var(--panel-strong);
+  stroke: var(--border-strong);
+  stroke-width: 1.2;
+}
+.mermaid-label {
+  fill: var(--text);
+  font: 700 13px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+.mermaid-edge-label {
+  fill: var(--muted);
+  font: 700 11px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  paint-order: stroke;
+  stroke: var(--panel);
+  stroke-width: 4px;
 }
 .form-panel { max-width: 820px; }
 .issue-form {

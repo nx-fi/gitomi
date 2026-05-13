@@ -109,6 +109,7 @@ pub fn appendShellEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
         \\</main>
         \\<script src="/theme.js"></script>
         \\<script src="/tree.js"></script>
+        \\<script src="/markdown.js"></script>
         \\<script src="/highlight.js"></script>
         \\</body>
         \\</html>
