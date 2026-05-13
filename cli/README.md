@@ -38,27 +38,30 @@ gt index rebuild|status
 gt refs
 gt events list [--json] [--limit N] [--ref REF]
 gt issue list [--json]
+gt issue show ISSUE [--json]
 gt issue open --title TITLE [--body BODY] [--label LABEL] [--assignee PRINCIPAL]
 gt issue edit ISSUE [--title TITLE] [--body BODY] [--state open|closed] [--label LABEL] [--unlabel LABEL] [--assignee PRINCIPAL] [--unassign PRINCIPAL]
 gt issue title ISSUE --title TITLE
 gt issue body ISSUE --body BODY
 gt issue close|reopen ISSUE
-gt issue label add|remove ISSUE LABEL
-gt issue assignee add|remove ISSUE PRINCIPAL
-gt pull list [--json]
-gt pull open --title TITLE --base BASE --head HEAD [--body BODY] [--draft]
-gt pull edit PULL [--title TITLE] [--body BODY] [--state open|closed] [--base BASE] [--head HEAD] [--label LABEL] [--unlabel LABEL] [--assignee PRINCIPAL] [--unassign PRINCIPAL] [--reviewer PRINCIPAL] [--unreviewer PRINCIPAL]
-gt pull title PULL --title TITLE
-gt pull body PULL --body BODY
-gt pull close|reopen PULL
-gt pull base PULL --base BASE
-gt pull head PULL --head HEAD
-gt pull label add|remove PULL LABEL
-gt pull assignee add|remove PULL PRINCIPAL
-gt pull reviewer add|remove PULL PRINCIPAL
-gt pull merge PULL [--merge-oid OID] [--target-oid OID]
-gt comment list issue|pull OBJECT [--json]
-gt comment add issue|pull OBJECT --body BODY
+gt issue label ISSUE add|remove LABEL
+gt issue assignee ISSUE add|remove PRINCIPAL
+gt pr list [--json]
+gt pr view PR [--json]
+gt pr create --title TITLE --base BASE --head HEAD [--body BODY] [--draft]
+gt pr edit PR [--title TITLE] [--body BODY] [--state open|closed] [--base BASE] [--head HEAD] [--add-label LABEL] [--remove-label LABEL] [--add-assignee PRINCIPAL] [--remove-assignee PRINCIPAL] [--add-reviewer PRINCIPAL] [--remove-reviewer PRINCIPAL]
+gt pr title PR --title TITLE
+gt pr body PR --body BODY
+gt pr close|reopen PR
+gt pr base PR --base BASE
+gt pr head PR --head HEAD
+gt pr label PR add|remove LABEL
+gt pr assignee PR add|remove PRINCIPAL
+gt pr reviewer PR add|remove PRINCIPAL
+gt pr comment PR --body BODY
+gt pr merge PR [--merge-oid OID] [--target-oid OID]
+gt comment list issue|pr OBJECT [--json]
+gt comment add issue|pr OBJECT --body BODY
 gt comment edit COMMENT --body BODY
 gt comment redact COMMENT [--reason REASON]
 gt runs prune [--dry-run] [--max-age-days N] [--max-count N] [--max-bytes N]
@@ -77,8 +80,11 @@ client UUIDs are retained only as labels/idempotency keys. New events include
 `parent_hashes` for the previous log event and up to 32 non-reachable observed
 causal heads.
 
-`gt issue edit` and `gt pull edit` batch multiple scalar and collection updates
+`gt issue edit` and `gt pr edit` batch multiple scalar and collection updates
 into one signed `issue.updated` or `pull.updated` event.
+
+`gt pull` remains accepted as a compatibility alias for `gt pr`. `gt pr view`
+also accepts `show`, and `gt pr create` also accepts `open` and `new`.
 
 `gt sync` fetches remote genesis and inbox refs into `refs/gitomi/staging/*`,
 then admits only compatible genesis refs and new or fast-forward inbox refs into

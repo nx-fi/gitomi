@@ -21,7 +21,7 @@ pub fn createPullOpenedEvent(
     head_ref: []const u8,
     draft: bool,
 ) !void {
-    var writer = try EventWriter.init(allocator, "gt pull open");
+    var writer = try EventWriter.init(allocator, "gt pr create");
     defer writer.deinit();
 
     const pull_id = try newUuidV7(allocator);
@@ -53,10 +53,10 @@ pub fn createPullOpenedEvent(
 
     const subject = try std.fmt.allocPrint(allocator, "pull.opened #{s} {s}", .{ pull_id[0..7], title });
     defer allocator.free(subject);
-    const commit_oid = try writer.write("gt pull", subject, event_body);
+    const commit_oid = try writer.write("gt pr", subject, event_body);
     defer allocator.free(commit_oid);
 
-    try out("opened pull #{s}\n", .{pull_id[0..7]});
+    try out("opened pr #{s}\n", .{pull_id[0..7]});
     try out("  id:     {s}\n", .{pull_id});
     try out("  commit: {s}\n", .{commit_oid});
     try out("  ref:    {s}\n", .{writer.inbox_ref});
@@ -69,7 +69,7 @@ pub fn createPullStringEvent(
     payload_key: []const u8,
     payload_value: []const u8,
 ) !void {
-    var writer = try EventWriter.init(allocator, "gt pull");
+    var writer = try EventWriter.init(allocator, "gt pr");
     defer writer.deinit();
 
     const event_uuid = try newUuidV7(allocator);
@@ -97,7 +97,7 @@ pub fn createPullStringEvent(
 
     const subject = try std.fmt.allocPrint(allocator, "{s} #{s} {s}", .{ event_type, pull_id[0..@min(pull_id.len, 7)], payload_value });
     defer allocator.free(subject);
-    const commit_oid = try writer.write("gt pull", subject, event_body);
+    const commit_oid = try writer.write("gt pr", subject, event_body);
     defer allocator.free(commit_oid);
 
     try out("{s} #{s}\n", .{ event_type, pull_id[0..@min(pull_id.len, 7)] });
@@ -111,7 +111,7 @@ pub fn createPullMergedEvent(
     merge_oid: ?[]const u8,
     target_oid: ?[]const u8,
 ) !void {
-    var writer = try EventWriter.init(allocator, "gt pull");
+    var writer = try EventWriter.init(allocator, "gt pr");
     defer writer.deinit();
 
     const event_uuid = try newUuidV7(allocator);
@@ -138,7 +138,7 @@ pub fn createPullMergedEvent(
 
     const subject = try std.fmt.allocPrint(allocator, "pull.merged #{s}", .{pull_id[0..@min(pull_id.len, 7)]});
     defer allocator.free(subject);
-    const commit_oid = try writer.write("gt pull", subject, event_body);
+    const commit_oid = try writer.write("gt pr", subject, event_body);
     defer allocator.free(commit_oid);
 
     try out("pull.merged #{s}\n", .{pull_id[0..@min(pull_id.len, 7)]});
@@ -152,11 +152,11 @@ pub fn createPullUpdatedEvent(
     update: event_mod.PullUpdate,
 ) !void {
     if (!update.hasChanges()) {
-        try eprint("gt pull edit: at least one update option is required\n", .{});
+        try eprint("gt pr edit: at least one update option is required\n", .{});
         return CliError.InvalidArgument;
     }
 
-    var writer = try EventWriter.init(allocator, "gt pull edit");
+    var writer = try EventWriter.init(allocator, "gt pr edit");
     defer writer.deinit();
 
     const event_uuid = try newUuidV7(allocator);
@@ -182,7 +182,7 @@ pub fn createPullUpdatedEvent(
 
     const subject = try std.fmt.allocPrint(allocator, "pull.updated #{s}", .{pull_id[0..@min(pull_id.len, 7)]});
     defer allocator.free(subject);
-    const commit_oid = try writer.write("gt pull", subject, event_body);
+    const commit_oid = try writer.write("gt pr", subject, event_body);
     defer allocator.free(commit_oid);
 
     try out("pull.updated #{s}\n", .{pull_id[0..@min(pull_id.len, 7)]});

@@ -13,6 +13,11 @@ const runCommand = git.runCommand;
 
 const max_commit_diff_bytes = 8 * 1024 * 1024;
 
+const DiffHunkRange = struct {
+    old_start: usize,
+    new_start: usize,
+};
+
 const CommitListEntry = struct {
     full_hash: []u8,
     short_hash: []u8,
@@ -128,17 +133,20 @@ pub fn renderCommitsPage(allocator: Allocator, repo: Repo, target: []const u8) !
 pub fn renderCommitPage(allocator: Allocator, repo: Repo, target: []const u8) ![]u8 {
     const query_sha = try queryValueOwned(allocator, target, "sha");
     defer if (query_sha) |value| allocator.free(value);
+    const query_context = try queryValueOwned(allocator, target, "context");
+    defer if (query_context) |value| allocator.free(value);
     const sha = if (query_sha) |value| blk: {
         const trimmed = std.mem.trim(u8, value, " \t\r\n");
         break :blk if (trimmed.len == 0) "HEAD" else trimmed;
     } else "HEAD";
+    const diff_context = diffContext(query_context);
 
     const detail_opt = try loadCommitDetail(allocator, repo, sha);
     if (detail_opt == null) return renderMissingCommitPage(allocator, repo, sha);
     const detail = detail_opt.?;
     defer detail.deinit(allocator);
 
-    const diff = try loadCommitDiff(allocator, repo, sha);
+    const diff = try loadCommitDiff(allocator, repo, sha, diff_context);
     defer if (diff) |bytes| allocator.free(bytes);
 
     var buf: std.ArrayList(u8) = .empty;
@@ -184,7 +192,7 @@ pub fn renderCommitPage(allocator: Allocator, repo: Repo, target: []const u8) ![
         \\  </div>
     );
     if (diff) |bytes| {
-        try appendDiff(&buf, allocator, bytes);
+        try appendDiff(&buf, allocator, sha, diff_context, bytes);
     } else {
         try appendEmptyState(&buf, allocator, "Diff not available.", "Git could not render a patch for this commit.");
     }
@@ -279,50 +287,123 @@ fn loadCommitDetail(allocator: Allocator, repo: Repo, sha: []const u8) !?CommitD
     };
 }
 
-fn loadCommitDiff(allocator: Allocator, repo: Repo, sha: []const u8) !?[]u8 {
+fn loadCommitDiff(allocator: Allocator, repo: Repo, sha: []const u8, context: usize) !?[]u8 {
+    const unified = try std.fmt.allocPrint(allocator, "--unified={d}", .{context});
+    defer allocator.free(unified);
     return gitMaybe(allocator, repo, &.{
         "show",
         "--pretty=format:",
         "--no-ext-diff",
         "--find-renames",
         "--patch",
-        "--unified=3",
+        unified,
         sha,
     }, max_commit_diff_bytes);
 }
 
-fn appendDiff(buf: *std.ArrayList(u8), allocator: Allocator, diff: []const u8) !void {
+fn appendDiff(buf: *std.ArrayList(u8), allocator: Allocator, sha: []const u8, context: usize, diff: []const u8) !void {
     if (std.mem.trim(u8, diff, " \t\r\n").len == 0) {
         try appendEmptyState(buf, allocator, "No file changes.", "This commit does not contain a patch to display.");
         return;
     }
 
     var in_file = false;
+    var rendered_lines: usize = 0;
+    var old_line: ?usize = null;
+    var new_line: ?usize = null;
     var lines = std.mem.splitScalar(u8, diff, '\n');
     while (lines.next()) |raw_line| {
         const line = std.mem.trimRight(u8, raw_line, "\r");
         if (std.mem.startsWith(u8, line, "diff --git ")) {
-            if (in_file) try buf.appendSlice(allocator, "</pre></section>");
+            if (in_file) try buf.appendSlice(allocator, "</div></section>");
             in_file = true;
+            rendered_lines = 0;
+            old_line = null;
+            new_line = null;
             try buf.appendSlice(allocator, "<section class=\"panel diff-file\"><div class=\"diff-file-head\"><strong>");
             try appendHtml(buf, allocator, diffFileTitle(line));
-            try buf.appendSlice(allocator, "</strong></div><pre class=\"diff-lines\">");
+            try buf.appendSlice(allocator, "</strong></div><div class=\"diff-lines\">");
+            continue;
         } else if (!in_file) {
             in_file = true;
-            try buf.appendSlice(allocator, "<section class=\"panel diff-file\"><div class=\"diff-file-head\"><strong>Patch</strong></div><pre class=\"diff-lines\">");
+            rendered_lines = 0;
+            old_line = null;
+            new_line = null;
+            try buf.appendSlice(allocator, "<section class=\"panel diff-file\"><div class=\"diff-file-head\"><strong>Patch</strong></div><div class=\"diff-lines\">");
         }
-        try appendDiffLine(buf, allocator, line);
+
+        if (parseHunkHeader(line)) |range| {
+            if (rendered_lines == 0) {
+                if (range.old_start > 1 or range.new_start > 1) {
+                    try appendDiffExpandRow(buf, allocator, sha, context, "Expand from file start");
+                }
+            } else {
+                try appendDiffExpandRow(buf, allocator, sha, context, "Expand hidden lines");
+            }
+            old_line = range.old_start;
+            new_line = range.new_start;
+            try appendDiffLine(buf, allocator, line, "hunk", null, null);
+            rendered_lines += 1;
+            continue;
+        }
+
+        const class = diffLineClass(line);
+        if (std.mem.eql(u8, class, "add")) {
+            try appendDiffLine(buf, allocator, line, class, null, new_line);
+            if (new_line) |value| new_line = value + 1;
+        } else if (std.mem.eql(u8, class, "del")) {
+            try appendDiffLine(buf, allocator, line, class, old_line, null);
+            if (old_line) |value| old_line = value + 1;
+        } else if (std.mem.eql(u8, class, "context")) {
+            try appendDiffLine(buf, allocator, line, class, old_line, new_line);
+            if (old_line) |value| old_line = value + 1;
+            if (new_line) |value| new_line = value + 1;
+        } else {
+            try appendDiffLine(buf, allocator, line, class, null, null);
+        }
+        rendered_lines += 1;
     }
 
-    if (in_file) try buf.appendSlice(allocator, "</pre></section>");
+    if (in_file) try buf.appendSlice(allocator, "</div></section>");
 }
 
-fn appendDiffLine(buf: *std.ArrayList(u8), allocator: Allocator, line: []const u8) !void {
-    try buf.appendSlice(allocator, "<span class=\"diff-line ");
-    try buf.appendSlice(allocator, diffLineClass(line));
-    try buf.appendSlice(allocator, "\">");
+fn appendDiffExpandRow(buf: *std.ArrayList(u8), allocator: Allocator, sha: []const u8, context: usize, label: []const u8) !void {
+    try buf.appendSlice(allocator, "<div class=\"diff-row diff-expand\"><span></span><span></span>");
+    if (context < 200) {
+        try buf.appendSlice(allocator, "<a href=\"");
+        try appendCommitHrefWithContext(buf, allocator, sha, @min(context * 4, @as(usize, 200)));
+        try buf.appendSlice(allocator, "\">");
+        try appendHtml(buf, allocator, label);
+        try buf.appendSlice(allocator, "</a>");
+    } else {
+        try buf.appendSlice(allocator, "<span>Maximum context shown</span>");
+    }
+    try buf.appendSlice(allocator, "</div>");
+}
+
+fn appendDiffLine(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    line: []const u8,
+    class: []const u8,
+    old_line: ?usize,
+    new_line: ?usize,
+) !void {
+    try buf.appendSlice(allocator, "<div class=\"diff-row ");
+    try appendHtml(buf, allocator, class);
+    try buf.appendSlice(allocator, "\"><span class=\"diff-num old\">");
+    try appendLineNumber(buf, allocator, old_line);
+    try buf.appendSlice(allocator, "</span><span class=\"diff-num new\">");
+    try appendLineNumber(buf, allocator, new_line);
+    try buf.appendSlice(allocator, "</span><code class=\"diff-code\">");
     try appendHtml(buf, allocator, line);
-    try buf.appendSlice(allocator, "</span>\n");
+    try buf.appendSlice(allocator, "</code></div>");
+}
+
+fn appendLineNumber(buf: *std.ArrayList(u8), allocator: Allocator, line_number: ?usize) !void {
+    if (line_number) |value| {
+        if (value != 0) try std.fmt.format(buf.writer(allocator), "{d}", .{value});
+    }
 }
 
 fn diffLineClass(line: []const u8) []const u8 {
@@ -343,6 +424,31 @@ fn diffLineClass(line: []const u8) []const u8 {
         return "meta";
     }
     return "context";
+}
+
+fn parseHunkHeader(line: []const u8) ?DiffHunkRange {
+    if (!std.mem.startsWith(u8, line, "@@")) return null;
+    const minus = std.mem.indexOfScalar(u8, line, '-') orelse return null;
+    const plus = std.mem.indexOfScalarPos(u8, line, minus + 1, '+') orelse return null;
+    return .{
+        .old_start = parseHunkStart(line[minus + 1 .. plus]) orelse return null,
+        .new_start = parseHunkStart(line[plus + 1 ..]) orelse return null,
+    };
+}
+
+fn parseHunkStart(value: []const u8) ?usize {
+    var end: usize = 0;
+    while (end < value.len and std.ascii.isDigit(value[end])) : (end += 1) {}
+    if (end == 0) return null;
+    return std.fmt.parseUnsigned(usize, value[0..end], 10) catch null;
+}
+
+fn diffContext(query_context: ?[]u8) usize {
+    const raw = query_context orelse return 3;
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (trimmed.len == 0) return 3;
+    const parsed = std.fmt.parseUnsigned(usize, trimmed, 10) catch return 3;
+    return @min(@max(parsed, @as(usize, 3)), @as(usize, 200));
 }
 
 fn diffFileTitle(line: []const u8) []const u8 {
@@ -427,6 +533,12 @@ fn appendCommitHref(buf: *std.ArrayList(u8), allocator: Allocator, hash: []const
     try appendUrlEncoded(buf, allocator, hash);
 }
 
+fn appendCommitHrefWithContext(buf: *std.ArrayList(u8), allocator: Allocator, hash: []const u8, context: usize) !void {
+    try appendCommitHref(buf, allocator, hash);
+    try buf.appendSlice(allocator, "&context=");
+    try std.fmt.format(buf.writer(allocator), "{d}", .{context});
+}
+
 fn appendUrlEncoded(buf: *std.ArrayList(u8), allocator: Allocator, value: []const u8) !void {
     const hex = "0123456789ABCDEF";
     for (value) |c| {
@@ -479,10 +591,14 @@ test "web commits renders diff line classes" {
     try appendDiff(
         &buf,
         std.testing.allocator,
+        "abc123",
+        3,
         "diff --git a/a.zig b/a.zig\n@@ -1 +1 @@\n-old\n+new\n",
     );
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "diff-file") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "diff-line hunk") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "diff-line del") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "diff-line add") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "diff-row hunk") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "diff-row del") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "diff-row add") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "diff-num old\">1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "diff-num new\">1") != null);
 }

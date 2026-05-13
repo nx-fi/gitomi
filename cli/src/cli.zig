@@ -59,8 +59,8 @@ fn realMain() !void {
         try cmdEvents(allocator, args[2..]);
     } else if (std.mem.eql(u8, cmd, "issue")) {
         try cmdIssue(allocator, args[2..]);
-    } else if (std.mem.eql(u8, cmd, "pull")) {
-        try cmdPull(allocator, args[2..]);
+    } else if (std.mem.eql(u8, cmd, "pr") or std.mem.eql(u8, cmd, "pull")) {
+        try cmdPr(allocator, args[2..], if (std.mem.eql(u8, cmd, "pull")) "gt pull" else "gt pr");
     } else if (std.mem.eql(u8, cmd, "comment")) {
         try cmdComment(allocator, args[2..]);
     } else if (std.mem.eql(u8, cmd, "acl")) {
@@ -98,21 +98,22 @@ fn printUsage() !void {
         \\  gt issue close|reopen ISSUE
         \\  gt issue label ISSUE add|remove LABEL
         \\  gt issue assignee ISSUE add|remove PRINCIPAL
-        \\  gt pull list [--json]
-        \\  gt pull show PULL [--json]
-        \\  gt pull open --title TITLE --base BASE --head HEAD [--body BODY] [--draft]
-        \\  gt pull edit PULL [--title TITLE] [--body BODY] [--state open|closed] [--base BASE] [--head HEAD] [--label LABEL] [--unlabel LABEL] [--assignee PRINCIPAL] [--unassign PRINCIPAL] [--reviewer PRINCIPAL] [--unreviewer PRINCIPAL]
-        \\  gt pull title PULL --title TITLE
-        \\  gt pull body PULL --body BODY
-        \\  gt pull close|reopen PULL
-        \\  gt pull base PULL --base BASE
-        \\  gt pull head PULL --head HEAD
-        \\  gt pull label PULL add|remove LABEL
-        \\  gt pull assignee PULL add|remove PRINCIPAL
-        \\  gt pull reviewer PULL add|remove PRINCIPAL
-        \\  gt pull merge PULL [--merge-oid OID] [--target-oid OID]
-        \\  gt comment list issue|pull OBJECT [--json]
-        \\  gt comment add issue|pull OBJECT --body BODY
+        \\  gt pr list [--json]
+        \\  gt pr view PR [--json]
+        \\  gt pr create --title TITLE --base BASE --head HEAD [--body BODY] [--draft]
+        \\  gt pr edit PR [--title TITLE] [--body BODY] [--state open|closed] [--base BASE] [--head HEAD] [--add-label LABEL] [--remove-label LABEL] [--add-assignee PRINCIPAL] [--remove-assignee PRINCIPAL] [--add-reviewer PRINCIPAL] [--remove-reviewer PRINCIPAL]
+        \\  gt pr title PR --title TITLE
+        \\  gt pr body PR --body BODY
+        \\  gt pr close|reopen PR
+        \\  gt pr base PR --base BASE
+        \\  gt pr head PR --head HEAD
+        \\  gt pr label PR add|remove LABEL
+        \\  gt pr assignee PR add|remove PRINCIPAL
+        \\  gt pr reviewer PR add|remove PRINCIPAL
+        \\  gt pr comment PR --body BODY
+        \\  gt pr merge PR [--merge-oid OID] [--target-oid OID]
+        \\  gt comment list issue|pr OBJECT [--json]
+        \\  gt comment add issue|pr OBJECT --body BODY
         \\  gt comment edit COMMENT --body BODY
         \\  gt comment redact COMMENT [--reason REASON]
         \\  gt acl grant PRINCIPAL ROLE
@@ -680,6 +681,22 @@ fn requireNonEmptyOption(context: []const u8, option: []const u8, value: []const
     return CliError.UserError;
 }
 
+fn appendCollectionOptionValues(
+    allocator: Allocator,
+    list: *std.ArrayList([]const u8),
+    context: []const u8,
+    option: []const u8,
+    value: []const u8,
+) !void {
+    var fields = try util.splitCommaFields(allocator, value);
+    defer fields.deinit(allocator);
+    if (fields.items.len == 0) {
+        try io.eprint("{s}: {s} must not be empty\n", .{ context, option });
+        return CliError.UserError;
+    }
+    for (fields.items) |field| try list.append(allocator, field);
+}
+
 const CollectionMutation = struct {
     object_ref: []const u8,
     op: []const u8,
@@ -700,9 +717,9 @@ fn isIssueState(value: []const u8) bool {
     return std.mem.eql(u8, value, "open") or std.mem.eql(u8, value, "closed");
 }
 
-fn cmdPull(allocator: Allocator, args: []const []const u8) !void {
+fn cmdPr(allocator: Allocator, args: []const []const u8, command_context: []const u8) !void {
     if (args.len == 0) {
-        try io.eprint("gt pull: expected subcommand 'list', 'show', 'open', or a pull update command\n", .{});
+        try io.eprint("{s}: expected subcommand 'list', 'view', 'create', or a PR update command\n", .{command_context});
         return CliError.UserError;
     }
 
@@ -714,7 +731,7 @@ fn cmdPull(allocator: Allocator, args: []const []const u8) !void {
             if (std.mem.eql(u8, arg, "--json")) {
                 json = true;
             } else {
-                try io.eprint("gt pull list: unknown option '{s}'\n", .{arg});
+                try io.eprint("{s} list: unknown option '{s}'\n", .{ command_context, arg });
                 return CliError.UserError;
             }
         }
@@ -726,9 +743,9 @@ fn cmdPull(allocator: Allocator, args: []const []const u8) !void {
         return;
     }
 
-    if (std.mem.eql(u8, args[0], "show")) {
+    if (std.mem.eql(u8, args[0], "view") or std.mem.eql(u8, args[0], "show")) {
         if (args.len < 2) {
-            try io.eprint("gt pull show: PULL is required\n", .{});
+            try io.eprint("{s} {s}: PR is required\n", .{ command_context, args[0] });
             return CliError.UserError;
         }
         var json = false;
@@ -738,7 +755,7 @@ fn cmdPull(allocator: Allocator, args: []const []const u8) !void {
             if (std.mem.eql(u8, arg, "--json")) {
                 json = true;
             } else {
-                try io.eprint("gt pull show: unknown option '{s}'\n", .{arg});
+                try io.eprint("{s} {s}: unknown option '{s}'\n", .{ command_context, args[0], arg });
                 return CliError.UserError;
             }
         }
@@ -754,7 +771,7 @@ fn cmdPull(allocator: Allocator, args: []const []const u8) !void {
 
     if (std.mem.eql(u8, args[0], "edit")) {
         if (args.len < 2) {
-            try io.eprint("gt pull edit: PULL is required\n", .{});
+            try io.eprint("{s} edit: PR is required\n", .{command_context});
             return CliError.UserError;
         }
 
@@ -775,47 +792,41 @@ fn cmdPull(allocator: Allocator, args: []const []const u8) !void {
         var i: usize = 2;
         while (i < args.len) : (i += 1) {
             const arg = args[i];
-            if (std.mem.eql(u8, arg, "--title")) {
+            if (std.mem.eql(u8, arg, "--title") or std.mem.eql(u8, arg, "-t")) {
                 update.title = try util.requireValue(args, &i, "--title");
-            } else if (std.mem.eql(u8, arg, "--body")) {
+            } else if (std.mem.eql(u8, arg, "--body") or std.mem.eql(u8, arg, "-b")) {
                 update.body = try util.requireValue(args, &i, "--body");
             } else if (std.mem.eql(u8, arg, "--state")) {
                 const state = try util.requireValue(args, &i, "--state");
                 if (!isIssueState(state)) {
-                    try io.eprint("gt pull edit: --state must be open or closed\n", .{});
+                    try io.eprint("{s} edit: --state must be open or closed\n", .{command_context});
                     return CliError.UserError;
                 }
                 update.state = state;
-            } else if (std.mem.eql(u8, arg, "--base")) {
+            } else if (std.mem.eql(u8, arg, "--base") or std.mem.eql(u8, arg, "-B")) {
                 update.base_ref = try util.requireValue(args, &i, "--base");
             } else if (std.mem.eql(u8, arg, "--head")) {
                 update.head_ref = try util.requireValue(args, &i, "--head");
-            } else if (std.mem.eql(u8, arg, "--label")) {
-                const value = try util.requireValue(args, &i, "--label");
-                try requireNonEmptyOption("gt pull edit", "--label", value);
-                try labels_added.append(allocator, value);
-            } else if (std.mem.eql(u8, arg, "--unlabel")) {
-                const value = try util.requireValue(args, &i, "--unlabel");
-                try requireNonEmptyOption("gt pull edit", "--unlabel", value);
-                try labels_removed.append(allocator, value);
-            } else if (std.mem.eql(u8, arg, "--assignee")) {
-                const value = try util.requireValue(args, &i, "--assignee");
-                try requireNonEmptyOption("gt pull edit", "--assignee", value);
-                try assignees_added.append(allocator, value);
-            } else if (std.mem.eql(u8, arg, "--unassign")) {
-                const value = try util.requireValue(args, &i, "--unassign");
-                try requireNonEmptyOption("gt pull edit", "--unassign", value);
-                try assignees_removed.append(allocator, value);
-            } else if (std.mem.eql(u8, arg, "--reviewer")) {
-                const value = try util.requireValue(args, &i, "--reviewer");
-                try requireNonEmptyOption("gt pull edit", "--reviewer", value);
-                try reviewers_added.append(allocator, value);
-            } else if (std.mem.eql(u8, arg, "--unreviewer")) {
-                const value = try util.requireValue(args, &i, "--unreviewer");
-                try requireNonEmptyOption("gt pull edit", "--unreviewer", value);
-                try reviewers_removed.append(allocator, value);
+            } else if (std.mem.eql(u8, arg, "--label") or std.mem.eql(u8, arg, "--add-label")) {
+                const value = try util.requireValue(args, &i, arg);
+                try appendCollectionOptionValues(allocator, &labels_added, command_context, arg, value);
+            } else if (std.mem.eql(u8, arg, "--unlabel") or std.mem.eql(u8, arg, "--remove-label")) {
+                const value = try util.requireValue(args, &i, arg);
+                try appendCollectionOptionValues(allocator, &labels_removed, command_context, arg, value);
+            } else if (std.mem.eql(u8, arg, "--assignee") or std.mem.eql(u8, arg, "--add-assignee")) {
+                const value = try util.requireValue(args, &i, arg);
+                try appendCollectionOptionValues(allocator, &assignees_added, command_context, arg, value);
+            } else if (std.mem.eql(u8, arg, "--unassign") or std.mem.eql(u8, arg, "--remove-assignee")) {
+                const value = try util.requireValue(args, &i, arg);
+                try appendCollectionOptionValues(allocator, &assignees_removed, command_context, arg, value);
+            } else if (std.mem.eql(u8, arg, "--reviewer") or std.mem.eql(u8, arg, "--add-reviewer")) {
+                const value = try util.requireValue(args, &i, arg);
+                try appendCollectionOptionValues(allocator, &reviewers_added, command_context, arg, value);
+            } else if (std.mem.eql(u8, arg, "--unreviewer") or std.mem.eql(u8, arg, "--remove-reviewer")) {
+                const value = try util.requireValue(args, &i, arg);
+                try appendCollectionOptionValues(allocator, &reviewers_removed, command_context, arg, value);
             } else {
-                try io.eprint("gt pull edit: unknown option '{s}'\n", .{arg});
+                try io.eprint("{s} edit: unknown option '{s}'\n", .{ command_context, arg });
                 return CliError.UserError;
             }
         }
@@ -827,12 +838,12 @@ fn cmdPull(allocator: Allocator, args: []const []const u8) !void {
         update.reviewers_added = reviewers_added.items;
         update.reviewers_removed = reviewers_removed.items;
         if (!update.hasChanges()) {
-            try io.eprint("gt pull edit: at least one update option is required\n", .{});
+            try io.eprint("{s} edit: at least one update option is required\n", .{command_context});
             return CliError.UserError;
         }
-        if (update.title) |title| try requireNonEmptyOption("gt pull edit", "--title", title);
-        if (update.base_ref) |base_ref| try requireNonEmptyOption("gt pull edit", "--base", base_ref);
-        if (update.head_ref) |head_ref| try requireNonEmptyOption("gt pull edit", "--head", head_ref);
+        if (update.title) |title| try requireNonEmptyOption(command_context, "--title", title);
+        if (update.base_ref) |base_ref| try requireNonEmptyOption(command_context, "--base", base_ref);
+        if (update.head_ref) |head_ref| try requireNonEmptyOption(command_context, "--head", head_ref);
 
         const pull_id = try resolvePullIdForCommand(allocator, args[1]);
         defer allocator.free(pull_id);
@@ -870,7 +881,7 @@ fn cmdPull(allocator: Allocator, args: []const []const u8) !void {
         else
             "--head";
         if (args.len < 2) {
-            try io.eprint("gt pull {s}: PULL is required\n", .{args[0]});
+            try io.eprint("{s} {s}: PR is required\n", .{ command_context, args[0] });
             return CliError.UserError;
         }
         var value: ?[]const u8 = null;
@@ -880,12 +891,12 @@ fn cmdPull(allocator: Allocator, args: []const []const u8) !void {
             if (std.mem.eql(u8, arg, option_name)) {
                 value = try util.requireValue(args, &i, option_name);
             } else {
-                try io.eprint("gt pull {s}: unknown option '{s}'\n", .{ args[0], arg });
+                try io.eprint("{s} {s}: unknown option '{s}'\n", .{ command_context, args[0], arg });
                 return CliError.UserError;
             }
         }
         if (value == null or std.mem.trim(u8, value.?, " \t\r\n").len == 0) {
-            try io.eprint("gt pull {s}: {s} is required\n", .{ args[0], option_name });
+            try io.eprint("{s} {s}: {s} is required\n", .{ command_context, args[0], option_name });
             return CliError.UserError;
         }
         const pull_id = try resolvePullIdForCommand(allocator, args[1]);
@@ -896,7 +907,7 @@ fn cmdPull(allocator: Allocator, args: []const []const u8) !void {
 
     if (std.mem.eql(u8, args[0], "close") or std.mem.eql(u8, args[0], "reopen")) {
         if (args.len != 2) {
-            try io.eprint("gt pull {s}: expected PULL\n", .{args[0]});
+            try io.eprint("{s} {s}: expected PR\n", .{ command_context, args[0] });
             return CliError.UserError;
         }
         const pull_id = try resolvePullIdForCommand(allocator, args[1]);
@@ -911,19 +922,19 @@ fn cmdPull(allocator: Allocator, args: []const []const u8) !void {
         std.mem.eql(u8, args[0], "reviewer"))
     {
         if (args.len != 4) {
-            try io.eprint("gt pull {s}: expected PULL add|remove VALUE\n", .{args[0]});
+            try io.eprint("{s} {s}: expected PR add|remove VALUE\n", .{ command_context, args[0] });
             return CliError.UserError;
         }
         const collection = args[0];
-        const parsed = try parseCollectionMutation("gt pull", collection, args[1], args[2]);
+        const parsed = try parseCollectionMutation(command_context, collection, args[1], args[2]);
         const object_ref = parsed.object_ref;
         const op = parsed.op;
         if (!std.mem.eql(u8, op, "add") and !std.mem.eql(u8, op, "remove")) {
-            try io.eprint("gt pull {s}: expected add or remove\n", .{collection});
+            try io.eprint("{s} {s}: expected add or remove\n", .{ command_context, collection });
             return CliError.UserError;
         }
         if (std.mem.trim(u8, args[3], " \t\r\n").len == 0) {
-            try io.eprint("gt pull {s}: value must not be empty\n", .{collection});
+            try io.eprint("{s} {s}: value must not be empty\n", .{ command_context, collection });
             return CliError.UserError;
         }
         const pull_id = try resolvePullIdForCommand(allocator, object_ref);
@@ -934,9 +945,34 @@ fn cmdPull(allocator: Allocator, args: []const []const u8) !void {
         return;
     }
 
+    if (std.mem.eql(u8, args[0], "comment")) {
+        if (args.len < 2) {
+            try io.eprint("{s} comment: PR is required\n", .{command_context});
+            return CliError.UserError;
+        }
+        var body: ?[]const u8 = null;
+        var i: usize = 2;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--body") or std.mem.eql(u8, args[i], "-b")) {
+                body = try util.requireValue(args, &i, "--body");
+            } else {
+                try io.eprint("{s} comment: unknown option '{s}'\n", .{ command_context, args[i] });
+                return CliError.UserError;
+            }
+        }
+        if (body == null or std.mem.trim(u8, body.?, " \t\r\n").len == 0) {
+            try io.eprint("{s} comment: --body is required\n", .{command_context});
+            return CliError.UserError;
+        }
+        const pull_id = try resolvePullIdForCommand(allocator, args[1]);
+        defer allocator.free(pull_id);
+        try comment.createCommentAddedEvent(allocator, "pull", pull_id, body.?);
+        return;
+    }
+
     if (std.mem.eql(u8, args[0], "merge")) {
         if (args.len < 2) {
-            try io.eprint("gt pull merge: PULL is required\n", .{});
+            try io.eprint("{s} merge: PR is required\n", .{command_context});
             return CliError.UserError;
         }
         var merge_oid: ?[]const u8 = null;
@@ -949,14 +985,14 @@ fn cmdPull(allocator: Allocator, args: []const []const u8) !void {
             } else if (std.mem.eql(u8, arg, "--target-oid")) {
                 target_oid = try util.requireValue(args, &i, "--target-oid");
             } else {
-                try io.eprint("gt pull merge: unknown option '{s}'\n", .{arg});
+                try io.eprint("{s} merge: unknown option '{s}'\n", .{ command_context, arg });
                 return CliError.UserError;
             }
         }
         if ((merge_oid == null or std.mem.trim(u8, merge_oid.?, " \t\r\n").len == 0) and
             (target_oid == null or std.mem.trim(u8, target_oid.?, " \t\r\n").len == 0))
         {
-            try io.eprint("gt pull merge: --merge-oid or --target-oid is required\n", .{});
+            try io.eprint("{s} merge: --merge-oid or --target-oid is required\n", .{command_context});
             return CliError.UserError;
         }
         const pull_id = try resolvePullIdForCommand(allocator, args[1]);
@@ -965,8 +1001,8 @@ fn cmdPull(allocator: Allocator, args: []const []const u8) !void {
         return;
     }
 
-    if (!std.mem.eql(u8, args[0], "open")) {
-        try io.eprint("gt pull: expected subcommand 'list', 'show', 'open', or a pull update command\n", .{});
+    if (!std.mem.eql(u8, args[0], "create") and !std.mem.eql(u8, args[0], "new") and !std.mem.eql(u8, args[0], "open")) {
+        try io.eprint("{s}: expected subcommand 'list', 'view', 'create', or a PR update command\n", .{command_context});
         return CliError.UserError;
     }
 
@@ -983,28 +1019,28 @@ fn cmdPull(allocator: Allocator, args: []const []const u8) !void {
             title = try util.requireValue(args, &i, "--title");
         } else if (std.mem.eql(u8, arg, "--body") or std.mem.eql(u8, arg, "-b")) {
             body = try util.requireValue(args, &i, "--body");
-        } else if (std.mem.eql(u8, arg, "--base")) {
+        } else if (std.mem.eql(u8, arg, "--base") or std.mem.eql(u8, arg, "-B")) {
             base_ref = try util.requireValue(args, &i, "--base");
-        } else if (std.mem.eql(u8, arg, "--head")) {
+        } else if (std.mem.eql(u8, arg, "--head") or std.mem.eql(u8, arg, "-H")) {
             head_ref = try util.requireValue(args, &i, "--head");
-        } else if (std.mem.eql(u8, arg, "--draft")) {
+        } else if (std.mem.eql(u8, arg, "--draft") or std.mem.eql(u8, arg, "-d")) {
             draft = true;
         } else {
-            try io.eprint("gt pull open: unknown option '{s}'\n", .{arg});
+            try io.eprint("{s} {s}: unknown option '{s}'\n", .{ command_context, args[0], arg });
             return CliError.UserError;
         }
     }
 
     if (title == null or std.mem.trim(u8, title.?, " \t\r\n").len == 0) {
-        try io.eprint("gt pull open: --title is required\n", .{});
+        try io.eprint("{s} {s}: --title is required\n", .{ command_context, args[0] });
         return CliError.UserError;
     }
     if (base_ref == null or std.mem.trim(u8, base_ref.?, " \t\r\n").len == 0) {
-        try io.eprint("gt pull open: --base is required\n", .{});
+        try io.eprint("{s} {s}: --base is required\n", .{ command_context, args[0] });
         return CliError.UserError;
     }
     if (head_ref == null or std.mem.trim(u8, head_ref.?, " \t\r\n").len == 0) {
-        try io.eprint("gt pull open: --head is required\n", .{});
+        try io.eprint("{s} {s}: --head is required\n", .{ command_context, args[0] });
         return CliError.UserError;
     }
 
@@ -1018,11 +1054,11 @@ fn cmdComment(allocator: Allocator, args: []const []const u8) !void {
     }
 
     if (std.mem.eql(u8, args[0], "list")) {
-        if (args.len < 3 or (!std.mem.eql(u8, args[1], "issue") and !std.mem.eql(u8, args[1], "pull"))) {
-            try io.eprint("gt comment list: expected issue ISSUE or pull PULL [--json]\n", .{});
+        if (args.len < 3 or (!isCommentParentKind(args[1]))) {
+            try io.eprint("gt comment list: expected issue ISSUE or pr PR [--json]\n", .{});
             return CliError.UserError;
         }
-        const parent_kind = args[1];
+        const parent_kind = canonicalCommentParentKind(args[1]);
         var json = false;
         var i: usize = 3;
         while (i < args.len) : (i += 1) {
@@ -1046,11 +1082,11 @@ fn cmdComment(allocator: Allocator, args: []const []const u8) !void {
     }
 
     if (std.mem.eql(u8, args[0], "add")) {
-        if (args.len < 3 or (!std.mem.eql(u8, args[1], "issue") and !std.mem.eql(u8, args[1], "pull"))) {
-            try io.eprint("gt comment add: expected issue ISSUE or pull PULL --body BODY\n", .{});
+        if (args.len < 3 or (!isCommentParentKind(args[1]))) {
+            try io.eprint("gt comment add: expected issue ISSUE or pr PR --body BODY\n", .{});
             return CliError.UserError;
         }
-        const parent_kind = args[1];
+        const parent_kind = canonicalCommentParentKind(args[1]);
         var body: ?[]const u8 = null;
         var i: usize = 3;
         while (i < args.len) : (i += 1) {
@@ -1122,6 +1158,14 @@ fn cmdComment(allocator: Allocator, args: []const []const u8) !void {
 
     try io.eprint("gt comment: expected subcommand 'list', 'add', 'edit', or 'redact'\n", .{});
     return CliError.UserError;
+}
+
+fn isCommentParentKind(value: []const u8) bool {
+    return std.mem.eql(u8, value, "issue") or std.mem.eql(u8, value, "pr") or std.mem.eql(u8, value, "pull");
+}
+
+fn canonicalCommentParentKind(value: []const u8) []const u8 {
+    return if (std.mem.eql(u8, value, "pr")) "pull" else value;
 }
 
 fn cmdAcl(allocator: Allocator, args: []const []const u8) !void {

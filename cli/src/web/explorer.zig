@@ -60,6 +60,8 @@ pub fn renderCodePage(allocator: Allocator, repo: Repo, target: []const u8) ![]u
     defer if (query_ref) |value| allocator.free(value);
     const query_path = try queryValueOwned(allocator, target, "path");
     defer if (query_path) |value| allocator.free(value);
+    const query_view = try queryValueOwned(allocator, target, "view");
+    defer if (query_view) |value| allocator.free(value);
 
     const default_ref = try defaultRef(allocator, repo);
     defer allocator.free(default_ref);
@@ -85,7 +87,8 @@ pub fn renderCodePage(allocator: Allocator, repo: Repo, target: []const u8) ![]u
     const kind = kind_owned orelse return renderMissingPathPage(allocator, repo, ref, path);
 
     if (std.mem.eql(u8, kind, "blob")) {
-        return renderBlobPage(allocator, repo, ref, path, spec);
+        const view = if (query_view) |value| std.mem.trim(u8, value, " \t\r\n") else "";
+        return renderBlobPage(allocator, repo, ref, path, spec, view);
     }
     if (std.mem.eql(u8, kind, "tree")) {
         return renderTreePage(allocator, repo, ref, path);
@@ -132,7 +135,7 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     return buf.toOwnedSlice(allocator);
 }
 
-fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8, spec: []const u8) ![]u8 {
+fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8, spec: []const u8, view: []const u8) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
@@ -154,6 +157,9 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     );
     try appendBreadcrumbs(&buf, allocator, repo, ref, path);
     try buf.appendSlice(allocator, "</div><div class=\"file-actions\">");
+    const markdown = isMarkdownPath(path);
+    const raw_selected = !markdown or std.mem.eql(u8, view, "raw");
+    if (markdown) try appendMarkdownViewTabs(&buf, allocator, ref, path, raw_selected);
     if (size) |bytes| try appendFmt(&buf, allocator, "{d} bytes", .{bytes});
     try buf.appendSlice(allocator, "<a class=\"button secondary\" href=\"");
     try appendCommitsHref(&buf, allocator, ref, path);
@@ -162,6 +168,10 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     if (content) |bytes| {
         if (containsNul(bytes)) {
             try appendEmptyState(&buf, allocator, "Binary file not displayed.", "This blob contains NUL bytes.");
+        } else if (markdown and !raw_selected) {
+            try buf.appendSlice(allocator, "<div class=\"readme-body markdown-body markdown-preview\">");
+            try appendMarkdown(&buf, allocator, bytes);
+            try buf.appendSlice(allocator, "</div>");
         } else {
             try appendBlobLines(&buf, allocator, path, bytes);
         }
@@ -173,6 +183,18 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     try appendCodeLayoutEnd(&buf, allocator);
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
+}
+
+fn appendMarkdownViewTabs(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, path: []const u8, raw_selected: bool) !void {
+    try buf.appendSlice(allocator, "<nav class=\"view-tabs\" aria-label=\"Markdown view\"><a class=\"");
+    try buf.appendSlice(allocator, if (!raw_selected) "active" else "");
+    try buf.appendSlice(allocator, "\" href=\"");
+    try appendCodeHrefWithView(buf, allocator, ref, path, "preview");
+    try buf.appendSlice(allocator, "\">Preview</a><a class=\"");
+    try buf.appendSlice(allocator, if (raw_selected) "active" else "");
+    try buf.appendSlice(allocator, "\" href=\"");
+    try appendCodeHrefWithView(buf, allocator, ref, path, "raw");
+    try buf.appendSlice(allocator, "\">Raw</a></nav>");
 }
 
 fn renderMissingPathPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) ![]u8 {
@@ -918,6 +940,12 @@ fn findReadme(entries: []const TreeEntry) ?[]const u8 {
     return null;
 }
 
+fn isMarkdownPath(path: []const u8) bool {
+    return std.mem.endsWith(u8, path, ".md") or
+        std.mem.endsWith(u8, path, ".markdown") or
+        std.ascii.eqlIgnoreCase(baseName(path), "README");
+}
+
 fn languageForPath(path: []const u8) []const u8 {
     if (std.mem.endsWith(u8, path, ".zig")) return "zig";
     if (std.mem.endsWith(u8, path, ".js")) return "javascript";
@@ -935,7 +963,7 @@ fn languageForPath(path: []const u8) []const u8 {
     if (std.mem.endsWith(u8, path, ".sql")) return "sql";
     if (std.mem.endsWith(u8, path, ".rs")) return "rust";
     if (std.mem.endsWith(u8, path, ".py")) return "python";
-    if (std.mem.endsWith(u8, path, ".md")) return "markdown";
+    if (isMarkdownPath(path)) return "markdown";
     if (std.mem.endsWith(u8, path, "Makefile")) return "bash";
     return "plaintext";
 }
@@ -999,6 +1027,12 @@ fn appendCodeHref(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8
         try buf.appendSlice(allocator, "&path=");
         try appendUrlEncoded(buf, allocator, path);
     }
+}
+
+fn appendCodeHrefWithView(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, path: []const u8, view: []const u8) !void {
+    try appendCodeHref(buf, allocator, ref, path);
+    try buf.appendSlice(allocator, "&view=");
+    try appendUrlEncoded(buf, allocator, view);
 }
 
 fn appendCommitsHref(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, path: []const u8) !void {

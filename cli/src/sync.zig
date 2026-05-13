@@ -32,13 +32,44 @@ pub fn syncPull(allocator: Allocator, remote: []const u8) !void {
     const genesis_refspec = try std.fmt.allocPrint(allocator, "refs/gitomi/genesis:{s}/genesis", .{staging_prefix});
     defer allocator.free(genesis_refspec);
 
+    try out("fetching Gitomi genesis ref from {s} into {s}/genesis\n", .{ remote, staging_prefix });
+    try fetchOptionalGenesisRef(allocator, remote, genesis_refspec);
+
     try out("fetching Gitomi inbox refs from {s} into {s}\n", .{ remote, staging_prefix });
-    const fetched = try gitChecked(allocator, &.{ "fetch", remote, genesis_refspec, fetch_refspec });
+    const fetched = try gitChecked(allocator, &.{ "fetch", remote, fetch_refspec });
     defer allocator.free(fetched);
     if (fetched.len != 0) try out("{s}", .{fetched});
 
     try admitStagedGenesisRef(allocator, staging_prefix);
     try admitStagedInboxRefs(allocator, staging_prefix);
+}
+
+fn fetchOptionalGenesisRef(allocator: Allocator, remote: []const u8, genesis_refspec: []const u8) !void {
+    var argv = [_][]const u8{ "git", "fetch", remote, genesis_refspec };
+    var result = try runCommand(allocator, &argv, null, max_git_output);
+    defer result.deinit();
+
+    if (result.exitCode() == 0) {
+        if (result.stdout.len != 0) try out("{s}", .{result.stdout});
+        return;
+    }
+
+    const stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
+    if (isMissingRemoteGenesis(stderr)) {
+        try out("no remote Gitomi genesis ref at {s}\n", .{remote});
+        return;
+    }
+
+    if (stderr.len != 0) {
+        try eprint("git fetch failed: {s}\n", .{stderr});
+    } else {
+        try eprint("git fetch failed\n", .{});
+    }
+    return CliError.GitFailed;
+}
+
+fn isMissingRemoteGenesis(stderr: []const u8) bool {
+    return std.mem.indexOf(u8, stderr, "couldn't find remote ref refs/gitomi/genesis") != null;
 }
 
 pub fn syncPush(allocator: Allocator, remote: []const u8) !void {
@@ -57,6 +88,7 @@ pub fn syncPush(allocator: Allocator, remote: []const u8) !void {
     }
 
     if (genesis_oid != null) {
+        try out("pushing Gitomi genesis ref to {s}\n", .{remote});
         try pushGenesisRef(allocator, remote);
     }
 
@@ -153,6 +185,14 @@ pub fn admitStagedInboxRefs(allocator: Allocator, staging_prefix: []const u8) !v
         try out("no staged Gitomi inbox refs to admit\n", .{});
         return;
     }
+
+    const genesis_oid = try resolveOptionalRef(allocator, repo_mod.genesis_ref);
+    defer if (genesis_oid) |oid| allocator.free(oid);
+    if (genesis_oid == null) {
+        try eprint("gt sync: refusing to admit inbox refs without {s}\n", .{repo_mod.genesis_ref});
+        return CliError.UserError;
+    }
+
     if (refs.len > git.max_default_inbox_refs) {
         try eprint("gt sync: refusing to admit {d} inbox refs; v1 default limit is {d}\n", .{ refs.len, git.max_default_inbox_refs });
         return CliError.UserError;
@@ -526,4 +566,9 @@ test "staged refs map back to authoritative inbox refs" {
     );
     defer std.testing.allocator.free(local_ref);
     try std.testing.expectEqualStrings("refs/gitomi/inbox/alice/laptop", local_ref);
+}
+
+test "missing remote genesis fetch errors are optional" {
+    try std.testing.expect(isMissingRemoteGenesis("fatal: couldn't find remote ref refs/gitomi/genesis"));
+    try std.testing.expect(!isMissingRemoteGenesis("fatal: authentication failed"));
 }
