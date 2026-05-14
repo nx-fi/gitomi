@@ -5,6 +5,7 @@
   const treeWidthKey = "gitomi.treeSidebarWidth";
   const minTreeWidth = 220;
   const maxTreeWidth = 520;
+  const maxTreeSearchResults = 30;
 
   function clamp(value, min, max) {
     return Math.min(max, Math.max(min, value));
@@ -96,38 +97,86 @@
     return value.trim().toLowerCase().split(/\s+/).filter(Boolean);
   }
 
-  function fuzzyMatch(text, token) {
-    if (token === "") return true;
-    if (text.includes(token)) return true;
-    if (token.length > text.length) return false;
+  function fuzzyScore(text, token) {
+    if (token === "") return 0;
+    if (text === token) return 0;
+    if (text.startsWith(token)) return 20 + text.length - token.length;
 
+    const exactIndex = text.indexOf(token);
+    if (exactIndex !== -1) return 45 + exactIndex * 2 + text.length - token.length;
+    if (token.length > text.length) return null;
+
+    let first = -1;
+    let last = -1;
     let tokenIndex = 0;
     for (let i = 0; i < text.length && tokenIndex < token.length; i += 1) {
-      if (text.charCodeAt(i) === token.charCodeAt(tokenIndex)) tokenIndex += 1;
+      if (text.charCodeAt(i) === token.charCodeAt(tokenIndex)) {
+        if (first === -1) first = i;
+        last = i;
+        tokenIndex += 1;
+      }
     }
-    return tokenIndex === token.length;
+    if (tokenIndex !== token.length) return null;
+
+    const spread = last - first + 1 - token.length;
+    return 90 + first * 3 + spread * 5 + text.length;
+  }
+
+  function scoreSearchItem(item, tokens) {
+    if (tokens.length === 0) return null;
+    let score = item.kind === "tree" ? 8 : 0;
+    tokens.forEach((token) => {
+      if (score === null) return;
+      const nameScore = fuzzyScore(item.searchName, token);
+      const pathScore = fuzzyScore(item.searchPath, token);
+      if (nameScore === null && pathScore === null) {
+        score = null;
+      } else {
+        score += Math.min(
+          nameScore === null ? Number.POSITIVE_INFINITY : nameScore,
+          pathScore === null ? Number.POSITIVE_INFINITY : pathScore + 12,
+        );
+      }
+    });
+    return score;
   }
 
   function itemMatchesSearch(item, tokens) {
-    if (tokens.length === 0) return false;
-    return tokens.every((token) => fuzzyMatch(item.name, token) || fuzzyMatch(item.path, token));
+    return scoreSearchItem(item, tokens) !== null;
+  }
+
+  function rankedSearchItems(items, tokens, limit) {
+    if (tokens.length === 0) return [];
+    return items
+      .map((item) => ({ item, score: item.path === "" ? null : scoreSearchItem(item, tokens) }))
+      .filter((result) => result.score !== null)
+      .sort((a, b) => (
+        a.score - b.score ||
+        a.item.searchPath.length - b.item.searchPath.length ||
+        a.item.searchPath.localeCompare(b.item.searchPath)
+      ))
+      .slice(0, limit);
   }
 
   function initTree(nav) {
     const nodes = Array.from(nav.querySelectorAll("[data-tree-path]"));
     const byPath = new Map();
     const items = nodes.map((node) => {
-      const path = (node.dataset.treePath || "").toLowerCase();
+      const path = node.dataset.treePath || "";
+      const searchPath = path.toLowerCase();
       const slash = path.lastIndexOf("/");
       const name = slash === -1 ? path : path.slice(slash + 1);
+      const link = node.querySelector("a[href]");
       const item = {
         node,
         path,
         name,
-        parentPath: (node.dataset.treeParent || "").toLowerCase(),
+        searchPath,
+        searchName: name.toLowerCase(),
+        href: link ? link.getAttribute("href") : "",
+        kind: node.dataset.treeKind || "blob",
+        parentPath: node.dataset.treeParent || "",
         parent: null,
-        matched: false,
-        descendantMatched: false,
         visible: false,
       };
       byPath.set(path, item);
@@ -136,32 +185,12 @@
     items.forEach((item) => {
       item.parent = byPath.get(item.parentPath) || null;
     });
-    const itemsByDepth = items.slice().sort((a, b) => b.path.length - a.path.length);
-
-    let activeTokens = [];
-    let syncFrame = 0;
 
     function syncVisibility() {
-      const searching = activeTokens.length !== 0;
-
-      if (searching) {
-        items.forEach((item) => {
-          item.matched = item.path !== "" && itemMatchesSearch(item, activeTokens);
-          item.descendantMatched = false;
-        });
-        itemsByDepth.forEach((item) => {
-          if ((item.matched || item.descendantMatched) && item.parent) {
-            item.parent.descendantMatched = true;
-          }
-        });
-      }
-
       items.forEach((item) => {
         let show = false;
         if (item.path === "") {
           show = true;
-        } else if (searching) {
-          show = item.matched || item.descendantMatched;
         } else {
           const parentVisible = item.parent ? item.parent.visible : true;
           const parentExpanded = item.parent ? item.parent.node.classList.contains("expanded") : true;
@@ -170,15 +199,7 @@
         item.visible = show;
         item.node.hidden = !show;
         item.node.classList.toggle("collapsed-child", !show);
-        item.node.classList.toggle("search-match", searching && item.matched);
-      });
-    }
-
-    function scheduleVisibilitySync() {
-      if (syncFrame !== 0) return;
-      syncFrame = window.requestAnimationFrame(() => {
-        syncFrame = 0;
-        syncVisibility();
+        item.node.classList.remove("search-match");
       });
     }
 
@@ -201,11 +222,149 @@
     const sidebar = nav.closest("[data-tree-sidebar]");
     const search = sidebar ? sidebar.querySelector("[data-tree-search]") : null;
     if (search) {
-      search.addEventListener("input", () => {
-        activeTokens = searchTokens(search.value);
-        scheduleVisibilitySync();
-      });
+      initTreeSearchMenu(search, items);
     }
+  }
+
+  function initTreeSearchMenu(input, items) {
+    const label = input.closest(".tree-search-label") || input.parentElement;
+    const container = input.closest(".tree-search-wrap") || label;
+    if (!container) return;
+
+    const menu = document.createElement("div");
+    const menuId = `tree-search-menu-${Math.random().toString(36).slice(2)}`;
+    menu.id = menuId;
+    menu.className = "tree-search-menu";
+    menu.setAttribute("role", "listbox");
+    menu.hidden = true;
+    container.appendChild(menu);
+    input.setAttribute("aria-autocomplete", "list");
+    input.setAttribute("aria-controls", menuId);
+    input.setAttribute("aria-expanded", "false");
+    input.setAttribute("role", "combobox");
+
+    let results = [];
+    let activeIndex = -1;
+    let renderFrame = 0;
+
+    function setMenuOpen(open) {
+      menu.hidden = !open;
+      input.setAttribute("aria-expanded", String(open));
+      if (!open) {
+        activeIndex = -1;
+        input.removeAttribute("aria-activedescendant");
+      }
+    }
+
+    function setActiveIndex(index) {
+      activeIndex = index;
+      Array.from(menu.querySelectorAll(".tree-search-result")).forEach((node, i) => {
+        const active = i === activeIndex;
+        node.classList.toggle("active", active);
+        node.setAttribute("aria-selected", String(active));
+        if (active) {
+          input.setAttribute("aria-activedescendant", node.id);
+          node.scrollIntoView({ block: "nearest" });
+        }
+      });
+      if (activeIndex === -1) input.removeAttribute("aria-activedescendant");
+    }
+
+    function renderResults() {
+      renderFrame = 0;
+      const tokens = searchTokens(input.value);
+      results = rankedSearchItems(items, tokens, maxTreeSearchResults);
+      menu.textContent = "";
+
+      if (tokens.length === 0) {
+        setMenuOpen(false);
+        return;
+      }
+
+      if (results.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "tree-search-empty";
+        empty.textContent = "No matching files";
+        menu.appendChild(empty);
+        setMenuOpen(true);
+        setActiveIndex(-1);
+        return;
+      }
+
+      results.forEach((result, index) => {
+        const item = result.item;
+        const link = document.createElement("a");
+        link.id = `${menuId}-result-${index}`;
+        link.className = "tree-search-result";
+        link.href = item.href;
+        link.setAttribute("role", "option");
+        link.setAttribute("aria-selected", "false");
+        link.tabIndex = -1;
+        link.dataset.index = String(index);
+
+        const name = document.createElement("span");
+        name.className = "tree-search-result-name";
+        name.textContent = item.name;
+        link.appendChild(name);
+
+        const path = document.createElement("span");
+        path.className = "tree-search-result-path";
+        path.textContent = item.path;
+        link.appendChild(path);
+
+        menu.appendChild(link);
+      });
+      setMenuOpen(true);
+      setActiveIndex(0);
+    }
+
+    function scheduleRender() {
+      if (renderFrame !== 0) return;
+      renderFrame = window.requestAnimationFrame(renderResults);
+    }
+
+    function flushRender() {
+      if (renderFrame === 0) return;
+      window.cancelAnimationFrame(renderFrame);
+      renderResults();
+    }
+
+    input.addEventListener("input", scheduleRender);
+    input.addEventListener("focus", () => {
+      if (searchTokens(input.value).length !== 0) scheduleRender();
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        setMenuOpen(false);
+        return;
+      }
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        flushRender();
+        if (menu.hidden) renderResults();
+        if (results.length === 0) return;
+        event.preventDefault();
+        const step = event.key === "ArrowDown" ? 1 : -1;
+        setActiveIndex((activeIndex + step + results.length) % results.length);
+        return;
+      }
+      if (event.key === "Enter") {
+        flushRender();
+        const result = results[activeIndex] || results[0];
+        if (!result) return;
+        event.preventDefault();
+        window.location.href = result.item.href;
+      }
+    });
+
+    menu.addEventListener("mousemove", (event) => {
+      const link = event.target.closest(".tree-search-result");
+      if (!link || !menu.contains(link)) return;
+      setActiveIndex(Number(link.dataset.index));
+    });
+    document.addEventListener("click", (event) => {
+      if (container.contains(event.target)) return;
+      setMenuOpen(false);
+    });
   }
 
   function initRootFileSearch(input) {
@@ -213,8 +372,8 @@
     const rows = Array.from(panel.querySelectorAll("[data-root-file-row]"));
     const items = rows.map((row) => ({
       row,
-      name: (row.dataset.rootFileName || "").toLowerCase(),
-      path: (row.dataset.rootFilePath || "").toLowerCase(),
+      searchName: (row.dataset.rootFileName || "").toLowerCase(),
+      searchPath: (row.dataset.rootFilePath || "").toLowerCase(),
     }));
     const sync = () => {
       const tokens = searchTokens(input.value);

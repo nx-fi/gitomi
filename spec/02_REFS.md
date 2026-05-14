@@ -679,6 +679,9 @@ The config file uses TOML syntax with the following keys:
 | `principal` | string  | The local actor's principal identity. |
 | `device`    | string  | The local actor's device identifier. |
 | `seq`       | integer | Cached last sequence number used by this device. Writers MUST recover from stale or invalid cached sequence values by scanning the local authoritative inbox ref. |
+| `web.shortcut_leader` | string | Optional web UI leader key for click shortcuts. Defaults to `Space`. |
+| `web.shortcut_keys` | string | Optional whitespace-separated keymap used to assign web UI click shortcuts. |
+| `web.shortcut_timeout_ms` | integer | Optional timeout for multi-key web UI shortcut sequences. Defaults to `900`. |
 
 Example:
 
@@ -687,6 +690,9 @@ repo_id = "018f0000-0000-7000-8000-000000000001"
 principal = "alice"
 device = "laptop"
 seq = 42
+web.shortcut_leader = "Space"
+web.shortcut_keys = "A S D F J K L E R U I O W Q P Z X C V B N M G H Y T"
+web.shortcut_timeout_ms = 900
 ```
 
 ### 9.3. Index Database
