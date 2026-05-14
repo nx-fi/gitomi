@@ -817,6 +817,9 @@ tbody tr:hover {
 .code-layout.has-symbols {
   grid-template-columns: 280px minmax(0, 1fr) 240px;
 }
+.code-layout.has-symbols.symbols-collapsed {
+  grid-template-columns: 280px minmax(0, 1fr);
+}
 .code-layout.no-sidebar {
   grid-template-columns: 1fr;
 }
@@ -852,6 +855,9 @@ tbody tr:hover {
 }
 .symbols-sidebar {
   grid-column: 3;
+}
+.symbols-sidebar[hidden] {
+  display: none;
 }
 .symbols-nav {
   display: grid;
@@ -1043,6 +1049,10 @@ tbody tr:hover {
   opacity: 0.72;
   transform: none;
 }
+.symbols-toggle[aria-expanded="true"] {
+  background: var(--panel);
+  border-color: var(--border-strong);
+}
 .commit-bar {
   display: flex;
   align-items: center;
@@ -1074,7 +1084,7 @@ tbody tr:hover {
 }
 .file-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 120px 104px;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 0.8fr) 120px 104px;
   gap: 12px;
   align-items: center;
   min-height: 42px;
@@ -1101,6 +1111,26 @@ tbody tr:hover {
   min-width: 0;
   font-weight: 600;
   overflow-wrap: anywhere;
+}
+.file-commit {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-commit a {
+  color: inherit;
+}
+.file-commit a:hover {
+  color: var(--link);
+  text-decoration: none;
+}
+.file-commit.empty {
+  font-weight: 500;
+  opacity: 0.7;
 }
 .file-icon {
   position: relative;
@@ -1946,6 +1976,9 @@ textarea {
   .code-layout.has-symbols {
     grid-template-columns: 240px minmax(0, 1fr);
   }
+  .code-layout.has-symbols.symbols-collapsed {
+    grid-template-columns: 240px minmax(0, 1fr);
+  }
   .symbols-sidebar {
     grid-column: 2;
     position: static;
@@ -1988,6 +2021,9 @@ textarea {
     grid-template-columns: 1fr;
   }
   .code-layout.has-symbols {
+    grid-template-columns: 1fr;
+  }
+  .code-layout.has-symbols.symbols-collapsed {
     grid-template-columns: 1fr;
   }
   .tree-sidebar,
@@ -2037,9 +2073,10 @@ textarea {
     margin-left: 0;
   }
   .file-row {
-    grid-template-columns: minmax(0, 1fr) 76px;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
-  .file-row > :nth-child(3) {
+  .file-row > :nth-child(3),
+  .file-row > :nth-child(4) {
     display: none;
   }
   .blob-lines li {

@@ -50,6 +50,7 @@ const TreeEntry = struct {
     oid: []u8,
     size: []u8,
     name: []u8,
+    last_commit: ?TreeEntryCommit = null,
 
     fn deinit(self: TreeEntry, allocator: Allocator) void {
         allocator.free(self.mode);
@@ -57,6 +58,7 @@ const TreeEntry = struct {
         allocator.free(self.oid);
         allocator.free(self.size);
         allocator.free(self.name);
+        if (self.last_commit) |commit| commit.deinit(allocator);
     }
 };
 
@@ -67,6 +69,16 @@ const TreeNavEntry = struct {
     fn deinit(self: TreeNavEntry, allocator: Allocator) void {
         allocator.free(self.kind);
         allocator.free(self.path);
+    }
+};
+
+const TreeEntryCommit = struct {
+    full_hash: []u8,
+    subject: []u8,
+
+    fn deinit(self: TreeEntryCommit, allocator: Allocator) void {
+        allocator.free(self.full_hash);
+        allocator.free(self.subject);
     }
 };
 
@@ -313,6 +325,7 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     try appendCodePanelStart(&buf, allocator, repo, ref, path);
     if (markdown) try appendMarkdownViewTabs(&buf, allocator, ref, path, raw_selected);
     try appendBlobMetrics(&buf, allocator, size, text_content, sloc_counts);
+    if (symbol_items.len != 0) try appendSymbolsToggleButton(&buf, allocator);
     try shared.appendButtonLink(&buf, allocator, Button{ .label = "Raw", .href = rawHref(ref, path) });
     if (text_content != null) try appendCopyButton(&buf, allocator, ref, path);
     try shared.appendButtonLink(&buf, allocator, Button{ .label = "Blame", .href = blameHref(ref, path) });
@@ -418,6 +431,12 @@ fn appendCopyButton(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const 
     , .{ .href = rawHref(ref, path) });
 }
 
+fn appendSymbolsToggleButton(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try appendTemplate(buf, allocator,
+        \\<button class="button secondary symbols-toggle" type="button" data-symbols-toggle aria-controls="code-symbols-sidebar" aria-expanded="true">Hide symbols</button>
+    , .{});
+}
+
 fn renderMissingPathPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -507,7 +526,7 @@ fn appendCodePanelEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
 
 fn appendCodeSymbolsSidebar(buf: *std.ArrayList(u8), allocator: Allocator, symbols: []const code_symbols.Symbol) !void {
     try appendTemplate(buf, allocator,
-        \\<aside class="panel symbols-sidebar" aria-label="Symbols">
+        \\<aside id="code-symbols-sidebar" class="panel symbols-sidebar" aria-label="Symbols" data-symbols-sidebar>
         \\  <div class="symbols-head">Symbols</div>
         \\  <nav class="symbols-nav">
     , .{});
@@ -631,7 +650,7 @@ fn appendTreeListing(
 ) !void {
     try appendTemplate(buf, allocator,
         \\<div class="file-list">
-        \\  <div class="file-row file-row-head"><span>Name</span><span>Mode</span><span>Size</span></div>
+        \\  <div class="file-row file-row-head"><span>Name</span><span>Last commit</span><span>Mode</span><span>Size</span></div>
     , .{});
 
     if (path.len != 0) {
@@ -654,7 +673,7 @@ fn appendParentDirectoryRow(buf: *std.ArrayList(u8), allocator: Allocator, ref: 
         \\<div class="file-row"><a class="file-name" href="{href}">
     , .{ .href = codeHref(ref, parentPath(path)) });
     try appendFileIcon(buf, allocator, "", "tree");
-    try appendTemplate(buf, allocator, "..</a><span></span><span></span></div>", .{});
+    try appendTemplate(buf, allocator, "..</a><span></span><span></span><span></span></div>", .{});
 }
 
 fn appendTreeEntryRow(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, parent: []const u8, entry: TreeEntry) !void {
@@ -666,15 +685,31 @@ fn appendTreeEntryRow(buf: *std.ArrayList(u8), allocator: Allocator, ref: []cons
     , .{ .href = codeHref(ref, child_path) });
     try appendFileIcon(buf, allocator, child_path, entry.kind);
     try appendTemplate(buf, allocator,
-        \\{name}</a><span><code>{mode}</code></span><span class="file-size">
+        \\{name}</a>
     , .{
         .name = entry.name,
-        .mode = entry.mode,
     });
+    try appendTreeEntryCommit(buf, allocator, entry.last_commit);
+    try appendTemplate(buf, allocator,
+        \\<span><code>{mode}</code></span><span class="file-size">
+    , .{ .mode = entry.mode });
     if (std.mem.eql(u8, entry.kind, "blob")) {
         try appendSize(buf, allocator, entry.size);
     }
     try appendTemplate(buf, allocator, "</span></div>", .{});
+}
+
+fn appendTreeEntryCommit(buf: *std.ArrayList(u8), allocator: Allocator, commit_opt: ?TreeEntryCommit) !void {
+    if (commit_opt) |commit| {
+        try appendTemplate(buf, allocator,
+            \\<span class="file-commit" title="{subject}"><a href="{href}">{subject}</a></span>
+        , .{
+            .href = commitHref(commit.full_hash),
+            .subject = commit.subject,
+        });
+    } else {
+        try appendTemplate(buf, allocator, "<span class=\"file-commit empty\">No commit</span>", .{});
+    }
 }
 
 fn appendCommitBar(buf: *std.ArrayList(u8), allocator: Allocator, summary_opt: ?CommitSummary) !void {
@@ -1026,8 +1061,97 @@ fn loadTreeEntries(allocator: Allocator, repo: Repo, ref: []const u8, path: []co
         });
     }
     std.mem.sort(TreeEntry, entries.items, {}, treeEntryLessThan);
+    if (entries.items.len != 0) {
+        loadTreeEntryCommits(allocator, repo, ref, path, entries.items) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => {},
+        };
+    }
 
     return try entries.toOwnedSlice(allocator);
+}
+
+fn loadTreeEntryCommits(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8, entries: []TreeEntry) !void {
+    var index_by_name = std.StringHashMap(usize).init(allocator);
+    defer index_by_name.deinit();
+    for (entries, 0..) |entry, i| {
+        try index_by_name.put(entry.name, i);
+    }
+
+    const format = "--format=%x1e%H%x09%s";
+    const raw = if (path.len == 0)
+        try gitMaybe(allocator, repo, &.{ "log", format, "--name-only", "-z", ref, "--" }, git.max_git_output)
+    else blk: {
+        const pathspec = try std.fmt.allocPrint(allocator, ":(top){s}", .{path});
+        defer allocator.free(pathspec);
+        break :blk try gitMaybe(allocator, repo, &.{ "log", format, "--name-only", "-z", ref, "--", pathspec }, git.max_git_output);
+    };
+    const text = raw orelse return;
+    defer allocator.free(text);
+
+    var commit: ?LogCommit = null;
+    var filled: usize = 0;
+    var records = std.mem.splitScalar(u8, text, 0);
+    while (records.next()) |record| {
+        if (record.len == 0) continue;
+        if (parseLogCommitHeader(record)) |parsed| {
+            commit = parsed;
+            continue;
+        }
+
+        const changed_path = normalizeLogPathRecord(record);
+        if (changed_path.len == 0) continue;
+        const parsed_commit = commit orelse continue;
+        const child_name = directChildName(path, changed_path) orelse continue;
+        const entry_index = index_by_name.get(child_name) orelse continue;
+        if (entries[entry_index].last_commit != null) continue;
+        entries[entry_index].last_commit = try treeEntryCommitOwned(allocator, parsed_commit);
+        filled += 1;
+        if (filled == entries.len) break;
+    }
+}
+
+fn treeEntryCommitOwned(allocator: Allocator, commit: LogCommit) !TreeEntryCommit {
+    const full_hash = try allocator.dupe(u8, commit.full_hash);
+    errdefer allocator.free(full_hash);
+    const subject = try allocator.dupe(u8, commit.subject);
+    return .{
+        .full_hash = full_hash,
+        .subject = subject,
+    };
+}
+
+const LogCommit = struct {
+    full_hash: []const u8,
+    subject: []const u8,
+};
+
+fn parseLogCommitHeader(record: []const u8) ?LogCommit {
+    if (record.len == 0 or record[0] != 0x1e) return null;
+    const payload = record[1..];
+    const tab = std.mem.indexOfScalar(u8, payload, '\t') orelse return null;
+    if (tab == 0) return null;
+    return .{
+        .full_hash = payload[0..tab],
+        .subject = payload[tab + 1 ..],
+    };
+}
+
+fn normalizeLogPathRecord(record: []const u8) []const u8 {
+    return std.mem.trimLeft(u8, record, "\r\n");
+}
+
+fn directChildName(parent: []const u8, changed_path: []const u8) ?[]const u8 {
+    const rest = if (parent.len == 0)
+        changed_path
+    else blk: {
+        if (!std.mem.startsWith(u8, changed_path, parent)) return null;
+        if (changed_path.len <= parent.len or changed_path[parent.len] != '/') return null;
+        break :blk changed_path[parent.len + 1 ..];
+    };
+    if (rest.len == 0) return null;
+    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return rest;
+    return rest[0..slash];
 }
 
 fn loadBlameLines(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?[]BlameLine {
@@ -1805,6 +1929,22 @@ test "web explorer sorts paths as dot dirs dirs dot files files" {
     for (expected, 0..) |path, i| {
         try std.testing.expectEqualStrings(path, entries[i].path);
     }
+}
+
+test "web explorer parses git log commit headers" {
+    const parsed = parseLogCommitHeader("\x1e0123456789abcdef\tfix: path\twith tab").?;
+    try std.testing.expectEqualStrings("0123456789abcdef", parsed.full_hash);
+    try std.testing.expectEqualStrings("fix: path\twith tab", parsed.subject);
+    try std.testing.expect(parseLogCommitHeader("src/main.zig") == null);
+}
+
+test "web explorer maps changed paths to direct children" {
+    try std.testing.expectEqualStrings("src", directChildName("", "src/main.zig").?);
+    try std.testing.expectEqualStrings("main.zig", directChildName("src", "src/main.zig").?);
+    try std.testing.expectEqualStrings("web", directChildName("cli/src", "cli/src/web/explorer.zig").?);
+    try std.testing.expectEqualStrings("code.js", directChildName("cli/src/web", normalizeLogPathRecord("\ncli/src/web/code.js")).?);
+    try std.testing.expect(directChildName("src", "src") == null);
+    try std.testing.expect(directChildName("src", "src-old/main.zig") == null);
 }
 
 test "web explorer maps media paths to preview metadata" {
