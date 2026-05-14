@@ -14,6 +14,7 @@ const appendEmptyState = shared.appendEmptyState;
 const appendSectionHead = shared.appendSectionHead;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
+const appendRelativeTime = shared.appendRelativeTime;
 const appendTemplate = shared.appendTemplate;
 const createCommentAddedEvent = comment_mod.createCommentAddedEvent;
 const createIssueOpenedEvent = issue.createIssueOpenedEvent;
@@ -251,13 +252,17 @@ fn appendIssueListRow(
         try appendLegacyIssueLink(buf, allocator, legacy_number);
     }
     try appendTemplate(buf, allocator,
-        \\ by {author} {verb} {time}</p></div>
-        \\  <div class="issue-row-side">
+        \\ by {author} {verb}
     , .{
         .author = author,
         .verb = if (closed) "was closed" else "opened",
-        .time = if (closed) state_at else opened_at,
     });
+    try buf.append(allocator, ' ');
+    try appendRelativeTime(buf, allocator, if (closed) state_at else opened_at);
+    try buf.appendSlice(allocator,
+        \\</p></div>
+        \\  <div class="issue-row-side">
+    );
     if (milestone.len != 0) {
         try appendTemplate(buf, allocator,
             \\<span class="issue-row-milestone" title="Milestone"><span class="issue-milestone-icon" aria-hidden="true"></span>{milestone}</span>
@@ -446,16 +451,20 @@ fn renderIssueDetailPageWithCommentForm(
     try appendIssueAvatar(&buf, allocator, display_author, "issue-detail-avatar");
     try appendTemplate(&buf, allocator,
         \\        </div>
-        \\        <article class="issue-comment-box">
+        \\        <article class="issue-comment-box" id="issue-description">
         \\          <header class="issue-comment-head">
-        \\            <div><strong>{author}</strong><span>opened {opened_at}</span></div>
-        \\            <button class="issue-kebab-button" type="button" disabled aria-label="Comment actions"></button>
-        \\          </header>
-        \\          <div class="markdown-body">
+        \\            <div><strong>{author}</strong><span>opened
     , .{
         .author = display_author,
-        .opened_at = opened_at,
     });
+    try buf.append(allocator, ' ');
+    try appendRelativeTime(&buf, allocator, opened_at);
+    try buf.appendSlice(allocator, "</span></div>");
+    try appendIssueActionMenu(&buf, allocator, "issue-description", body, body.len != 0, false);
+    try appendTemplate(&buf, allocator,
+        \\          </header>
+        \\          <div class="markdown-body">
+    , .{});
     if (body.len == 0) {
         try buf.appendSlice(allocator, "<p class=\"muted\">No description provided.</p>");
     } else {
@@ -505,13 +514,15 @@ fn appendIssuePageHeader(
     , .{});
     try appendIssueStateBadge(buf, allocator, state);
     try appendTemplate(buf, allocator,
-        \\      <span><strong>{author}</strong> opened this issue {opened_at}
+        \\      <span><strong>{author}</strong> opened this issue
     , .{
         .author = author,
-        .opened_at = opened_at,
     });
+    try buf.append(allocator, ' ');
+    try appendRelativeTime(buf, allocator, opened_at);
     if (std.mem.eql(u8, state, "closed")) {
-        try appendTemplate(buf, allocator, " and closed it {state_at}", .{ .state_at = state_at });
+        try buf.appendSlice(allocator, " and closed it ");
+        try appendRelativeTime(buf, allocator, state_at);
     }
     try appendTemplate(buf, allocator,
         \\ · {comment_count} {comment_word}</span>
@@ -573,7 +584,7 @@ fn appendLegacyIssueLink(buf: *std.ArrayList(u8), allocator: Allocator, legacy_n
 
 fn appendIssueComments(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8) !void {
     var stmt = try db.prepare(
-        \\SELECT body, redacted, COALESCE(NULLIF(source_author, ''), author_principal), created_at, reply_parent_id, reply_parent_hash
+        \\SELECT id, body, redacted, COALESCE(NULLIF(source_author, ''), author_principal), created_at, reply_parent_id, reply_parent_hash
         \\FROM comments
         \\WHERE parent_kind = 'issue' AND parent_id = ?
         \\ORDER BY created_at, id
@@ -581,29 +592,40 @@ fn appendIssueComments(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
     defer stmt.deinit();
     try stmt.bindText(1, issue_id);
     while (try stmt.step()) {
-        const body = try stmt.columnTextDup(allocator, 0);
+        const id = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(id);
+        const body = try stmt.columnTextDup(allocator, 1);
         defer allocator.free(body);
-        const redacted = stmt.columnInt(1) != 0;
-        const author = try stmt.columnTextDup(allocator, 2);
+        const redacted = stmt.columnInt(2) != 0;
+        const author = try stmt.columnTextDup(allocator, 3);
         defer allocator.free(author);
-        const created_at = try stmt.columnTextDup(allocator, 3);
+        const created_at = try stmt.columnTextDup(allocator, 4);
         defer allocator.free(created_at);
-        const reply_parent_id = try stmt.columnTextDup(allocator, 4);
+        const reply_parent_id = try stmt.columnTextDup(allocator, 5);
         defer allocator.free(reply_parent_id);
-        const reply_parent_hash = try stmt.columnTextDup(allocator, 5);
+        const reply_parent_hash = try stmt.columnTextDup(allocator, 6);
         defer allocator.free(reply_parent_hash);
+        const anchor = try std.fmt.allocPrint(allocator, "comment-{s}", .{id[0..@min(id.len, 7)]});
+        defer allocator.free(anchor);
 
         const is_reply = reply_parent_id.len != 0 or reply_parent_hash.len != 0;
         try appendTemplate(buf, allocator,
-            \\<div class="{classes}"><div class="issue-timeline-avatar">
-        , .{ .classes = shared.classes("issue-timeline-item", &.{shared.class("is-reply", is_reply)}) });
+            \\<div class="{classes}" id="{anchor}"><div class="issue-timeline-avatar">
+        , .{
+            .classes = shared.classes("issue-timeline-item", &.{shared.class("is-reply", is_reply)}),
+            .anchor = anchor,
+        });
         try appendIssueAvatar(buf, allocator, author, "issue-detail-avatar");
         try appendTemplate(buf, allocator,
-            \\</div><article class="issue-comment-box"><header class="issue-comment-head"><div><strong>{author}</strong><span>commented {created_at}</span></div><button class="issue-kebab-button" type="button" disabled aria-label="Comment actions"></button></header>
+            \\</div><article class="issue-comment-box"><header class="issue-comment-head"><div><strong>{author}</strong><span>commented
         , .{
             .author = author,
-            .created_at = created_at,
         });
+        try buf.append(allocator, ' ');
+        try appendRelativeTime(buf, allocator, created_at);
+        try buf.appendSlice(allocator, "</span></div>");
+        try appendIssueActionMenu(buf, allocator, anchor, body, !redacted and body.len != 0, false);
+        try buf.appendSlice(allocator, "</header>");
         if (reply_parent_id.len != 0 or reply_parent_hash.len != 0) {
             try buf.appendSlice(allocator, "<p class=\"reply-note\">Reply to ");
             if (reply_parent_id.len != 0) {
@@ -625,6 +647,51 @@ fn appendIssueComments(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
         }
         try buf.appendSlice(allocator, "</div></article></div>");
     }
+}
+
+fn appendIssueActionMenu(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    anchor: []const u8,
+    markdown: []const u8,
+    markdown_available: bool,
+    edit_available: bool,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<details class="issue-action-menu" data-issue-menu data-issue-anchor="{anchor}">
+        \\  <summary class="issue-kebab-button" aria-label="Comment actions" title="Comment actions"></summary>
+        \\  <template data-issue-markdown>{markdown}</template>
+        \\  <div class="issue-action-popover" role="menu">
+    , .{
+        .anchor = anchor,
+        .markdown = markdown,
+    });
+    try appendIssueActionMenuItem(buf, allocator, "copy-link", "issue-menu-icon-link", "Copy link", false);
+    try appendIssueActionMenuItem(buf, allocator, "copy-markdown", "issue-menu-icon-markdown", "Copy Markdown", !markdown_available);
+    try appendIssueActionMenuItem(buf, allocator, "quote-reply", "issue-menu-icon-quote", "Quote reply", !markdown_available);
+    try buf.appendSlice(allocator, "<div class=\"issue-action-divider\" role=\"separator\"></div>");
+    try appendIssueActionMenuItem(buf, allocator, "edit", "issue-menu-icon-edit", "Edit", !edit_available);
+    try buf.appendSlice(allocator, "</div></details>");
+}
+
+fn appendIssueActionMenuItem(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    action: []const u8,
+    icon_class: []const u8,
+    label: []const u8,
+    disabled: bool,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<button type="button" role="menuitem" data-issue-action="{action}"
+    , .{ .action = action });
+    if (disabled) try buf.appendSlice(allocator, " disabled");
+    try appendTemplate(buf, allocator,
+        \\><span class="issue-menu-icon {icon_class}" aria-hidden="true"></span><span data-issue-menu-label>{label}</span></button>
+    , .{
+        .icon_class = icon_class,
+        .label = label,
+    });
 }
 
 fn appendIssueCommentForm(

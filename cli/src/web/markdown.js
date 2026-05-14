@@ -37,6 +37,178 @@
     }
   }
 
+  function plural(value, unit) {
+    return value + " " + unit + (value === 1 ? "" : "s");
+  }
+
+  function relativeTimeLabel(date, now) {
+    const deltaSeconds = Math.round((now.getTime() - date.getTime()) / 1000);
+    if (!Number.isFinite(deltaSeconds)) return "";
+
+    const future = deltaSeconds < -30;
+    const seconds = Math.abs(deltaSeconds);
+    if (seconds < 60) return future ? "in less than a minute" : "just now";
+
+    const units = [
+      { name: "year", seconds: 365 * 24 * 60 * 60 },
+      { name: "month", seconds: 30 * 24 * 60 * 60 },
+      { name: "week", seconds: 7 * 24 * 60 * 60 },
+      { name: "day", seconds: 24 * 60 * 60 },
+      { name: "hour", seconds: 60 * 60 },
+      { name: "minute", seconds: 60 },
+    ];
+
+    for (let index = 0; index < units.length; index += 1) {
+      const unit = units[index];
+      if (seconds >= unit.seconds) {
+        const value = Math.max(1, Math.floor(seconds / unit.seconds));
+        const label = plural(value, unit.name);
+        return future ? "in " + label : label + " ago";
+      }
+    }
+
+    return future ? "in less than a minute" : "just now";
+  }
+
+  let relativeTimeTimer = 0;
+
+  function renderRelativeTimes() {
+    const now = new Date();
+    document.querySelectorAll("time[data-relative-time]").forEach(function (element) {
+      const raw = element.getAttribute("datetime") || element.textContent || "";
+      const date = new Date(raw);
+      if (Number.isNaN(date.getTime())) return;
+      const label = relativeTimeLabel(date, now);
+      if (label) element.textContent = label;
+      if (!element.getAttribute("title")) {
+        element.setAttribute("title", date.toLocaleString());
+      }
+    });
+    if (!relativeTimeTimer) {
+      relativeTimeTimer = window.setInterval(renderRelativeTimes, 60 * 1000);
+    }
+  }
+
+  function issueMenuMarkdown(menu) {
+    const template = menu.querySelector("template[data-issue-markdown]");
+    if (!template) return "";
+    if (template.content) return template.content.textContent || "";
+    return template.textContent || "";
+  }
+
+  function issueMenuPermalink(menu) {
+    const url = new URL(window.location.href);
+    const anchor = menu.dataset.issueAnchor || "";
+    url.hash = anchor;
+    return url.href;
+  }
+
+  function quoteMarkdown(markdown) {
+    const value = String(markdown || "").replace(/\s+$/g, "");
+    if (!value) return "";
+    return value.split(/\r?\n/).map(function (line) {
+      return line ? "> " + line : ">";
+    }).join("\n") + "\n\n";
+  }
+
+  function commentTextarea() {
+    return document.querySelector(".issue-comment-form textarea[name='body']");
+  }
+
+  function appendCommentText(value) {
+    const textarea = commentTextarea();
+    if (!textarea || !value) return false;
+    const current = textarea.value.replace(/\s+$/g, "");
+    textarea.value = current ? current + "\n\n" + value : value;
+    textarea.focus();
+    textarea.scrollIntoView({ block: "center" });
+    const end = textarea.value.length;
+    textarea.setSelectionRange(end, end);
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    return true;
+  }
+
+  function issueMenuLabel(button) {
+    return button.querySelector("[data-issue-menu-label]") || button;
+  }
+
+  function flashIssueMenuLabel(button, label) {
+    const labelElement = issueMenuLabel(button);
+    const original = labelElement.textContent || "";
+    labelElement.textContent = label;
+    window.setTimeout(function () {
+      labelElement.textContent = original;
+    }, 1200);
+  }
+
+  function closeIssueMenus(except) {
+    document.querySelectorAll("details[data-issue-menu][open]").forEach(function (menu) {
+      if (menu !== except) menu.open = false;
+    });
+  }
+
+  async function runIssueAction(menu, button) {
+    if (button.disabled) return;
+    const action = button.dataset.issueAction || "";
+    const markdown = issueMenuMarkdown(menu);
+    if (action === "copy-link") {
+      try {
+        await copyText(issueMenuPermalink(menu));
+        flashIssueMenuLabel(button, "Copied");
+        window.setTimeout(function () { closeIssueMenus(null); }, 250);
+      } catch (_) {
+        flashIssueMenuLabel(button, "Failed");
+      }
+      return;
+    }
+    if (action === "copy-markdown") {
+      try {
+        await copyText(markdown);
+        flashIssueMenuLabel(button, "Copied");
+        window.setTimeout(function () { closeIssueMenus(null); }, 250);
+      } catch (_) {
+        flashIssueMenuLabel(button, "Failed");
+      }
+      return;
+    }
+    if (action === "quote-reply") {
+      if (appendCommentText(quoteMarkdown(markdown))) closeIssueMenus(null);
+    }
+  }
+
+  function initIssueActionMenus() {
+    document.querySelectorAll("details[data-issue-menu]").forEach(function (menu) {
+      if (menu.dataset.issueMenuReady === "yes") return;
+      menu.dataset.issueMenuReady = "yes";
+      const summary = menu.querySelector("summary");
+      if (summary) summary.setAttribute("aria-expanded", menu.open ? "true" : "false");
+      menu.addEventListener("toggle", function () {
+        if (summary) summary.setAttribute("aria-expanded", menu.open ? "true" : "false");
+        if (menu.open) closeIssueMenus(menu);
+      });
+      menu.addEventListener("click", function (event) {
+        const target = event.target instanceof Element ? event.target : null;
+        if (!target) return;
+        const button = target.closest("[data-issue-action]");
+        if (!button || !menu.contains(button)) return;
+        event.preventDefault();
+        runIssueAction(menu, button);
+      });
+    });
+
+    if (document.body.dataset.issueMenusReady === "yes") return;
+    document.body.dataset.issueMenusReady = "yes";
+    document.addEventListener("click", function (event) {
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target || !target.closest("details[data-issue-menu]")) {
+        closeIssueMenus(null);
+      }
+    });
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape") closeIssueMenus(null);
+    });
+  }
+
   function renderLatex(value) {
     let html = escapeHtml(String(value || "").trim());
     html = html.replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, '<span class="math-frac"><span>$1</span><span>$2</span></span>');
@@ -380,6 +552,8 @@
     renderMath();
     renderMermaid();
     renderCodeCopyButtons();
+    renderRelativeTimes();
+    initIssueActionMenus();
   }
 
   if (document.readyState === "loading") {
