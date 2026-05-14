@@ -207,7 +207,7 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         defer allocator.free(body);
         try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/issues")) {
-        const body = try issues_page.renderIssuesPage(allocator, repo);
+        const body = try issues_page.renderIssuesPage(allocator, repo, request.target);
         defer allocator.free(body);
         try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.startsWith(u8, request.path, "/issues/")) {

@@ -27,34 +27,38 @@ const sendResponse = shared.sendResponse;
 const splitCommaFields = util.splitCommaFields;
 const sqlite = index.sqlite;
 
-pub fn renderIssuesPage(allocator: Allocator, repo: Repo) ![]u8 {
-    if (try shared.renderIndexingPageIfStale(allocator, repo, "Issues", "issues", "/issues")) |body| return body;
+const IssueStateFilter = enum {
+    open,
+    closed,
+    all,
+};
+
+const IssueCounts = struct {
+    open: usize = 0,
+    closed: usize = 0,
+    all: usize = 0,
+};
+
+pub fn renderIssuesPage(allocator: Allocator, repo: Repo, target: []const u8) ![]u8 {
+    if (try shared.renderIndexingPageIfStale(allocator, repo, "Issues", "issues", target)) |body| return body;
     try ensureIndex(allocator, repo);
 
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
-    try appendShellStart(&buf, allocator, repo, "Issues", "issues");
-    try buf.appendSlice(allocator, "<section class=\"panel\">");
-    try appendSectionHead(&buf, allocator, "Issues", "Local Issue Tracker", Button{
-        .label = "New issue",
-        .href = literalHref("/new-issue"),
-        .kind = "primary",
-    });
-    try buf.appendSlice(allocator,
-        \\  <div class="list">
-    );
-
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
-    var stmt = try db.prepare(
-        \\SELECT i.id, i.title, i.state,
-        \\       COALESCE(NULLIF(m.source_author, ''), i.author_principal),
-        \\       i.opened_at
-        \\FROM issues i
-        \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
-        \\ORDER BY i.opened_at DESC, i.id DESC
-    );
+
+    const requested_filter = try issueStateFilterFromTarget(allocator, target);
+    const counts = try loadIssueCounts(&db);
+    const filter = requested_filter orelse if (counts.open == 0 and counts.closed > 0) IssueStateFilter.closed else IssueStateFilter.open;
+
+    try appendShellStart(&buf, allocator, repo, "Issues", "issues");
+    try appendIssuesToolbar(&buf, allocator, filter);
+    try buf.appendSlice(allocator, "<section class=\"panel issues-panel\">");
+    try appendIssuesListHeader(&buf, allocator, filter, counts);
+
+    var stmt = try db.prepare(issueListSql(filter));
     defer stmt.deinit();
 
     var shown: usize = 0;
@@ -69,33 +73,304 @@ pub fn renderIssuesPage(allocator: Allocator, repo: Repo) ![]u8 {
         defer allocator.free(author);
         const opened_at = try stmt.columnTextDup(allocator, 4);
         defer allocator.free(opened_at);
+        const state_at = try stmt.columnTextDup(allocator, 5);
+        defer allocator.free(state_at);
+        const milestone = try stmt.columnTextDup(allocator, 6);
+        defer allocator.free(milestone);
+        const comment_count = @as(usize, @intCast(stmt.columnInt64(7)));
+        const legacy_number = stmt.columnInt64(8);
 
-        var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
-        const issue_ref = util.shortObjectRef(&issue_ref_buf, id);
-        try buf.appendSlice(allocator, "<article class=\"issue-row\"><div class=\"issue-main\"><div class=\"issue-title\">");
-        try appendStatePill(&buf, allocator, state);
-        try appendTemplate(&buf, allocator,
-            \\<a href="{href}">{title}</a></div><p class="muted">#{id} opened by {author} at {opened_at}</p></div></article>
-        , .{
-            .href = issueHref(issue_ref),
-            .id = issue_ref,
-            .title = title,
-            .author = author,
-            .opened_at = opened_at,
-        });
+        try appendIssueListRow(&buf, allocator, &db, id, title, state, author, opened_at, state_at, milestone, comment_count, legacy_number);
         shown += 1;
     }
 
     if (shown == 0) {
-        try appendEmptyState(&buf, allocator, "No issues yet.", "Create the first local issue from this browser UI or with gt issue open.");
+        switch (filter) {
+            .open => try appendEmptyState(&buf, allocator, "No open issues.", "Closed issues are available from the Closed tab."),
+            .closed => try appendEmptyState(&buf, allocator, "No closed issues.", "Open issues are available from the Open tab."),
+            .all => try appendEmptyState(&buf, allocator, "No issues yet.", "Create the first local issue from this browser UI or with gt issue open."),
+        }
     }
 
-    try buf.appendSlice(allocator,
-        \\  </div>
-        \\</section>
-    );
+    try buf.appendSlice(allocator, "</section>");
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
+}
+
+fn issueStateFilterFromTarget(allocator: Allocator, target: []const u8) !?IssueStateFilter {
+    const state_value = try queryValueOwned(allocator, target, "state");
+    defer if (state_value) |value| allocator.free(value);
+    const value = state_value orelse return null;
+    if (std.mem.eql(u8, value, "open")) return .open;
+    if (std.mem.eql(u8, value, "closed")) return .closed;
+    if (std.mem.eql(u8, value, "all")) return .all;
+    return null;
+}
+
+fn issueListSql(filter: IssueStateFilter) []const u8 {
+    const select =
+        \\SELECT i.id, i.title, i.state,
+        \\       COALESCE(NULLIF(m.source_author, ''), i.author_principal),
+        \\       i.opened_at, i.state_occurred_at, COALESCE(m.milestone, ''),
+        \\       (SELECT COUNT(*) FROM comments c WHERE c.parent_kind = 'issue' AND c.parent_id = i.id),
+        \\       COALESCE(a.number, 0)
+        \\FROM issues i
+        \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
+        \\LEFT JOIN legacy_aliases a
+        \\  ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
+    ;
+    return switch (filter) {
+        .open => select ++
+            \\ WHERE i.state = 'open'
+            \\ ORDER BY i.opened_at DESC, i.id DESC
+        ,
+        .closed => select ++
+            \\ WHERE i.state = 'closed'
+            \\ ORDER BY i.state_occurred_at DESC, i.opened_at DESC, i.id DESC
+        ,
+        .all => select ++
+            \\ ORDER BY i.state_occurred_at DESC, i.opened_at DESC, i.id DESC
+        ,
+    };
+}
+
+fn loadIssueCounts(db: *SqliteDb) !IssueCounts {
+    var counts: IssueCounts = .{};
+    var stmt = try db.prepare("SELECT state, COUNT(*) FROM issues GROUP BY state");
+    defer stmt.deinit();
+    while (try stmt.step()) {
+        const state = try stmt.columnTextDup(db.allocator, 0);
+        defer db.allocator.free(state);
+        const count = @as(usize, @intCast(stmt.columnInt64(1)));
+        counts.all += count;
+        if (std.mem.eql(u8, state, "open")) {
+            counts.open = count;
+        } else if (std.mem.eql(u8, state, "closed")) {
+            counts.closed = count;
+        }
+    }
+    return counts;
+}
+
+fn appendIssuesToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filter: IssueStateFilter) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="issues-toolbar">
+        \\  <form class="issues-search" action="/issues" method="get">
+        \\    <span class="issues-search-icon" aria-hidden="true"></span>
+        \\    <input type="search" name="q" value="{query}" aria-label="Search issues">
+        \\    <input type="hidden" name="state" value="{state}">
+        \\  </form>
+        \\  <div class="issues-toolbar-actions">
+        \\    <button class="button secondary issue-tool-button" type="button" disabled><span class="button-icon icon-labels" aria-hidden="true"></span><span>Labels</span></button>
+        \\    <button class="button secondary issue-tool-button" type="button" disabled><span class="button-icon icon-milestones" aria-hidden="true"></span><span>Milestones</span></button>
+        \\    <a class="button primary" href="/new-issue">New issue</a>
+        \\  </div>
+        \\</div>
+    , .{
+        .query = issueSearchQuery(filter),
+        .state = issueStateValue(filter),
+    });
+}
+
+fn appendIssuesListHeader(buf: *std.ArrayList(u8), allocator: Allocator, filter: IssueStateFilter, counts: IssueCounts) !void {
+    try buf.appendSlice(allocator,
+        \\<header class="issues-list-head">
+        \\  <div class="issues-select-all"><input type="checkbox" aria-label="Select all issues" disabled></div>
+        \\  <nav class="issues-state-tabs" aria-label="Issue state">
+    );
+    try appendIssueStateTab(buf, allocator, "Open", counts.open, .open, filter, "issue-open-icon");
+    try appendIssueStateTab(buf, allocator, "Closed", counts.closed, .closed, filter, "issue-closed-icon");
+    try buf.appendSlice(allocator,
+        \\  </nav>
+        \\  <div class="issues-filter-menus">
+        \\    <button type="button" disabled>Author</button>
+        \\    <button type="button" disabled>Labels</button>
+        \\    <button type="button" disabled>Projects</button>
+        \\    <button type="button" disabled>Milestones</button>
+        \\    <button type="button" disabled>Assignees</button>
+        \\    <button type="button" disabled>Newest</button>
+        \\  </div>
+        \\</header>
+    );
+}
+
+fn appendIssueStateTab(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    label: []const u8,
+    count: usize,
+    tab_filter: IssueStateFilter,
+    active_filter: IssueStateFilter,
+    icon_class: []const u8,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<a class="{classes}" href="/issues?state={state}"><span class="issue-tab-icon {icon_class}" aria-hidden="true"></span><span>{label}</span><span class="issue-count-badge">{count}</span></a>
+    , .{
+        .classes = shared.classes("issues-state-tab", &.{shared.class("active", tab_filter == active_filter)}),
+        .state = issueStateValue(tab_filter),
+        .icon_class = icon_class,
+        .label = label,
+        .count = count,
+    });
+}
+
+fn appendIssueListRow(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    id: []const u8,
+    title: []const u8,
+    state: []const u8,
+    author: []const u8,
+    opened_at: []const u8,
+    state_at: []const u8,
+    milestone: []const u8,
+    comment_count: usize,
+    legacy_number: i64,
+) !void {
+    var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const issue_ref = util.shortObjectRef(&issue_ref_buf, id);
+    const closed = std.mem.eql(u8, state, "closed");
+    try appendTemplate(buf, allocator,
+        \\<article class="issue-list-row is-{state}">
+        \\  <div class="issue-select-cell"><input type="checkbox" aria-label="Select issue {id}" disabled></div>
+        \\  <div class="issue-state-cell"><span class="issue-state-icon {state}" title="{state}" aria-label="{state}"></span></div>
+        \\  <div class="issue-row-content">
+        \\    <div class="issue-row-title-line"><a class="issue-row-title" href="{href}">{title}</a>
+    , .{
+        .state = state,
+        .id = issue_ref,
+        .href = issueHref(issue_ref),
+        .title = title,
+    });
+    try appendIssueRowLabels(buf, allocator, db, id);
+    try appendTemplate(buf, allocator,
+        \\</div><p class="issue-row-meta">#{id}
+    , .{
+        .id = issue_ref,
+    });
+    if (legacy_number > 0) {
+        try buf.appendSlice(allocator, " / GitHub ");
+        try appendLegacyIssueLink(buf, allocator, legacy_number);
+    }
+    try appendTemplate(buf, allocator,
+        \\ by {author} {verb} {time}</p></div>
+        \\  <div class="issue-row-side">
+    , .{
+        .author = author,
+        .verb = if (closed) "was closed" else "opened",
+        .time = if (closed) state_at else opened_at,
+    });
+    if (milestone.len != 0) {
+        try appendTemplate(buf, allocator,
+            \\<span class="issue-row-milestone" title="Milestone"><span class="issue-milestone-icon" aria-hidden="true"></span>{milestone}</span>
+        , .{ .milestone = milestone });
+    }
+    try appendIssueAssignees(buf, allocator, db, id);
+    if (comment_count > 0) {
+        try appendTemplate(buf, allocator,
+            \\<span class="issue-comments" title="Comments"><span class="issue-comments-icon" aria-hidden="true"></span>{comment_count}</span>
+        , .{ .comment_count = comment_count });
+    }
+    try appendIssueAvatar(buf, allocator, author, "issue-author-avatar");
+    try buf.appendSlice(allocator,
+        \\  </div>
+        \\</article>
+    );
+}
+
+fn appendIssueRowLabels(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8) !void {
+    var stmt = try db.prepare("SELECT DISTINCT label FROM issue_labels WHERE issue_id = ? ORDER BY label");
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    var shown = false;
+    while (try stmt.step()) {
+        const label = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(label);
+        if (!shown) {
+            try buf.appendSlice(allocator, "<span class=\"issue-row-labels\">");
+            shown = true;
+        }
+        try appendIssueLabel(buf, allocator, label);
+    }
+    if (shown) try buf.appendSlice(allocator, "</span>");
+}
+
+fn appendIssueLabel(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<span class="issue-label {kind}">{label}</span>
+    , .{
+        .kind = issueLabelKind(label),
+        .label = label,
+    });
+}
+
+fn appendIssueAssignees(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8) !void {
+    var stmt = try db.prepare("SELECT DISTINCT assignee FROM issue_assignees WHERE issue_id = ? ORDER BY assignee");
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    var shown = false;
+    while (try stmt.step()) {
+        const assignee = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(assignee);
+        if (!shown) {
+            try buf.appendSlice(allocator, "<span class=\"issue-row-assignees\">");
+            shown = true;
+        }
+        try appendIssueAvatar(buf, allocator, assignee, "");
+    }
+    if (shown) try buf.appendSlice(allocator, "</span>");
+}
+
+fn appendIssueAvatar(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8, extra_class: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<span class="issue-avatar {extra_class}" title="{name}" aria-label="{name}">
+    , .{
+        .extra_class = extra_class,
+        .name = name,
+    });
+    var initial_buf = [_]u8{'?'};
+    for (name) |c| {
+        if (std.ascii.isAlphanumeric(c)) {
+            initial_buf[0] = std.ascii.toUpper(c);
+            break;
+        }
+    }
+    try shared.appendHtml(buf, allocator, initial_buf[0..]);
+    try buf.appendSlice(allocator, "</span>");
+}
+
+fn issueSearchQuery(filter: IssueStateFilter) []const u8 {
+    return switch (filter) {
+        .open => "is:issue state:open",
+        .closed => "is:issue state:closed",
+        .all => "is:issue",
+    };
+}
+
+fn issueStateValue(filter: IssueStateFilter) []const u8 {
+    return switch (filter) {
+        .open => "open",
+        .closed => "closed",
+        .all => "all",
+    };
+}
+
+fn issueLabelKind(label: []const u8) []const u8 {
+    if (asciiEqlIgnoreCase(label, "bug")) return "label-bug";
+    if (asciiEqlIgnoreCase(label, "enhancement") or asciiEqlIgnoreCase(label, "feature") or asciiEqlIgnoreCase(label, "feat")) return "label-enhancement";
+    if (asciiEqlIgnoreCase(label, "docs") or asciiEqlIgnoreCase(label, "documentation")) return "label-docs";
+    if (asciiEqlIgnoreCase(label, "question")) return "label-question";
+    if (asciiEqlIgnoreCase(label, "security")) return "label-security";
+    return "label-default";
+}
+
+fn asciiEqlIgnoreCase(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |left, right| {
+        if (std.ascii.toLower(left) != std.ascii.toLower(right)) return false;
+    }
+    return true;
 }
 
 pub fn renderIssueDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
@@ -113,9 +388,11 @@ pub fn renderIssueDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const 
 
     var stmt = try db.prepare(
         \\SELECT i.id, i.title, i.state, i.author_principal, i.author_device, i.opened_at, i.body,
-        \\       COALESCE(m.source_author, ''), COALESCE(m.milestone, '')
+        \\       COALESCE(m.source_author, ''), COALESCE(m.milestone, ''), COALESCE(a.number, 0)
         \\FROM issues i
         \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
+        \\LEFT JOIN legacy_aliases a
+        \\  ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
         \\WHERE i.id = ?
     );
     defer stmt.deinit();
@@ -140,6 +417,7 @@ pub fn renderIssueDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const 
     defer allocator.free(source_author);
     const milestone = try stmt.columnTextDup(allocator, 8);
     defer allocator.free(milestone);
+    const legacy_number = stmt.columnInt64(9);
 
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -157,7 +435,7 @@ pub fn renderIssueDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const 
         \\  <div class="issue-detail-body">
         \\    <aside class="issue-sidebar">
     , .{ .title = title });
-    try appendIssueFacts(&buf, allocator, &db, id, state, author_principal, author_device, source_author, opened_at, milestone);
+    try appendIssueFacts(&buf, allocator, &db, id, state, author_principal, author_device, source_author, opened_at, milestone, legacy_number);
     try appendTemplate(&buf, allocator,
         \\    </aside>
         \\    <div class="issue-thread">
@@ -209,6 +487,7 @@ fn appendIssueFacts(
     source_author: []const u8,
     opened_at: []const u8,
     milestone: []const u8,
+    legacy_number: i64,
 ) !void {
     try appendTemplate(buf, allocator,
         \\<dl class="facts issue-facts"><div><dt>Status</dt><dd>
@@ -232,6 +511,11 @@ fn appendIssueFacts(
         try appendTemplate(buf, allocator, "/{author_device}", .{ .author_device = author_device });
     }
     try buf.appendSlice(allocator, "</dd></div>");
+    if (legacy_number > 0) {
+        try buf.appendSlice(allocator, "<div><dt>GitHub</dt><dd>");
+        try appendLegacyIssueLink(buf, allocator, legacy_number);
+        try buf.appendSlice(allocator, "</dd></div>");
+    }
     if (milestone.len != 0) {
         try appendTemplate(buf, allocator,
             \\<div><dt>Milestone</dt><dd>{milestone}</dd></div>
@@ -241,6 +525,12 @@ fn appendIssueFacts(
     try appendIssueCollectionFact(buf, allocator, db, "Assignees", "SELECT DISTINCT assignee FROM issue_assignees WHERE issue_id = ? ORDER BY assignee", issue_id);
     try appendIssueProjectsFact(buf, allocator, db, issue_id);
     try buf.appendSlice(allocator, "</dl>");
+}
+
+fn appendLegacyIssueLink(buf: *std.ArrayList(u8), allocator: Allocator, legacy_number: i64) !void {
+    const issue_ref = try std.fmt.allocPrint(allocator, "{d}", .{legacy_number});
+    defer allocator.free(issue_ref);
+    try shared.appendIssueReferenceLink(buf, allocator, issue_ref);
 }
 
 fn appendIssueCollectionFact(

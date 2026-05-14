@@ -91,6 +91,58 @@ pub fn issueHref(issue_ref: []const u8) Href {
     return .{ .issue = issue_ref };
 }
 
+pub fn issueReferenceEnd(value: []const u8, start: usize) ?usize {
+    if (start >= value.len or value[start] != '#') return null;
+    const token_start = start + 1;
+    if (token_start >= value.len or !std.ascii.isHex(value[token_start])) return null;
+
+    var end = token_start;
+    while (end < value.len and std.ascii.isHex(value[end])) : (end += 1) {}
+    if (end < value.len and isReferenceTrailingIdentifier(value[end])) return null;
+
+    const token = value[token_start..end];
+    if (isPositiveDecimalReference(token) or util.isObjectRefPrefix(token)) return end;
+    return null;
+}
+
+pub fn appendIssueReferenceLink(buf: *std.ArrayList(u8), allocator: Allocator, issue_ref: []const u8) !void {
+    try buf.appendSlice(allocator, "<a href=\"");
+    try appendHref(buf, allocator, issueHref(issue_ref));
+    try buf.appendSlice(allocator, "\">#");
+    try appendHtml(buf, allocator, issue_ref);
+    try buf.appendSlice(allocator, "</a>");
+}
+
+pub fn appendIssueLinkedText(buf: *std.ArrayList(u8), allocator: Allocator, value: []const u8) !void {
+    var plain_start: usize = 0;
+    var i: usize = 0;
+    while (i < value.len) {
+        if (issueReferenceEnd(value, i)) |end| {
+            if (plain_start < i) try appendHtml(buf, allocator, value[plain_start..i]);
+            try appendIssueReferenceLink(buf, allocator, value[i + 1 .. end]);
+            i = end;
+            plain_start = i;
+            continue;
+        }
+        i += 1;
+    }
+    if (plain_start < value.len) try appendHtml(buf, allocator, value[plain_start..]);
+}
+
+fn isPositiveDecimalReference(value: []const u8) bool {
+    if (value.len == 0) return false;
+    var has_non_zero = false;
+    for (value) |c| {
+        if (!std.ascii.isDigit(c)) return false;
+        if (c != '0') has_non_zero = true;
+    }
+    return has_non_zero;
+}
+
+fn isReferenceTrailingIdentifier(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '-' or c == '_';
+}
+
 pub fn class(name: []const u8, enabled: bool) Class {
     return .{ .name = name, .enabled = enabled };
 }
@@ -777,4 +829,13 @@ test "web template supports typed href classes and formatters" {
     });
 
     try std.testing.expectEqualStrings("<a class=\"button active\" href=\"/code?ref=feature/test&amp;path=src/a%20b.zig&amp;view=preview\">12,345 83.3%</a>", buf.items);
+}
+
+test "web issue linked text autolinks legacy and hash references" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendIssueLinkedText(&buf, std.testing.allocator, "Refs #42, #A1B2C3D, not #abc, #abcdef0g, or #018f0000-uuid.");
+
+    try std.testing.expectEqualStrings("Refs <a href=\"/issues/42\">#42</a>, <a href=\"/issues/A1B2C3D\">#A1B2C3D</a>, not #abc, #abcdef0g, or #018f0000-uuid.", buf.items);
 }

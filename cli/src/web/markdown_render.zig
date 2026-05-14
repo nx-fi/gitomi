@@ -17,6 +17,7 @@ pub const MarkdownLinkContext = struct {
 
 pub const MarkdownOptions = struct {
     link_context: ?MarkdownLinkContext = null,
+    autolink_issues: bool = true,
 };
 
 const MarkdownState = struct {
@@ -446,13 +447,21 @@ fn appendInlineMarkdown(
                             try buf.appendSlice(allocator, "<a href=\"");
                             try appendMarkdownHref(buf, allocator, href, options);
                             try buf.appendSlice(allocator, "\">");
-                            try appendInlineMarkdown(buf, allocator, value[i + 1 .. label_end], options);
+                            try appendInlineMarkdown(buf, allocator, value[i + 1 .. label_end], withoutIssueAutolinks(options));
                             try buf.appendSlice(allocator, "</a>");
                             i = href_end + 1;
                             continue;
                         }
                     }
                 }
+            }
+        }
+
+        if (options.autolink_issues) {
+            if (shared.issueReferenceEnd(value, i)) |end| {
+                try shared.appendIssueReferenceLink(buf, allocator, value[i + 1 .. end]);
+                i = end;
+                continue;
             }
         }
 
@@ -471,6 +480,13 @@ fn appendInlineMarkdown(
         }
         i += 1;
     }
+}
+
+fn withoutIssueAutolinks(options: MarkdownOptions) MarkdownOptions {
+    return .{
+        .link_context = options.link_context,
+        .autolink_issues = false,
+    };
 }
 
 fn appendMarkdownMedia(
@@ -846,6 +862,21 @@ test "web markdown renderer handles task list checkboxes" {
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<li class=\"task-list-item\"><input class=\"task-list-checkbox\" type=\"checkbox\" disabled checked> also done</li>") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<li>[y] plain item</li>") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<ol><li class=\"task-list-item\"><input class=\"task-list-checkbox\" type=\"checkbox\" disabled> ordered task</li></ol>") != null);
+}
+
+test "web markdown renderer autolinks issue references" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    try appendMarkdown(
+        &buf,
+        std.testing.allocator,
+        "Refs #42 and #a1b2c3d, but `#43` stays code and [label #44](/x) stays one link.",
+    );
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<a href=\"/issues/42\">#42</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<a href=\"/issues/a1b2c3d\">#a1b2c3d</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<code>#43</code>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<a href=\"/x\">label #44</a>") != null);
 }
 
 test "web markdown renderer rewrites repository relative links" {

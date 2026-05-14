@@ -193,7 +193,7 @@ fn collectReferencePrefixes(allocator: Allocator, message: []const u8, prefixes:
 
         var end = start;
         while (end < message.len and std.ascii.isHex(message[end])) : (end += 1) {}
-        if (end < message.len and message[end] == '-') continue;
+        if (end < message.len and isReferenceTrailingIdentifier(message[end])) continue;
         const raw_prefix = message[start..end];
         i = end;
         if (!isReferencePrefixCandidate(raw_prefix)) continue;
@@ -201,8 +201,12 @@ fn collectReferencePrefixes(allocator: Allocator, message: []const u8, prefixes:
     }
 }
 
+fn isReferenceTrailingIdentifier(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '-' or c == '_';
+}
+
 fn isReferencePrefixCandidate(prefix: []const u8) bool {
-    return util.isObjectRefPrefix(prefix);
+    return util.isObjectRefPrefix(prefix) or parsePositiveDecimal(prefix) != null;
 }
 
 fn appendUniqueLowerPrefix(allocator: Allocator, prefixes: *std.ArrayList([]u8), raw_prefix: []const u8) !void {
@@ -221,6 +225,16 @@ fn appendUniqueLowerPrefix(allocator: Allocator, prefixes: *std.ArrayList([]u8),
 }
 
 fn resolveDerivedReference(allocator: Allocator, db: *SqliteDb, prefix: []const u8) !?DerivedReferenceTarget {
+    if (util.isObjectRefPrefix(prefix)) {
+        if (try resolveDerivedHashReference(allocator, db, prefix)) |target| return target;
+    }
+    if (parsePositiveDecimal(prefix)) |number| {
+        return try resolveDerivedLegacyReference(allocator, db, number);
+    }
+    return null;
+}
+
+fn resolveDerivedHashReference(allocator: Allocator, db: *SqliteDb, prefix: []const u8) !?DerivedReferenceTarget {
     var stmt = try db.prepare(
         \\SELECT object_kind, id FROM (
         \\  SELECT 'issue' AS object_kind, id FROM issues
@@ -272,6 +286,62 @@ fn resolveDerivedReference(allocator: Allocator, db: *SqliteDb, prefix: []const 
     object_kind = null;
     object_id = null;
     return target;
+}
+
+fn resolveDerivedLegacyReference(allocator: Allocator, db: *SqliteDb, number: i64) !?DerivedReferenceTarget {
+    var stmt = try db.prepare(
+        \\SELECT object_kind, object_id
+        \\FROM legacy_aliases
+        \\WHERE provider = 'github'
+        \\  AND object_kind IN ('issue', 'pull')
+        \\  AND number = ?
+        \\ORDER BY object_kind, object_id
+    );
+    defer stmt.deinit();
+    try stmt.bindInt64(1, number);
+
+    var object_kind: ?[]u8 = null;
+    var object_id: ?[]u8 = null;
+    errdefer if (object_kind) |value| allocator.free(value);
+    errdefer if (object_id) |value| allocator.free(value);
+    while (try stmt.step()) {
+        const candidate_kind = try stmt.columnTextDup(allocator, 0);
+        errdefer allocator.free(candidate_kind);
+        const candidate_id = try stmt.columnTextDup(allocator, 1);
+        errdefer allocator.free(candidate_id);
+
+        if (object_id != null) {
+            allocator.free(candidate_kind);
+            allocator.free(candidate_id);
+            allocator.free(object_kind.?);
+            allocator.free(object_id.?);
+            object_kind = null;
+            object_id = null;
+            return null;
+        }
+
+        object_kind = candidate_kind;
+        object_id = candidate_id;
+    }
+    if (object_id == null) return null;
+
+    const target = DerivedReferenceTarget{
+        .allocator = allocator,
+        .object_kind = object_kind.?,
+        .object_id = object_id.?,
+    };
+    object_kind = null;
+    object_id = null;
+    return target;
+}
+
+fn parsePositiveDecimal(value: []const u8) ?i64 {
+    if (value.len == 0) return null;
+    for (value) |c| {
+        if (!std.ascii.isDigit(c)) return null;
+    }
+    const number = std.fmt.parseInt(i64, value, 10) catch return null;
+    return if (number > 0) number else null;
 }
 
 fn insertDerivedCommitReference(
@@ -1099,17 +1169,18 @@ pub fn insertIndexedEvent(
     try stmt.stepDone();
 }
 
-test "data commit reference parser extracts unique object hash refs" {
+test "data commit reference parser extracts unique hash and legacy refs" {
     var prefixes: std.ArrayList([]u8) = .empty;
     defer freeStringArrayList(std.testing.allocator, &prefixes);
 
     try collectReferencePrefixes(
         std.testing.allocator,
-        "Fix #A1B2C3D and refs #a1b2c3d #12345 #not-a-ref #018f000",
+        "Fix #A1B2C3D and refs #a1b2c3d #42 #not-a-ref #abcdef0g #018f000",
         &prefixes,
     );
 
-    try std.testing.expectEqual(@as(usize, 2), prefixes.items.len);
+    try std.testing.expectEqual(@as(usize, 3), prefixes.items.len);
     try std.testing.expectEqualStrings("a1b2c3d", prefixes.items[0]);
-    try std.testing.expectEqualStrings("018f000", prefixes.items[1]);
+    try std.testing.expectEqualStrings("42", prefixes.items[1]);
+    try std.testing.expectEqualStrings("018f000", prefixes.items[2]);
 }
