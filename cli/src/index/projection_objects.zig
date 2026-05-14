@@ -14,6 +14,17 @@ const eventWins = ordering.eventWins;
 const max_projected_labels: usize = 256;
 const max_projected_participants: usize = 128;
 
+fn creationEventWins(db: *SqliteDb, event_type: []const u8, object_id: []const u8, event_hash: []const u8) !bool {
+    var stmt = try db.prepare("SELECT event_hash FROM events WHERE event_type = ? AND object_id = ? ORDER BY event_hash DESC LIMIT 1");
+    defer stmt.deinit();
+    try stmt.bindText(1, event_type);
+    try stmt.bindText(2, object_id);
+    if (!(try stmt.step())) return false;
+    const winner = try stmt.columnTextDup(db.allocator, 0);
+    defer db.allocator.free(winner);
+    return std.mem.eql(u8, winner, event_hash);
+}
+
 pub fn applyIssueProjection(allocator: Allocator, db: *SqliteDb, event_hash: []const u8, envelope: ValidatedEnvelope, body: []const u8) !?[]const u8 {
     if (!std.mem.startsWith(u8, envelope.event_type, "issue.")) return null;
 
