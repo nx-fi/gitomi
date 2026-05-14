@@ -6,6 +6,15 @@ const Allocator = std.mem.Allocator;
 const appendFmt = shared.appendFmt;
 const appendHtml = shared.appendHtml;
 
+pub const MarkdownLinkContext = struct {
+    ref: []const u8,
+    current_path: []const u8,
+};
+
+pub const MarkdownOptions = struct {
+    link_context: ?MarkdownLinkContext = null,
+};
+
 const MarkdownState = struct {
     paragraph_open: bool = false,
     ul_open: bool = false,
@@ -14,6 +23,15 @@ const MarkdownState = struct {
 };
 
 pub fn appendMarkdown(buf: *std.ArrayList(u8), allocator: Allocator, markdown: []const u8) !void {
+    try appendMarkdownWithOptions(buf, allocator, markdown, .{});
+}
+
+pub fn appendMarkdownWithOptions(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    markdown: []const u8,
+    options: MarkdownOptions,
+) !void {
     var state = MarkdownState{};
     var markdown_lines: std.ArrayList([]const u8) = .empty;
     defer markdown_lines.deinit(allocator);
@@ -69,7 +87,7 @@ pub fn appendMarkdown(buf: *std.ArrayList(u8), allocator: Allocator, markdown: [
 
         if (isTableStart(markdown_lines.items, line_index)) {
             try closeMarkdownFlow(buf, allocator, &state);
-            line_index = try appendMarkdownTable(buf, allocator, markdown_lines.items, line_index);
+            line_index = try appendMarkdownTable(buf, allocator, markdown_lines.items, line_index, options);
             continue;
         }
 
@@ -77,7 +95,7 @@ pub fn appendMarkdown(buf: *std.ArrayList(u8), allocator: Allocator, markdown: [
             try closeMarkdownFlow(buf, allocator, &state);
             const content = std.mem.trim(u8, trimmed[level + 1 ..], " \t");
             try appendFmt(buf, allocator, "<h{d}>", .{level});
-            try appendInlineMarkdown(buf, allocator, content);
+            try appendInlineMarkdown(buf, allocator, content, options);
             try appendFmt(buf, allocator, "</h{d}>", .{level});
             line_index += 1;
             continue;
@@ -94,7 +112,7 @@ pub fn appendMarkdown(buf: *std.ArrayList(u8), allocator: Allocator, markdown: [
             try closeMarkdownFlow(buf, allocator, &state);
             const quote = std.mem.trim(u8, trimmed[1..], " \t");
             try buf.appendSlice(allocator, "<blockquote><p>");
-            try appendInlineMarkdown(buf, allocator, quote);
+            try appendInlineMarkdown(buf, allocator, quote, options);
             try buf.appendSlice(allocator, "</p></blockquote>");
             line_index += 1;
             continue;
@@ -111,7 +129,7 @@ pub fn appendMarkdown(buf: *std.ArrayList(u8), allocator: Allocator, markdown: [
                 state.ul_open = true;
             }
             try buf.appendSlice(allocator, "<li>");
-            try appendInlineMarkdown(buf, allocator, item);
+            try appendInlineMarkdown(buf, allocator, item, options);
             try buf.appendSlice(allocator, "</li>");
             line_index += 1;
             continue;
@@ -128,7 +146,7 @@ pub fn appendMarkdown(buf: *std.ArrayList(u8), allocator: Allocator, markdown: [
                 state.ol_open = true;
             }
             try buf.appendSlice(allocator, "<li>");
-            try appendInlineMarkdown(buf, allocator, item);
+            try appendInlineMarkdown(buf, allocator, item, options);
             try buf.appendSlice(allocator, "</li>");
             line_index += 1;
             continue;
@@ -148,7 +166,7 @@ pub fn appendMarkdown(buf: *std.ArrayList(u8), allocator: Allocator, markdown: [
         } else {
             try buf.append(allocator, ' ');
         }
-        try appendInlineMarkdown(buf, allocator, trimmed);
+        try appendInlineMarkdown(buf, allocator, trimmed, options);
         line_index += 1;
     }
 
@@ -171,9 +189,10 @@ fn appendMarkdownTable(
     allocator: Allocator,
     lines: []const []const u8,
     start: usize,
+    options: MarkdownOptions,
 ) !usize {
     try buf.appendSlice(allocator, "<div class=\"table-wrap markdown-table-wrap\"><table class=\"markdown-table\"><thead>");
-    try appendMarkdownTableRow(buf, allocator, lines[start], "th");
+    try appendMarkdownTableRow(buf, allocator, lines[start], "th", options);
     try buf.appendSlice(allocator, "</thead>");
 
     var index = start + 2;
@@ -185,7 +204,7 @@ fn appendMarkdownTable(
             try buf.appendSlice(allocator, "<tbody>");
             body_open = true;
         }
-        try appendMarkdownTableRow(buf, allocator, trimmed, "td");
+        try appendMarkdownTableRow(buf, allocator, trimmed, "td", options);
     }
     if (body_open) try buf.appendSlice(allocator, "</tbody>");
     try buf.appendSlice(allocator, "</table></div>");
@@ -197,6 +216,7 @@ fn appendMarkdownTableRow(
     allocator: Allocator,
     row: []const u8,
     tag: []const u8,
+    options: MarkdownOptions,
 ) !void {
     try buf.appendSlice(allocator, "<tr>");
     var cells = std.mem.splitScalar(u8, trimTablePipes(row), '|');
@@ -205,7 +225,7 @@ fn appendMarkdownTableRow(
         try buf.append(allocator, '<');
         try buf.appendSlice(allocator, tag);
         try buf.append(allocator, '>');
-        try appendInlineMarkdown(buf, allocator, cell);
+        try appendInlineMarkdown(buf, allocator, cell, options);
         try buf.appendSlice(allocator, "</");
         try buf.appendSlice(allocator, tag);
         try buf.append(allocator, '>');
@@ -316,7 +336,12 @@ fn closeParagraph(buf: *std.ArrayList(u8), allocator: Allocator, state: *Markdow
     }
 }
 
-fn appendInlineMarkdown(buf: *std.ArrayList(u8), allocator: Allocator, value: []const u8) !void {
+fn appendInlineMarkdown(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    value: []const u8,
+    options: MarkdownOptions,
+) !void {
     var i: usize = 0;
     while (i < value.len) {
         if (value[i] == '`') {
@@ -344,10 +369,25 @@ fn appendInlineMarkdown(buf: *std.ArrayList(u8), allocator: Allocator, value: []
         if (std.mem.startsWith(u8, value[i..], "**")) {
             if (std.mem.indexOfPos(u8, value, i + 2, "**")) |end| {
                 try buf.appendSlice(allocator, "<strong>");
-                try appendInlineMarkdown(buf, allocator, value[i + 2 .. end]);
+                try appendInlineMarkdown(buf, allocator, value[i + 2 .. end], options);
                 try buf.appendSlice(allocator, "</strong>");
                 i = end + 2;
                 continue;
+            }
+        }
+
+        if (std.mem.startsWith(u8, value[i..], "![")) {
+            if (std.mem.indexOfScalarPos(u8, value, i + 2, ']')) |label_end| {
+                if (label_end + 1 < value.len and value[label_end + 1] == '(') {
+                    if (std.mem.indexOfScalarPos(u8, value, label_end + 2, ')')) |href_end| {
+                        const href = std.mem.trim(u8, value[label_end + 2 .. href_end], " \t");
+                        if (isSafeHref(href)) {
+                            try appendMarkdownMedia(buf, allocator, value[i + 2 .. label_end], href, options);
+                            i = href_end + 1;
+                            continue;
+                        }
+                    }
+                }
             }
         }
 
@@ -358,9 +398,9 @@ fn appendInlineMarkdown(buf: *std.ArrayList(u8), allocator: Allocator, value: []
                         const href = std.mem.trim(u8, value[label_end + 2 .. href_end], " \t");
                         if (isSafeHref(href)) {
                             try buf.appendSlice(allocator, "<a href=\"");
-                            try appendHtml(buf, allocator, href);
+                            try appendMarkdownHref(buf, allocator, href, options);
                             try buf.appendSlice(allocator, "\">");
-                            try appendInlineMarkdown(buf, allocator, value[i + 1 .. label_end]);
+                            try appendInlineMarkdown(buf, allocator, value[i + 1 .. label_end], options);
                             try buf.appendSlice(allocator, "</a>");
                             i = href_end + 1;
                             continue;
@@ -385,6 +425,280 @@ fn appendInlineMarkdown(buf: *std.ArrayList(u8), allocator: Allocator, value: []
         }
         i += 1;
     }
+}
+
+fn appendMarkdownMedia(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    alt: []const u8,
+    href: []const u8,
+    options: MarkdownOptions,
+) !void {
+    if (isVideoHref(href)) {
+        try buf.appendSlice(allocator, "<video class=\"markdown-media\" controls preload=\"metadata\"><source src=\"");
+        try appendMarkdownMediaSrc(buf, allocator, href, options);
+        if (mediaContentTypeForHref(href)) |content_type| {
+            try buf.appendSlice(allocator, "\" type=\"");
+            try appendHtml(buf, allocator, content_type);
+        }
+        try buf.appendSlice(allocator, "\">");
+        try appendHtml(buf, allocator, alt);
+        try buf.appendSlice(allocator, "</video>");
+        return;
+    }
+
+    try buf.appendSlice(allocator, "<img class=\"markdown-media\" src=\"");
+    try appendMarkdownMediaSrc(buf, allocator, href, options);
+    try buf.appendSlice(allocator, "\" alt=\"");
+    try appendHtml(buf, allocator, alt);
+    try buf.appendSlice(allocator, "\">");
+}
+
+fn appendMarkdownMediaSrc(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    href: []const u8,
+    options: MarkdownOptions,
+) !void {
+    if (options.link_context) |context| {
+        if (try appendRepositoryRawHref(buf, allocator, href, context)) return;
+    }
+    try appendHtml(buf, allocator, href);
+}
+
+fn appendMarkdownHref(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    href: []const u8,
+    options: MarkdownOptions,
+) !void {
+    if (options.link_context) |context| {
+        if (try appendRepositoryHref(buf, allocator, href, context)) return;
+    }
+    try appendHtml(buf, allocator, href);
+}
+
+fn appendRepositoryHref(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    href: []const u8,
+    context: MarkdownLinkContext,
+) !bool {
+    if (!isRepositoryRelativeHref(href)) return false;
+
+    const href_path = hrefPathPart(href);
+    if (href_path.len == 0 and !std.mem.eql(u8, href, "/")) return false;
+
+    const decoded_path = percentDecodeUrlPath(allocator, href_path) catch |err| switch (err) {
+        error.InvalidUrlEncoding => return false,
+        else => return err,
+    };
+    defer allocator.free(decoded_path);
+
+    const target_path = (try resolveRepositoryPathOwned(allocator, context.current_path, decoded_path)) orelse return false;
+    defer allocator.free(target_path);
+
+    try appendCodeHref(buf, allocator, context.ref, target_path);
+    if (isMarkdownPath(target_path)) {
+        try buf.appendSlice(allocator, "&view=preview");
+    }
+    const fragment = hrefFragmentPart(href);
+    if (fragment.len != 0) try appendHtml(buf, allocator, fragment);
+    return true;
+}
+
+fn appendRepositoryRawHref(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    href: []const u8,
+    context: MarkdownLinkContext,
+) !bool {
+    if (!isRepositoryRelativeHref(href)) return false;
+
+    const href_path = hrefPathPart(href);
+    if (href_path.len == 0 and !std.mem.eql(u8, href, "/")) return false;
+
+    const decoded_path = percentDecodeUrlPath(allocator, href_path) catch |err| switch (err) {
+        error.InvalidUrlEncoding => return false,
+        else => return err,
+    };
+    defer allocator.free(decoded_path);
+
+    const target_path = (try resolveRepositoryPathOwned(allocator, context.current_path, decoded_path)) orelse return false;
+    defer allocator.free(target_path);
+
+    try appendRawHref(buf, allocator, context.ref, target_path);
+    const fragment = hrefFragmentPart(href);
+    if (fragment.len != 0) try appendHtml(buf, allocator, fragment);
+    return true;
+}
+
+fn isRepositoryRelativeHref(href: []const u8) bool {
+    if (href.len == 0) return false;
+    if (href[0] == '#' or href[0] == '?') return false;
+    if (std.mem.startsWith(u8, href, "//")) return false;
+    return !hasUriScheme(href);
+}
+
+fn hasUriScheme(value: []const u8) bool {
+    if (value.len == 0 or !std.ascii.isAlphabetic(value[0])) return false;
+    var i: usize = 1;
+    while (i < value.len) : (i += 1) {
+        switch (value[i]) {
+            ':' => return true,
+            '/', '?', '#' => return false,
+            'A'...'Z', 'a'...'z', '0'...'9', '+', '-', '.' => {},
+            else => return false,
+        }
+    }
+    return false;
+}
+
+fn hrefPathPart(href: []const u8) []const u8 {
+    const query = std.mem.indexOfScalar(u8, href, '?') orelse href.len;
+    const fragment = std.mem.indexOfScalar(u8, href, '#') orelse href.len;
+    return href[0..@min(query, fragment)];
+}
+
+fn hrefFragmentPart(href: []const u8) []const u8 {
+    const fragment = std.mem.indexOfScalar(u8, href, '#') orelse return "";
+    return href[fragment..];
+}
+
+fn resolveRepositoryPathOwned(
+    allocator: Allocator,
+    current_path: []const u8,
+    href_path: []const u8,
+) !?[]u8 {
+    var segments: std.ArrayList([]const u8) = .empty;
+    defer segments.deinit(allocator);
+
+    const root_relative = std.mem.startsWith(u8, href_path, "/");
+    if (!root_relative) {
+        try appendPathSegments(&segments, allocator, parentPath(current_path));
+    }
+
+    var parts = std.mem.splitScalar(u8, std.mem.trim(u8, href_path, "/"), '/');
+    while (parts.next()) |part| {
+        if (part.len == 0 or std.mem.eql(u8, part, ".")) continue;
+        if (std.mem.eql(u8, part, "..")) {
+            if (segments.items.len == 0) return null;
+            _ = segments.pop();
+            continue;
+        }
+        try segments.append(allocator, part);
+    }
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    for (segments.items, 0..) |segment, index| {
+        if (index != 0) try out.append(allocator, '/');
+        try out.appendSlice(allocator, segment);
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+fn appendPathSegments(
+    segments: *std.ArrayList([]const u8),
+    allocator: Allocator,
+    path: []const u8,
+) !void {
+    var parts = std.mem.splitScalar(u8, path, '/');
+    while (parts.next()) |part| {
+        if (part.len == 0) continue;
+        try segments.append(allocator, part);
+    }
+}
+
+fn percentDecodeUrlPath(allocator: Allocator, value: []const u8) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < value.len) : (i += 1) {
+        if (value[i] == '%') {
+            if (i + 2 >= value.len) return error.InvalidUrlEncoding;
+            const hi = hexValue(value[i + 1]) orelse return error.InvalidUrlEncoding;
+            const lo = hexValue(value[i + 2]) orelse return error.InvalidUrlEncoding;
+            try buf.append(allocator, (hi << 4) | lo);
+            i += 2;
+        } else {
+            try buf.append(allocator, value[i]);
+        }
+    }
+
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn appendRawHref(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, path: []const u8) !void {
+    try buf.appendSlice(allocator, "/raw?ref=");
+    try appendUrlEncoded(buf, allocator, ref);
+    if (path.len != 0) {
+        try buf.appendSlice(allocator, "&path=");
+        try appendUrlEncoded(buf, allocator, path);
+    }
+}
+
+fn appendCodeHref(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, path: []const u8) !void {
+    try buf.appendSlice(allocator, "/code?ref=");
+    try appendUrlEncoded(buf, allocator, ref);
+    if (path.len != 0) {
+        try buf.appendSlice(allocator, "&path=");
+        try appendUrlEncoded(buf, allocator, path);
+    }
+}
+
+fn appendUrlEncoded(buf: *std.ArrayList(u8), allocator: Allocator, value: []const u8) !void {
+    const hex = "0123456789ABCDEF";
+    for (value) |c| {
+        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~' or c == '/') {
+            try buf.append(allocator, c);
+        } else {
+            try buf.append(allocator, '%');
+            try buf.append(allocator, hex[c >> 4]);
+            try buf.append(allocator, hex[c & 0x0f]);
+        }
+    }
+}
+
+fn parentPath(path: []const u8) []const u8 {
+    const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return "";
+    return path[0..slash];
+}
+
+fn baseName(path: []const u8) []const u8 {
+    const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return path;
+    return path[slash + 1 ..];
+}
+
+fn isMarkdownPath(path: []const u8) bool {
+    return std.mem.endsWith(u8, path, ".md") or
+        std.mem.endsWith(u8, path, ".markdown") or
+        std.ascii.eqlIgnoreCase(baseName(path), "README");
+}
+
+fn isVideoHref(href: []const u8) bool {
+    const path = hrefPathPart(href);
+    return endsWithIgnoreCase(path, ".mp4") or
+        endsWithIgnoreCase(path, ".m4v") or
+        endsWithIgnoreCase(path, ".webm") or
+        endsWithIgnoreCase(path, ".ogv") or
+        endsWithIgnoreCase(path, ".ogg") or
+        endsWithIgnoreCase(path, ".mov");
+}
+
+fn mediaContentTypeForHref(href: []const u8) ?[]const u8 {
+    const path = hrefPathPart(href);
+    if (endsWithIgnoreCase(path, ".mp4") or endsWithIgnoreCase(path, ".m4v")) return "video/mp4";
+    if (endsWithIgnoreCase(path, ".webm")) return "video/webm";
+    if (endsWithIgnoreCase(path, ".ogv") or endsWithIgnoreCase(path, ".ogg")) return "video/ogg";
+    if (endsWithIgnoreCase(path, ".mov")) return "video/quicktime";
+    if (endsWithIgnoreCase(path, ".svg")) return "image/svg+xml";
+    if (endsWithIgnoreCase(path, ".jpg") or endsWithIgnoreCase(path, ".jpeg")) return "image/jpeg";
+    if (endsWithIgnoreCase(path, ".png")) return "image/png";
+    if (endsWithIgnoreCase(path, ".gif")) return "image/gif";
+    if (endsWithIgnoreCase(path, ".webp")) return "image/webp";
+    return null;
 }
 
 fn isFence(trimmed: []const u8) bool {
@@ -465,6 +779,20 @@ fn startsWithIgnoreCase(value: []const u8, prefix: []const u8) bool {
     return std.ascii.eqlIgnoreCase(value[0..prefix.len], prefix);
 }
 
+fn endsWithIgnoreCase(value: []const u8, suffix: []const u8) bool {
+    if (value.len < suffix.len) return false;
+    return std.ascii.eqlIgnoreCase(value[value.len - suffix.len ..], suffix);
+}
+
+fn hexValue(c: u8) ?u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => null,
+    };
+}
+
 test "web markdown renderer handles preview blocks" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
@@ -481,4 +809,45 @@ test "web markdown renderer handles preview blocks" {
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-latex-display") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<pre><code class=\"language-zig\">") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<pre class=\"mermaid-source\" data-mermaid><code>") != null);
+}
+
+test "web markdown renderer rewrites repository relative links" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    try appendMarkdownWithOptions(
+        &buf,
+        std.testing.allocator,
+        "[peer](guide.md) [parent](../README.md#intro) [root](/spec/01_PRODUCT.md) [space](My%20File.md) [anchor](#local) [external](https://example.com/x)",
+        .{
+            .link_context = .{
+                .ref = "feature/test",
+                .current_path = "docs/intro.md",
+            },
+        },
+    );
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<a href=\"/code?ref=feature/test&path=docs/guide.md&view=preview\">peer</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<a href=\"/code?ref=feature/test&path=README.md&view=preview#intro\">parent</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<a href=\"/code?ref=feature/test&path=spec/01_PRODUCT.md&view=preview\">root</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<a href=\"/code?ref=feature/test&path=docs/My%20File.md&view=preview\">space</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<a href=\"#local\">anchor</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<a href=\"https://example.com/x\">external</a>") != null);
+}
+
+test "web markdown renderer embeds repository relative media" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    try appendMarkdownWithOptions(
+        &buf,
+        std.testing.allocator,
+        "![Diagram](../assets/diagram.svg)\n\n![Clip](media/clip.mp4)\n\n![Remote](https://example.com/demo.webp)",
+        .{
+            .link_context = .{
+                .ref = "feature/test",
+                .current_path = "docs/intro.md",
+            },
+        },
+    );
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<img class=\"markdown-media\" src=\"/raw?ref=feature/test&path=assets/diagram.svg\" alt=\"Diagram\">") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<video class=\"markdown-media\" controls preload=\"metadata\"><source src=\"/raw?ref=feature/test&path=docs/media/clip.mp4\" type=\"video/mp4\">Clip</video>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<img class=\"markdown-media\" src=\"https://example.com/demo.webp\" alt=\"Remote\">") != null);
 }

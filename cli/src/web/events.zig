@@ -7,9 +7,9 @@ const Allocator = std.mem.Allocator;
 const IndexedEvent = index.IndexedEvent;
 const Repo = repo_mod.Repo;
 const SqliteDb = index.SqliteDb;
-const appendHtml = shared.appendHtml;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
+const appendTemplate = shared.appendTemplate;
 const ensureIndex = index.ensureIndex;
 const freeIndexedEvent = index.freeIndexedEvent;
 const indexedEventFromStmt = index.indexedEventFromStmt;
@@ -66,26 +66,27 @@ pub fn renderEventsPage(allocator: Allocator, repo: Repo) ![]u8 {
 }
 
 fn appendEventTableRow(buf: *std.ArrayList(u8), allocator: Allocator, event: IndexedEvent) !void {
-    try buf.appendSlice(allocator, "<tr id=\"");
-    try appendHtml(buf, allocator, event.object_id[0..@min(event.object_id.len, 7)]);
-    try buf.appendSlice(allocator, "\"><td><span class=\"event-type\">");
-    try appendHtml(buf, allocator, if (event.valid_json) event.event_type else "invalid-event");
-    try buf.appendSlice(allocator, "</span></td><td>");
-    try appendHtml(buf, allocator, event.object_kind);
+    const object_short = event.object_id[0..@min(event.object_id.len, 7)];
+    try appendTemplate(buf, allocator,
+        \\<tr id="{object_id}"><td><span class="event-type">{event_type}</span></td><td>{object_kind}
+    , .{
+        .object_id = object_short,
+        .event_type = if (event.valid_json) event.event_type else "invalid-event",
+        .object_kind = event.object_kind,
+    });
     if (event.object_id.len != 0) {
-        try buf.appendSlice(allocator, " <code>#");
-        try appendHtml(buf, allocator, event.object_id[0..@min(event.object_id.len, 7)]);
-        try buf.appendSlice(allocator, "</code>");
+        try appendTemplate(buf, allocator, " <code>#{object_id}</code>", .{ .object_id = object_short });
     }
-    try buf.appendSlice(allocator, "</td><td>");
-    try appendHtml(buf, allocator, event.actor_principal);
+    try appendTemplate(buf, allocator, "</td><td>{actor_principal}", .{
+        .actor_principal = event.actor_principal,
+    });
     if (event.actor_device.len != 0) {
-        try buf.appendSlice(allocator, "/");
-        try appendHtml(buf, allocator, event.actor_device);
+        try appendTemplate(buf, allocator, "/{actor_device}", .{ .actor_device = event.actor_device });
     }
-    try buf.appendSlice(allocator, "</td><td><code>");
-    try appendHtml(buf, allocator, event.commit[0..@min(event.commit.len, 12)]);
-    try buf.appendSlice(allocator, "</code></td><td><code>");
-    try appendHtml(buf, allocator, event.ref);
-    try buf.appendSlice(allocator, "</code></td></tr>");
+    try appendTemplate(buf, allocator,
+        \\</td><td><code>{commit}</code></td><td><code>{ref}</code></td></tr>
+    , .{
+        .commit = event.commit[0..@min(event.commit.len, 12)],
+        .ref = event.ref,
+    });
 }

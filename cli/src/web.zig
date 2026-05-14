@@ -37,6 +37,12 @@ pub const HttpRequest = struct {
     target: []const u8,
     path: []const u8,
     body: []const u8,
+    range: ?ByteRange = null,
+};
+
+pub const ByteRange = struct {
+    start: ?usize,
+    end: ?usize,
 };
 
 pub fn serve(allocator: Allocator, repo: Repo, options: Options) !void {
@@ -150,6 +156,23 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", markdown_js, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/highlight.js")) {
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", highlight_js, null);
+    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/diff.js")) {
+        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", diff_js, null);
+    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/raw")) {
+        const raw_blob_opt = explorer.loadRawBlob(allocator, repo, request.target) catch |err| switch (err) {
+            error.BlobTooLarge => {
+                try shared.sendPlainResponse(allocator, stream, 413, "Payload Too Large", "Blob too large\n");
+                return;
+            },
+            else => return err,
+        };
+        if (raw_blob_opt) |raw_blob| {
+            var blob = raw_blob;
+            defer blob.deinit(allocator);
+            try sendRawBlobResponse(allocator, stream, blob, request.range);
+        } else {
+            try shared.sendPlainResponse(allocator, stream, 404, "Not Found", "Blob not found\n");
+        }
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/index/rebuild")) {
         try index.ensureIndex(allocator, repo);
         try shared.sendResponse(allocator, stream, 204, "No Content", "text/plain", "", null);
@@ -264,6 +287,7 @@ pub fn parseHttpRequest(raw: []const u8) !HttpRequest {
         .target = target,
         .path = target[0..query_start],
         .body = raw[body_start .. body_start + content_len],
+        .range = parseRangeHeader(headers),
     };
 }
 
@@ -280,6 +304,33 @@ pub fn parseContentLength(headers: []const u8) !usize {
     return 0;
 }
 
+fn parseRangeHeader(headers: []const u8) ?ByteRange {
+    var lines = std.mem.splitSequence(u8, headers, "\r\n");
+    _ = lines.next();
+    while (lines.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const name = std.mem.trim(u8, line[0..colon], " \t");
+        if (!std.ascii.eqlIgnoreCase(name, "range")) continue;
+        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        return parseByteRange(value);
+    }
+    return null;
+}
+
+fn parseByteRange(value: []const u8) ?ByteRange {
+    if (!std.mem.startsWith(u8, value, "bytes=")) return null;
+    const spec = std.mem.trim(u8, value["bytes=".len..], " \t");
+    if (std.mem.indexOfScalar(u8, spec, ',') != null) return null;
+    const dash = std.mem.indexOfScalar(u8, spec, '-') orelse return null;
+    const start_raw = std.mem.trim(u8, spec[0..dash], " \t");
+    const end_raw = std.mem.trim(u8, spec[dash + 1 ..], " \t");
+    if (start_raw.len == 0 and end_raw.len == 0) return null;
+    return .{
+        .start = if (start_raw.len == 0) null else std.fmt.parseUnsigned(usize, start_raw, 10) catch return null,
+        .end = if (end_raw.len == 0) null else std.fmt.parseUnsigned(usize, end_raw, 10) catch return null,
+    };
+}
+
 fn renderNotFoundPage(allocator: Allocator, repo: Repo) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -287,6 +338,69 @@ fn renderNotFoundPage(allocator: Allocator, repo: Repo) ![]u8 {
     try shared.appendEmptyState(&buf, allocator, "Page not found.", "The local Gitomi web UI does not have a route for that path.");
     try shared.appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
+}
+
+const raw_blob_headers = "Accept-Ranges: bytes\r\nCache-Control: no-store\r\nContent-Security-Policy: sandbox\r\n";
+
+const ResolvedRange = struct {
+    start: usize,
+    end: usize,
+};
+
+fn sendRawBlobResponse(
+    allocator: Allocator,
+    stream: std.net.Stream,
+    blob: explorer.RawBlob,
+    range: ?ByteRange,
+) !void {
+    if (range) |requested| {
+        if (resolveByteRange(requested, blob.body.len)) |resolved| {
+            const extra = try std.fmt.allocPrint(
+                allocator,
+                raw_blob_headers ++ "Content-Range: bytes {d}-{d}/{d}\r\n",
+                .{ resolved.start, resolved.end, blob.body.len },
+            );
+            defer allocator.free(extra);
+            try shared.sendBinaryResponse(
+                allocator,
+                stream,
+                206,
+                "Partial Content",
+                blob.content_type,
+                blob.body[resolved.start .. resolved.end + 1],
+                extra,
+            );
+            return;
+        }
+
+        const extra = try std.fmt.allocPrint(
+            allocator,
+            raw_blob_headers ++ "Content-Range: bytes */{d}\r\n",
+            .{blob.body.len},
+        );
+        defer allocator.free(extra);
+        try shared.sendBinaryResponse(allocator, stream, 416, "Range Not Satisfiable", "text/plain", "", extra);
+        return;
+    }
+
+    try shared.sendBinaryResponse(allocator, stream, 200, "OK", blob.content_type, blob.body, raw_blob_headers);
+}
+
+fn resolveByteRange(range: ByteRange, len: usize) ?ResolvedRange {
+    if (len == 0) return null;
+
+    if (range.start) |start| {
+        if (start >= len) return null;
+        var end = range.end orelse len - 1;
+        if (end < start) return null;
+        end = @min(end, len - 1);
+        return .{ .start = start, .end = end };
+    }
+
+    const suffix_len = range.end orelse return null;
+    if (suffix_len == 0) return null;
+    if (suffix_len >= len) return .{ .start = 0, .end = len - 1 };
+    return .{ .start = len - suffix_len, .end = len - 1 };
 }
 
 pub fn isLoopbackHost(host: []const u8) bool {
@@ -301,6 +415,7 @@ const theme_js = @embedFile("web/theme.js");
 const tree_js = @embedFile("web/tree.js");
 const markdown_js = @embedFile("web/markdown.js");
 const highlight_js = @embedFile("web/highlight.js");
+const diff_js = @embedFile("web/diff.js");
 
 test "web request parser separates method path and body" {
     const raw =
@@ -314,4 +429,18 @@ test "web request parser separates method path and body" {
     try std.testing.expectEqualStrings("/issues?x=1", request.target);
     try std.testing.expectEqualStrings("/issues", request.path);
     try std.testing.expectEqualStrings("title=Smoke", request.body);
+    try std.testing.expect(request.range == null);
+}
+
+test "web request parser accepts byte ranges" {
+    const raw =
+        "GET /raw?path=movie.mp4 HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1\r\n" ++
+        "Range: bytes=10-99\r\n" ++
+        "\r\n";
+    const request = try parseHttpRequest(raw);
+    try std.testing.expectEqualStrings("GET", request.method);
+    try std.testing.expect(request.range != null);
+    try std.testing.expectEqual(@as(?usize, 10), request.range.?.start);
+    try std.testing.expectEqual(@as(?usize, 99), request.range.?.end);
 }

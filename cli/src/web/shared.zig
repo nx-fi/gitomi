@@ -89,13 +89,13 @@ pub fn appendShellStart(
     );
 
     if (cfg_opt) |cfg| {
-        try buf.appendSlice(allocator, "<section class=\"init-banner ready\"><strong>");
-        try appendHtml(buf, allocator, cfg.principal);
-        try buf.appendSlice(allocator, "/");
-        try appendHtml(buf, allocator, cfg.device);
-        try buf.appendSlice(allocator, "</strong><span>");
-        try appendHtml(buf, allocator, cfg.repo_id);
-        try buf.appendSlice(allocator, "</span></section>");
+        try appendTemplate(buf, allocator,
+            \\<section class="init-banner ready"><strong>{principal}/{device}</strong><span>{repo_id}</span></section>
+        , .{
+            .principal = cfg.principal,
+            .device = cfg.device,
+            .repo_id = cfg.repo_id,
+        });
     } else {
         try buf.appendSlice(allocator,
             \\<section class="init-banner">
@@ -113,6 +113,7 @@ pub fn appendShellEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
         \\<script src="/tree.js"></script>
         \\<script src="/markdown.js"></script>
         \\<script src="/highlight.js"></script>
+        \\<script src="/diff.js"></script>
         \\</body>
         \\</html>
     );
@@ -127,28 +128,30 @@ pub fn appendNavLink(
     label: []const u8,
     count: ?usize,
 ) !void {
-    try buf.appendSlice(allocator, "<a");
-    if (std.mem.eql(u8, active, id)) try buf.appendSlice(allocator, " class=\"active\"");
-    try buf.appendSlice(allocator, " href=\"");
-    try appendHtml(buf, allocator, href);
-    try buf.appendSlice(allocator, "\">");
-    try appendHtml(buf, allocator, label);
+    try appendTemplate(buf, allocator,
+        \\<a{active_class} href="{href}">{label}
+    , .{
+        .active_class = trustedHtml(if (std.mem.eql(u8, active, id)) " class=\"active\"" else ""),
+        .href = href,
+        .label = label,
+    });
     if (count) |value| {
         if (value > 0) {
-            try buf.appendSlice(allocator, "<span class=\"nav-badge\">");
-            try appendFmt(buf, allocator, "{d}", .{value});
-            try buf.appendSlice(allocator, "</span>");
+            try appendTemplate(buf, allocator,
+                \\<span class="nav-badge">{value}</span>
+            , .{ .value = value });
         }
     }
     try buf.appendSlice(allocator, "</a>");
 }
 
 pub fn appendEmptyState(buf: *std.ArrayList(u8), allocator: Allocator, title: []const u8, detail: []const u8) !void {
-    try buf.appendSlice(allocator, "<div class=\"empty\"><strong>");
-    try appendHtml(buf, allocator, title);
-    try buf.appendSlice(allocator, "</strong><p>");
-    try appendHtml(buf, allocator, detail);
-    try buf.appendSlice(allocator, "</p></div>");
+    try appendTemplate(buf, allocator,
+        \\<div class="empty"><strong>{title}</strong><p>{detail}</p></div>
+    , .{
+        .title = title,
+        .detail = detail,
+    });
 }
 
 pub fn renderIndexingPageIfStale(
@@ -217,6 +220,90 @@ pub fn appendHtml(buf: *std.ArrayList(u8), allocator: Allocator, value: []const 
     }
 }
 
+pub const TrustedHtml = struct {
+    value: []const u8,
+};
+
+pub fn trustedHtml(value: []const u8) TrustedHtml {
+    return .{ .value = value };
+}
+
+pub fn appendTemplate(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    comptime template: []const u8,
+    values: anytype,
+) !void {
+    comptime var cursor: usize = 0;
+    inline while (cursor < template.len) {
+        comptime var token = cursor;
+        inline while (token < template.len and template[token] != '{' and template[token] != '}') : (token += 1) {}
+
+        if (token > cursor) try buf.appendSlice(allocator, template[cursor..token]);
+        if (token == template.len) {
+            cursor = token;
+            continue;
+        }
+
+        if (template[token] == '{') {
+            if (token + 1 < template.len and template[token + 1] == '{') {
+                try buf.append(allocator, '{');
+                cursor = token + 2;
+                continue;
+            }
+
+            comptime var end = token + 1;
+            inline while (end < template.len and template[end] != '}') : (end += 1) {
+                if (template[end] == '{') @compileError("nested HTML template placeholder");
+            }
+            if (end == template.len) @compileError("unclosed HTML template placeholder");
+            if (end == token + 1) @compileError("empty HTML template placeholder");
+
+            try appendTemplateValue(buf, allocator, @field(values, template[token + 1 .. end]));
+            cursor = end + 1;
+            continue;
+        }
+
+        if (token + 1 < template.len and template[token + 1] == '}') {
+            try buf.append(allocator, '}');
+            cursor = token + 2;
+            continue;
+        }
+        @compileError("unescaped closing brace in HTML template");
+    }
+}
+
+fn appendTemplateValue(buf: *std.ArrayList(u8), allocator: Allocator, value: anytype) !void {
+    const T = @TypeOf(value);
+    if (T == TrustedHtml) {
+        try buf.appendSlice(allocator, value.value);
+        return;
+    }
+
+    switch (@typeInfo(T)) {
+        .pointer => |info| switch (info.size) {
+            .one, .slice => {
+                const slice: []const u8 = value;
+                try appendHtml(buf, allocator, slice);
+            },
+            .many, .c => {
+                const slice: [:0]const u8 = std.mem.span(value);
+                try appendHtml(buf, allocator, slice);
+            },
+        },
+        .array => {
+            const slice: []const u8 = &value;
+            try appendHtml(buf, allocator, slice);
+        },
+        .bool => try buf.appendSlice(allocator, if (value) "true" else "false"),
+        .int, .comptime_int => try std.fmt.format(buf.writer(allocator), "{d}", .{value}),
+        .float, .comptime_float => try std.fmt.format(buf.writer(allocator), "{d}", .{value}),
+        .@"enum", .enum_literal => try appendHtml(buf, allocator, @tagName(value)),
+        .optional => if (value) |payload| try appendTemplateValue(buf, allocator, payload),
+        else => @compileError("unsupported HTML template value type: " ++ @typeName(T)),
+    }
+}
+
 pub fn appendFmt(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -263,6 +350,25 @@ pub fn sendResponse(
     try stream.writeAll(body);
 }
 
+pub fn sendBinaryResponse(
+    allocator: Allocator,
+    stream: std.net.Stream,
+    status: u16,
+    reason: []const u8,
+    content_type: []const u8,
+    body: []const u8,
+    extra_headers: ?[]const u8,
+) !void {
+    const headers = try std.fmt.allocPrint(
+        allocator,
+        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\n{s}\r\n",
+        .{ status, reason, content_type, body.len, extra_headers orelse "" },
+    );
+    defer allocator.free(headers);
+    try stream.writeAll(headers);
+    try stream.writeAll(body);
+}
+
 fn loadWebStats(allocator: Allocator, repo: Repo) !WebStats {
     var stats = WebStats{};
     stats.inbox_refs = countRefsWithPrefix(allocator, "refs/gitomi/inbox") catch 0;
@@ -282,4 +388,28 @@ fn countRefsWithPrefix(allocator: Allocator, prefix: []const u8) !usize {
     });
     defer allocator.free(refs);
     return countNonEmptyLines(refs);
+}
+
+test "web template escapes placeholders" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendTemplate(&buf, std.testing.allocator, "<p class=\"{class}\">{body}</p>", .{
+        .class = "a&b",
+        .body = "<hello> \"world\"",
+    });
+
+    try std.testing.expectEqualStrings("<p class=\"a&amp;b\">&lt;hello&gt; &quot;world&quot;</p>", buf.items);
+}
+
+test "web template supports raw values braces and numbers" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendTemplate(&buf, std.testing.allocator, "<script>{{x:{count}}}</script>{raw}", .{
+        .count = 3,
+        .raw = trustedHtml("<span>ok</span>"),
+    });
+
+    try std.testing.expectEqualStrings("<script>{x:3}</script><span>ok</span>", buf.items);
 }

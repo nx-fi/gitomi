@@ -5,9 +5,9 @@ const shared = @import("shared.zig");
 
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
-const appendHtml = shared.appendHtml;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
+const appendTemplate = shared.appendTemplate;
 const gitChecked = git.gitChecked;
 
 pub fn renderRefsPage(allocator: Allocator, repo: Repo) ![]u8 {
@@ -48,13 +48,13 @@ pub fn renderRefsPage(allocator: Allocator, repo: Repo) ![]u8 {
         const ref = cols.next() orelse "";
         const oid = cols.next() orelse "";
         const updated = cols.next() orelse "";
-        try buf.appendSlice(allocator, "<tr><td><code>");
-        try appendHtml(&buf, allocator, ref);
-        try buf.appendSlice(allocator, "</code></td><td><code>");
-        try appendHtml(&buf, allocator, oid);
-        try buf.appendSlice(allocator, "</code></td><td>");
-        try appendHtml(&buf, allocator, updated);
-        try buf.appendSlice(allocator, "</td></tr>");
+        try appendTemplate(&buf, allocator,
+            \\<tr><td><code>{ref}</code></td><td><code>{oid}</code></td><td>{updated}</td></tr>
+        , .{
+            .ref = ref,
+            .oid = oid,
+            .updated = updated,
+        });
         shown += 1;
     }
 
