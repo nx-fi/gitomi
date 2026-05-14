@@ -66,6 +66,17 @@ pub const SnapshotLimits = struct {
     max_total_bytes: u64 = default_max_snapshot_total_bytes,
 };
 
+const IndexBuildLock = struct {
+    allocator: Allocator,
+    path: []u8,
+    file: std.fs.File,
+
+    fn deinit(self: *IndexBuildLock) void {
+        self.file.close();
+        self.allocator.free(self.path);
+    }
+};
+
 const RefHead = struct {
     allocator: Allocator,
     ref: []u8,
@@ -226,7 +237,12 @@ const IndexAdmission = struct {
 pub fn ensureIndex(allocator: Allocator, repo: Repo) !void {
     enforceSnapshotRetention(allocator, SnapshotLimits{}) catch {};
     if (try isIndexFresh(allocator, repo)) return;
-    _ = try rebuildIndex(allocator, repo);
+
+    var lock = try acquireIndexBuildLock(allocator, repo);
+    defer lock.deinit();
+
+    if (try isIndexFresh(allocator, repo)) return;
+    _ = try rebuildIndexUnlocked(allocator, repo);
 }
 
 pub fn isIndexFresh(allocator: Allocator, repo: Repo) !bool {
@@ -257,6 +273,30 @@ fn isSchemaFresh(allocator: Allocator, db: *SqliteDb) !bool {
 }
 
 pub fn rebuildIndex(allocator: Allocator, repo: Repo) !IndexStats {
+    var lock = try acquireIndexBuildLock(allocator, repo);
+    defer lock.deinit();
+    return try rebuildIndexUnlocked(allocator, repo);
+}
+
+fn acquireIndexBuildLock(allocator: Allocator, repo: Repo) !IndexBuildLock {
+    try std.fs.cwd().makePath(repo.gitomi_dir);
+    const lock_path = try std.fs.path.join(allocator, &.{ repo.gitomi_dir, "index.lock" });
+    errdefer allocator.free(lock_path);
+
+    const file = try std.fs.createFileAbsolute(lock_path, .{
+        .read = true,
+        .truncate = false,
+        .lock = .exclusive,
+    });
+
+    return .{
+        .allocator = allocator,
+        .path = lock_path,
+        .file = file,
+    };
+}
+
+fn rebuildIndexUnlocked(allocator: Allocator, repo: Repo) !IndexStats {
     try std.fs.cwd().makePath(repo.gitomi_dir);
 
     const refs_raw = try currentIndexRefsRaw(allocator);

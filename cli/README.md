@@ -73,7 +73,7 @@ gt runs prune [--dry-run] [--max-age-days N] [--max-count N] [--max-bytes N]
 gt sync [--remote REMOTE] [--pull-only|--push-only]
 gt github import [--repo OWNER/REPO] [--token TOKEN] [--from-file PATH] [--no-comments]
 gt github export --repo OWNER/REPO [--token TOKEN] [--dry-run] [--map-file PATH] [--reuse-legacy]
-gt web [--host 127.0.0.1] [--port 8080]
+gt web [--host 127.0.0.1] [--port 12655]
 ```
 
 `gt init` writes a signed genesis manifest to `refs/gitomi/genesis`, including
@@ -134,7 +134,8 @@ API or fixture options, it shells out to local `gh api` and lets `gh` choose the
 repository and credentials from the current Git checkout. Imported
 issue and pull numbers are preserved as `legacy.github_issue_number` and
 `legacy.github_pull_number`, are materialized in the local index, and can be
-used as `#123`, `gh#123`, or `github:123` references.
+used as `#123`, `gh#123`, or `github:123` references. A later import skips
+issues and pulls whose GitHub number is already present locally.
 
 `gt github export` replays accepted Gitomi issue, pull, and comment transitions
 through the GitHub API. It stores the Gitomi UUID to GitHub number mapping in
@@ -143,6 +144,6 @@ requests without network writes, or `--reuse-legacy` when exporting back to the
 same GitHub repository that was imported.
 
 `gt web` starts a local-only GitHub-like web UI for the current repository. It
-binds to loopback by default, opens on a committed-tree code explorer, also
+binds to loopback on port 12655 by default, opens on a committed-tree code explorer, also
 serves overview/issues/events/refs pages, and can create signed issue events
 through the same storage path as `gt issue open`.

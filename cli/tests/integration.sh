@@ -249,6 +249,10 @@ case "$endpoint" in
 JSON
     ;;
   'repos/{owner}/{repo}/issues/43/comments?per_page=100')
+    if [[ "${GH_FAIL_COMMENTS:-}" == "1" ]]; then
+      echo "comments endpoint should be skipped for already imported issue" >&2
+      exit 4
+    fi
     cat <<'JSON'
 [
   {
@@ -259,7 +263,34 @@ JSON
 JSON
     ;;
   'repos/{owner}/{repo}/pulls?state=all&per_page=100&page=1')
-    printf '[]\n'
+    cat <<'JSON'
+[
+  {
+    "number": 44,
+    "title": "Current repo pull",
+    "body": "Imported pull through gh",
+    "state": "open",
+    "created_at": "2026-01-06T00:00:00Z",
+    "base": { "ref": "main" },
+    "head": { "ref": "feature" },
+    "draft": false
+  }
+]
+JSON
+    ;;
+  'repos/{owner}/{repo}/issues/44/comments?per_page=100')
+    if [[ "${GH_FAIL_COMMENTS:-}" == "1" ]]; then
+      echo "comments endpoint should be skipped for already imported pull" >&2
+      exit 4
+    fi
+    cat <<'JSON'
+[
+  {
+    "body": "Current repo pull comment",
+    "created_at": "2026-01-06T01:00:00Z"
+  }
+]
+JSON
     ;;
   *)
     echo "unexpected endpoint: $endpoint" >&2
@@ -276,8 +307,18 @@ SH
   issues="$(gt issue list --json)"
   assert_contains "$issues" '"title":"Current repo issue"'
   assert_contains "$issues" '"legacy_github_issue_number":43'
+  pulls="$(gt pr list --json)"
+  assert_contains "$pulls" '"title":"Current repo pull"'
+  assert_contains "$pulls" '"legacy_github_pull_number":44'
   events="$(gt events list --json)"
   assert_contains "$events" '"event_type":"comment.added"'
+  : > "$GH_CALL_LOG"
+  GH_FAIL_COMMENTS=1 PATH="$fakebin:$PATH" gt github import >/dev/null
+  gh_calls="$(cat "$GH_CALL_LOG")"
+  assert_contains "$gh_calls" 'repos/{owner}/{repo}/issues?state=all&per_page=100&page=1'
+  assert_contains "$gh_calls" 'repos/{owner}/{repo}/pulls?state=all&per_page=100&page=1'
+  assert_not_contains "$gh_calls" 'repos/{owner}/{repo}/issues/43/comments?per_page=100'
+  assert_not_contains "$gh_calls" 'repos/{owner}/{repo}/issues/44/comments?per_page=100'
   gt fsck >/dev/null
 )
 

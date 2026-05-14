@@ -225,7 +225,7 @@ code {
   text-align: left;
 }
 main {
-  width: min(1180px, calc(100vw - 48px));
+  width: min(1440px, calc(100vw - 48px));
   margin: 24px auto 48px;
 }
 .init-banner {
@@ -841,30 +841,69 @@ tbody tr:hover {
   margin: 0;
   padding: 0;
   overflow-x: auto;
+  scrollbar-gutter: stable;
   list-style: none;
   font: 12px/1.55 var(--mono);
   background: var(--panel);
 }
 .blame-row {
+  --age-color: #8c959f;
+  --age-bg: var(--panel-strong);
   display: grid;
-  grid-template-columns: minmax(220px, 260px) 64px minmax(max-content, 1fr);
-  min-height: 22px;
+  grid-template-columns: 300px 56px minmax(max-content, 1fr);
+  min-width: max-content;
+  min-height: 24px;
 }
-.blame-row:hover .blame-meta,
+.blame-row.age-now {
+  --age-color: #d1242f;
+  --age-bg: color-mix(in srgb, #ffebe9 74%, var(--panel-strong));
+}
+.blame-row.age-week {
+  --age-color: #fb8500;
+  --age-bg: color-mix(in srgb, #fff1d6 76%, var(--panel-strong));
+}
+.blame-row.age-month {
+  --age-color: #d4a72c;
+  --age-bg: color-mix(in srgb, #fff8c5 78%, var(--panel-strong));
+}
+.blame-row.age-quarter {
+  --age-color: #1a7f37;
+  --age-bg: color-mix(in srgb, #dafbe1 74%, var(--panel-strong));
+}
+.blame-row.age-year {
+  --age-color: #0969da;
+  --age-bg: color-mix(in srgb, #ddf4ff 72%, var(--panel-strong));
+}
+.blame-row.age-old,
+.blame-row.age-unknown {
+  --age-color: var(--border-strong);
+  --age-bg: var(--panel-strong);
+}
 .blame-row:hover .line-num,
 .blame-row:hover .blame-code {
   background: var(--subtle);
 }
+.blame-row:hover .blame-meta {
+  background: linear-gradient(90deg, var(--age-color) 0 5px, color-mix(in srgb, var(--age-bg) 68%, var(--subtle)) 5px);
+}
 .blame-meta {
+  position: sticky;
+  left: 0;
+  z-index: 2;
   display: grid;
-  grid-template-columns: 70px minmax(0, 1fr) 78px;
+  grid-template-columns: 70px minmax(0, 1fr) 92px;
   gap: 8px;
   align-items: center;
   min-width: 0;
-  padding: 0 10px;
+  padding: 0 10px 0 15px;
   color: var(--muted);
-  background: var(--panel-strong);
+  background: linear-gradient(90deg, var(--age-color) 0 5px, var(--age-bg) 5px);
   border-right: 1px solid var(--border);
+}
+.blame-row > .line-num {
+  position: sticky;
+  left: 300px;
+  z-index: 2;
 }
 .blame-hash {
   overflow: hidden;
@@ -887,12 +926,32 @@ tbody tr:hover {
 .blame-code {
   display: block;
   min-width: max-content;
-  padding: 0 12px;
+  padding: 0 18px 0 12px;
   background: transparent;
   border: 0;
   border-radius: 0;
   font: inherit;
   white-space: pre;
+}
+:root[data-theme="dark"] .blame-row.age-now {
+  --age-color: #ff7b72;
+  --age-bg: color-mix(in srgb, #3d1517 74%, var(--panel-strong));
+}
+:root[data-theme="dark"] .blame-row.age-week {
+  --age-color: #ffa657;
+  --age-bg: color-mix(in srgb, #3d2b10 74%, var(--panel-strong));
+}
+:root[data-theme="dark"] .blame-row.age-month {
+  --age-color: #d29922;
+  --age-bg: color-mix(in srgb, #3b3006 74%, var(--panel-strong));
+}
+:root[data-theme="dark"] .blame-row.age-quarter {
+  --age-color: #3fb950;
+  --age-bg: color-mix(in srgb, #123b24 74%, var(--panel-strong));
+}
+:root[data-theme="dark"] .blame-row.age-year {
+  --age-color: #58a6ff;
+  --age-bg: color-mix(in srgb, #0b3551 74%, var(--panel-strong));
 }
 .hljs-keyword {
   color: var(--hljs-keyword);
@@ -1412,12 +1471,15 @@ textarea {
     grid-template-columns: 48px minmax(max-content, 1fr);
   }
   .blame-row {
-    grid-template-columns: minmax(190px, 220px) 48px minmax(max-content, 1fr);
+    grid-template-columns: 238px 48px minmax(max-content, 1fr);
   }
   .blame-meta {
-    grid-template-columns: 62px minmax(0, 1fr) 72px;
+    grid-template-columns: 62px minmax(0, 1fr) 82px;
     gap: 6px;
-    padding: 0 8px;
+    padding: 0 8px 0 13px;
+  }
+  .blame-row > .line-num {
+    left: 238px;
   }
   .facts div {
     grid-template-columns: 1fr;

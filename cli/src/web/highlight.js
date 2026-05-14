@@ -144,7 +144,7 @@
   }
 
   function highlightAll() {
-    document.querySelectorAll("pre code, .blob-lines code").forEach(highlightElement);
+    document.querySelectorAll("pre code, .blob-lines code, .blame-lines code").forEach(highlightElement);
   }
 
   window.hljs = { highlightElement, highlightAll };

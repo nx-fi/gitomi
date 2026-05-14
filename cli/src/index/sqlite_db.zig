@@ -11,6 +11,8 @@ const Allocator = std.mem.Allocator;
 const CliError = errors.CliError;
 const eprint = io.eprint;
 
+const busy_timeout_ms = 30_000;
+
 pub const SqliteDb = struct {
     allocator: Allocator,
     db: *sqlite.sqlite3,
@@ -32,6 +34,15 @@ pub const SqliteDb = struct {
                 }
             }
             if (db) |handle| _ = sqlite.sqlite3_close(handle);
+            return CliError.SqliteFailed;
+        }
+
+        const busy_rc = sqlite.sqlite3_busy_timeout(db_opt.?, busy_timeout_ms);
+        if (busy_rc != sqlite.SQLITE_OK) {
+            if (!quiet) {
+                try eprint("gt index: sqlite open {s}: failed to set busy timeout: {s}\n", .{ path, std.mem.span(sqlite.sqlite3_errmsg(db_opt.?)) });
+            }
+            _ = sqlite.sqlite3_close(db_opt.?);
             return CliError.SqliteFailed;
         }
 

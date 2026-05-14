@@ -137,7 +137,7 @@ fn printUsage() !void {
         \\  gt sync [--remote REMOTE] [--pull-only|--push-only]
         \\  gt github import [--repo OWNER/REPO] [--token TOKEN] [--from-file PATH] [--no-comments]
         \\  gt github export --repo OWNER/REPO [--token TOKEN] [--dry-run] [--map-file PATH] [--reuse-legacy]
-        \\  gt web [--host 127.0.0.1] [--port 8080]
+        \\  gt web [--host 127.0.0.1] [--port 12655]
         \\
         \\Gitomi stores local state in .git/gitomi and signed events in refs/gitomi/inbox/*.
         \\
@@ -1552,6 +1552,7 @@ fn cmdWeb(allocator: Allocator, args: []const []const u8) !void {
                 try io.eprint("gt web: --port must be an integer from 1 to 65535\n", .{});
                 return CliError.InvalidArgument;
             };
+            options.port_supplied = true;
         } else if (std.mem.eql(u8, arg, "--once")) {
             options.once = true;
         } else {
