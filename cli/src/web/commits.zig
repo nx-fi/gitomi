@@ -1,5 +1,6 @@
 const std = @import("std");
 const git = @import("../git.zig");
+const markdown_render = @import("markdown_render.zig");
 const repo_mod = @import("../repo.zig");
 const shared = @import("shared.zig");
 
@@ -8,6 +9,7 @@ const Repo = repo_mod.Repo;
 const Button = shared.Button;
 const appendEmptyState = shared.appendEmptyState;
 const appendHref = shared.appendHref;
+const appendIssueLinkedText = shared.appendIssueLinkedText;
 const appendOptionalAttr = shared.appendOptionalAttr;
 const appendRepoHeaderShared = shared.appendRepoHeader;
 const appendShellEnd = shared.appendShellEnd;
@@ -48,6 +50,7 @@ const CommitDetail = struct {
     email: []u8,
     relative: []u8,
     subject: []u8,
+    body: []u8,
 
     fn deinit(self: CommitDetail, allocator: Allocator) void {
         allocator.free(self.full_hash);
@@ -56,6 +59,7 @@ const CommitDetail = struct {
         allocator.free(self.email);
         allocator.free(self.relative);
         allocator.free(self.subject);
+        allocator.free(self.body);
     }
 };
 
@@ -112,10 +116,13 @@ pub fn renderCommitsPage(allocator: Allocator, repo: Repo, target: []const u8) !
 
     for (commits) |commit| {
         try appendTemplate(&buf, allocator,
-            \\<article class="commit-row"><div><a class="commit-title" href="{href}">{subject}</a><p>{author} committed {relative}</p></div><a class="commit-sha" href="{href}"><code>{short_hash}</code></a></article>
+            \\<article class="commit-row"><div><span class="commit-title">
+        , .{});
+        try appendIssueLinkedText(&buf, allocator, commit.subject);
+        try appendTemplate(&buf, allocator,
+            \\</span><p>{author} committed {relative}</p></div><a class="commit-sha" href="{href}"><code>{short_hash}</code></a></article>
         , .{
             .href = commitHref(commit.full_hash),
-            .subject = commit.subject,
             .author = commit.author,
             .relative = commit.relative,
             .short_hash = commit.short_hash,
@@ -160,7 +167,11 @@ pub fn renderCommitPage(allocator: Allocator, repo: Repo, target: []const u8) ![
         \\  <div class="commit-detail-head">
         \\    <div>
         \\      <p class="eyebrow">Commit</p>
-        \\      <h1>{subject}</h1>
+        \\      <h1>
+    , .{});
+    try appendIssueLinkedText(&buf, allocator, detail.subject);
+    try appendTemplate(&buf, allocator,
+        \\</h1>
         \\      <p class="commit-full-hash">{full_hash}</p>
         \\    </div>
         \\    <a class="button secondary" href="/commits">History</a>
@@ -168,14 +179,18 @@ pub fn renderCommitPage(allocator: Allocator, repo: Repo, target: []const u8) ![
         \\  <div class="commit-meta">
         \\    <strong>{author}</strong><span>{email}</span><span>{relative}</span>
         \\  </div>
-        \\</section>
     , .{
-        .subject = detail.subject,
         .full_hash = detail.full_hash,
         .author = detail.author,
         .email = detail.email,
         .relative = detail.relative,
     });
+    if (std.mem.trim(u8, detail.body, " \t\r\n").len != 0) {
+        try buf.appendSlice(allocator, "<div class=\"commit-message markdown-body\">");
+        try markdown_render.appendMarkdown(&buf, allocator, detail.body);
+        try buf.appendSlice(allocator, "</div>");
+    }
+    try buf.appendSlice(allocator, "</section>");
 
     try buf.appendSlice(allocator,
         \\<section class="diff-section">
@@ -249,11 +264,11 @@ fn loadCommits(allocator: Allocator, repo: Repo, ref: []const u8, path: []const 
 }
 
 fn loadCommitDetail(allocator: Allocator, repo: Repo, sha: []const u8) !?CommitDetail {
-    const raw = try gitMaybe(allocator, repo, &.{ "show", "-s", "--format=%H%x09%h%x09%an%x09%ae%x09%cr%x09%s", sha }, 1024 * 1024) orelse return null;
+    const raw = try gitMaybe(allocator, repo, &.{ "show", "-s", "--format=%H%x00%h%x00%an%x00%ae%x00%cr%x00%s%x00%b", sha }, 1024 * 1024) orelse return null;
     defer allocator.free(raw);
-    const line = std.mem.trim(u8, raw, " \t\r\n");
-    if (line.len == 0) return null;
-    var cols = std.mem.splitScalar(u8, line, '\t');
+    const record = std.mem.trimRight(u8, raw, "\r\n");
+    if (record.len == 0) return null;
+    var cols = std.mem.splitScalar(u8, record, 0);
     return .{
         .full_hash = try allocator.dupe(u8, cols.next() orelse ""),
         .short_hash = try allocator.dupe(u8, cols.next() orelse ""),
@@ -261,6 +276,7 @@ fn loadCommitDetail(allocator: Allocator, repo: Repo, sha: []const u8) !?CommitD
         .email = try allocator.dupe(u8, cols.next() orelse ""),
         .relative = try allocator.dupe(u8, cols.next() orelse ""),
         .subject = try allocator.dupe(u8, cols.next() orelse ""),
+        .body = try allocator.dupe(u8, cols.next() orelse ""),
     };
 }
 

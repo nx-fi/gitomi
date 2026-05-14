@@ -47,6 +47,10 @@ json_field() {
   printf '%s\n' "$json" | sed -n 's/.*"'"$field"'":"\([^"]*\)".*/\1/p' | head -n 1
 }
 
+object_ref() {
+  printf '%s' "$1" | sha256sum | awk '{ print substr($1, 1, 7) }'
+}
+
 write_gt_config() {
   local repo_id="$1"
   local principal="$2"
@@ -112,12 +116,12 @@ init_repo "$single"
   assert_contains "$issues" '"assignees":["alice"]'
   issue_id="$(json_field "$issues" id)"
   [[ -n "$issue_id" ]] || fail "expected issue id from issue list"
-  issue_show="$(gt issue show "#${issue_id:0:7}")"
+  issue_show="$(gt issue show "#$(object_ref "$issue_id")")"
   assert_contains "$issue_show" "id:        $issue_id"
   assert_contains "$issue_show" "labels:    bug"
   assert_contains "$issue_show" "assignees: alice"
   assert_contains "$issue_show" "Body text"
-  issue_show_json="$(gt issue show "#${issue_id:0:7}" --json)"
+  issue_show_json="$(gt issue show "#$(object_ref "$issue_id")" --json)"
   assert_line_count "$issue_show_json" 1
   assert_contains "$issue_show_json" '"id":"'"$issue_id"'"'
   assert_contains "$issue_show_json" '"body":"Body text"'
@@ -134,7 +138,7 @@ init_repo "$reducer"
   first_event="$(gt events list --json)"
   issue_id="$(json_field "$first_event" object_id)"
   [[ -n "$issue_id" ]] || fail "expected issue id from event list"
-  issue_ref="#${issue_id:0:7}"
+  issue_ref="#$(object_ref "$issue_id")"
   sleep 1
   gt issue title "$issue_ref" --title "Updated title" >/dev/null
   gt issue body "$issue_ref" --body "Updated body" >/dev/null
@@ -172,7 +176,7 @@ init_repo "$projects_repo"
   gt issue open --title "Ship kanban" >/dev/null
   issue_id="$(json_field "$(gt issue list --json)" id)"
   [[ -n "$issue_id" ]] || fail "expected issue id from issue list"
-  issue_ref="#${issue_id:0:7}"
+  issue_ref="#$(object_ref "$issue_id")"
   gt project add "Roadmap" "$issue_ref" --column "Backlog" >/dev/null
   gt issue milestone "$issue_ref" --milestone "v1.0" >/dev/null
   issue_show="$(gt issue show "$issue_ref")"
@@ -198,7 +202,7 @@ init_repo "$github_io"
     {
       "number": 42,
       "title": "Legacy bug",
-      "body": "Imported issue body",
+      "body": "Imported issue body mentioning #42",
       "state": "closed",
       "created_at": "2026-01-01T00:00:00Z",
       "closed_at": "2026-01-02T00:00:00Z",
@@ -225,7 +229,7 @@ init_repo "$github_io"
   ],
   "comments": {
     "issue:42": [
-      { "id": 100, "body": "Imported issue comment", "created_at": "2026-01-02T01:00:00Z", "user": { "login": "commenter" } },
+      { "id": 100, "body": "Imported issue comment mentioning #42", "created_at": "2026-01-02T01:00:00Z", "user": { "login": "commenter" } },
       { "id": 101, "body": "Imported issue reply", "created_at": "2026-01-02T01:30:00Z", "user": { "login": "reviewer" }, "in_reply_to_id": 100 }
     ],
     "pull:7": [{ "body": "Imported pull comment", "created_at": "2026-01-04T01:00:00Z" }]
@@ -259,6 +263,15 @@ JSON
   events="$(gt events list --json)"
   assert_contains "$events" '"actor_principal":"import-bot"'
   assert_contains "$events" '"event_type":"comment.added"'
+  mkdir -p src
+  printf 'legacy refs\n' > src/legacy.txt
+  git add src/legacy.txt
+  git commit -m "Connect #42 and #7" >/dev/null
+  code_commit="$(git rev-parse HEAD)"
+  issue_show_json="$(gt issue show '#42' --json)"
+  assert_contains "$issue_show_json" '"commit_references":["'"$code_commit"'"]'
+  pull_show_json="$(gt pr view '#7' --json)"
+  assert_contains "$pull_show_json" '"commit_references":["'"$code_commit"'"]'
   replay="$(gt github export --repo acme/project --dry-run --reuse-legacy)"
   assert_contains "$replay" "PATCH /repos/acme/project/issues/42"
   assert_contains "$replay" "PUT /repos/acme/project/pulls/7/merge"
@@ -390,7 +403,7 @@ init_repo "$snapshots"
   first_event="$(gt events list --json)"
   issue_id="$(json_field "$first_event" object_id)"
   [[ -n "$issue_id" ]] || fail "expected issue id from event list"
-  issue_ref="#${issue_id:0:7}"
+  issue_ref="#$(object_ref "$issue_id")"
 
   gt index rebuild >/dev/null
   snapshot_refs="$(git for-each-ref '--format=%(refname)' refs/gitomi/snapshots)"
@@ -427,7 +440,7 @@ init_repo "$issue_edit"
   first_event="$(gt events list --json)"
   issue_id="$(json_field "$first_event" object_id)"
   [[ -n "$issue_id" ]] || fail "expected issue id from event list"
-  issue_ref="#${issue_id:0:7}"
+  issue_ref="#$(object_ref "$issue_id")"
   sleep 1
   gt issue edit "$issue_ref" --title "Batch title" --body "Batch body" --state closed --unlabel bug --label regression --unassign alice --assignee bob >/dev/null
   issues="$(gt issue list --json)"
@@ -453,7 +466,7 @@ init_repo "$comments"
   first_event="$(gt events list --json)"
   issue_id="$(json_field "$first_event" object_id)"
   [[ -n "$issue_id" ]] || fail "expected issue id from event list"
-  issue_ref="#${issue_id:0:7}"
+  issue_ref="#$(object_ref "$issue_id")"
   gt comment add issue "$issue_ref" --body "Initial comment" >/dev/null
   comments_json="$(gt comment list issue "$issue_ref" --json)"
   assert_line_count "$comments_json" 1
@@ -490,7 +503,7 @@ init_repo "$pulls_repo"
   assert_contains "$pulls_json" '"draft":true'
   pull_id="$(json_field "$pulls_json" id)"
   [[ -n "$pull_id" ]] || fail "expected pull id from pull list"
-  pull_ref="#${pull_id:0:7}"
+  pull_ref="#$(object_ref "$pull_id")"
   legacy_pulls_json="$(gt pull list --json)"
   assert_contains "$legacy_pulls_json" '"id":"'"$pull_id"'"'
   pull_show="$(gt pr view "$pull_ref")"
@@ -535,7 +548,7 @@ init_repo "$pull_edit"
   pulls_json="$(gt pr list --json)"
   pull_id="$(json_field "$pulls_json" id)"
   [[ -n "$pull_id" ]] || fail "expected pull id from pull list"
-  pull_ref="#${pull_id:0:7}"
+  pull_ref="#$(object_ref "$pull_id")"
   sleep 1
   gt pr edit "$pull_ref" -t "Batch pull updated" -b "New body" --state closed -B trunk --head feature-v2 --add-label review --add-assignee bob --add-reviewer alice >/dev/null
   pulls_json="$(gt pr list --json)"
@@ -572,12 +585,12 @@ init_repo "$derived_refs"
   mkdir -p src
   printf 'referenced\n' > src/app.txt
   git add src/app.txt
-  git commit -m "Connect #$issue_id and #$pull_id" >/dev/null
+  git commit -m "Connect #$(object_ref "$issue_id") and #$(object_ref "$pull_id")" >/dev/null
   code_commit="$(git rev-parse HEAD)"
 
-  issue_show_json="$(gt issue show "#${issue_id:0:7}" --json)"
+  issue_show_json="$(gt issue show "#$(object_ref "$issue_id")" --json)"
   assert_contains "$issue_show_json" '"commit_references":["'"$code_commit"'"]'
-  pull_show_json="$(gt pr view "#${pull_id:0:7}" --json)"
+  pull_show_json="$(gt pr view "#$(object_ref "$pull_id")" --json)"
   assert_contains "$pull_show_json" '"commit_references":["'"$code_commit"'"]'
   gt fsck >/dev/null
 )
@@ -612,7 +625,7 @@ init_repo "$domain_invalid"
   empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
   missing_issue="018f0000-0000-7000-8000-000000000111"
   bad_body='{"$schema":"urn:gitomi:event:v1","repo_id":"018f0000-0000-7000-8000-000000000001","event_uuid":"018f0000-0000-7000-8000-000000000112","event_type":"issue.title_set","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000000111"},"idempotency_key":"018f0000-0000-7000-8000-000000000113","actor":{"principal":"alice","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:30:59Z","parent_hashes":{"log":"","causal":[],"related":[]},"legacy":{},"payload":{"title":"No opener"}}'
-  bad_commit="$(git commit-tree -S -m "issue.title_set #${missing_issue:0:7}" -m "$bad_body" "$empty_tree")"
+  bad_commit="$(git commit-tree -S -m "issue.title_set #$(object_ref "$missing_issue")" -m "$bad_body" "$empty_tree")"
   git update-ref refs/gitomi/inbox/alice/laptop "$bad_commit"
   events="$(gt events list --json)"
   assert_line_count "$events" 1
@@ -632,9 +645,9 @@ init_repo "$duplicate_open"
   empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
   issue_id="018f0000-0000-7000-8000-000000000211"
   body1='{"$schema":"urn:gitomi:event:v1","repo_id":"018f0000-0000-7000-8000-000000000001","event_uuid":"018f0000-0000-7000-8000-000000000212","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000000211"},"idempotency_key":"018f0000-0000-7000-8000-000000000213","actor":{"principal":"alice","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:30:59Z","parent_hashes":{"log":"","causal":[],"related":[]},"legacy":{},"payload":{"title":"First open"}}'
-  first_commit="$(git commit-tree -S -m "issue.opened #${issue_id:0:7} First open" -m "$body1" "$empty_tree")"
+  first_commit="$(git commit-tree -S -m "issue.opened #$(object_ref "$issue_id") First open" -m "$body1" "$empty_tree")"
   body2='{"$schema":"urn:gitomi:event:v1","repo_id":"018f0000-0000-7000-8000-000000000001","event_uuid":"018f0000-0000-7000-8000-000000000214","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000000211"},"idempotency_key":"018f0000-0000-7000-8000-000000000215","actor":{"principal":"alice","device":"laptop"},"seq":2,"occurred_at":"2026-05-13T18:31:00Z","parent_hashes":{"log":"'"$first_commit"'","causal":[],"related":["'"$first_commit"'"]},"legacy":{},"payload":{"title":"Second open"}}'
-  second_commit="$(git commit-tree -S -m "issue.opened #${issue_id:0:7} Second open" -m "$body2" -p "$first_commit" "$empty_tree")"
+  second_commit="$(git commit-tree -S -m "issue.opened #$(object_ref "$issue_id") Second open" -m "$body2" -p "$first_commit" "$empty_tree")"
   git update-ref refs/gitomi/inbox/alice/laptop "$second_commit"
   events="$(gt events list --json)"
   assert_line_count "$events" 2
@@ -661,7 +674,7 @@ init_repo "$collection_limits"
   issue_json="$(gt issue list --json)"
   issue_id="$(json_field "$issue_json" id)"
   [[ -n "$issue_id" ]] || fail "expected bounded issue id"
-  issue_ref="#${issue_id:0:7}"
+  issue_ref="#$(object_ref "$issue_id")"
 
   add_labels=(issue edit "$issue_ref")
   for n in $(seq 129 256); do
@@ -683,7 +696,7 @@ init_repo "$collection_limits"
   pull_json="$(gt pr list --json)"
   pull_id="$(json_field "$pull_json" id)"
   [[ -n "$pull_id" ]] || fail "expected bounded pull id"
-  pull_ref="#${pull_id:0:7}"
+  pull_ref="#$(object_ref "$pull_id")"
 
   add_reviewers=(pr edit "$pull_ref")
   for n in $(seq 1 128); do
@@ -836,7 +849,7 @@ init_repo "$signature_binding"
   git config user.signingkey "$BOB_KEY"
   issue_id="018f0000-0000-7000-8000-000000002301"
   bad_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002302","event_type":"issue.opened","object":{"kind":"issue","id":"'"$issue_id"'"},"idempotency_key":"018f0000-0000-7000-8000-000000002303","actor":{"principal":"alice","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:34:00Z","parent_hashes":{"log":"","causal":[],"related":[]},"legacy":{},"payload":{"title":"Wrong signer"}}'
-  bad_commit="$(git commit-tree -S -m "issue.opened #${issue_id:0:7} Wrong signer" -m "$bad_body" "$empty_tree")"
+  bad_commit="$(git commit-tree -S -m "issue.opened #$(object_ref "$issue_id") Wrong signer" -m "$bad_body" "$empty_tree")"
   git update-ref refs/gitomi/inbox/alice/laptop "$bad_commit"
   events="$(gt events list --json)"
   assert_line_count "$events" 1
@@ -855,7 +868,7 @@ init_repo "$unauthorized"
   empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
   issue_id="018f0000-0000-7000-8000-000000000311"
   bad_body='{"$schema":"urn:gitomi:event:v1","repo_id":"018f0000-0000-7000-8000-000000000001","event_uuid":"018f0000-0000-7000-8000-000000000312","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000000311"},"idempotency_key":"018f0000-0000-7000-8000-000000000313","actor":{"principal":"mallory","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:30:59Z","parent_hashes":{"log":"","causal":[],"related":[]},"legacy":{},"payload":{"title":"Unauthorized"}}'
-  bad_commit="$(git commit-tree -S -m "issue.opened #${issue_id:0:7} Unauthorized" -m "$bad_body" "$empty_tree")"
+  bad_commit="$(git commit-tree -S -m "issue.opened #$(object_ref "$issue_id") Unauthorized" -m "$bad_body" "$empty_tree")"
   git update-ref refs/gitomi/inbox/mallory/laptop "$bad_commit"
   events="$(gt events list --json)"
   assert_line_count "$events" 1
@@ -877,7 +890,7 @@ init_repo "$seq_recovery"
   issue_id="$(json_field "$first_event" object_id)"
   [[ -n "$issue_id" ]] || fail "expected issue id"
   write_gt_config "$REPO_ID" alice laptop 0
-  gt issue title "#${issue_id:0:7}" --title "Recovered seq" >/dev/null
+  gt issue title "#$(object_ref "$issue_id")" --title "Recovered seq" >/dev/null
   events="$(gt events list --json)"
   assert_line_count "$events" 2
   assert_contains "$events" '"seq":2'

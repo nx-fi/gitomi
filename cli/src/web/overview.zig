@@ -168,10 +168,14 @@ fn appendEventList(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, li
         const event = try indexedEventFromStmt(allocator, &stmt);
         defer freeIndexedEvent(allocator, event);
         try appendTemplate(buf, allocator,
-            \\<article><span class="dot"></span><div><strong>{event_type}</strong><p>{subject}</p><small>{actor_principal}
+            \\<article><span class="dot"></span><div><strong>{event_type}</strong><p>
         , .{
             .event_type = if (event.valid_json) event.event_type else "invalid-event",
-            .subject = event.subject,
+        });
+        try shared.appendIssueLinkedText(buf, allocator, event.subject);
+        try appendTemplate(buf, allocator,
+            \\</p><small>{actor_principal}
+        , .{
             .actor_principal = event.actor_principal,
         });
         if (event.object_id.len != 0) {
