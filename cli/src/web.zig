@@ -18,12 +18,14 @@ const eprint = io.eprint;
 
 const max_http_request = 64 * 1024;
 const default_worker_count = 8;
+const default_port_attempt_limit = 128;
 pub const default_host = "127.0.0.1";
-pub const default_port = 8080;
+pub const default_port = 12655;
 
 pub const Options = struct {
     host: []const u8 = default_host,
     port: u16 = default_port,
+    port_supplied: bool = false,
     once: bool = false,
     worker_count: usize = default_worker_count,
 };
@@ -37,12 +39,7 @@ pub const HttpRequest = struct {
 
 pub fn serve(allocator: Allocator, repo: Repo, options: Options) !void {
     const bind_host: []const u8 = if (std.mem.eql(u8, options.host, "localhost")) default_host else options.host;
-    const address = std.net.Address.parseIp(bind_host, options.port) catch {
-        try eprint("gt web: invalid host or port {s}:{d}\n", .{ options.host, options.port });
-        return CliError.InvalidArgument;
-    };
-
-    var server = try address.listen(.{ .reuse_address = true, .kernel_backlog = 32 });
+    var server = try listenWeb(bind_host, options);
     defer server.deinit();
 
     const actual_port = server.listen_address.getPort();
@@ -80,6 +77,34 @@ pub fn serve(allocator: Allocator, repo: Repo, options: Options) !void {
     }
 }
 
+fn listenWeb(bind_host: []const u8, options: Options) !std.net.Server {
+    var port = options.port;
+    var attempts: usize = 0;
+    while (true) {
+        const address = std.net.Address.parseIp(bind_host, port) catch {
+            try eprint("gt web: invalid host or port {s}:{d}\n", .{ options.host, port });
+            return CliError.InvalidArgument;
+        };
+
+        return address.listen(.{ .reuse_address = true, .kernel_backlog = 32 }) catch |err| {
+            if (options.port_supplied or err != error.AddressInUse) return err;
+            attempts += 1;
+            if (attempts >= default_port_attempt_limit) {
+                try eprint("gt web: could not find an available port after {d} attempts starting from {d}\n", .{ attempts, options.port });
+                return CliError.UserError;
+            }
+
+            const increment = std.crypto.random.intRangeAtMost(u16, 1, 10);
+            if (port > std.math.maxInt(u16) - increment) {
+                try eprint("gt web: no available port found before 65535\n", .{});
+                return CliError.UserError;
+            }
+            port += increment;
+            continue;
+        };
+    }
+}
+
 fn handleWebConnectionTask(allocator: Allocator, repo: Repo, connection: std.net.Server.Connection, permits: *std.Thread.Semaphore) void {
     defer permits.post();
     defer connection.stream.close();
@@ -88,8 +113,15 @@ fn handleWebConnectionTask(allocator: Allocator, repo: Repo, connection: std.net
 
 fn handleWebConnectionLogged(allocator: Allocator, repo: Repo, stream: std.net.Stream) !void {
     handleWebConnection(allocator, repo, stream) catch |err| {
+        if (isClientDisconnect(err)) return;
         try eprint("gt web: request failed: {s}\n", .{@errorName(err)});
     };
+}
+
+fn isClientDisconnect(err: anyerror) bool {
+    return err == error.BrokenPipe or
+        err == error.ConnectionResetByPeer or
+        err == error.ConnectionTimedOut;
 }
 
 pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Stream) !void {

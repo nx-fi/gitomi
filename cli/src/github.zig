@@ -276,6 +276,11 @@ const ImportStats = struct {
     comments: usize = 0,
 };
 
+const ImportedObject = struct {
+    id: []u8,
+    is_new: bool,
+};
+
 fn githubTokenFromEnv(allocator: Allocator) !?[]u8 {
     return std.process.getEnvVarOwned(allocator, "GITHUB_TOKEN") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => std.process.getEnvVarOwned(allocator, "GH_TOKEN") catch |fallback_err| switch (fallback_err) {
@@ -377,18 +382,22 @@ fn importFromFile(allocator: Allocator, path: []const u8, options: ImportOptions
         for (issues.items) |item| {
             if (item != .object) continue;
             if (item.object.get("pull_request") != null) continue;
-            const issue_id = try importIssueObject(allocator, item.object, options, stats);
-            defer if (issue_id) |id| allocator.free(id);
-            if (issue_id) |id| try importFixtureComments(allocator, root, "issue", item.object, id, options, stats);
+            const issue_result = try importIssueObject(allocator, item.object, options, stats);
+            defer if (issue_result) |result| allocator.free(result.id);
+            if (issue_result) |result| {
+                if (result.is_new) try importFixtureComments(allocator, root, "issue", item.object, result.id, options, stats);
+            }
         }
     }
     if (jsonArray(root.get("pulls"))) |pulls| {
         try eprint("gt github import: importing {d} fixture pull record{s}\n", .{ pulls.items.len, if (pulls.items.len == 1) "" else "s" });
         for (pulls.items) |item| {
             if (item != .object) continue;
-            const pull_id = try importPullObject(allocator, item.object, options, stats);
-            defer if (pull_id) |id| allocator.free(id);
-            if (pull_id) |id| try importFixtureComments(allocator, root, "pull", item.object, id, options, stats);
+            const pull_result = try importPullObject(allocator, item.object, options, stats);
+            defer if (pull_result) |result| allocator.free(result.id);
+            if (pull_result) |result| {
+                if (result.is_new) try importFixtureComments(allocator, root, "pull", item.object, result.id, options, stats);
+            }
         }
     }
 }
@@ -436,9 +445,11 @@ fn importFromApi(allocator: Allocator, client: GitHubClient, options: ImportOpti
         for (issues.items) |item| {
             if (item != .object) continue;
             if (item.object.get("pull_request") != null) continue;
-            const issue_id = try importIssueObject(allocator, item.object, options, stats);
-            defer if (issue_id) |id| allocator.free(id);
-            if (issue_id) |id| try importApiComments(allocator, client, "issue", jsonInteger(item.object.get("number")) orelse continue, id, options, stats);
+            const issue_result = try importIssueObject(allocator, item.object, options, stats);
+            defer if (issue_result) |result| allocator.free(result.id);
+            if (issue_result) |result| {
+                if (result.is_new) try importApiComments(allocator, client, "issue", jsonInteger(item.object.get("number")) orelse continue, result.id, options, stats);
+            }
         }
         if (issues.items.len < 100) break;
     }
@@ -462,9 +473,11 @@ fn importFromApi(allocator: Allocator, client: GitHubClient, options: ImportOpti
         if (pulls.items.len == 0) break;
         for (pulls.items) |item| {
             if (item != .object) continue;
-            const pull_id = try importPullObject(allocator, item.object, options, stats);
-            defer if (pull_id) |id| allocator.free(id);
-            if (pull_id) |id| try importApiComments(allocator, client, "pull", jsonInteger(item.object.get("number")) orelse continue, id, options, stats);
+            const pull_result = try importPullObject(allocator, item.object, options, stats);
+            defer if (pull_result) |result| allocator.free(result.id);
+            if (pull_result) |result| {
+                if (result.is_new) try importApiComments(allocator, client, "pull", jsonInteger(item.object.get("number")) orelse continue, result.id, options, stats);
+            }
         }
         if (pulls.items.len < 100) break;
     }
@@ -497,13 +510,13 @@ fn importApiComments(
     try importCommentsArray(allocator, parent_kind, parent_id, comments, options, stats);
 }
 
-fn importIssueObject(allocator: Allocator, issue: std.json.ObjectMap, options: ImportOptions, stats: *ImportStats) !?[]u8 {
+fn importIssueObject(allocator: Allocator, issue: std.json.ObjectMap, options: ImportOptions, stats: *ImportStats) !?ImportedObject {
     const number = jsonInteger(issue.get("number")) orelse return null;
     var repo = try repo_mod.discoverRepo(allocator);
     defer repo.deinit();
     if (try index.lookupLegacyGithubObjectId(allocator, repo, "issue", number)) |existing| {
-        try eprint("gt github import: issue #{d} already imported\n", .{number});
-        return existing;
+        try eprint("gt github import: issue #{d} already imported; skipping\n", .{number});
+        return .{ .id = existing, .is_new = false };
     }
 
     const title = try githubSizedString(allocator, event_mod.jsonString(issue.get("title")), "(untitled)", git.max_payload_title_bytes);
@@ -532,16 +545,16 @@ fn importIssueObject(allocator: Allocator, issue: std.json.ObjectMap, options: I
         }
     }
 
-    return issue_id;
+    return .{ .id = issue_id, .is_new = true };
 }
 
-fn importPullObject(allocator: Allocator, pull: std.json.ObjectMap, options: ImportOptions, stats: *ImportStats) !?[]u8 {
+fn importPullObject(allocator: Allocator, pull: std.json.ObjectMap, options: ImportOptions, stats: *ImportStats) !?ImportedObject {
     const number = jsonInteger(pull.get("number")) orelse return null;
     var repo = try repo_mod.discoverRepo(allocator);
     defer repo.deinit();
     if (try index.lookupLegacyGithubObjectId(allocator, repo, "pull", number)) |existing| {
-        try eprint("gt github import: pull #{d} already imported\n", .{number});
-        return existing;
+        try eprint("gt github import: pull #{d} already imported; skipping\n", .{number});
+        return .{ .id = existing, .is_new = false };
     }
 
     const title = try githubSizedString(allocator, event_mod.jsonString(pull.get("title")), "(untitled)", git.max_payload_title_bytes);
@@ -567,7 +580,7 @@ fn importPullObject(allocator: Allocator, pull: std.json.ObjectMap, options: Imp
             if (event_mod.jsonString(pull.get("merged_at"))) |merged_at| {
                 if (merged_at.len != 0) {
                     try writeImportedPullMerged(allocator, options, pull_id, merged_at, event_mod.jsonString(pull.get("merge_commit_sha")) orelse "", null);
-                    return pull_id;
+                    return .{ .id = pull_id, .is_new = true };
                 }
             }
             const closed_at = try githubTimestampOrNow(allocator, firstJsonValue(pull.get("closed_at"), pull.get("updated_at")));
@@ -576,7 +589,7 @@ fn importPullObject(allocator: Allocator, pull: std.json.ObjectMap, options: Imp
         }
     }
 
-    return pull_id;
+    return .{ .id = pull_id, .is_new = true };
 }
 
 fn importCommentsArray(

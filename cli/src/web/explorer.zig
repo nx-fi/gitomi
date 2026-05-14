@@ -62,6 +62,7 @@ const BlameLine = struct {
     short_hash: []u8,
     author: []u8,
     date: []u8,
+    author_timestamp: ?i64,
     summary: []u8,
     line_no: usize,
     content: []u8,
@@ -547,9 +548,12 @@ fn appendBlobLines(buf: *std.ArrayList(u8), allocator: Allocator, path: []const 
 
 fn appendBlameLines(buf: *std.ArrayList(u8), allocator: Allocator, path: []const u8, lines: []const BlameLine) !void {
     const language = languageForPath(path);
+    const now = std.time.timestamp();
     try buf.appendSlice(allocator, "<ol class=\"blame-lines\">");
     for (lines) |line| {
-        try buf.appendSlice(allocator, "<li class=\"blame-row\" id=\"L");
+        try buf.appendSlice(allocator, "<li class=\"blame-row ");
+        try appendHtml(buf, allocator, blameAgeClass(line.author_timestamp, now));
+        try buf.appendSlice(allocator, "\" id=\"L");
         try appendFmt(buf, allocator, "{d}", .{line.line_no});
         try buf.appendSlice(allocator, "\"><span class=\"blame-meta\" title=\"");
         try appendHtml(buf, allocator, line.summary);
@@ -559,8 +563,12 @@ fn appendBlameLines(buf: *std.ArrayList(u8), allocator: Allocator, path: []const
         try appendHtml(buf, allocator, line.short_hash);
         try buf.appendSlice(allocator, "</a><span class=\"blame-author\">");
         try appendHtml(buf, allocator, line.author);
-        try buf.appendSlice(allocator, "</span><span class=\"blame-date\">");
+        try buf.appendSlice(allocator, "</span><span class=\"blame-date\" title=\"");
         try appendHtml(buf, allocator, line.date);
+        try buf.appendSlice(allocator, "\">");
+        const relative_date = try relativeTimeOwned(allocator, line.author_timestamp, now);
+        defer allocator.free(relative_date);
+        try appendHtml(buf, allocator, relative_date);
         try buf.appendSlice(allocator, "</span></span><a class=\"line-num\" href=\"#L");
         try appendFmt(buf, allocator, "{d}", .{line.line_no});
         try buf.appendSlice(allocator, "\">");
@@ -637,15 +645,13 @@ fn loadTreeEntries(allocator: Allocator, repo: Repo, ref: []const u8, path: []co
 }
 
 fn loadBlameLines(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?[]BlameLine {
-    const pathspec = try std.fmt.allocPrint(allocator, ":(top){s}", .{path});
-    defer allocator.free(pathspec);
     const raw = try gitMaybe(allocator, repo, &.{
         "blame",
         "--line-porcelain",
         "--root",
         ref,
         "--",
-        pathspec,
+        path,
     }, max_blame_display_bytes) orelse return null;
     defer allocator.free(raw);
     return try parseBlamePorcelain(allocator, raw);
@@ -724,6 +730,7 @@ fn appendBlameRecord(
         .short_hash = try shortHashOwned(allocator, header.commit),
         .author = try allocator.dupe(u8, if (author.len == 0) "Unknown" else author),
         .date = try authorDateOwned(allocator, author_time, author_tz),
+        .author_timestamp = parseAuthorTimestamp(author_time),
         .summary = try allocator.dupe(u8, summary),
         .line_no = header.line_no,
         .content = try allocator.dupe(u8, content),
@@ -749,6 +756,62 @@ fn authorDateOwned(allocator: Allocator, author_time: []const u8, author_tz: []c
         allocator,
         "{d}-{s}{d}-{s}{d}",
         .{ year_day.year, if (month < 10) "0" else "", month, if (day < 10) "0" else "", day },
+    );
+}
+
+fn parseAuthorTimestamp(author_time: []const u8) ?i64 {
+    if (author_time.len == 0) return null;
+    return std.fmt.parseInt(i64, author_time, 10) catch null;
+}
+
+fn blameAgeClass(author_timestamp: ?i64, now: i64) []const u8 {
+    const timestamp = author_timestamp orelse return "age-unknown";
+    if (timestamp >= now) return "age-now";
+
+    const seconds_per_day = 24 * 60 * 60;
+    const age_days = @divFloor(now - timestamp, seconds_per_day);
+    if (age_days <= 1) return "age-now";
+    if (age_days <= 7) return "age-week";
+    if (age_days <= 30) return "age-month";
+    if (age_days <= 90) return "age-quarter";
+    if (age_days <= 365) return "age-year";
+    return "age-old";
+}
+
+fn relativeTimeOwned(allocator: Allocator, author_timestamp: ?i64, now: i64) ![]u8 {
+    const timestamp = author_timestamp orelse return allocator.dupe(u8, "unknown");
+    const age_seconds = now - timestamp;
+    if (age_seconds < 60) return allocator.dupe(u8, "now");
+
+    const minute = 60;
+    const hour = 60 * minute;
+    const day = 24 * hour;
+    if (age_seconds < hour) {
+        return relativeUnitOwned(allocator, @divFloor(age_seconds, minute), "minute");
+    }
+    if (age_seconds < day) {
+        return relativeUnitOwned(allocator, @divFloor(age_seconds, hour), "hour");
+    }
+
+    const age_days = @divFloor(age_seconds, day);
+    if (age_days < 30) {
+        return relativeUnitOwned(allocator, age_days, "day");
+    }
+
+    const age_months = @divFloor(age_days, 30);
+    if (age_months <= 24) {
+        return relativeUnitOwned(allocator, age_months, "month");
+    }
+
+    const age_years = @max(@as(i64, 1), @divFloor(age_days, 365));
+    return relativeUnitOwned(allocator, age_years, "year");
+}
+
+fn relativeUnitOwned(allocator: Allocator, value: i64, unit: []const u8) ![]u8 {
+    return std.fmt.allocPrint(
+        allocator,
+        "{d} {s}{s} ago",
+        .{ value, unit, if (value == 1) "" else "s" },
     );
 }
 
@@ -1151,6 +1214,54 @@ test "web explorer parses blame porcelain" {
     try std.testing.expectEqualStrings("01234567", lines[0].short_hash);
     try std.testing.expectEqualStrings("Alice Example", lines[0].author);
     try std.testing.expectEqualStrings("2023-11-15", lines[0].date);
+    try std.testing.expectEqual(@as(?i64, 1700000000), lines[0].author_timestamp);
     try std.testing.expectEqual(@as(usize, 7), lines[0].line_no);
     try std.testing.expectEqualStrings("const x = 1;", lines[0].content);
+}
+
+test "web explorer maps blame timestamps to age classes" {
+    const day = 24 * 60 * 60;
+    try std.testing.expectEqualStrings("age-unknown", blameAgeClass(null, 10_000));
+    try std.testing.expectEqualStrings("age-now", blameAgeClass(10_000, 10_000));
+    try std.testing.expectEqualStrings("age-week", blameAgeClass(10_000 - 3 * day, 10_000));
+    try std.testing.expectEqualStrings("age-month", blameAgeClass(10_000 - 20 * day, 10_000));
+    try std.testing.expectEqualStrings("age-quarter", blameAgeClass(10_000 - 60 * day, 10_000));
+    try std.testing.expectEqualStrings("age-year", blameAgeClass(10_000 - 200 * day, 10_000));
+    try std.testing.expectEqualStrings("age-old", blameAgeClass(10_000 - 700 * day, 10_000));
+}
+
+test "web explorer formats blame relative dates" {
+    const allocator = std.testing.allocator;
+    const now: i64 = 2_000_000;
+    const minute = 60;
+    const hour = 60 * minute;
+    const day = 24 * hour;
+
+    const unknown = try relativeTimeOwned(allocator, null, now);
+    defer allocator.free(unknown);
+    try std.testing.expectEqualStrings("unknown", unknown);
+
+    const current = try relativeTimeOwned(allocator, now - 12, now);
+    defer allocator.free(current);
+    try std.testing.expectEqualStrings("now", current);
+
+    const minutes = try relativeTimeOwned(allocator, now - 5 * minute, now);
+    defer allocator.free(minutes);
+    try std.testing.expectEqualStrings("5 minutes ago", minutes);
+
+    const hours = try relativeTimeOwned(allocator, now - 3 * hour, now);
+    defer allocator.free(hours);
+    try std.testing.expectEqualStrings("3 hours ago", hours);
+
+    const days = try relativeTimeOwned(allocator, now - 9 * day, now);
+    defer allocator.free(days);
+    try std.testing.expectEqualStrings("9 days ago", days);
+
+    const months = try relativeTimeOwned(allocator, now - 24 * 30 * day, now);
+    defer allocator.free(months);
+    try std.testing.expectEqualStrings("24 months ago", months);
+
+    const years = try relativeTimeOwned(allocator, now - 25 * 30 * day, now);
+    defer allocator.free(years);
+    try std.testing.expectEqualStrings("2 years ago", years);
 }
