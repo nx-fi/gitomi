@@ -1050,6 +1050,17 @@ tbody tr:hover {
   height: 16px;
   font-size: 16px;
 }
+.file-icon.devicon-zig-original { color: #f7a41d; }
+.file-icon.devicon-javascript-plain { color: #c99a00; }
+.file-icon.devicon-typescript-plain { color: #3178c6; }
+.file-icon.devicon-bash-plain { color: #4eaa25; }
+.file-icon.devicon-yaml-plain { color: #cb171e; }
+.file-icon.devicon-css3-plain { color: #1572b6; }
+.file-icon.devicon-html5-plain { color: #e34f26; }
+.file-icon.devicon-xml-plain { color: #005fad; }
+.file-icon.devicon-rust-plain { color: #dea584; }
+.file-icon.devicon-python-plain { color: #3776ab; }
+.file-icon.devicon-markdown-original { color: #57606a; }
 .file-icon[class*="lang-"] {
   display: inline-grid;
   place-items: center;
