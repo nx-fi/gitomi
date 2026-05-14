@@ -78,8 +78,8 @@ gt web [--host 127.0.0.1] [--port 8080]
 
 `gt init` writes a signed genesis manifest to `refs/gitomi/genesis`, including
 the repo id, owner, device, public signing key, and key fingerprint. Configure
-Git SSH commit signing before using it, for example with `gpg.format=ssh` and a
-`user.signingkey` SSH private key path.
+Git commit signing before using it. OpenPGP `user.signingkey` values are
+exported with `gpg`; SSH signing is also supported when `gpg.format=ssh`.
 
 `gt issue open` writes a signed Git commit to the configured inbox ref under
 `refs/gitomi/inbox/<principal>/<device>`. Event identity is the Git commit hash;

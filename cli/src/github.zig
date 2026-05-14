@@ -309,14 +309,12 @@ fn writeImportBotIdentity(allocator: Allocator, principal: []const u8, device: [
     var writer = try EventWriter.initForInboxRef(allocator, "gt github import", principal, device);
     defer writer.deinit();
 
-    const public_key = try repo_mod.signingPublicKey(allocator);
-    defer allocator.free(public_key);
-    if (std.mem.trim(u8, public_key, " \t\r\n").len == 0) {
-        try eprint("gt github import: signing public key is required to authorize import-bot; configure Git SSH signing with gpg.format=ssh and user.signingkey\n", .{});
+    var signing_key = try repo_mod.configuredSigningKey(allocator);
+    defer signing_key.deinit();
+    if (std.mem.trim(u8, signing_key.public_key, " \t\r\n").len == 0) {
+        try eprint("gt github import: signing public key is required to authorize import-bot; configure Git signing with user.signingkey\n", .{});
         return CliError.MissingArgument;
     }
-    const fingerprint = try repo_mod.signingKeyFingerprint(allocator, public_key);
-    defer allocator.free(fingerprint);
 
     const event_uuid = try util.newUuidV7(allocator);
     defer allocator.free(event_uuid);
@@ -324,7 +322,7 @@ fn writeImportBotIdentity(allocator: Allocator, principal: []const u8, device: [
     defer allocator.free(idem);
     const occurred_at = try util.rfc3339Now(allocator);
     defer allocator.free(occurred_at);
-    const body = try event_mod.buildIdentityDeviceAddedJson(allocator, writer.cfg, writer.nextSeq(), principal, device, public_key, fingerprint, "ssh", event_uuid, idem, occurred_at, writer.eventParents());
+    const body = try event_mod.buildIdentityDeviceAddedJson(allocator, writer.cfg, writer.nextSeq(), principal, device, signing_key.public_key, signing_key.fingerprint, signing_key.scheme, event_uuid, idem, occurred_at, writer.eventParents());
     defer allocator.free(body);
     const subject = try std.fmt.allocPrint(allocator, "identity.device_added {s}/{s}", .{ principal, device });
     defer allocator.free(subject);

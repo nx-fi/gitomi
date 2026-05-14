@@ -125,7 +125,7 @@ fn printUsage() !void {
         \\  gt acl grant PRINCIPAL ROLE
         \\  gt acl revoke PRINCIPAL
         \\  gt acl list [--json]
-        \\  gt identity add-device PRINCIPAL DEVICE [--public-key KEY] [--fingerprint FP] [--scheme ssh]
+        \\  gt identity add-device PRINCIPAL DEVICE [--public-key KEY] [--fingerprint FP] [--scheme ssh|openpgp]
         \\  gt identity revoke-device PRINCIPAL DEVICE
         \\  gt identity list [--json]
         \\  gt actions workflows [--json] [--ref REF|--oid OID]
@@ -205,15 +205,13 @@ fn cmdInit(allocator: Allocator, args: []const []const u8) !void {
     };
     defer cfg.deinit();
 
-    const public_key = try repo_mod.signingPublicKey(allocator);
-    defer allocator.free(public_key);
-    if (std.mem.trim(u8, public_key, " \t\r\n").len == 0) {
-        try io.eprint("gt init: signing public key is required; configure Git SSH signing with gpg.format=ssh and user.signingkey\n", .{});
+    var signing_key = try repo_mod.configuredSigningKey(allocator);
+    defer signing_key.deinit();
+    if (std.mem.trim(u8, signing_key.public_key, " \t\r\n").len == 0) {
+        try io.eprint("gt init: signing public key is required; configure Git signing with user.signingkey\n", .{});
         return CliError.MissingArgument;
     }
-    const fingerprint = try repo_mod.signingKeyFingerprint(allocator, public_key);
-    defer allocator.free(fingerprint);
-    const genesis_manifest = try repo_mod.buildGenesisManifestJson(allocator, cfg, public_key, fingerprint);
+    const genesis_manifest = try repo_mod.buildGenesisManifestJson(allocator, cfg, signing_key.public_key, signing_key.fingerprint, signing_key.scheme);
     defer allocator.free(genesis_manifest);
 
     try repo_mod.writeConfig(repo.config_path, cfg);
