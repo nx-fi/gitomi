@@ -22,8 +22,9 @@ state.
 
 Gitomi RBAC does protect:
 
-*   whether accepted `issue.*`, `pull.*`, `comment.*`, `action.*`, `acl.*`, and
-    `identity.*` events affect the projection;
+*   whether accepted `issue.*`, `pull.*`, `project.*`, `milestone.*`,
+    `comment.*`, `action.*`, `acl.*`, and `identity.*` events affect the
+    projection;
 *   whether a signing key is authorized for `actor.principal` and
     `actor.device` at the event's causal frontier; and
 *   whether owners can grant or revoke roles and device bindings without
@@ -50,10 +51,10 @@ Gitomi defines five built-in roles, ordered from least to most privileged:
 
 | Role         | Description                                                      |
 |--------------|------------------------------------------------------------------|
-| `reader`     | Read-only access to issues, pull requests, and comments.         |
+| `reader`     | Read-only access to issues, pull requests, projects, milestones, and comments. |
 | `reporter`   | Can open issues and add comments.                                |
 | `contributor`| Can open issues and pull requests, comment, and manage own objects. |
-| `maintainer` | Full read/write on issues, pulls, and comments; can manage labels and assignees on any object; can trigger action runs. |
+| `maintainer` | Full read/write on issues, pulls, projects, milestones, and comments; can manage labels, assignees, project placements, and milestones on any object; can trigger action runs. |
 | `owner`      | All maintainer permissions plus ACL and identity management.     |
 
 Implementations MUST recognize these five role names. Implementations MAY define additional custom roles, but custom roles MUST NOT override the semantics of the built-in roles.
@@ -78,6 +79,8 @@ The following table defines the minimum permission set and the lowest role requi
 |-----------------------------|--------|----------|-------------|------------|-------|
 | `issue.read`                | ✓      | ✓        | ✓           | ✓          | ✓     |
 | `pull.read`                 | ✓      | ✓        | ✓           | ✓          | ✓     |
+| `project.read`              | ✓      | ✓        | ✓           | ✓          | ✓     |
+| `milestone.read`            | ✓      | ✓        | ✓           | ✓          | ✓     |
 | `comment.read`              | ✓      | ✓        | ✓           | ✓          | ✓     |
 | `issue.open`                |        | ✓        | ✓           | ✓          | ✓     |
 | `comment.add`               |        | ✓        | ✓           | ✓          | ✓     |
@@ -91,10 +94,14 @@ The following table defines the minimum permission set and the lowest role requi
 | `comment.redact_any`        |        |          |             | ✓          | ✓     |
 | `issue.manage_labels`       |        |          |             | ✓          | ✓     |
 | `issue.manage_assignees`    |        |          |             | ✓          | ✓     |
+| `issue.manage_projects`     |        |          |             | ✓          | ✓     |
+| `issue.manage_milestones`   |        |          |             | ✓          | ✓     |
 | `pull.manage_labels`        |        |          |             | ✓          | ✓     |
 | `pull.manage_assignees`     |        |          |             | ✓          | ✓     |
 | `pull.manage_reviewers`     |        |          |             | ✓          | ✓     |
 | `pull.merge`                |        |          |             | ✓          | ✓     |
+| `project.manage`            |        |          |             | ✓          | ✓     |
+| `milestone.manage`          |        |          |             | ✓          | ✓     |
 | `action.run_request`        |        |          |             | ✓          | ✓     |
 | `acl.grant`                 |        |          |             |            | ✓     |
 | `acl.revoke`                |        |          |             |            | ✓     |
@@ -133,6 +140,9 @@ Every event type MUST map to a required permission. The following defines the ma
 | `issue.label_removed`     | `issue.manage_labels`     | —       |
 | `issue.assignee_added`    | `issue.manage_assignees`  | —       |
 | `issue.assignee_removed`  | `issue.manage_assignees`  | —       |
+| `issue.milestone_set`     | `issue.manage_milestones` | —       |
+| `issue.project_added`     | `issue.manage_projects`   | —       |
+| `issue.project_removed`   | `issue.manage_projects`   | —       |
 | `pull.opened`             | `pull.open`               | —       |
 | `pull.title_set`          | `pull.edit_own` or `pull.edit_any` | object |
 | `pull.body_set`           | `pull.edit_own` or `pull.edit_any` | object |
@@ -146,6 +156,13 @@ Every event type MUST map to a required permission. The following defines the ma
 | `pull.reviewer_added`     | `pull.manage_reviewers`   | —       |
 | `pull.reviewer_removed`   | `pull.manage_reviewers`   | —       |
 | `pull.merged`             | `pull.merge`              | —       |
+| `project.created`         | `project.manage`          | —       |
+| `project.updated`         | `project.manage`          | —       |
+| `project.column_added`    | `project.manage`          | —       |
+| `project.column_removed`  | `project.manage`          | —       |
+| `milestone.created`       | `milestone.manage`        | —       |
+| `milestone.updated`       | `milestone.manage`        | —       |
+| `milestone.state_set`     | `milestone.manage`        | —       |
 | `comment.added`           | `comment.add`             | —       |
 | `comment.body_set`        | `comment.edit_own` or `comment.edit_any` | object |
 | `comment.redacted`        | `comment.edit_own` or `comment.redact_any` | object |
@@ -162,7 +179,9 @@ An `issue.opened` event that includes `payload.labels` MUST also require
 `issue.manage_labels`. An `issue.opened` event that includes
 `payload.assignees` MUST also require `issue.manage_assignees`. These
 collection additions cannot bypass RBAC by being batched into the issue creation
-event.
+event. An `issue.opened` event that includes `payload.milestone` MUST also
+require `issue.manage_milestones`, and one that includes `payload.projects`
+MUST also require `issue.manage_projects`.
 
 ## 4. Bootstrap Trust
 

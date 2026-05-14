@@ -3,6 +3,7 @@ const commits_page = @import("web/commits.zig");
 const errors = @import("errors.zig");
 const events_page = @import("web/events.zig");
 const explorer = @import("web/explorer.zig");
+const index = @import("index.zig");
 const io = @import("io.zig");
 const issues_page = @import("web/issues.zig");
 const overview_page = @import("web/overview.zig");
@@ -149,6 +150,9 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", markdown_js, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/highlight.js")) {
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", highlight_js, null);
+    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/index/rebuild")) {
+        try index.ensureIndex(allocator, repo);
+        try shared.sendResponse(allocator, stream, 204, "No Content", "text/plain", "", null);
     } else if (std.mem.eql(u8, request.method, "GET") and (std.mem.eql(u8, request.path, "/") or std.mem.eql(u8, request.path, "/code"))) {
         const body = try explorer.renderCodePage(allocator, repo, request.target);
         defer allocator.free(body);

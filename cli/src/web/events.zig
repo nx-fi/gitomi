@@ -17,6 +17,9 @@ const index_event_columns = index.index_event_columns;
 const sqlite = index.sqlite;
 
 pub fn renderEventsPage(allocator: Allocator, repo: Repo) ![]u8 {
+    if (try shared.renderIndexingPageIfStale(allocator, repo, "Events", "events", "/events")) |body| return body;
+    try ensureIndex(allocator, repo);
+
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
@@ -35,7 +38,6 @@ pub fn renderEventsPage(allocator: Allocator, repo: Repo) ![]u8 {
         \\      <tbody>
     );
 
-    try ensureIndex(allocator, repo);
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
     var stmt = try db.prepare("SELECT " ++ index_event_columns ++ " FROM events ORDER BY ordinal");

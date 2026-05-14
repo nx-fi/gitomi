@@ -12,6 +12,7 @@ const issue = @import("issue.zig");
 const pull_mod = @import("pull.zig");
 const rbac = @import("rbac.zig");
 const repo_mod = @import("repo.zig");
+const reset = @import("reset.zig");
 const runs = @import("runs.zig");
 const sync = @import("sync.zig");
 const util = @import("util.zig");
@@ -57,6 +58,8 @@ fn realMain() !void {
         try cmdIndex(allocator, args[2..]);
     } else if (std.mem.eql(u8, cmd, "refs")) {
         try cmdRefs(allocator);
+    } else if (std.mem.eql(u8, cmd, "clear") or std.mem.eql(u8, cmd, "reset")) {
+        try reset.cmdClearOrReset(allocator, args[2..], if (std.mem.eql(u8, cmd, "clear")) "gt clear" else "gt reset");
     } else if (std.mem.eql(u8, cmd, "events")) {
         try cmdEvents(allocator, args[2..]);
     } else if (std.mem.eql(u8, cmd, "issue")) {
@@ -94,6 +97,10 @@ fn printUsage() !void {
         \\  gt fsck
         \\  gt index rebuild|status
         \\  gt refs
+        \\  gt clear local [--yes]
+        \\  gt clear remote [--remote REMOTE] [--yes]
+        \\  gt reset local [--yes]
+        \\  gt reset remote [--remote REMOTE] [--yes]
         \\  gt events list [--json] [--limit N] [--ref REF]
         \\  gt issue list [--json]
         \\  gt issue show ISSUE [--json]

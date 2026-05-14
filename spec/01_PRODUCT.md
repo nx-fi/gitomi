@@ -2,7 +2,9 @@
 
 ## 1. Introduction
 
-Gitomi is a local-first, Git-native forge that layers issues, pull requests, ACLs, and workflow execution over a standard Git repository.
+Gitomi is a local-first, Git-native forge that layers issues, pull requests,
+projects, milestones, ACLs, and workflow execution over a standard Git
+repository.
 
 Gitomi separates:
 
@@ -29,8 +31,8 @@ Under stock Git, ref names are not an enforceable authorization boundary. `refs/
 ### 2.1. Security Model Limitations
 
 Gitomi RBAC protects the Control Plane projection. It determines which signed
-events affect issues, pull requests, comments, workflow requests, ACL state, and
-identity state.
+events affect issues, pull requests, projects, milestones, comments, workflow
+requests, ACL state, and identity state.
 
 Gitomi RBAC does not, by itself, provide all repository security boundaries:
 
@@ -77,7 +79,8 @@ Implementations MUST maintain a local cache outside version control. The RECOMME
 The following local paths are RECOMMENDED:
 
 *   `.git/gitomi/config.toml`: Repo-local Gitomi configuration.
-*   `.git/gitomi/index.sqlite`: Materialized state for issues, pull requests, comments, ACLs, and workflow status.
+*   `.git/gitomi/index.sqlite`: Materialized state for issues, pull requests,
+    projects, milestones, comments, ACLs, and workflow status.
 *   `.git/gitomi/cursors.sqlite`: Per-ref replay cursors and snapshot metadata.
 
 The local cache is disposable. A compliant implementation MUST be able to rebuild it from valid Gitomi refs alone.
@@ -146,9 +149,9 @@ the derived event hash for those purposes.
 
 ### 4.3. Object Identifiers and Human References
 
-Issue, pull request, comment, and action run identifiers MUST be UUIDv7. ACL
-and identity events target stable system objects rather than user-facing
-content objects:
+Issue, pull request, project, milestone, comment, and action run identifiers
+MUST be UUIDv7. ACL and identity events target stable system objects rather
+than user-facing content objects:
 
 *   `acl.*`: `object.id` MUST be `acl:<principal>`, where `<principal>` is the
     canonical target principal in `payload.principal`.
@@ -158,11 +161,23 @@ content objects:
     run UUID. For `action.run_completed`, `payload.run_id` MUST equal
     `object.id`.
 
-Gitomi v1 does not require a native repo-wide integer allocator. The canonical human reference form is a unique UUID prefix:
+Gitomi v1 does not require a native repo-wide integer allocator. The canonical
+human reference form for UUID-backed objects is a unique UUID prefix:
 
-*   `#<uuid-prefix>` for issues and pull requests
+*   `#<uuid-prefix>` for issues in issue contexts
+*   `pr:<uuid-prefix>` for pull requests outside an explicit pull context
+*   `project:<uuid-prefix>` or `@<slug>` for projects
+*   `milestone:<uuid-prefix>` or `^<slug>` for milestones
 *   minimum prefix length: 7 lowercase hex characters
 *   implementations MUST extend the displayed prefix when 7 characters are ambiguous within the local projection
+
+Project and milestone slugs are display aliases, not Git ref names and not
+security identifiers. They MUST be ref-safe path segments as defined by the ref
+format specification, generated from the human name by lowercasing, replacing
+disallowed characters with hyphens, and appending a deterministic disambiguator
+when required. A kanban column reference is written as
+`@<project-slug>/<column-slug>` when both sides have slugs; payloads MUST still
+carry the human project and column names used for display.
 
 Imported GitHub numbers MAY be preserved as secondary aliases in `legacy.*`, but native Gitomi objects MUST remain addressable without allocating sequential integers.
 
@@ -180,8 +195,10 @@ preserve them without admitting malformed history.
 
 Compliant implementations MUST understand the following event families:
 
-*   `issue.opened`, `issue.updated`, `issue.title_set`, `issue.body_set`, `issue.state_set`, `issue.label_added`, `issue.label_removed`, `issue.assignee_added`, `issue.assignee_removed`
+*   `issue.opened`, `issue.updated`, `issue.title_set`, `issue.body_set`, `issue.state_set`, `issue.label_added`, `issue.label_removed`, `issue.assignee_added`, `issue.assignee_removed`, `issue.milestone_set`, `issue.project_added`, `issue.project_removed`
 *   `pull.opened`, `pull.updated`, `pull.title_set`, `pull.body_set`, `pull.state_set`, `pull.base_set`, `pull.head_set`, `pull.label_added`, `pull.label_removed`, `pull.assignee_added`, `pull.assignee_removed`, `pull.reviewer_added`, `pull.reviewer_removed`, `pull.merged`
+*   `project.created`, `project.updated`, `project.column_added`, `project.column_removed`
+*   `milestone.created`, `milestone.updated`, `milestone.state_set`
 *   `comment.added`, `comment.body_set`, `comment.redacted`
 *   `acl.role_granted`, `acl.role_revoked`
 *   `identity.device_added`, `identity.device_revoked`
@@ -193,13 +210,15 @@ Implementations MAY support additional event types. Unknown event types MUST be 
 
 The following payload members are REQUIRED for interoperable v1 implementations:
 
-*   `issue.opened`: `title`; OPTIONAL `body`, `labels`, `assignees`
+*   `issue.opened`: `title`; OPTIONAL `body`, `labels`, `assignees`, `milestone`, `projects`
 *   `issue.updated`: OPTIONAL `title`, `body`, `state`, `labels_added`, `labels_removed`, `assignees_added`, `assignees_removed`; at least one field MUST be present
 *   `issue.title_set`: `title`
 *   `issue.body_set`: `body`
 *   `issue.state_set`: `state`
 *   `issue.label_added` / `issue.label_removed`: `label`
 *   `issue.assignee_added` / `issue.assignee_removed`: `assignee`
+*   `issue.milestone_set`: `milestone`; OPTIONAL `milestone_ref`. An empty `milestone` clears the assignment.
+*   `issue.project_added` / `issue.project_removed`: `project`, `column`; OPTIONAL `project_ref`, `column_ref`
 *   `pull.opened`: `title`, `base_ref`, `head_ref`; OPTIONAL `body`, `draft`
 *   `pull.updated`: OPTIONAL `title`, `body`, `state`, `base_ref`, `head_ref`, `labels_added`, `labels_removed`, `assignees_added`, `assignees_removed`, `reviewers_added`, `reviewers_removed`; at least one field MUST be present
 *   `pull.title_set`: `title`
@@ -211,6 +230,12 @@ The following payload members are REQUIRED for interoperable v1 implementations:
 *   `pull.assignee_added` / `pull.assignee_removed`: `assignee`
 *   `pull.reviewer_added` / `pull.reviewer_removed`: `reviewer`
 *   `pull.merged`: `merge_oid` or `target_oid`
+*   `project.created`: `name`; OPTIONAL `description`, `slug`, `columns`
+*   `project.updated`: OPTIONAL `name`, `description`, `state`; at least one field MUST be present
+*   `project.column_added` / `project.column_removed`: `column`; OPTIONAL `column_ref`
+*   `milestone.created`: `title`; OPTIONAL `description`, `slug`, `due_at`, `state`
+*   `milestone.updated`: OPTIONAL `title`, `description`, `due_at`, `state`; at least one field MUST be present
+*   `milestone.state_set`: `state` (`open` or `closed`)
 *   `comment.added`: `parent_kind`, `parent_id`, `body`
 *   `comment.body_set`: `body`
 *   `comment.redacted`: OPTIONAL `reason`
@@ -350,12 +375,14 @@ The following issue fields MUST be modeled as causal scalar registers:
 *   `title`
 *   `body`
 *   `state` (`open` or `closed`)
-*   implementation-defined scalar metadata such as `priority` or `milestone`
+*   `milestone`
+*   implementation-defined scalar metadata such as `priority`
 
 The following issue collections MUST be modeled as Observed-Remove Sets:
 
 *   labels
 *   assignees
+*   project placements, keyed by `(project, column)`
 
 The add tag for an OR-Set member is the add event hash. A remove affects only
 add tags reachable from the remove event's causal frontier or explicitly listed
@@ -369,9 +396,9 @@ SHOULD prefer `issue.updated` for user-facing edit flows that change multiple
 fields, to avoid one signed commit per small UI mutation.
 
 The visible issue projection MUST be bounded. A v1 implementation MUST NOT
-project more than 256 labels or more than 128 assignees on one issue. An event
-that would exceed those limits after reduction MUST be domain-rejected with
-reason `collection_limit_exceeded`.
+project more than 256 labels, more than 128 assignees, or more than 256 project
+placements on one issue. An event that would exceed those limits after
+reduction MUST be domain-rejected with reason `collection_limit_exceeded`.
 
 Reducers MUST preserve all accepted events in the issue timeline, even when the visible projection only shows the latest scalar values.
 
@@ -451,17 +478,87 @@ For a comment that has not been redacted, the current visible body MUST be
 derived from the latest accepted `comment.body_set` or the initial
 `comment.added` payload.
 
-### 6.5. Derived References From Code Commits
+### 6.5. Projects and Kanban Boards
+
+A project is created by `project.created`.
+
+A project event other than `project.created` has a creation precondition: the
+target project MUST already have an accepted `project.created` event in the
+event's effective replay history. If not, the event MUST be domain-rejected
+with reason `object_not_created`.
+
+If more than one structurally valid `project.created` event targets the same
+`object.id`, one creation event wins by the implementation's deterministic
+reducer order; all other creation events for that ID MUST be domain-rejected
+with reason `duplicate_object_id`.
+
+The following project fields MUST be modeled as causal scalar registers:
+
+*   `name`
+*   `description`
+*   `state` (`open` or `closed`)
+
+Kanban columns MUST be modeled as an Observed-Remove Set keyed by column name.
+The add tag for a column is the `project.created` or `project.column_added`
+event hash. A `project.column_removed` event removes only column add tags
+reachable from the remove event's causal frontier or explicitly listed in the
+remove payload.
+
+The `columns` array in `project.created` is reduced as if each column had been
+added at the same event hash. Implementations SHOULD create new projects with
+a small default column set such as `Todo`, `In Progress`, and `Done` when the
+user did not provide columns.
+
+Issue placements on a project board are expressed with `issue.project_added`
+and `issue.project_removed`, not by mutating the project object. This keeps
+issue card movement causally attached to the issue history. Implementations MAY
+display imported or legacy placements for projects that do not have a
+corresponding accepted `project.created` event, but created project objects are
+the canonical way to preserve empty boards, board metadata, and empty columns.
+
+A visible project projection MUST NOT expose more than 128 kanban columns. An
+event that would exceed this limit after reduction MUST be domain-rejected with
+reason `collection_limit_exceeded`.
+
+### 6.6. Milestones
+
+A milestone is created by `milestone.created`.
+
+A milestone event other than `milestone.created` has a creation precondition:
+the target milestone MUST already have an accepted `milestone.created` event in
+the event's effective replay history. If not, the event MUST be
+domain-rejected with reason `object_not_created`.
+
+If more than one structurally valid `milestone.created` event targets the same
+`object.id`, one creation event wins by deterministic reducer order; all other
+creation events for that ID MUST be domain-rejected with reason
+`duplicate_object_id`.
+
+The following milestone fields MUST be modeled as causal scalar registers:
+
+*   `title`
+*   `description`
+*   `due_at`
+*   `state` (`open` or `closed`)
+
+An issue milestone assignment is expressed by `issue.milestone_set`, whose
+target is the issue. The assignment MAY use a plain milestone title for
+compatibility with imported trackers. If `milestone_ref` is present and
+resolves locally, implementations SHOULD use the referenced milestone for UI
+linking; absence of a created milestone MUST NOT make the issue assignment
+invalid.
+
+### 6.7. Derived References From Code Commits
 
 Implementations MUST parse Data Plane commit messages to derive links from code to Gitomi objects.
 
-*   **Syntax**: `#<uuid-prefix>`
+*   **Syntax**: `#<uuid-prefix>`, `issue:<uuid-prefix>`, or `pr:<uuid-prefix>`
 *   **Resolution**: the prefix MUST resolve against the local issue and pull index
 *   **Ambiguity**: if multiple objects share the prefix, the implementation SHOULD prompt for a longer prefix or ignore the reference
 
 These links are derived projection data. They MUST NOT be written back as explicit control-plane events.
 
-### 6.6. Cache Rebuild
+### 6.8. Cache Rebuild
 
 `.git/gitomi/index.sqlite` and `.git/gitomi/cursors.sqlite` are disposable caches.
 
