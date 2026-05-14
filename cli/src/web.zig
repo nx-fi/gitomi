@@ -156,13 +156,13 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", code_js, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/markdown.js")) {
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", markdown_js, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/highlight.js")) {
+    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/vendor/hljs/all-languages.js")) {
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", highlight_js, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/highlight-zig.js")) {
+    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/highlight/zig.js")) {
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", highlight_zig_js, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/solidity.js")) {
+    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/highlight/solidity.js")) {
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", solidity_js, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/highlight-init.js")) {
+    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/highlight/init.js")) {
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", highlight_init_js, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/diff.js")) {
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", diff_js, null);
@@ -423,10 +423,10 @@ const theme_js = @embedFile("web/theme.js");
 const tree_js = @embedFile("web/tree.js");
 const code_js = @embedFile("web/code.js");
 const markdown_js = @embedFile("web/markdown.js");
-const highlight_js = @embedFile("web/highlight.js");
-const highlight_zig_js = @embedFile("web/highlight-zig.js");
-const solidity_js = @embedFile("web/solidity.js");
-const highlight_init_js = @embedFile("web/highlight-init.js");
+const highlight_js = @embedFile("web/vendor/hljs/all-languages.js");
+const highlight_zig_js = @embedFile("web/highlight/zig.js");
+const solidity_js = @embedFile("web/highlight/solidity.js");
+const highlight_init_js = @embedFile("web/highlight/init.js");
 const diff_js = @embedFile("web/diff.js");
 
 test "web request parser separates method path and body" {
