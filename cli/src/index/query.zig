@@ -49,6 +49,17 @@ pub fn countIssueOpenedEvents(allocator: Allocator, repo: Repo) !usize {
     return if (count <= 0) 0 else @as(usize, @intCast(count));
 }
 
+pub fn countPulls(allocator: Allocator, repo: Repo) !usize {
+    if (!fileExists(repo.index_path)) return 0;
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    var stmt = try db.prepare("SELECT COUNT(*) FROM pulls");
+    defer stmt.deinit();
+    if (!try stmt.step()) return 0;
+    const count = stmt.columnInt64(0);
+    return if (count <= 0) 0 else @as(usize, @intCast(count));
+}
+
 pub fn countIndexedEventsInDb(db: *SqliteDb) !usize {
     var stmt = try db.prepare("SELECT COUNT(*) FROM events");
     defer stmt.deinit();

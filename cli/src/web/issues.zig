@@ -9,19 +9,14 @@ const util = @import("../util.zig");
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
 const SqliteDb = index.SqliteDb;
-const Button = shared.Button;
 const appendEmptyState = shared.appendEmptyState;
-const appendInlineEmpty = shared.appendInlineEmpty;
-const appendPill = shared.appendPill;
 const appendSectionHead = shared.appendSectionHead;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
-const appendStatePill = shared.appendStatePill;
 const appendTemplate = shared.appendTemplate;
 const createIssueOpenedEvent = issue.createIssueOpenedEvent;
 const ensureIndex = index.ensureIndex;
 const issueHref = shared.issueHref;
-const literalHref = shared.literalHref;
 const sendRedirect = shared.sendRedirect;
 const sendResponse = shared.sendResponse;
 const splitCommaFields = util.splitCommaFields;
@@ -387,8 +382,10 @@ pub fn renderIssueDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const 
     defer db.deinit();
 
     var stmt = try db.prepare(
-        \\SELECT i.id, i.title, i.state, i.author_principal, i.author_device, i.opened_at, i.body,
-        \\       COALESCE(m.source_author, ''), COALESCE(m.milestone, ''), COALESCE(a.number, 0)
+        \\SELECT i.id, i.title, i.state, i.author_principal, i.opened_at, i.body,
+        \\       COALESCE(m.source_author, ''), COALESCE(m.milestone, ''), COALESCE(a.number, 0),
+        \\       i.state_occurred_at,
+        \\       (SELECT COUNT(*) FROM comments c WHERE c.parent_kind = 'issue' AND c.parent_id = i.id)
         \\FROM issues i
         \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
         \\LEFT JOIN legacy_aliases a
@@ -407,43 +404,44 @@ pub fn renderIssueDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const 
     defer allocator.free(state);
     const author_principal = try stmt.columnTextDup(allocator, 3);
     defer allocator.free(author_principal);
-    const author_device = try stmt.columnTextDup(allocator, 4);
-    defer allocator.free(author_device);
-    const opened_at = try stmt.columnTextDup(allocator, 5);
+    const opened_at = try stmt.columnTextDup(allocator, 4);
     defer allocator.free(opened_at);
-    const body = try stmt.columnTextDup(allocator, 6);
+    const body = try stmt.columnTextDup(allocator, 5);
     defer allocator.free(body);
-    const source_author = try stmt.columnTextDup(allocator, 7);
+    const source_author = try stmt.columnTextDup(allocator, 6);
     defer allocator.free(source_author);
-    const milestone = try stmt.columnTextDup(allocator, 8);
+    const milestone = try stmt.columnTextDup(allocator, 7);
     defer allocator.free(milestone);
-    const legacy_number = stmt.columnInt64(9);
+    const legacy_number = stmt.columnInt64(8);
+    const state_at = try stmt.columnTextDup(allocator, 9);
+    defer allocator.free(state_at);
+    const comment_count = @as(usize, @intCast(stmt.columnInt64(10)));
 
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
+    const display_author = if (source_author.len != 0) source_author else author_principal;
+
     try appendShellStart(&buf, allocator, repo, title, "issues");
+    try buf.appendSlice(allocator, "<section class=\"issue-page\">");
+    try appendIssuePageHeader(&buf, allocator, id, title, state, display_author, opened_at, state_at, comment_count, legacy_number);
     try appendTemplate(&buf, allocator,
-        \\<section class="panel issue-detail">
-        \\  <div class="section-head issue-detail-head">
-        \\    <div>
-        \\      <p class="eyebrow">Issue</p>
-        \\      <h1>{title}</h1>
-        \\    </div>
-        \\    <a class="button secondary" href="/issues">Back to issues</a>
-        \\  </div>
-        \\  <div class="issue-detail-body">
-        \\    <aside class="issue-sidebar">
-    , .{ .title = title });
-    try appendIssueFacts(&buf, allocator, &db, id, state, author_principal, author_device, source_author, opened_at, milestone, legacy_number);
+        \\  <div class="issue-conversation-layout">
+        \\    <div class="issue-conversation">
+        \\      <div class="issue-timeline-item">
+        \\        <div class="issue-timeline-avatar">
+    , .{});
+    try appendIssueAvatar(&buf, allocator, display_author, "issue-detail-avatar");
     try appendTemplate(&buf, allocator,
-        \\    </aside>
-        \\    <div class="issue-thread">
-        \\      <article class="issue-card">
-        \\        <div class="comment-meta"><strong>{author}</strong><span>{opened_at}</span></div>
-        \\        <div class="markdown-body">
+        \\        </div>
+        \\        <article class="issue-comment-box">
+        \\          <header class="issue-comment-head">
+        \\            <div><strong>{author}</strong><span>opened {opened_at}</span></div>
+        \\            <button class="issue-kebab-button" type="button" disabled aria-label="Comment actions"></button>
+        \\          </header>
+        \\          <div class="markdown-body">
     , .{
-        .author = if (source_author.len != 0) source_author else author_principal,
+        .author = display_author,
         .opened_at = opened_at,
     });
     if (body.len == 0) {
@@ -452,17 +450,95 @@ pub fn renderIssueDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const 
         try markdown_render.appendMarkdown(&buf, allocator, body);
     }
     try buf.appendSlice(allocator,
-        \\        </div>
-        \\      </article>
+        \\          </div>
+        \\        </article>
+        \\      </div>
     );
     try appendIssueComments(&buf, allocator, &db, id);
-    try buf.appendSlice(allocator,
-        \\    </div>
-        \\  </div>
-        \\</section>
-    );
+    try buf.appendSlice(allocator, "    </div><aside class=\"issue-meta-sidebar\">");
+    try appendIssueSidebar(&buf, allocator, &db, id, display_author, milestone);
+    try buf.appendSlice(allocator, "</aside></div></section>");
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
+}
+
+fn appendIssuePageHeader(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    issue_id: []const u8,
+    title: []const u8,
+    state: []const u8,
+    author: []const u8,
+    opened_at: []const u8,
+    state_at: []const u8,
+    comment_count: usize,
+    legacy_number: i64,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\  <header class="issue-page-head">
+        \\    <div class="issue-title-line">
+        \\      <h1><span>{title}</span> <span class="issue-page-number">
+    , .{ .title = title });
+    try appendIssueDisplayRef(buf, allocator, issue_id, legacy_number);
+    try appendTemplate(buf, allocator,
+        \\</span></h1>
+        \\      <div class="issue-page-actions">
+        \\        <button class="button secondary" type="button" disabled>Edit</button>
+        \\        <a class="button primary" href="/new-issue">New issue</a>
+        \\        <button class="issue-copy-button" type="button" disabled aria-label="Copy issue link"><span class="button-icon icon-copy" aria-hidden="true"></span></button>
+        \\      </div>
+        \\    </div>
+        \\    <div class="issue-status-line">
+    , .{});
+    try appendIssueStateBadge(buf, allocator, state);
+    try appendTemplate(buf, allocator,
+        \\      <span><strong>{author}</strong> opened this issue {opened_at}
+    , .{
+        .author = author,
+        .opened_at = opened_at,
+    });
+    if (std.mem.eql(u8, state, "closed")) {
+        try appendTemplate(buf, allocator, " and closed it {state_at}", .{ .state_at = state_at });
+    }
+    try appendTemplate(buf, allocator,
+        \\ · {comment_count} {comment_word}</span>
+        \\    </div>
+        \\  </header>
+    , .{
+        .comment_count = comment_count,
+        .comment_word = commentWord(comment_count),
+    });
+}
+
+fn appendIssueDisplayRef(buf: *std.ArrayList(u8), allocator: Allocator, issue_id: []const u8, legacy_number: i64) !void {
+    try buf.append(allocator, '#');
+    if (legacy_number > 0) {
+        try std.fmt.format(buf.writer(allocator), "{d}", .{legacy_number});
+        return;
+    }
+
+    var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const issue_ref = util.shortObjectRef(&issue_ref_buf, issue_id);
+    try shared.appendHtml(buf, allocator, issue_ref);
+}
+
+fn appendIssueStateBadge(buf: *std.ArrayList(u8), allocator: Allocator, state: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<span class="issue-state-badge is-{state}"><span class="issue-state-mark" aria-hidden="true"></span>{label}</span>
+    , .{
+        .state = state,
+        .label = issueStateLabel(state),
+    });
+}
+
+fn issueStateLabel(state: []const u8) []const u8 {
+    if (std.mem.eql(u8, state, "open")) return "Open";
+    if (std.mem.eql(u8, state, "closed")) return "Closed";
+    return state;
+}
+
+fn commentWord(count: usize) []const u8 {
+    return if (count == 1) "comment" else "comments";
 }
 
 fn renderIssueNotFound(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
@@ -476,145 +552,42 @@ fn renderIssueNotFound(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![
     return buf.toOwnedSlice(allocator);
 }
 
-fn appendIssueFacts(
-    buf: *std.ArrayList(u8),
-    allocator: Allocator,
-    db: *SqliteDb,
-    issue_id: []const u8,
-    state: []const u8,
-    author_principal: []const u8,
-    author_device: []const u8,
-    source_author: []const u8,
-    opened_at: []const u8,
-    milestone: []const u8,
-    legacy_number: i64,
-) !void {
-    try appendTemplate(buf, allocator,
-        \\<dl class="facts issue-facts"><div><dt>Status</dt><dd>
-    , .{});
-    try appendStatePill(buf, allocator, state);
-    try appendTemplate(buf, allocator,
-        \\</dd></div><div><dt>ID</dt><dd><code>{issue_id}</code></dd></div><div><dt>Opened</dt><dd>{opened_at}</dd></div><div><dt>Author</dt><dd>{author}
-    , .{
-        .issue_id = issue_id,
-        .opened_at = opened_at,
-        .author = if (source_author.len != 0) source_author else author_principal,
-    });
-    if (source_author.len != 0) {
-        try appendTemplate(buf, allocator,
-            \\ <span class="muted">imported by {author_principal}/{author_device}</span>
-        , .{
-            .author_principal = author_principal,
-            .author_device = author_device,
-        });
-    } else {
-        try appendTemplate(buf, allocator, "/{author_device}", .{ .author_device = author_device });
-    }
-    try buf.appendSlice(allocator, "</dd></div>");
-    if (legacy_number > 0) {
-        try buf.appendSlice(allocator, "<div><dt>GitHub</dt><dd>");
-        try appendLegacyIssueLink(buf, allocator, legacy_number);
-        try buf.appendSlice(allocator, "</dd></div>");
-    }
-    if (milestone.len != 0) {
-        try appendTemplate(buf, allocator,
-            \\<div><dt>Milestone</dt><dd>{milestone}</dd></div>
-        , .{ .milestone = milestone });
-    }
-    try appendIssueCollectionFact(buf, allocator, db, "Labels", "SELECT DISTINCT label FROM issue_labels WHERE issue_id = ? ORDER BY label", issue_id);
-    try appendIssueCollectionFact(buf, allocator, db, "Assignees", "SELECT DISTINCT assignee FROM issue_assignees WHERE issue_id = ? ORDER BY assignee", issue_id);
-    try appendIssueProjectsFact(buf, allocator, db, issue_id);
-    try buf.appendSlice(allocator, "</dl>");
-}
-
 fn appendLegacyIssueLink(buf: *std.ArrayList(u8), allocator: Allocator, legacy_number: i64) !void {
     const issue_ref = try std.fmt.allocPrint(allocator, "{d}", .{legacy_number});
     defer allocator.free(issue_ref);
     try shared.appendIssueReferenceLink(buf, allocator, issue_ref);
 }
 
-fn appendIssueCollectionFact(
-    buf: *std.ArrayList(u8),
-    allocator: Allocator,
-    db: *SqliteDb,
-    label: []const u8,
-    comptime sql_text: []const u8,
-    issue_id: []const u8,
-) !void {
-    try appendTemplate(buf, allocator,
-        \\<div><dt>{label}</dt><dd class="pill-list">
-    , .{ .label = label });
-    var stmt = try db.prepare(sql_text);
-    defer stmt.deinit();
-    try stmt.bindText(1, issue_id);
-    var shown = false;
-    while (try stmt.step()) {
-        const value = try stmt.columnTextDup(allocator, 0);
-        defer allocator.free(value);
-        try appendPill(buf, allocator, value);
-        shown = true;
-    }
-    if (!shown) try buf.appendSlice(allocator, "<span class=\"muted\">None</span>");
-    try buf.appendSlice(allocator, "</dd></div>");
-}
-
-fn appendIssueProjectsFact(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8) !void {
-    var stmt = try db.prepare(
-        \\SELECT DISTINCT project, column_name
-        \\FROM issue_projects
-        \\WHERE issue_id = ?
-        \\ORDER BY project, column_name
-    );
-    defer stmt.deinit();
-    try stmt.bindText(1, issue_id);
-    try buf.appendSlice(allocator, "<div><dt>Projects</dt><dd class=\"pill-list\">");
-    var shown = false;
-    while (try stmt.step()) {
-        const project = try stmt.columnTextDup(allocator, 0);
-        defer allocator.free(project);
-        const column = try stmt.columnTextDup(allocator, 1);
-        defer allocator.free(column);
-        try buf.appendSlice(allocator, "<span class=\"pill\">");
-        try appendTemplate(buf, allocator, "{project}", .{ .project = project });
-        if (column.len != 0) {
-            try appendTemplate(buf, allocator, " / {column}", .{ .column = column });
-        }
-        try buf.appendSlice(allocator, "</span>");
-        shown = true;
-    }
-    if (!shown) try buf.appendSlice(allocator, "<span class=\"muted\">None</span>");
-    try buf.appendSlice(allocator, "</dd></div>");
-}
-
 fn appendIssueComments(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8) !void {
     var stmt = try db.prepare(
-        \\SELECT id, body, redacted, COALESCE(NULLIF(source_author, ''), author_principal), created_at, reply_parent_id, reply_parent_hash
+        \\SELECT body, redacted, COALESCE(NULLIF(source_author, ''), author_principal), created_at, reply_parent_id, reply_parent_hash
         \\FROM comments
         \\WHERE parent_kind = 'issue' AND parent_id = ?
         \\ORDER BY created_at, id
     );
     defer stmt.deinit();
     try stmt.bindText(1, issue_id);
-    var shown = false;
     while (try stmt.step()) {
-        const id = try stmt.columnTextDup(allocator, 0);
-        defer allocator.free(id);
-        const body = try stmt.columnTextDup(allocator, 1);
+        const body = try stmt.columnTextDup(allocator, 0);
         defer allocator.free(body);
-        const redacted = stmt.columnInt(2) != 0;
-        const author = try stmt.columnTextDup(allocator, 3);
+        const redacted = stmt.columnInt(1) != 0;
+        const author = try stmt.columnTextDup(allocator, 2);
         defer allocator.free(author);
-        const created_at = try stmt.columnTextDup(allocator, 4);
+        const created_at = try stmt.columnTextDup(allocator, 3);
         defer allocator.free(created_at);
-        const reply_parent_id = try stmt.columnTextDup(allocator, 5);
+        const reply_parent_id = try stmt.columnTextDup(allocator, 4);
         defer allocator.free(reply_parent_id);
-        const reply_parent_hash = try stmt.columnTextDup(allocator, 6);
+        const reply_parent_hash = try stmt.columnTextDup(allocator, 5);
         defer allocator.free(reply_parent_hash);
 
+        const is_reply = reply_parent_id.len != 0 or reply_parent_hash.len != 0;
         try appendTemplate(buf, allocator,
-            \\<article class="{classes}"><div class="comment-meta"><strong>{author}</strong><span>{created_at}</span></div>
+            \\<div class="{classes}"><div class="issue-timeline-avatar">
+        , .{ .classes = shared.classes("issue-timeline-item", &.{shared.class("is-reply", is_reply)}) });
+        try appendIssueAvatar(buf, allocator, author, "issue-detail-avatar");
+        try appendTemplate(buf, allocator,
+            \\</div><article class="issue-comment-box"><header class="issue-comment-head"><div><strong>{author}</strong><span>commented {created_at}</span></div><button class="issue-kebab-button" type="button" disabled aria-label="Comment actions"></button></header>
         , .{
-            .classes = shared.classes("issue-card comment-card", &.{shared.class("is-reply", reply_parent_id.len != 0 or reply_parent_hash.len != 0)}),
             .author = author,
             .created_at = created_at,
         });
@@ -637,12 +610,139 @@ fn appendIssueComments(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
         } else {
             try markdown_render.appendMarkdown(buf, allocator, body);
         }
-        try buf.appendSlice(allocator, "</div></article>");
+        try buf.appendSlice(allocator, "</div></article></div>");
+    }
+}
+
+fn appendIssueSidebar(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    issue_id: []const u8,
+    author: []const u8,
+    milestone: []const u8,
+) !void {
+    try appendIssueSidebarAssignees(buf, allocator, db, issue_id);
+    try appendIssueSidebarLabels(buf, allocator, db, issue_id);
+    try appendIssueSidebarText(buf, allocator, "Type", "No type");
+    try appendIssueSidebarProjects(buf, allocator, db, issue_id);
+    try appendIssueSidebarText(buf, allocator, "Milestone", if (milestone.len == 0) "No milestone" else milestone);
+    try appendIssueSidebarText(buf, allocator, "Relationships", "None yet");
+    try appendIssueSidebarText(buf, allocator, "Development", "No linked branches or pull requests.");
+    try appendIssueSidebarNotifications(buf, allocator);
+    try appendIssueSidebarParticipants(buf, allocator, db, issue_id, author);
+}
+
+fn appendIssueSidebarAssignees(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8) !void {
+    try appendIssueSidebarSectionStart(buf, allocator, "Assignees");
+    var stmt = try db.prepare("SELECT DISTINCT assignee FROM issue_assignees WHERE issue_id = ? ORDER BY assignee");
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    var shown = false;
+    while (try stmt.step()) {
+        const assignee = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(assignee);
+        try appendIssueSidebarPerson(buf, allocator, assignee);
         shown = true;
     }
-    if (!shown) {
-        try appendInlineEmpty(buf, allocator, "No comments yet.");
+    if (!shown) try buf.appendSlice(allocator, "<p class=\"issue-sidebar-empty\">No one assigned</p>");
+    try appendIssueSidebarSectionEnd(buf, allocator);
+}
+
+fn appendIssueSidebarLabels(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8) !void {
+    try appendIssueSidebarSectionStart(buf, allocator, "Labels");
+    var stmt = try db.prepare("SELECT DISTINCT label FROM issue_labels WHERE issue_id = ? ORDER BY label");
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    var shown = false;
+    while (try stmt.step()) {
+        const label = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(label);
+        if (!shown) {
+            try buf.appendSlice(allocator, "<div class=\"issue-sidebar-labels\">");
+            shown = true;
+        }
+        try appendIssueLabel(buf, allocator, label);
     }
+    if (shown) {
+        try buf.appendSlice(allocator, "</div>");
+    } else {
+        try buf.appendSlice(allocator, "<p class=\"issue-sidebar-empty\">None yet</p>");
+    }
+    try appendIssueSidebarSectionEnd(buf, allocator);
+}
+
+fn appendIssueSidebarProjects(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8) !void {
+    try appendIssueSidebarSectionStart(buf, allocator, "Projects");
+    var stmt = try db.prepare(
+        \\SELECT DISTINCT project, column_name
+        \\FROM issue_projects
+        \\WHERE issue_id = ?
+        \\ORDER BY project, column_name
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    var shown = false;
+    while (try stmt.step()) {
+        const project = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(project);
+        const column = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(column);
+        try buf.appendSlice(allocator, "<span class=\"issue-sidebar-pill\">");
+        try appendTemplate(buf, allocator, "{project}", .{ .project = project });
+        if (column.len != 0) try appendTemplate(buf, allocator, " / {column}", .{ .column = column });
+        try buf.appendSlice(allocator, "</span>");
+        shown = true;
+    }
+    if (!shown) try buf.appendSlice(allocator, "<p class=\"issue-sidebar-empty\">No projects</p>");
+    try appendIssueSidebarSectionEnd(buf, allocator);
+}
+
+fn appendIssueSidebarParticipants(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8, author: []const u8) !void {
+    try appendIssueSidebarSectionStart(buf, allocator, "Participants");
+    try buf.appendSlice(allocator, "<div class=\"issue-participants\">");
+    try appendIssueAvatar(buf, allocator, author, "");
+    var stmt = try db.prepare("SELECT DISTINCT assignee FROM issue_assignees WHERE issue_id = ? AND assignee <> ? ORDER BY assignee");
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    try stmt.bindText(2, author);
+    while (try stmt.step()) {
+        const assignee = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(assignee);
+        try appendIssueAvatar(buf, allocator, assignee, "");
+    }
+    try buf.appendSlice(allocator, "</div>");
+    try appendIssueSidebarSectionEnd(buf, allocator);
+}
+
+fn appendIssueSidebarNotifications(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try appendIssueSidebarSectionStart(buf, allocator, "Notifications");
+    try buf.appendSlice(allocator,
+        \\<button class="button secondary issue-sidebar-full-button" type="button" disabled>Subscribe</button>
+    );
+    try appendIssueSidebarSectionEnd(buf, allocator);
+}
+
+fn appendIssueSidebarText(buf: *std.ArrayList(u8), allocator: Allocator, title: []const u8, value: []const u8) !void {
+    try appendIssueSidebarSectionStart(buf, allocator, title);
+    try appendTemplate(buf, allocator, "<p class=\"issue-sidebar-empty\">{value}</p>", .{ .value = value });
+    try appendIssueSidebarSectionEnd(buf, allocator);
+}
+
+fn appendIssueSidebarSectionStart(buf: *std.ArrayList(u8), allocator: Allocator, title: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<section class="issue-sidebar-section"><h2>{title}</h2>
+    , .{ .title = title });
+}
+
+fn appendIssueSidebarSectionEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try buf.appendSlice(allocator, "</section>");
+}
+
+fn appendIssueSidebarPerson(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8) !void {
+    try buf.appendSlice(allocator, "<div class=\"issue-sidebar-person\">");
+    try appendIssueAvatar(buf, allocator, name, "");
+    try appendTemplate(buf, allocator, "<span>{name}</span></div>", .{ .name = name });
 }
 
 pub fn renderIssueForm(

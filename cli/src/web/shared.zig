@@ -21,6 +21,7 @@ const WebStats = struct {
     staged_refs: usize = 0,
     events: usize = 0,
     issues: usize = 0,
+    pulls: usize = 0,
 };
 
 pub const Href = union(enum) {
@@ -31,6 +32,7 @@ pub const Href = union(enum) {
     blame: PathHref,
     commit: []const u8,
     issue: []const u8,
+    pull: []const u8,
 };
 
 pub const PathHref = struct {
@@ -89,6 +91,10 @@ pub fn commitHref(hash: []const u8) Href {
 
 pub fn issueHref(issue_ref: []const u8) Href {
     return .{ .issue = issue_ref };
+}
+
+pub fn pullHref(pull_ref: []const u8) Href {
+    return .{ .pull = pull_ref };
 }
 
 pub fn issueReferenceEnd(value: []const u8, start: usize) ?usize {
@@ -203,6 +209,7 @@ pub fn appendShellStart(
     try appendNavLink(buf, allocator, active, "code", "/", "Code", null);
     try appendNavLink(buf, allocator, active, "commits", "/commits", "Commits", null);
     try appendNavLink(buf, allocator, active, "issues", "/issues", "Issues", stats.issues);
+    try appendNavLink(buf, allocator, active, "pulls", "/pulls", "PRs", stats.pulls);
     try appendNavLink(buf, allocator, active, "projects", "/projects", "Projects", null);
     try appendNavLink(buf, allocator, active, "events", "/events", "Events", null);
     try appendNavLink(buf, allocator, active, "refs", "/refs", "Refs", null);
@@ -628,6 +635,10 @@ pub fn appendHref(buf: *std.ArrayList(u8), allocator: Allocator, href: Href) !vo
             try buf.appendSlice(allocator, "/issues/");
             try appendUrlEncoded(buf, allocator, issue_ref);
         },
+        .pull => |pull_ref| {
+            try buf.appendSlice(allocator, "/pulls/");
+            try appendUrlEncoded(buf, allocator, pull_ref);
+        },
     }
 }
 
@@ -780,6 +791,7 @@ fn loadWebStats(allocator: Allocator, repo: Repo) !WebStats {
     if (!(index.isIndexFresh(allocator, repo) catch false)) return stats;
     stats.events = countIndexedEvents(allocator, repo) catch 0;
     stats.issues = index.countIssueOpenedEvents(allocator, repo) catch 0;
+    stats.pulls = index.countPulls(allocator, repo) catch 0;
     return stats;
 }
 
