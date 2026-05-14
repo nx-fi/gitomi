@@ -84,16 +84,15 @@ fn isMissingRemoteGenesis(stderr: []const u8) bool {
 }
 
 pub fn syncPush(allocator: Allocator, remote: []const u8) !void {
-    const actor_ref = try configuredActorInboxRef(allocator);
-    defer if (actor_ref) |ref| allocator.free(ref);
+    try validateConfiguredRepoIfPresent(allocator);
 
-    const actor_oid = if (actor_ref) |ref| try resolveOptionalRef(allocator, ref) else null;
-    defer if (actor_oid) |oid| allocator.free(oid);
+    const inbox_refs = try listRefs(allocator, "refs/gitomi/inbox");
+    defer freeStringList(allocator, inbox_refs);
 
     const genesis_oid = try resolveOptionalRef(allocator, repo_mod.genesis_ref);
     defer if (genesis_oid) |oid| allocator.free(oid);
 
-    if (actor_oid == null and genesis_oid == null) {
+    if (inbox_refs.len == 0 and genesis_oid == null) {
         try out("no local Gitomi refs to push\n", .{});
         return;
     }
@@ -103,32 +102,15 @@ pub fn syncPush(allocator: Allocator, remote: []const u8) !void {
         try pushGenesisRef(allocator, remote);
     }
 
-    const ref = actor_ref orelse {
-        try out("no local Gitomi actor configured; no inbox ref pushed\n", .{});
-        return;
-    };
-
-    if (actor_oid == null) {
-        try out("no local actor inbox ref to push\n", .{});
-        return;
-    }
-
-    const refspec = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ ref, ref });
-    defer allocator.free(refspec);
-    const push_args = [_][]const u8{ "push", remote, refspec };
-
-    try out("pushing local actor Gitomi inbox ref to {s}\n", .{remote});
-    const pushed = try gitChecked(allocator, &push_args);
-    defer allocator.free(pushed);
-    if (pushed.len != 0) try out("{s}", .{pushed});
+    try pushInboxRefs(allocator, remote, inbox_refs);
 }
 
-fn configuredActorInboxRef(allocator: Allocator) !?[]u8 {
+fn validateConfiguredRepoIfPresent(allocator: Allocator) !void {
     var repo = try repo_mod.discoverRepo(allocator);
     defer repo.deinit();
 
     var cfg = repo_mod.loadConfig(allocator, repo.config_path) catch |err| switch (err) {
-        CliError.ConfigNotFound => return null,
+        CliError.ConfigNotFound => return,
         CliError.ConfigInvalid => {
             try eprint("gt sync: invalid Gitomi config; run `gt init` or fix .git/gitomi/config.toml\n", .{});
             return err;
@@ -138,7 +120,38 @@ fn configuredActorInboxRef(allocator: Allocator) !?[]u8 {
     defer cfg.deinit();
 
     try repo_mod.validateConfigRepoId(allocator, cfg);
-    return try repo_mod.inboxRef(allocator, cfg);
+}
+
+fn pushInboxRefs(allocator: Allocator, remote: []const u8, refs: [][]u8) !void {
+    if (refs.len == 0) {
+        try out("no authoritative Gitomi inbox refs to push\n", .{});
+        return;
+    }
+    if (refs.len > git.max_default_inbox_refs) {
+        try eprint("gt sync: refusing to push {d} inbox refs; v1 default limit is {d}\n", .{ refs.len, git.max_default_inbox_refs });
+        return CliError.UserError;
+    }
+
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    var refspecs: std.ArrayList([]u8) = .empty;
+    defer {
+        for (refspecs.items) |refspec| allocator.free(refspec);
+        refspecs.deinit(allocator);
+    }
+
+    try argv.appendSlice(allocator, &.{ "push", remote });
+    for (refs) |ref| {
+        const refspec = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ ref, ref });
+        errdefer allocator.free(refspec);
+        try argv.append(allocator, refspec);
+        try refspecs.append(allocator, refspec);
+    }
+
+    try out("pushing {d} authoritative Gitomi inbox ref{s} to {s}\n", .{ refs.len, if (refs.len == 1) "" else "s", remote });
+    const pushed = try gitChecked(allocator, argv.items);
+    defer allocator.free(pushed);
+    if (pushed.len != 0) try out("{s}", .{pushed});
 }
 
 fn pushGenesisRef(allocator: Allocator, remote: []const u8) !void {

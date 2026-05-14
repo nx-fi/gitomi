@@ -1,4 +1,5 @@
 const std = @import("std");
+const actions_page = @import("web/actions.zig");
 const commits_page = @import("web/commits.zig");
 const errors = @import("errors.zig");
 const events_page = @import("web/events.zig");
@@ -247,6 +248,14 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
     } else if (std.mem.eql(u8, request.method, "POST") and std.mem.eql(u8, request.path, "/projects")) {
         try projects_page.handleProjectPost(allocator, repo, stream, request.body);
+    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/actions")) {
+        const body = try actions_page.renderActionsPage(allocator, repo, request.target);
+        defer allocator.free(body);
+        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
+    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.eql(u8, request.path, "/actions/request")) {
+        try actions_page.handleActionsRequestPost(allocator, repo, stream, request.body);
+    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.eql(u8, request.path, "/actions/run-requested")) {
+        try actions_page.handleRunRequestedPost(allocator, stream);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/events")) {
         const body = try events_page.renderEventsPage(allocator, repo);
         defer allocator.free(body);

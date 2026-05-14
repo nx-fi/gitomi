@@ -81,6 +81,7 @@ gt actions request --workflow WORKFLOW [--ref REF|--oid OID] [--event EVENT]
 gt actions complete RUN --conclusion CONCLUSION [--workflow WORKFLOW] [--ref REF|--oid OID] [--event EVENT]
 gt actions run --event EVENT [--ref REF|--oid OID] [--object-id ID] [--dry-run] [--act PATH] [-- ACT_ARGS...]
 gt actions run-requested [RUN] [--dry-run] [--act PATH] [-- ACT_ARGS...]
+gt actions daemon [--once] [--replay] [--interval-ms N] [--dry-run] [--act PATH] [-- ACT_ARGS...]
 gt runs prune [--dry-run] [--max-age-days N] [--max-count N] [--max-bytes N]
 gt sync [--remote REMOTE] [--pull-only|--push-only]
 gt github import [--repo OWNER/REPO] [--token TOKEN] [--from-file PATH] [--no-comments] [--no-projects]
@@ -117,8 +118,11 @@ then admits only compatible genesis refs and new or fast-forward inbox refs into
 the authoritative namespace after checking the event commit chain, empty-tree
 rule, native Git signature, parent hashes, and v1 JSON envelope. Diverged or
 chain-invalid staged inbox refs are moved under `refs/gitomi/quarantine/*`.
-Default push publishes only local genesis and the configured actor's own inbox
-ref, not every locally replicated inbox ref.
+Default push publishes local genesis and all authoritative inbox refs under
+`refs/gitomi/inbox/*`, so a replica can relay the durable event logs it has
+accepted. Sync does not publish local cache or diagnostic namespaces such as
+`refs/gitomi/staging/*`, `refs/gitomi/quarantine/*`, `refs/gitomi/snapshots/*`,
+or `refs/gitomi/runs/*`.
 
 `gt fsck` verifies authoritative inbox refs for ref-safe names, empty-tree event
 commits, native Git signatures, v1 event envelopes, matching repo IDs, unique
@@ -128,11 +132,20 @@ inbox-chain shape.
 `gt actions workflows` reads GitHub Actions-compatible workflow definitions from
 `.github/workflows/*.yml` and `.github/workflows/*.yaml` in the selected commit.
 `gt actions run` schedules matching workflows for a Gitomi or data-plane event,
-emits a signed `action.run_requested` event, executes the workflow through
-`nektos/act`, then emits a signed `action.run_completed` event. `gt actions
-request` and `gt actions complete` expose the same event emission manually, and
-`gt actions run-requested` executes accepted pending run requests from the local
-event projection. Extra act flags can be passed after `--`.
+emits a signed `action.run_requested` event, creates a detached worktree at the
+target commit, runs `nektos/act` as
+`act <event> -W <workflow> -e <payload>`, then emits a signed
+`action.run_completed` event. `gt actions request` and `gt actions complete`
+expose the same event emission manually, and `gt actions run-requested`
+executes accepted pending run requests from the local event projection. Extra
+act flags can be passed after `--`; `--act PATH` selects a non-default act
+binary.
+
+`gt actions daemon` is the scheduler service. It polls the local repository,
+executes accepted pending run requests, schedules new accepted Gitomi events
+and `HEAD` changes against matching workflow triggers, and stores local cursors
+under `.git/gitomi/actions-scheduler.state`. On first start it begins from the
+current frontier; use `--replay` to intentionally schedule existing history.
 
 `gt index rebuild` writes a disposable SQLite event projection to
 `.git/gitomi/index.sqlite`, including the inbox ref heads used to decide
@@ -172,7 +185,7 @@ same GitHub repository that was imported.
 `gt web` starts a local-only GitHub-like web UI for the current repository. It
 binds to loopback on port 12655 by default, retrying nearby random ports if that
 port is occupied. It opens on a committed-tree code explorer, also serves
-overview/issues/projects/events/refs pages, and can create signed issue events
-through the same storage path as `gt issue open`. The projects page renders
-kanban boards from signed project and issue placement events and can create new
-project boards.
+overview/issues/projects/actions/events/refs pages, and can create signed issue
+events and workflow run requests through the same storage path as the CLI. The
+projects page renders kanban boards from signed project and issue placement
+events and can create new project boards.

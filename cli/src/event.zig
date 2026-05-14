@@ -1526,6 +1526,8 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!hasString(payload, "target_ref") and !hasString(payload, "target_oid")) return "action.run_requested payload.target_ref or payload.target_oid must be a string";
         if (!optionalStringWithin(payload, "target_ref", git.max_payload_ref_bytes)) return "action.run_requested payload.target_ref exceeds v1 ref size limit";
         if (!optionalStringWithin(payload, "target_oid", git.max_payload_ref_bytes)) return "action.run_requested payload.target_oid exceeds v1 ref size limit";
+        if (!optionalStringWithin(payload, "event_name", git.max_payload_atom_bytes)) return "action.run_requested payload.event_name exceeds v1 field size limit";
+        if (!optionalStringWithin(payload, "gitomi_event_type", git.max_payload_atom_bytes)) return "action.run_requested payload.gitomi_event_type exceeds v1 field size limit";
         return null;
     }
     if (std.mem.eql(u8, event_type, "action.run_completed")) {
@@ -1533,9 +1535,13 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!stringWithin(payload, "run_id", git.max_payload_ref_bytes)) return "action.run_completed payload.run_id exceeds v1 field size limit";
         if (!hasString(payload, "conclusion")) return "action.run_completed payload.conclusion must be a string";
         if (!stringWithin(payload, "conclusion", git.max_payload_atom_bytes)) return "action.run_completed payload.conclusion exceeds v1 field size limit";
+        const conclusion = jsonString(payload.get("conclusion")) orelse return "action.run_completed payload.conclusion must be a string";
+        if (!isActionConclusion(conclusion)) return "action.run_completed payload.conclusion is not a recognized conclusion";
         if (!hasString(payload, "target_ref") and !hasString(payload, "target_oid")) return "action.run_completed payload.target_ref or payload.target_oid must be a string";
         if (!optionalStringWithin(payload, "target_ref", git.max_payload_ref_bytes)) return "action.run_completed payload.target_ref exceeds v1 ref size limit";
         if (!optionalStringWithin(payload, "target_oid", git.max_payload_ref_bytes)) return "action.run_completed payload.target_oid exceeds v1 ref size limit";
+        if (!optionalStringWithin(payload, "workflow", git.max_payload_atom_bytes)) return "action.run_completed payload.workflow exceeds v1 field size limit";
+        if (!optionalStringWithin(payload, "event_name", git.max_payload_atom_bytes)) return "action.run_completed payload.event_name exceeds v1 field size limit";
         return null;
     }
 
@@ -1660,6 +1666,16 @@ fn optionalStringWithin(object: std.json.ObjectMap, key: []const u8, max_bytes: 
         else => return false,
     };
     return string.len <= max_bytes;
+}
+
+fn isActionConclusion(value: []const u8) bool {
+    return std.mem.eql(u8, value, "success") or
+        std.mem.eql(u8, value, "failure") or
+        std.mem.eql(u8, value, "cancelled") or
+        std.mem.eql(u8, value, "skipped") or
+        std.mem.eql(u8, value, "neutral") or
+        std.mem.eql(u8, value, "timed_out") or
+        std.mem.eql(u8, value, "action_required");
 }
 
 fn optionalBool(object: std.json.ObjectMap, key: []const u8) bool {

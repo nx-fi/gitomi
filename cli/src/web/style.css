@@ -774,13 +774,18 @@ main.page-code:has(.root-page-grid) {
   gap: 4px;
   min-width: 0;
   padding: 0 14px;
-  overflow-x: auto;
+  overflow: visible;
   scrollbar-width: none;
 }
 .issues-filter-menus::-webkit-scrollbar {
   display: none;
 }
-.issues-filter-menus button {
+.issues-filter-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+.issues-filter-menus button,
+.issues-filter-menu summary {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -793,16 +798,89 @@ main.page-code:has(.root-page-grid) {
   font: inherit;
   font-weight: 600;
   white-space: nowrap;
-  cursor: default;
+  cursor: pointer;
   opacity: 1;
+  list-style: none;
 }
-.issues-filter-menus button::after {
+.issues-filter-menus button {
+  cursor: default;
+}
+.issues-filter-menu summary::-webkit-details-marker {
+  display: none;
+}
+.issues-filter-menu[open] summary,
+.issues-filter-menu.active summary,
+.issues-filter-menu summary:hover {
+  color: var(--text);
+  background: var(--button-secondary-bg);
+}
+.issues-filter-menus button::after,
+.issues-filter-menu summary::after {
   content: "";
   width: 0;
   height: 0;
   border-top: 4px solid currentColor;
   border-right: 4px solid transparent;
   border-left: 4px solid transparent;
+}
+.issues-filter-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 24;
+  display: grid;
+  width: max-content;
+  min-width: 220px;
+  max-width: min(320px, calc(100vw - 24px));
+  max-height: 340px;
+  padding: 6px 0;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
+}
+.issues-filter-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 12px;
+  color: var(--text);
+  font-weight: 600;
+}
+.issues-filter-option:hover,
+.issues-filter-option.selected {
+  background: var(--panel-strong);
+  text-decoration: none;
+}
+.issues-filter-option.selected::before {
+  content: "";
+  width: 7px;
+  height: 4px;
+  border-bottom: 2px solid currentColor;
+  border-left: 2px solid currentColor;
+  transform: rotate(-45deg);
+}
+.issues-filter-option.selected {
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+}
+.issues-filter-option span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.issues-filter-option small {
+  color: var(--muted);
+  font-weight: 700;
+}
+.issues-filter-empty {
+  padding: 10px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
 }
 .issue-list-row {
   display: grid;
@@ -2040,10 +2118,51 @@ tbody tr:hover {
   color: var(--muted);
   font-size: 12px;
 }
-.root-language-sloc {
+.root-sloc-breakdown {
+  display: grid;
+  gap: 6px;
+}
+.root-sloc-row {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding-top: 6px;
   color: var(--muted);
   font-size: 12px;
+  line-height: 1.25;
+  border-top: 1px solid var(--border);
+}
+.root-sloc-row:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+.root-sloc-language {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+  color: var(--text);
+  font-weight: 700;
+}
+.root-sloc-language > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
+}
+.root-sloc-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  min-width: 0;
+}
+.root-sloc-metrics span {
+  min-width: 0;
+}
+.root-sloc-metrics strong {
+  display: block;
+  color: var(--text);
+  font-weight: 700;
 }
 .root-sidebar-empty {
   margin: 0;

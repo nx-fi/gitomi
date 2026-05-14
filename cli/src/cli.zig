@@ -154,6 +154,7 @@ fn printUsage() !void {
         \\  gt actions complete RUN --conclusion CONCLUSION [--workflow WORKFLOW] [--ref REF|--oid OID] [--event EVENT]
         \\  gt actions run --event EVENT [--ref REF|--oid OID] [--object-id ID] [--dry-run] [--act PATH] [-- ACT_ARGS...]
         \\  gt actions run-requested [RUN] [--dry-run] [--act PATH] [-- ACT_ARGS...]
+        \\  gt actions daemon [--once] [--replay] [--interval-ms N] [--dry-run] [--act PATH] [-- ACT_ARGS...]
         \\  gt runs prune [--dry-run] [--max-age-days N] [--max-count N] [--max-bytes N]
         \\  gt sync [--remote REMOTE] [--pull-only|--push-only]
         \\  gt github import [--repo OWNER/REPO] [--token TOKEN] [--from-file PATH] [--no-comments] [--no-projects]
@@ -1548,7 +1549,7 @@ fn cmdIdentity(allocator: Allocator, args: []const []const u8) !void {
 
 fn cmdActions(allocator: Allocator, args: []const []const u8, command_name: []const u8) !void {
     if (args.len == 0) {
-        try io.eprint("{s}: expected subcommand 'workflows', 'request', 'complete', 'run', or 'run-requested'\n", .{command_name});
+        try io.eprint("{s}: expected subcommand 'workflows', 'request', 'complete', 'run', 'run-requested', or 'daemon'\n", .{command_name});
         return CliError.UserError;
     }
 
@@ -1717,7 +1718,38 @@ fn cmdActions(allocator: Allocator, args: []const []const u8, command_name: []co
         return;
     }
 
-    try io.eprint("{s}: expected subcommand 'workflows', 'request', 'complete', 'run', or 'run-requested'\n", .{command_name});
+    if (std.mem.eql(u8, args[0], "daemon") or std.mem.eql(u8, args[0], "watch")) {
+        var options = actions.DaemonOptions{};
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            const arg = args[i];
+            if (std.mem.eql(u8, arg, "--")) {
+                options.extra_args = args[i + 1 ..];
+                break;
+            } else if (std.mem.eql(u8, arg, "--act")) {
+                options.act_path = try util.requireValue(args, &i, "--act");
+            } else if (std.mem.eql(u8, arg, "--dry-run")) {
+                options.dry_run = true;
+            } else if (std.mem.eql(u8, arg, "--once")) {
+                options.once = true;
+            } else if (std.mem.eql(u8, arg, "--replay")) {
+                options.replay = true;
+            } else if (std.mem.eql(u8, arg, "--interval-ms")) {
+                const raw = try util.requireValue(args, &i, "--interval-ms");
+                options.interval_ms = std.fmt.parseUnsigned(u64, raw, 10) catch {
+                    try io.eprint("{s} daemon: --interval-ms must be a non-negative integer\n", .{command_name});
+                    return CliError.UserError;
+                };
+            } else {
+                try io.eprint("{s} daemon: unknown option '{s}'\n", .{ command_name, arg });
+                return CliError.UserError;
+            }
+        }
+        try actions.runDaemon(allocator, options);
+        return;
+    }
+
+    try io.eprint("{s}: expected subcommand 'workflows', 'request', 'complete', 'run', 'run-requested', or 'daemon'\n", .{command_name});
     return CliError.UserError;
 }
 
