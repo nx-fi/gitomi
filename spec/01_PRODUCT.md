@@ -244,8 +244,8 @@ The following payload members are REQUIRED for interoperable v1 implementations:
 *   `acl.role_granted` / `acl.role_revoked`: `principal`, `role`
 *   `identity.device_added`: `principal`, `device`, `signing_key.public_key`, `signing_key.fingerprint`
 *   `identity.device_revoked`: `principal`, `device`
-*   `action.run_requested`: `workflow`, `target_ref` or `target_oid`
-*   `action.run_completed`: `run_id`, `conclusion`, `target_ref` or `target_oid`
+*   `action.run_requested`: `workflow`, `target_ref` or `target_oid`; OPTIONAL `event_name`, `gitomi_event_type`
+*   `action.run_completed`: `run_id`, `conclusion`, `target_ref` or `target_oid`; OPTIONAL `workflow`, `event_name`
 
 ### 4.7. Pull Request Product Model
 
@@ -611,9 +611,12 @@ If missing or corrupted, a compliant implementation MUST rebuild state by:
 
 Synchronization MUST use standard Git transport and refs. Implementations MUST be able to fetch and push Gitomi refs over normal Git protocol v2 transports such as SSH, HTTPS, or bundles.
 
-Default push MUST publish only `refs/gitomi/genesis` and the configured local
-actor's own inbox ref. It MUST NOT republish other locally replicated inbox refs
-unless the operator selects an explicit mirror or backup mode.
+Default push MUST publish `refs/gitomi/genesis` and every local authoritative
+inbox ref under `refs/gitomi/inbox/*`. A replica MAY therefore relay inbox refs
+that it fetched and admitted from another replica. Default push MUST NOT publish
+local cache or diagnostic refs, including `refs/gitomi/staging/*`,
+`refs/gitomi/quarantine/*`, `refs/gitomi/snapshots/*`, or
+`refs/gitomi/runs/*`.
 
 ### 7.2. `repo_id` Discovery and Forks
 
@@ -685,23 +688,79 @@ per repository unless the operator explicitly configures larger values.
 Workflows MUST be read from `.github/workflows/*.yml` or `.github/workflows/*.yaml`.
 
 Gitomi SHOULD preserve GitHub Actions syntax compatibility for workflow files.
+At minimum, implementations MUST recognize top-level `on` declarations in the
+scalar, array, mapping, and block forms commonly used by GitHub Actions. A
+workflow is eligible when its trigger matches the Gitomi event type, the GitHub
+event name derived from that type, or the Gitomi event family.
 
 ### 8.2. Scheduler
 
 The scheduler MUST observe both:
 
 *   Data Plane events such as branch updates; and
-*   Control Plane events such as `issue.*`, `pull.*`, and `action.run_requested`
+*   Control Plane events such as `issue.*`, `pull.*`, and `action.run_requested`.
 
-When an event matches a workflow trigger, the scheduler MUST construct a GitHub-like event payload and invoke the execution core against the referenced code state.
+Implementations MUST provide a scheduler service or daemon mode that can run
+continuously without user interaction. The daemon MUST maintain local,
+disposable scheduler cursors outside the Data Plane, normally under
+`.git/gitomi/`, so it can resume after restart without replaying already
+scheduled events. On first start it SHOULD initialize its cursors to the current
+accepted event frontier and current `HEAD` unless the operator explicitly asks
+to replay existing events.
+
+When an event matches a workflow trigger, the scheduler MUST create an
+`action.run_requested` inbox event before execution. The request payload MUST
+record the workflow file path and the target code state as `target_oid`, and MAY
+also record the human ref as `target_ref`. The payload SHOULD record both the
+GitHub-compatible `event_name` used to execute the workflow and the original
+Gitomi `gitomi_event_type`.
+
+The scheduler MUST then construct a GitHub-like event payload and invoke the
+execution core against the referenced code state. For Gitomi Control Plane
+events, the GitHub-compatible event names are:
+
+| Gitomi event | GitHub event name |
+|--------------|-------------------|
+| `issue.*` | `issues` |
+| `pull.*` | `pull_request` |
+| `action.run_requested` | `workflow_dispatch` |
+| `push` | `push` |
+| other event types | unchanged event type string |
 
 ### 8.3. Execution Core
 
-Implementations SHOULD use `nektos/act` or a compatible derivative as the local execution core.
+Implementations SHOULD use `nektos/act` or a compatible derivative as the local
+execution core. The v1 CLI execution contract is:
+
+1.  Resolve the target to a commit OID.
+2.  Create a temporary detached worktree at that commit.
+3.  Write the synthesized event payload to a local file outside the data-plane
+    tree, normally under `.git/gitomi/action-events/`.
+4.  Invoke `act` from the temporary worktree as:
+
+    ```text
+    act <event_name> -W <workflow-path> -e <event-payload-path> [extra args...]
+    ```
+
+The execution payload MUST include `ref`, `after`, `repository`, `workflow`, and
+`gitomi` fields. `gitomi.run_id` MUST equal the run request UUID, and
+`gitomi.event_type` MUST carry the original Gitomi event type. For issue and
+pull request events, implementations SHOULD set the payload `action` field from
+the suffix of the Gitomi event type (for example `issue.opened` becomes
+`opened`) and include minimal `issue` or `pull_request` objects containing the
+Gitomi object ID when known.
+
+Implementations MAY pass through additional `act` arguments supplied by the
+operator after Gitomi's required arguments. A missing or failing execution core
+MUST NOT remove the run request event; it MUST be represented by a completion
+event with an appropriate non-success conclusion when the runner is able to
+write one.
 
 ### 8.4. Run Storage and Results
 
 Workflow execution results MUST be summarized by a signed `action.run_completed` event in an inbox ref.
+The completion `conclusion` MUST be one of `success`, `failure`, `cancelled`,
+`skipped`, `neutral`, `timed_out`, or `action_required`.
 
 Implementations MAY additionally stream incremental logs, traces, or artifacts into `refs/gitomi/runs/<runner-id>/<run-id>` or external object storage.
 
@@ -719,6 +778,21 @@ Implementations MUST bound diagnostic storage. v1 implementations SHOULD cap
 default retained run diagnostics to 256 MiB total, SHOULD reject or externalize
 large individual artifacts, and MUST require an explicit diagnostic path to
 fetch or push run refs.
+
+### 8.5. Web UI
+
+Implementations that provide a web UI MUST expose workflow automation state.
+The UI SHOULD include:
+
+*   discovered workflow files and their triggers for the selected code state;
+*   accepted run requests, pending runs, completions, and conclusions;
+*   enough target information to identify the ref or commit being run; and
+*   controls to request a workflow run when the local actor can write signed
+    `action.run_requested` events.
+
+The web UI MAY expose a local-only "run pending" control that invokes the same
+execution core as the daemon. Long-running or privileged runner operation
+SHOULD remain an explicit local action and MUST NOT require publishing run refs.
 
 ## 9. Migration Compatibility
 

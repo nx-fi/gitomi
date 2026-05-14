@@ -153,9 +153,27 @@ fn classifyRef(ref: []const u8) RefScope {
         return .{ .label = "Remote", .detail = "staged by sync", .class = "remote" };
     }
     if (std.mem.startsWith(u8, ref, "refs/gitomi/quarantine/")) {
-        return .{ .label = "Remote", .detail = "quarantined", .class = "remote" };
+        return .{ .label = "Local", .detail = "quarantined", .class = "local" };
     }
-    return .{ .label = "Local only", .detail = "authoritative", .class = "local" };
+    if (std.mem.eql(u8, ref, "refs/gitomi/genesis")) {
+        return .{ .label = "Gitomi", .detail = "trust root", .class = "local" };
+    }
+    if (std.mem.startsWith(u8, ref, "refs/gitomi/inbox/")) {
+        return .{ .label = "Gitomi", .detail = "authoritative inbox", .class = "local" };
+    }
+    if (std.mem.startsWith(u8, ref, "refs/gitomi/snapshots/")) {
+        return .{ .label = "Local cache", .detail = "snapshot", .class = "local" };
+    }
+    if (std.mem.startsWith(u8, ref, "refs/gitomi/runs/")) {
+        return .{ .label = "Local", .detail = "workflow run", .class = "local" };
+    }
+    if (std.mem.startsWith(u8, ref, "refs/heads/")) {
+        return .{ .label = "Local", .detail = "branch", .class = "local" };
+    }
+    if (std.mem.startsWith(u8, ref, "refs/tags/")) {
+        return .{ .label = "Local", .detail = "tag", .class = "local" };
+    }
+    return .{ .label = "Local", .detail = "ref", .class = "local" };
 }
 
 fn hasQueryToken(target: []const u8, token: []const u8) bool {
@@ -168,7 +186,11 @@ fn hasQueryToken(target: []const u8, token: []const u8) bool {
 }
 
 test "web refs classify local and remote refs" {
-    try std.testing.expectEqualStrings("Local only", classifyRef("refs/heads/main").label);
+    try std.testing.expectEqualStrings("Local", classifyRef("refs/heads/main").label);
+    try std.testing.expectEqualStrings("branch", classifyRef("refs/heads/main").detail);
     try std.testing.expectEqualStrings("Remote", classifyRef("refs/remotes/origin/main").label);
+    try std.testing.expectEqualStrings("authoritative inbox", classifyRef("refs/gitomi/inbox/alice/laptop").detail);
+    try std.testing.expectEqualStrings("snapshot", classifyRef("refs/gitomi/snapshots/019e").detail);
     try std.testing.expectEqualStrings("staged by sync", classifyRef("refs/gitomi/staging/origin/inbox/alice/laptop").detail);
+    try std.testing.expectEqualStrings("quarantined", classifyRef("refs/gitomi/quarantine/origin/inbox/alice/laptop").detail);
 }

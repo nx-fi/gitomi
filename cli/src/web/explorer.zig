@@ -1091,28 +1091,32 @@ fn appendRootLanguages(buf: *std.ArrayList(u8), allocator: Allocator, stats_opt:
             .color = source_stats.languageColor(stat.language),
         });
     }
+    try appendTemplate(buf, allocator, "</div>", .{});
+    try appendTemplate(buf, allocator,
+        \\<div class="root-sloc-breakdown" aria-label="Source lines of code by language">
+    , .{});
+    for (stats.rows[0..@min(stats.rows.len, 3)]) |stat| {
+        try appendTemplate(buf, allocator,
+            \\<div class="root-sloc-row"><span class="root-sloc-language"><span class="language-dot" style="--language-color: {color};"></span><span>{name}</span></span><span class="root-sloc-metrics"><span><strong>{code}</strong> code</span><span><strong>{test_count}</strong> test</span><span><strong>{comment}</strong> comments</span></span></div>
+        , .{
+            .color = source_stats.languageColor(stat.language),
+            .name = source_stats.languageDisplayName(stat.language),
+            .code = shared.groupedUnsigned(stat.code),
+            .test_count = shared.groupedUnsigned(stat.test_count),
+            .comment = shared.groupedUnsigned(stat.comment),
+        });
+    }
     try appendTemplate(buf, allocator,
         \\</div><ul class="root-language-list">
     , .{});
-    for (stats.rows, 0..) |stat, idx| {
-        if (idx < 3) {
-            try appendTemplate(buf, allocator,
-                \\<li><span class="language-dot" style="--language-color: {color};"></span><span class="root-language-name">{name}</span><strong>{share}</strong><span class="root-language-sloc">{sloc} SLOC</span></li>
-            , .{
-                .color = source_stats.languageColor(stat.language),
-                .name = source_stats.languageDisplayName(stat.language),
-                .share = shared.percent(stat.total(), total),
-                .sloc = shared.groupedUnsigned(stat.total()),
-            });
-        } else {
-            try appendTemplate(buf, allocator,
-                \\<li><span class="language-dot" style="--language-color: {color};"></span><span class="root-language-name">{name}</span><strong>{share}</strong></li>
-            , .{
-                .color = source_stats.languageColor(stat.language),
-                .name = source_stats.languageDisplayName(stat.language),
-                .share = shared.percent(stat.total(), total),
-            });
-        }
+    for (stats.rows) |stat| {
+        try appendTemplate(buf, allocator,
+            \\<li><span class="language-dot" style="--language-color: {color};"></span><span class="root-language-name">{name}</span><strong>{share}</strong></li>
+        , .{
+            .color = source_stats.languageColor(stat.language),
+            .name = source_stats.languageDisplayName(stat.language),
+            .share = shared.percent(stat.total(), total),
+        });
     }
     try appendTemplate(buf, allocator, "</ul></div>", .{});
 }

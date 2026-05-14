@@ -14,11 +14,21 @@ const CliError = errors.CliError;
 const EventWriter = event_writer_mod.EventWriter;
 const appendJsonFieldString = json_writer.appendJsonFieldString;
 const appendJsonFieldStringArray = json_writer.appendJsonFieldStringArray;
+const appendJsonFieldUnsigned = json_writer.appendJsonFieldUnsigned;
 
 pub const Options = struct {
     act_path: []const u8 = "act",
     dry_run: bool = false,
     extra_args: []const []const u8 = &.{},
+};
+
+pub const DaemonOptions = struct {
+    act_path: []const u8 = "act",
+    dry_run: bool = false,
+    extra_args: []const []const u8 = &.{},
+    once: bool = false,
+    replay: bool = false,
+    interval_ms: u64 = 5000,
 };
 
 pub const ResolvedTarget = struct {
@@ -82,6 +92,30 @@ pub const CompleteResult = struct {
 
     pub fn deinit(self: *CompleteResult) void {
         self.allocator.free(self.commit_oid);
+    }
+};
+
+const SchedulerState = struct {
+    allocator: Allocator,
+    exists: bool = false,
+    last_event_ordinal: i64 = 0,
+    last_head_oid: []u8,
+
+    fn init(allocator: Allocator) !SchedulerState {
+        return .{
+            .allocator = allocator,
+            .last_head_oid = try allocator.dupe(u8, ""),
+        };
+    }
+
+    fn deinit(self: *SchedulerState) void {
+        self.allocator.free(self.last_head_oid);
+    }
+
+    fn setHead(self: *SchedulerState, value: []const u8) !void {
+        const owned = try self.allocator.dupe(u8, value);
+        self.allocator.free(self.last_head_oid);
+        self.last_head_oid = owned;
     }
 };
 
@@ -308,7 +342,10 @@ pub fn scheduleEvent(
 pub fn runRequested(allocator: Allocator, run_filter: ?[]const u8, options: Options) !void {
     var repo = try repo_mod.discoverRepo(allocator);
     defer repo.deinit();
+    try runRequestedWithRepo(allocator, repo, run_filter, options);
+}
 
+fn runRequestedWithRepo(allocator: Allocator, repo: repo_mod.Repo, run_filter: ?[]const u8, options: Options) !void {
     const requests = try loadPendingRequests(allocator, repo);
     defer {
         for (requests) |*request| request.deinit();
@@ -371,6 +408,192 @@ pub fn runRequested(allocator: Allocator, run_filter: ?[]const u8, options: Opti
     }
 
     if (failed) return CliError.UserError;
+}
+
+pub fn runDaemon(allocator: Allocator, options: DaemonOptions) !void {
+    var repo = try repo_mod.discoverRepo(allocator);
+    defer repo.deinit();
+
+    try io.out("gt actions daemon: watching {s}\n", .{repo.root});
+    if (options.replay) {
+        try io.out("gt actions daemon: replaying existing accepted events\n", .{});
+    }
+
+    var tick_options = options;
+    while (true) {
+        try runDaemonTick(allocator, repo, tick_options);
+        if (options.once) return;
+        tick_options.replay = false;
+        std.Thread.sleep(options.interval_ms * std.time.ns_per_ms);
+    }
+}
+
+fn runDaemonTick(allocator: Allocator, repo: repo_mod.Repo, options: DaemonOptions) !void {
+    try index.ensureIndex(allocator, repo);
+
+    if (try countPendingRequests(allocator, repo) != 0) {
+        runRequestedWithRepo(allocator, repo, null, daemonRunOptions(options)) catch |err| {
+            if (!errors.isUserError(err)) return err;
+            if (!errors.isReported(err)) {
+                try io.eprint("gt actions daemon: pending run failed: {s}\n", .{@errorName(err)});
+            }
+        };
+        try index.ensureIndex(allocator, repo);
+    }
+
+    var state = try loadSchedulerState(allocator, repo, options.replay);
+    defer state.deinit();
+
+    var db = try index.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
+    const max_ordinal = try maxAcceptedOrdinal(&db);
+    if (!state.exists and !options.replay) {
+        state.last_event_ordinal = max_ordinal;
+        if (try currentHeadOid(allocator)) |head| {
+            defer allocator.free(head);
+            try state.setHead(head);
+        }
+        if (!options.dry_run) try saveSchedulerState(allocator, repo, state);
+        try io.out("gt actions daemon: initialized scheduler cursor at event {d}\n", .{state.last_event_ordinal});
+        return;
+    }
+
+    try scheduleAcceptedEventsAfter(allocator, repo, &db, state.last_event_ordinal, options);
+    state.last_event_ordinal = max_ordinal;
+
+    if (try currentHeadOid(allocator)) |head| {
+        defer allocator.free(head);
+        if (options.replay or state.last_head_oid.len == 0 or !std.mem.eql(u8, state.last_head_oid, head)) {
+            try runScheduledEvent(allocator, "push", "HEAD", head, null, options);
+            try state.setHead(head);
+        }
+    }
+
+    if (!options.dry_run) try saveSchedulerState(allocator, repo, state);
+}
+
+fn scheduleAcceptedEventsAfter(
+    allocator: Allocator,
+    repo: repo_mod.Repo,
+    db: *index.SqliteDb,
+    last_ordinal: i64,
+    options: DaemonOptions,
+) !void {
+    _ = repo;
+    var stmt = try db.prepare(
+        \\SELECT ordinal, event_type, object_id
+        \\FROM events
+        \\WHERE valid_json != 0 AND domain_status = 'accepted' AND ordinal > ?
+        \\ORDER BY ordinal
+    );
+    defer stmt.deinit();
+    try stmt.bindInt64(1, last_ordinal);
+
+    while (try stmt.step()) {
+        const event_type = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(event_type);
+        const object_id = try stmt.columnTextDup(allocator, 2);
+        defer allocator.free(object_id);
+
+        if (std.mem.startsWith(u8, event_type, "action.")) continue;
+        try runScheduledEvent(allocator, event_type, null, null, if (object_id.len == 0) null else object_id, options);
+    }
+}
+
+fn runScheduledEvent(
+    allocator: Allocator,
+    event_type: []const u8,
+    target_ref: ?[]const u8,
+    target_oid: ?[]const u8,
+    object_id: ?[]const u8,
+    options: DaemonOptions,
+) !void {
+    scheduleEvent(allocator, event_type, target_ref, target_oid, object_id, daemonRunOptions(options)) catch |err| {
+        if (errors.isUserError(err)) return;
+        return err;
+    };
+}
+
+fn daemonRunOptions(options: DaemonOptions) Options {
+    return .{
+        .act_path = options.act_path,
+        .dry_run = options.dry_run,
+        .extra_args = options.extra_args,
+    };
+}
+
+pub fn countPendingRequests(allocator: Allocator, repo: repo_mod.Repo) !usize {
+    const requests = try loadPendingRequests(allocator, repo);
+    defer {
+        for (requests) |*request| request.deinit();
+        allocator.free(requests);
+    }
+    return requests.len;
+}
+
+fn maxAcceptedOrdinal(db: *index.SqliteDb) !i64 {
+    var stmt = try db.prepare("SELECT COALESCE(MAX(ordinal), 0) FROM events WHERE domain_status = 'accepted'");
+    defer stmt.deinit();
+    if (try stmt.step()) return stmt.columnInt64(0);
+    return 0;
+}
+
+fn currentHeadOid(allocator: Allocator) !?[]u8 {
+    var argv = [_][]const u8{ "git", "rev-parse", "--verify", "HEAD^{commit}" };
+    var result = try git.runCommand(allocator, &argv, null, 512 * 1024);
+    defer result.deinit();
+    if (result.exitCode() != 0) return null;
+    return try util.trimDup(allocator, result.stdout);
+}
+
+fn schedulerStatePath(allocator: Allocator, repo: repo_mod.Repo) ![]u8 {
+    return std.fs.path.join(allocator, &.{ repo.gitomi_dir, "actions-scheduler.state" });
+}
+
+fn loadSchedulerState(allocator: Allocator, repo: repo_mod.Repo, replay: bool) !SchedulerState {
+    var state = try SchedulerState.init(allocator);
+    errdefer state.deinit();
+    if (replay) return state;
+
+    const path = try schedulerStatePath(allocator, repo);
+    defer allocator.free(path);
+    const bytes = std.fs.cwd().readFileAlloc(allocator, path, 16 * 1024) catch |err| switch (err) {
+        error.FileNotFound => return state,
+        else => return err,
+    };
+    defer allocator.free(bytes);
+
+    state.exists = true;
+    var lines = std.mem.splitScalar(u8, bytes, '\n');
+    while (lines.next()) |line_raw| {
+        const line = std.mem.trim(u8, line_raw, " \t\r\n");
+        if (line.len == 0 or line[0] == '#') continue;
+        const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+        const key = std.mem.trim(u8, line[0..eq], " \t");
+        const value = std.mem.trim(u8, line[eq + 1 ..], " \t");
+        if (std.mem.eql(u8, key, "last_event_ordinal")) {
+            state.last_event_ordinal = std.fmt.parseInt(i64, value, 10) catch 0;
+        } else if (std.mem.eql(u8, key, "last_head_oid")) {
+            try state.setHead(value);
+        }
+    }
+    return state;
+}
+
+fn saveSchedulerState(allocator: Allocator, repo: repo_mod.Repo, state: SchedulerState) !void {
+    try std.fs.cwd().makePath(repo.gitomi_dir);
+    const path = try schedulerStatePath(allocator, repo);
+    defer allocator.free(path);
+    const contents = try std.fmt.allocPrint(
+        allocator,
+        "last_event_ordinal={d}\nlast_head_oid={s}\n",
+        .{ state.last_event_ordinal, state.last_head_oid },
+    );
+    defer allocator.free(contents);
+    const file = try std.fs.createFileAbsolute(path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(contents);
 }
 
 pub fn createRunRequestedEvent(
@@ -563,7 +786,7 @@ fn writeActEventPayload(
     defer payload.deinit(allocator);
 
     try payload.append(allocator, '{');
-    try appendJsonFieldString(&payload, allocator, "action", "gitomi", true);
+    try appendJsonFieldString(&payload, allocator, "action", githubActionValue(gitomi_event_type), true);
     try appendJsonFieldString(&payload, allocator, "event_name", event_name, true);
     try appendJsonFieldString(&payload, allocator, "ref", target.target_ref orelse "", true);
     try appendJsonFieldString(&payload, allocator, "after", target.target_oid, true);
@@ -575,6 +798,13 @@ fn writeActEventPayload(
     try appendJsonFieldString(&payload, allocator, "path", workflow.path, true);
     try appendJsonFieldString(&payload, allocator, "name", workflow.name, false);
     try payload.appendSlice(allocator, "},");
+    if (object_id) |value| {
+        if (std.mem.eql(u8, event_name, "issues")) {
+            try appendMinimalIssuePayload(&payload, allocator, value);
+        } else if (std.mem.eql(u8, event_name, "pull_request")) {
+            try appendMinimalPullRequestPayload(&payload, allocator, value, target);
+        }
+    }
     try payload.appendSlice(allocator, "\"gitomi\":{");
     try appendJsonFieldString(&payload, allocator, "run_id", run_id, true);
     try appendJsonFieldString(&payload, allocator, "event_type", gitomi_event_type, true);
@@ -586,6 +816,27 @@ fn writeActEventPayload(
     defer file.close();
     try file.writeAll(payload.items);
     return event_path;
+}
+
+fn appendMinimalIssuePayload(buf: *std.ArrayList(u8), allocator: Allocator, object_id: []const u8) !void {
+    try buf.appendSlice(allocator, "\"issue\":{");
+    try appendJsonFieldString(buf, allocator, "id", object_id, true);
+    try appendJsonFieldString(buf, allocator, "node_id", object_id, true);
+    try appendJsonFieldUnsigned(buf, allocator, "number", 0, false);
+    try buf.appendSlice(allocator, "},");
+}
+
+fn appendMinimalPullRequestPayload(buf: *std.ArrayList(u8), allocator: Allocator, object_id: []const u8, target: ResolvedTarget) !void {
+    try buf.appendSlice(allocator, "\"pull_request\":{");
+    try appendJsonFieldString(buf, allocator, "id", object_id, true);
+    try appendJsonFieldString(buf, allocator, "node_id", object_id, true);
+    try appendJsonFieldUnsigned(buf, allocator, "number", 0, true);
+    try buf.appendSlice(allocator, "\"base\":{");
+    try appendJsonFieldString(buf, allocator, "ref", target.target_ref orelse "", false);
+    try buf.appendSlice(allocator, "},");
+    try buf.appendSlice(allocator, "\"head\":{");
+    try appendJsonFieldString(buf, allocator, "sha", target.target_oid, false);
+    try buf.appendSlice(allocator, "}},");
 }
 
 fn runCommandInDir(
@@ -816,6 +1067,13 @@ fn githubEventName(event_type: []const u8) []const u8 {
     return event_type;
 }
 
+fn githubActionValue(event_type: []const u8) []const u8 {
+    if (std.mem.indexOfScalar(u8, event_type, '.')) |dot| {
+        if (dot + 1 < event_type.len) return event_type[dot + 1 ..];
+    }
+    return event_type;
+}
+
 fn eventFamily(event_type: []const u8) []const u8 {
     if (std.mem.indexOfScalar(u8, event_type, '.')) |dot| return event_type[0..dot];
     return event_type;
@@ -862,21 +1120,65 @@ fn addInlineTriggers(allocator: Allocator, triggers: *std.ArrayList([]u8), raw: 
     const value = std.mem.trim(u8, raw, " \t\r\n");
     if (value.len == 0) return;
     if (value[0] == '[' and value[value.len - 1] == ']') {
-        var parts = std.mem.splitScalar(u8, value[1 .. value.len - 1], ',');
-        while (parts.next()) |part| try addTrigger(allocator, triggers, part);
+        try addInlineTriggerParts(allocator, triggers, value[1 .. value.len - 1], false);
         return;
     }
     if (value[0] == '{' and value[value.len - 1] == '}') {
-        var parts = std.mem.splitScalar(u8, value[1 .. value.len - 1], ',');
-        while (parts.next()) |part| {
-            const clean = std.mem.trim(u8, part, " \t\r\n");
-            if (parseYamlKeyValue(clean)) |kv| {
-                try addTrigger(allocator, triggers, kv.key);
-            }
-        }
+        try addInlineTriggerParts(allocator, triggers, value[1 .. value.len - 1], true);
         return;
     }
     try addTrigger(allocator, triggers, value);
+}
+
+fn addInlineTriggerParts(allocator: Allocator, triggers: *std.ArrayList([]u8), inner: []const u8, mapping: bool) !void {
+    var start: usize = 0;
+    var depth: usize = 0;
+    var in_single = false;
+    var in_double = false;
+    var idx: usize = 0;
+    while (idx <= inner.len) : (idx += 1) {
+        const at_end = idx == inner.len;
+        if (!at_end) {
+            const c = inner[idx];
+            if (c == '\'' and !in_double) {
+                in_single = !in_single;
+                continue;
+            }
+            if (c == '"' and !in_single) {
+                in_double = !in_double;
+                continue;
+            }
+            if (!in_single and !in_double) {
+                if (c == ',' and depth == 0) {
+                    try addInlineTriggerPart(allocator, triggers, inner[start..idx], mapping);
+                    start = idx + 1;
+                    continue;
+                }
+                if (c == '[' or c == '{') {
+                    depth += 1;
+                    continue;
+                }
+                if ((c == ']' or c == '}') and depth != 0) {
+                    depth -= 1;
+                    continue;
+                }
+            }
+            continue;
+        }
+        try addInlineTriggerPart(allocator, triggers, inner[start..idx], mapping);
+    }
+}
+
+fn addInlineTriggerPart(allocator: Allocator, triggers: *std.ArrayList([]u8), raw: []const u8, mapping: bool) !void {
+    const clean = std.mem.trim(u8, raw, " \t\r\n");
+    if (clean.len == 0) return;
+    if (mapping) {
+        if (parseYamlKeyValue(clean)) |kv| {
+            try addTrigger(allocator, triggers, kv.key);
+            return;
+        }
+    }
+    try addTrigger(allocator, triggers, clean);
 }
 
 fn addTrigger(allocator: Allocator, triggers: *std.ArrayList([]u8), raw: []const u8) !void {
@@ -945,4 +1247,20 @@ test "workflow parser supports inline trigger arrays" {
     defer workflow.deinit();
     try std.testing.expect(workflowMatches(workflow, "push", "push"));
     try std.testing.expect(workflowMatches(workflow, "action.run_requested", "workflow_dispatch"));
+}
+
+test "workflow parser supports inline trigger maps with filters" {
+    const bytes =
+        \\name: Filtered
+        \\on: { push: { branches: [main, release] }, pull_request: { types: [opened, synchronize] } }
+    ;
+    var workflow = try parseWorkflow(std.testing.allocator, ".github/workflows/filtered.yml", bytes);
+    defer workflow.deinit();
+    try std.testing.expect(workflowMatches(workflow, "push", "push"));
+    try std.testing.expect(workflowMatches(workflow, "pull.opened", "pull_request"));
+}
+
+test "github action value uses event suffix" {
+    try std.testing.expectEqualStrings("opened", githubActionValue("issue.opened"));
+    try std.testing.expectEqualStrings("push", githubActionValue("push"));
 }
