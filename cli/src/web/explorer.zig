@@ -131,6 +131,20 @@ const SlocCounts = struct {
     }
 };
 
+const RootEntryCounts = struct {
+    files: usize = 0,
+    directories: usize = 0,
+};
+
+const RootLanguageStat = struct {
+    ext: []u8,
+    lines: u64,
+
+    fn deinit(self: RootLanguageStat, allocator: Allocator) void {
+        allocator.free(self.ext);
+    }
+};
+
 const PathQuery = union(enum) {
     ok: []u8,
     invalid: []u8,
@@ -271,7 +285,9 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
         defer freeTreeEntries(allocator, entries);
         const summary_opt = try loadCommitSummary(allocator, repo, ref, path);
         defer if (summary_opt) |summary| summary.deinit(allocator);
+        const is_root = path.len == 0;
 
+        if (is_root) try appendRootPageGridStart(&buf, allocator);
         try appendCodePanelStart(&buf, allocator, repo, ref, path);
         try shared.appendButtonLink(&buf, allocator, Button{ .label = "History", .href = commitsHref(ref, path) });
         try appendCodePanelToolbarEnd(&buf, allocator);
@@ -281,6 +297,11 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
         try appendCodePanelEnd(&buf, allocator);
 
         try appendReadmePreview(&buf, allocator, repo, ref, path, entries);
+        if (is_root) {
+            try appendRootPageMainEnd(&buf, allocator);
+            try appendRootSidebar(&buf, allocator, repo, ref, entries, summary_opt);
+            try appendRootPageGridEnd(&buf, allocator);
+        }
     } else {
         try appendEmptyState(&buf, allocator, "No committed files found.", "The selected ref does not point at a readable tree yet.");
     }
@@ -311,8 +332,9 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     const markdown = isMarkdownPath(path);
     const raw_selected = !markdown or std.mem.eql(u8, view, "raw");
     const render_markdown = markdown and !raw_selected;
+    const show_symbols_panel = text_content != null and media_kind == null and !render_markdown and code_symbols.hasProvider(path);
     const symbol_items = if (text_content) |bytes|
-        if (media_kind == null and !render_markdown)
+        if (show_symbols_panel)
             try code_symbols.extract(allocator, repo.root, path, bytes)
         else
             try allocator.alloc(code_symbols.Symbol, 0)
@@ -320,12 +342,12 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
         try allocator.alloc(code_symbols.Symbol, 0);
     defer code_symbols.free(allocator, symbol_items);
 
-    try appendCodeLayoutStartWithSymbols(&buf, allocator, repo, ref, path, symbol_items.len != 0);
+    try appendCodeLayoutStartWithSymbols(&buf, allocator, repo, ref, path, show_symbols_panel);
 
     try appendCodePanelStart(&buf, allocator, repo, ref, path);
     if (markdown) try appendMarkdownViewTabs(&buf, allocator, ref, path, raw_selected);
     try appendBlobMetrics(&buf, allocator, size, text_content, sloc_counts);
-    if (symbol_items.len != 0) try appendSymbolsToggleButton(&buf, allocator);
+    if (show_symbols_panel) try appendSymbolsToggleButton(&buf, allocator);
     try shared.appendButtonLink(&buf, allocator, Button{ .label = "Raw", .href = rawHref(ref, path) });
     if (text_content != null) try appendCopyButton(&buf, allocator, ref, path);
     try shared.appendButtonLink(&buf, allocator, Button{ .label = "Blame", .href = blameHref(ref, path) });
@@ -337,7 +359,7 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     try appendBlobContent(&buf, allocator, ref, path, media_kind, can_preview_media, content, render_markdown);
 
     try appendCodePanelEnd(&buf, allocator);
-    try appendCodeLayoutEndWithSymbols(&buf, allocator, symbol_items);
+    try appendCodeLayoutEndWithSymbols(&buf, allocator, show_symbols_panel, symbol_items);
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
 }
@@ -453,7 +475,6 @@ fn renderMissingPathPage(allocator: Allocator, repo: Repo, ref: []const u8, path
 fn appendRepoHeader(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8) !void {
     try appendRepoHeaderShared(buf, allocator, repo, ref, &.{
         .{ .label = "Commits", .href = literalHref("/commits") },
-        .{ .label = "Overview", .href = literalHref("/overview") },
     });
 }
 
@@ -486,12 +507,12 @@ fn appendCodeLayoutStartWithSymbols(
 }
 
 fn appendCodeLayoutEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
-    try appendCodeLayoutEndWithSymbols(buf, allocator, &.{});
+    try appendCodeLayoutEndWithSymbols(buf, allocator, false, &.{});
 }
 
-fn appendCodeLayoutEndWithSymbols(buf: *std.ArrayList(u8), allocator: Allocator, symbols: []const code_symbols.Symbol) !void {
+fn appendCodeLayoutEndWithSymbols(buf: *std.ArrayList(u8), allocator: Allocator, show_symbols_panel: bool, symbols: []const code_symbols.Symbol) !void {
     try appendTemplate(buf, allocator, "</div>", .{});
-    if (symbols.len != 0) try appendCodeSymbolsSidebar(buf, allocator, symbols);
+    if (show_symbols_panel) try appendCodeSymbolsSidebar(buf, allocator, symbols);
     try appendTemplate(buf, allocator, "</div>", .{});
 }
 
@@ -530,8 +551,14 @@ fn appendCodeSymbolsSidebar(buf: *std.ArrayList(u8), allocator: Allocator, symbo
         \\  <div class="symbols-head">Symbols</div>
         \\  <nav class="symbols-nav">
     , .{});
-    for (symbols) |symbol| {
-        try appendCodeSymbolLink(buf, allocator, symbol);
+    if (symbols.len == 0) {
+        try appendTemplate(buf, allocator,
+            \\<div class="symbols-empty">No symbols found</div>
+        , .{});
+    } else {
+        for (symbols) |symbol| {
+            try appendCodeSymbolLink(buf, allocator, symbol);
+        }
     }
     try appendTemplate(buf, allocator, "</nav></aside>", .{});
 }
@@ -864,10 +891,382 @@ fn appendReadmePreview(
 
     try appendTemplate(buf, allocator,
         \\<section class="panel readme-panel">
-        \\  <div class="section-head"><h2>{readme}</h2></div><div class="readme-body markdown-body">
-    , .{ .readme = readme });
+        \\  <div class="section-head readme-head"><div><p class="eyebrow">Documentation</p><h2>{readme}</h2></div><a class="button secondary" href="{href}">Open file</a></div><div class="readme-body markdown-body">
+    , .{
+        .readme = readme,
+        .href = codeHrefWithView(ref, readme_path, "preview"),
+    });
     try appendRepositoryMarkdown(buf, allocator, ref, readme_path, content);
     try appendTemplate(buf, allocator, "</div></section>", .{});
+}
+
+fn appendRootPageGridStart(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="root-page-grid"><div class="root-page-main">
+    , .{});
+}
+
+fn appendRootPageMainEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try appendTemplate(buf, allocator, "</div>", .{});
+}
+
+fn appendRootPageGridEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try appendTemplate(buf, allocator, "</div>", .{});
+}
+
+fn appendRootSidebar(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    repo: Repo,
+    ref: []const u8,
+    entries: []const TreeEntry,
+    summary_opt: ?CommitSummary,
+) !void {
+    const counts = rootEntryCounts(entries);
+    const readme_name = findReadme(entries);
+    const changes = git.workingTreeChangeCount(allocator) catch 0;
+    const about_summary = loadReadmeSummaryOwned(allocator, repo, ref, entries) catch null;
+    defer if (about_summary) |summary| allocator.free(summary);
+    const languages_opt = loadRootLanguageStats(allocator, repo) catch null;
+    defer if (languages_opt) |stats| freeRootLanguageStats(allocator, stats);
+    const about_text = about_summary orelse "Browse this repository's files, documentation, and Gitomi records from the local checkout.";
+
+    try appendTemplate(buf, allocator,
+        \\<aside class="root-sidebar" aria-label="Repository details">
+        \\  <section class="panel root-sidebar-panel">
+        \\    <div class="root-sidebar-section">
+        \\      <h2>About</h2>
+        \\      <p class="root-about-text">{about}</p>
+        \\      <div class="root-link-list">
+    , .{ .about = about_text });
+
+    if (readme_name) |name| {
+        try appendTemplate(buf, allocator,
+            \\<a href="{href}">README</a>
+        , .{ .href = codeHrefWithView(ref, name, "preview") });
+    }
+    try appendTemplate(buf, allocator,
+        \\        <a href="/commits">Commits</a>
+        \\        <a href="/issues">Issues</a>
+        \\        <a href="/projects">Projects</a>
+        \\      </div>
+        \\    </div>
+        \\    <div class="root-sidebar-section">
+        \\      <h2>Repository</h2>
+        \\      <dl class="root-meta-list">
+        \\        <div><dt>Ref</dt><dd><code>{ref}</code></dd></div>
+        \\        <div><dt>Root</dt><dd>{files} {files_label}, {directories} {directories_label}</dd></div>
+        \\        <div><dt>Working tree</dt><dd>{changes} {changes_label}</dd></div>
+        \\      </dl>
+        \\    </div>
+    , .{
+        .ref = ref,
+        .files = counts.files,
+        .files_label = if (counts.files == 1) "file" else "files",
+        .directories = counts.directories,
+        .directories_label = if (counts.directories == 1) "folder" else "folders",
+        .changes = changes,
+        .changes_label = if (changes == 1) "change" else "changes",
+    });
+
+    try appendRootLatestCommit(buf, allocator, summary_opt);
+    try appendRootLanguages(buf, allocator, languages_opt);
+    try appendTemplate(buf, allocator, "</section></aside>", .{});
+}
+
+fn appendRootLatestCommit(buf: *std.ArrayList(u8), allocator: Allocator, summary_opt: ?CommitSummary) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="root-sidebar-section">
+        \\  <h2>Latest commit</h2>
+    , .{});
+    if (summary_opt) |summary| {
+        try appendTemplate(buf, allocator,
+            \\<a class="root-latest-commit" href="{href}"><strong>{subject}</strong><small><code>{hash}</code>{relative}</small></a>
+        , .{
+            .href = commitHref(summary.full_hash),
+            .subject = summary.subject,
+            .hash = summary.hash,
+            .relative = summary.relative,
+        });
+    } else {
+        try appendTemplate(buf, allocator,
+            \\<p class="root-sidebar-empty">No commits found for this ref.</p>
+        , .{});
+    }
+    try appendTemplate(buf, allocator, "</div>", .{});
+}
+
+fn appendRootLanguages(buf: *std.ArrayList(u8), allocator: Allocator, stats_opt: ?[]RootLanguageStat) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="root-sidebar-section">
+        \\  <h2>Languages</h2>
+    , .{});
+    const stats = stats_opt orelse {
+        try appendTemplate(buf, allocator,
+            \\<p class="root-sidebar-empty">No language data available.</p></div>
+        , .{});
+        return;
+    };
+    const total = rootLanguageTotal(stats);
+    if (total == 0 or stats.len == 0) {
+        try appendTemplate(buf, allocator,
+            \\<p class="root-sidebar-empty">No source files counted.</p></div>
+        , .{});
+        return;
+    }
+
+    try appendTemplate(buf, allocator,
+        \\<div class="root-language-bar" aria-hidden="true">
+    , .{});
+    for (stats) |stat| {
+        try appendTemplate(buf, allocator,
+            \\<span style="--share: {share}; --language-color: {color};"></span>
+        , .{
+            .share = shared.percent(stat.lines, total),
+            .color = languageColor(stat.ext),
+        });
+    }
+    try appendTemplate(buf, allocator,
+        \\</div><ul class="root-language-list">
+    , .{});
+    for (stats) |stat| {
+        try appendTemplate(buf, allocator,
+            \\<li><span class="language-dot" style="--language-color: {color};"></span><span>{name}</span><strong>{share}</strong></li>
+        , .{
+            .color = languageColor(stat.ext),
+            .name = languageDisplayName(stat.ext),
+            .share = shared.percent(stat.lines, total),
+        });
+    }
+    try appendTemplate(buf, allocator, "</ul></div>", .{});
+}
+
+fn rootEntryCounts(entries: []const TreeEntry) RootEntryCounts {
+    var counts = RootEntryCounts{};
+    for (entries) |entry| {
+        if (std.mem.eql(u8, entry.kind, "tree")) {
+            counts.directories += 1;
+        } else {
+            counts.files += 1;
+        }
+    }
+    return counts;
+}
+
+fn loadReadmeSummaryOwned(allocator: Allocator, repo: Repo, ref: []const u8, entries: []const TreeEntry) !?[]u8 {
+    const readme = findReadme(entries) orelse return null;
+    const spec = try objectSpec(allocator, ref, readme);
+    defer allocator.free(spec);
+    const content = try gitMaybe(allocator, repo, &.{ "show", spec }, 64 * 1024) orelse return null;
+    defer allocator.free(content);
+    if (containsNul(content)) return null;
+    return try markdownSummaryOwned(allocator, content);
+}
+
+fn markdownSummaryOwned(allocator: Allocator, content: []const u8) !?[]u8 {
+    var in_fence = false;
+    var paragraph: std.ArrayList(u8) = .empty;
+    defer paragraph.deinit(allocator);
+
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r\n");
+        if (std.mem.startsWith(u8, line, "```") or std.mem.startsWith(u8, line, "~~~")) {
+            in_fence = !in_fence;
+            continue;
+        }
+        if (in_fence) continue;
+        if (line.len == 0) {
+            if (paragraph.items.len != 0) break;
+            continue;
+        }
+        if (paragraph.items.len == 0 and shouldSkipSummaryLine(line)) continue;
+        if (paragraph.items.len != 0) try paragraph.append(allocator, ' ');
+        try appendCleanMarkdownText(&paragraph, allocator, line);
+        if (paragraph.items.len >= 220) break;
+    }
+
+    const trimmed = std.mem.trim(u8, paragraph.items, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    const max_len = @min(trimmed.len, 220);
+    return try allocator.dupe(u8, std.mem.trimRight(u8, trimmed[0..max_len], " \t\r\n.,;:"));
+}
+
+fn shouldSkipSummaryLine(line: []const u8) bool {
+    return line[0] == '#' or
+        line[0] == '!' or
+        std.mem.startsWith(u8, line, "[!") or
+        std.mem.startsWith(u8, line, "<p") or
+        std.mem.startsWith(u8, line, "<div") or
+        std.mem.startsWith(u8, line, "<img");
+}
+
+fn appendCleanMarkdownText(buf: *std.ArrayList(u8), allocator: Allocator, line: []const u8) !void {
+    var i: usize = 0;
+    while (i < line.len) : (i += 1) {
+        const c = line[i];
+        switch (c) {
+            '`', '*', '_', '~' => {},
+            '[' => {
+                const close = std.mem.indexOfScalarPos(u8, line, i + 1, ']') orelse {
+                    try buf.append(allocator, c);
+                    continue;
+                };
+                if (close + 1 < line.len and line[close + 1] == '(') {
+                    try appendCleanMarkdownText(buf, allocator, line[i + 1 .. close]);
+                    const link_end = std.mem.indexOfScalarPos(u8, line, close + 2, ')') orelse close + 1;
+                    i = link_end;
+                    continue;
+                }
+                try buf.append(allocator, c);
+            },
+            '<' => {
+                const close = std.mem.indexOfScalarPos(u8, line, i + 1, '>') orelse {
+                    try buf.append(allocator, c);
+                    continue;
+                };
+                i = close;
+            },
+            else => try buf.append(allocator, c),
+        }
+    }
+}
+
+fn loadRootLanguageStats(allocator: Allocator, repo: Repo) !?[]RootLanguageStat {
+    var candidates: std.ArrayList([]u8) = .empty;
+    defer {
+        for (candidates.items) |candidate| allocator.free(candidate);
+        candidates.deinit(allocator);
+    }
+
+    const env_cmd = slocCommandFromEnv(allocator) catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => null,
+        else => return err,
+    };
+    if (env_cmd) |command| {
+        defer allocator.free(command);
+        try appendSlocCommandCandidate(&candidates, allocator, repo, command);
+    }
+
+    const repo_sloc = try std.fs.path.join(allocator, &.{ repo.root, local_sloc_bin });
+    defer allocator.free(repo_sloc);
+    try candidates.append(allocator, try allocator.dupe(u8, repo_sloc));
+    try candidates.append(allocator, try allocator.dupe(u8, "sloc"));
+
+    for (candidates.items) |command| {
+        if (try loadRootLanguageStatsWithCommand(allocator, repo, command)) |stats| return stats;
+    }
+    return null;
+}
+
+fn loadRootLanguageStatsWithCommand(allocator: Allocator, repo: Repo, command: []const u8) !?[]RootLanguageStat {
+    const argv = [_][]const u8{ command, "--summary" };
+    var result = runCommandInDir(allocator, &argv, repo.root, max_sloc_output) catch return null;
+    defer result.deinit();
+    if (result.exitCode() != 0) return null;
+    return parseRootLanguageStats(allocator, result.stdout) catch null;
+}
+
+fn parseRootLanguageStats(allocator: Allocator, output: []const u8) !?[]RootLanguageStat {
+    var rows: std.ArrayList(RootLanguageStat) = .empty;
+    errdefer {
+        for (rows.items) |row| row.deinit(allocator);
+        rows.deinit(allocator);
+    }
+
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        if (trimmed.len == 0) continue;
+
+        var tokens = std.mem.tokenizeAny(u8, trimmed, " \t");
+        const code_token = tokens.next() orelse continue;
+        const test_token = tokens.next() orelse continue;
+        const comment_token = tokens.next() orelse continue;
+        const label = tokens.next() orelse continue;
+        if (label.len < 2 or label[0] != '.') continue;
+
+        const code = parseSlocNumber(code_token) catch continue;
+        const test_count = parseSlocNumber(test_token) catch continue;
+        const comment = parseSlocNumber(comment_token) catch continue;
+        const total = try std.math.add(u64, try std.math.add(u64, code, test_count), comment);
+        if (total == 0) continue;
+
+        const ext = try allocator.dupe(u8, label[1..]);
+        rows.append(allocator, .{
+            .ext = ext,
+            .lines = total,
+        }) catch |err| {
+            allocator.free(ext);
+            return err;
+        };
+    }
+
+    if (rows.items.len == 0) return null;
+    std.mem.sort(RootLanguageStat, rows.items, {}, struct {
+        fn lessThan(_: void, a: RootLanguageStat, b: RootLanguageStat) bool {
+            if (a.lines != b.lines) return a.lines > b.lines;
+            return std.mem.lessThan(u8, a.ext, b.ext);
+        }
+    }.lessThan);
+    return try rows.toOwnedSlice(allocator);
+}
+
+fn rootLanguageTotal(stats: []const RootLanguageStat) u64 {
+    var total: u64 = 0;
+    for (stats) |stat| total +|= stat.lines;
+    return total;
+}
+
+fn freeRootLanguageStats(allocator: Allocator, stats: []RootLanguageStat) void {
+    for (stats) |stat| stat.deinit(allocator);
+    allocator.free(stats);
+}
+
+fn languageDisplayName(ext: []const u8) []const u8 {
+    if (std.ascii.eqlIgnoreCase(ext, "zig")) return "Zig";
+    if (std.ascii.eqlIgnoreCase(ext, "c")) return "C";
+    if (std.ascii.eqlIgnoreCase(ext, "h")) return "C/C++ Header";
+    if (std.ascii.eqlIgnoreCase(ext, "cpp") or std.ascii.eqlIgnoreCase(ext, "cc") or std.ascii.eqlIgnoreCase(ext, "cxx")) return "C++";
+    if (std.ascii.eqlIgnoreCase(ext, "js") or std.ascii.eqlIgnoreCase(ext, "mjs") or std.ascii.eqlIgnoreCase(ext, "cjs")) return "JavaScript";
+    if (std.ascii.eqlIgnoreCase(ext, "ts") or std.ascii.eqlIgnoreCase(ext, "tsx")) return "TypeScript";
+    if (std.ascii.eqlIgnoreCase(ext, "css")) return "CSS";
+    if (std.ascii.eqlIgnoreCase(ext, "sh") or std.ascii.eqlIgnoreCase(ext, "bash")) return "Shell";
+    if (std.ascii.eqlIgnoreCase(ext, "md")) return "Markdown";
+    if (std.ascii.eqlIgnoreCase(ext, "py")) return "Python";
+    if (std.ascii.eqlIgnoreCase(ext, "rs")) return "Rust";
+    if (std.ascii.eqlIgnoreCase(ext, "go")) return "Go";
+    if (std.ascii.eqlIgnoreCase(ext, "html") or std.ascii.eqlIgnoreCase(ext, "htm")) return "HTML";
+    if (std.ascii.eqlIgnoreCase(ext, "json")) return "JSON";
+    if (std.ascii.eqlIgnoreCase(ext, "svg")) return "SVG";
+    if (std.ascii.eqlIgnoreCase(ext, "yml") or std.ascii.eqlIgnoreCase(ext, "yaml")) return "YAML";
+    if (std.ascii.eqlIgnoreCase(ext, "sql")) return "SQL";
+    if (std.ascii.eqlIgnoreCase(ext, "nix")) return "Nix";
+    if (std.ascii.eqlIgnoreCase(ext, "tla")) return "TLA+";
+    return ext;
+}
+
+fn languageColor(ext: []const u8) []const u8 {
+    if (std.ascii.eqlIgnoreCase(ext, "zig")) return "#ec915c";
+    if (std.ascii.eqlIgnoreCase(ext, "c")) return "#555555";
+    if (std.ascii.eqlIgnoreCase(ext, "h")) return "#a8b9cc";
+    if (std.ascii.eqlIgnoreCase(ext, "cpp") or std.ascii.eqlIgnoreCase(ext, "cc") or std.ascii.eqlIgnoreCase(ext, "cxx")) return "#f34b7d";
+    if (std.ascii.eqlIgnoreCase(ext, "js") or std.ascii.eqlIgnoreCase(ext, "mjs") or std.ascii.eqlIgnoreCase(ext, "cjs")) return "#f1e05a";
+    if (std.ascii.eqlIgnoreCase(ext, "ts") or std.ascii.eqlIgnoreCase(ext, "tsx")) return "#3178c6";
+    if (std.ascii.eqlIgnoreCase(ext, "css")) return "#563d7c";
+    if (std.ascii.eqlIgnoreCase(ext, "sh") or std.ascii.eqlIgnoreCase(ext, "bash")) return "#89e051";
+    if (std.ascii.eqlIgnoreCase(ext, "md")) return "#083fa1";
+    if (std.ascii.eqlIgnoreCase(ext, "py")) return "#3572a5";
+    if (std.ascii.eqlIgnoreCase(ext, "rs")) return "#dea584";
+    if (std.ascii.eqlIgnoreCase(ext, "go")) return "#00add8";
+    if (std.ascii.eqlIgnoreCase(ext, "html") or std.ascii.eqlIgnoreCase(ext, "htm")) return "#e34c26";
+    if (std.ascii.eqlIgnoreCase(ext, "json")) return "#292929";
+    if (std.ascii.eqlIgnoreCase(ext, "svg") or std.ascii.eqlIgnoreCase(ext, "xml")) return "#0060ac";
+    if (std.ascii.eqlIgnoreCase(ext, "yml") or std.ascii.eqlIgnoreCase(ext, "yaml")) return "#cb171e";
+    if (std.ascii.eqlIgnoreCase(ext, "sql")) return "#e38c00";
+    if (std.ascii.eqlIgnoreCase(ext, "nix")) return "#7e7eff";
+    if (std.ascii.eqlIgnoreCase(ext, "tla")) return "#4c4f69";
+    return "#8b949e";
 }
 
 fn appendRepositoryMarkdown(

@@ -154,26 +154,24 @@ pub fn appendShellStart(
     try appendNavLink(buf, allocator, active, "projects", "/projects", "Projects", null);
     try appendNavLink(buf, allocator, active, "events", "/events", "Events", stats.events);
     try appendNavLink(buf, allocator, active, "refs", "/refs", "Refs", stats.inbox_refs + stats.staged_refs);
-    try appendNavLink(buf, allocator, active, "overview", "/overview", "Overview", null);
     try buf.appendSlice(allocator,
         \\  </nav>
+        \\  <div class="topbar-actions">
+    );
+    if (cfg_opt) |cfg| {
+        try appendUserMenu(buf, allocator, cfg);
+    }
+    try buf.appendSlice(allocator,
         \\  <button class="theme-toggle" type="button" data-theme-toggle aria-pressed="false" aria-label="Toggle dark mode" title="Toggle dark mode">
         \\    <span class="theme-toggle-track" aria-hidden="true"><span class="theme-toggle-thumb"></span></span>
         \\    <span class="theme-toggle-label" data-theme-label>Light</span>
         \\  </button>
+        \\  </div>
         \\</header>
         \\<main>
     );
 
-    if (cfg_opt) |cfg| {
-        try appendTemplate(buf, allocator,
-            \\<section class="init-banner ready"><strong>{principal}/{device}</strong><span>{repo_id}</span></section>
-        , .{
-            .principal = cfg.principal,
-            .device = cfg.device,
-            .repo_id = cfg.repo_id,
-        });
-    } else {
+    if (cfg_opt == null) {
         try buf.appendSlice(allocator,
             \\<section class="init-banner">
             \\  <strong>Gitomi is not initialized.</strong>
@@ -181,6 +179,32 @@ pub fn appendShellStart(
             \\</section>
         );
     }
+}
+
+fn appendUserMenu(buf: *std.ArrayList(u8), allocator: Allocator, cfg: Config) !void {
+    try appendTemplate(buf, allocator,
+        \\<details class="user-menu">
+        \\  <summary aria-label="User menu">
+        \\    <span class="user-avatar" aria-hidden="true"></span>
+        \\    <span class="user-menu-label"><strong>{principal}</strong><span>{device}</span></span>
+        \\  </summary>
+        \\  <div class="user-menu-popover" role="menu">
+        \\    <div class="user-menu-section">
+        \\      <span class="user-menu-kicker">User</span>
+        \\      <strong>{principal}</strong>
+        \\      <span>{device}</span>
+        \\    </div>
+        \\    <div class="user-menu-section">
+        \\      <span class="user-menu-kicker">Repository ID</span>
+        \\      <code>{repo_id}</code>
+        \\    </div>
+        \\  </div>
+        \\</details>
+    , .{
+        .principal = cfg.principal,
+        .device = cfg.device,
+        .repo_id = cfg.repo_id,
+    });
 }
 
 pub fn appendShellEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
@@ -289,16 +313,18 @@ pub fn appendRepoHeader(
     ref: []const u8,
     actions: []const Button,
 ) !void {
+    const repo_name = std.fs.path.basename(repo.root);
+    const owner_name = if (std.fs.path.dirname(repo.root)) |parent| std.fs.path.basename(parent) else "local";
     try appendTemplate(buf, allocator,
         \\<section class="repo-head">
         \\  <div>
-        \\    <p class="eyebrow">Repository</p>
-        \\    <h1>{repo_name}</h1>
+        \\    <h1><span class="repo-owner">{owner_name}</span><span class="repo-separator">/</span>{repo_name}</h1>
         \\  </div>
         \\  <div class="repo-actions">
         \\    <span class="branch-pill">{ref}</span>
     , .{
-        .repo_name = std.fs.path.basename(repo.root),
+        .owner_name = owner_name,
+        .repo_name = repo_name,
         .ref = ref,
     });
     for (actions) |button| try appendButtonLink(buf, allocator, button);
