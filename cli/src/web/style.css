@@ -1360,6 +1360,32 @@ main.page-code:has(.root-page-grid) {
 .issue-comment-box .markdown-body {
   padding: 16px;
 }
+.issue-comment-form {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+.issue-comment-form.issue-comment-box::after {
+  border-right-color: var(--panel);
+}
+.issue-comment-form textarea {
+  min-height: 112px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  resize: vertical;
+}
+.issue-comment-form-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+.issue-comment-error {
+  margin: 0;
+  color: var(--red);
+  font-size: 13px;
+  font-weight: 700;
+}
+.issue-comment-form-avatar {
+  background: var(--blue);
+}
 .issue-meta-sidebar {
   display: grid;
   min-width: 0;
