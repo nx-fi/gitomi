@@ -23,6 +23,135 @@ const no_comment_plugin = sloc_lang_plugins.Plugin{
     .inline_test_mode = .none,
 };
 
+const LanguageDisplayName = struct {
+    id: []const u8,
+    name: []const u8,
+};
+
+const language_display_names = [_]LanguageDisplayName{
+    .{ .id = "actionscript", .name = "ActionScript" },
+    .{ .id = "angelscript", .name = "AngelScript" },
+    .{ .id = "apache", .name = "Apache config" },
+    .{ .id = "autohotkey", .name = "AutoHotkey" },
+    .{ .id = "autoit", .name = "AutoIt" },
+    .{ .id = "avrasm", .name = "AVR Assembly" },
+    .{ .id = "awk", .name = "Awk" },
+    .{ .id = "bash", .name = "Shell" },
+    .{ .id = "basic", .name = "BASIC" },
+    .{ .id = "bnf", .name = "Backus-Naur Form" },
+    .{ .id = "c", .name = "C" },
+    .{ .id = "cal", .name = "C/AL" },
+    .{ .id = "capnproto", .name = "Cap'n Proto" },
+    .{ .id = "ceylon", .name = "Ceylon" },
+    .{ .id = "clean", .name = "Clean" },
+    .{ .id = "clojure-repl", .name = "Clojure REPL" },
+    .{ .id = "clojure", .name = "Clojure" },
+    .{ .id = "cmake", .name = "CMake" },
+    .{ .id = "coffeescript", .name = "CoffeeScript" },
+    .{ .id = "coq", .name = "Coq" },
+    .{ .id = "cos", .name = "Cache Object Script" },
+    .{ .id = "cpp", .name = "C++" },
+    .{ .id = "crystal", .name = "Crystal" },
+    .{ .id = "csharp", .name = "C#" },
+    .{ .id = "csp", .name = "CSP" },
+    .{ .id = "css", .name = "CSS" },
+    .{ .id = "d", .name = "D" },
+    .{ .id = "dns", .name = "DNS Zone" },
+    .{ .id = "dockerfile", .name = "Dockerfile" },
+    .{ .id = "dust", .name = "Dust" },
+    .{ .id = "elixir", .name = "Elixir" },
+    .{ .id = "erb", .name = "ERB" },
+    .{ .id = "erlang-repl", .name = "Erlang REPL" },
+    .{ .id = "excel", .name = "Excel" },
+    .{ .id = "fix", .name = "FIX" },
+    .{ .id = "flix", .name = "Flix" },
+    .{ .id = "fsharp", .name = "F#" },
+    .{ .id = "gams", .name = "GAMS" },
+    .{ .id = "gauss", .name = "GAUSS" },
+    .{ .id = "gherkin", .name = "Gherkin" },
+    .{ .id = "glsl", .name = "GLSL" },
+    .{ .id = "gml", .name = "GML" },
+    .{ .id = "go", .name = "Go" },
+    .{ .id = "golo", .name = "Golo" },
+    .{ .id = "gradle", .name = "Gradle" },
+    .{ .id = "haml", .name = "HAML" },
+    .{ .id = "haskell", .name = "Haskell" },
+    .{ .id = "haxe", .name = "Haxe" },
+    .{ .id = "html", .name = "HTML" },
+    .{ .id = "hsp", .name = "HSP" },
+    .{ .id = "hy", .name = "Hy" },
+    .{ .id = "inform7", .name = "Inform 7" },
+    .{ .id = "ini", .name = "INI" },
+    .{ .id = "javascript", .name = "JavaScript" },
+    .{ .id = "jboss-cli", .name = "JBoss CLI" },
+    .{ .id = "json", .name = "JSON" },
+    .{ .id = "julia-repl", .name = "Julia REPL" },
+    .{ .id = "julia", .name = "Julia" },
+    .{ .id = "kotlin", .name = "Kotlin" },
+    .{ .id = "lasso", .name = "Lasso" },
+    .{ .id = "ldif", .name = "LDIF" },
+    .{ .id = "leaf", .name = "Leaf" },
+    .{ .id = "less", .name = "Less" },
+    .{ .id = "lisp", .name = "Lisp" },
+    .{ .id = "livecodeserver", .name = "LiveCode" },
+    .{ .id = "makefile", .name = "Makefile" },
+    .{ .id = "markdown", .name = "Markdown" },
+    .{ .id = "mathematica", .name = "Mathematica" },
+    .{ .id = "matlab", .name = "MATLAB" },
+    .{ .id = "maxima", .name = "Maxima" },
+    .{ .id = "mel", .name = "MEL" },
+    .{ .id = "mercury", .name = "Mercury" },
+    .{ .id = "mipsasm", .name = "MIPS Assembly" },
+    .{ .id = "mizar", .name = "Mizar" },
+    .{ .id = "mojolicious", .name = "Mojolicious" },
+    .{ .id = "n1ql", .name = "N1QL" },
+    .{ .id = "nestedtext", .name = "Nested Text" },
+    .{ .id = "nginx", .name = "NGINX config" },
+    .{ .id = "nim", .name = "Nim" },
+    .{ .id = "nix", .name = "Nix" },
+    .{ .id = "node-repl", .name = "Node REPL" },
+    .{ .id = "ocaml", .name = "OCaml" },
+    .{ .id = "perl", .name = "Perl" },
+    .{ .id = "pf", .name = "Packet Filter config" },
+    .{ .id = "php-template", .name = "PHP Template" },
+    .{ .id = "php", .name = "PHP" },
+    .{ .id = "plaintext", .name = "Plain text" },
+    .{ .id = "pony", .name = "Pony" },
+    .{ .id = "powershell", .name = "PowerShell" },
+    .{ .id = "profile", .name = "Python profiler" },
+    .{ .id = "prolog", .name = "Prolog" },
+    .{ .id = "purebasic", .name = "PureBASIC" },
+    .{ .id = "python", .name = "Python" },
+    .{ .id = "q", .name = "Q" },
+    .{ .id = "reasonml", .name = "ReasonML" },
+    .{ .id = "rib", .name = "RenderMan RIB" },
+    .{ .id = "ruby", .name = "Ruby" },
+    .{ .id = "ruleslanguage", .name = "Oracle Rules Language" },
+    .{ .id = "rust", .name = "Rust" },
+    .{ .id = "scheme", .name = "Scheme" },
+    .{ .id = "shell", .name = "Shell Session" },
+    .{ .id = "sml", .name = "SML (Standard ML)" },
+    .{ .id = "sqf", .name = "SQF" },
+    .{ .id = "sql", .name = "SQL" },
+    .{ .id = "stata", .name = "Stata" },
+    .{ .id = "step21", .name = "STEP Part 21" },
+    .{ .id = "subunit", .name = "SubUnit" },
+    .{ .id = "taggerscript", .name = "Tagger Script" },
+    .{ .id = "tap", .name = "Test Anything Protocol" },
+    .{ .id = "thrift", .name = "Thrift" },
+    .{ .id = "toml", .name = "TOML" },
+    .{ .id = "tp", .name = "TP" },
+    .{ .id = "typescript", .name = "TypeScript" },
+    .{ .id = "vala", .name = "Vala" },
+    .{ .id = "vbscript-html", .name = "VBScript in HTML" },
+    .{ .id = "vim", .name = "Vim Script" },
+    .{ .id = "wasm", .name = "Wasm" },
+    .{ .id = "x86asm", .name = "Intel x86 Assembly" },
+    .{ .id = "xml", .name = "XML" },
+    .{ .id = "xquery", .name = "XQuery" },
+    .{ .id = "yaml", .name = "YAML" },
+};
+
 pub const Counts = struct {
     code: u64,
     test_count: u64,
@@ -135,25 +264,9 @@ pub fn languageForPath(path: []const u8) []const u8 {
 }
 
 pub fn languageDisplayName(language: []const u8) []const u8 {
-    if (std.ascii.eqlIgnoreCase(language, "bash")) return "Shell";
-    if (std.ascii.eqlIgnoreCase(language, "c")) return "C";
-    if (std.ascii.eqlIgnoreCase(language, "cpp")) return "C++";
-    if (std.ascii.eqlIgnoreCase(language, "csharp")) return "C#";
-    if (std.ascii.eqlIgnoreCase(language, "css")) return "CSS";
-    if (std.ascii.eqlIgnoreCase(language, "go")) return "Go";
-    if (std.ascii.eqlIgnoreCase(language, "html")) return "HTML";
-    if (std.ascii.eqlIgnoreCase(language, "ini")) return "INI";
-    if (std.ascii.eqlIgnoreCase(language, "javascript")) return "JavaScript";
-    if (std.ascii.eqlIgnoreCase(language, "json")) return "JSON";
-    if (std.ascii.eqlIgnoreCase(language, "markdown")) return "Markdown";
-    if (std.ascii.eqlIgnoreCase(language, "nix")) return "Nix";
-    if (std.ascii.eqlIgnoreCase(language, "python")) return "Python";
-    if (std.ascii.eqlIgnoreCase(language, "rust")) return "Rust";
-    if (std.ascii.eqlIgnoreCase(language, "sql")) return "SQL";
-    if (std.ascii.eqlIgnoreCase(language, "toml")) return "TOML";
-    if (std.ascii.eqlIgnoreCase(language, "typescript")) return "TypeScript";
-    if (std.ascii.eqlIgnoreCase(language, "xml")) return "XML";
-    if (std.ascii.eqlIgnoreCase(language, "yaml")) return "YAML";
+    for (language_display_names) |entry| {
+        if (std.ascii.eqlIgnoreCase(language, entry.id)) return entry.name;
+    }
     return hljs_languages.displayName(language);
 }
 
@@ -345,6 +458,17 @@ test "source stats maps hljs aliases to canonical languages" {
     try std.testing.expectEqualStrings("solidity", languageForPath("contracts/Token.sol"));
     try std.testing.expectEqualStrings("tla", languageForPath("spec/Consensus.tla"));
     try std.testing.expectEqualStrings("plaintext", languageForPath("LICENSE"));
+}
+
+test "source stats display names use language capitalization" {
+    try std.testing.expectEqualStrings("Dockerfile", languageDisplayName("dockerfile"));
+    try std.testing.expectEqualStrings("Elixir", languageDisplayName("elixir"));
+    try std.testing.expectEqualStrings("Wasm", languageDisplayName("wasm"));
+    try std.testing.expectEqualStrings("CMake", languageDisplayName("cmake"));
+    try std.testing.expectEqualStrings("Makefile", languageDisplayName("makefile"));
+    try std.testing.expectEqualStrings("PHP", languageDisplayName("php"));
+    try std.testing.expectEqualStrings("Ruby", languageDisplayName("ruby"));
+    try std.testing.expectEqualStrings("unknownlang", languageDisplayName("unknownlang"));
 }
 
 test "source stats counts blob lines without the sloc binary" {

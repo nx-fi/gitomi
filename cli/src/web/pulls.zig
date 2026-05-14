@@ -19,6 +19,7 @@ const appendPill = shared.appendPill;
 const appendSectionHead = shared.appendSectionHead;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
+const appendRelativeTime = shared.appendRelativeTime;
 const appendTemplate = shared.appendTemplate;
 const commitHref = shared.commitHref;
 const literalHref = shared.literalHref;
@@ -334,12 +335,17 @@ fn appendPullListRow(
         try appendLegacyPullLink(buf, allocator, legacy_number);
     }
     try appendTemplate(buf, allocator,
-        \\ by {author} {verb} {time}</p><p class="pull-branch-line"><span>{head_ref}</span><span aria-hidden="true">-&gt;</span><span>{base_ref}</span></p></div>
-        \\  <div class="issue-row-side">
+        \\ by {author} {verb}
     , .{
         .author = author,
         .verb = if (std.mem.eql(u8, state, "open")) "opened" else "was updated",
-        .time = if (std.mem.eql(u8, state, "open")) opened_at else state_at,
+    });
+    try buf.append(allocator, ' ');
+    try appendRelativeTime(buf, allocator, if (std.mem.eql(u8, state, "open")) opened_at else state_at);
+    try appendTemplate(buf, allocator,
+        \\</p><p class="pull-branch-line"><span>{head_ref}</span><span aria-hidden="true">-&gt;</span><span>{base_ref}</span></p></div>
+        \\  <div class="issue-row-side">
+    , .{
         .head_ref = head_ref,
         .base_ref = base_ref,
     });
@@ -514,10 +520,14 @@ fn appendPullFacts(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, db
     try buf.appendSlice(allocator, "<div><dt>Status</dt><dd>");
     try appendPullStatePill(buf, allocator, detail.state, detail.draft);
     try appendTemplate(buf, allocator,
-        \\</dd></div><div><dt>ID</dt><dd><code>{id}</code></dd></div><div><dt>Opened</dt><dd>{opened_at}</dd></div><div><dt>Author</dt><dd>{author}/{device}</dd></div><div><dt>Base</dt><dd><code>{base_ref}</code></dd></div><div><dt>Head</dt><dd><code>{head_ref}</code></dd></div>
+        \\</dd></div><div><dt>ID</dt><dd><code>{id}</code></dd></div><div><dt>Opened</dt><dd>
     , .{
         .id = detail.id,
-        .opened_at = detail.opened_at,
+    });
+    try appendRelativeTime(buf, allocator, detail.opened_at);
+    try appendTemplate(buf, allocator,
+        \\</dd></div><div><dt>Author</dt><dd>{author}/{device}</dd></div><div><dt>Base</dt><dd><code>{base_ref}</code></dd></div><div><dt>Head</dt><dd><code>{head_ref}</code></dd></div>
+    , .{
         .author = detail.author_principal,
         .device = detail.author_device,
         .base_ref = detail.base_ref,
@@ -565,12 +575,14 @@ fn appendPullCollectionFact(buf: *std.ArrayList(u8), allocator: Allocator, db: *
 fn appendPullConversation(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, detail: PullDetail) !void {
     try appendTemplate(buf, allocator,
         \\<article class="issue-card pull-card">
-        \\  <div class="comment-meta"><strong>{author}</strong><span>{opened_at}</span></div>
+        \\  <div class="comment-meta"><strong>{author}</strong><span>opened
+    , .{ .author = detail.author_principal });
+    try buf.append(allocator, ' ');
+    try appendRelativeTime(buf, allocator, detail.opened_at);
+    try appendTemplate(buf, allocator,
+        \\</span></div>
         \\  <div class="markdown-body">
-    , .{
-        .author = detail.author_principal,
-        .opened_at = detail.opened_at,
-    });
+    , .{});
     if (detail.body.len == 0) {
         try buf.appendSlice(allocator, "<p class=\"muted\">No description provided.</p>");
     } else {
@@ -604,12 +616,14 @@ fn appendPullComments(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlite
         defer allocator.free(reply_parent_hash);
 
         try appendTemplate(buf, allocator,
-            \\<article class="{classes}"><div class="comment-meta"><strong>{author}</strong><span>{created_at}</span></div>
+            \\<article class="{classes}"><div class="comment-meta"><strong>{author}</strong><span>commented
         , .{
             .classes = shared.classes("issue-card comment-card", &.{shared.class("is-reply", reply_parent_id.len != 0 or reply_parent_hash.len != 0)}),
             .author = author,
-            .created_at = created_at,
         });
+        try buf.append(allocator, ' ');
+        try appendRelativeTime(buf, allocator, created_at);
+        try buf.appendSlice(allocator, "</span></div>");
         if (reply_parent_id.len != 0 or reply_parent_hash.len != 0) {
             try buf.appendSlice(allocator, "<p class=\"reply-note\">Reply to ");
             if (reply_parent_id.len != 0) {
