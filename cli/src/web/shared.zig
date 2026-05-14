@@ -140,6 +140,7 @@ pub fn appendShellStart(
     try appendTemplate(buf, allocator,
         \\ - Gitomi</title>
         \\  <link rel="icon" href="/logo.svg" type="image/svg+xml">
+        \\  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/devicons/devicon@latest/devicon.min.css">
         \\  <link rel="stylesheet" href="/style.css">
         \\</head>
         \\<body>
