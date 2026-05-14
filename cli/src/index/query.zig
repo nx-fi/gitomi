@@ -27,7 +27,8 @@ const fileExists = util.fileExists;
 const freeIndexedEvent = index_event_row.freeIndexedEvent;
 const indexedEventFromStmt = index_event_row.indexedEventFromStmt;
 const out = io.out;
-const parseValidatedEnvelope = event_mod.parseValidatedEnvelope;
+const parseValidatedEnvelopeObject = event_mod.parseValidatedEnvelopeObject;
+const validateEnvelopeObject = event_mod.validateEnvelopeObject;
 const printIndexedEvent = index_event_row.printIndexedEvent;
 
 pub fn countIndexedEvents(allocator: Allocator, repo: Repo) !usize {
@@ -60,8 +61,28 @@ pub fn requireAuthorizedWrite(allocator: Allocator, repo: Repo, event_body: []co
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
 
-    var envelope = parseValidatedEnvelope(allocator, event_body) catch {
-        try eprint("gt: refusing to create invalid event envelope\n", .{});
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, event_body, .{}) catch {
+        try eprint("gt: refusing to create invalid event envelope: event body is not valid JSON\n", .{});
+        return CliError.InvalidEvent;
+    };
+    defer parsed.deinit();
+
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => {
+            try eprint("gt: refusing to create invalid event envelope: event body must be a JSON object\n", .{});
+            return CliError.InvalidEvent;
+        },
+    };
+
+    if (try validateEnvelopeObject(allocator, root)) |message| {
+        defer allocator.free(message);
+        try eprint("gt: refusing to create invalid event envelope: {s}\n", .{message});
+        return CliError.InvalidEvent;
+    }
+
+    var envelope = parseValidatedEnvelopeObject(allocator, root) catch {
+        try eprint("gt: refusing to create invalid event envelope: parser rejected validated envelope\n", .{});
         return CliError.InvalidEvent;
     };
     defer envelope.deinit();

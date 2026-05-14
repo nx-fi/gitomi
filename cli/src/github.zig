@@ -487,8 +487,10 @@ fn importIssueObject(allocator: Allocator, issue: std.json.ObjectMap, options: I
     defer repo.deinit();
     if (try index.lookupLegacyGithubObjectId(allocator, repo, "issue", number)) |existing| return existing;
 
-    const title = event_mod.jsonString(issue.get("title")) orelse "(untitled)";
-    const body = event_mod.jsonString(issue.get("body")) orelse "";
+    const title = try githubSizedString(allocator, event_mod.jsonString(issue.get("title")), "(untitled)", git.max_payload_title_bytes);
+    defer allocator.free(title);
+    const body = try githubSizedString(allocator, event_mod.jsonString(issue.get("body")), "", git.max_payload_text_bytes);
+    defer allocator.free(body);
     const occurred_at = try githubTimestampOrNow(allocator, issue.get("created_at"));
     defer allocator.free(occurred_at);
 
@@ -519,10 +521,14 @@ fn importPullObject(allocator: Allocator, pull: std.json.ObjectMap, options: Imp
     defer repo.deinit();
     if (try index.lookupLegacyGithubObjectId(allocator, repo, "pull", number)) |existing| return existing;
 
-    const title = event_mod.jsonString(pull.get("title")) orelse "(untitled)";
-    const body = event_mod.jsonString(pull.get("body")) orelse "";
-    const base_ref = nestedString(pull, "base", "ref") orelse "main";
-    const head_ref = nestedString(pull, "head", "ref") orelse "unknown";
+    const title = try githubSizedString(allocator, event_mod.jsonString(pull.get("title")), "(untitled)", git.max_payload_title_bytes);
+    defer allocator.free(title);
+    const body = try githubSizedString(allocator, event_mod.jsonString(pull.get("body")), "", git.max_payload_text_bytes);
+    defer allocator.free(body);
+    const base_ref = try githubSizedString(allocator, nestedString(pull, "base", "ref"), "main", git.max_payload_ref_bytes);
+    defer allocator.free(base_ref);
+    const head_ref = try githubSizedString(allocator, nestedString(pull, "head", "ref"), "unknown", git.max_payload_ref_bytes);
+    defer allocator.free(head_ref);
     const draft = jsonBool(pull.get("draft")) orelse false;
     const occurred_at = try githubTimestampOrNow(allocator, pull.get("created_at"));
     defer allocator.free(occurred_at);
@@ -557,15 +563,41 @@ fn importCommentsArray(
     options: ImportOptions,
     stats: *ImportStats,
 ) !void {
+    var repo = try repo_mod.discoverRepo(allocator);
+    defer repo.deinit();
+    try index.ensureIndex(allocator, repo);
+    var db = try index.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
     for (comments.items) |item| {
         if (item != .object) continue;
-        const body = event_mod.jsonString(item.object.get("body")) orelse "";
+        const body = try githubSizedString(allocator, event_mod.jsonString(item.object.get("body")), "", git.max_payload_text_bytes);
+        defer allocator.free(body);
         if (std.mem.trim(u8, body, " \t\r\n").len == 0) continue;
         const occurred_at = try githubTimestampOrNow(allocator, item.object.get("created_at"));
         defer allocator.free(occurred_at);
+        if (try importedCommentExists(&db, parent_kind, parent_id, occurred_at, body)) continue;
         try writeImportedCommentAdded(allocator, options, parent_kind, parent_id, occurred_at, body);
         stats.comments += 1;
     }
+}
+
+fn importedCommentExists(db: *index.SqliteDb, parent_kind: []const u8, parent_id: []const u8, created_at: []const u8, body: []const u8) !bool {
+    var stmt = try db.prepare(
+        \\SELECT 1
+        \\FROM comments
+        \\WHERE parent_kind = ?
+        \\  AND parent_id = ?
+        \\  AND created_at = ?
+        \\  AND body = ?
+        \\LIMIT 1
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, parent_kind);
+    try stmt.bindText(2, parent_id);
+    try stmt.bindText(3, created_at);
+    try stmt.bindText(4, body);
+    return try stmt.step();
 }
 
 fn writeImportedIssueOpened(
@@ -588,7 +620,9 @@ fn writeImportedIssueOpened(
     defer allocator.free(idem);
     const body = try event_mod.buildIssueOpenedJsonWithLegacy(allocator, writer.cfg, writer.nextSeq(), issue_id, event_uuid, idem, occurred_at, writer.eventParents(), title, body_text, labels, assignees, .{ .github_issue_number = number });
     defer allocator.free(body);
-    const subject = try std.fmt.allocPrint(allocator, "issue.opened #{s} GitHub #{d} {s}", .{ issue_id[0..7], number, title });
+    const subject_prefix = try std.fmt.allocPrint(allocator, "issue.opened #{s} GitHub #{d} ", .{ issue_id[0..7], number });
+    defer allocator.free(subject_prefix);
+    const subject = try githubSubject(allocator, subject_prefix, title);
     defer allocator.free(subject);
     const commit = try writer.write("gt github import", subject, body);
     allocator.free(commit);
@@ -615,7 +649,9 @@ fn writeImportedPullOpened(
     defer allocator.free(idem);
     const body = try event_mod.buildPullOpenedJsonWithLegacy(allocator, writer.cfg, writer.nextSeq(), pull_id, event_uuid, idem, occurred_at, writer.eventParents(), title, body_text, base_ref, head_ref, draft, .{ .github_pull_number = number });
     defer allocator.free(body);
-    const subject = try std.fmt.allocPrint(allocator, "pull.opened #{s} GitHub #{d} {s}", .{ pull_id[0..7], number, title });
+    const subject_prefix = try std.fmt.allocPrint(allocator, "pull.opened #{s} GitHub #{d} ", .{ pull_id[0..7], number });
+    defer allocator.free(subject_prefix);
+    const subject = try githubSubject(allocator, subject_prefix, title);
     defer allocator.free(subject);
     const commit = try writer.write("gt github import", subject, body);
     allocator.free(commit);
@@ -695,6 +731,36 @@ fn writeImportedCommentAdded(
     defer allocator.free(subject);
     const commit = try writer.write("gt github import", subject, body);
     allocator.free(commit);
+}
+
+fn githubSizedString(allocator: Allocator, value: ?[]const u8, fallback: []const u8, max_bytes: usize) ![]u8 {
+    const raw = value orelse fallback;
+    if (raw.len <= max_bytes) return allocator.dupe(u8, raw);
+
+    const marker = "\n\n[truncated by gitomi github import]";
+    if (max_bytes <= marker.len) return allocator.dupe(u8, raw[0..utf8PrefixLen(raw, max_bytes)]);
+
+    const prefix_len = utf8PrefixLen(raw, max_bytes - marker.len);
+    var out_buf: std.ArrayList(u8) = .empty;
+    errdefer out_buf.deinit(allocator);
+    try out_buf.appendSlice(allocator, raw[0..prefix_len]);
+    try out_buf.appendSlice(allocator, marker);
+    return try out_buf.toOwnedSlice(allocator);
+}
+
+fn githubSubject(allocator: Allocator, prefix: []const u8, title: []const u8) ![]u8 {
+    const title_limit = if (prefix.len >= git.max_event_subject_bytes) 0 else git.max_event_subject_bytes - prefix.len;
+    const title_part = try githubSizedString(allocator, title, "", title_limit);
+    defer allocator.free(title_part);
+    return std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, title_part });
+}
+
+fn utf8PrefixLen(value: []const u8, max_bytes: usize) usize {
+    var len = @min(value.len, max_bytes);
+    while (len > 0 and len < value.len and (value[len] & 0xc0) == 0x80) {
+        len -= 1;
+    }
+    return len;
 }
 
 const ExportOptions = struct {
@@ -1385,10 +1451,10 @@ fn githubNamedArray(allocator: Allocator, value: ?std.json.Value, key: []const u
     errdefer freeStringList(allocator, list.items);
     for (array.items) |item| {
         if (item == .string) {
-            try list.append(allocator, try allocator.dupe(u8, item.string));
+            try list.append(allocator, try githubSizedString(allocator, item.string, "", git.max_payload_atom_bytes));
         } else if (item == .object) {
             if (event_mod.jsonString(item.object.get(key))) |name| {
-                if (name.len != 0) try list.append(allocator, try allocator.dupe(u8, name));
+                if (name.len != 0) try list.append(allocator, try githubSizedString(allocator, name, "", git.max_payload_atom_bytes));
             }
         }
     }
@@ -1456,4 +1522,22 @@ fn urlPathEscape(allocator: Allocator, value: []const u8) ![]u8 {
         }
     }
     return buf.toOwnedSlice(allocator);
+}
+
+test "github import text capping preserves utf8 and limit" {
+    const raw = "hello 世界 this text is too long";
+    const capped = try githubSizedString(std.testing.allocator, raw, "", 18);
+    defer std.testing.allocator.free(capped);
+    try std.testing.expect(capped.len <= 18);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(capped));
+}
+
+test "github import subject stays within event subject limit" {
+    const title = try std.testing.allocator.alloc(u8, git.max_event_subject_bytes * 2);
+    defer std.testing.allocator.free(title);
+    @memset(title, 'a');
+
+    const subject = try githubSubject(std.testing.allocator, "issue.opened #1234567 GitHub #1 ", title);
+    defer std.testing.allocator.free(subject);
+    try std.testing.expect(subject.len <= git.max_event_subject_bytes);
 }
