@@ -4,7 +4,12 @@
   const symbolsStorageKey = "gitomi.symbolsPanel";
 
   function setButtonState(button, label) {
-    button.textContent = label;
+    const labelNode = button.querySelector("[data-button-label]");
+    if (labelNode) {
+      labelNode.textContent = label;
+    } else {
+      button.textContent = label;
+    }
   }
 
   function storedSymbolsVisible() {
@@ -29,7 +34,8 @@
     layout.classList.toggle("symbols-collapsed", !visible);
     sidebar.hidden = !visible;
     button.setAttribute("aria-expanded", String(visible));
-    button.textContent = visible ? "Hide symbols" : "Show symbols";
+    setButtonState(button, visible ? "Hide symbols" : "Show symbols");
+    button.setAttribute("aria-label", visible ? "Hide symbols panel" : "Show symbols panel");
     button.title = visible ? "Hide symbols panel" : "Show symbols panel";
     if (persist) storeSymbolsVisible(visible);
   }
@@ -71,7 +77,8 @@
       const url = button.dataset.copyRaw;
       if (!url) return;
 
-      const original = button.textContent || "Copy";
+      const labelNode = button.querySelector("[data-button-label]");
+      const original = (labelNode && labelNode.textContent) || button.textContent || "Copy";
       button.disabled = true;
       setButtonState(button, "Copying");
       try {
@@ -94,12 +101,376 @@
     document.querySelectorAll("[data-copy-raw]").forEach(initCopyButton);
   }
 
+  function initPathCopyButton(button) {
+    button.addEventListener("click", async function () {
+      const path = button.dataset.copyPath || "";
+      const original = button.title || "Copy path";
+      button.disabled = true;
+      try {
+        await copyText(path);
+        button.title = "Copied path";
+        button.setAttribute("aria-label", "Copied path");
+      } catch (_) {
+        button.title = "Copy failed";
+        button.setAttribute("aria-label", "Copy failed");
+      } finally {
+        window.setTimeout(function () {
+          button.disabled = false;
+          button.title = original;
+          button.setAttribute("aria-label", original);
+        }, 1200);
+      }
+    });
+  }
+
+  function initPathCopyButtons() {
+    document.querySelectorAll("[data-copy-path]").forEach(initPathCopyButton);
+  }
+
+  let activeLine = null;
+  let activeLineButton = null;
+  let lineMenu = null;
+  let lineDocumentHandlersBound = false;
+
+  function lineNumber(row) {
+    return row.dataset.lineNumber || (row.id || "").replace(/^L/, "");
+  }
+
+  function lineContainer(row) {
+    return row.closest("[data-code-lines]");
+  }
+
+  function linePath(row) {
+    const container = lineContainer(row);
+    return (container && container.dataset.path) || "";
+  }
+
+  function lineCode(row) {
+    const code = row.querySelector("code");
+    return (code && code.textContent) || "";
+  }
+
+  function lineUrl(row) {
+    const url = new URL(window.location.href);
+    if (row.id) url.hash = row.id;
+    return url;
+  }
+
+  function blameUrl(row) {
+    const container = lineContainer(row);
+    const href = (container && container.dataset.blameHref) || "";
+    const url = href ? new URL(href, window.location.href) : new URL(window.location.href);
+    url.pathname = "/blame";
+    if (row.id) url.hash = row.id;
+    return url;
+  }
+
+  function githubDevUrl(row) {
+    const container = lineContainer(row);
+    const href = (container && container.dataset.githubDevUrl) || "";
+    if (!href) return null;
+    const url = new URL(href, window.location.href);
+    if (row.id) url.hash = row.id;
+    return url;
+  }
+
+  function lineReference(row) {
+    const path = linePath(row);
+    const number = lineNumber(row);
+    return path ? `${path}:${number}` : `line ${number}`;
+  }
+
+  function newIssueUrl(row) {
+    const params = new URLSearchParams();
+    const reference = lineReference(row);
+    params.set("title", `Reference ${reference}`);
+    params.set("body", `${reference}\n\n${lineUrl(row).href}`);
+    return `/new-issue?${params.toString()}`;
+  }
+
+  function setMenuItemDisabled(action, disabled) {
+    if (!lineMenu) return;
+    const item = lineMenu.querySelector(`[data-line-action="${action}"]`);
+    if (item) item.disabled = disabled;
+  }
+
+  function ensureLineMenu() {
+    if (lineMenu) return lineMenu;
+
+    lineMenu = document.createElement("div");
+    lineMenu.className = "line-actions-menu";
+    lineMenu.setAttribute("role", "menu");
+    lineMenu.hidden = true;
+    lineMenu.innerHTML = [
+      '<button type="button" role="menuitem" data-line-action="copy-line">Copy line</button>',
+      '<button type="button" role="menuitem" data-line-action="copy-permalink">Copy permalink</button>',
+      '<button type="button" role="menuitem" data-line-action="view-blame">View git blame</button>',
+      '<button type="button" role="menuitem" data-line-action="new-issue">Reference in new issue</button>',
+      '<button type="button" role="menuitem" data-line-action="github-dev">View file in GitHub.dev</button>',
+      '<button type="button" role="menuitem" data-line-action="switch-ref"><span>View file in different branch/tag</span><kbd>W</kbd></button>',
+    ].join("");
+    document.body.appendChild(lineMenu);
+
+    lineMenu.addEventListener("click", async function (event) {
+      const item = event.target.closest("[data-line-action]");
+      if (!item || item.disabled || !activeLine) return;
+      event.preventDefault();
+      await runLineAction(item.dataset.lineAction, activeLine);
+    });
+
+    return lineMenu;
+  }
+
+  function positionLineMenu(button) {
+    if (!lineMenu || lineMenu.hidden) return;
+    lineMenu.style.visibility = "hidden";
+    lineMenu.style.left = "0";
+    lineMenu.style.top = "0";
+
+    const rect = button.getBoundingClientRect();
+    const width = lineMenu.offsetWidth;
+    const height = lineMenu.offsetHeight;
+    const gap = 6;
+    const margin = 8;
+    let left = rect.left;
+    let top = rect.bottom + gap;
+
+    if (left + width > window.innerWidth - margin) {
+      left = window.innerWidth - width - margin;
+    }
+    if (top + height > window.innerHeight - margin) {
+      top = rect.top - height - gap;
+    }
+
+    lineMenu.style.left = `${Math.max(margin, left)}px`;
+    lineMenu.style.top = `${Math.max(margin, top)}px`;
+    lineMenu.style.visibility = "";
+  }
+
+  function closeLineMenu() {
+    if (lineMenu) lineMenu.hidden = true;
+    if (activeLineButton) activeLineButton.setAttribute("aria-expanded", "false");
+    activeLineButton = null;
+  }
+
+  function openLineMenu(row, button) {
+    ensureLineMenu();
+    activeLineButton = button;
+    button.setAttribute("aria-expanded", "true");
+    setMenuItemDisabled("github-dev", githubDevUrl(row) === null);
+    setMenuItemDisabled("switch-ref", document.querySelector("[data-branch-switcher]") === null);
+    lineMenu.hidden = false;
+    positionLineMenu(button);
+    const first = lineMenu.querySelector("[data-line-action]:not(:disabled)");
+    if (first) first.focus();
+  }
+
+  function clearActiveLine() {
+    if (!activeLine) return;
+    activeLine.classList.remove("line-selected");
+    const button = activeLine.querySelector("[data-line-menu-button]");
+    if (button) {
+      button.setAttribute("aria-expanded", "false");
+      button.tabIndex = -1;
+    }
+    activeLine = null;
+  }
+
+  function setActiveLine(row, options) {
+    const opts = options || {};
+    if (activeLine !== row) {
+      closeLineMenu();
+      clearActiveLine();
+      activeLine = row;
+      row.classList.add("line-selected");
+      const nextButton = row.querySelector("[data-line-menu-button]");
+      if (nextButton) nextButton.tabIndex = 0;
+    }
+
+    if (opts.updateHash !== false && row.id) {
+      const url = lineUrl(row);
+      if (url.href !== window.location.href) {
+        try {
+          window.history.pushState(null, "", url);
+        } catch (_) {
+          window.location.hash = row.id;
+        }
+      }
+    }
+
+    const button = row.querySelector("[data-line-menu-button]");
+    if (opts.openMenu && button) {
+      openLineMenu(row, button);
+    }
+  }
+
+  async function runLineAction(action, row) {
+    if (action === "copy-line") {
+      await copyText(lineCode(row));
+      closeLineMenu();
+    } else if (action === "copy-permalink") {
+      await copyText(lineUrl(row).href);
+      closeLineMenu();
+    } else if (action === "view-blame") {
+      window.location.href = blameUrl(row).href;
+    } else if (action === "new-issue") {
+      window.location.href = newIssueUrl(row);
+    } else if (action === "github-dev") {
+      const url = githubDevUrl(row);
+      if (url) window.location.href = url.href;
+    } else if (action === "switch-ref") {
+      focusBranchSwitcher();
+    }
+  }
+
+  function focusBranchSwitcher() {
+    const select = document.querySelector("[data-branch-switcher]");
+    if (!select) return;
+    closeLineMenu();
+    select.focus();
+    select.classList.add("branch-switcher-pulse");
+    window.setTimeout(function () {
+      select.classList.remove("branch-switcher-pulse");
+    }, 900);
+  }
+
+  function lineFromCurrentHash() {
+    const id = window.location.hash.replace(/^#/, "");
+    if (!id) return null;
+    let decoded = id;
+    try {
+      decoded = decodeURIComponent(id);
+    } catch (_) {}
+    const row = document.getElementById(decoded);
+    return row && row.matches("[data-line-row], .blame-row") ? row : null;
+  }
+
+  function stickyBottom(element) {
+    if (!element) return 0;
+    const position = window.getComputedStyle(element).position;
+    if (position !== "sticky" && position !== "fixed") return 0;
+    const rect = element.getBoundingClientRect();
+    if (rect.bottom <= 0 || rect.top >= window.innerHeight) return 0;
+    return Math.max(0, Math.min(window.innerHeight, rect.bottom));
+  }
+
+  function lineViewportTop(row) {
+    const panel = row.closest(".code-panel");
+    const panelHead = panel && panel.querySelector(".code-panel-head");
+    return Math.max(
+      stickyBottom(document.querySelector(".topbar")),
+      stickyBottom(panelHead),
+    );
+  }
+
+  function scrollLineIntoView(row) {
+    const gap = 8;
+    const top = Math.min(window.innerHeight, lineViewportTop(row) + gap);
+    const rect = row.getBoundingClientRect();
+    const nextTop = window.scrollY + rect.top - top;
+    if (Math.abs(rect.top - top) > 1) {
+      window.scrollTo({ top: Math.max(0, nextTop), left: window.scrollX, behavior: "auto" });
+    }
+  }
+
+  function scrollLineIntoViewSoon(row) {
+    window.requestAnimationFrame(function () {
+      scrollLineIntoView(row);
+      window.requestAnimationFrame(function () {
+        scrollLineIntoView(row);
+      });
+    });
+  }
+
+  function syncLineSelectionFromHash() {
+    const row = lineFromCurrentHash();
+    if (row) {
+      if (row.matches("[data-line-row]")) {
+        setActiveLine(row, { updateHash: false, openMenu: false });
+      } else {
+        closeLineMenu();
+        clearActiveLine();
+      }
+      scrollLineIntoViewSoon(row);
+    } else {
+      closeLineMenu();
+      clearActiveLine();
+    }
+  }
+
+  function bindLineDocumentHandlers() {
+    if (lineDocumentHandlersBound) return;
+    lineDocumentHandlersBound = true;
+
+    document.addEventListener("click", function (event) {
+      if (!lineMenu || lineMenu.hidden) return;
+      if (lineMenu.contains(event.target)) return;
+      if (activeLineButton && activeLineButton.contains(event.target)) return;
+      closeLineMenu();
+    });
+
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape") {
+        const button = activeLineButton;
+        closeLineMenu();
+        if (button) button.focus();
+        return;
+      }
+      if (!lineMenu || lineMenu.hidden) return;
+      if (event.key.toLowerCase() === "w" && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        event.preventDefault();
+        focusBranchSwitcher();
+      }
+    });
+
+    window.addEventListener("resize", closeLineMenu);
+    window.addEventListener("hashchange", syncLineSelectionFromHash);
+    window.addEventListener("popstate", syncLineSelectionFromHash);
+  }
+
+  function initCodeLineActions(container) {
+    bindLineDocumentHandlers();
+
+    container.addEventListener("click", function (event) {
+      const button = event.target.closest("[data-line-menu-button]");
+      if (button && container.contains(button)) {
+        const row = button.closest("[data-line-row]");
+        if (!row) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const shouldOpen = !lineMenu || lineMenu.hidden || activeLineButton !== button;
+        if (shouldOpen) {
+          setActiveLine(row, { openMenu: true });
+        } else {
+          closeLineMenu();
+        }
+        return;
+      }
+
+      const line = event.target.closest(".line-num");
+      if (!line || !container.contains(line)) return;
+      const row = line.closest("[data-line-row]");
+      if (!row) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setActiveLine(row, { openMenu: true });
+    });
+  }
+
+  function initCodeLineActionControls() {
+    bindLineDocumentHandlers();
+    document.querySelectorAll("[data-code-lines]").forEach(initCodeLineActions);
+    syncLineSelectionFromHash();
+  }
+
   function initSymbolsToggles() {
     document.querySelectorAll("[data-symbols-toggle]").forEach(initSymbolsToggle);
   }
 
   function initCodeControls() {
     initCopyButtons();
+    initPathCopyButtons();
+    initCodeLineActionControls();
     initSymbolsToggles();
   }
 

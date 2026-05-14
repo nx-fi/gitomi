@@ -17,7 +17,7 @@ const aliases_angelscript = [_][]const u8{ "asc" };
 const aliases_apache = [_][]const u8{ "apacheconf" };
 const aliases_applescript = [_][]const u8{ "osascript" };
 const aliases_arcade = [_][]const u8{};
-const aliases_arduino = [_][]const u8{ "cc", "c++", "h++", "hpp", "hh", "hxx", "cxx" };
+const aliases_arduino = [_][]const u8{ "ino" };
 const aliases_armasm = [_][]const u8{ "arm" };
 const aliases_asciidoc = [_][]const u8{ "adoc" };
 const aliases_aspectj = [_][]const u8{};
@@ -184,7 +184,7 @@ const aliases_tcl = [_][]const u8{ "tk" };
 const aliases_thrift = [_][]const u8{};
 const aliases_tp = [_][]const u8{};
 const aliases_twig = [_][]const u8{ "craftcms" };
-const aliases_typescript = [_][]const u8{ "js", "jsx", "mjs", "cjs" };
+const aliases_typescript = [_][]const u8{ "ts", "tsx", "mts", "cts" };
 const aliases_vala = [_][]const u8{};
 const aliases_vbnet = [_][]const u8{ "vb" };
 const aliases_vbscript_html = [_][]const u8{};
@@ -204,6 +204,7 @@ const aliases_zig = [_][]const u8{ "zig" };
 const aliases_solidity = [_][]const u8{ "sol" };
 const aliases_tla = [_][]const u8{ "tlaplus" };
 const aliases_toml = [_][]const u8{ "toml" };
+const aliases_svelte = [_][]const u8{};
 
 pub const languages = [_]Language{
     .{ .id = "1c", .name = "1C:Enterprise", .aliases = &aliases_1c },
@@ -215,7 +216,7 @@ pub const languages = [_]Language{
     .{ .id = "apache", .name = "apache", .aliases = &aliases_apache },
     .{ .id = "applescript", .name = "AppleScript", .aliases = &aliases_applescript },
     .{ .id = "arcade", .name = "ArcGIS Arcade", .aliases = &aliases_arcade },
-    .{ .id = "arduino", .name = "C++", .aliases = &aliases_arduino },
+    .{ .id = "arduino", .name = "Arduino", .aliases = &aliases_arduino },
     .{ .id = "armasm", .name = "ARM Assembly", .aliases = &aliases_armasm },
     .{ .id = "asciidoc", .name = "AsciiDoc", .aliases = &aliases_asciidoc },
     .{ .id = "aspectj", .name = "AspectJ", .aliases = &aliases_aspectj },
@@ -382,7 +383,7 @@ pub const languages = [_]Language{
     .{ .id = "thrift", .name = "thrift", .aliases = &aliases_thrift },
     .{ .id = "tp", .name = "tp", .aliases = &aliases_tp },
     .{ .id = "twig", .name = "Twig", .aliases = &aliases_twig },
-    .{ .id = "typescript", .name = "JavaScript", .aliases = &aliases_typescript },
+    .{ .id = "typescript", .name = "TypeScript", .aliases = &aliases_typescript },
     .{ .id = "vala", .name = "vala", .aliases = &aliases_vala },
     .{ .id = "vbnet", .name = "Visual Basic .NET", .aliases = &aliases_vbnet },
     .{ .id = "vbscript-html", .name = "vbscript-html", .aliases = &aliases_vbscript_html },
@@ -402,6 +403,7 @@ pub const languages = [_]Language{
     .{ .id = "solidity", .name = "Solidity", .aliases = &aliases_solidity },
     .{ .id = "tla", .name = "TLA+", .aliases = &aliases_tla },
     .{ .id = "toml", .name = "TOML", .aliases = &aliases_toml },
+    .{ .id = "svelte", .name = "Svelte", .aliases = &aliases_svelte },
 };
 
 pub fn languageForToken(token: []const u8) ?[]const u8 {
@@ -427,4 +429,3 @@ pub fn displayName(language_id: []const u8) []const u8 {
     }
     return language_id;
 }
-

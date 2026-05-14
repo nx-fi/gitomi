@@ -337,6 +337,10 @@ test "source stats maps hljs aliases to canonical languages" {
     try std.testing.expectEqualStrings("c", languageForPath("src/main.c"));
     try std.testing.expectEqualStrings("c", languageForPath("include/main.h"));
     try std.testing.expectEqualStrings("cpp", languageForPath("include/main.hpp"));
+    try std.testing.expectEqualStrings("javascript", languageForPath("assets/app.js"));
+    try std.testing.expectEqualStrings("typescript", languageForPath("src/app.ts"));
+    try std.testing.expectEqualStrings("typescript", languageForPath("src/app.tsx"));
+    try std.testing.expectEqualStrings("svelte", languageForPath("src/App.svelte"));
     try std.testing.expectEqualStrings("markdown", languageForPath("README.md"));
     try std.testing.expectEqualStrings("solidity", languageForPath("contracts/Token.sol"));
     try std.testing.expectEqualStrings("tla", languageForPath("spec/Consensus.tla"));
