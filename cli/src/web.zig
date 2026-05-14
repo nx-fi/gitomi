@@ -8,6 +8,7 @@ const io = @import("io.zig");
 const issues_page = @import("web/issues.zig");
 const overview_page = @import("web/overview.zig");
 const projects_page = @import("web/projects.zig");
+const pulls_page = @import("web/pulls.zig");
 const refs_page = @import("web/refs.zig");
 const repo_mod = @import("repo.zig");
 const shared = @import("web/shared.zig");
@@ -215,6 +216,18 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         const body = try issues_page.renderIssueDetailPage(allocator, repo, issue_ref);
         defer allocator.free(body);
         try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
+    } else if (std.mem.eql(u8, request.method, "GET") and (std.mem.eql(u8, request.path, "/pulls") or std.mem.eql(u8, request.path, "/prs"))) {
+        const body = try pulls_page.renderPullsPage(allocator, repo, request.target);
+        defer allocator.free(body);
+        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
+    } else if (std.mem.eql(u8, request.method, "GET") and (std.mem.startsWith(u8, request.path, "/pulls/") or std.mem.startsWith(u8, request.path, "/prs/"))) {
+        const pull_ref = if (std.mem.startsWith(u8, request.path, "/pulls/"))
+            request.path["/pulls/".len..]
+        else
+            request.path["/prs/".len..];
+        const body = try pulls_page.renderPullDetailPage(allocator, repo, pull_ref, request.target);
+        defer allocator.free(body);
+        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/projects")) {
         const body = try projects_page.renderProjectsPage(allocator, repo);
         defer allocator.free(body);
@@ -239,6 +252,12 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
     } else if (std.mem.eql(u8, request.method, "POST") and std.mem.eql(u8, request.path, "/issues")) {
         try issues_page.handleIssuePost(allocator, repo, stream, request.body);
+    } else if (std.mem.eql(u8, request.method, "GET") and (std.mem.eql(u8, request.path, "/new-pull") or std.mem.eql(u8, request.path, "/new-pr"))) {
+        const body = try pulls_page.renderPullForm(allocator, repo, null, "", "", "", "", false);
+        defer allocator.free(body);
+        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
+    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.eql(u8, request.path, "/pulls")) {
+        try pulls_page.handlePullPost(allocator, repo, stream, request.body);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/favicon.ico")) {
         try shared.sendResponse(allocator, stream, 204, "No Content", "text/plain", "", null);
     } else {
