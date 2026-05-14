@@ -353,7 +353,8 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
 
     try appendCommitBar(&buf, allocator, summary_opt);
     try appendCodePanelHeadEnd(&buf, allocator);
-    try appendBlobContent(&buf, allocator, repo, ref, path, media_kind, can_preview_media, content, render_markdown);
+    const permalink_ref = if (summary_opt) |summary| summary.full_hash else ref;
+    try appendBlobContent(&buf, allocator, ref, permalink_ref, path, media_kind, can_preview_media, content, render_markdown);
 
     try appendCodePanelEnd(&buf, allocator);
     try appendCodeLayoutEndWithSymbols(&buf, allocator, show_symbols_panel, symbol_items);
@@ -364,8 +365,8 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
 fn appendBlobContent(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
-    repo: Repo,
     ref: []const u8,
+    permalink_ref: []const u8,
     path: []const u8,
     media_kind: ?MediaKind,
     can_preview_media: bool,
@@ -394,7 +395,7 @@ fn appendBlobContent(
         try appendRepositoryMarkdown(buf, allocator, ref, path, bytes);
         try appendTemplate(buf, allocator, "</div>", .{});
     } else {
-        try appendBlobLines(buf, allocator, repo, ref, path, bytes);
+        try appendBlobLines(buf, allocator, ref, permalink_ref, path, bytes);
     }
 }
 
@@ -846,17 +847,15 @@ fn appendBreadcrumbs(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, 
     try appendTemplate(buf, allocator, "</nav>", .{});
 }
 
-fn appendBlobLines(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8, content: []const u8) !void {
+fn appendBlobLines(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, permalink_ref: []const u8, path: []const u8, content: []const u8) !void {
     const language = languageForPath(path);
-    const github_dev_url_opt = try githubDevUrlOwned(allocator, repo, ref, path);
-    defer if (github_dev_url_opt) |github_dev_url| allocator.free(github_dev_url);
     try appendTemplate(buf, allocator,
-        \\<ol class="blob-lines" data-code-lines data-path="{path}" data-code-href="{code_href}" data-blame-href="{blame_href}" data-github-dev-url="{github_dev_url}">
+        \\<ol class="blob-lines" data-code-lines data-path="{path}" data-code-href="{code_href}" data-permalink-href="{permalink_href}" data-blame-href="{blame_href}">
     , .{
         .path = path,
         .code_href = codeHref(ref, path),
+        .permalink_href = codeHref(permalink_ref, path),
         .blame_href = blameHref(ref, path),
-        .github_dev_url = github_dev_url_opt orelse "",
     });
     var lines = std.mem.splitScalar(u8, content, '\n');
     var line_no: usize = 1;
@@ -1695,46 +1694,6 @@ fn blobSize(allocator: Allocator, repo: Repo, spec: []const u8) !?usize {
     const text = std.mem.trim(u8, raw, " \t\r\n");
     if (text.len == 0) return null;
     return std.fmt.parseUnsigned(usize, text, 10) catch null;
-}
-
-fn githubDevUrlOwned(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?[]u8 {
-    const raw = try gitMaybe(allocator, repo, &.{ "config", "--get", "remote.origin.url" }, 4096) orelse return null;
-    defer allocator.free(raw);
-
-    const slug_opt = try githubSlugOwned(allocator, std.mem.trim(u8, raw, " \t\r\n"));
-    const slug = slug_opt orelse return null;
-    defer allocator.free(slug);
-
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-    try buf.appendSlice(allocator, "https://github.dev/");
-    try buf.appendSlice(allocator, slug);
-    try buf.appendSlice(allocator, "/blob/");
-    try shared.appendUrlEncoded(&buf, allocator, ref);
-    try buf.append(allocator, '/');
-    try shared.appendUrlEncoded(&buf, allocator, path);
-    return try buf.toOwnedSlice(allocator);
-}
-
-fn githubSlugOwned(allocator: Allocator, remote_url: []const u8) !?[]u8 {
-    const raw_slug = if (std.mem.startsWith(u8, remote_url, "https://github.com/"))
-        remote_url["https://github.com/".len..]
-    else if (std.mem.startsWith(u8, remote_url, "http://github.com/"))
-        remote_url["http://github.com/".len..]
-    else if (std.mem.startsWith(u8, remote_url, "ssh://git@github.com/"))
-        remote_url["ssh://git@github.com/".len..]
-    else if (std.mem.startsWith(u8, remote_url, "git@github.com:"))
-        remote_url["git@github.com:".len..]
-    else
-        return null;
-
-    var slug = std.mem.trim(u8, raw_slug, " \t\r\n/");
-    if (std.mem.endsWith(u8, slug, ".git")) slug = slug[0 .. slug.len - ".git".len];
-    var parts = std.mem.splitScalar(u8, slug, '/');
-    const owner = parts.next() orelse return null;
-    const name = parts.next() orelse return null;
-    if (owner.len == 0 or name.len == 0) return null;
-    return try std.fmt.allocPrint(allocator, "{s}/{s}", .{ owner, name });
 }
 
 fn defaultRef(allocator: Allocator, repo: Repo) ![]u8 {

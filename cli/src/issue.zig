@@ -16,6 +16,8 @@ const buildIssueStringPayloadJson = event_mod.buildIssueStringPayloadJson;
 const buildIssueUpdatedJson = event_mod.buildIssueUpdatedJson;
 const newUuidV7 = util.newUuidV7;
 const rfc3339Now = util.rfc3339Now;
+const shortObjectRef = util.shortObjectRef;
+const short_object_ref_len = util.short_object_ref_len;
 
 pub fn createIssueOpenedEvent(
     allocator: Allocator,
@@ -53,12 +55,14 @@ pub fn createIssueOpenedEvent(
     );
     defer allocator.free(event_body);
 
-    const subject = try std.fmt.allocPrint(allocator, "issue.opened #{s} {s}", .{ issue_id[0..7], title });
+    var issue_ref_buf: [short_object_ref_len]u8 = undefined;
+    const issue_ref = shortObjectRef(&issue_ref_buf, issue_id);
+    const subject = try std.fmt.allocPrint(allocator, "issue.opened #{s} {s}", .{ issue_ref, title });
     defer allocator.free(subject);
     const commit_oid = try writer.write("gt issue", subject, event_body);
     defer allocator.free(commit_oid);
 
-    try out("opened issue #{s}\n", .{issue_id[0..7]});
+    try out("opened issue #{s}\n", .{issue_ref});
     try out("  id:     {s}\n", .{issue_id});
     try out("  commit: {s}\n", .{commit_oid});
     try out("  ref:    {s}\n", .{writer.inbox_ref});
@@ -97,12 +101,14 @@ pub fn createIssueStringEvent(
     );
     defer allocator.free(event_body);
 
-    const subject = try std.fmt.allocPrint(allocator, "{s} #{s} {s}", .{ event_type, issue_id[0..@min(issue_id.len, 7)], payload_value });
+    var issue_ref_buf: [short_object_ref_len]u8 = undefined;
+    const issue_ref = shortObjectRef(&issue_ref_buf, issue_id);
+    const subject = try std.fmt.allocPrint(allocator, "{s} #{s} {s}", .{ event_type, issue_ref, payload_value });
     defer allocator.free(subject);
     const commit_oid = try writer.write("gt issue", subject, event_body);
     defer allocator.free(commit_oid);
 
-    try out("{s} #{s}\n", .{ event_type, issue_id[0..@min(issue_id.len, 7)] });
+    try out("{s} #{s}\n", .{ event_type, issue_ref });
     try out("  commit: {s}\n", .{commit_oid});
     try out("  ref:    {s}\n", .{writer.inbox_ref});
 }
@@ -141,12 +147,14 @@ pub fn createIssueUpdatedEvent(
     );
     defer allocator.free(event_body);
 
-    const subject = try std.fmt.allocPrint(allocator, "issue.updated #{s}", .{issue_id[0..@min(issue_id.len, 7)]});
+    var issue_ref_buf: [short_object_ref_len]u8 = undefined;
+    const issue_ref = shortObjectRef(&issue_ref_buf, issue_id);
+    const subject = try std.fmt.allocPrint(allocator, "issue.updated #{s}", .{issue_ref});
     defer allocator.free(subject);
     const commit_oid = try writer.write("gt issue", subject, event_body);
     defer allocator.free(commit_oid);
 
-    try out("issue.updated #{s}\n", .{issue_id[0..@min(issue_id.len, 7)]});
+    try out("issue.updated #{s}\n", .{issue_ref});
     try out("  commit: {s}\n", .{commit_oid});
     try out("  ref:    {s}\n", .{writer.inbox_ref});
 }
@@ -185,12 +193,14 @@ pub fn createIssueProjectEvent(
     );
     defer allocator.free(event_body);
 
-    const subject = try std.fmt.allocPrint(allocator, "{s} #{s} {s}", .{ event_type, issue_id[0..@min(issue_id.len, 7)], project });
+    var issue_ref_buf: [short_object_ref_len]u8 = undefined;
+    const issue_ref = shortObjectRef(&issue_ref_buf, issue_id);
+    const subject = try std.fmt.allocPrint(allocator, "{s} #{s} {s}", .{ event_type, issue_ref, project });
     defer allocator.free(subject);
     const commit_oid = try writer.write("gt issue", subject, event_body);
     defer allocator.free(commit_oid);
 
-    try out("{s} #{s}\n", .{ event_type, issue_id[0..@min(issue_id.len, 7)] });
+    try out("{s} #{s}\n", .{ event_type, issue_ref });
     try out("  commit: {s}\n", .{commit_oid});
     try out("  ref:    {s}\n", .{writer.inbox_ref});
 }

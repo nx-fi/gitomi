@@ -7,6 +7,7 @@ const ordering = @import("projection_ordering.zig");
 const projection_objects = @import("projection_objects.zig");
 const repo_mod = @import("../repo.zig");
 const sqlite_db = @import("sqlite_db.zig");
+const util = @import("../util.zig");
 
 const Allocator = std.mem.Allocator;
 const CliError = errors.CliError;
@@ -21,7 +22,6 @@ const gitCheckedMax = git.gitCheckedMax;
 const eventInFrontier = ordering.eventInFrontier;
 const eventWins = ordering.eventWins;
 
-const min_reference_prefix_hex = 7;
 const max_derived_commit_log_bytes = 64 * 1024 * 1024;
 
 fn isDataPlaneIndexRef(ref: []const u8) bool {
@@ -189,10 +189,11 @@ fn collectReferencePrefixes(allocator: Allocator, message: []const u8, prefixes:
     while (i < message.len) : (i += 1) {
         if (message[i] != '#') continue;
         const start = i + 1;
-        if (start >= message.len or !isUuidPrefixChar(message[start])) continue;
+        if (start >= message.len or !std.ascii.isHex(message[start])) continue;
 
         var end = start;
-        while (end < message.len and isUuidPrefixChar(message[end])) : (end += 1) {}
+        while (end < message.len and std.ascii.isHex(message[end])) : (end += 1) {}
+        if (end < message.len and message[end] == '-') continue;
         const raw_prefix = message[start..end];
         i = end;
         if (!isReferencePrefixCandidate(raw_prefix)) continue;
@@ -200,20 +201,8 @@ fn collectReferencePrefixes(allocator: Allocator, message: []const u8, prefixes:
     }
 }
 
-fn isUuidPrefixChar(c: u8) bool {
-    return std.ascii.isHex(c) or c == '-';
-}
-
 fn isReferencePrefixCandidate(prefix: []const u8) bool {
-    var hex_count: usize = 0;
-    for (prefix) |c| {
-        if (std.ascii.isHex(c)) {
-            hex_count += 1;
-        } else if (c != '-') {
-            return false;
-        }
-    }
-    return hex_count >= min_reference_prefix_hex;
+    return util.isObjectRefPrefix(prefix);
 }
 
 fn appendUniqueLowerPrefix(allocator: Allocator, prefixes: *std.ArrayList([]u8), raw_prefix: []const u8) !void {
@@ -232,33 +221,48 @@ fn appendUniqueLowerPrefix(allocator: Allocator, prefixes: *std.ArrayList([]u8),
 }
 
 fn resolveDerivedReference(allocator: Allocator, db: *SqliteDb, prefix: []const u8) !?DerivedReferenceTarget {
-    const pattern = try std.fmt.allocPrint(allocator, "{s}%", .{prefix});
-    defer allocator.free(pattern);
-
     var stmt = try db.prepare(
         \\SELECT object_kind, id FROM (
-        \\  SELECT 'issue' AS object_kind, id FROM issues WHERE id LIKE ?
+        \\  SELECT 'issue' AS object_kind, id FROM issues
         \\  UNION ALL
-        \\  SELECT 'pull' AS object_kind, id FROM pulls WHERE id LIKE ?
+        \\  SELECT 'pull' AS object_kind, id FROM pulls
         \\)
         \\ORDER BY id, object_kind
-        \\LIMIT 2
     );
     defer stmt.deinit();
-    try stmt.bindText(1, pattern);
-    try stmt.bindText(2, pattern);
 
-    if (!(try stmt.step())) return null;
-    var object_kind: ?[]u8 = try stmt.columnTextDup(allocator, 0);
+    var object_kind: ?[]u8 = null;
+    var object_id: ?[]u8 = null;
     errdefer if (object_kind) |value| allocator.free(value);
-    var object_id: ?[]u8 = try stmt.columnTextDup(allocator, 1);
     errdefer if (object_id) |value| allocator.free(value);
+    while (try stmt.step()) {
+        const candidate_kind = try stmt.columnTextDup(allocator, 0);
+        errdefer allocator.free(candidate_kind);
+        const candidate_id = try stmt.columnTextDup(allocator, 1);
+        errdefer allocator.free(candidate_id);
 
-    if (try stmt.step()) {
-        allocator.free(object_kind.?);
-        allocator.free(object_id.?);
-        return null;
+        var ref_buf: [util.max_object_ref_len]u8 = undefined;
+        const object_ref = util.objectRefPrefix(ref_buf[0..prefix.len], candidate_id);
+        if (!std.mem.eql(u8, object_ref, prefix)) {
+            allocator.free(candidate_kind);
+            allocator.free(candidate_id);
+            continue;
+        }
+
+        if (object_id != null) {
+            allocator.free(candidate_kind);
+            allocator.free(candidate_id);
+            allocator.free(object_kind.?);
+            allocator.free(object_id.?);
+            object_kind = null;
+            object_id = null;
+            return null;
+        }
+
+        object_kind = candidate_kind;
+        object_id = candidate_id;
     }
+    if (object_id == null) return null;
 
     const target = DerivedReferenceTarget{
         .allocator = allocator,
@@ -1095,17 +1099,17 @@ pub fn insertIndexedEvent(
     try stmt.stepDone();
 }
 
-test "data commit reference parser extracts unique uuid prefixes" {
+test "data commit reference parser extracts unique object hash refs" {
     var prefixes: std.ArrayList([]u8) = .empty;
     defer freeStringArrayList(std.testing.allocator, &prefixes);
 
     try collectReferencePrefixes(
         std.testing.allocator,
-        "Fix #018F0000-0000-7000-8000-000000000123 and refs #018f000 #12345 #not-a-ref #018f000",
+        "Fix #A1B2C3D and refs #a1b2c3d #12345 #not-a-ref #018f000",
         &prefixes,
     );
 
     try std.testing.expectEqual(@as(usize, 2), prefixes.items.len);
-    try std.testing.expectEqualStrings("018f0000-0000-7000-8000-000000000123", prefixes.items[0]);
+    try std.testing.expectEqualStrings("a1b2c3d", prefixes.items[0]);
     try std.testing.expectEqualStrings("018f000", prefixes.items[1]);
 }

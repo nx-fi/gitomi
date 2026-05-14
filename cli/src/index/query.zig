@@ -185,89 +185,77 @@ pub fn listIdentityFromIndex(allocator: Allocator, repo: Repo, json: bool) !void
 }
 
 pub fn resolveIssueId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
-    if (parseLegacyGithubNumber(raw_ref)) |number| {
+    if (parseExplicitLegacyGithubNumber(raw_ref)) |number| {
         if (try lookupLegacyGithubObjectId(allocator, repo, "issue", number)) |id| return id;
         try eprint("gt issue: no issue has GitHub legacy number #{d}\n", .{number});
         return CliError.NotFound;
     }
 
-    const prefix = if (std.mem.startsWith(u8, raw_ref, "#")) raw_ref[1..] else raw_ref;
-    if (prefix.len < 7) {
-        try eprint("gt issue: issue reference must be at least 7 hex characters\n", .{});
-        return CliError.InvalidReference;
-    }
-    for (prefix) |c| {
-        if (!std.ascii.isHex(c) and c != '-') {
-            try eprint("gt issue: issue reference must be a UUID or UUID prefix\n", .{});
-            return CliError.InvalidReference;
-        }
-    }
+    const value = issueRefValue(raw_ref);
 
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
 
-    const pattern = try std.fmt.allocPrint(allocator, "{s}%", .{prefix});
-    defer allocator.free(pattern);
-    var stmt = try db.prepare("SELECT id FROM issues WHERE id LIKE ? ORDER BY id LIMIT 2");
-    defer stmt.deinit();
-    try stmt.bindText(1, pattern);
-
-    if (!(try stmt.step())) {
-        try eprint("gt issue: no issue matches #{s}\n", .{prefix});
+    if (util.looksLikeUuid(value)) {
+        if (try lookupExactObjectIdInDb(allocator, &db, "issues", value)) |id| return id;
+        try eprint("gt issue: no issue matches {s}\n", .{value});
         return CliError.NotFound;
     }
-    const first = try stmt.columnTextDup(allocator, 0);
-    errdefer allocator.free(first);
-    if (try stmt.step()) {
-        const second = try stmt.columnTextDup(allocator, 0);
-        defer allocator.free(second);
-        try eprint("gt issue: ambiguous issue reference #{s} matches {s} and {s}\n", .{ prefix, first, second });
-        return CliError.AmbiguousReference;
+
+    if (util.isObjectRefPrefix(value)) {
+        if (try lookupObjectIdByHashRefInDb(allocator, &db, "issues", "issue", value)) |id| return id;
+        if (parsePositiveDecimal(value)) |number| {
+            if (try lookupLegacyGithubObjectIdInDb(allocator, &db, "issue", number)) |id| return id;
+        }
+        try eprint("gt issue: no issue matches #{s}\n", .{value});
+        return CliError.NotFound;
     }
-    return first;
+
+    if (parsePositiveDecimal(value)) |number| {
+        if (try lookupLegacyGithubObjectIdInDb(allocator, &db, "issue", number)) |id| return id;
+        try eprint("gt issue: no issue has GitHub legacy number #{d}\n", .{number});
+        return CliError.NotFound;
+    }
+
+    try eprint("gt issue: issue reference must be a 7+ hex hash alias, full UUID, or GitHub number\n", .{});
+    return CliError.InvalidReference;
 }
 
 pub fn resolvePullId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
-    if (parseLegacyGithubNumber(raw_ref)) |number| {
+    if (parseExplicitLegacyGithubNumber(raw_ref)) |number| {
         if (try lookupLegacyGithubObjectId(allocator, repo, "pull", number)) |id| return id;
         try eprint("gt pr: no PR has GitHub legacy number #{d}\n", .{number});
         return CliError.NotFound;
     }
 
-    const prefix = if (std.mem.startsWith(u8, raw_ref, "#")) raw_ref[1..] else raw_ref;
-    if (prefix.len < 7) {
-        try eprint("gt pr: PR reference must be at least 7 hex characters\n", .{});
-        return CliError.InvalidReference;
-    }
-    for (prefix) |c| {
-        if (!std.ascii.isHex(c) and c != '-') {
-            try eprint("gt pr: PR reference must be a UUID or UUID prefix\n", .{});
-            return CliError.InvalidReference;
-        }
-    }
+    const value = pullRefValue(raw_ref);
 
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
 
-    const pattern = try std.fmt.allocPrint(allocator, "{s}%", .{prefix});
-    defer allocator.free(pattern);
-    var stmt = try db.prepare("SELECT id FROM pulls WHERE id LIKE ? ORDER BY id LIMIT 2");
-    defer stmt.deinit();
-    try stmt.bindText(1, pattern);
-
-    if (!(try stmt.step())) {
-        try eprint("gt pr: no PR matches #{s}\n", .{prefix});
+    if (util.looksLikeUuid(value)) {
+        if (try lookupExactObjectIdInDb(allocator, &db, "pulls", value)) |id| return id;
+        try eprint("gt pr: no PR matches {s}\n", .{value});
         return CliError.NotFound;
     }
-    const first = try stmt.columnTextDup(allocator, 0);
-    errdefer allocator.free(first);
-    if (try stmt.step()) {
-        const second = try stmt.columnTextDup(allocator, 0);
-        defer allocator.free(second);
-        try eprint("gt pr: ambiguous PR reference #{s} matches {s} and {s}\n", .{ prefix, first, second });
-        return CliError.AmbiguousReference;
+
+    if (util.isObjectRefPrefix(value)) {
+        if (try lookupObjectIdByHashRefInDb(allocator, &db, "pulls", "PR", value)) |id| return id;
+        if (parsePositiveDecimal(value)) |number| {
+            if (try lookupLegacyGithubObjectIdInDb(allocator, &db, "pull", number)) |id| return id;
+        }
+        try eprint("gt pr: no PR matches #{s}\n", .{value});
+        return CliError.NotFound;
     }
-    return first;
+
+    if (parsePositiveDecimal(value)) |number| {
+        if (try lookupLegacyGithubObjectIdInDb(allocator, &db, "pull", number)) |id| return id;
+        try eprint("gt pr: no PR has GitHub legacy number #{d}\n", .{number});
+        return CliError.NotFound;
+    }
+
+    try eprint("gt pr: PR reference must be a 7+ hex hash alias, full UUID, or GitHub number\n", .{});
+    return CliError.InvalidReference;
 }
 
 pub fn resolveProjectId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
@@ -344,7 +332,22 @@ fn isUuidPrefix(value: []const u8) bool {
     return true;
 }
 
-fn parseLegacyGithubNumber(raw_ref: []const u8) ?i64 {
+fn issueRefValue(raw_ref: []const u8) []const u8 {
+    const trimmed = std.mem.trim(u8, raw_ref, " \t\r\n");
+    if (std.mem.startsWith(u8, trimmed, "issue:")) return trimmed["issue:".len..];
+    if (std.mem.startsWith(u8, trimmed, "#")) return trimmed[1..];
+    return trimmed;
+}
+
+fn pullRefValue(raw_ref: []const u8) []const u8 {
+    const trimmed = std.mem.trim(u8, raw_ref, " \t\r\n");
+    if (std.mem.startsWith(u8, trimmed, "pull:")) return trimmed["pull:".len..];
+    if (std.mem.startsWith(u8, trimmed, "pr:")) return trimmed["pr:".len..];
+    if (std.mem.startsWith(u8, trimmed, "#")) return trimmed[1..];
+    return trimmed;
+}
+
+fn parseExplicitLegacyGithubNumber(raw_ref: []const u8) ?i64 {
     const trimmed = std.mem.trim(u8, raw_ref, " \t\r\n");
     const value = if (std.mem.startsWith(u8, trimmed, "github#"))
         trimmed["github#".len..]
@@ -354,16 +357,74 @@ fn parseLegacyGithubNumber(raw_ref: []const u8) ?i64 {
         trimmed["gh#".len..]
     else if (std.mem.startsWith(u8, trimmed, "gh:"))
         trimmed["gh:".len..]
-    else if (std.mem.startsWith(u8, trimmed, "#"))
-        trimmed[1..]
     else
-        trimmed;
+        return null;
+    return parsePositiveDecimal(value);
+}
+
+fn parsePositiveDecimal(value: []const u8) ?i64 {
     if (value.len == 0) return null;
     for (value) |c| {
         if (!std.ascii.isDigit(c)) return null;
     }
     const number = std.fmt.parseInt(i64, value, 10) catch return null;
     return if (number > 0) number else null;
+}
+
+fn lookupExactObjectIdInDb(allocator: Allocator, db: *SqliteDb, comptime table: []const u8, object_id: []const u8) !?[]u8 {
+    var stmt = try db.prepare("SELECT id FROM " ++ table ++ " WHERE id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, object_id);
+    if (!(try stmt.step())) return null;
+    return try stmt.columnTextDup(allocator, 0);
+}
+
+fn lookupObjectIdByHashRefInDb(
+    allocator: Allocator,
+    db: *SqliteDb,
+    comptime table: []const u8,
+    noun: []const u8,
+    raw_prefix: []const u8,
+) !?[]u8 {
+    var prefix = try allocator.alloc(u8, raw_prefix.len);
+    defer allocator.free(prefix);
+    for (raw_prefix, 0..) |c, i| prefix[i] = std.ascii.toLower(c);
+
+    var stmt = try db.prepare("SELECT id FROM " ++ table ++ " ORDER BY id");
+    defer stmt.deinit();
+
+    var first: ?[]u8 = null;
+    errdefer if (first) |value| allocator.free(value);
+    while (try stmt.step()) {
+        const id = try stmt.columnTextDup(allocator, 0);
+        errdefer allocator.free(id);
+
+        var ref_buf: [util.max_object_ref_len]u8 = undefined;
+        const object_ref = util.objectRefPrefix(ref_buf[0..prefix.len], id);
+        if (!std.mem.eql(u8, object_ref, prefix)) {
+            allocator.free(id);
+            continue;
+        }
+
+        if (first) |first_id| {
+            const display_len = @min(util.max_object_ref_len, @max(prefix.len + 5, 12));
+            var first_ref_buf: [util.max_object_ref_len]u8 = undefined;
+            var second_ref_buf: [util.max_object_ref_len]u8 = undefined;
+            const first_ref = util.objectRefPrefix(first_ref_buf[0..display_len], first_id);
+            const second_ref = util.objectRefPrefix(second_ref_buf[0..display_len], id);
+            try eprint("gt: ambiguous {s} reference #{s} matches #{s} ({s}) and #{s} ({s})\n", .{ noun, prefix, first_ref, first_id, second_ref, id });
+            allocator.free(first_id);
+            allocator.free(id);
+            first = null;
+            return CliError.AmbiguousReference;
+        }
+
+        first = id;
+    }
+
+    const result = first orelse return null;
+    first = null;
+    return result;
 }
 
 pub fn lookupLegacyGithubObjectId(allocator: Allocator, repo: Repo, object_kind: []const u8, number: i64) !?[]u8 {
@@ -494,7 +555,8 @@ pub fn listIssuesFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
             try line.append(allocator, '}');
             try out("{s}\n", .{line.items});
         } else {
-            try out("#{s} {s} {s}\n", .{ id[0..@min(id.len, 7)], state, title });
+            var ref_buf: [util.short_object_ref_len]u8 = undefined;
+            try out("#{s} {s} {s}\n", .{ util.shortObjectRef(&ref_buf, id), state, title });
         }
     }
 }
@@ -748,8 +810,9 @@ pub fn listPullsFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
             try line.append(allocator, '}');
             try out("{s}\n", .{line.items});
         } else {
+            var ref_buf: [util.short_object_ref_len]u8 = undefined;
             try out("#{s} {s} {s}->{s} {s}\n", .{
-                id[0..@min(id.len, 7)],
+                util.shortObjectRef(&ref_buf, id),
                 state,
                 head_ref,
                 base_ref,

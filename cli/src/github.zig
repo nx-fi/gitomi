@@ -801,12 +801,14 @@ fn importCommentsArray(
             written.deinit(allocator);
         }
         if (imported % 10 == 0) {
-            try eprint("gt github import: imported {d} new comment{s} for {s} #{s}\n", .{ imported, if (imported == 1) "" else "s", parent_kind, parent_id[0..@min(parent_id.len, 7)] });
+            var parent_ref_buf: [util.short_object_ref_len]u8 = undefined;
+            try eprint("gt github import: imported {d} new comment{s} for {s} #{s}\n", .{ imported, if (imported == 1) "" else "s", parent_kind, util.shortObjectRef(&parent_ref_buf, parent_id) });
         }
         stats.comments += 1;
     }
     if (comments.items.len != 0 and (imported == 0 or imported % 10 != 0)) {
-        try eprint("gt github import: imported {d} new comment{s} for {s} #{s}\n", .{ imported, if (imported == 1) "" else "s", parent_kind, parent_id[0..@min(parent_id.len, 7)] });
+        var parent_ref_buf: [util.short_object_ref_len]u8 = undefined;
+        try eprint("gt github import: imported {d} new comment{s} for {s} #{s}\n", .{ imported, if (imported == 1) "" else "s", parent_kind, util.shortObjectRef(&parent_ref_buf, parent_id) });
     }
 }
 
@@ -892,7 +894,9 @@ fn writeImportedIssueOpened(
         },
     );
     defer allocator.free(body);
-    const subject_prefix = try std.fmt.allocPrint(allocator, "issue.opened #{s} GitHub #{d} ", .{ issue_id[0..7], number });
+    var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const issue_ref = util.shortObjectRef(&issue_ref_buf, issue_id);
+    const subject_prefix = try std.fmt.allocPrint(allocator, "issue.opened #{s} GitHub #{d} ", .{ issue_ref, number });
     defer allocator.free(subject_prefix);
     const subject = try githubSubject(allocator, subject_prefix, title);
     defer allocator.free(subject);
@@ -921,7 +925,9 @@ fn writeImportedPullOpened(
     defer allocator.free(idem);
     const body = try event_mod.buildPullOpenedJsonWithLegacy(allocator, writer.cfg, writer.nextSeq(), pull_id, event_uuid, idem, occurred_at, writer.eventParents(), title, body_text, base_ref, head_ref, draft, .{ .github_pull_number = number });
     defer allocator.free(body);
-    const subject_prefix = try std.fmt.allocPrint(allocator, "pull.opened #{s} GitHub #{d} ", .{ pull_id[0..7], number });
+    var pull_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const pull_ref = util.shortObjectRef(&pull_ref_buf, pull_id);
+    const subject_prefix = try std.fmt.allocPrint(allocator, "pull.opened #{s} GitHub #{d} ", .{ pull_ref, number });
     defer allocator.free(subject_prefix);
     const subject = try githubSubject(allocator, subject_prefix, title);
     defer allocator.free(subject);
@@ -951,7 +957,9 @@ fn writeImportedStringEvent(
     else
         try event_mod.buildPullStringPayloadJson(allocator, writer.cfg, writer.nextSeq(), object_id, event_uuid, idem, occurred_at, writer.eventParents(), event_type, payload_key, payload_value);
     defer allocator.free(body);
-    const subject = try std.fmt.allocPrint(allocator, "{s} #{s}", .{ event_type, object_id[0..@min(object_id.len, 7)] });
+    var object_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const object_ref = util.shortObjectRef(&object_ref_buf, object_id);
+    const subject = try std.fmt.allocPrint(allocator, "{s} #{s}", .{ event_type, object_ref });
     defer allocator.free(subject);
     const commit = try writer.write("gt github import", subject, body);
     allocator.free(commit);
@@ -974,7 +982,9 @@ fn writeImportedIssueProjectAdded(
     defer allocator.free(idem);
     const body = try event_mod.buildIssueProjectEventJson(allocator, writer.cfg, writer.nextSeq(), issue_id, event_uuid, idem, occurred_at, writer.eventParents(), "issue.project_added", project, column);
     defer allocator.free(body);
-    const subject = try std.fmt.allocPrint(allocator, "issue.project_added #{s} {s}", .{ issue_id[0..@min(issue_id.len, 7)], project });
+    var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const issue_ref = util.shortObjectRef(&issue_ref_buf, issue_id);
+    const subject = try std.fmt.allocPrint(allocator, "issue.project_added #{s} {s}", .{ issue_ref, project });
     defer allocator.free(subject);
     const commit = try writer.write("gt github import", subject, body);
     allocator.free(commit);
@@ -997,7 +1007,9 @@ fn writeImportedPullMerged(
     defer allocator.free(idem);
     const body = try event_mod.buildPullMergedJson(allocator, writer.cfg, writer.nextSeq(), pull_id, event_uuid, idem, occurred_at, writer.eventParents(), if (merge_oid.len == 0) null else merge_oid, target_oid);
     defer allocator.free(body);
-    const subject = try std.fmt.allocPrint(allocator, "pull.merged #{s}", .{pull_id[0..@min(pull_id.len, 7)]});
+    var pull_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const pull_ref = util.shortObjectRef(&pull_ref_buf, pull_id);
+    const subject = try std.fmt.allocPrint(allocator, "pull.merged #{s}", .{pull_ref});
     defer allocator.free(subject);
     const commit = try writer.write("gt github import", subject, body);
     allocator.free(commit);
