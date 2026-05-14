@@ -44,11 +44,16 @@ pub const Config = struct {
     principal: []u8,
     device: []u8,
     seq: u64,
+    web_shortcut_leader: ?[]u8 = null,
+    web_shortcut_keys: ?[]u8 = null,
+    web_shortcut_timeout_ms: ?u64 = null,
 
     pub fn deinit(self: *Config) void {
         self.allocator.free(self.repo_id);
         self.allocator.free(self.principal);
         self.allocator.free(self.device);
+        if (self.web_shortcut_leader) |value| self.allocator.free(value);
+        if (self.web_shortcut_keys) |value| self.allocator.free(value);
     }
 };
 
@@ -137,10 +142,15 @@ pub fn parseConfig(allocator: Allocator, bytes: []const u8) !Config {
     var principal: ?[]u8 = null;
     var device: ?[]u8 = null;
     var seq: ?u64 = null;
+    var web_shortcut_leader: ?[]u8 = null;
+    var web_shortcut_keys: ?[]u8 = null;
+    var web_shortcut_timeout_ms: ?u64 = null;
     errdefer {
         if (repo_id) |v| allocator.free(v);
         if (principal) |v| allocator.free(v);
         if (device) |v| allocator.free(v);
+        if (web_shortcut_leader) |v| allocator.free(v);
+        if (web_shortcut_keys) |v| allocator.free(v);
     }
 
     var parser = ConfigParser{
@@ -167,6 +177,17 @@ pub fn parseConfig(allocator: Allocator, bytes: []const u8) !Config {
         } else if (std.mem.eql(u8, entry.key, "seq")) {
             if (entry.value.kind != .bare) return CliError.ConfigInvalid;
             seq = std.fmt.parseUnsigned(u64, value, 10) catch return CliError.ConfigInvalid;
+        } else if (std.mem.eql(u8, entry.key, "web.shortcut_leader") or std.mem.eql(u8, entry.key, "web_shortcut_leader")) {
+            if (web_shortcut_leader) |old| allocator.free(old);
+            web_shortcut_leader = value;
+            moved = true;
+        } else if (std.mem.eql(u8, entry.key, "web.shortcut_keys") or std.mem.eql(u8, entry.key, "web_shortcut_keys")) {
+            if (web_shortcut_keys) |old| allocator.free(old);
+            web_shortcut_keys = value;
+            moved = true;
+        } else if (std.mem.eql(u8, entry.key, "web.shortcut_timeout_ms") or std.mem.eql(u8, entry.key, "web_shortcut_timeout_ms")) {
+            if (entry.value.kind != .bare) return CliError.ConfigInvalid;
+            web_shortcut_timeout_ms = std.fmt.parseUnsigned(u64, value, 10) catch return CliError.ConfigInvalid;
         }
     }
 
@@ -180,6 +201,9 @@ pub fn parseConfig(allocator: Allocator, bytes: []const u8) !Config {
         .principal = principal.?,
         .device = device.?,
         .seq = seq orelse 0,
+        .web_shortcut_leader = web_shortcut_leader,
+        .web_shortcut_keys = web_shortcut_keys,
+        .web_shortcut_timeout_ms = web_shortcut_timeout_ms,
     };
 }
 
@@ -415,19 +439,60 @@ fn isTomlBareKeyChar(c: u8) bool {
 }
 
 pub fn writeConfig(path: []const u8, cfg: Config) !void {
-    const content = try std.fmt.allocPrint(cfg.allocator,
-        \\# Gitomi repo-local configuration.
-        \\repo_id = "{s}"
-        \\principal = "{s}"
-        \\device = "{s}"
-        \\seq = {d}
-        \\
-    , .{ cfg.repo_id, cfg.principal, cfg.device, cfg.seq });
-    defer cfg.allocator.free(content);
+    var content: std.ArrayList(u8) = .empty;
+    defer content.deinit(cfg.allocator);
+
+    try content.appendSlice(cfg.allocator, "# Gitomi repo-local configuration.\n");
+    try appendTomlStringField(&content, cfg.allocator, "repo_id", cfg.repo_id);
+    try appendTomlStringField(&content, cfg.allocator, "principal", cfg.principal);
+    try appendTomlStringField(&content, cfg.allocator, "device", cfg.device);
+    try content.writer(cfg.allocator).print("seq = {d}\n", .{cfg.seq});
+
+    if (cfg.web_shortcut_leader != null or cfg.web_shortcut_keys != null or cfg.web_shortcut_timeout_ms != null) {
+        try content.append(cfg.allocator, '\n');
+        if (cfg.web_shortcut_leader) |value| {
+            try appendTomlStringField(&content, cfg.allocator, "web.shortcut_leader", value);
+        }
+        if (cfg.web_shortcut_keys) |value| {
+            try appendTomlStringField(&content, cfg.allocator, "web.shortcut_keys", value);
+        }
+        if (cfg.web_shortcut_timeout_ms) |value| {
+            try content.writer(cfg.allocator).print("web.shortcut_timeout_ms = {d}\n", .{value});
+        }
+    }
 
     const file = try std.fs.createFileAbsolute(path, .{ .truncate = true });
     defer file.close();
-    try file.writeAll(content);
+    try file.writeAll(content.items);
+}
+
+fn appendTomlStringField(buf: *std.ArrayList(u8), allocator: Allocator, key: []const u8, value: []const u8) !void {
+    try buf.appendSlice(allocator, key);
+    try buf.appendSlice(allocator, " = ");
+    try appendTomlString(buf, allocator, value);
+    try buf.append(allocator, '\n');
+}
+
+fn appendTomlString(buf: *std.ArrayList(u8), allocator: Allocator, value: []const u8) !void {
+    try buf.append(allocator, '"');
+    for (value) |c| {
+        switch (c) {
+            '"' => try buf.appendSlice(allocator, "\\\""),
+            '\\' => try buf.appendSlice(allocator, "\\\\"),
+            '\n' => try buf.appendSlice(allocator, "\\n"),
+            '\r' => try buf.appendSlice(allocator, "\\r"),
+            '\t' => try buf.appendSlice(allocator, "\\t"),
+            0x08 => try buf.appendSlice(allocator, "\\b"),
+            0x0c => try buf.appendSlice(allocator, "\\f"),
+            0x00...0x07, 0x0b, 0x0e...0x1f => {
+                const escaped = try std.fmt.allocPrint(allocator, "\\u{x:0>4}", .{c});
+                defer allocator.free(escaped);
+                try buf.appendSlice(allocator, escaped);
+            },
+            else => try buf.append(allocator, c),
+        }
+    }
+    try buf.append(allocator, '"');
 }
 
 pub fn loadConfigForWrite(allocator: Allocator, repo: Repo) !Config {
@@ -881,6 +946,23 @@ test "config parser accepts inline comments and escaped strings" {
     try std.testing.expectEqualStrings("alice\nops", cfg.principal);
     try std.testing.expectEqualStrings("laptop", cfg.device);
     try std.testing.expectEqual(@as(u64, 43), cfg.seq);
+}
+
+test "config parser accepts web shortcut settings" {
+    var cfg = try parseConfig(std.testing.allocator,
+        \\repo_id = "018f0000-0000-7000-8000-000000000001"
+        \\principal = "alice"
+        \\device = "laptop"
+        \\seq = 42
+        \\web.shortcut_leader = ","
+        \\web.shortcut_keys = "A J K L"
+        \\web.shortcut_timeout_ms = 700
+        \\
+    );
+    defer cfg.deinit();
+    try std.testing.expectEqualStrings(",", cfg.web_shortcut_leader.?);
+    try std.testing.expectEqualStrings("A J K L", cfg.web_shortcut_keys.?);
+    try std.testing.expectEqual(@as(u64, 700), cfg.web_shortcut_timeout_ms.?);
 }
 
 test "config parser accepts multiline strings" {

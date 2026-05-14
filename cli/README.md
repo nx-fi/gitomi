@@ -189,3 +189,14 @@ overview/issues/projects/actions/events/refs pages, and can create signed issue
 events and workflow run requests through the same storage path as the CLI. The
 projects page renders kanban boards from signed project and issue placement
 events and can create new project boards.
+
+The web UI supports leader-key click shortcuts across pages. Press Space by
+default to show keystroke hints for the visible clickable elements, then type
+the displayed key sequence to click that element. Customize the keys in
+`.git/gitomi/config.toml`:
+
+```toml
+web.shortcut_leader = "Space"
+web.shortcut_keys = "A S D F J K L E R U I O W Q P Z X C V B N M G H Y T"
+web.shortcut_timeout_ms = 900
+```

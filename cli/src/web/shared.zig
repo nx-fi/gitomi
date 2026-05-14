@@ -16,6 +16,10 @@ const gitChecked = git.gitChecked;
 const appendJsonString = json_writer.appendJsonString;
 const loadConfig = repo_mod.loadConfig;
 
+const default_web_shortcut_leader = "Space";
+const default_web_shortcut_keys = "A S D F J K L E R U I O W Q P Z X C V B N M G H Y T";
+const default_web_shortcut_timeout_ms: u64 = 900;
+
 const WebStats = struct {
     inbox_refs: usize = 0,
     staged_refs: usize = 0,
@@ -307,6 +311,9 @@ pub fn appendShellStart(
         \\  <link rel="icon" href="/logo.svg" type="image/svg+xml">
         \\  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/devicons/devicon@latest/devicon.min.css">
         \\  <link rel="stylesheet" href="/style.css">
+    , .{});
+    try appendShortcutConfigScript(buf, allocator, cfg_opt);
+    try appendTemplate(buf, allocator,
         \\</head>
         \\<body>
         \\<header class="topbar">
@@ -374,10 +381,30 @@ fn appendUserMenu(buf: *std.ArrayList(u8), allocator: Allocator, cfg: Config) !v
     });
 }
 
+fn appendShortcutConfigScript(buf: *std.ArrayList(u8), allocator: Allocator, cfg_opt: ?Config) !void {
+    var leader: []const u8 = default_web_shortcut_leader;
+    var keys: []const u8 = default_web_shortcut_keys;
+    var timeout_ms: u64 = default_web_shortcut_timeout_ms;
+
+    if (cfg_opt) |cfg| {
+        if (cfg.web_shortcut_leader) |value| leader = value;
+        if (cfg.web_shortcut_keys) |value| keys = value;
+        if (cfg.web_shortcut_timeout_ms) |value| timeout_ms = value;
+    }
+
+    try buf.appendSlice(allocator, "<script>\nwindow.gitomiShortcutConfig = { leader: ");
+    try appendJsonString(buf, allocator, leader);
+    try buf.appendSlice(allocator, ", keys: ");
+    try appendJsonString(buf, allocator, keys);
+    try std.fmt.format(buf.writer(allocator), ", sequenceTimeoutMs: {d}", .{timeout_ms});
+    try buf.appendSlice(allocator, " };\n</script>\n");
+}
+
 pub fn appendShellEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
     try buf.appendSlice(allocator,
         \\</main>
         \\<script src="/theme.js"></script>
+        \\<script src="/shortcuts.js"></script>
         \\<script src="/tree.js"></script>
         \\<script src="/code.js"></script>
         \\<script src="/markdown.js"></script>

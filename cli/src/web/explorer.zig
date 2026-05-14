@@ -643,7 +643,7 @@ fn appendTreeSidebar(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, 
     try appendBranchOptions(buf, allocator, branches, ref);
     try appendTemplate(buf, allocator,
         \\    </select></label>
-        \\    <label class="tree-search-label"><span>File search</span><input class="tree-search-input" type="search" data-tree-search placeholder="Go to file" autocomplete="off" spellcheck="false"></label>
+        \\    <div class="tree-search-wrap"><label class="tree-search-label"><span>File search</span><input class="tree-search-input" type="search" data-tree-search placeholder="Go to file" autocomplete="off" spellcheck="false"></label></div>
         \\  </div>
         \\  <nav class="tree-nav" data-tree-nav>
     , .{});
@@ -1269,7 +1269,19 @@ fn appendRootLanguages(buf: *std.ArrayList(u8), allocator: Allocator, stats_opt:
     }
     try appendTemplate(buf, allocator, "</div>", .{});
     try appendTemplate(buf, allocator,
-        \\<div class="root-sloc-breakdown" aria-label="Source lines of code by language">
+        \\<ul class="root-language-list">
+    , .{});
+    for (stats.rows) |stat| {
+        try appendTemplate(buf, allocator,
+            \\<li><span class="language-dot" style="--language-color: {color};"></span><span class="root-language-name">{name}</span><strong>{share}</strong></li>
+        , .{
+            .color = source_stats.languageColor(stat.language),
+            .name = source_stats.languageDisplayName(stat.language),
+            .share = shared.percent(stat.total(), total),
+        });
+    }
+    try appendTemplate(buf, allocator,
+        \\</ul><div class="root-sloc-breakdown" aria-label="Source lines of code by language">
     , .{});
     for (stats.rows[0..@min(stats.rows.len, 3)]) |stat| {
         try appendTemplate(buf, allocator,
@@ -1282,19 +1294,7 @@ fn appendRootLanguages(buf: *std.ArrayList(u8), allocator: Allocator, stats_opt:
             .comment = shared.groupedUnsigned(stat.comment),
         });
     }
-    try appendTemplate(buf, allocator,
-        \\</div><ul class="root-language-list">
-    , .{});
-    for (stats.rows) |stat| {
-        try appendTemplate(buf, allocator,
-            \\<li><span class="language-dot" style="--language-color: {color};"></span><span class="root-language-name">{name}</span><strong>{share}</strong></li>
-        , .{
-            .color = source_stats.languageColor(stat.language),
-            .name = source_stats.languageDisplayName(stat.language),
-            .share = shared.percent(stat.total(), total),
-        });
-    }
-    try appendTemplate(buf, allocator, "</ul></div>", .{});
+    try appendTemplate(buf, allocator, "</div></div>", .{});
 }
 
 fn rootEntryCounts(entries: []const TreeEntry) RootEntryCounts {

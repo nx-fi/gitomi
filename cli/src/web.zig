@@ -152,6 +152,8 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         try shared.sendResponse(allocator, stream, 200, "OK", "image/svg+xml", logo_svg, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/theme.js")) {
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", theme_js, null);
+    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/shortcuts.js")) {
+        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", shortcuts_js, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/tree.js")) {
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", tree_js, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/code.js")) {
@@ -470,6 +472,7 @@ pub fn isLoopbackHost(host: []const u8) bool {
 const web_css = @embedFile("web/style.css");
 const logo_svg = @embedFile("web/logo.svg");
 const theme_js = @embedFile("web/theme.js");
+const shortcuts_js = @embedFile("web/shortcuts.js");
 const tree_js = @embedFile("web/tree.js");
 const code_js = @embedFile("web/code.js");
 const markdown_js = @embedFile("web/markdown.js");
