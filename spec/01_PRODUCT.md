@@ -247,6 +247,42 @@ The following payload members are REQUIRED for interoperable v1 implementations:
 *   `action.run_requested`: `workflow`, `target_ref` or `target_oid`
 *   `action.run_completed`: `run_id`, `conclusion`, `target_ref` or `target_oid`
 
+### 4.7. Pull Request Product Model
+
+Gitomi pull requests are first-class Control Plane objects that coordinate a
+proposed Data Plane change. A pull request MUST NOT contain or own source code
+bytes. It records review metadata around ordinary Git refs and commits.
+
+A compliant forge UI SHOULD expose pull requests separately from issues. The
+minimum pull request surface is:
+
+*   a pull request list filtered by `open`, `closed`, and `merged` state;
+*   a pull request detail page containing the conversation, status summary, and
+    branch relationship;
+*   derived commit and file-change views for `base_ref` and `head_ref`;
+*   visible labels, assignees, reviewers, comments, draft state, merge state,
+    and imported legacy GitHub number aliases when present.
+
+The canonical branch relationship is `head_ref` proposed for integration into
+`base_ref`. Implementations SHOULD compute the default diff using the merge base
+between `base_ref` and `head_ref` and the current `head_ref` tip. If either ref
+is missing locally, the pull request remains valid but the derived commit and
+file-change views SHOULD explain that the data is unavailable.
+
+`pull.merged` records the accepted merge result in the Control Plane. The
+payload's `merge_oid` SHOULD identify the merge commit when the integration
+created one. The payload's `target_oid` SHOULD identify the resulting target
+commit when the integration was a fast-forward, squash, rebase, or externally
+applied update. A pull request with an accepted `pull.merged` event is displayed
+as merged even if a local clone cannot currently prove that `base_ref` contains
+the recorded commit. Implementations SHOULD separately report whether the local
+Data Plane confirms the recorded merge result.
+
+Structured reviews are optional in v1. Requested reviewers are modeled directly
+on the pull request. General review discussion is represented by comments whose
+`parent_kind` is `pull`. Implementations MAY add future `review.*` events or
+line-scoped comment metadata while preserving this base pull request model.
+
 ## 5. Identity, Signing, and Authorization
 
 ### 5.1. Signing Backends

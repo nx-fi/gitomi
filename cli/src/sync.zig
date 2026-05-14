@@ -27,6 +27,7 @@ pub fn syncPull(allocator: Allocator, remote: []const u8) !void {
     defer allocator.free(remote_segment);
     const staging_prefix = try std.fmt.allocPrint(allocator, "refs/gitomi/staging/{s}", .{remote_segment});
     defer allocator.free(staging_prefix);
+    try clearStagedRemoteRefs(allocator, staging_prefix);
     const fetch_refspec = try std.fmt.allocPrint(allocator, "+refs/gitomi/inbox/*:{s}/inbox/*", .{staging_prefix});
     defer allocator.free(fetch_refspec);
     const genesis_refspec = try std.fmt.allocPrint(allocator, "refs/gitomi/genesis:{s}/genesis", .{staging_prefix});
@@ -42,6 +43,16 @@ pub fn syncPull(allocator: Allocator, remote: []const u8) !void {
 
     try admitStagedGenesisRef(allocator, staging_prefix);
     try admitStagedInboxRefs(allocator, staging_prefix);
+}
+
+fn clearStagedRemoteRefs(allocator: Allocator, staging_prefix: []const u8) !void {
+    const refs = try listRefs(allocator, staging_prefix);
+    defer freeStringList(allocator, refs);
+
+    for (refs) |ref| {
+        const deleted = try gitChecked(allocator, &.{ "update-ref", "-d", ref });
+        allocator.free(deleted);
+    }
 }
 
 fn fetchOptionalGenesisRef(allocator: Allocator, remote: []const u8, genesis_refspec: []const u8) !void {
