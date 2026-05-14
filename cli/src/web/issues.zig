@@ -398,6 +398,27 @@ pub fn renderIssueForm(
     return buf.toOwnedSlice(allocator);
 }
 
+pub fn renderIssueFormFromTarget(allocator: Allocator, repo: Repo, target: []const u8) ![]u8 {
+    const title = try queryValueOwned(allocator, target, "title");
+    defer if (title) |value| allocator.free(value);
+    const body = try queryValueOwned(allocator, target, "body");
+    defer if (body) |value| allocator.free(value);
+    const labels = try queryValueOwned(allocator, target, "labels");
+    defer if (labels) |value| allocator.free(value);
+    const assignees = try queryValueOwned(allocator, target, "assignees");
+    defer if (assignees) |value| allocator.free(value);
+
+    return renderIssueForm(
+        allocator,
+        repo,
+        null,
+        title orelse "",
+        body orelse "",
+        labels orelse "",
+        assignees orelse "",
+    );
+}
+
 pub fn handleIssuePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
     const title_owned = (try formValueOwned(allocator, form_body, "title")) orelse try allocator.dupe(u8, "");
     defer allocator.free(title_owned);
@@ -450,6 +471,21 @@ pub fn issueTitleFromSubject(subject: []const u8) []const u8 {
 
 pub fn formValueOwned(allocator: Allocator, body: []const u8, wanted_key: []const u8) !?[]u8 {
     var pairs = std.mem.splitScalar(u8, body, '&');
+    while (pairs.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
+        const raw_key = pair[0..eq];
+        const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
+        const key = try percentDecodeForm(allocator, raw_key);
+        defer allocator.free(key);
+        if (!std.mem.eql(u8, key, wanted_key)) continue;
+        return try percentDecodeForm(allocator, raw_value);
+    }
+    return null;
+}
+
+fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const u8) !?[]u8 {
+    const query_start = std.mem.indexOfScalar(u8, target, '?') orelse return null;
+    var pairs = std.mem.splitScalar(u8, target[query_start + 1 ..], '&');
     while (pairs.next()) |pair| {
         const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
         const raw_key = pair[0..eq];

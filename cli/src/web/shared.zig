@@ -161,15 +161,15 @@ pub fn appendShellStart(
     if (cfg_opt) |cfg| {
         try appendUserMenu(buf, allocator, cfg);
     }
-    try buf.appendSlice(allocator,
+    try appendTemplate(buf, allocator,
         \\  <button class="theme-toggle" type="button" data-theme-toggle aria-pressed="false" aria-label="Toggle dark mode" title="Toggle dark mode">
         \\    <span class="theme-toggle-track" aria-hidden="true"><span class="theme-toggle-thumb"></span></span>
         \\    <span class="theme-toggle-label" data-theme-label>Light</span>
         \\  </button>
         \\  </div>
         \\</header>
-        \\<main>
-    );
+        \\<main class="page page-{active}">
+    , .{ .active = active });
 
     if (cfg_opt == null) {
         try buf.appendSlice(allocator,

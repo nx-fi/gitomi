@@ -8,7 +8,7 @@ const source_stats = @import("source_stats.zig");
 
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
-const Button = shared.Button;
+const Href = shared.Href;
 const appendEmptyState = shared.appendEmptyState;
 const appendFmt = shared.appendFmt;
 const appendHref = shared.appendHref;
@@ -68,6 +68,14 @@ const TreeNavEntry = struct {
     fn deinit(self: TreeNavEntry, allocator: Allocator) void {
         allocator.free(self.kind);
         allocator.free(self.path);
+    }
+};
+
+const BranchRef = struct {
+    name: []u8,
+
+    fn deinit(self: BranchRef, allocator: Allocator) void {
+        allocator.free(self.name);
     }
 };
 
@@ -203,8 +211,9 @@ pub fn renderBlamePage(allocator: Allocator, repo: Repo, target: []const u8) ![]
     try appendCodeLayoutStart(&buf, allocator, repo, ref, path);
 
     try appendCodePanelStart(&buf, allocator, repo, ref, path);
-    try shared.appendButtonLink(&buf, allocator, Button{ .label = "Code", .href = codeHref(ref, path) });
-    try shared.appendButtonLink(&buf, allocator, Button{ .label = "History", .href = commitsHref(ref, path) });
+    try appendCodeBlameSwitch(&buf, allocator, ref, path, true);
+    try appendFileActionsSpacer(&buf, allocator);
+    try appendCodeActionLink(&buf, allocator, "History", commitsHref(ref, path), "icon-history");
     try appendCodePanelToolbarEnd(&buf, allocator);
     try appendCommitBar(&buf, allocator, summary_opt);
     try appendCodePanelHeadEnd(&buf, allocator);
@@ -248,8 +257,14 @@ pub fn loadRawBlob(allocator: Allocator, repo: Repo, target: []const u8) !?RawBl
     if (size != null and size.? > max_raw_blob_bytes) return error.BlobTooLarge;
 
     const body = try gitMaybe(allocator, repo, &.{ "show", spec }, max_raw_blob_bytes) orelse return null;
+    const content_type = if (mediaKindForPath(path) != null)
+        contentTypeForPath(path)
+    else if (containsNul(body))
+        "application/octet-stream"
+    else
+        "text/plain; charset=utf-8";
     return .{
-        .content_type = contentTypeForPath(path),
+        .content_type = content_type,
         .body = body,
     };
 }
@@ -271,7 +286,7 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
 
         if (is_root) try appendRootPageGridStart(&buf, allocator);
         try appendCodePanelStart(&buf, allocator, repo, ref, path);
-        try shared.appendButtonLink(&buf, allocator, Button{ .label = "History", .href = commitsHref(ref, path) });
+        try appendCodeActionLink(&buf, allocator, "History", commitsHref(ref, path), "icon-history");
         try appendCodePanelToolbarEnd(&buf, allocator);
         try appendCommitBar(&buf, allocator, summary_opt);
         try appendCodePanelHeadEnd(&buf, allocator);
@@ -327,18 +342,18 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     try appendCodeLayoutStartWithSymbols(&buf, allocator, repo, ref, path, show_symbols_panel);
 
     try appendCodePanelStart(&buf, allocator, repo, ref, path);
+    try appendCodeBlameSwitch(&buf, allocator, ref, path, false);
     if (markdown) try appendMarkdownViewTabs(&buf, allocator, ref, path, raw_selected);
     try appendBlobMetrics(&buf, allocator, size, text_content, sloc_counts);
     if (show_symbols_panel) try appendSymbolsToggleButton(&buf, allocator);
-    try shared.appendButtonLink(&buf, allocator, Button{ .label = "Raw", .href = rawHref(ref, path) });
+    try appendCodeActionLink(&buf, allocator, "Raw", rawHref(ref, path), "icon-file-code");
     if (text_content != null) try appendCopyButton(&buf, allocator, ref, path);
-    try shared.appendButtonLink(&buf, allocator, Button{ .label = "Blame", .href = blameHref(ref, path) });
-    try shared.appendButtonLink(&buf, allocator, Button{ .label = "History", .href = commitsHref(ref, path) });
+    try appendCodeActionLink(&buf, allocator, "History", commitsHref(ref, path), "icon-history");
     try appendCodePanelToolbarEnd(&buf, allocator);
 
     try appendCommitBar(&buf, allocator, summary_opt);
     try appendCodePanelHeadEnd(&buf, allocator);
-    try appendBlobContent(&buf, allocator, ref, path, media_kind, can_preview_media, content, render_markdown);
+    try appendBlobContent(&buf, allocator, repo, ref, path, media_kind, can_preview_media, content, render_markdown);
 
     try appendCodePanelEnd(&buf, allocator);
     try appendCodeLayoutEndWithSymbols(&buf, allocator, show_symbols_panel, symbol_items);
@@ -349,6 +364,7 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
 fn appendBlobContent(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
+    repo: Repo,
     ref: []const u8,
     path: []const u8,
     media_kind: ?MediaKind,
@@ -378,7 +394,7 @@ fn appendBlobContent(
         try appendRepositoryMarkdown(buf, allocator, ref, path, bytes);
         try appendTemplate(buf, allocator, "</div>", .{});
     } else {
-        try appendBlobLines(buf, allocator, path, bytes);
+        try appendBlobLines(buf, allocator, repo, ref, path, bytes);
     }
 }
 
@@ -391,6 +407,21 @@ fn appendMarkdownViewTabs(buf: *std.ArrayList(u8), allocator: Allocator, ref: []
         .raw_class = shared.classAttr("", &.{shared.class("active", raw_selected)}),
         .raw_href = codeHrefWithView(ref, path, "raw"),
     });
+}
+
+fn appendCodeBlameSwitch(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, path: []const u8, blame_selected: bool) !void {
+    try appendTemplate(buf, allocator,
+        \\<nav class="code-view-switch" aria-label="Code view"><a{code_class} href="{code_href}"><span class="button-icon icon-code" aria-hidden="true"></span><span>Code</span></a><a{blame_class} href="{blame_href}"><span class="button-icon icon-blame" aria-hidden="true"></span><span>Blame</span></a></nav>
+    , .{
+        .code_class = shared.classAttr("", &.{shared.class("active", !blame_selected)}),
+        .code_href = codeHref(ref, path),
+        .blame_class = shared.classAttr("", &.{shared.class("active", blame_selected)}),
+        .blame_href = blameHref(ref, path),
+    });
+}
+
+fn appendFileActionsSpacer(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try appendTemplate(buf, allocator, "<span class=\"file-actions-spacer\" aria-hidden=\"true\"></span>", .{});
 }
 
 fn appendBlobMetrics(
@@ -431,14 +462,24 @@ fn appendBlobMetrics(
 
 fn appendCopyButton(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, path: []const u8) !void {
     try appendTemplate(buf, allocator,
-        \\<button class="button secondary copy-button" type="button" data-copy-raw="{href}">Copy</button>
+        \\<button class="button secondary code-action copy-button" type="button" data-copy-raw="{href}" title="Copy" aria-label="Copy"><span class="button-icon icon-copy" aria-hidden="true"></span><span class="button-label" data-button-label>Copy</span></button>
     , .{ .href = rawHref(ref, path) });
 }
 
 fn appendSymbolsToggleButton(buf: *std.ArrayList(u8), allocator: Allocator) !void {
     try appendTemplate(buf, allocator,
-        \\<button class="button secondary symbols-toggle" type="button" data-symbols-toggle aria-controls="code-symbols-sidebar" aria-expanded="true">Hide symbols</button>
+        \\<button class="button secondary code-action symbols-toggle" type="button" data-symbols-toggle aria-controls="code-symbols-sidebar" aria-expanded="true" title="Hide symbols panel" aria-label="Hide symbols panel"><span class="button-icon icon-symbols" aria-hidden="true"></span><span class="button-label" data-button-label>Hide symbols</span></button>
     , .{});
+}
+
+fn appendCodeActionLink(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, href: Href, icon: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<a class="button secondary code-action" href="{href}" title="{label}" aria-label="{label}"><span class="button-icon {icon}" aria-hidden="true"></span><span class="button-label">{label}</span></a>
+    , .{
+        .href = href,
+        .label = label,
+        .icon = icon,
+    });
 }
 
 fn renderMissingPathPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) ![]u8 {
@@ -502,20 +543,21 @@ fn appendCodePanelStart(buf: *std.ArrayList(u8), allocator: Allocator, repo: Rep
     try appendTemplate(buf, allocator,
         \\<section class="panel code-panel">
         \\  <div class="code-panel-head">
-        \\  <div class="code-toolbar">
-        \\    <div>
+        \\    <div class="code-pathbar">
     , .{});
     try appendBreadcrumbs(buf, allocator, repo, ref, path);
     try appendTemplate(buf, allocator,
+        \\      <button class="path-copy-button" type="button" data-copy-path="{path}" aria-label="Copy path" title="Copy path"><span class="button-icon icon-copy" aria-hidden="true"></span></button>
         \\    </div>
-        \\    <div class="file-actions">
-    , .{});
+        \\    <div class="code-toolbar">
+        \\      <div class="file-actions">
+    , .{ .path = path });
 }
 
 fn appendCodePanelToolbarEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
     try appendTemplate(buf, allocator,
+        \\      </div>
         \\    </div>
-        \\  </div>
     , .{});
 }
 
@@ -561,10 +603,20 @@ fn appendCodeSymbolLink(buf: *std.ArrayList(u8), allocator: Allocator, symbol: c
 fn appendTreeSidebar(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8, active_path: []const u8) !void {
     const entries_opt = try loadTreeNavEntries(allocator, repo, ref);
     defer if (entries_opt) |entries| freeTreeNavEntries(allocator, entries);
+    const branches = try loadBranchRefs(allocator, repo);
+    defer freeBranchRefs(allocator, branches);
 
     try appendTemplate(buf, allocator,
-        \\<aside class="panel tree-sidebar">
-        \\  <div class="tree-sidebar-head">Files</div>
+        \\<aside class="panel tree-sidebar" data-tree-sidebar>
+        \\  <div class="tree-sidebar-head"><span class="tree-sidebar-title">Files</span><button class="tree-icon-button tree-collapse-button" type="button" data-tree-collapse aria-label="Collapse files panel" title="Collapse files panel"></button></div>
+        \\  <div class="tree-sidebar-controls">
+        \\    <label class="tree-branch-label"><span>Branch</span><select class="tree-branch-select" data-branch-switcher data-active-path="{active_path}">
+    , .{ .active_path = active_path });
+    try appendBranchOptions(buf, allocator, branches, ref);
+    try appendTemplate(buf, allocator,
+        \\    </select></label>
+        \\    <label class="tree-search-label"><span>File search</span><input class="tree-search-input" type="search" data-tree-search placeholder="Go to file" autocomplete="off" spellcheck="false"></label>
+        \\  </div>
         \\  <nav class="tree-nav" data-tree-nav>
     , .{});
     try appendTreeRootNode(buf, allocator, repo, ref, active_path);
@@ -579,7 +631,30 @@ fn appendTreeSidebar(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, 
         , .{});
     }
 
-    try appendTemplate(buf, allocator, "</nav></aside>", .{});
+    try appendTemplate(buf, allocator,
+        \\  </nav>
+        \\  <div class="tree-resizer" data-tree-resizer aria-hidden="true"></div>
+        \\</aside>
+    , .{});
+}
+
+fn appendBranchOptions(buf: *std.ArrayList(u8), allocator: Allocator, branches: []const BranchRef, selected_ref: []const u8) !void {
+    var found_selected = false;
+    for (branches) |branch| {
+        const selected = std.mem.eql(u8, branch.name, selected_ref);
+        found_selected = found_selected or selected;
+        try appendTemplate(buf, allocator,
+            \\<option value="{name}"{selected_attr}>{name}</option>
+        , .{
+            .name = branch.name,
+            .selected_attr = shared.trustedHtml(if (selected) " selected" else ""),
+        });
+    }
+    if (!found_selected) {
+        try appendTemplate(buf, allocator,
+            \\<option value="{name}" selected>{name}</option>
+        , .{ .name = selected_ref });
+    }
 }
 
 fn appendTreeRootNode(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8, active_path: []const u8) !void {
@@ -771,9 +846,18 @@ fn appendBreadcrumbs(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, 
     try appendTemplate(buf, allocator, "</nav>", .{});
 }
 
-fn appendBlobLines(buf: *std.ArrayList(u8), allocator: Allocator, path: []const u8, content: []const u8) !void {
+fn appendBlobLines(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8, content: []const u8) !void {
     const language = languageForPath(path);
-    try appendTemplate(buf, allocator, "<ol class=\"blob-lines\">", .{});
+    const github_dev_url_opt = try githubDevUrlOwned(allocator, repo, ref, path);
+    defer if (github_dev_url_opt) |github_dev_url| allocator.free(github_dev_url);
+    try appendTemplate(buf, allocator,
+        \\<ol class="blob-lines" data-code-lines data-path="{path}" data-code-href="{code_href}" data-blame-href="{blame_href}" data-github-dev-url="{github_dev_url}">
+    , .{
+        .path = path,
+        .code_href = codeHref(ref, path),
+        .blame_href = blameHref(ref, path),
+        .github_dev_url = github_dev_url_opt orelse "",
+    });
     var lines = std.mem.splitScalar(u8, content, '\n');
     var line_no: usize = 1;
     while (lines.next()) |line| : (line_no += 1) {
@@ -787,7 +871,7 @@ fn appendBlobLines(buf: *std.ArrayList(u8), allocator: Allocator, path: []const 
 
 fn appendBlobLine(buf: *std.ArrayList(u8), allocator: Allocator, language: []const u8, line_no: usize, line: []const u8) !void {
     try appendTemplate(buf, allocator,
-        \\<li id="L{line_no}"><a class="line-num" href="#L{line_no}">{line_no}</a><code class="language-{language}">{line}</code></li>
+        \\<li class="blob-row" id="L{line_no}" data-line-row data-line-number="{line_no}"><button class="line-menu-button" type="button" data-line-menu-button aria-label="Line {line_no} actions" aria-expanded="false" tabindex="-1"></button><a class="line-num" href="#L{line_no}">{line_no}</a><code class="language-{language}">{line}</code></li>
     , .{
         .line_no = line_no,
         .language = language,
@@ -1499,6 +1583,33 @@ fn loadTreeNavEntries(allocator: Allocator, repo: Repo, ref: []const u8) !?[]Tre
     return try entries.toOwnedSlice(allocator);
 }
 
+fn loadBranchRefs(allocator: Allocator, repo: Repo) ![]BranchRef {
+    const raw = try gitMaybe(allocator, repo, &.{ "for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes" }, git.max_git_output) orelse {
+        return allocator.alloc(BranchRef, 0);
+    };
+    defer allocator.free(raw);
+
+    var branches: std.ArrayList(BranchRef) = .empty;
+    errdefer {
+        for (branches.items) |branch| branch.deinit(allocator);
+        branches.deinit(allocator);
+    }
+
+    var lines = std.mem.splitScalar(u8, raw, '\n');
+    while (lines.next()) |line| {
+        const name = std.mem.trim(u8, line, " \t\r\n");
+        if (name.len == 0) continue;
+        if (std.mem.endsWith(u8, name, "/HEAD")) continue;
+        try branches.append(allocator, .{ .name = try allocator.dupe(u8, name) });
+    }
+    std.mem.sort(BranchRef, branches.items, {}, struct {
+        fn lessThan(_: void, a: BranchRef, b: BranchRef) bool {
+            return std.ascii.lessThanIgnoreCase(a.name, b.name);
+        }
+    }.lessThan);
+    return branches.toOwnedSlice(allocator);
+}
+
 fn treeEntryLessThan(_: void, a: TreeEntry, b: TreeEntry) bool {
     return entryNameLessThan(
         a.name,
@@ -1584,6 +1695,46 @@ fn blobSize(allocator: Allocator, repo: Repo, spec: []const u8) !?usize {
     const text = std.mem.trim(u8, raw, " \t\r\n");
     if (text.len == 0) return null;
     return std.fmt.parseUnsigned(usize, text, 10) catch null;
+}
+
+fn githubDevUrlOwned(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?[]u8 {
+    const raw = try gitMaybe(allocator, repo, &.{ "config", "--get", "remote.origin.url" }, 4096) orelse return null;
+    defer allocator.free(raw);
+
+    const slug_opt = try githubSlugOwned(allocator, std.mem.trim(u8, raw, " \t\r\n"));
+    const slug = slug_opt orelse return null;
+    defer allocator.free(slug);
+
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.appendSlice(allocator, "https://github.dev/");
+    try buf.appendSlice(allocator, slug);
+    try buf.appendSlice(allocator, "/blob/");
+    try shared.appendUrlEncoded(&buf, allocator, ref);
+    try buf.append(allocator, '/');
+    try shared.appendUrlEncoded(&buf, allocator, path);
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn githubSlugOwned(allocator: Allocator, remote_url: []const u8) !?[]u8 {
+    const raw_slug = if (std.mem.startsWith(u8, remote_url, "https://github.com/"))
+        remote_url["https://github.com/".len..]
+    else if (std.mem.startsWith(u8, remote_url, "http://github.com/"))
+        remote_url["http://github.com/".len..]
+    else if (std.mem.startsWith(u8, remote_url, "ssh://git@github.com/"))
+        remote_url["ssh://git@github.com/".len..]
+    else if (std.mem.startsWith(u8, remote_url, "git@github.com:"))
+        remote_url["git@github.com:".len..]
+    else
+        return null;
+
+    var slug = std.mem.trim(u8, raw_slug, " \t\r\n/");
+    if (std.mem.endsWith(u8, slug, ".git")) slug = slug[0 .. slug.len - ".git".len];
+    var parts = std.mem.splitScalar(u8, slug, '/');
+    const owner = parts.next() orelse return null;
+    const name = parts.next() orelse return null;
+    if (owner.len == 0 or name.len == 0) return null;
+    return try std.fmt.allocPrint(allocator, "{s}/{s}", .{ owner, name });
 }
 
 fn defaultRef(allocator: Allocator, repo: Repo) ![]u8 {
@@ -1879,6 +2030,11 @@ fn freeTreeEntries(allocator: Allocator, entries: []TreeEntry) void {
 fn freeTreeNavEntries(allocator: Allocator, entries: []TreeNavEntry) void {
     for (entries) |entry| entry.deinit(allocator);
     allocator.free(entries);
+}
+
+fn freeBranchRefs(allocator: Allocator, branches: []BranchRef) void {
+    for (branches) |branch| branch.deinit(allocator);
+    allocator.free(branches);
 }
 
 fn freeBlameLines(allocator: Allocator, lines: []BlameLine) void {

@@ -234,7 +234,7 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         defer allocator.free(body);
         try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/new-issue")) {
-        const body = try issues_page.renderIssueForm(allocator, repo, null, "", "", "", "");
+        const body = try issues_page.renderIssueFormFromTarget(allocator, repo, request.target);
         defer allocator.free(body);
         try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
     } else if (std.mem.eql(u8, request.method, "POST") and std.mem.eql(u8, request.path, "/issues")) {
