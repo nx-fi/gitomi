@@ -1,4 +1,5 @@
 const std = @import("std");
+const comment_mod = @import("../comment.zig");
 const index = @import("../index.zig");
 const issue = @import("../issue.zig");
 const markdown_render = @import("markdown_render.zig");
@@ -14,6 +15,7 @@ const appendSectionHead = shared.appendSectionHead;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
 const appendTemplate = shared.appendTemplate;
+const createCommentAddedEvent = comment_mod.createCommentAddedEvent;
 const createIssueOpenedEvent = issue.createIssueOpenedEvent;
 const ensureIndex = index.ensureIndex;
 const issueHref = shared.issueHref;
@@ -369,6 +371,16 @@ fn asciiEqlIgnoreCase(a: []const u8, b: []const u8) bool {
 }
 
 pub fn renderIssueDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
+    return renderIssueDetailPageWithCommentForm(allocator, repo, raw_ref, null, "");
+}
+
+fn renderIssueDetailPageWithCommentForm(
+    allocator: Allocator,
+    repo: Repo,
+    raw_ref: []const u8,
+    comment_error: ?[]const u8,
+    comment_value: []const u8,
+) ![]u8 {
     const return_target = try std.fmt.allocPrint(allocator, "/issues/{s}", .{raw_ref});
     defer allocator.free(return_target);
     if (try shared.renderIndexingPageIfStale(allocator, repo, "Issue", "issues", return_target)) |body| return body;
@@ -455,6 +467,7 @@ pub fn renderIssueDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const 
         \\      </div>
     );
     try appendIssueComments(&buf, allocator, &db, id);
+    try appendIssueCommentForm(&buf, allocator, raw_ref, comment_error, comment_value);
     try buf.appendSlice(allocator, "    </div><aside class=\"issue-meta-sidebar\">");
     try appendIssueSidebar(&buf, allocator, &db, id, display_author, milestone);
     try buf.appendSlice(allocator, "</aside></div></section>");
@@ -614,6 +627,37 @@ fn appendIssueComments(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
     }
 }
 
+fn appendIssueCommentForm(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    raw_ref: []const u8,
+    error_message: ?[]const u8,
+    body_value: []const u8,
+) !void {
+    try buf.appendSlice(allocator,
+        \\<div class="issue-timeline-item issue-comment-form-item">
+        \\  <div class="issue-timeline-avatar"><span class="issue-avatar issue-detail-avatar issue-comment-form-avatar" title="Current user" aria-label="Current user">Y</span></div>
+        \\  <form class="issue-comment-box issue-comment-form" method="post" action="/issues/
+    );
+    try shared.appendUrlEncoded(buf, allocator, raw_ref);
+    try appendTemplate(buf, allocator,
+        \\/comments">
+        \\    <textarea name="body" rows="5" placeholder="Leave a comment" required>{body_value}</textarea>
+    , .{ .body_value = body_value });
+    if (error_message) |message| {
+        try appendTemplate(buf, allocator,
+            \\    <p class="issue-comment-error">{message}</p>
+        , .{ .message = message });
+    }
+    try buf.appendSlice(allocator,
+        \\    <div class="issue-comment-form-actions">
+        \\      <button class="button primary" type="submit">Comment</button>
+        \\    </div>
+        \\  </form>
+        \\</div>
+    );
+}
+
 fn appendIssueSidebar(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -743,6 +787,45 @@ fn appendIssueSidebarPerson(buf: *std.ArrayList(u8), allocator: Allocator, name:
     try buf.appendSlice(allocator, "<div class=\"issue-sidebar-person\">");
     try appendIssueAvatar(buf, allocator, name, "");
     try appendTemplate(buf, allocator, "<span>{name}</span></div>", .{ .name = name });
+}
+
+pub fn handleIssueCommentPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
+    const body_owned = (try formValueOwned(allocator, form_body, "body")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(body_owned);
+
+    const body = std.mem.trim(u8, body_owned, " \t\r\n");
+    if (body.len == 0) {
+        const page = try renderIssueDetailPageWithCommentForm(allocator, repo, raw_ref, "Comment is required.", body_owned);
+        defer allocator.free(page);
+        try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", page, null);
+        return;
+    }
+
+    try ensureIndex(allocator, repo);
+    const issue_id = index.resolveIssueId(allocator, repo, raw_ref) catch {
+        const page = try renderIssueNotFound(allocator, repo, raw_ref);
+        defer allocator.free(page);
+        try sendResponse(allocator, stream, 404, "Not Found", "text/html", page, null);
+        return;
+    };
+    defer allocator.free(issue_id);
+
+    createCommentAddedEvent(allocator, "issue", issue_id, body_owned) catch {
+        const page = try renderIssueDetailPageWithCommentForm(
+            allocator,
+            repo,
+            raw_ref,
+            "Could not add the comment. Check that Gitomi is initialized and Git commit signing is configured.",
+            body_owned,
+        );
+        defer allocator.free(page);
+        try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", page, null);
+        return;
+    };
+
+    const location = try std.fmt.allocPrint(allocator, "/issues/{s}", .{raw_ref});
+    defer allocator.free(location);
+    try sendRedirect(allocator, stream, location);
 }
 
 pub fn renderIssueForm(
