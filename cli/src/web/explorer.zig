@@ -4,6 +4,7 @@ const markdown_render = @import("markdown_render.zig");
 const repo_mod = @import("../repo.zig");
 const shared = @import("shared.zig");
 const code_symbols = @import("symbols.zig");
+const source_stats = @import("source_stats.zig");
 
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
@@ -27,8 +28,6 @@ const runCommand = git.runCommand;
 const max_blob_display_bytes = 512 * 1024;
 const max_blame_display_bytes = 16 * 1024 * 1024;
 const max_raw_blob_bytes = git.max_git_output;
-const max_sloc_output = 512 * 1024;
-const local_sloc_bin = "tools/sloc";
 
 pub const RawBlob = struct {
     content_type: []const u8,
@@ -121,28 +120,11 @@ const BlameHeader = struct {
     line_no: usize,
 };
 
-const SlocCounts = struct {
-    code: u64,
-    test_count: u64,
-    comment: u64,
-
-    fn total(self: SlocCounts) u64 {
-        return self.code + self.test_count + self.comment;
-    }
-};
+const SlocCounts = source_stats.Counts;
 
 const RootEntryCounts = struct {
     files: usize = 0,
     directories: usize = 0,
-};
-
-const RootLanguageStat = struct {
-    ext: []u8,
-    lines: u64,
-
-    fn deinit(self: RootLanguageStat, allocator: Allocator) void {
-        allocator.free(self.ext);
-    }
 };
 
 const PathQuery = union(enum) {
@@ -328,7 +310,7 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     const summary_opt = try loadCommitSummary(allocator, repo, ref, path);
     defer if (summary_opt) |summary| summary.deinit(allocator);
     const text_content = if (content) |bytes| if (containsNul(bytes)) null else bytes else null;
-    const sloc_counts = if (text_content) |bytes| loadBlobSlocCounts(allocator, repo, path, bytes) catch null else null;
+    const sloc_counts = if (text_content) |bytes| source_stats.countBlob(path, bytes) else null;
     const markdown = isMarkdownPath(path);
     const raw_selected = !markdown or std.mem.eql(u8, view, "raw");
     const render_markdown = markdown and !raw_selected;
@@ -927,8 +909,8 @@ fn appendRootSidebar(
     const changes = git.workingTreeChangeCount(allocator) catch 0;
     const about_summary = loadReadmeSummaryOwned(allocator, repo, ref, entries) catch null;
     defer if (about_summary) |summary| allocator.free(summary);
-    const languages_opt = loadRootLanguageStats(allocator, repo) catch null;
-    defer if (languages_opt) |stats| freeRootLanguageStats(allocator, stats);
+    var languages_opt = source_stats.loadRepositoryStats(allocator, repo) catch null;
+    defer if (languages_opt) |*stats| stats.deinit(allocator);
     const about_text = about_summary orelse "Browse this repository's files, documentation, and Gitomi records from the local checkout.";
 
     try appendTemplate(buf, allocator,
@@ -996,7 +978,7 @@ fn appendRootLatestCommit(buf: *std.ArrayList(u8), allocator: Allocator, summary
     try appendTemplate(buf, allocator, "</div>", .{});
 }
 
-fn appendRootLanguages(buf: *std.ArrayList(u8), allocator: Allocator, stats_opt: ?[]RootLanguageStat) !void {
+fn appendRootLanguages(buf: *std.ArrayList(u8), allocator: Allocator, stats_opt: ?source_stats.Stats) !void {
     try appendTemplate(buf, allocator,
         \\<div class="root-sidebar-section">
         \\  <h2>Languages</h2>
@@ -1007,8 +989,8 @@ fn appendRootLanguages(buf: *std.ArrayList(u8), allocator: Allocator, stats_opt:
         , .{});
         return;
     };
-    const total = rootLanguageTotal(stats);
-    if (total == 0 or stats.len == 0) {
+    const total = stats.total();
+    if (total == 0 or stats.rows.len == 0) {
         try appendTemplate(buf, allocator,
             \\<p class="root-sidebar-empty">No source files counted.</p></div>
         , .{});
@@ -1018,24 +1000,24 @@ fn appendRootLanguages(buf: *std.ArrayList(u8), allocator: Allocator, stats_opt:
     try appendTemplate(buf, allocator,
         \\<div class="root-language-bar" aria-hidden="true">
     , .{});
-    for (stats) |stat| {
+    for (stats.rows) |stat| {
         try appendTemplate(buf, allocator,
             \\<span style="--share: {share}; --language-color: {color};"></span>
         , .{
-            .share = shared.percent(stat.lines, total),
-            .color = languageColor(stat.ext),
+            .share = shared.percent(stat.total(), total),
+            .color = source_stats.languageColor(stat.language),
         });
     }
     try appendTemplate(buf, allocator,
         \\</div><ul class="root-language-list">
     , .{});
-    for (stats) |stat| {
+    for (stats.rows) |stat| {
         try appendTemplate(buf, allocator,
             \\<li><span class="language-dot" style="--language-color: {color};"></span><span>{name}</span><strong>{share}</strong></li>
         , .{
-            .color = languageColor(stat.ext),
-            .name = languageDisplayName(stat.ext),
-            .share = shared.percent(stat.lines, total),
+            .color = source_stats.languageColor(stat.language),
+            .name = source_stats.languageDisplayName(stat.language),
+            .share = shared.percent(stat.total(), total),
         });
     }
     try appendTemplate(buf, allocator, "</ul></div>", .{});
@@ -1132,143 +1114,6 @@ fn appendCleanMarkdownText(buf: *std.ArrayList(u8), allocator: Allocator, line: 
     }
 }
 
-fn loadRootLanguageStats(allocator: Allocator, repo: Repo) !?[]RootLanguageStat {
-    var candidates: std.ArrayList([]u8) = .empty;
-    defer {
-        for (candidates.items) |candidate| allocator.free(candidate);
-        candidates.deinit(allocator);
-    }
-
-    const env_cmd = slocCommandFromEnv(allocator) catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => null,
-        else => return err,
-    };
-    if (env_cmd) |command| {
-        defer allocator.free(command);
-        try appendSlocCommandCandidate(&candidates, allocator, repo, command);
-    }
-
-    const repo_sloc = try std.fs.path.join(allocator, &.{ repo.root, local_sloc_bin });
-    defer allocator.free(repo_sloc);
-    try candidates.append(allocator, try allocator.dupe(u8, repo_sloc));
-    try candidates.append(allocator, try allocator.dupe(u8, "sloc"));
-
-    for (candidates.items) |command| {
-        if (try loadRootLanguageStatsWithCommand(allocator, repo, command)) |stats| return stats;
-    }
-    return null;
-}
-
-fn loadRootLanguageStatsWithCommand(allocator: Allocator, repo: Repo, command: []const u8) !?[]RootLanguageStat {
-    const argv = [_][]const u8{ command, "--summary" };
-    var result = runCommandInDir(allocator, &argv, repo.root, max_sloc_output) catch return null;
-    defer result.deinit();
-    if (result.exitCode() != 0) return null;
-    return parseRootLanguageStats(allocator, result.stdout) catch null;
-}
-
-fn parseRootLanguageStats(allocator: Allocator, output: []const u8) !?[]RootLanguageStat {
-    var rows: std.ArrayList(RootLanguageStat) = .empty;
-    errdefer {
-        for (rows.items) |row| row.deinit(allocator);
-        rows.deinit(allocator);
-    }
-
-    var lines = std.mem.splitScalar(u8, output, '\n');
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r\n");
-        if (trimmed.len == 0) continue;
-
-        var tokens = std.mem.tokenizeAny(u8, trimmed, " \t");
-        const code_token = tokens.next() orelse continue;
-        const test_token = tokens.next() orelse continue;
-        const comment_token = tokens.next() orelse continue;
-        const label = tokens.next() orelse continue;
-        if (label.len < 2 or label[0] != '.') continue;
-
-        const code = parseSlocNumber(code_token) catch continue;
-        const test_count = parseSlocNumber(test_token) catch continue;
-        const comment = parseSlocNumber(comment_token) catch continue;
-        const total = try std.math.add(u64, try std.math.add(u64, code, test_count), comment);
-        if (total == 0) continue;
-
-        const ext = try allocator.dupe(u8, label[1..]);
-        rows.append(allocator, .{
-            .ext = ext,
-            .lines = total,
-        }) catch |err| {
-            allocator.free(ext);
-            return err;
-        };
-    }
-
-    if (rows.items.len == 0) return null;
-    std.mem.sort(RootLanguageStat, rows.items, {}, struct {
-        fn lessThan(_: void, a: RootLanguageStat, b: RootLanguageStat) bool {
-            if (a.lines != b.lines) return a.lines > b.lines;
-            return std.mem.lessThan(u8, a.ext, b.ext);
-        }
-    }.lessThan);
-    return try rows.toOwnedSlice(allocator);
-}
-
-fn rootLanguageTotal(stats: []const RootLanguageStat) u64 {
-    var total: u64 = 0;
-    for (stats) |stat| total +|= stat.lines;
-    return total;
-}
-
-fn freeRootLanguageStats(allocator: Allocator, stats: []RootLanguageStat) void {
-    for (stats) |stat| stat.deinit(allocator);
-    allocator.free(stats);
-}
-
-fn languageDisplayName(ext: []const u8) []const u8 {
-    if (std.ascii.eqlIgnoreCase(ext, "zig")) return "Zig";
-    if (std.ascii.eqlIgnoreCase(ext, "c")) return "C";
-    if (std.ascii.eqlIgnoreCase(ext, "h")) return "C/C++ Header";
-    if (std.ascii.eqlIgnoreCase(ext, "cpp") or std.ascii.eqlIgnoreCase(ext, "cc") or std.ascii.eqlIgnoreCase(ext, "cxx")) return "C++";
-    if (std.ascii.eqlIgnoreCase(ext, "js") or std.ascii.eqlIgnoreCase(ext, "mjs") or std.ascii.eqlIgnoreCase(ext, "cjs")) return "JavaScript";
-    if (std.ascii.eqlIgnoreCase(ext, "ts") or std.ascii.eqlIgnoreCase(ext, "tsx")) return "TypeScript";
-    if (std.ascii.eqlIgnoreCase(ext, "css")) return "CSS";
-    if (std.ascii.eqlIgnoreCase(ext, "sh") or std.ascii.eqlIgnoreCase(ext, "bash")) return "Shell";
-    if (std.ascii.eqlIgnoreCase(ext, "md")) return "Markdown";
-    if (std.ascii.eqlIgnoreCase(ext, "py")) return "Python";
-    if (std.ascii.eqlIgnoreCase(ext, "rs")) return "Rust";
-    if (std.ascii.eqlIgnoreCase(ext, "go")) return "Go";
-    if (std.ascii.eqlIgnoreCase(ext, "html") or std.ascii.eqlIgnoreCase(ext, "htm")) return "HTML";
-    if (std.ascii.eqlIgnoreCase(ext, "json")) return "JSON";
-    if (std.ascii.eqlIgnoreCase(ext, "svg")) return "SVG";
-    if (std.ascii.eqlIgnoreCase(ext, "yml") or std.ascii.eqlIgnoreCase(ext, "yaml")) return "YAML";
-    if (std.ascii.eqlIgnoreCase(ext, "sql")) return "SQL";
-    if (std.ascii.eqlIgnoreCase(ext, "nix")) return "Nix";
-    if (std.ascii.eqlIgnoreCase(ext, "tla")) return "TLA+";
-    return ext;
-}
-
-fn languageColor(ext: []const u8) []const u8 {
-    if (std.ascii.eqlIgnoreCase(ext, "zig")) return "#ec915c";
-    if (std.ascii.eqlIgnoreCase(ext, "c")) return "#555555";
-    if (std.ascii.eqlIgnoreCase(ext, "h")) return "#a8b9cc";
-    if (std.ascii.eqlIgnoreCase(ext, "cpp") or std.ascii.eqlIgnoreCase(ext, "cc") or std.ascii.eqlIgnoreCase(ext, "cxx")) return "#f34b7d";
-    if (std.ascii.eqlIgnoreCase(ext, "js") or std.ascii.eqlIgnoreCase(ext, "mjs") or std.ascii.eqlIgnoreCase(ext, "cjs")) return "#f1e05a";
-    if (std.ascii.eqlIgnoreCase(ext, "ts") or std.ascii.eqlIgnoreCase(ext, "tsx")) return "#3178c6";
-    if (std.ascii.eqlIgnoreCase(ext, "css")) return "#563d7c";
-    if (std.ascii.eqlIgnoreCase(ext, "sh") or std.ascii.eqlIgnoreCase(ext, "bash")) return "#89e051";
-    if (std.ascii.eqlIgnoreCase(ext, "md")) return "#083fa1";
-    if (std.ascii.eqlIgnoreCase(ext, "py")) return "#3572a5";
-    if (std.ascii.eqlIgnoreCase(ext, "rs")) return "#dea584";
-    if (std.ascii.eqlIgnoreCase(ext, "go")) return "#00add8";
-    if (std.ascii.eqlIgnoreCase(ext, "html") or std.ascii.eqlIgnoreCase(ext, "htm")) return "#e34c26";
-    if (std.ascii.eqlIgnoreCase(ext, "json")) return "#292929";
-    if (std.ascii.eqlIgnoreCase(ext, "svg") or std.ascii.eqlIgnoreCase(ext, "xml")) return "#0060ac";
-    if (std.ascii.eqlIgnoreCase(ext, "yml") or std.ascii.eqlIgnoreCase(ext, "yaml")) return "#cb171e";
-    if (std.ascii.eqlIgnoreCase(ext, "sql")) return "#e38c00";
-    if (std.ascii.eqlIgnoreCase(ext, "nix")) return "#7e7eff";
-    if (std.ascii.eqlIgnoreCase(ext, "tla")) return "#4c4f69";
-    return "#8b949e";
-}
-
 fn appendRepositoryMarkdown(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -1292,140 +1137,6 @@ fn physicalLineCount(content: []const u8) usize {
     }
     if (content[content.len - 1] != '\n') lines += 1;
     return lines;
-}
-
-fn loadBlobSlocCounts(allocator: Allocator, repo: Repo, path: []const u8, content: []const u8) !?SlocCounts {
-    var candidates: std.ArrayList([]u8) = .empty;
-    defer {
-        for (candidates.items) |candidate| allocator.free(candidate);
-        candidates.deinit(allocator);
-    }
-
-    const env_cmd = slocCommandFromEnv(allocator) catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => null,
-        else => return err,
-    };
-    if (env_cmd) |command| {
-        defer allocator.free(command);
-        try appendSlocCommandCandidate(&candidates, allocator, repo, command);
-    }
-
-    const repo_sloc = try std.fs.path.join(allocator, &.{ repo.root, local_sloc_bin });
-    defer allocator.free(repo_sloc);
-    try candidates.append(allocator, try allocator.dupe(u8, repo_sloc));
-    try candidates.append(allocator, try allocator.dupe(u8, "sloc"));
-
-    for (candidates.items) |command| {
-        if (try loadBlobSlocCountsWithCommand(allocator, command, path, content)) |counts| return counts;
-    }
-    return null;
-}
-
-fn slocCommandFromEnv(allocator: Allocator) !?[]u8 {
-    return std.process.getEnvVarOwned(allocator, "GITOMI_SLOC_BIN") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => std.process.getEnvVarOwned(allocator, "SLOC_BIN") catch |fallback_err| switch (fallback_err) {
-            error.EnvironmentVariableNotFound => null,
-            else => return fallback_err,
-        },
-        else => return err,
-    };
-}
-
-fn appendSlocCommandCandidate(candidates: *std.ArrayList([]u8), allocator: Allocator, repo: Repo, raw_command: []const u8) !void {
-    const command = std.mem.trim(u8, raw_command, " \t\r\n");
-    if (command.len == 0) return;
-    const resolved = if (std.fs.path.isAbsolute(command) or std.mem.indexOfScalar(u8, command, '/') == null)
-        try allocator.dupe(u8, command)
-    else
-        try std.fs.path.join(allocator, &.{ repo.root, command });
-    try candidates.append(allocator, resolved);
-}
-
-fn loadBlobSlocCountsWithCommand(allocator: Allocator, command: []const u8, path: []const u8, content: []const u8) !?SlocCounts {
-    const tmp_root = makeSlocTempRoot(allocator) catch return null;
-    defer allocator.free(tmp_root);
-    defer std.fs.deleteTreeAbsolute(tmp_root) catch {};
-
-    writeSlocTempFile(allocator, tmp_root, path, content) catch return null;
-
-    const argv = [_][]const u8{ command, "--summary" };
-    var result = runCommandInDir(allocator, &argv, tmp_root, max_sloc_output) catch return null;
-    defer result.deinit();
-    if (result.exitCode() != 0) return null;
-    return parseSlocCounts(result.stdout) catch null;
-}
-
-fn makeSlocTempRoot(allocator: Allocator) ![]u8 {
-    var attempts: usize = 0;
-    while (attempts < 32) : (attempts += 1) {
-        const path = try std.fmt.allocPrint(
-            allocator,
-            "/tmp/gitomi-sloc-{d}-{d}",
-            .{ std.time.nanoTimestamp(), std.crypto.random.int(u64) },
-        );
-        std.fs.makeDirAbsolute(path) catch |err| {
-            allocator.free(path);
-            if (err == error.PathAlreadyExists) continue;
-            return err;
-        };
-        return path;
-    }
-    return error.TempDirUnavailable;
-}
-
-fn writeSlocTempFile(allocator: Allocator, tmp_root: []const u8, path: []const u8, content: []const u8) !void {
-    const file_path = try std.fs.path.join(allocator, &.{ tmp_root, path });
-    defer allocator.free(file_path);
-    if (std.fs.path.dirname(file_path)) |dir| try std.fs.cwd().makePath(dir);
-    var file = try std.fs.createFileAbsolute(file_path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(content);
-}
-
-fn parseSlocCounts(output: []const u8) !?SlocCounts {
-    var fallback = SlocCounts{ .code = 0, .test_count = 0, .comment = 0 };
-    var saw_row = false;
-
-    var lines = std.mem.splitScalar(u8, output, '\n');
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r\n");
-        if (trimmed.len == 0) continue;
-
-        var tokens = std.mem.tokenizeAny(u8, trimmed, " \t");
-        const code_token = tokens.next() orelse continue;
-        const test_token = tokens.next() orelse continue;
-        const comment_token = tokens.next() orelse continue;
-        const label = tokens.next() orelse continue;
-
-        const counts = SlocCounts{
-            .code = parseSlocNumber(code_token) catch continue,
-            .test_count = parseSlocNumber(test_token) catch continue,
-            .comment = parseSlocNumber(comment_token) catch continue,
-        };
-
-        if (std.mem.eql(u8, label, "TOTAL")) return counts;
-        if (label.len >= 2 and label[0] == '.') {
-            fallback.code += counts.code;
-            fallback.test_count += counts.test_count;
-            fallback.comment += counts.comment;
-            saw_row = true;
-        }
-    }
-
-    return if (saw_row) fallback else null;
-}
-
-fn parseSlocNumber(text: []const u8) !u64 {
-    var value: u64 = 0;
-    var saw_digit = false;
-    for (text) |c| {
-        if (c == ',') continue;
-        if (c < '0' or c > '9') return error.InvalidSlocNumber;
-        saw_digit = true;
-        value = try std.math.add(u64, try std.math.mul(u64, value, 10), c - '0');
-    }
-    if (!saw_digit) return error.InvalidSlocNumber;
-    return value;
 }
 
 fn loadTreeEntries(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?[]TreeEntry {
@@ -2074,27 +1785,7 @@ fn contentTypeForPath(path: []const u8) []const u8 {
 }
 
 fn languageForPath(path: []const u8) []const u8 {
-    if (std.mem.endsWith(u8, path, ".zig")) return "zig";
-    if (std.mem.endsWith(u8, path, ".js")) return "javascript";
-    if (std.mem.endsWith(u8, path, ".mjs")) return "javascript";
-    if (std.mem.endsWith(u8, path, ".ts")) return "typescript";
-    if (std.mem.endsWith(u8, path, ".sh")) return "bash";
-    if (std.mem.endsWith(u8, path, ".bash")) return "bash";
-    if (std.mem.endsWith(u8, path, ".json")) return "json";
-    if (std.mem.endsWith(u8, path, ".toml")) return "toml";
-    if (std.mem.endsWith(u8, path, ".yaml")) return "yaml";
-    if (std.mem.endsWith(u8, path, ".yml")) return "yaml";
-    if (std.mem.endsWith(u8, path, ".css")) return "css";
-    if (std.mem.endsWith(u8, path, ".html")) return "html";
-    if (std.mem.endsWith(u8, path, ".xml")) return "xml";
-    if (std.mem.endsWith(u8, path, ".sql")) return "sql";
-    if (std.mem.endsWith(u8, path, ".sol")) return "solidity";
-    if (std.mem.endsWith(u8, path, ".tla")) return "tla";
-    if (std.mem.endsWith(u8, path, ".rs")) return "rust";
-    if (std.mem.endsWith(u8, path, ".py")) return "python";
-    if (isMarkdownPath(path)) return "markdown";
-    if (std.mem.endsWith(u8, path, "Makefile")) return "bash";
-    return "plaintext";
+    return source_stats.languageForPath(path);
 }
 
 fn normalizedPathOwned(allocator: Allocator, raw: []const u8) ![]u8 {
@@ -2214,32 +1905,6 @@ fn gitMaybe(allocator: Allocator, repo: Repo, git_args: []const []const u8, max_
     return null;
 }
 
-fn runCommandInDir(allocator: Allocator, argv: []const []const u8, cwd: []const u8, max_output_bytes: usize) !git.RunOutput {
-    var child = std.process.Child.init(argv, allocator);
-    child.cwd = cwd;
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
-
-    var stdout: std.ArrayList(u8) = .empty;
-    errdefer stdout.deinit(allocator);
-    var stderr: std.ArrayList(u8) = .empty;
-    errdefer stderr.deinit(allocator);
-
-    try child.spawn();
-    errdefer _ = child.kill() catch {};
-
-    try child.collectOutput(allocator, &stdout, &stderr, max_output_bytes);
-    const term = try child.wait();
-
-    return .{
-        .allocator = allocator,
-        .stdout = try stdout.toOwnedSlice(allocator),
-        .stderr = try stderr.toOwnedSlice(allocator),
-        .term = term,
-    };
-}
-
 fn hexValue(c: u8) ?u8 {
     return switch (c) {
         '0'...'9' => c - '0',
@@ -2355,21 +2020,6 @@ test "web explorer maps media paths to preview metadata" {
     try std.testing.expectEqualStrings("image/gif", contentTypeForPath("animation.gif"));
     try std.testing.expectEqualStrings("image/webp", contentTypeForPath("image.webp"));
     try std.testing.expectEqualStrings("video/mp4", contentTypeForPath("demo.m4v"));
-}
-
-test "web explorer parses sloc counts" {
-    const output =
-        \\  CODE   TEST  COMMENT  TYPE
-        \\─────────────────────────────────────────────────
-        \\ 1,286     42       94  .rs ████████████████████
-        \\──────────────────────
-        \\ 1,286     42       94  TOTAL
-        \\
-    ;
-    const counts = (try parseSlocCounts(output)).?;
-    try std.testing.expectEqual(@as(u64, 1_286), counts.code);
-    try std.testing.expectEqual(@as(u64, 42), counts.test_count);
-    try std.testing.expectEqual(@as(u64, 94), counts.comment);
 }
 
 test "web explorer counts physical lines" {

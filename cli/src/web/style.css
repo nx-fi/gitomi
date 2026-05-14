@@ -1259,7 +1259,7 @@ tbody tr:hover {
   font-size: 12px;
 }
 .code-panel {
-  overflow: hidden;
+  overflow: clip;
   margin-bottom: 16px;
 }
 .code-panel-head {
