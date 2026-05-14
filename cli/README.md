@@ -50,6 +50,14 @@ gt issue body ISSUE --body BODY
 gt issue close|reopen ISSUE
 gt issue label ISSUE add|remove LABEL
 gt issue assignee ISSUE add|remove PRINCIPAL
+gt issue milestone ISSUE --milestone MILESTONE
+gt issue project ISSUE add|remove PROJECT --column COLUMN
+gt project list [--json]
+gt project create --name NAME [--description TEXT] [--column COLUMN]
+gt project column PROJECT add|remove COLUMN
+gt project add|remove PROJECT ISSUE --column COLUMN
+gt milestone list [--json]
+gt milestone create --title TITLE [--description TEXT] [--due DATE]
 gt pr list [--json]
 gt pr view PR [--json]
 gt pr create --title TITLE --base BASE --head HEAD [--body BODY] [--draft]
@@ -75,7 +83,7 @@ gt actions run --event EVENT [--ref REF|--oid OID] [--object-id ID] [--dry-run] 
 gt actions run-requested [RUN] [--dry-run] [--act PATH] [-- ACT_ARGS...]
 gt runs prune [--dry-run] [--max-age-days N] [--max-count N] [--max-bytes N]
 gt sync [--remote REMOTE] [--pull-only|--push-only]
-gt github import [--repo OWNER/REPO] [--token TOKEN] [--from-file PATH] [--no-comments]
+gt github import [--repo OWNER/REPO] [--token TOKEN] [--from-file PATH] [--no-comments] [--no-projects]
 gt github export --repo OWNER/REPO [--token TOKEN] [--dry-run] [--map-file PATH] [--reuse-legacy]
 gt web [--host 127.0.0.1] [--port 12655]
 ```
@@ -93,6 +101,13 @@ causal heads.
 
 `gt issue edit` and `gt pr edit` batch multiple scalar and collection updates
 into one signed `issue.updated` or `pull.updated` event.
+
+`gt project create` creates a signed project board event with kanban columns.
+When no columns are supplied it creates `Todo`, `In Progress`, and `Done`.
+`gt project add` and `gt project remove` place issue cards on or off a board
+column by writing signed issue placement events. `gt milestone create` creates
+named milestones, and `gt issue milestone` assigns or clears an issue
+milestone.
 
 `gt pull` remains accepted as a compatibility alias for `gt pr`. `gt pr view`
 also accepts `show`, and `gt pr create` also accepts `open` and `new`.
@@ -158,4 +173,6 @@ same GitHub repository that was imported.
 binds to loopback on port 12655 by default, retrying nearby random ports if that
 port is occupied. It opens on a committed-tree code explorer, also serves
 overview/issues/projects/events/refs pages, and can create signed issue events
-through the same storage path as `gt issue open`.
+through the same storage path as `gt issue open`. The projects page renders
+kanban boards from signed project and issue placement events and can create new
+project boards.

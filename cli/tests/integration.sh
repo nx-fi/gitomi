@@ -152,6 +152,40 @@ init_repo "$reducer"
   gt fsck >/dev/null
 )
 
+echo "integration: project boards and milestones are signed and projected"
+projects_repo="$ROOT/projects"
+init_repo "$projects_repo"
+(
+  cd "$projects_repo"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  gt project create --name "Roadmap" --description "Release work" --column "Backlog" --column "Done" >/dev/null
+  projects="$(gt project list --json)"
+  assert_line_count "$projects" 1
+  assert_contains "$projects" '"name":"Roadmap"'
+  assert_contains "$projects" '"description":"Release work"'
+  assert_contains "$projects" '"columns":["Backlog","Done"]'
+  gt milestone create --title "v1.0" --description "First release" --due "2026-06-01" >/dev/null
+  milestones="$(gt milestone list --json)"
+  assert_line_count "$milestones" 1
+  assert_contains "$milestones" '"title":"v1.0"'
+  assert_contains "$milestones" '"due_at":"2026-06-01"'
+  gt issue open --title "Ship kanban" >/dev/null
+  issue_id="$(json_field "$(gt issue list --json)" id)"
+  [[ -n "$issue_id" ]] || fail "expected issue id from issue list"
+  issue_ref="#${issue_id:0:7}"
+  gt project add "Roadmap" "$issue_ref" --column "Backlog" >/dev/null
+  gt issue milestone "$issue_ref" --milestone "v1.0" >/dev/null
+  issue_show="$(gt issue show "$issue_ref")"
+  assert_contains "$issue_show" "milestone: v1.0"
+  assert_contains "$issue_show" "projects:  Roadmap / Backlog"
+  events="$(gt events list --json)"
+  assert_contains "$events" '"event_type":"project.created"'
+  assert_contains "$events" '"event_type":"milestone.created"'
+  assert_contains "$events" '"event_type":"issue.project_added"'
+  assert_contains "$events" '"event_type":"issue.milestone_set"'
+  gt fsck >/dev/null
+)
+
 echo "integration: github import preserves legacy numbers and export replays API calls"
 github_io="$ROOT/github-io"
 init_repo "$github_io"
@@ -364,7 +398,7 @@ init_repo "$snapshots"
   snapshot_ref="$(git for-each-ref --sort=-committerdate '--format=%(refname)' refs/gitomi/snapshots | head -n 1)"
   manifest="$(git show "$snapshot_ref:manifest.json")"
   assert_contains "$manifest" '"$schema":"urn:gitomi:snapshot:v1"'
-  assert_contains "$manifest" '"index_schema_version":"3"'
+  assert_contains "$manifest" '"index_schema_version":"4"'
   assert_contains "$manifest" '"covered_refs"'
 
   rm -f .git/gitomi/index.sqlite

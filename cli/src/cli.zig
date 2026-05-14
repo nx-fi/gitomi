@@ -9,6 +9,8 @@ const github = @import("github.zig");
 const index = @import("index.zig");
 const io = @import("io.zig");
 const issue = @import("issue.zig");
+const milestone = @import("milestone.zig");
+const project = @import("project.zig");
 const pull_mod = @import("pull.zig");
 const rbac = @import("rbac.zig");
 const repo_mod = @import("repo.zig");
@@ -64,6 +66,10 @@ fn realMain() !void {
         try cmdEvents(allocator, args[2..]);
     } else if (std.mem.eql(u8, cmd, "issue")) {
         try cmdIssue(allocator, args[2..]);
+    } else if (std.mem.eql(u8, cmd, "project") or std.mem.eql(u8, cmd, "projects")) {
+        try cmdProject(allocator, args[2..]);
+    } else if (std.mem.eql(u8, cmd, "milestone") or std.mem.eql(u8, cmd, "milestones")) {
+        try cmdMilestone(allocator, args[2..]);
     } else if (std.mem.eql(u8, cmd, "pr") or std.mem.eql(u8, cmd, "pull")) {
         try cmdPr(allocator, args[2..], if (std.mem.eql(u8, cmd, "pull")) "gt pull" else "gt pr");
     } else if (std.mem.eql(u8, cmd, "comment")) {
@@ -111,6 +117,14 @@ fn printUsage() !void {
         \\  gt issue close|reopen ISSUE
         \\  gt issue label ISSUE add|remove LABEL
         \\  gt issue assignee ISSUE add|remove PRINCIPAL
+        \\  gt issue milestone ISSUE --milestone MILESTONE
+        \\  gt issue project ISSUE add|remove PROJECT --column COLUMN
+        \\  gt project list [--json]
+        \\  gt project create --name NAME [--description TEXT] [--column COLUMN]
+        \\  gt project column PROJECT add|remove COLUMN
+        \\  gt project add|remove PROJECT ISSUE --column COLUMN
+        \\  gt milestone list [--json]
+        \\  gt milestone create --title TITLE [--description TEXT] [--due DATE]
         \\  gt pr list [--json]
         \\  gt pr view PR [--json]
         \\  gt pr create --title TITLE --base BASE --head HEAD [--body BODY] [--draft]
@@ -640,6 +654,65 @@ fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
         return;
     }
 
+    if (std.mem.eql(u8, args[0], "milestone")) {
+        if (args.len < 2) {
+            try io.eprint("gt issue milestone: ISSUE is required\n", .{});
+            return CliError.UserError;
+        }
+        var value: ?[]const u8 = null;
+        var i: usize = 2;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--milestone")) {
+                value = try util.requireValue(args, &i, "--milestone");
+            } else {
+                try io.eprint("gt issue milestone: unknown option '{s}'\n", .{args[i]});
+                return CliError.UserError;
+            }
+        }
+        if (value == null) {
+            try io.eprint("gt issue milestone: --milestone is required\n", .{});
+            return CliError.UserError;
+        }
+        const issue_id = try resolveIssueIdForCommand(allocator, args[1]);
+        defer allocator.free(issue_id);
+        try issue.createIssueStringEvent(allocator, issue_id, "issue.milestone_set", "milestone", value.?);
+        return;
+    }
+
+    if (std.mem.eql(u8, args[0], "project")) {
+        if (args.len < 5) {
+            try io.eprint("gt issue project: expected ISSUE add|remove PROJECT --column COLUMN\n", .{});
+            return CliError.UserError;
+        }
+        const parsed = try parseCollectionMutation("gt issue", "project", args[1], args[2]);
+        const issue_ref = parsed.object_ref;
+        const op = parsed.op;
+        if (!std.mem.eql(u8, op, "add") and !std.mem.eql(u8, op, "remove")) {
+            try io.eprint("gt issue project: expected add or remove\n", .{});
+            return CliError.UserError;
+        }
+        const project_name = args[3];
+        try requireNonEmptyOption("gt issue project", "PROJECT", project_name);
+        var column: ?[]const u8 = null;
+        var i: usize = 4;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--column") or std.mem.eql(u8, args[i], "-c")) {
+                column = try util.requireValue(args, &i, "--column");
+            } else {
+                try io.eprint("gt issue project: unknown option '{s}'\n", .{args[i]});
+                return CliError.UserError;
+            }
+        }
+        if (column == null or std.mem.trim(u8, column.?, " \t\r\n").len == 0) {
+            try io.eprint("gt issue project: --column is required\n", .{});
+            return CliError.UserError;
+        }
+        const issue_id = try resolveIssueIdForCommand(allocator, issue_ref);
+        defer allocator.free(issue_id);
+        try issue.createIssueProjectEvent(allocator, issue_id, project_name, column.?, std.mem.eql(u8, op, "add"));
+        return;
+    }
+
     if (!std.mem.eql(u8, args[0], "open")) {
         try io.eprint("gt issue: expected subcommand 'list', 'show', 'open', or an issue update command\n", .{});
         return CliError.UserError;
@@ -677,11 +750,181 @@ fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
     try issue.createIssueOpenedEvent(allocator, title.?, body, labels.items, assignees.items);
 }
 
+fn cmdProject(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len == 0) {
+        try io.eprint("gt project: expected subcommand 'list', 'create', 'column', 'add', or 'remove'\n", .{});
+        return CliError.UserError;
+    }
+
+    if (std.mem.eql(u8, args[0], "list")) {
+        var json = false;
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--json")) {
+                json = true;
+            } else {
+                try io.eprint("gt project list: unknown option '{s}'\n", .{args[i]});
+                return CliError.UserError;
+            }
+        }
+        var repo = try repo_mod.discoverRepo(allocator);
+        defer repo.deinit();
+        try index.ensureIndex(allocator, repo);
+        try index.listProjectsFromIndex(allocator, repo, json);
+        return;
+    }
+
+    if (std.mem.eql(u8, args[0], "create")) {
+        var name: ?[]const u8 = null;
+        var description: []const u8 = "";
+        var columns: std.ArrayList([]const u8) = .empty;
+        defer columns.deinit(allocator);
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--name") or std.mem.eql(u8, args[i], "-n")) {
+                name = try util.requireValue(args, &i, "--name");
+            } else if (std.mem.eql(u8, args[i], "--description") or std.mem.eql(u8, args[i], "-d")) {
+                description = try util.requireValue(args, &i, "--description");
+            } else if (std.mem.eql(u8, args[i], "--column") or std.mem.eql(u8, args[i], "-c")) {
+                const value = try util.requireValue(args, &i, "--column");
+                try requireNonEmptyOption("gt project create", "--column", value);
+                try columns.append(allocator, value);
+            } else {
+                try io.eprint("gt project create: unknown option '{s}'\n", .{args[i]});
+                return CliError.UserError;
+            }
+        }
+        if (name == null or std.mem.trim(u8, name.?, " \t\r\n").len == 0) {
+            try io.eprint("gt project create: --name is required\n", .{});
+            return CliError.UserError;
+        }
+        try project.createProjectCreatedEvent(allocator, name.?, description, columns.items);
+        return;
+    }
+
+    if (std.mem.eql(u8, args[0], "column")) {
+        if (args.len != 4) {
+            try io.eprint("gt project column: expected PROJECT add|remove COLUMN\n", .{});
+            return CliError.UserError;
+        }
+        const op = args[2];
+        if (!std.mem.eql(u8, op, "add") and !std.mem.eql(u8, op, "remove")) {
+            try io.eprint("gt project column: expected add or remove\n", .{});
+            return CliError.UserError;
+        }
+        try requireNonEmptyOption("gt project column", "COLUMN", args[3]);
+        const project_id = try resolveProjectIdForCommand(allocator, args[1]);
+        defer allocator.free(project_id);
+        try project.createProjectColumnEvent(allocator, project_id, args[3], std.mem.eql(u8, op, "add"));
+        return;
+    }
+
+    if (std.mem.eql(u8, args[0], "add") or std.mem.eql(u8, args[0], "remove")) {
+        if (args.len < 3) {
+            try io.eprint("gt project {s}: expected PROJECT ISSUE --column COLUMN\n", .{args[0]});
+            return CliError.UserError;
+        }
+        var column: ?[]const u8 = null;
+        var i: usize = 3;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--column") or std.mem.eql(u8, args[i], "-c")) {
+                column = try util.requireValue(args, &i, "--column");
+            } else {
+                try io.eprint("gt project {s}: unknown option '{s}'\n", .{ args[0], args[i] });
+                return CliError.UserError;
+            }
+        }
+        if (column == null or std.mem.trim(u8, column.?, " \t\r\n").len == 0) {
+            try io.eprint("gt project {s}: --column is required\n", .{args[0]});
+            return CliError.UserError;
+        }
+
+        const project_id = try resolveProjectIdForCommand(allocator, args[1]);
+        defer allocator.free(project_id);
+        const project_name = try projectNameForCommand(allocator, project_id);
+        defer allocator.free(project_name);
+        const issue_id = try resolveIssueIdForCommand(allocator, args[2]);
+        defer allocator.free(issue_id);
+        try issue.createIssueProjectEvent(allocator, issue_id, project_name, column.?, std.mem.eql(u8, args[0], "add"));
+        return;
+    }
+
+    try io.eprint("gt project: expected subcommand 'list', 'create', 'column', 'add', or 'remove'\n", .{});
+    return CliError.UserError;
+}
+
+fn cmdMilestone(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len == 0) {
+        try io.eprint("gt milestone: expected subcommand 'list' or 'create'\n", .{});
+        return CliError.UserError;
+    }
+
+    if (std.mem.eql(u8, args[0], "list")) {
+        var json = false;
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--json")) {
+                json = true;
+            } else {
+                try io.eprint("gt milestone list: unknown option '{s}'\n", .{args[i]});
+                return CliError.UserError;
+            }
+        }
+        var repo = try repo_mod.discoverRepo(allocator);
+        defer repo.deinit();
+        try index.ensureIndex(allocator, repo);
+        try index.listMilestonesFromIndex(allocator, repo, json);
+        return;
+    }
+
+    if (std.mem.eql(u8, args[0], "create")) {
+        var title: ?[]const u8 = null;
+        var description: []const u8 = "";
+        var due_at: []const u8 = "";
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--title") or std.mem.eql(u8, args[i], "-t")) {
+                title = try util.requireValue(args, &i, "--title");
+            } else if (std.mem.eql(u8, args[i], "--description") or std.mem.eql(u8, args[i], "-d")) {
+                description = try util.requireValue(args, &i, "--description");
+            } else if (std.mem.eql(u8, args[i], "--due")) {
+                due_at = try util.requireValue(args, &i, "--due");
+            } else {
+                try io.eprint("gt milestone create: unknown option '{s}'\n", .{args[i]});
+                return CliError.UserError;
+            }
+        }
+        if (title == null or std.mem.trim(u8, title.?, " \t\r\n").len == 0) {
+            try io.eprint("gt milestone create: --title is required\n", .{});
+            return CliError.UserError;
+        }
+        try milestone.createMilestoneCreatedEvent(allocator, title.?, description, due_at);
+        return;
+    }
+
+    try io.eprint("gt milestone: expected subcommand 'list' or 'create'\n", .{});
+    return CliError.UserError;
+}
+
 fn resolveIssueIdForCommand(allocator: Allocator, raw_ref: []const u8) ![]u8 {
     var repo = try repo_mod.discoverRepo(allocator);
     defer repo.deinit();
     try index.ensureIndex(allocator, repo);
     return try index.resolveIssueId(allocator, repo, raw_ref);
+}
+
+fn resolveProjectIdForCommand(allocator: Allocator, raw_ref: []const u8) ![]u8 {
+    var repo = try repo_mod.discoverRepo(allocator);
+    defer repo.deinit();
+    try index.ensureIndex(allocator, repo);
+    return try index.resolveProjectId(allocator, repo, raw_ref);
+}
+
+fn projectNameForCommand(allocator: Allocator, project_id: []const u8) ![]u8 {
+    var repo = try repo_mod.discoverRepo(allocator);
+    defer repo.deinit();
+    try index.ensureIndex(allocator, repo);
+    return try index.projectNameForId(allocator, repo, project_id);
 }
 
 fn resolvePullIdForCommand(allocator: Allocator, raw_ref: []const u8) ![]u8 {

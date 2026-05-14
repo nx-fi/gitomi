@@ -1097,10 +1097,14 @@ pub const listAclFromIndex = index_query.listAclFromIndex;
 pub const listIdentityFromIndex = index_query.listIdentityFromIndex;
 pub const listIssuesFromIndex = index_query.listIssuesFromIndex;
 pub const showIssueFromIndex = index_query.showIssueFromIndex;
+pub const listProjectsFromIndex = index_query.listProjectsFromIndex;
+pub const listMilestonesFromIndex = index_query.listMilestonesFromIndex;
 pub const listPullsFromIndex = index_query.listPullsFromIndex;
 pub const showPullFromIndex = index_query.showPullFromIndex;
 pub const listCommentsFromIndex = index_query.listCommentsFromIndex;
 pub const listEventsFromIndex = index_query.listEventsFromIndex;
+pub const resolveProjectId = index_query.resolveProjectId;
+pub const projectNameForId = index_query.projectNameForId;
 pub const sqliteLimitValue = index_query.sqliteLimitValue;
 
 pub fn requireAuthorizedWrite(allocator: Allocator, repo: Repo, event_body: []const u8) !void {

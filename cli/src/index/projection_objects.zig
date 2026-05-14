@@ -13,6 +13,7 @@ const eventWins = ordering.eventWins;
 
 const max_projected_labels: usize = 256;
 const max_projected_participants: usize = 128;
+const max_projected_project_columns: usize = 128;
 
 fn creationEventWins(db: *SqliteDb, event_type: []const u8, object_id: []const u8, event_hash: []const u8) !bool {
     var stmt = try db.prepare("SELECT event_hash FROM events WHERE event_type = ? AND object_id = ? ORDER BY event_hash DESC LIMIT 1");
@@ -396,6 +397,295 @@ fn issueCollectionLimitRejection(db: *SqliteDb, issue_id: []const u8) !?[]const 
         return "collection_limit_exceeded";
     }
     return null;
+}
+
+pub fn applyProjectProjection(allocator: Allocator, db: *SqliteDb, event_hash: []const u8, envelope: ValidatedEnvelope, body: []const u8) !?[]const u8 {
+    if (!std.mem.startsWith(u8, envelope.event_type, "project.")) return null;
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return "invalid_event_envelope",
+    };
+    const payload = switch (root.get("payload") orelse return "invalid_event_envelope") {
+        .object => |object| object,
+        else => return "invalid_event_envelope",
+    };
+
+    if (std.mem.eql(u8, envelope.event_type, "project.created")) {
+        if (!(try creationEventWins(db, "project.created", envelope.object_id, event_hash))) return "duplicate_object_id";
+        const name = event_mod.jsonString(payload.get("name")) orelse return "invalid_event_envelope";
+        const description = event_mod.jsonString(payload.get("description")) orelse "";
+        const state = event_mod.jsonString(payload.get("state")) orelse "open";
+        try insertProjectCreated(db, event_hash, envelope, name, description, state);
+        try insertPayloadProjectColumns(db, payload, envelope.object_id, event_hash);
+        return try projectColumnLimitRejection(db, envelope.object_id);
+    }
+
+    if (!(try projectExists(db, envelope.object_id))) return "object_not_created";
+
+    if (std.mem.eql(u8, envelope.event_type, "project.updated")) {
+        if (event_mod.jsonString(payload.get("name"))) |name| {
+            try updateProjectScalar(allocator, db, envelope.object_id, name, event_hash, envelope, "name", "name_occurred_at", "name_actor_principal", "name_event_hash");
+        }
+        if (event_mod.jsonString(payload.get("description"))) |description| {
+            try updateProjectScalar(allocator, db, envelope.object_id, description, event_hash, envelope, "description", "description_occurred_at", "description_actor_principal", "description_event_hash");
+        }
+        if (event_mod.jsonString(payload.get("state"))) |state| {
+            try updateProjectScalar(allocator, db, envelope.object_id, state, event_hash, envelope, "state", "state_occurred_at", "state_actor_principal", "state_event_hash");
+        }
+    } else if (std.mem.eql(u8, envelope.event_type, "project.column_added")) {
+        const column = event_mod.jsonString(payload.get("column")) orelse return "invalid_event_envelope";
+        try insertProjectColumn(db, envelope.object_id, column, event_hash);
+        if (try projectColumnLimitRejection(db, envelope.object_id)) |reason| return reason;
+    } else if (std.mem.eql(u8, envelope.event_type, "project.column_removed")) {
+        const column = event_mod.jsonString(payload.get("column")) orelse return "invalid_event_envelope";
+        try deleteProjectColumn(allocator, db, envelope.object_id, column, event_hash);
+    }
+    return null;
+}
+
+pub fn applyMilestoneProjection(allocator: Allocator, db: *SqliteDb, event_hash: []const u8, envelope: ValidatedEnvelope, body: []const u8) !?[]const u8 {
+    if (!std.mem.startsWith(u8, envelope.event_type, "milestone.")) return null;
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return "invalid_event_envelope",
+    };
+    const payload = switch (root.get("payload") orelse return "invalid_event_envelope") {
+        .object => |object| object,
+        else => return "invalid_event_envelope",
+    };
+
+    if (std.mem.eql(u8, envelope.event_type, "milestone.created")) {
+        if (!(try creationEventWins(db, "milestone.created", envelope.object_id, event_hash))) return "duplicate_object_id";
+        const title = event_mod.jsonString(payload.get("title")) orelse return "invalid_event_envelope";
+        const description = event_mod.jsonString(payload.get("description")) orelse "";
+        const due_at = event_mod.jsonString(payload.get("due_at")) orelse "";
+        const state = event_mod.jsonString(payload.get("state")) orelse "open";
+        try insertMilestoneCreated(db, event_hash, envelope, title, description, due_at, state);
+        return null;
+    }
+
+    if (!(try milestoneExists(db, envelope.object_id))) return "object_not_created";
+
+    if (std.mem.eql(u8, envelope.event_type, "milestone.updated")) {
+        if (event_mod.jsonString(payload.get("title"))) |title| {
+            try updateMilestoneScalar(allocator, db, envelope.object_id, title, event_hash, envelope, "title", "title_occurred_at", "title_actor_principal", "title_event_hash");
+        }
+        if (event_mod.jsonString(payload.get("description"))) |description| {
+            try updateMilestoneScalar(allocator, db, envelope.object_id, description, event_hash, envelope, "description", "description_occurred_at", "description_actor_principal", "description_event_hash");
+        }
+        if (event_mod.jsonString(payload.get("due_at"))) |due_at| {
+            try updateMilestoneScalar(allocator, db, envelope.object_id, due_at, event_hash, envelope, "due_at", "due_at_occurred_at", "due_at_actor_principal", "due_at_event_hash");
+        }
+        if (event_mod.jsonString(payload.get("state"))) |state| {
+            try updateMilestoneScalar(allocator, db, envelope.object_id, state, event_hash, envelope, "state", "state_occurred_at", "state_actor_principal", "state_event_hash");
+        }
+    } else if (std.mem.eql(u8, envelope.event_type, "milestone.state_set")) {
+        const state = event_mod.jsonString(payload.get("state")) orelse return "invalid_event_envelope";
+        try updateMilestoneScalar(allocator, db, envelope.object_id, state, event_hash, envelope, "state", "state_occurred_at", "state_actor_principal", "state_event_hash");
+    }
+    return null;
+}
+
+fn insertProjectCreated(db: *SqliteDb, event_hash: []const u8, envelope: ValidatedEnvelope, name: []const u8, description: []const u8, state: []const u8) !void {
+    var stmt = try db.prepare(
+        \\INSERT OR IGNORE INTO projects(
+        \\  id,
+        \\  name, name_occurred_at, name_actor_principal, name_event_hash,
+        \\  description, description_occurred_at, description_actor_principal, description_event_hash,
+        \\  state, state_occurred_at, state_actor_principal, state_event_hash,
+        \\  created_at, author_principal, author_device
+        \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, envelope.object_id);
+    try stmt.bindText(2, name);
+    try stmt.bindText(3, envelope.occurred_at);
+    try stmt.bindText(4, envelope.actor_principal);
+    try stmt.bindText(5, event_hash);
+    try stmt.bindText(6, description);
+    try stmt.bindText(7, envelope.occurred_at);
+    try stmt.bindText(8, envelope.actor_principal);
+    try stmt.bindText(9, event_hash);
+    try stmt.bindText(10, state);
+    try stmt.bindText(11, envelope.occurred_at);
+    try stmt.bindText(12, envelope.actor_principal);
+    try stmt.bindText(13, event_hash);
+    try stmt.bindText(14, envelope.occurred_at);
+    try stmt.bindText(15, envelope.actor_principal);
+    try stmt.bindText(16, envelope.actor_device);
+    try stmt.stepDone();
+}
+
+fn projectExists(db: *SqliteDb, project_id: []const u8) !bool {
+    var stmt = try db.prepare("SELECT 1 FROM projects WHERE id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    return try stmt.step();
+}
+
+fn updateProjectScalar(
+    allocator: Allocator,
+    db: *SqliteDb,
+    project_id: []const u8,
+    value: []const u8,
+    event_hash: []const u8,
+    envelope: ValidatedEnvelope,
+    comptime value_col: []const u8,
+    comptime occurred_at_col: []const u8,
+    comptime actor_col: []const u8,
+    comptime event_hash_col: []const u8,
+) !void {
+    var select = try db.prepare("SELECT " ++ occurred_at_col ++ ", " ++ actor_col ++ ", " ++ event_hash_col ++ " FROM projects WHERE id = ?");
+    defer select.deinit();
+    try select.bindText(1, project_id);
+    if (!(try select.step())) return;
+    const old_occurred_at = try select.columnTextDup(allocator, 0);
+    defer allocator.free(old_occurred_at);
+    const old_actor = try select.columnTextDup(allocator, 1);
+    defer allocator.free(old_actor);
+    const old_event_hash = try select.columnTextDup(allocator, 2);
+    defer allocator.free(old_event_hash);
+
+    if (!(try eventWins(allocator, event_hash, old_event_hash))) return;
+
+    var update = try db.prepare("UPDATE projects SET " ++ value_col ++ " = ?, " ++ occurred_at_col ++ " = ?, " ++ actor_col ++ " = ?, " ++ event_hash_col ++ " = ? WHERE id = ?");
+    defer update.deinit();
+    try update.bindText(1, value);
+    try update.bindText(2, envelope.occurred_at);
+    try update.bindText(3, envelope.actor_principal);
+    try update.bindText(4, event_hash);
+    try update.bindText(5, project_id);
+    try update.stepDone();
+}
+
+fn insertPayloadProjectColumns(db: *SqliteDb, payload: std.json.ObjectMap, project_id: []const u8, event_hash: []const u8) !void {
+    const value = payload.get("columns") orelse return;
+    const array = switch (value) {
+        .array => |items| items,
+        else => return,
+    };
+    for (array.items) |item| {
+        if (item != .string) continue;
+        try insertProjectColumn(db, project_id, item.string, event_hash);
+    }
+}
+
+fn insertProjectColumn(db: *SqliteDb, project_id: []const u8, column: []const u8, event_hash: []const u8) !void {
+    if (std.mem.trim(u8, column, " \t\r\n").len == 0) return;
+    var stmt = try db.prepare("INSERT OR IGNORE INTO project_columns(project_id, column_name, add_hash) VALUES (?, ?, ?)");
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    try stmt.bindText(2, column);
+    try stmt.bindText(3, event_hash);
+    try stmt.stepDone();
+}
+
+fn deleteProjectColumn(allocator: Allocator, db: *SqliteDb, project_id: []const u8, column: []const u8, remove_hash: []const u8) !void {
+    var select = try db.prepare("SELECT add_hash FROM project_columns WHERE project_id = ? AND column_name = ?");
+    defer select.deinit();
+    try select.bindText(1, project_id);
+    try select.bindText(2, column);
+    while (try select.step()) {
+        const add_hash = try select.columnTextDup(allocator, 0);
+        defer allocator.free(add_hash);
+        if (!(try git.isAncestor(allocator, add_hash, remove_hash))) continue;
+        var delete = try db.prepare("DELETE FROM project_columns WHERE project_id = ? AND column_name = ? AND add_hash = ?");
+        defer delete.deinit();
+        try delete.bindText(1, project_id);
+        try delete.bindText(2, column);
+        try delete.bindText(3, add_hash);
+        try delete.stepDone();
+    }
+}
+
+fn projectColumnLimitRejection(db: *SqliteDb, project_id: []const u8) !?[]const u8 {
+    if (try collectionCountExceeds(db, "SELECT COUNT(DISTINCT column_name) FROM project_columns WHERE project_id = ?", project_id, max_projected_project_columns)) {
+        return "collection_limit_exceeded";
+    }
+    return null;
+}
+
+fn insertMilestoneCreated(db: *SqliteDb, event_hash: []const u8, envelope: ValidatedEnvelope, title: []const u8, description: []const u8, due_at: []const u8, state: []const u8) !void {
+    var stmt = try db.prepare(
+        \\INSERT OR IGNORE INTO milestones(
+        \\  id,
+        \\  title, title_occurred_at, title_actor_principal, title_event_hash,
+        \\  description, description_occurred_at, description_actor_principal, description_event_hash,
+        \\  due_at, due_at_occurred_at, due_at_actor_principal, due_at_event_hash,
+        \\  state, state_occurred_at, state_actor_principal, state_event_hash,
+        \\  created_at, author_principal, author_device
+        \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, envelope.object_id);
+    try stmt.bindText(2, title);
+    try stmt.bindText(3, envelope.occurred_at);
+    try stmt.bindText(4, envelope.actor_principal);
+    try stmt.bindText(5, event_hash);
+    try stmt.bindText(6, description);
+    try stmt.bindText(7, envelope.occurred_at);
+    try stmt.bindText(8, envelope.actor_principal);
+    try stmt.bindText(9, event_hash);
+    try stmt.bindText(10, due_at);
+    try stmt.bindText(11, envelope.occurred_at);
+    try stmt.bindText(12, envelope.actor_principal);
+    try stmt.bindText(13, event_hash);
+    try stmt.bindText(14, state);
+    try stmt.bindText(15, envelope.occurred_at);
+    try stmt.bindText(16, envelope.actor_principal);
+    try stmt.bindText(17, event_hash);
+    try stmt.bindText(18, envelope.occurred_at);
+    try stmt.bindText(19, envelope.actor_principal);
+    try stmt.bindText(20, envelope.actor_device);
+    try stmt.stepDone();
+}
+
+fn milestoneExists(db: *SqliteDb, milestone_id: []const u8) !bool {
+    var stmt = try db.prepare("SELECT 1 FROM milestones WHERE id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, milestone_id);
+    return try stmt.step();
+}
+
+fn updateMilestoneScalar(
+    allocator: Allocator,
+    db: *SqliteDb,
+    milestone_id: []const u8,
+    value: []const u8,
+    event_hash: []const u8,
+    envelope: ValidatedEnvelope,
+    comptime value_col: []const u8,
+    comptime occurred_at_col: []const u8,
+    comptime actor_col: []const u8,
+    comptime event_hash_col: []const u8,
+) !void {
+    var select = try db.prepare("SELECT " ++ occurred_at_col ++ ", " ++ actor_col ++ ", " ++ event_hash_col ++ " FROM milestones WHERE id = ?");
+    defer select.deinit();
+    try select.bindText(1, milestone_id);
+    if (!(try select.step())) return;
+    const old_occurred_at = try select.columnTextDup(allocator, 0);
+    defer allocator.free(old_occurred_at);
+    const old_actor = try select.columnTextDup(allocator, 1);
+    defer allocator.free(old_actor);
+    const old_event_hash = try select.columnTextDup(allocator, 2);
+    defer allocator.free(old_event_hash);
+
+    if (!(try eventWins(allocator, event_hash, old_event_hash))) return;
+
+    var update = try db.prepare("UPDATE milestones SET " ++ value_col ++ " = ?, " ++ occurred_at_col ++ " = ?, " ++ actor_col ++ " = ?, " ++ event_hash_col ++ " = ? WHERE id = ?");
+    defer update.deinit();
+    try update.bindText(1, value);
+    try update.bindText(2, envelope.occurred_at);
+    try update.bindText(3, envelope.actor_principal);
+    try update.bindText(4, event_hash);
+    try update.bindText(5, milestone_id);
+    try update.stepDone();
 }
 
 pub fn applyPullProjection(allocator: Allocator, db: *SqliteDb, event_hash: []const u8, envelope: ValidatedEnvelope, body: []const u8) !?[]const u8 {
