@@ -4,12 +4,8 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const sqlite_dep = b.dependency("sqlite", .{});
-    const tree_sitter_dep = b.dependency("tree_sitter", .{
-        .amalgamated = true,
-    });
-    const tree_sitter_zig_dep = b.dependency("tree_sitter_zig", .{
-        .@"build-shared" = false,
-    });
+    const tree_sitter_dep = b.dependency("tree_sitter", .{});
+    const tree_sitter_zig_dep = b.dependency("tree_sitter_zig", .{});
 
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -74,7 +70,17 @@ fn addTreeSitter(
     tree_sitter_dep: *std.Build.Dependency,
     tree_sitter_zig_dep: *std.Build.Dependency,
 ) void {
-    module.linkLibrary(tree_sitter_dep.artifact("tree-sitter"));
-    module.linkLibrary(tree_sitter_zig_dep.artifact("tree-sitter-zig"));
+    module.addCSourceFile(.{
+        .file = tree_sitter_dep.path("lib/src/lib.c"),
+        .flags = &.{ "-std=c11", "-D_POSIX_C_SOURCE=200112L", "-D_DEFAULT_SOURCE", "-D_BSD_SOURCE", "-D_DARWIN_C_SOURCE" },
+    });
+    module.addCSourceFile(.{
+        .file = tree_sitter_zig_dep.path("src/parser.c"),
+        .flags = &.{"-std=c11"},
+    });
+
     module.addIncludePath(tree_sitter_dep.path("lib/include"));
+    module.addIncludePath(tree_sitter_dep.path("lib/src"));
+    module.addIncludePath(tree_sitter_dep.path("lib/src/wasm"));
+    module.addIncludePath(tree_sitter_zig_dep.path("src"));
 }
