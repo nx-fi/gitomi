@@ -5,6 +5,8 @@ const shared = @import("shared.zig");
 
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
+const appendEmptyCell = shared.appendEmptyCell;
+const appendSectionHead = shared.appendSectionHead;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
 const appendTemplate = shared.appendTemplate;
@@ -15,14 +17,9 @@ pub fn renderRefsPage(allocator: Allocator, repo: Repo) ![]u8 {
     errdefer buf.deinit(allocator);
 
     try appendShellStart(&buf, allocator, repo, "Refs", "refs");
+    try buf.appendSlice(allocator, "<section class=\"panel\">");
+    try appendSectionHead(&buf, allocator, "Git references", "Branches, Tags, and Gitomi Refs", null);
     try buf.appendSlice(allocator,
-        \\<section class="panel">
-        \\  <div class="section-head">
-        \\    <div>
-        \\      <p class="eyebrow">Git references</p>
-        \\      <h1>Branches, Tags, and Gitomi Refs</h1>
-        \\    </div>
-        \\  </div>
         \\  <div class="table-wrap">
         \\    <table>
         \\      <thead><tr><th>Ref</th><th>Object</th><th>Updated</th></tr></thead>
@@ -59,7 +56,7 @@ pub fn renderRefsPage(allocator: Allocator, repo: Repo) ![]u8 {
     }
 
     if (shown == 0) {
-        try buf.appendSlice(allocator, "<tr><td colspan=\"3\" class=\"empty-cell\">No refs found.</td></tr>");
+        try appendEmptyCell(&buf, allocator, 3, "No refs found.");
     }
 
     try buf.appendSlice(allocator,

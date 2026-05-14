@@ -4,7 +4,11 @@ const shared = @import("shared.zig");
 
 const Allocator = std.mem.Allocator;
 const appendFmt = shared.appendFmt;
+const appendHref = shared.appendHref;
 const appendHtml = shared.appendHtml;
+const codeHref = shared.codeHref;
+const codeHrefWithView = shared.codeHrefWithView;
+const rawHref = shared.rawHref;
 
 pub const MarkdownLinkContext = struct {
     ref: []const u8,
@@ -498,10 +502,10 @@ fn appendRepositoryHref(
     const target_path = (try resolveRepositoryPathOwned(allocator, context.current_path, decoded_path)) orelse return false;
     defer allocator.free(target_path);
 
-    try appendCodeHref(buf, allocator, context.ref, target_path);
-    if (isMarkdownPath(target_path)) {
-        try buf.appendSlice(allocator, "&view=preview");
-    }
+    try appendHref(buf, allocator, if (isMarkdownPath(target_path))
+        codeHrefWithView(context.ref, target_path, "preview")
+    else
+        codeHref(context.ref, target_path));
     const fragment = hrefFragmentPart(href);
     if (fragment.len != 0) try appendHtml(buf, allocator, fragment);
     return true;
@@ -527,7 +531,7 @@ fn appendRepositoryRawHref(
     const target_path = (try resolveRepositoryPathOwned(allocator, context.current_path, decoded_path)) orelse return false;
     defer allocator.free(target_path);
 
-    try appendRawHref(buf, allocator, context.ref, target_path);
+    try appendHref(buf, allocator, rawHref(context.ref, target_path));
     const fragment = hrefFragmentPart(href);
     if (fragment.len != 0) try appendHtml(buf, allocator, fragment);
     return true;
@@ -628,37 +632,6 @@ fn percentDecodeUrlPath(allocator: Allocator, value: []const u8) ![]u8 {
     }
 
     return try buf.toOwnedSlice(allocator);
-}
-
-fn appendRawHref(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, path: []const u8) !void {
-    try buf.appendSlice(allocator, "/raw?ref=");
-    try appendUrlEncoded(buf, allocator, ref);
-    if (path.len != 0) {
-        try buf.appendSlice(allocator, "&path=");
-        try appendUrlEncoded(buf, allocator, path);
-    }
-}
-
-fn appendCodeHref(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, path: []const u8) !void {
-    try buf.appendSlice(allocator, "/code?ref=");
-    try appendUrlEncoded(buf, allocator, ref);
-    if (path.len != 0) {
-        try buf.appendSlice(allocator, "&path=");
-        try appendUrlEncoded(buf, allocator, path);
-    }
-}
-
-fn appendUrlEncoded(buf: *std.ArrayList(u8), allocator: Allocator, value: []const u8) !void {
-    const hex = "0123456789ABCDEF";
-    for (value) |c| {
-        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~' or c == '/') {
-            try buf.append(allocator, c);
-        } else {
-            try buf.append(allocator, '%');
-            try buf.append(allocator, hex[c >> 4]);
-            try buf.append(allocator, hex[c & 0x0f]);
-        }
-    }
 }
 
 fn parentPath(path: []const u8) []const u8 {

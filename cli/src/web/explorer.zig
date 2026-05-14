@@ -6,13 +6,22 @@ const shared = @import("shared.zig");
 
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
+const Button = shared.Button;
 const appendEmptyState = shared.appendEmptyState;
 const appendFmt = shared.appendFmt;
+const appendHref = shared.appendHref;
+const appendRepoHeaderShared = shared.appendRepoHeader;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
 const appendTemplate = shared.appendTemplate;
+const blameHref = shared.blameHref;
+const codeHref = shared.codeHref;
+const codeHrefWithView = shared.codeHrefWithView;
+const commitHref = shared.commitHref;
+const commitsHref = shared.commitsHref;
+const literalHref = shared.literalHref;
+const rawHref = shared.rawHref;
 const runCommand = git.runCommand;
-const trustedHtml = shared.trustedHtml;
 
 const max_blob_display_bytes = 512 * 1024;
 const max_blame_display_bytes = 16 * 1024 * 1024;
@@ -184,11 +193,10 @@ pub fn renderBlamePage(allocator: Allocator, repo: Repo, target: []const u8) ![]
         \\    <div>
     );
     try appendBreadcrumbs(&buf, allocator, repo, ref, path);
-    try buf.appendSlice(allocator, "</div><div class=\"file-actions\"><a class=\"button secondary\" href=\"");
-    try appendCodeHref(&buf, allocator, ref, path);
-    try buf.appendSlice(allocator, "\">Code</a><a class=\"button secondary\" href=\"");
-    try appendCommitsHref(&buf, allocator, ref, path);
-    try buf.appendSlice(allocator, "\">History</a></div></div>");
+    try buf.appendSlice(allocator, "</div><div class=\"file-actions\">");
+    try shared.appendButtonLink(&buf, allocator, Button{ .label = "Code", .href = codeHref(ref, path) });
+    try shared.appendButtonLink(&buf, allocator, Button{ .label = "History", .href = commitsHref(ref, path) });
+    try buf.appendSlice(allocator, "</div></div>");
     try appendCommitBar(&buf, allocator, summary_opt);
 
     if (blame_opt) |lines| {
@@ -261,11 +269,9 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
             \\    <div>
         );
         try appendBreadcrumbs(&buf, allocator, repo, ref, path);
-        try buf.appendSlice(allocator,
-            \\    </div><div class="file-actions"><a class="button secondary" href="
-        );
-        try appendCommitsHref(&buf, allocator, ref, path);
-        try buf.appendSlice(allocator, "\">History</a></div></div>");
+        try buf.appendSlice(allocator, "</div><div class=\"file-actions\">");
+        try shared.appendButtonLink(&buf, allocator, Button{ .label = "History", .href = commitsHref(ref, path) });
+        try buf.appendSlice(allocator, "</div></div>");
         try appendCommitBar(&buf, allocator, summary_opt);
         try appendTreeListing(&buf, allocator, ref, path, entries);
         try buf.appendSlice(allocator, "</section>");
@@ -309,16 +315,11 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     if (markdown) try appendMarkdownViewTabs(&buf, allocator, ref, path, raw_selected);
     if (size) |bytes| try appendFmt(&buf, allocator, "{d} bytes", .{bytes});
     if (media_kind != null) {
-        try buf.appendSlice(allocator, "<a class=\"button secondary\" href=\"");
-        try appendRawHref(&buf, allocator, ref, path);
-        try buf.appendSlice(allocator, "\">Raw</a>");
+        try shared.appendButtonLink(&buf, allocator, Button{ .label = "Raw", .href = rawHref(ref, path) });
     }
-    try buf.appendSlice(allocator, "<a class=\"button secondary\" href=\"");
-    try appendBlameHref(&buf, allocator, ref, path);
-    try buf.appendSlice(allocator, "\">Blame</a>");
-    try buf.appendSlice(allocator, "<a class=\"button secondary\" href=\"");
-    try appendCommitsHref(&buf, allocator, ref, path);
-    try buf.appendSlice(allocator, "\">History</a></div></div>");
+    try shared.appendButtonLink(&buf, allocator, Button{ .label = "Blame", .href = blameHref(ref, path) });
+    try shared.appendButtonLink(&buf, allocator, Button{ .label = "History", .href = commitsHref(ref, path) });
+    try buf.appendSlice(allocator, "</div></div>");
 
     if (media_kind) |kind| {
         if (can_preview_media) {
@@ -347,15 +348,14 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
 }
 
 fn appendMarkdownViewTabs(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, path: []const u8, raw_selected: bool) !void {
-    try buf.appendSlice(allocator, "<nav class=\"view-tabs\" aria-label=\"Markdown view\"><a class=\"");
-    try buf.appendSlice(allocator, if (!raw_selected) "active" else "");
-    try buf.appendSlice(allocator, "\" href=\"");
-    try appendCodeHrefWithView(buf, allocator, ref, path, "preview");
-    try buf.appendSlice(allocator, "\">Preview</a><a class=\"");
-    try buf.appendSlice(allocator, if (raw_selected) "active" else "");
-    try buf.appendSlice(allocator, "\" href=\"");
-    try appendCodeHrefWithView(buf, allocator, ref, path, "raw");
-    try buf.appendSlice(allocator, "\">Raw</a></nav>");
+    try appendTemplate(buf, allocator,
+        \\<nav class="view-tabs" aria-label="Markdown view"><a class="{preview_classes}" href="{preview_href}">Preview</a><a class="{raw_classes}" href="{raw_href}">Raw</a></nav>
+    , .{
+        .preview_classes = shared.classes("", &.{shared.class("active", !raw_selected)}),
+        .preview_href = codeHrefWithView(ref, path, "preview"),
+        .raw_classes = shared.classes("", &.{shared.class("active", raw_selected)}),
+        .raw_href = codeHrefWithView(ref, path, "raw"),
+    });
 }
 
 fn renderMissingPathPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) ![]u8 {
@@ -372,21 +372,9 @@ fn renderMissingPathPage(allocator: Allocator, repo: Repo, ref: []const u8, path
 }
 
 fn appendRepoHeader(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8) !void {
-    try appendTemplate(buf, allocator,
-        \\<section class="repo-head">
-        \\  <div>
-        \\    <p class="eyebrow">Repository</p>
-        \\    <h1>{repo_name}</h1>
-        \\  </div>
-        \\  <div class="repo-actions">
-        \\    <span class="branch-pill">{ref}</span>
-        \\    <a class="button secondary" href="/commits">Commits</a>
-        \\    <a class="button secondary" href="/overview">Overview</a>
-        \\  </div>
-        \\</section>
-    , .{
-        .repo_name = std.fs.path.basename(repo.root),
-        .ref = ref,
+    try appendRepoHeaderShared(buf, allocator, repo, ref, &.{
+        .{ .label = "Commits", .href = literalHref("/commits") },
+        .{ .label = "Overview", .href = literalHref("/overview") },
     });
 }
 
@@ -414,12 +402,13 @@ fn appendTreeSidebar(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, 
         \\  <nav class="tree-nav" data-tree-nav>
         \\    <div class="tree-node expanded" data-tree-path="" data-tree-depth="0" data-tree-kind="tree">
         \\      <button class="tree-toggle" type="button" aria-label="Collapse repository" aria-expanded="true" data-tree-toggle></button>
-        \\      <a class="tree-link
     );
-    if (active_path.len == 0) try buf.appendSlice(allocator, " active");
-    try buf.appendSlice(allocator, "\" href=\"");
-    try appendCodeHref(buf, allocator, ref, "");
-    try buf.appendSlice(allocator, "\">");
+    try appendTemplate(buf, allocator,
+        \\      <a class="{classes}" href="{href}">
+    , .{
+        .classes = shared.classes("tree-link", &.{shared.class("active", active_path.len == 0)}),
+        .href = codeHref(ref, ""),
+    });
     try appendFileIcon(buf, allocator, "", "tree");
     try appendTemplate(buf, allocator,
         \\<span class="tree-name">{repo_name}</span></a></div>
@@ -435,12 +424,14 @@ fn appendTreeSidebar(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, 
             const visible = treeEntryInitiallyVisible(entry.path, active_path);
 
             try appendTemplate(buf, allocator,
-                \\<div class="tree-node{active_class}{ancestor_class}{expanded_class}{hidden_class}" data-tree-path="{path}" data-tree-parent="{parent_path}" data-tree-depth="{depth}" data-tree-kind="{kind}" style="--depth: {depth}">
+                \\<div class="{classes}" data-tree-path="{path}" data-tree-parent="{parent_path}" data-tree-depth="{depth}" data-tree-kind="{kind}" style="--depth: {depth}">
             , .{
-                .active_class = trustedHtml(if (active) " active" else ""),
-                .ancestor_class = trustedHtml(if (ancestor) " ancestor" else ""),
-                .expanded_class = trustedHtml(if (expanded) " expanded" else ""),
-                .hidden_class = trustedHtml(if (!visible) " collapsed-child" else ""),
+                .classes = shared.classes("tree-node", &.{
+                    shared.class("active", active),
+                    shared.class("ancestor", ancestor),
+                    shared.class("expanded", expanded),
+                    shared.class("collapsed-child", !visible),
+                }),
                 .path = entry.path,
                 .parent_path = parentPath(entry.path),
                 .depth = depth,
@@ -459,13 +450,14 @@ fn appendTreeSidebar(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, 
             }
 
             try appendTemplate(buf, allocator,
-                \\<a class="tree-link{active_class}{ancestor_class}" href="
+                \\<a class="{classes}" href="{href}">
             , .{
-                .active_class = trustedHtml(if (active) " active" else ""),
-                .ancestor_class = trustedHtml(if (ancestor) " ancestor" else ""),
+                .classes = shared.classes("tree-link", &.{
+                    shared.class("active", active),
+                    shared.class("ancestor", ancestor),
+                }),
+                .href = codeHref(ref, entry.path),
             });
-            try appendCodeHref(buf, allocator, ref, entry.path);
-            try buf.appendSlice(allocator, "\">");
             try appendFileIcon(buf, allocator, entry.path, entry.kind);
             try appendTemplate(buf, allocator,
                 \\<span class="tree-name">{name}</span></a></div>
@@ -491,20 +483,20 @@ fn appendTreeListing(
     );
 
     if (path.len != 0) {
-        try buf.appendSlice(allocator, "<div class=\"file-row\"><a class=\"file-name\" href=\"");
-        try appendCodeHref(buf, allocator, ref, parentPath(path));
-        try buf.appendSlice(allocator, "\">");
+        try appendTemplate(buf, allocator,
+            \\<div class="file-row"><a class="file-name" href="{href}">
+        , .{ .href = codeHref(ref, parentPath(path)) });
         try appendFileIcon(buf, allocator, "", "tree");
-        try buf.appendSlice(allocator, "..</a><span></span><span></span></div>");
+        try appendTemplate(buf, allocator, "..</a><span></span><span></span></div>", .{});
     }
 
     for (entries) |entry| {
         const child_path = try childPath(allocator, path, entry.name);
         defer allocator.free(child_path);
 
-        try buf.appendSlice(allocator, "<div class=\"file-row\"><a class=\"file-name\" href=\"");
-        try appendCodeHref(buf, allocator, ref, child_path);
-        try buf.appendSlice(allocator, "\">");
+        try appendTemplate(buf, allocator,
+            \\<div class="file-row"><a class="file-name" href="{href}">
+        , .{ .href = codeHref(ref, child_path) });
         try appendFileIcon(buf, allocator, child_path, entry.kind);
         try appendTemplate(buf, allocator,
             \\{name}</a><span><code>{mode}</code></span><span class="file-size">
@@ -526,31 +518,29 @@ fn appendTreeListing(
 }
 
 fn appendCommitBar(buf: *std.ArrayList(u8), allocator: Allocator, summary_opt: ?CommitSummary) !void {
-    try buf.appendSlice(allocator, "<div class=\"commit-bar\">");
+    try appendTemplate(buf, allocator, "<div class=\"commit-bar\">", .{});
     if (summary_opt) |summary| {
-        try buf.appendSlice(allocator, "<a class=\"commit-hash\" href=\"");
-        try appendCommitHref(buf, allocator, summary.full_hash);
         try appendTemplate(buf, allocator,
-            \\"><code>{hash}</code></a><strong><a href="
-        , .{ .hash = summary.hash });
-        try appendCommitHref(buf, allocator, summary.full_hash);
-        try appendTemplate(buf, allocator,
-            \\">{subject}</a></strong><span>{relative}</span>
+            \\<a class="commit-hash" href="{href}"><code>{hash}</code></a><strong><a href="{href}">{subject}</a></strong><span>{relative}</span>
         , .{
+            .href = commitHref(summary.full_hash),
+            .hash = summary.hash,
             .subject = summary.subject,
             .relative = summary.relative,
         });
     } else {
-        try buf.appendSlice(allocator, "<strong>No commits yet</strong><span>This ref has no history to summarize.</span>");
+        try appendTemplate(buf, allocator, "<strong>No commits yet</strong><span>This ref has no history to summarize.</span>", .{});
     }
-    try buf.appendSlice(allocator, "</div>");
+    try appendTemplate(buf, allocator, "</div>", .{});
 }
 
 fn appendBreadcrumbs(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !void {
-    try buf.appendSlice(allocator, "<nav class=\"breadcrumbs\"><a href=\"");
-    try appendCodeHref(buf, allocator, ref, "");
-    try buf.appendSlice(allocator, "\">");
-    try appendTemplate(buf, allocator, "{repo_name}</a>", .{ .repo_name = std.fs.path.basename(repo.root) });
+    try appendTemplate(buf, allocator,
+        \\<nav class="breadcrumbs"><a href="{href}">{repo_name}</a>
+    , .{
+        .href = codeHref(ref, ""),
+        .repo_name = std.fs.path.basename(repo.root),
+    });
 
     if (path.len != 0) {
         var built: std.ArrayList(u8) = .empty;
@@ -560,18 +550,21 @@ fn appendBreadcrumbs(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, 
             if (part.len == 0) continue;
             if (built.items.len != 0) try built.append(allocator, '/');
             try built.appendSlice(allocator, part);
-            try buf.appendSlice(allocator, "<span>/</span>");
+            try appendTemplate(buf, allocator, "<span>/</span>", .{});
             if (built.items.len == path.len) {
                 try appendTemplate(buf, allocator, "<strong>{part}</strong>", .{ .part = part });
             } else {
-                try buf.appendSlice(allocator, "<a href=\"");
-                try appendCodeHref(buf, allocator, ref, built.items);
-                try appendTemplate(buf, allocator, "\">{part}</a>", .{ .part = part });
+                try appendTemplate(buf, allocator,
+                    \\<a href="{href}">{part}</a>
+                , .{
+                    .href = codeHref(ref, built.items),
+                    .part = part,
+                });
             }
         }
     }
 
-    try buf.appendSlice(allocator, "</nav>");
+    try appendTemplate(buf, allocator, "</nav>", .{});
 }
 
 fn appendBlobLines(buf: *std.ArrayList(u8), allocator: Allocator, path: []const u8, content: []const u8) !void {
@@ -603,29 +596,27 @@ fn appendMediaPreview(
     path: []const u8,
     kind: MediaKind,
 ) !void {
-    try buf.appendSlice(allocator, "<div class=\"media-preview\">");
+    try appendTemplate(buf, allocator, "<div class=\"media-preview\">", .{});
     switch (kind) {
         .image => {
-            try buf.appendSlice(allocator, "<a class=\"media-preview-link\" href=\"");
-            try appendRawHref(buf, allocator, ref, path);
-            try buf.appendSlice(allocator, "\"><img src=\"");
-            try appendRawHref(buf, allocator, ref, path);
             try appendTemplate(buf, allocator,
-                \\" alt="{alt}" loading="lazy" decoding="async"></a>
-            , .{ .alt = baseName(path) });
+                \\<a class="media-preview-link" href="{href}"><img src="{href}" alt="{alt}" loading="lazy" decoding="async"></a>
+            , .{
+                .href = rawHref(ref, path),
+                .alt = baseName(path),
+            });
         },
         .video => {
-            try buf.appendSlice(allocator, "<video controls preload=\"metadata\"><source src=\"");
-            try appendRawHref(buf, allocator, ref, path);
             try appendTemplate(buf, allocator,
-                \\" type="{content_type}">{name}</video>
+                \\<video controls preload="metadata"><source src="{href}" type="{content_type}">{name}</video>
             , .{
+                .href = rawHref(ref, path),
                 .content_type = contentTypeForPath(path),
                 .name = baseName(path),
             });
         },
     }
-    try buf.appendSlice(allocator, "</div>");
+    try appendTemplate(buf, allocator, "</div>", .{});
 }
 
 fn appendBlameLines(buf: *std.ArrayList(u8), allocator: Allocator, path: []const u8, lines: []const BlameLine) !void {
@@ -633,24 +624,19 @@ fn appendBlameLines(buf: *std.ArrayList(u8), allocator: Allocator, path: []const
     const now = std.time.timestamp();
     try buf.appendSlice(allocator, "<ol class=\"blame-lines\">");
     for (lines) |line| {
+        const relative_date = try relativeTimeOwned(allocator, line.author_timestamp, now);
+        defer allocator.free(relative_date);
         try appendTemplate(buf, allocator,
-            \\<li class="blame-row {age_class}" id="L{line_no}"><span class="blame-meta" title="{summary}"><a class="blame-hash" href="
+            \\<li class="blame-row {age_class}" id="L{line_no}"><span class="blame-meta" title="{summary}"><a class="blame-hash" href="{href}">{short_hash}</a><span class="blame-author">{author}</span><span class="blame-date" title="{date}">{relative_date}</span></span><a class="line-num" href="#L{line_no}">{line_no}</a><code class="blame-code language-{language}">{content}</code></li>
         , .{
             .age_class = blameAgeClass(line.author_timestamp, now),
             .line_no = line.line_no,
             .summary = line.summary,
-        });
-        try appendCommitHref(buf, allocator, line.commit);
-        const relative_date = try relativeTimeOwned(allocator, line.author_timestamp, now);
-        defer allocator.free(relative_date);
-        try appendTemplate(buf, allocator,
-            \\">{short_hash}</a><span class="blame-author">{author}</span><span class="blame-date" title="{date}">{relative_date}</span></span><a class="line-num" href="#L{line_no}">{line_no}</a><code class="blame-code language-{language}">{content}</code></li>
-        , .{
+            .href = commitHref(line.commit),
             .short_hash = line.short_hash,
             .author = line.author,
             .date = line.date,
             .relative_date = relative_date,
-            .line_no = line.line_no,
             .language = language,
             .content = line.content,
         });
@@ -1195,64 +1181,6 @@ fn percentDecode(allocator: Allocator, value: []const u8) ![]u8 {
     return buf.toOwnedSlice(allocator);
 }
 
-fn appendCodeHref(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, path: []const u8) !void {
-    try buf.appendSlice(allocator, "/code?ref=");
-    try appendUrlEncoded(buf, allocator, ref);
-    if (path.len != 0) {
-        try buf.appendSlice(allocator, "&path=");
-        try appendUrlEncoded(buf, allocator, path);
-    }
-}
-
-fn appendRawHref(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, path: []const u8) !void {
-    try buf.appendSlice(allocator, "/raw?ref=");
-    try appendUrlEncoded(buf, allocator, ref);
-    if (path.len != 0) {
-        try buf.appendSlice(allocator, "&path=");
-        try appendUrlEncoded(buf, allocator, path);
-    }
-}
-
-fn appendCodeHrefWithView(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, path: []const u8, view: []const u8) !void {
-    try appendCodeHref(buf, allocator, ref, path);
-    try buf.appendSlice(allocator, "&view=");
-    try appendUrlEncoded(buf, allocator, view);
-}
-
-fn appendCommitsHref(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, path: []const u8) !void {
-    try buf.appendSlice(allocator, "/commits?ref=");
-    try appendUrlEncoded(buf, allocator, ref);
-    if (path.len != 0) {
-        try buf.appendSlice(allocator, "&path=");
-        try appendUrlEncoded(buf, allocator, path);
-    }
-}
-
-fn appendBlameHref(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, path: []const u8) !void {
-    try buf.appendSlice(allocator, "/blame?ref=");
-    try appendUrlEncoded(buf, allocator, ref);
-    try buf.appendSlice(allocator, "&path=");
-    try appendUrlEncoded(buf, allocator, path);
-}
-
-fn appendCommitHref(buf: *std.ArrayList(u8), allocator: Allocator, hash: []const u8) !void {
-    try buf.appendSlice(allocator, "/commit?sha=");
-    try appendUrlEncoded(buf, allocator, hash);
-}
-
-fn appendUrlEncoded(buf: *std.ArrayList(u8), allocator: Allocator, value: []const u8) !void {
-    const hex = "0123456789ABCDEF";
-    for (value) |c| {
-        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~' or c == '/') {
-            try buf.append(allocator, c);
-        } else {
-            try buf.append(allocator, '%');
-            try buf.append(allocator, hex[c >> 4]);
-            try buf.append(allocator, hex[c & 0x0f]);
-        }
-    }
-}
-
 fn appendSize(buf: *std.ArrayList(u8), allocator: Allocator, raw: []const u8) !void {
     const size = std.fmt.parseUnsigned(usize, raw, 10) catch {
         try appendTemplate(buf, allocator, "{raw}", .{ .raw = raw });
@@ -1338,8 +1266,8 @@ test "web explorer normalizes paths" {
 test "web explorer encodes code links" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
-    try appendCodeHref(&buf, std.testing.allocator, "feature/test", "src/a b.zig");
-    try std.testing.expectEqualStrings("/code?ref=feature/test&path=src/a%20b.zig", buf.items);
+    try appendHref(&buf, std.testing.allocator, codeHref("feature/test", "src/a b.zig"));
+    try std.testing.expectEqualStrings("/code?ref=feature/test&amp;path=src/a%20b.zig", buf.items);
 }
 
 test "web explorer maps file paths to highlight languages" {
