@@ -11,6 +11,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     addSqlite(mod, sqlite_dep);
+    addTreeSitter(mod, b);
 
     const exe = b.addExecutable(.{
         .name = "gt",
@@ -32,6 +33,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     addSqlite(test_mod, sqlite_dep);
+    addTreeSitter(test_mod, b);
     const tests = b.addTest(.{ .root_module = test_mod });
     tests.linkLibC();
     const run_tests = b.addRunArtifact(tests);
@@ -59,4 +61,20 @@ fn addSqlite(module: *std.Build.Module, sqlite_dep: *std.Build.Dependency) void 
             "-DSQLITE_DEFAULT_MEMSTATUS=0",
         },
     });
+}
+
+fn addTreeSitter(module: *std.Build.Module, b: *std.Build) void {
+    module.addCSourceFile(.{
+        .file = b.path("vendor/tree-sitter/lib/src/lib.c"),
+        .flags = &.{ "-std=c11", "-D_POSIX_C_SOURCE=200112L", "-D_DEFAULT_SOURCE", "-D_BSD_SOURCE", "-D_DARWIN_C_SOURCE" },
+    });
+    module.addCSourceFile(.{
+        .file = b.path("vendor/tree-sitter-zig/src/parser.c"),
+        .flags = &.{"-std=c11"},
+    });
+
+    module.addIncludePath(b.path("vendor/tree-sitter/lib/include"));
+    module.addIncludePath(b.path("vendor/tree-sitter/lib/src"));
+    module.addIncludePath(b.path("vendor/tree-sitter/lib/src/wasm"));
+    module.addIncludePath(b.path("vendor/tree-sitter-zig/src"));
 }

@@ -25,16 +25,29 @@
   --brand-mark-bg: #1f883d;
   --brand-mark-text: #ffffff;
   --button-secondary-bg: #f6f8fa;
-  --code-bg: #f6f8fa;
+  --code-bg: #eff1f5;
   --soft-row: #edf1f4;
   --folder-bg: #fff8c5;
   --folder-border: #bf8700;
   --input-bg: #ffffff;
-  --hljs-keyword: #cf222e;
-  --hljs-string: #0a3069;
-  --hljs-comment: #6e7781;
-  --hljs-number: #0550ae;
-  --hljs-attr: #953800;
+  --hljs-text: #4c4f69;
+  --hljs-keyword: #8839ef;
+  --hljs-string: #40a02b;
+  --hljs-comment: #7c7f93;
+  --hljs-number: #fe640b;
+  --hljs-attr: #04a5e5;
+  --hljs-title: #1e66f5;
+  --hljs-built-in: #df8e1d;
+  --hljs-literal: #fe640b;
+  --hljs-meta: #7c7f93;
+  --hljs-symbol: #ea76cb;
+  --hljs-type: #df8e1d;
+  --hljs-operator: #04a5e5;
+  --hljs-punctuation: #5c5f77;
+  --hljs-params: #e64553;
+  --hljs-variable: #4c4f69;
+  --hljs-addition: #40a02b;
+  --hljs-deletion: #d20f39;
   --accent-soft: #edf8f2;
   --shadow: 0 10px 30px rgba(31, 35, 40, 0.06), 0 1px 2px rgba(31, 35, 40, 0.08);
   --shadow-subtle: 0 1px 2px rgba(31, 35, 40, 0.06);
@@ -72,11 +85,24 @@
   --folder-bg: #3b2f05;
   --folder-border: #d29922;
   --input-bg: #0d1117;
-  --hljs-keyword: #ff7b72;
-  --hljs-string: #a5d6ff;
-  --hljs-comment: #8b949e;
-  --hljs-number: #79c0ff;
-  --hljs-attr: #d2a8ff;
+  --hljs-text: #cdd6f4;
+  --hljs-keyword: #cba6f7;
+  --hljs-string: #a6e3a1;
+  --hljs-comment: #9399b2;
+  --hljs-number: #fab387;
+  --hljs-attr: #89dceb;
+  --hljs-title: #89b4fa;
+  --hljs-built-in: #f9e2af;
+  --hljs-literal: #fab387;
+  --hljs-meta: #9399b2;
+  --hljs-symbol: #f5c2e7;
+  --hljs-type: #f9e2af;
+  --hljs-operator: #89dceb;
+  --hljs-punctuation: #bac2de;
+  --hljs-params: #eba0ac;
+  --hljs-variable: #cdd6f4;
+  --hljs-addition: #a6e3a1;
+  --hljs-deletion: #f38ba8;
   --accent-soft: #12291c;
   --shadow: 0 14px 34px rgba(1, 4, 9, 0.32), 0 1px 2px rgba(1, 4, 9, 0.55);
   --shadow-subtle: 0 1px 2px rgba(1, 4, 9, 0.45);
@@ -904,8 +930,17 @@ tbody tr:hover {
   font-size: 12px;
 }
 .code-panel {
-  overflow: hidden;
+  overflow: visible;
   margin-bottom: 16px;
+}
+.code-panel-head {
+  position: sticky;
+  top: 84px;
+  z-index: 6;
+  overflow: hidden;
+  background: var(--panel);
+  border-radius: 8px 8px 0 0;
+  box-shadow: var(--shadow-subtle);
 }
 .code-toolbar {
   display: flex;
@@ -933,7 +968,35 @@ tbody tr:hover {
   align-items: center;
   justify-content: flex-end;
   gap: 10px;
+  min-width: 0;
+  flex-wrap: wrap;
   white-space: nowrap;
+}
+.file-metrics {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+.file-metrics span + span::before {
+  content: "";
+  display: inline-block;
+  width: 3px;
+  height: 3px;
+  margin-right: 8px;
+  vertical-align: middle;
+  background: currentColor;
+  border-radius: 50%;
+  opacity: 0.55;
+}
+.copy-button[disabled] {
+  cursor: wait;
+  opacity: 0.72;
+  transform: none;
 }
 .commit-bar {
   display: flex;
@@ -1075,6 +1138,8 @@ tbody tr:hover {
 .file-icon.lang-xml::after { content: "XML"; font-size: 7px; }
 .file-icon.lang-sql { background: #0a7f8f; }
 .file-icon.lang-sql::after { content: "DB"; }
+.file-icon.lang-sol { background: #363636; }
+.file-icon.lang-sol::after { content: "SOL"; font-size: 7px; }
 .file-icon.lang-rs { background: #dea584; color: #1f2328; }
 .file-icon.lang-rs::after { content: "RS"; }
 .file-icon.lang-py { background: #3776ab; }
@@ -1265,22 +1330,89 @@ tbody tr:hover {
   --age-color: #58a6ff;
   --age-bg: color-mix(in srgb, #0b3551 74%, var(--panel-strong));
 }
-.hljs-keyword {
+.hljs {
+  color: var(--hljs-text);
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-tag {
   color: var(--hljs-keyword);
   font-weight: 600;
 }
-.hljs-string {
+.hljs-string,
+.hljs-regexp,
+.hljs-code {
   color: var(--hljs-string);
 }
-.hljs-comment {
+.hljs-comment,
+.hljs-quote {
   color: var(--hljs-comment);
   font-style: italic;
 }
 .hljs-number {
   color: var(--hljs-number);
 }
-.hljs-attr {
+.hljs-literal,
+.hljs-variable.constant_ {
+  color: var(--hljs-literal);
+}
+.hljs-attr,
+.hljs-attribute,
+.hljs-property,
+.hljs-selector-id {
   color: var(--hljs-attr);
+}
+.hljs-title,
+.hljs-section,
+.hljs-selector-class {
+  color: var(--hljs-title);
+  font-weight: 600;
+}
+.hljs-title.class_,
+.hljs-type {
+  color: var(--hljs-type);
+}
+.hljs-built_in,
+.hljs-name,
+.hljs-doctag {
+  color: var(--hljs-built-in);
+}
+.hljs-meta,
+.hljs-template-tag,
+.hljs-template-variable {
+  color: var(--hljs-meta);
+}
+.hljs-symbol,
+.hljs-bullet,
+.hljs-link {
+  color: var(--hljs-symbol);
+}
+.hljs-params,
+.hljs-variable,
+.hljs-template-variable {
+  color: var(--hljs-variable);
+}
+.hljs-params {
+  color: var(--hljs-params);
+}
+.hljs-operator {
+  color: var(--hljs-operator);
+}
+.hljs-punctuation,
+.hljs-subst {
+  color: var(--hljs-punctuation);
+}
+.hljs-addition {
+  color: var(--hljs-addition);
+}
+.hljs-deletion {
+  color: var(--hljs-deletion);
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 700;
 }
 .readme-panel {
   overflow: visible;
@@ -1762,6 +1894,9 @@ textarea {
   .tree-sidebar {
     position: static;
     max-height: 260px;
+  }
+  .code-panel-head {
+    top: 0;
   }
   .tree-nav {
     max-height: 210px;

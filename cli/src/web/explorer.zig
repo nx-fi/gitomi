@@ -3,6 +3,7 @@ const git = @import("../git.zig");
 const markdown_render = @import("markdown_render.zig");
 const repo_mod = @import("../repo.zig");
 const shared = @import("shared.zig");
+const code_symbols = @import("symbols.zig");
 
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
@@ -26,6 +27,8 @@ const runCommand = git.runCommand;
 const max_blob_display_bytes = 512 * 1024;
 const max_blame_display_bytes = 16 * 1024 * 1024;
 const max_raw_blob_bytes = git.max_git_output;
+const max_sloc_output = 512 * 1024;
+const local_sloc_bin = "tools/sloc";
 
 pub const RawBlob = struct {
     content_type: []const u8,
@@ -104,6 +107,16 @@ const BlameLine = struct {
 const BlameHeader = struct {
     commit: []const u8,
     line_no: usize,
+};
+
+const SlocCounts = struct {
+    code: u64,
+    test_count: u64,
+    comment: u64,
+
+    fn total(self: SlocCounts) u64 {
+        return self.code + self.test_count + self.comment;
+    }
 };
 
 const PathQuery = union(enum) {
@@ -186,6 +199,7 @@ pub fn renderBlamePage(allocator: Allocator, repo: Repo, target: []const u8) ![]
     try shared.appendButtonLink(&buf, allocator, Button{ .label = "History", .href = commitsHref(ref, path) });
     try appendCodePanelToolbarEnd(&buf, allocator);
     try appendCommitBar(&buf, allocator, summary_opt);
+    try appendCodePanelHeadEnd(&buf, allocator);
 
     if (blame_opt) |lines| {
         if (lines.len == 0) {
@@ -250,6 +264,7 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
         try shared.appendButtonLink(&buf, allocator, Button{ .label = "History", .href = commitsHref(ref, path) });
         try appendCodePanelToolbarEnd(&buf, allocator);
         try appendCommitBar(&buf, allocator, summary_opt);
+        try appendCodePanelHeadEnd(&buf, allocator);
         try appendTreeListing(&buf, allocator, ref, path, entries);
         try appendCodePanelEnd(&buf, allocator);
 
@@ -269,8 +284,6 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
 
     try appendShellStart(&buf, allocator, repo, "Code", "code");
     try appendRepoHeader(&buf, allocator, repo, ref);
-    try appendCodeLayoutStart(&buf, allocator, repo, ref, path);
-
     const size = try blobSize(allocator, repo, spec);
     const media_kind = mediaKindForPath(path);
     const can_preview_media = media_kind != null and (size == null or size.? <= max_raw_blob_bytes);
@@ -281,24 +294,37 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     defer if (content) |bytes| allocator.free(bytes);
     const summary_opt = try loadCommitSummary(allocator, repo, ref, path);
     defer if (summary_opt) |summary| summary.deinit(allocator);
-
-    try appendCodePanelStart(&buf, allocator, repo, ref, path);
+    const text_content = if (content) |bytes| if (containsNul(bytes)) null else bytes else null;
+    const sloc_counts = if (text_content) |bytes| loadBlobSlocCounts(allocator, repo, path, bytes) catch null else null;
     const markdown = isMarkdownPath(path);
     const raw_selected = !markdown or std.mem.eql(u8, view, "raw");
+    const render_markdown = markdown and !raw_selected;
+    const symbol_items = if (text_content) |bytes|
+        if (media_kind == null and !render_markdown)
+            try code_symbols.extract(allocator, path, bytes)
+        else
+            try allocator.alloc(code_symbols.Symbol, 0)
+    else
+        try allocator.alloc(code_symbols.Symbol, 0);
+    defer code_symbols.free(allocator, symbol_items);
+
+    try appendCodeLayoutStartWithSymbols(&buf, allocator, repo, ref, path, symbol_items.len != 0);
+
+    try appendCodePanelStart(&buf, allocator, repo, ref, path);
     if (markdown) try appendMarkdownViewTabs(&buf, allocator, ref, path, raw_selected);
-    if (size) |bytes| try appendFmt(&buf, allocator, "{d} bytes", .{bytes});
-    if (media_kind != null) {
-        try shared.appendButtonLink(&buf, allocator, Button{ .label = "Raw", .href = rawHref(ref, path) });
-    }
+    try appendBlobMetrics(&buf, allocator, size, text_content, sloc_counts);
+    try shared.appendButtonLink(&buf, allocator, Button{ .label = "Raw", .href = rawHref(ref, path) });
+    if (text_content != null) try appendCopyButton(&buf, allocator, ref, path);
     try shared.appendButtonLink(&buf, allocator, Button{ .label = "Blame", .href = blameHref(ref, path) });
     try shared.appendButtonLink(&buf, allocator, Button{ .label = "History", .href = commitsHref(ref, path) });
     try appendCodePanelToolbarEnd(&buf, allocator);
 
     try appendCommitBar(&buf, allocator, summary_opt);
-    try appendBlobContent(&buf, allocator, ref, path, media_kind, can_preview_media, content, markdown and !raw_selected);
+    try appendCodePanelHeadEnd(&buf, allocator);
+    try appendBlobContent(&buf, allocator, ref, path, media_kind, can_preview_media, content, render_markdown);
 
     try appendCodePanelEnd(&buf, allocator);
-    try appendCodeLayoutEnd(&buf, allocator);
+    try appendCodeLayoutEndWithSymbols(&buf, allocator, symbol_items);
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
 }
@@ -350,6 +376,48 @@ fn appendMarkdownViewTabs(buf: *std.ArrayList(u8), allocator: Allocator, ref: []
     });
 }
 
+fn appendBlobMetrics(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    size: ?usize,
+    text_content: ?[]const u8,
+    sloc_counts: ?SlocCounts,
+) !void {
+    try appendTemplate(buf, allocator, "<span class=\"file-metrics\">", .{});
+    if (text_content) |bytes| {
+        const lines = physicalLineCount(bytes);
+        try appendTemplate(buf, allocator,
+            \\<span>{count} {label}</span>
+        , .{
+            .count = shared.groupedUnsigned(@intCast(lines)),
+            .label = if (lines == 1) "line" else "lines",
+        });
+    }
+    if (sloc_counts) |counts| {
+        if (counts.total() > 0) {
+            try appendTemplate(buf, allocator,
+                \\<span>{code} code</span><span>{test_count} test</span><span>{comment} comment</span>
+            , .{
+                .code = shared.groupedUnsigned(counts.code),
+                .test_count = shared.groupedUnsigned(counts.test_count),
+                .comment = shared.groupedUnsigned(counts.comment),
+            });
+        }
+    }
+    if (size) |bytes| {
+        try appendTemplate(buf, allocator, "<span>", .{});
+        try appendByteSize(buf, allocator, bytes);
+        try appendTemplate(buf, allocator, "</span>", .{});
+    }
+    try appendTemplate(buf, allocator, "</span>", .{});
+}
+
+fn appendCopyButton(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, path: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<button class="button secondary copy-button" type="button" data-copy-raw="{href}">Copy</button>
+    , .{ .href = rawHref(ref, path) });
+}
+
 fn renderMissingPathPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -371,9 +439,25 @@ fn appendRepoHeader(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, r
 }
 
 fn appendCodeLayoutStart(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8, active_path: []const u8) !void {
+    try appendCodeLayoutStartWithSymbols(buf, allocator, repo, ref, active_path, false);
+}
+
+fn appendCodeLayoutStartWithSymbols(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    repo: Repo,
+    ref: []const u8,
+    active_path: []const u8,
+    has_symbols: bool,
+) !void {
     try appendTemplate(buf, allocator,
         \\<div{class_attr}>
-    , .{ .class_attr = shared.classAttr("code-layout", &.{shared.class("no-sidebar", active_path.len == 0)}) });
+    , .{
+        .class_attr = shared.classAttr("code-layout", &.{
+            shared.class("no-sidebar", active_path.len == 0),
+            shared.class("has-symbols", has_symbols),
+        }),
+    });
     if (active_path.len != 0) {
         try appendTreeSidebar(buf, allocator, repo, ref, active_path);
     }
@@ -383,12 +467,19 @@ fn appendCodeLayoutStart(buf: *std.ArrayList(u8), allocator: Allocator, repo: Re
 }
 
 fn appendCodeLayoutEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
-    try appendTemplate(buf, allocator, "</div></div>", .{});
+    try appendCodeLayoutEndWithSymbols(buf, allocator, &.{});
+}
+
+fn appendCodeLayoutEndWithSymbols(buf: *std.ArrayList(u8), allocator: Allocator, symbols: []const code_symbols.Symbol) !void {
+    try appendTemplate(buf, allocator, "</div>", .{});
+    if (symbols.len != 0) try appendCodeSymbolsSidebar(buf, allocator, symbols);
+    try appendTemplate(buf, allocator, "</div>", .{});
 }
 
 fn appendCodePanelStart(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !void {
     try appendTemplate(buf, allocator,
         \\<section class="panel code-panel">
+        \\  <div class="code-panel-head">
         \\  <div class="code-toolbar">
         \\    <div>
     , .{});
@@ -406,8 +497,37 @@ fn appendCodePanelToolbarEnd(buf: *std.ArrayList(u8), allocator: Allocator) !voi
     , .{});
 }
 
+fn appendCodePanelHeadEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try appendTemplate(buf, allocator, "  </div>", .{});
+}
+
 fn appendCodePanelEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
     try appendTemplate(buf, allocator, "</section>", .{});
+}
+
+fn appendCodeSymbolsSidebar(buf: *std.ArrayList(u8), allocator: Allocator, symbols: []const code_symbols.Symbol) !void {
+    try appendTemplate(buf, allocator,
+        \\<aside class="panel symbols-sidebar" aria-label="Symbols">
+        \\  <div class="symbols-head">Symbols</div>
+        \\  <nav class="symbols-nav">
+    , .{});
+    for (symbols) |symbol| {
+        try appendCodeSymbolLink(buf, allocator, symbol);
+    }
+    try appendTemplate(buf, allocator, "</nav></aside>", .{});
+}
+
+fn appendCodeSymbolLink(buf: *std.ArrayList(u8), allocator: Allocator, symbol: code_symbols.Symbol) !void {
+    try appendTemplate(buf, allocator,
+        \\<a class="symbol-link" href="#L{line_no}" title="{name}" style="--depth: {depth}">
+        \\  <span class="symbol-kind">{kind}</span><span class="symbol-name">{name}</span><span class="symbol-line">L{line_no}</span>
+        \\</a>
+    , .{
+        .line_no = symbol.line_no,
+        .name = symbol.name,
+        .depth = symbol.depth,
+        .kind = symbol.kind.label(),
+    });
 }
 
 fn appendTreeSidebar(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8, active_path: []const u8) !void {
@@ -728,6 +848,150 @@ fn appendRepositoryMarkdown(
             .current_path = path,
         },
     });
+}
+
+fn physicalLineCount(content: []const u8) usize {
+    if (content.len == 0) return 0;
+    var lines: usize = 0;
+    for (content) |c| {
+        if (c == '\n') lines += 1;
+    }
+    if (content[content.len - 1] != '\n') lines += 1;
+    return lines;
+}
+
+fn loadBlobSlocCounts(allocator: Allocator, repo: Repo, path: []const u8, content: []const u8) !?SlocCounts {
+    var candidates: std.ArrayList([]u8) = .empty;
+    defer {
+        for (candidates.items) |candidate| allocator.free(candidate);
+        candidates.deinit(allocator);
+    }
+
+    const env_cmd = slocCommandFromEnv(allocator) catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => null,
+        else => return err,
+    };
+    if (env_cmd) |command| {
+        defer allocator.free(command);
+        try appendSlocCommandCandidate(&candidates, allocator, repo, command);
+    }
+
+    const repo_sloc = try std.fs.path.join(allocator, &.{ repo.root, local_sloc_bin });
+    defer allocator.free(repo_sloc);
+    try candidates.append(allocator, try allocator.dupe(u8, repo_sloc));
+    try candidates.append(allocator, try allocator.dupe(u8, "sloc"));
+
+    for (candidates.items) |command| {
+        if (try loadBlobSlocCountsWithCommand(allocator, command, path, content)) |counts| return counts;
+    }
+    return null;
+}
+
+fn slocCommandFromEnv(allocator: Allocator) !?[]u8 {
+    return std.process.getEnvVarOwned(allocator, "GITOMI_SLOC_BIN") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => std.process.getEnvVarOwned(allocator, "SLOC_BIN") catch |fallback_err| switch (fallback_err) {
+            error.EnvironmentVariableNotFound => null,
+            else => return fallback_err,
+        },
+        else => return err,
+    };
+}
+
+fn appendSlocCommandCandidate(candidates: *std.ArrayList([]u8), allocator: Allocator, repo: Repo, raw_command: []const u8) !void {
+    const command = std.mem.trim(u8, raw_command, " \t\r\n");
+    if (command.len == 0) return;
+    const resolved = if (std.fs.path.isAbsolute(command) or std.mem.indexOfScalar(u8, command, '/') == null)
+        try allocator.dupe(u8, command)
+    else
+        try std.fs.path.join(allocator, &.{ repo.root, command });
+    try candidates.append(allocator, resolved);
+}
+
+fn loadBlobSlocCountsWithCommand(allocator: Allocator, command: []const u8, path: []const u8, content: []const u8) !?SlocCounts {
+    const tmp_root = makeSlocTempRoot(allocator) catch return null;
+    defer allocator.free(tmp_root);
+    defer std.fs.deleteTreeAbsolute(tmp_root) catch {};
+
+    writeSlocTempFile(allocator, tmp_root, path, content) catch return null;
+
+    const argv = [_][]const u8{ command, "--summary" };
+    var result = runCommandInDir(allocator, &argv, tmp_root, max_sloc_output) catch return null;
+    defer result.deinit();
+    if (result.exitCode() != 0) return null;
+    return parseSlocCounts(result.stdout) catch null;
+}
+
+fn makeSlocTempRoot(allocator: Allocator) ![]u8 {
+    var attempts: usize = 0;
+    while (attempts < 32) : (attempts += 1) {
+        const path = try std.fmt.allocPrint(
+            allocator,
+            "/tmp/gitomi-sloc-{d}-{d}",
+            .{ std.time.nanoTimestamp(), std.crypto.random.int(u64) },
+        );
+        std.fs.makeDirAbsolute(path) catch |err| {
+            allocator.free(path);
+            if (err == error.PathAlreadyExists) continue;
+            return err;
+        };
+        return path;
+    }
+    return error.TempDirUnavailable;
+}
+
+fn writeSlocTempFile(allocator: Allocator, tmp_root: []const u8, path: []const u8, content: []const u8) !void {
+    const file_path = try std.fs.path.join(allocator, &.{ tmp_root, path });
+    defer allocator.free(file_path);
+    if (std.fs.path.dirname(file_path)) |dir| try std.fs.cwd().makePath(dir);
+    var file = try std.fs.createFileAbsolute(file_path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(content);
+}
+
+fn parseSlocCounts(output: []const u8) !?SlocCounts {
+    var fallback = SlocCounts{ .code = 0, .test_count = 0, .comment = 0 };
+    var saw_row = false;
+
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        if (trimmed.len == 0) continue;
+
+        var tokens = std.mem.tokenizeAny(u8, trimmed, " \t");
+        const code_token = tokens.next() orelse continue;
+        const test_token = tokens.next() orelse continue;
+        const comment_token = tokens.next() orelse continue;
+        const label = tokens.next() orelse continue;
+
+        const counts = SlocCounts{
+            .code = parseSlocNumber(code_token) catch continue,
+            .test_count = parseSlocNumber(test_token) catch continue,
+            .comment = parseSlocNumber(comment_token) catch continue,
+        };
+
+        if (std.mem.eql(u8, label, "TOTAL")) return counts;
+        if (label.len >= 2 and label[0] == '.') {
+            fallback.code += counts.code;
+            fallback.test_count += counts.test_count;
+            fallback.comment += counts.comment;
+            saw_row = true;
+        }
+    }
+
+    return if (saw_row) fallback else null;
+}
+
+fn parseSlocNumber(text: []const u8) !u64 {
+    var value: u64 = 0;
+    var saw_digit = false;
+    for (text) |c| {
+        if (c == ',') continue;
+        if (c < '0' or c > '9') return error.InvalidSlocNumber;
+        saw_digit = true;
+        value = try std.math.add(u64, try std.math.mul(u64, value, 10), c - '0');
+    }
+    if (!saw_digit) return error.InvalidSlocNumber;
+    return value;
 }
 
 fn loadTreeEntries(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?[]TreeEntry {
@@ -1194,6 +1458,7 @@ fn deviconClassForPath(path: []const u8, kind: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, language, "css")) return "devicon-css3-plain";
     if (std.mem.eql(u8, language, "html")) return "devicon-html5-plain";
     if (std.mem.eql(u8, language, "xml")) return "devicon-xml-plain";
+    if (std.mem.eql(u8, language, "solidity")) return "devicon-solidity-plain";
     if (std.mem.eql(u8, language, "rust")) return "devicon-rust-plain";
     if (std.mem.eql(u8, language, "python")) return "devicon-python-plain";
     if (std.mem.eql(u8, language, "markdown")) return "devicon-markdown-original";
@@ -1220,6 +1485,7 @@ fn fileIconClass(path: []const u8, kind: []const u8) []const u8 {
     if (std.mem.eql(u8, language, "html")) return "file lang-html";
     if (std.mem.eql(u8, language, "xml")) return "file lang-xml";
     if (std.mem.eql(u8, language, "sql")) return "file lang-sql";
+    if (std.mem.eql(u8, language, "solidity")) return "file lang-sol";
     if (std.mem.eql(u8, language, "rust")) return "file lang-rs";
     if (std.mem.eql(u8, language, "python")) return "file lang-py";
     if (std.mem.eql(u8, language, "markdown")) return "file lang-md";
@@ -1298,6 +1564,7 @@ fn languageForPath(path: []const u8) []const u8 {
     if (std.mem.endsWith(u8, path, ".html")) return "html";
     if (std.mem.endsWith(u8, path, ".xml")) return "xml";
     if (std.mem.endsWith(u8, path, ".sql")) return "sql";
+    if (std.mem.endsWith(u8, path, ".sol")) return "solidity";
     if (std.mem.endsWith(u8, path, ".rs")) return "rust";
     if (std.mem.endsWith(u8, path, ".py")) return "python";
     if (isMarkdownPath(path)) return "markdown";
@@ -1362,6 +1629,10 @@ fn appendSize(buf: *std.ArrayList(u8), allocator: Allocator, raw: []const u8) !v
         try appendTemplate(buf, allocator, "{raw}", .{ .raw = raw });
         return;
     };
+    try appendByteSize(buf, allocator, size);
+}
+
+fn appendByteSize(buf: *std.ArrayList(u8), allocator: Allocator, size: usize) !void {
     if (size >= 1024 * 1024) {
         const whole = size / (1024 * 1024);
         const tenth = (size % (1024 * 1024)) * 10 / (1024 * 1024);
@@ -1418,6 +1689,32 @@ fn gitMaybe(allocator: Allocator, repo: Repo, git_args: []const []const u8, max_
     return null;
 }
 
+fn runCommandInDir(allocator: Allocator, argv: []const []const u8, cwd: []const u8, max_output_bytes: usize) !git.RunOutput {
+    var child = std.process.Child.init(argv, allocator);
+    child.cwd = cwd;
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+
+    var stdout: std.ArrayList(u8) = .empty;
+    errdefer stdout.deinit(allocator);
+    var stderr: std.ArrayList(u8) = .empty;
+    errdefer stderr.deinit(allocator);
+
+    try child.spawn();
+    errdefer _ = child.kill() catch {};
+
+    try child.collectOutput(allocator, &stdout, &stderr, max_output_bytes);
+    const term = try child.wait();
+
+    return .{
+        .allocator = allocator,
+        .stdout = try stdout.toOwnedSlice(allocator),
+        .stderr = try stderr.toOwnedSlice(allocator),
+        .term = term,
+    };
+}
+
 fn hexValue(c: u8) ?u8 {
     return switch (c) {
         '0'...'9' => c - '0',
@@ -1449,6 +1746,7 @@ test "web explorer encodes code links" {
 test "web explorer maps file paths to highlight languages" {
     try std.testing.expectEqualStrings("zig", languageForPath("src/main.zig"));
     try std.testing.expectEqualStrings("markdown", languageForPath("README.md"));
+    try std.testing.expectEqualStrings("solidity", languageForPath("contracts/Token.sol"));
     try std.testing.expectEqualStrings("plaintext", languageForPath("LICENSE"));
 }
 
@@ -1515,6 +1813,28 @@ test "web explorer maps media paths to preview metadata" {
     try std.testing.expectEqualStrings("image/gif", contentTypeForPath("animation.gif"));
     try std.testing.expectEqualStrings("image/webp", contentTypeForPath("image.webp"));
     try std.testing.expectEqualStrings("video/mp4", contentTypeForPath("demo.m4v"));
+}
+
+test "web explorer parses sloc counts" {
+    const output =
+        \\  CODE   TEST  COMMENT  TYPE
+        \\─────────────────────────────────────────────────
+        \\ 1,286     42       94  .rs ████████████████████
+        \\──────────────────────
+        \\ 1,286     42       94  TOTAL
+        \\
+    ;
+    const counts = (try parseSlocCounts(output)).?;
+    try std.testing.expectEqual(@as(u64, 1_286), counts.code);
+    try std.testing.expectEqual(@as(u64, 42), counts.test_count);
+    try std.testing.expectEqual(@as(u64, 94), counts.comment);
+}
+
+test "web explorer counts physical lines" {
+    try std.testing.expectEqual(@as(usize, 0), physicalLineCount(""));
+    try std.testing.expectEqual(@as(usize, 1), physicalLineCount("one"));
+    try std.testing.expectEqual(@as(usize, 1), physicalLineCount("one\n"));
+    try std.testing.expectEqual(@as(usize, 2), physicalLineCount("one\ntwo"));
 }
 
 test "web explorer parses blame porcelain" {
