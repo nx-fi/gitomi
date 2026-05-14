@@ -301,7 +301,7 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     const render_markdown = markdown and !raw_selected;
     const symbol_items = if (text_content) |bytes|
         if (media_kind == null and !render_markdown)
-            try code_symbols.extract(allocator, path, bytes)
+            try code_symbols.extract(allocator, repo.root, path, bytes)
         else
             try allocator.alloc(code_symbols.Symbol, 0)
     else
@@ -1486,6 +1486,7 @@ fn fileIconClass(path: []const u8, kind: []const u8) []const u8 {
     if (std.mem.eql(u8, language, "xml")) return "file lang-xml";
     if (std.mem.eql(u8, language, "sql")) return "file lang-sql";
     if (std.mem.eql(u8, language, "solidity")) return "file lang-sol";
+    if (std.mem.eql(u8, language, "tla")) return "file lang-tla";
     if (std.mem.eql(u8, language, "rust")) return "file lang-rs";
     if (std.mem.eql(u8, language, "python")) return "file lang-py";
     if (std.mem.eql(u8, language, "markdown")) return "file lang-md";
@@ -1565,6 +1566,7 @@ fn languageForPath(path: []const u8) []const u8 {
     if (std.mem.endsWith(u8, path, ".xml")) return "xml";
     if (std.mem.endsWith(u8, path, ".sql")) return "sql";
     if (std.mem.endsWith(u8, path, ".sol")) return "solidity";
+    if (std.mem.endsWith(u8, path, ".tla")) return "tla";
     if (std.mem.endsWith(u8, path, ".rs")) return "rust";
     if (std.mem.endsWith(u8, path, ".py")) return "python";
     if (isMarkdownPath(path)) return "markdown";
@@ -1747,6 +1749,7 @@ test "web explorer maps file paths to highlight languages" {
     try std.testing.expectEqualStrings("zig", languageForPath("src/main.zig"));
     try std.testing.expectEqualStrings("markdown", languageForPath("README.md"));
     try std.testing.expectEqualStrings("solidity", languageForPath("contracts/Token.sol"));
+    try std.testing.expectEqualStrings("tla", languageForPath("spec/Consensus.tla"));
     try std.testing.expectEqualStrings("plaintext", languageForPath("LICENSE"));
 }
 

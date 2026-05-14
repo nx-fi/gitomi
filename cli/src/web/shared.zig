@@ -193,6 +193,7 @@ pub fn appendShellEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
         \\<script src="/vendor/hljs/all-languages.js"></script>
         \\<script src="/highlight/zig.js"></script>
         \\<script src="/highlight/solidity.js"></script>
+        \\<script src="/highlight/tla.js"></script>
         \\<script src="/highlight/init.js"></script>
         \\<script src="/diff.js"></script>
         \\</body>
