@@ -212,6 +212,75 @@ JSON
   gt fsck >/dev/null
 )
 
+echo "integration: github import without options uses local gh current-repo context"
+github_gh="$ROOT/github-gh"
+init_repo "$github_gh"
+(
+  cd "$github_gh"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  git remote add origin git@github.com:acme/current.git
+  fakebin="$PWD/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\n' "$*" >> "${GH_CALL_LOG:?}"
+[[ "${1:-}" == "api" ]] || {
+  echo "expected gh api" >&2
+  exit 2
+}
+
+endpoint="${@: -1}"
+case "$endpoint" in
+  'repos/{owner}/{repo}/issues?state=all&per_page=100&page=1')
+    cat <<'JSON'
+[
+  {
+    "number": 43,
+    "title": "Current repo issue",
+    "body": "Imported through gh",
+    "state": "open",
+    "created_at": "2026-01-05T00:00:00Z",
+    "labels": [],
+    "assignees": []
+  }
+]
+JSON
+    ;;
+  'repos/{owner}/{repo}/issues/43/comments?per_page=100')
+    cat <<'JSON'
+[
+  {
+    "body": "Current repo comment",
+    "created_at": "2026-01-05T01:00:00Z"
+  }
+]
+JSON
+    ;;
+  'repos/{owner}/{repo}/pulls?state=all&per_page=100&page=1')
+    printf '[]\n'
+    ;;
+  *)
+    echo "unexpected endpoint: $endpoint" >&2
+    exit 3
+    ;;
+esac
+SH
+  chmod +x "$fakebin/gh"
+  export GH_CALL_LOG="$PWD/gh-calls.log"
+  PATH="$fakebin:$PATH" gt github import >/dev/null
+  gh_calls="$(cat "$GH_CALL_LOG")"
+  assert_contains "$gh_calls" "api --method GET"
+  assert_contains "$gh_calls" 'repos/{owner}/{repo}/issues?state=all&per_page=100&page=1'
+  issues="$(gt issue list --json)"
+  assert_contains "$issues" '"title":"Current repo issue"'
+  assert_contains "$issues" '"legacy_github_issue_number":43'
+  events="$(gt events list --json)"
+  assert_contains "$events" '"event_type":"comment.added"'
+  gt fsck >/dev/null
+)
+
 echo "integration: index snapshots restore cache and enforce retention count"
 snapshots="$ROOT/snapshots"
 init_repo "$snapshots"

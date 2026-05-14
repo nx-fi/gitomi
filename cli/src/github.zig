@@ -23,6 +23,11 @@ const import_bot_principal = "import-bot";
 const import_bot_device = "github";
 const default_api_url = "https://api.github.com";
 const max_github_json = 32 * 1024 * 1024;
+const gh_current_repo = RepoSlug{
+    .owner = "{owner}",
+    .name = "{repo}",
+    .slug = "{owner}/{repo}",
+};
 
 pub fn cmdGithub(allocator: Allocator, args: []const []const u8) !void {
     if (args.len == 0) {
@@ -66,9 +71,12 @@ const GitHubClient = struct {
     api_url: []const u8,
     repo: RepoSlug,
     token: ?[]const u8,
+    use_gh: bool = false,
     dry_run: bool = false,
 
     fn request(self: GitHubClient, method: []const u8, path: []const u8, body: ?[]const u8) ![]u8 {
+        if (self.use_gh) return self.requestGh(method, path, body);
+
         if (self.dry_run) {
             try out("{s} {s}", .{ method, path });
             if (body) |bytes| try out(" {s}", .{bytes});
@@ -127,6 +135,43 @@ const GitHubClient = struct {
         return CliError.UserError;
     }
 
+    fn requestGh(self: GitHubClient, method: []const u8, path: []const u8, body: ?[]const u8) ![]u8 {
+        const endpoint = std.mem.trimLeft(u8, path, "/");
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(self.allocator);
+        try argv.appendSlice(self.allocator, &.{
+            "gh",
+            "api",
+            "--method",
+            method,
+            "-H",
+            "Accept: application/vnd.github+json",
+            "-H",
+            "X-GitHub-Api-Version: 2022-11-28",
+        });
+        if (body != null) {
+            try argv.append(self.allocator, "--input");
+            try argv.append(self.allocator, "-");
+        }
+        try argv.append(self.allocator, endpoint);
+
+        var result = try git.runCommand(self.allocator, argv.items, body, max_github_json);
+        if (result.exitCode() == 0) {
+            const stdout = result.stdout;
+            self.allocator.free(result.stderr);
+            return stdout;
+        }
+
+        defer result.deinit();
+        const stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
+        if (stderr.len != 0) {
+            try eprint("gt github: gh api request failed: {s}\n", .{stderr});
+        } else {
+            try eprint("gt github: gh api request failed\n", .{});
+        }
+        return CliError.UserError;
+    }
+
     fn repoPath(self: GitHubClient, allocator: Allocator, suffix: []const u8) ![]u8 {
         return std.fmt.allocPrint(allocator, "/repos/{s}{s}", .{ self.repo.slug, suffix });
     }
@@ -141,6 +186,7 @@ const ImportOptions = struct {
     bot_principal: []const u8 = import_bot_principal,
     bot_device: []const u8 = import_bot_device,
     max_pages: usize = 10,
+    use_gh: bool = false,
 };
 
 fn cmdImport(allocator: Allocator, args: []const []const u8) !void {
@@ -175,15 +221,20 @@ fn cmdImport(allocator: Allocator, args: []const []const u8) !void {
     }
 
     if (options.repo == null and options.from_file == null) {
-        try eprint("gt github import: --repo or --from-file is required\n", .{});
-        return CliError.MissingArgument;
+        if (options.token_arg == null and std.mem.eql(u8, options.api_url, default_api_url)) {
+            options.repo = gh_current_repo;
+            options.use_gh = true;
+        } else {
+            try eprint("gt github import: --repo or --from-file is required\n", .{});
+            return CliError.MissingArgument;
+        }
     }
 
     try ensureImportBot(allocator, options.bot_principal, options.bot_device);
 
     var token_owned: ?[]u8 = null;
     defer if (token_owned) |value| allocator.free(value);
-    const token = options.token_arg orelse blk: {
+    const token: ?[]const u8 = if (options.use_gh) null else options.token_arg orelse blk: {
         token_owned = githubTokenFromEnv(allocator) catch null;
         break :blk token_owned;
     };
@@ -197,6 +248,7 @@ fn cmdImport(allocator: Allocator, args: []const []const u8) !void {
             .api_url = options.api_url,
             .repo = options.repo.?,
             .token = token,
+            .use_gh = options.use_gh,
         };
         try importFromApi(allocator, client, options, &stats);
     }

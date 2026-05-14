@@ -71,7 +71,7 @@ gt actions run --event EVENT [--ref REF|--oid OID] [--object-id ID] [--dry-run] 
 gt actions run-requested [RUN] [--dry-run] [--act PATH] [-- ACT_ARGS...]
 gt runs prune [--dry-run] [--max-age-days N] [--max-count N] [--max-bytes N]
 gt sync [--remote REMOTE] [--pull-only|--push-only]
-gt github import --repo OWNER/REPO [--token TOKEN] [--from-file PATH] [--no-comments]
+gt github import [--repo OWNER/REPO] [--token TOKEN] [--from-file PATH] [--no-comments]
 gt github export --repo OWNER/REPO [--token TOKEN] [--dry-run] [--map-file PATH] [--reuse-legacy]
 gt web [--host 127.0.0.1] [--port 8080]
 ```
@@ -129,7 +129,9 @@ the signed `action.run_completed` inbox event is the durable workflow result.
 
 `gt github import` reads GitHub issues and pull requests from the GitHub API or
 a fixture JSON object with `issues`, `pulls`, and optional `comments` fields,
-then writes signed import events through an `import-bot/github` actor. Imported
+then writes signed import events through an `import-bot/github` actor. With no
+API or fixture options, it shells out to local `gh api` and lets `gh` choose the
+repository and credentials from the current Git checkout. Imported
 issue and pull numbers are preserved as `legacy.github_issue_number` and
 `legacy.github_pull_number`, are materialized in the local index, and can be
 used as `#123`, `gh#123`, or `github:123` references.
