@@ -4,6 +4,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const sqlite_dep = b.dependency("sqlite", .{});
+    const tree_sitter_dep = b.dependency("tree_sitter", .{
+        .amalgamated = true,
+    });
+    const tree_sitter_zig_dep = b.dependency("tree_sitter_zig", .{
+        .@"build-shared" = false,
+    });
 
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -11,7 +17,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     addSqlite(mod, sqlite_dep);
-    addTreeSitter(mod, b);
+    addTreeSitter(mod, tree_sitter_dep, tree_sitter_zig_dep);
 
     const exe = b.addExecutable(.{
         .name = "gt",
@@ -33,7 +39,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     addSqlite(test_mod, sqlite_dep);
-    addTreeSitter(test_mod, b);
+    addTreeSitter(test_mod, tree_sitter_dep, tree_sitter_zig_dep);
     const tests = b.addTest(.{ .root_module = test_mod });
     tests.linkLibC();
     const run_tests = b.addRunArtifact(tests);
@@ -63,18 +69,12 @@ fn addSqlite(module: *std.Build.Module, sqlite_dep: *std.Build.Dependency) void 
     });
 }
 
-fn addTreeSitter(module: *std.Build.Module, b: *std.Build) void {
-    module.addCSourceFile(.{
-        .file = b.path("vendor/tree-sitter/lib/src/lib.c"),
-        .flags = &.{ "-std=c11", "-D_POSIX_C_SOURCE=200112L", "-D_DEFAULT_SOURCE", "-D_BSD_SOURCE", "-D_DARWIN_C_SOURCE" },
-    });
-    module.addCSourceFile(.{
-        .file = b.path("vendor/tree-sitter-zig/src/parser.c"),
-        .flags = &.{"-std=c11"},
-    });
-
-    module.addIncludePath(b.path("vendor/tree-sitter/lib/include"));
-    module.addIncludePath(b.path("vendor/tree-sitter/lib/src"));
-    module.addIncludePath(b.path("vendor/tree-sitter/lib/src/wasm"));
-    module.addIncludePath(b.path("vendor/tree-sitter-zig/src"));
+fn addTreeSitter(
+    module: *std.Build.Module,
+    tree_sitter_dep: *std.Build.Dependency,
+    tree_sitter_zig_dep: *std.Build.Dependency,
+) void {
+    module.linkLibrary(tree_sitter_dep.artifact("tree-sitter"));
+    module.linkLibrary(tree_sitter_zig_dep.artifact("tree-sitter-zig"));
+    module.addIncludePath(tree_sitter_dep.path("lib/include"));
 }

@@ -13,6 +13,30 @@
       .replace(/'/g, "&#39;");
   }
 
+  function setButtonState(button, label) {
+    button.textContent = label;
+  }
+
+  async function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.top = "-1000px";
+    document.body.appendChild(textarea);
+    textarea.select();
+    try {
+      document.execCommand("copy");
+    } finally {
+      textarea.remove();
+    }
+  }
+
   function renderLatex(value) {
     let html = escapeHtml(String(value || "").trim());
     html = html.replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, '<span class="math-frac"><span>$1</span><span>$2</span></span>');
@@ -306,9 +330,56 @@
     document.querySelectorAll("pre[data-mermaid]").forEach(renderMermaidBlock);
   }
 
+  function codeElementForPre(pre) {
+    for (let index = 0; index < pre.children.length; index += 1) {
+      if (pre.children[index].tagName === "CODE") return pre.children[index];
+    }
+    return null;
+  }
+
+  function enhanceCodeBlock(pre) {
+    if (pre.dataset.copyEnhanced === "yes") return;
+    const code = codeElementForPre(pre);
+    if (!code || !pre.parentNode) return;
+
+    const wrapper = document.createElement("div");
+    wrapper.className = "markdown-codeblock";
+    pre.parentNode.insertBefore(wrapper, pre);
+    wrapper.appendChild(pre);
+
+    const button = document.createElement("button");
+    button.className = "markdown-copy-button";
+    button.type = "button";
+    button.setAttribute("aria-label", "Copy code to clipboard");
+    setButtonState(button, "Copy");
+    button.addEventListener("click", async function () {
+      const original = button.textContent || "Copy";
+      button.disabled = true;
+      setButtonState(button, "Copying");
+      try {
+        await copyText(code.textContent || "");
+        setButtonState(button, "Copied");
+      } catch (_) {
+        setButtonState(button, "Failed");
+      } finally {
+        window.setTimeout(function () {
+          button.disabled = false;
+          setButtonState(button, original);
+        }, 1200);
+      }
+    });
+    wrapper.appendChild(button);
+    pre.dataset.copyEnhanced = "yes";
+  }
+
+  function renderCodeCopyButtons() {
+    document.querySelectorAll(".markdown-body pre").forEach(enhanceCodeBlock);
+  }
+
   function renderMarkdownEnhancements() {
     renderMath();
     renderMermaid();
+    renderCodeCopyButtons();
   }
 
   if (document.readyState === "loading") {

@@ -814,13 +814,17 @@ tbody tr:hover {
   gap: 16px;
   align-items: start;
 }
+.code-layout.has-symbols {
+  grid-template-columns: 280px minmax(0, 1fr) 240px;
+}
 .code-layout.no-sidebar {
   grid-template-columns: 1fr;
 }
 .code-main {
   min-width: 0;
 }
-.tree-sidebar {
+.tree-sidebar,
+.symbols-sidebar {
   position: sticky;
   top: 84px;
   display: flex;
@@ -828,14 +832,16 @@ tbody tr:hover {
   max-height: calc(100vh - 108px);
   overflow: hidden;
 }
-.tree-sidebar-head {
+.tree-sidebar-head,
+.symbols-head {
   flex: 0 0 auto;
   padding: 13px 16px;
   border-bottom: 1px solid var(--border);
   background: var(--panel-strong);
   font-weight: 700;
 }
-.tree-nav {
+.tree-nav,
+.symbols-nav {
   flex: 1 1 auto;
   min-height: 0;
   max-height: calc(100vh - 158px);
@@ -843,6 +849,45 @@ tbody tr:hover {
   overflow-y: auto;
   scrollbar-gutter: stable;
   padding: 8px;
+}
+.symbols-sidebar {
+  grid-column: 3;
+}
+.symbols-nav {
+  display: grid;
+  align-content: start;
+  gap: 2px;
+}
+.symbol-link {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 8px;
+  min-height: 34px;
+  padding: 6px 8px 6px calc(8px + var(--depth, 0) * 12px);
+  color: var(--text);
+  border-radius: 6px;
+}
+.symbol-link:hover {
+  background: var(--subtle);
+  text-decoration: none;
+}
+.symbol-kind {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+.symbol-name {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.symbol-line {
+  color: var(--muted);
+  font: 11px/1.4 var(--mono);
 }
 .tree-node {
   display: grid;
@@ -1140,6 +1185,8 @@ tbody tr:hover {
 .file-icon.lang-sql::after { content: "DB"; }
 .file-icon.lang-sol { background: #363636; }
 .file-icon.lang-sol::after { content: "SOL"; font-size: 7px; }
+.file-icon.lang-tla { background: #4c4f69; }
+.file-icon.lang-tla::after { content: "TLA"; font-size: 7px; }
 .file-icon.lang-rs { background: #dea584; color: #1f2328; }
 .file-icon.lang-rs::after { content: "RS"; }
 .file-icon.lang-py { background: #3776ab; }
@@ -1185,6 +1232,10 @@ tbody tr:hover {
   border-radius: 0;
   font: inherit;
   white-space: pre;
+}
+.blob-lines li:target,
+.blame-row:target {
+  background: var(--info-bg);
 }
 .media-preview {
   display: grid;
@@ -1646,6 +1697,7 @@ tbody tr:hover {
 .markdown-body ol,
 .markdown-body blockquote,
 .markdown-body pre,
+.markdown-codeblock,
 .markdown-body .markdown-media,
 .markdown-table-wrap,
 .math-block,
@@ -1670,6 +1722,38 @@ tbody tr:hover {
   background: var(--code-bg);
   border: 1px solid var(--border);
   border-radius: 6px;
+}
+.markdown-codeblock {
+  position: relative;
+}
+.markdown-body .markdown-codeblock pre {
+  margin: 0;
+  padding-right: 78px;
+}
+.markdown-copy-button {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 58px;
+  min-height: 28px;
+  padding: 0 9px;
+  color: var(--text);
+  background: var(--button-secondary-bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  font: 700 12px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  box-shadow: var(--shadow-subtle);
+  cursor: pointer;
+}
+.markdown-copy-button:hover {
+  background: var(--panel);
+}
+.markdown-copy-button:disabled {
+  cursor: wait;
+  opacity: 0.72;
 }
 .markdown-body pre code {
   display: block;
@@ -1830,7 +1914,8 @@ textarea:focus,
 .button:focus-visible,
 .theme-toggle:focus-visible,
 .topbar a:focus-visible,
-.tree-link:focus-visible {
+.tree-link:focus-visible,
+.symbol-link:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--blue) 55%, transparent);
   outline-offset: 2px;
 }
@@ -1857,6 +1942,17 @@ textarea {
 @media (max-width: 980px) {
   .code-layout {
     grid-template-columns: 240px minmax(0, 1fr);
+  }
+  .code-layout.has-symbols {
+    grid-template-columns: 240px minmax(0, 1fr);
+  }
+  .symbols-sidebar {
+    grid-column: 2;
+    position: static;
+    max-height: none;
+  }
+  .symbols-nav {
+    max-height: 240px;
   }
 }
 @media (max-width: 760px) {
@@ -1891,14 +1987,22 @@ textarea {
   .code-layout {
     grid-template-columns: 1fr;
   }
-  .tree-sidebar {
+  .code-layout.has-symbols {
+    grid-template-columns: 1fr;
+  }
+  .tree-sidebar,
+  .symbols-sidebar {
     position: static;
     max-height: 260px;
+  }
+  .symbols-sidebar {
+    grid-column: auto;
   }
   .code-panel-head {
     top: 0;
   }
-  .tree-nav {
+  .tree-nav,
+  .symbols-nav {
     max-height: 210px;
   }
   main {

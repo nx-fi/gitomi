@@ -701,6 +701,9 @@ fn fenceLanguage(trimmed: []const u8) []const u8 {
     if (std.mem.eql(u8, rest, "sql")) return "sql";
     if (std.mem.eql(u8, rest, "sol")) return "solidity";
     if (std.mem.eql(u8, rest, "solidity")) return "solidity";
+    if (std.mem.eql(u8, rest, "tla")) return "tla";
+    if (std.mem.eql(u8, rest, "tla+")) return "tla";
+    if (std.mem.eql(u8, rest, "tlaplus")) return "tla";
     if (std.mem.eql(u8, rest, "mermaid")) return "mermaid";
     if (std.mem.eql(u8, rest, "mmd")) return "mermaid";
     if (std.mem.eql(u8, rest, "rs")) return "rust";
@@ -774,7 +777,7 @@ test "web markdown renderer handles preview blocks" {
     try appendMarkdown(
         &buf,
         std.testing.allocator,
-        "# Title\n\nA **bold** [link](docs/readme.md) with $x^2$.\n\n| Name | Value |\n| --- | --- |\n| Alpha | **1** |\n\n$$\n\\frac{a}{b}\n$$\n\n```zig\nconst x = 1;\n```\n\n```solidity\ncontract Token {}\n```\n\n```mermaid\ngraph TD\nA[Start] --> B[Done]\n```\n",
+        "# Title\n\nA **bold** [link](docs/readme.md) with $x^2$.\n\n| Name | Value |\n| --- | --- |\n| Alpha | **1** |\n\n$$\n\\frac{a}{b}\n$$\n\n```zig\nconst x = 1;\n```\n\n```solidity\ncontract Token {}\n```\n\n```tla\n---- MODULE Spec ----\n====\n```\n\n```mermaid\ngraph TD\nA[Start] --> B[Done]\n```\n",
     );
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<h1>Title</h1>") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<strong>bold</strong>") != null);
@@ -784,6 +787,7 @@ test "web markdown renderer handles preview blocks" {
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-latex-display") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<pre><code class=\"language-zig\">") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<pre><code class=\"language-solidity\">") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<pre><code class=\"language-tla\">") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<pre class=\"mermaid-source\" data-mermaid><code>") != null);
 }
 

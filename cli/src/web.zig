@@ -162,6 +162,8 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", highlight_zig_js, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/highlight/solidity.js")) {
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", solidity_js, null);
+    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/highlight/tla.js")) {
+        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", tla_js, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/highlight/init.js")) {
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", highlight_init_js, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/diff.js")) {
@@ -426,6 +428,7 @@ const markdown_js = @embedFile("web/markdown.js");
 const highlight_js = @embedFile("web/vendor/hljs/all-languages.js");
 const highlight_zig_js = @embedFile("web/highlight/zig.js");
 const solidity_js = @embedFile("web/highlight/solidity.js");
+const tla_js = @embedFile("web/highlight/tla.js");
 const highlight_init_js = @embedFile("web/highlight/init.js");
 const diff_js = @embedFile("web/diff.js");
 
