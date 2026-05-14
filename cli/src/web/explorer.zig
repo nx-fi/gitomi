@@ -82,22 +82,26 @@ const BranchRef = struct {
 const TreeEntryCommit = struct {
     full_hash: []u8,
     subject: []u8,
+    relative: []u8,
 
     fn deinit(self: TreeEntryCommit, allocator: Allocator) void {
         allocator.free(self.full_hash);
         allocator.free(self.subject);
+        allocator.free(self.relative);
     }
 };
 
 const CommitSummary = struct {
     full_hash: []u8,
     hash: []u8,
+    author: []u8,
     subject: []u8,
     relative: []u8,
 
     fn deinit(self: CommitSummary, allocator: Allocator) void {
         allocator.free(self.full_hash);
         allocator.free(self.hash);
+        allocator.free(self.author);
         allocator.free(self.subject);
         allocator.free(self.relative);
     }
@@ -284,14 +288,37 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
         defer if (summary_opt) |summary| summary.deinit(allocator);
         const is_root = path.len == 0;
 
-        if (is_root) try appendRootPageGridStart(&buf, allocator);
-        try appendCodePanelStart(&buf, allocator, repo, ref, path);
-        try appendCodeActionLink(&buf, allocator, "History", commitsHref(ref, path), "icon-history");
-        try appendCodePanelToolbarEnd(&buf, allocator);
-        try appendCommitBar(&buf, allocator, summary_opt);
-        try appendCodePanelHeadEnd(&buf, allocator);
-        try appendTreeListing(&buf, allocator, ref, path, entries);
-        try appendCodePanelEnd(&buf, allocator);
+        if (is_root) {
+            const branches = try loadBranchRefs(allocator, repo);
+            defer freeBranchRefs(allocator, branches);
+            const branch_count = loadRefCount(allocator, repo, "refs/heads") catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => 0,
+            };
+            const tag_count = loadRefCount(allocator, repo, "refs/tags") catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => 0,
+            };
+            const commit_count = loadCommitCount(allocator, repo, ref) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => null,
+            };
+
+            try appendRootPageGridStart(&buf, allocator);
+            try appendRootCodeToolbar(&buf, allocator, ref, branches, branch_count, tag_count);
+            try appendRootCodePanelStart(&buf, allocator);
+            try appendRootCommitBar(&buf, allocator, ref, summary_opt, commit_count);
+            try appendRootTreeListing(&buf, allocator, ref, entries);
+            try appendCodePanelEnd(&buf, allocator);
+        } else {
+            try appendCodePanelStart(&buf, allocator, repo, ref, path);
+            try appendCodeActionLink(&buf, allocator, "History", commitsHref(ref, path), "icon-history");
+            try appendCodePanelToolbarEnd(&buf, allocator);
+            try appendCommitBar(&buf, allocator, summary_opt);
+            try appendCodePanelHeadEnd(&buf, allocator);
+            try appendTreeListing(&buf, allocator, ref, path, entries);
+            try appendCodePanelEnd(&buf, allocator);
+        }
 
         try appendReadmePreview(&buf, allocator, repo, ref, path, entries);
         if (is_root) {
@@ -748,6 +775,155 @@ fn appendTreeListing(
 
     if (entries.len == 0) {
         try appendEmptyState(buf, allocator, "Empty directory.", "This tree has no entries.");
+    }
+
+    try appendTemplate(buf, allocator, "</div>", .{});
+}
+
+fn appendRootCodeToolbar(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    ref: []const u8,
+    branches: []const BranchRef,
+    branch_count: usize,
+    tag_count: usize,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="root-code-toolbar">
+        \\  <div class="root-code-toolbar-left">
+        \\    <label class="root-branch-select-wrap" aria-label="Branch">
+        \\      <span class="button-icon icon-branch" aria-hidden="true"></span>
+        \\      <select class="root-branch-select" data-branch-switcher data-active-path="">
+    , .{});
+    try appendBranchOptions(buf, allocator, branches, ref);
+    try appendTemplate(buf, allocator,
+        \\      </select>
+        \\      <span class="root-caret" aria-hidden="true"></span>
+        \\    </label>
+        \\    <a class="root-ref-link" href="/refs"><span class="button-icon icon-branch" aria-hidden="true"></span><strong>{branch_count}</strong> {branch_label}</a>
+        \\    <a class="root-ref-link" href="/refs"><span class="button-icon icon-tag" aria-hidden="true"></span><strong>{tag_count}</strong> {tag_label}</a>
+        \\  </div>
+        \\  <div class="root-code-toolbar-right">
+        \\    <label class="root-file-search" aria-label="Go to file">
+        \\      <span class="button-icon icon-search" aria-hidden="true"></span>
+        \\      <input type="search" data-root-file-search placeholder="Go to file" autocomplete="off" spellcheck="false">
+        \\      <kbd>T</kbd>
+        \\    </label>
+        \\    <details class="root-action-menu">
+        \\      <summary class="button secondary root-menu-button">Add file<span class="root-caret" aria-hidden="true"></span></summary>
+        \\      <div class="root-action-popover" role="menu">
+        \\        <button type="button" role="menuitem">Create new file</button>
+        \\        <button type="button" role="menuitem">Upload files</button>
+        \\      </div>
+        \\    </details>
+        \\    <button class="button secondary root-icon-button" type="button" aria-label="Download repository" title="Download repository"><span class="button-icon icon-download" aria-hidden="true"></span></button>
+        \\    <details class="root-action-menu root-code-menu">
+        \\      <summary class="button primary root-menu-button"><span class="button-icon icon-code" aria-hidden="true"></span>Code<span class="root-caret" aria-hidden="true"></span></summary>
+        \\      <div class="root-action-popover root-code-popover" role="menu">
+        \\        <div class="root-code-popover-head">Clone</div>
+        \\        <code>git clone .</code>
+        \\      </div>
+        \\    </details>
+        \\  </div>
+        \\</div>
+    , .{
+        .branch_count = shared.groupedUnsigned(@intCast(branch_count)),
+        .branch_label = if (branch_count == 1) "Branch" else "Branches",
+        .tag_count = shared.groupedUnsigned(@intCast(tag_count)),
+        .tag_label = if (tag_count == 1) "Tag" else "Tags",
+    });
+}
+
+fn appendRootCodePanelStart(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try appendTemplate(buf, allocator,
+        \\<section class="panel code-panel root-code-panel">
+    , .{});
+}
+
+fn appendRootCommitBar(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    ref: []const u8,
+    summary_opt: ?CommitSummary,
+    commit_count: ?usize,
+) !void {
+    try appendTemplate(buf, allocator, "<div class=\"root-commit-row\">", .{});
+    if (summary_opt) |summary| {
+        try appendTemplate(buf, allocator,
+            \\<span class="root-commit-avatar" aria-hidden="true"></span>
+            \\<div class="root-commit-main"><span class="root-commit-author">{author}</span><a class="root-commit-message" href="{href}">{subject}</a></div>
+            \\<div class="root-commit-meta"><a class="root-commit-hash" href="{href}">{hash}</a><span>{relative}</span></div>
+        , .{
+            .author = summary.author,
+            .href = commitHref(summary.full_hash),
+            .subject = summary.subject,
+            .hash = summary.hash,
+            .relative = summary.relative,
+        });
+    } else {
+        try appendTemplate(buf, allocator,
+            \\<span class="root-commit-avatar" aria-hidden="true"></span>
+            \\<div class="root-commit-main"><span class="root-commit-author">No commits yet</span><span class="root-commit-message muted">This ref has no history to summarize.</span></div>
+        , .{});
+    }
+    if (commit_count) |count| {
+        try appendTemplate(buf, allocator,
+            \\<a class="root-commit-count" href="{href}"><span class="button-icon icon-history" aria-hidden="true"></span><strong>{count}</strong> {label}</a>
+        , .{
+            .href = commitsHref(ref, ""),
+            .count = shared.groupedUnsigned(@intCast(count)),
+            .label = if (count == 1) "Commit" else "Commits",
+        });
+    }
+    try appendTemplate(buf, allocator, "</div>", .{});
+}
+
+fn appendRootTreeListing(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    ref: []const u8,
+    entries: []const TreeEntry,
+) !void {
+    try appendTemplate(buf, allocator, "<div class=\"root-file-list\" data-root-file-list>", .{});
+    for (entries) |entry| {
+        try appendRootTreeEntryRow(buf, allocator, ref, entry);
+    }
+
+    if (entries.len == 0) {
+        try appendEmptyState(buf, allocator, "Empty repository.", "This tree has no entries.");
+    }
+    try appendTemplate(buf, allocator, "</div>", .{});
+}
+
+fn appendRootTreeEntryRow(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, entry: TreeEntry) !void {
+    const child_path = try childPath(allocator, "", entry.name);
+    defer allocator.free(child_path);
+
+    try appendTemplate(buf, allocator,
+        \\<div class="root-file-row" data-root-file-row data-root-file-path="{path}" data-root-file-name="{name}">
+        \\  <a class="file-name root-file-name" href="{href}">
+    , .{
+        .path = child_path,
+        .name = entry.name,
+        .href = codeHref(ref, child_path),
+    });
+    try appendFileIcon(buf, allocator, child_path, entry.kind);
+    try appendTemplate(buf, allocator,
+        \\{name}</a>
+    , .{ .name = entry.name });
+
+    if (entry.last_commit) |commit| {
+        try appendTemplate(buf, allocator,
+            \\<a class="root-file-commit" href="{href}" title="{subject}">{subject}</a><span class="root-file-time">{relative}</span>
+        , .{
+            .href = commitHref(commit.full_hash),
+            .subject = commit.subject,
+            .relative = commit.relative,
+        });
+    } else {
+        try appendTemplate(buf, allocator,
+            \\<span class="root-file-commit empty">No commit</span><span class="root-file-time"></span>
+        , .{});
     }
 
     try appendTemplate(buf, allocator, "</div>", .{});
@@ -1286,7 +1462,7 @@ fn loadTreeEntryCommits(allocator: Allocator, repo: Repo, ref: []const u8, path:
         try index_by_name.put(entry.name, i);
     }
 
-    const format = "--format=%x1e%H%x09%s";
+    const format = "--format=%x1e%H%x09%s%x09%cr";
     const raw = if (path.len == 0)
         try gitMaybe(allocator, repo, &.{ "log", format, "--name-only", "-z", ref, "--" }, git.max_git_output)
     else blk: {
@@ -1323,25 +1499,31 @@ fn treeEntryCommitOwned(allocator: Allocator, commit: LogCommit) !TreeEntryCommi
     const full_hash = try allocator.dupe(u8, commit.full_hash);
     errdefer allocator.free(full_hash);
     const subject = try allocator.dupe(u8, commit.subject);
+    errdefer allocator.free(subject);
+    const relative = try allocator.dupe(u8, commit.relative);
     return .{
         .full_hash = full_hash,
         .subject = subject,
+        .relative = relative,
     };
 }
 
 const LogCommit = struct {
     full_hash: []const u8,
     subject: []const u8,
+    relative: []const u8,
 };
 
 fn parseLogCommitHeader(record: []const u8) ?LogCommit {
     if (record.len == 0 or record[0] != 0x1e) return null;
     const payload = record[1..];
     const tab = std.mem.indexOfScalar(u8, payload, '\t') orelse return null;
-    if (tab == 0) return null;
+    const last_tab = std.mem.lastIndexOfScalar(u8, payload, '\t') orelse return null;
+    if (tab == 0 or last_tab <= tab) return null;
     return .{
         .full_hash = payload[0..tab],
-        .subject = payload[tab + 1 ..],
+        .subject = payload[tab + 1 .. last_tab],
+        .relative = payload[last_tab + 1 ..],
     };
 }
 
@@ -1546,7 +1728,7 @@ fn parseTimezoneOffset(value: []const u8) i64 {
 }
 
 fn loadCommitSummary(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?CommitSummary {
-    const format = "--format=%H%x09%h%x09%s%x09%cr";
+    const format = "--format=%H%x09%h%x09%an%x09%s%x09%cr";
     const raw = if (path.len == 0)
         try gitMaybe(allocator, repo, &.{ "log", "-1", format, ref }, 1024 * 1024)
     else blk: {
@@ -1559,13 +1741,42 @@ fn loadCommitSummary(allocator: Allocator, repo: Repo, ref: []const u8, path: []
 
     const line = std.mem.trim(u8, text, " \t\r\n");
     if (line.len == 0) return null;
-    var cols = std.mem.splitScalar(u8, line, '\t');
+
+    const full_end = std.mem.indexOfScalar(u8, line, '\t') orelse return null;
+    const hash_start = full_end + 1;
+    const hash_end = std.mem.indexOfScalarPos(u8, line, hash_start, '\t') orelse return null;
+    const author_start = hash_end + 1;
+    const author_end = std.mem.indexOfScalarPos(u8, line, author_start, '\t') orelse return null;
+    const relative_start = std.mem.lastIndexOfScalar(u8, line, '\t') orelse return null;
+    if (relative_start <= author_end) return null;
+
     return .{
-        .full_hash = try allocator.dupe(u8, cols.next() orelse ""),
-        .hash = try allocator.dupe(u8, cols.next() orelse ""),
-        .subject = try allocator.dupe(u8, cols.next() orelse ""),
-        .relative = try allocator.dupe(u8, cols.next() orelse ""),
+        .full_hash = try allocator.dupe(u8, line[0..full_end]),
+        .hash = try allocator.dupe(u8, line[hash_start..hash_end]),
+        .author = try allocator.dupe(u8, line[author_start..author_end]),
+        .subject = try allocator.dupe(u8, line[author_end + 1 .. relative_start]),
+        .relative = try allocator.dupe(u8, line[relative_start + 1 ..]),
     };
+}
+
+fn loadCommitCount(allocator: Allocator, repo: Repo, ref: []const u8) !?usize {
+    const raw = try gitMaybe(allocator, repo, &.{ "rev-list", "--count", ref }, 1024) orelse return null;
+    defer allocator.free(raw);
+    const text = std.mem.trim(u8, raw, " \t\r\n");
+    if (text.len == 0) return null;
+    return std.fmt.parseUnsigned(usize, text, 10) catch null;
+}
+
+fn loadRefCount(allocator: Allocator, repo: Repo, namespace: []const u8) !usize {
+    const raw = try gitMaybe(allocator, repo, &.{ "for-each-ref", "--format=%(refname)", namespace }, git.max_git_output) orelse return 0;
+    defer allocator.free(raw);
+
+    var count: usize = 0;
+    var lines = std.mem.splitScalar(u8, raw, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.trim(u8, line, " \t\r\n").len != 0) count += 1;
+    }
+    return count;
 }
 
 fn loadTreeNavEntries(allocator: Allocator, repo: Repo, ref: []const u8) !?[]TreeNavEntry {
@@ -2126,9 +2337,10 @@ test "web explorer sorts paths as dot dirs dirs dot files files" {
 }
 
 test "web explorer parses git log commit headers" {
-    const parsed = parseLogCommitHeader("\x1e0123456789abcdef\tfix: path\twith tab").?;
+    const parsed = parseLogCommitHeader("\x1e0123456789abcdef\tfix: path\twith tab\t2 hours ago").?;
     try std.testing.expectEqualStrings("0123456789abcdef", parsed.full_hash);
     try std.testing.expectEqualStrings("fix: path\twith tab", parsed.subject);
+    try std.testing.expectEqualStrings("2 hours ago", parsed.relative);
     try std.testing.expect(parseLogCommitHeader("src/main.zig") == null);
 }
 

@@ -92,52 +92,93 @@
     });
   }
 
-  function nodeMatchesSearch(node, query) {
-    if (!query) return false;
-    const path = (node.dataset.treePath || "").toLowerCase();
-    return path.includes(query);
+  function searchTokens(value) {
+    return value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  }
+
+  function fuzzyMatch(text, token) {
+    if (token === "") return true;
+    if (text.includes(token)) return true;
+    if (token.length > text.length) return false;
+
+    let tokenIndex = 0;
+    for (let i = 0; i < text.length && tokenIndex < token.length; i += 1) {
+      if (text.charCodeAt(i) === token.charCodeAt(tokenIndex)) tokenIndex += 1;
+    }
+    return tokenIndex === token.length;
+  }
+
+  function itemMatchesSearch(item, tokens) {
+    if (tokens.length === 0) return false;
+    return tokens.every((token) => fuzzyMatch(item.name, token) || fuzzyMatch(item.path, token));
   }
 
   function initTree(nav) {
     const nodes = Array.from(nav.querySelectorAll("[data-tree-path]"));
     const byPath = new Map();
-    nodes.forEach((node) => {
-      byPath.set(node.dataset.treePath || "", node);
+    const items = nodes.map((node) => {
+      const path = (node.dataset.treePath || "").toLowerCase();
+      const slash = path.lastIndexOf("/");
+      const name = slash === -1 ? path : path.slice(slash + 1);
+      const item = {
+        node,
+        path,
+        name,
+        parentPath: (node.dataset.treeParent || "").toLowerCase(),
+        parent: null,
+        matched: false,
+        descendantMatched: false,
+        visible: false,
+      };
+      byPath.set(path, item);
+      return item;
     });
+    items.forEach((item) => {
+      item.parent = byPath.get(item.parentPath) || null;
+    });
+    const itemsByDepth = items.slice().sort((a, b) => b.path.length - a.path.length);
 
-    let searchQuery = "";
+    let activeTokens = [];
+    let syncFrame = 0;
 
     function syncVisibility() {
-      const visible = new Map();
-      nodes.forEach((node) => {
-        const path = node.dataset.treePath || "";
-        if (path === "") {
-          node.hidden = false;
-          visible.set(path, true);
-          return;
-        }
+      const searching = activeTokens.length !== 0;
 
-        const parent = byPath.get(node.dataset.treeParent || "");
-        const parentPath = parent ? parent.dataset.treePath || "" : "";
-        const parentVisible = parent ? visible.get(parentPath) !== false : true;
-        const parentExpanded = parent ? parent.classList.contains("expanded") : true;
-        let show = parentVisible && parentExpanded;
-        if (searchQuery) {
-          const selfMatch = nodeMatchesSearch(node, searchQuery);
-          const descendantMatch = nodes.some((candidate) => {
-            const candidatePath = candidate.dataset.treePath || "";
-            return candidatePath.startsWith(path + "/") && nodeMatchesSearch(candidate, searchQuery);
-          });
-          const ancestorMatch = nodes.some((candidate) => {
-            const candidatePath = candidate.dataset.treePath || "";
-            return nodeMatchesSearch(candidate, searchQuery) && path !== "" && candidatePath.startsWith(path + "/");
-          });
-          show = selfMatch || descendantMatch || ancestorMatch;
+      if (searching) {
+        items.forEach((item) => {
+          item.matched = item.path !== "" && itemMatchesSearch(item, activeTokens);
+          item.descendantMatched = false;
+        });
+        itemsByDepth.forEach((item) => {
+          if ((item.matched || item.descendantMatched) && item.parent) {
+            item.parent.descendantMatched = true;
+          }
+        });
+      }
+
+      items.forEach((item) => {
+        let show = false;
+        if (item.path === "") {
+          show = true;
+        } else if (searching) {
+          show = item.matched || item.descendantMatched;
+        } else {
+          const parentVisible = item.parent ? item.parent.visible : true;
+          const parentExpanded = item.parent ? item.parent.node.classList.contains("expanded") : true;
+          show = parentVisible && parentExpanded;
         }
-        node.hidden = !show;
-        node.classList.toggle("collapsed-child", !show);
-        node.classList.toggle("search-match", searchQuery !== "" && nodeMatchesSearch(node, searchQuery));
-        visible.set(path, show);
+        item.visible = show;
+        item.node.hidden = !show;
+        item.node.classList.toggle("collapsed-child", !show);
+        item.node.classList.toggle("search-match", searching && item.matched);
+      });
+    }
+
+    function scheduleVisibilitySync() {
+      if (syncFrame !== 0) return;
+      syncFrame = window.requestAnimationFrame(() => {
+        syncFrame = 0;
+        syncVisibility();
       });
     }
 
@@ -161,10 +202,52 @@
     const search = sidebar ? sidebar.querySelector("[data-tree-search]") : null;
     if (search) {
       search.addEventListener("input", () => {
-        searchQuery = search.value.trim().toLowerCase();
-        syncVisibility();
+        activeTokens = searchTokens(search.value);
+        scheduleVisibilitySync();
       });
     }
+  }
+
+  function initRootFileSearch(input) {
+    const panel = input.closest(".root-page-main") || document;
+    const rows = Array.from(panel.querySelectorAll("[data-root-file-row]"));
+    const items = rows.map((row) => ({
+      row,
+      name: (row.dataset.rootFileName || "").toLowerCase(),
+      path: (row.dataset.rootFilePath || "").toLowerCase(),
+    }));
+    const sync = () => {
+      const tokens = searchTokens(input.value);
+      items.forEach((item) => {
+        item.row.hidden = tokens.length !== 0 && !itemMatchesSearch(item, tokens);
+      });
+    };
+    input.addEventListener("input", sync);
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      const firstItem = items.find((item) => !item.row.hidden);
+      const first = firstItem ? firstItem.row : null;
+      const link = first ? first.querySelector("a[href]") : null;
+      if (link) link.click();
+    });
+    sync();
+  }
+
+  function initRootFileSearchShortcut(input) {
+    document.addEventListener("keydown", (event) => {
+      if (event.defaultPrevented || event.key.toLowerCase() !== "t") return;
+      const target = event.target;
+      const editing = target && (
+        target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.tagName === "SELECT" ||
+        target.isContentEditable
+      );
+      if (editing) return;
+      event.preventDefault();
+      input.focus();
+      input.select();
+    });
   }
 
   function initTrees() {
@@ -174,6 +257,10 @@
       initTreeResize(sidebar);
     });
     document.querySelectorAll("[data-branch-switcher]").forEach(initBranchSwitcher);
+    document.querySelectorAll("[data-root-file-search]").forEach((input) => {
+      initRootFileSearch(input);
+      initRootFileSearchShortcut(input);
+    });
   }
 
   if (document.readyState === "loading") {

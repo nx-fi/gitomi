@@ -18,9 +18,14 @@ const appendRelativeTime = shared.appendRelativeTime;
 const appendTemplate = shared.appendTemplate;
 const createCommentAddedEvent = comment_mod.createCommentAddedEvent;
 const createIssueOpenedEvent = issue.createIssueOpenedEvent;
+const createIssueProjectEvent = issue.createIssueProjectEvent;
+const createIssueStringEvent = issue.createIssueStringEvent;
 const ensureIndex = index.ensureIndex;
+const commitHref = shared.commitHref;
 const issueHref = shared.issueHref;
+const pullHref = shared.pullHref;
 const sendRedirect = shared.sendRedirect;
+const sendPlainResponse = shared.sendPlainResponse;
 const sendResponse = shared.sendResponse;
 const splitCommaFields = util.splitCommaFields;
 const sqlite = index.sqlite;
@@ -77,6 +82,28 @@ const IssueHrefOverride = struct {
     sort: ?IssueSort = null,
     param_name: ?[]const u8 = null,
     param_value: ?[]const u8 = null,
+};
+
+const RelationshipKind = enum {
+    refs,
+    relates_to,
+    blocks,
+    blocked_by,
+    duplicates,
+    duplicate_of,
+};
+
+const ResolvedObjectRef = struct {
+    allocator: Allocator,
+    object_kind: []const u8,
+    object_id: []u8,
+    title: []u8,
+    legacy_number: i64,
+
+    fn deinit(self: *ResolvedObjectRef) void {
+        self.allocator.free(self.object_id);
+        self.allocator.free(self.title);
+    }
 };
 
 pub fn renderIssuesPage(allocator: Allocator, repo: Repo, target: []const u8) ![]u8 {
@@ -915,7 +942,7 @@ fn renderIssueDetailPageWithCommentForm(
     try appendIssueComments(&buf, allocator, &db, id);
     try appendIssueCommentForm(&buf, allocator, raw_ref, comment_error, comment_value);
     try buf.appendSlice(allocator, "    </div><aside class=\"issue-meta-sidebar\">");
-    try appendIssueSidebar(&buf, allocator, &db, id, display_author, milestone);
+    try appendIssueSidebar(&buf, allocator, &db, raw_ref, id, display_author, milestone, body);
     try buf.appendSlice(allocator, "</aside></div></section>");
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
@@ -1166,22 +1193,24 @@ fn appendIssueSidebar(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
     db: *SqliteDb,
+    raw_ref: []const u8,
     issue_id: []const u8,
     author: []const u8,
     milestone: []const u8,
+    body: []const u8,
 ) !void {
-    try appendIssueSidebarAssignees(buf, allocator, db, issue_id);
-    try appendIssueSidebarLabels(buf, allocator, db, issue_id);
+    try appendIssueSidebarAssignees(buf, allocator, db, raw_ref, issue_id);
+    try appendIssueSidebarLabels(buf, allocator, db, raw_ref, issue_id);
     try appendIssueSidebarText(buf, allocator, "Type", "No type");
-    try appendIssueSidebarProjects(buf, allocator, db, issue_id);
-    try appendIssueSidebarText(buf, allocator, "Milestone", if (milestone.len == 0) "No milestone" else milestone);
-    try appendIssueSidebarText(buf, allocator, "Relationships", "None yet");
-    try appendIssueSidebarText(buf, allocator, "Development", "No linked branches or pull requests.");
+    try appendIssueSidebarProjects(buf, allocator, db, raw_ref, issue_id);
+    try appendIssueSidebarMilestone(buf, allocator, raw_ref, milestone);
+    try appendIssueSidebarRelationships(buf, allocator, db, issue_id, body);
+    try appendIssueSidebarDevelopment(buf, allocator, db, issue_id);
     try appendIssueSidebarNotifications(buf, allocator);
     try appendIssueSidebarParticipants(buf, allocator, db, issue_id, author);
 }
 
-fn appendIssueSidebarAssignees(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8) !void {
+fn appendIssueSidebarAssignees(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, raw_ref: []const u8, issue_id: []const u8) !void {
     try appendIssueSidebarSectionStart(buf, allocator, "Assignees");
     var stmt = try db.prepare("SELECT DISTINCT assignee FROM issue_assignees WHERE issue_id = ? ORDER BY assignee");
     defer stmt.deinit();
@@ -1190,14 +1219,15 @@ fn appendIssueSidebarAssignees(buf: *std.ArrayList(u8), allocator: Allocator, db
     while (try stmt.step()) {
         const assignee = try stmt.columnTextDup(allocator, 0);
         defer allocator.free(assignee);
-        try appendIssueSidebarPerson(buf, allocator, assignee);
+        try appendIssueSidebarPerson(buf, allocator, raw_ref, assignee);
         shown = true;
     }
     if (!shown) try buf.appendSlice(allocator, "<p class=\"issue-sidebar-empty\">No one assigned</p>");
+    try appendIssueSidebarSingleInputForm(buf, allocator, raw_ref, "add-assignee", "value", "Add assignee", "Assignee");
     try appendIssueSidebarSectionEnd(buf, allocator);
 }
 
-fn appendIssueSidebarLabels(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8) !void {
+fn appendIssueSidebarLabels(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, raw_ref: []const u8, issue_id: []const u8) !void {
     try appendIssueSidebarSectionStart(buf, allocator, "Labels");
     var stmt = try db.prepare("SELECT DISTINCT label FROM issue_labels WHERE issue_id = ? ORDER BY label");
     defer stmt.deinit();
@@ -1210,17 +1240,18 @@ fn appendIssueSidebarLabels(buf: *std.ArrayList(u8), allocator: Allocator, db: *
             try buf.appendSlice(allocator, "<div class=\"issue-sidebar-labels\">");
             shown = true;
         }
-        try appendIssueLabel(buf, allocator, label);
+        try appendIssueSidebarLabel(buf, allocator, raw_ref, label);
     }
     if (shown) {
         try buf.appendSlice(allocator, "</div>");
     } else {
         try buf.appendSlice(allocator, "<p class=\"issue-sidebar-empty\">None yet</p>");
     }
+    try appendIssueSidebarSingleInputForm(buf, allocator, raw_ref, "add-label", "value", "Add label", "Label");
     try appendIssueSidebarSectionEnd(buf, allocator);
 }
 
-fn appendIssueSidebarProjects(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8) !void {
+fn appendIssueSidebarProjects(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, raw_ref: []const u8, issue_id: []const u8) !void {
     try appendIssueSidebarSectionStart(buf, allocator, "Projects");
     var stmt = try db.prepare(
         \\SELECT DISTINCT project, column_name
@@ -1236,13 +1267,89 @@ fn appendIssueSidebarProjects(buf: *std.ArrayList(u8), allocator: Allocator, db:
         defer allocator.free(project);
         const column = try stmt.columnTextDup(allocator, 1);
         defer allocator.free(column);
-        try buf.appendSlice(allocator, "<span class=\"issue-sidebar-pill\">");
+        try buf.appendSlice(allocator, "<span class=\"issue-sidebar-token issue-sidebar-project-token\"><span class=\"issue-sidebar-pill\">");
         try appendTemplate(buf, allocator, "{project}", .{ .project = project });
         if (column.len != 0) try appendTemplate(buf, allocator, " / {column}", .{ .column = column });
+        try buf.appendSlice(allocator, "</span>");
+        try appendIssueSidebarRemoveProjectForm(buf, allocator, raw_ref, project, column);
         try buf.appendSlice(allocator, "</span>");
         shown = true;
     }
     if (!shown) try buf.appendSlice(allocator, "<p class=\"issue-sidebar-empty\">No projects</p>");
+    try appendIssueSidebarProjectForm(buf, allocator, raw_ref);
+    try appendIssueSidebarSectionEnd(buf, allocator);
+}
+
+fn appendIssueSidebarMilestone(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8, milestone: []const u8) !void {
+    try appendIssueSidebarSectionStart(buf, allocator, "Milestone");
+    if (milestone.len == 0) {
+        try buf.appendSlice(allocator, "<p class=\"issue-sidebar-empty\">No milestone</p>");
+    } else {
+        try buf.appendSlice(allocator, "<span class=\"issue-sidebar-token\"><span class=\"issue-sidebar-pill\">");
+        try shared.appendHtml(buf, allocator, milestone);
+        try buf.appendSlice(allocator, "</span>");
+        try appendIssueSidebarRemoveValueForm(buf, allocator, raw_ref, "clear-milestone", "Clear milestone");
+        try buf.appendSlice(allocator, "</span>");
+    }
+    try appendIssueSidebarSingleInputForm(buf, allocator, raw_ref, "set-milestone", "milestone", "Set milestone", "Milestone");
+    try appendIssueSidebarSectionEnd(buf, allocator);
+}
+
+fn appendIssueSidebarRelationships(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8, body: []const u8) !void {
+    try appendIssueSidebarSectionStart(buf, allocator, "Relationships");
+    var seen = std.StringHashMap(void).init(allocator);
+    defer {
+        var keys = seen.keyIterator();
+        while (keys.next()) |key| allocator.free(key.*);
+        seen.deinit();
+    }
+    var shown = false;
+    try appendRelationshipDirectivesFromText(buf, allocator, db, issue_id, body, &seen, &shown);
+
+    var stmt = try db.prepare(
+        \\SELECT body
+        \\FROM comments
+        \\WHERE parent_kind = 'issue'
+        \\  AND parent_id = ?
+        \\  AND redacted = 0
+        \\ORDER BY created_at, id
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    while (try stmt.step()) {
+        const comment_body = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(comment_body);
+        try appendRelationshipDirectivesFromText(buf, allocator, db, issue_id, comment_body, &seen, &shown);
+    }
+
+    if (!shown) try buf.appendSlice(allocator, "<p class=\"issue-sidebar-empty\">None yet</p>");
+    try appendIssueSidebarSectionEnd(buf, allocator);
+}
+
+fn appendIssueSidebarDevelopment(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8) !void {
+    try appendIssueSidebarSectionStart(buf, allocator, "Development");
+    var stmt = try db.prepare(
+        \\SELECT commit_oid
+        \\FROM commit_references
+        \\WHERE object_kind = 'issue' AND object_id = ?
+        \\ORDER BY commit_oid
+        \\LIMIT 8
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    var shown = false;
+    while (try stmt.step()) {
+        const commit_oid = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(commit_oid);
+        try appendTemplate(buf, allocator,
+            \\<a class="issue-sidebar-link-row" href="{href}"><span class="issue-sidebar-row-kind">commit</span><code>{short_oid}</code></a>
+        , .{
+            .href = commitHref(commit_oid),
+            .short_oid = commit_oid[0..@min(commit_oid.len, 12)],
+        });
+        shown = true;
+    }
+    if (!shown) try buf.appendSlice(allocator, "<p class=\"issue-sidebar-empty\">No linked branches or pull requests.</p>");
     try appendIssueSidebarSectionEnd(buf, allocator);
 }
 
@@ -1287,10 +1394,412 @@ fn appendIssueSidebarSectionEnd(buf: *std.ArrayList(u8), allocator: Allocator) !
     try buf.appendSlice(allocator, "</section>");
 }
 
-fn appendIssueSidebarPerson(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8) !void {
-    try buf.appendSlice(allocator, "<div class=\"issue-sidebar-person\">");
+fn appendIssueSidebarPerson(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8, name: []const u8) !void {
+    try buf.appendSlice(allocator, "<div class=\"issue-sidebar-person issue-sidebar-person-editable\">");
     try appendIssueAvatar(buf, allocator, name, "");
-    try appendTemplate(buf, allocator, "<span>{name}</span></div>", .{ .name = name });
+    try appendTemplate(buf, allocator, "<span>{name}</span>", .{ .name = name });
+    try appendIssueSidebarRemoveNamedValueForm(buf, allocator, raw_ref, "remove-assignee", "value", name, "Remove assignee");
+    try buf.appendSlice(allocator, "</div>");
+}
+
+fn appendIssueSidebarLabel(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8, label: []const u8) !void {
+    try buf.appendSlice(allocator, "<span class=\"issue-sidebar-token\">");
+    try appendIssueLabel(buf, allocator, label);
+    try appendIssueSidebarRemoveNamedValueForm(buf, allocator, raw_ref, "remove-label", "value", label, "Remove label");
+    try buf.appendSlice(allocator, "</span>");
+}
+
+fn appendIssueSidebarSingleInputForm(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    raw_ref: []const u8,
+    action: []const u8,
+    input_name: []const u8,
+    button_label: []const u8,
+    placeholder: []const u8,
+) !void {
+    try buf.appendSlice(allocator, "<form class=\"issue-sidebar-add-form\" method=\"post\" action=\"");
+    try appendIssueSidebarAction(buf, allocator, raw_ref);
+    try appendTemplate(buf, allocator,
+        \\"><input type="hidden" name="action" value="{action}"><input name="{input_name}" placeholder="{placeholder}" aria-label="{placeholder}"><button type="submit">{button_label}</button></form>
+    , .{
+        .action = action,
+        .input_name = input_name,
+        .placeholder = placeholder,
+        .button_label = button_label,
+    });
+}
+
+fn appendIssueSidebarProjectForm(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8) !void {
+    try buf.appendSlice(allocator, "<form class=\"issue-sidebar-add-form issue-sidebar-project-form\" method=\"post\" action=\"");
+    try appendIssueSidebarAction(buf, allocator, raw_ref);
+    try buf.appendSlice(allocator,
+        \\"><input type="hidden" name="action" value="add-project"><input name="project" placeholder="Project" aria-label="Project"><input name="column" placeholder="Column" aria-label="Column"><button type="submit">Add project</button></form>
+    );
+}
+
+fn appendIssueSidebarRemoveProjectForm(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8, project: []const u8, column: []const u8) !void {
+    try buf.appendSlice(allocator, "<form class=\"issue-sidebar-remove-form\" method=\"post\" action=\"");
+    try appendIssueSidebarAction(buf, allocator, raw_ref);
+    try appendTemplate(buf, allocator,
+        \\"><input type="hidden" name="action" value="remove-project"><input type="hidden" name="project" value="{project}"><input type="hidden" name="column" value="{column}"><button type="submit" aria-label="Remove project">x</button></form>
+    , .{
+        .project = project,
+        .column = column,
+    });
+}
+
+fn appendIssueSidebarRemoveValueForm(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8, action: []const u8, label: []const u8) !void {
+    try buf.appendSlice(allocator, "<form class=\"issue-sidebar-remove-form\" method=\"post\" action=\"");
+    try appendIssueSidebarAction(buf, allocator, raw_ref);
+    try appendTemplate(buf, allocator,
+        \\"><input type="hidden" name="action" value="{action}"><button type="submit" aria-label="{label}">x</button></form>
+    , .{
+        .action = action,
+        .label = label,
+    });
+}
+
+fn appendIssueSidebarRemoveNamedValueForm(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    raw_ref: []const u8,
+    action: []const u8,
+    input_name: []const u8,
+    value: []const u8,
+    label: []const u8,
+) !void {
+    try buf.appendSlice(allocator, "<form class=\"issue-sidebar-remove-form\" method=\"post\" action=\"");
+    try appendIssueSidebarAction(buf, allocator, raw_ref);
+    try appendTemplate(buf, allocator,
+        \\"><input type="hidden" name="action" value="{action}"><input type="hidden" name="{input_name}" value="{value}"><button type="submit" aria-label="{label}">x</button></form>
+    , .{
+        .action = action,
+        .input_name = input_name,
+        .value = value,
+        .label = label,
+    });
+}
+
+fn appendIssueSidebarAction(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8) !void {
+    try buf.appendSlice(allocator, "/issues/");
+    try shared.appendUrlEncoded(buf, allocator, raw_ref);
+    try buf.appendSlice(allocator, "/sidebar");
+}
+
+fn appendRelationshipDirectivesFromText(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    issue_id: []const u8,
+    text: []const u8,
+    seen: *std.StringHashMap(void),
+    shown: *bool,
+) !void {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r\n");
+        const separator = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const kind = relationshipKindFromKey(std.mem.trim(u8, line[0..separator], " \t\r\n")) orelse continue;
+        var tokens = std.mem.tokenizeAny(u8, line[separator + 1 ..], " \t\r\n,");
+        while (tokens.next()) |raw_token| {
+            const token = trimRelationshipToken(raw_token);
+            if (token.len == 0) continue;
+            var target = (try resolveRelationshipTarget(allocator, db, token)) orelse continue;
+            defer target.deinit();
+            if (std.mem.eql(u8, target.object_kind, "issue") and std.mem.eql(u8, target.object_id, issue_id)) continue;
+            try appendRelationshipTarget(buf, allocator, kind, target, seen, shown);
+        }
+    }
+}
+
+fn trimRelationshipToken(raw: []const u8) []const u8 {
+    return std.mem.trim(u8, raw, " \t\r\n.,;()[]{}<>\"'`");
+}
+
+fn relationshipKindFromKey(key: []const u8) ?RelationshipKind {
+    if (asciiEqlIgnoreCase(key, "Refs")) return .refs;
+    if (asciiEqlIgnoreCase(key, "Relates-To") or asciiEqlIgnoreCase(key, "Related-To")) return .relates_to;
+    if (asciiEqlIgnoreCase(key, "Blocks")) return .blocks;
+    if (asciiEqlIgnoreCase(key, "Blocked-By")) return .blocked_by;
+    if (asciiEqlIgnoreCase(key, "Duplicates")) return .duplicates;
+    if (asciiEqlIgnoreCase(key, "Duplicate-Of")) return .duplicate_of;
+    return null;
+}
+
+fn relationshipKindLabel(kind: RelationshipKind) []const u8 {
+    return switch (kind) {
+        .refs => "references",
+        .relates_to => "relates to",
+        .blocks => "blocks",
+        .blocked_by => "blocked by",
+        .duplicates => "duplicates",
+        .duplicate_of => "duplicate of",
+    };
+}
+
+fn appendRelationshipTarget(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    kind: RelationshipKind,
+    target: ResolvedObjectRef,
+    seen: *std.StringHashMap(void),
+    shown: *bool,
+) !void {
+    const key = try std.fmt.allocPrint(allocator, "{s}\x1f{s}\x1f{s}", .{ @tagName(kind), target.object_kind, target.object_id });
+    errdefer allocator.free(key);
+    const entry = try seen.getOrPut(key);
+    if (entry.found_existing) {
+        allocator.free(key);
+        return;
+    }
+    entry.value_ptr.* = {};
+
+    var object_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const object_ref = util.shortObjectRef(&object_ref_buf, target.object_id);
+    try buf.appendSlice(allocator, "<a class=\"issue-sidebar-link-row\" href=\"");
+    if (std.mem.eql(u8, target.object_kind, "pull")) {
+        try shared.appendHref(buf, allocator, pullHref(object_ref));
+    } else {
+        try shared.appendHref(buf, allocator, issueHref(object_ref));
+    }
+    try appendTemplate(buf, allocator,
+        \\"><span class="issue-sidebar-row-kind">{relation}</span><span class="issue-sidebar-row-ref">
+    , .{ .relation = relationshipKindLabel(kind) });
+    if (std.mem.eql(u8, target.object_kind, "pull")) try buf.appendSlice(allocator, "PR ");
+    try buf.append(allocator, '#');
+    if (target.legacy_number > 0) {
+        try std.fmt.format(buf.writer(allocator), "{d}", .{target.legacy_number});
+    } else {
+        try shared.appendHtml(buf, allocator, object_ref);
+    }
+    try appendTemplate(buf, allocator,
+        \\</span><span class="issue-sidebar-row-title">{title}</span></a>
+    , .{ .title = target.title });
+    shown.* = true;
+}
+
+fn resolveRelationshipTarget(allocator: Allocator, db: *SqliteDb, token: []const u8) !?ResolvedObjectRef {
+    if (std.mem.startsWith(u8, token, "#")) {
+        return try resolveUntypedRelationshipTarget(allocator, db, token[1..]);
+    }
+    if (asciiStartsWithIgnoreCase(token, "issue:")) {
+        return try resolveSpecificRelationshipTarget(allocator, db, "issue", stripOptionalHash(token["issue:".len..]));
+    }
+    if (asciiStartsWithIgnoreCase(token, "pr:")) {
+        return try resolveSpecificRelationshipTarget(allocator, db, "pull", stripOptionalHash(token["pr:".len..]));
+    }
+    if (asciiStartsWithIgnoreCase(token, "pull:")) {
+        return try resolveSpecificRelationshipTarget(allocator, db, "pull", stripOptionalHash(token["pull:".len..]));
+    }
+    return null;
+}
+
+fn resolveUntypedRelationshipTarget(allocator: Allocator, db: *SqliteDb, value: []const u8) !?ResolvedObjectRef {
+    var issue_target = try resolveSpecificRelationshipTarget(allocator, db, "issue", value);
+    errdefer if (issue_target) |*target| target.deinit();
+    var pull_target = try resolveSpecificRelationshipTarget(allocator, db, "pull", value);
+    if (issue_target != null and pull_target != null) {
+        issue_target.?.deinit();
+        pull_target.?.deinit();
+        return null;
+    }
+    if (issue_target) |target| return target;
+    return pull_target;
+}
+
+fn resolveSpecificRelationshipTarget(allocator: Allocator, db: *SqliteDb, object_kind: []const u8, raw_value: []const u8) !?ResolvedObjectRef {
+    const value = std.mem.trim(u8, raw_value, " \t\r\n");
+    if (value.len == 0) return null;
+    if (util.looksLikeUuid(value)) return try lookupResolvedObjectById(allocator, db, object_kind, value);
+    if (util.isObjectRefPrefix(value)) return try lookupResolvedObjectByHashRef(allocator, db, object_kind, value);
+    if (parsePositiveDecimal(value)) |number| return try lookupResolvedLegacyObject(allocator, db, object_kind, number);
+    return null;
+}
+
+fn lookupResolvedObjectById(allocator: Allocator, db: *SqliteDb, object_kind: []const u8, object_id: []const u8) !?ResolvedObjectRef {
+    const sql_text: []const u8 = if (std.mem.eql(u8, object_kind, "pull"))
+        \\SELECT p.id, p.title, COALESCE(a.number, 0)
+        \\FROM pulls p
+        \\LEFT JOIN legacy_aliases a
+        \\  ON a.provider = 'github' AND a.object_kind = 'pull' AND a.object_id = p.id
+        \\WHERE p.id = ?
+    else
+        \\SELECT i.id, i.title, COALESCE(a.number, 0)
+        \\FROM issues i
+        \\LEFT JOIN legacy_aliases a
+        \\  ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
+        \\WHERE i.id = ?
+    ;
+    var stmt = try db.prepare(sql_text);
+    defer stmt.deinit();
+    try stmt.bindText(1, object_id);
+    if (!(try stmt.step())) return null;
+    return .{
+        .allocator = allocator,
+        .object_kind = object_kind,
+        .object_id = try stmt.columnTextDup(allocator, 0),
+        .title = try stmt.columnTextDup(allocator, 1),
+        .legacy_number = stmt.columnInt64(2),
+    };
+}
+
+fn lookupResolvedObjectByHashRef(allocator: Allocator, db: *SqliteDb, object_kind: []const u8, value: []const u8) !?ResolvedObjectRef {
+    const sql_text: []const u8 = if (std.mem.eql(u8, object_kind, "pull"))
+        "SELECT id FROM pulls ORDER BY id"
+    else
+        "SELECT id FROM issues ORDER BY id";
+    var stmt = try db.prepare(sql_text);
+    defer stmt.deinit();
+
+    var matched_id: ?[]u8 = null;
+    errdefer if (matched_id) |id| allocator.free(id);
+    while (try stmt.step()) {
+        const candidate_id = try stmt.columnTextDup(allocator, 0);
+        errdefer allocator.free(candidate_id);
+        var ref_buf: [util.max_object_ref_len]u8 = undefined;
+        const candidate_ref = util.objectRefPrefix(ref_buf[0..value.len], candidate_id);
+        if (!asciiEqlIgnoreCase(candidate_ref, value)) {
+            allocator.free(candidate_id);
+            continue;
+        }
+        if (matched_id != null) {
+            allocator.free(candidate_id);
+            allocator.free(matched_id.?);
+            return null;
+        }
+        matched_id = candidate_id;
+    }
+    const id = matched_id orelse return null;
+    defer allocator.free(id);
+    return try lookupResolvedObjectById(allocator, db, object_kind, id);
+}
+
+fn lookupResolvedLegacyObject(allocator: Allocator, db: *SqliteDb, object_kind: []const u8, number: i64) !?ResolvedObjectRef {
+    var stmt = try db.prepare(
+        \\SELECT object_id
+        \\FROM legacy_aliases
+        \\WHERE provider = 'github'
+        \\  AND object_kind = ?
+        \\  AND number = ?
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, object_kind);
+    try stmt.bindInt64(2, number);
+    if (!(try stmt.step())) return null;
+    const object_id = try stmt.columnTextDup(allocator, 0);
+    defer allocator.free(object_id);
+    return try lookupResolvedObjectById(allocator, db, object_kind, object_id);
+}
+
+fn stripOptionalHash(value: []const u8) []const u8 {
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    if (std.mem.startsWith(u8, trimmed, "#")) return trimmed[1..];
+    return trimmed;
+}
+
+fn asciiStartsWithIgnoreCase(value: []const u8, prefix: []const u8) bool {
+    return value.len >= prefix.len and asciiEqlIgnoreCase(value[0..prefix.len], prefix);
+}
+
+fn parsePositiveDecimal(value: []const u8) ?i64 {
+    if (value.len == 0) return null;
+    for (value) |c| {
+        if (!std.ascii.isDigit(c)) return null;
+    }
+    const number = std.fmt.parseInt(i64, value, 10) catch return null;
+    return if (number > 0) number else null;
+}
+
+pub fn handleIssueSidebarPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
+    try ensureIndex(allocator, repo);
+    const issue_id = index.resolveIssueId(allocator, repo, raw_ref) catch {
+        try sendPlainResponse(allocator, stream, 404, "Not Found", "Issue not found\n");
+        return;
+    };
+    defer allocator.free(issue_id);
+
+    const action_owned = (try formValueOwned(allocator, form_body, "action")) orelse {
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Missing sidebar action\n");
+        return;
+    };
+    defer allocator.free(action_owned);
+    const action = std.mem.trim(u8, action_owned, " \t\r\n");
+
+    if (std.mem.eql(u8, action, "add-label") or std.mem.eql(u8, action, "remove-label")) {
+        const value_owned = try requiredSidebarValue(allocator, stream, form_body, "value", "Label is required.");
+        const value = value_owned orelse return;
+        defer allocator.free(value);
+        const event_type: []const u8 = if (std.mem.eql(u8, action, "add-label")) "issue.label_added" else "issue.label_removed";
+        if (!(try writeSidebarStringEventOrFail(allocator, stream, issue_id, event_type, "label", value))) return;
+    } else if (std.mem.eql(u8, action, "add-assignee") or std.mem.eql(u8, action, "remove-assignee")) {
+        const value_owned = try requiredSidebarValue(allocator, stream, form_body, "value", "Assignee is required.");
+        const value = value_owned orelse return;
+        defer allocator.free(value);
+        const event_type: []const u8 = if (std.mem.eql(u8, action, "add-assignee")) "issue.assignee_added" else "issue.assignee_removed";
+        if (!(try writeSidebarStringEventOrFail(allocator, stream, issue_id, event_type, "assignee", value))) return;
+    } else if (std.mem.eql(u8, action, "set-milestone")) {
+        const milestone_owned = (try formValueOwned(allocator, form_body, "milestone")) orelse try allocator.dupe(u8, "");
+        defer allocator.free(milestone_owned);
+        const milestone = std.mem.trim(u8, milestone_owned, " \t\r\n");
+        if (!(try writeSidebarStringEventOrFail(allocator, stream, issue_id, "issue.milestone_set", "milestone", milestone))) return;
+    } else if (std.mem.eql(u8, action, "clear-milestone")) {
+        if (!(try writeSidebarStringEventOrFail(allocator, stream, issue_id, "issue.milestone_set", "milestone", ""))) return;
+    } else if (std.mem.eql(u8, action, "add-project") or std.mem.eql(u8, action, "remove-project")) {
+        const project_owned = try requiredSidebarValue(allocator, stream, form_body, "project", "Project is required.");
+        const project_value = project_owned orelse return;
+        defer allocator.free(project_value);
+        const add = std.mem.eql(u8, action, "add-project");
+        const column_value = if (add) blk: {
+            const column_owned = try requiredSidebarValue(allocator, stream, form_body, "column", "Column is required.");
+            break :blk column_owned orelse return;
+        } else blk: {
+            const column_owned = (try formValueOwned(allocator, form_body, "column")) orelse try allocator.dupe(u8, "");
+            defer allocator.free(column_owned);
+            break :blk try allocator.dupe(u8, std.mem.trim(u8, column_owned, " \t\r\n"));
+        };
+        defer allocator.free(column_value);
+        createIssueProjectEvent(allocator, issue_id, project_value, column_value, add) catch {
+            try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update issue project placement\n");
+            return;
+        };
+    } else {
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Unknown sidebar action\n");
+        return;
+    }
+
+    const location = try std.fmt.allocPrint(allocator, "/issues/{s}", .{raw_ref});
+    defer allocator.free(location);
+    try sendRedirect(allocator, stream, location);
+}
+
+fn requiredSidebarValue(allocator: Allocator, stream: std.net.Stream, form_body: []const u8, name: []const u8, message: []const u8) !?[]u8 {
+    const owned = (try formValueOwned(allocator, form_body, name)) orelse {
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", message);
+        return null;
+    };
+    defer allocator.free(owned);
+    const trimmed = std.mem.trim(u8, owned, " \t\r\n");
+    if (trimmed.len == 0) {
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", message);
+        return null;
+    }
+    return try allocator.dupe(u8, trimmed);
+}
+
+fn writeSidebarStringEventOrFail(
+    allocator: Allocator,
+    stream: std.net.Stream,
+    issue_id: []const u8,
+    event_type: []const u8,
+    payload_key: []const u8,
+    payload_value: []const u8,
+) !bool {
+    createIssueStringEvent(allocator, issue_id, event_type, payload_key, payload_value) catch {
+        try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update issue metadata\n");
+        return false;
+    };
+    return true;
 }
 
 pub fn handleIssueCommentPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
@@ -1555,6 +2064,14 @@ test "issue filter hrefs preserve and clear parameters" {
         .param_value = null,
     });
     try std.testing.expectEqualStrings("/issues?state=open&q=crash%20fix&amp;sort=updated", buf.items);
+}
+
+test "relationship directive keys are case-insensitive" {
+    try std.testing.expectEqual(RelationshipKind.blocks, relationshipKindFromKey("blocks").?);
+    try std.testing.expectEqual(RelationshipKind.blocked_by, relationshipKindFromKey("Blocked-By").?);
+    try std.testing.expectEqual(RelationshipKind.relates_to, relationshipKindFromKey("related-to").?);
+    try std.testing.expect(relationshipKindFromKey("mentions") == null);
+    try std.testing.expectEqualStrings("#abc123", trimRelationshipToken("(#abc123,"));
 }
 
 test "web issue titles come from issue opened subjects" {
