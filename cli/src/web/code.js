@@ -2,6 +2,13 @@
   "use strict";
 
   const symbolsStorageKey = "gitomi.symbolsPanel";
+  const symbolsWidthKey = "gitomi.symbolsPanelWidth";
+  const minSymbolsWidth = 180;
+  const maxSymbolsWidth = 480;
+
+  function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+  }
 
   function setButtonState(button, label) {
     const labelNode = button.querySelector("[data-button-label]");
@@ -30,6 +37,21 @@
     } catch (_) {}
   }
 
+  function maxSymbolsWidthForLayout(layout) {
+    const layoutWidth = layout.getBoundingClientRect().width || window.innerWidth;
+    return Math.min(maxSymbolsWidth, Math.max(minSymbolsWidth, layoutWidth - 520));
+  }
+
+  function setSymbolsWidth(layout, width, persist) {
+    const next = clamp(width, minSymbolsWidth, maxSymbolsWidthForLayout(layout));
+    layout.style.setProperty("--symbols-width", `${next}px`);
+    if (persist) {
+      try {
+        window.localStorage.setItem(symbolsWidthKey, String(next));
+      } catch (_) {}
+    }
+  }
+
   function setSymbolsVisible(layout, sidebar, button, visible, persist) {
     layout.classList.toggle("symbols-collapsed", !visible);
     sidebar.hidden = !visible;
@@ -49,6 +71,41 @@
     setSymbolsVisible(layout, sidebar, button, storedSymbolsVisible(), false);
     button.addEventListener("click", function () {
       setSymbolsVisible(layout, sidebar, button, button.getAttribute("aria-expanded") !== "true", true);
+    });
+  }
+
+  function initSymbolsResize(sidebar) {
+    const handle = sidebar.querySelector("[data-symbols-resizer]");
+    const layout = sidebar.closest(".code-layout") || document.querySelector(".code-layout.has-symbols");
+    if (!handle || !layout) return;
+
+    try {
+      const stored = Number(window.localStorage.getItem(symbolsWidthKey));
+      if (Number.isFinite(stored) && stored > 0) {
+        setSymbolsWidth(layout, stored, false);
+      }
+    } catch (_) {}
+
+    handle.addEventListener("pointerdown", function (event) {
+      if (sidebar.hidden || layout.classList.contains("symbols-collapsed")) return;
+      event.preventDefault();
+      handle.setPointerCapture(event.pointerId);
+      document.documentElement.classList.add("symbols-resizing");
+
+      const onMove = function (moveEvent) {
+        const right = layout.getBoundingClientRect().right;
+        setSymbolsWidth(layout, right - moveEvent.clientX, true);
+      };
+      const onEnd = function () {
+        document.documentElement.classList.remove("symbols-resizing");
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onEnd);
+        window.removeEventListener("pointercancel", onEnd);
+      };
+
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onEnd);
+      window.addEventListener("pointercancel", onEnd);
     });
   }
 
@@ -459,6 +516,7 @@
 
   function initSymbolsToggles() {
     document.querySelectorAll("[data-symbols-toggle]").forEach(initSymbolsToggle);
+    document.querySelectorAll("[data-symbols-sidebar]").forEach(initSymbolsResize);
   }
 
   function initCodeControls() {

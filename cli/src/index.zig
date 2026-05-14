@@ -1092,7 +1092,9 @@ pub const insertIndexedEvent = index_projection.insertIndexedEvent;
 
 pub const countIndexedEvents = index_query.countIndexedEvents;
 pub const countIssueOpenedEvents = index_query.countIssueOpenedEvents;
+pub const countOpenIssues = index_query.countOpenIssues;
 pub const countPulls = index_query.countPulls;
+pub const countOpenPulls = index_query.countOpenPulls;
 pub const countIndexedEventsInDb = index_query.countIndexedEventsInDb;
 pub const listAclFromIndex = index_query.listAclFromIndex;
 pub const listIdentityFromIndex = index_query.listIdentityFromIndex;
