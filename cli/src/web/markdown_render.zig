@@ -132,9 +132,7 @@ pub fn appendMarkdownWithOptions(
                 try buf.appendSlice(allocator, "<ul>");
                 state.ul_open = true;
             }
-            try buf.appendSlice(allocator, "<li>");
-            try appendInlineMarkdown(buf, allocator, item, options);
-            try buf.appendSlice(allocator, "</li>");
+            try appendMarkdownListItem(buf, allocator, item, options);
             line_index += 1;
             continue;
         }
@@ -149,9 +147,7 @@ pub fn appendMarkdownWithOptions(
                 try buf.appendSlice(allocator, "<ol>");
                 state.ol_open = true;
             }
-            try buf.appendSlice(allocator, "<li>");
-            try appendInlineMarkdown(buf, allocator, item, options);
-            try buf.appendSlice(allocator, "</li>");
+            try appendMarkdownListItem(buf, allocator, item, options);
             line_index += 1;
             continue;
         }
@@ -338,6 +334,52 @@ fn closeParagraph(buf: *std.ArrayList(u8), allocator: Allocator, state: *Markdow
         try buf.appendSlice(allocator, "</p>");
         state.paragraph_open = false;
     }
+}
+
+const TaskListItem = struct {
+    checked: bool,
+    content: []const u8,
+};
+
+fn appendMarkdownListItem(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    item: []const u8,
+    options: MarkdownOptions,
+) !void {
+    if (taskListItem(item)) |task| {
+        try buf.appendSlice(allocator, "<li class=\"task-list-item\"><input class=\"task-list-checkbox\" type=\"checkbox\" disabled");
+        if (task.checked) try buf.appendSlice(allocator, " checked");
+        try buf.appendSlice(allocator, ">");
+        if (task.content.len != 0) {
+            try buf.append(allocator, ' ');
+            try appendInlineMarkdown(buf, allocator, task.content, options);
+        }
+        try buf.appendSlice(allocator, "</li>");
+        return;
+    }
+
+    try buf.appendSlice(allocator, "<li>");
+    try appendInlineMarkdown(buf, allocator, item, options);
+    try buf.appendSlice(allocator, "</li>");
+}
+
+fn taskListItem(item: []const u8) ?TaskListItem {
+    const trimmed = std.mem.trimLeft(u8, item, " \t");
+    if (trimmed.len < 3) return null;
+    if (trimmed[0] != '[' or trimmed[2] != ']') return null;
+
+    const checked = switch (trimmed[1]) {
+        ' ' => false,
+        'x', 'X' => true,
+        else => return null,
+    };
+
+    if (trimmed.len > 3 and trimmed[3] != ' ' and trimmed[3] != '\t') return null;
+    return .{
+        .checked = checked,
+        .content = if (trimmed.len > 3) std.mem.trim(u8, trimmed[3..], " \t") else "",
+    };
 }
 
 fn appendInlineMarkdown(
@@ -789,6 +831,21 @@ test "web markdown renderer handles preview blocks" {
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<pre><code class=\"language-solidity\">") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<pre><code class=\"language-tla\">") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<pre class=\"mermaid-source\" data-mermaid><code>") != null);
+}
+
+test "web markdown renderer handles task list checkboxes" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    try appendMarkdown(
+        &buf,
+        std.testing.allocator,
+        "- [ ] `database.url` dedicated PostgreSQL 18+ instance\n- [x] done\n- [X] also done\n- [y] plain item\n1. [ ] ordered task\n",
+    );
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<li class=\"task-list-item\"><input class=\"task-list-checkbox\" type=\"checkbox\" disabled> <code>database.url</code> dedicated PostgreSQL 18+ instance</li>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<li class=\"task-list-item\"><input class=\"task-list-checkbox\" type=\"checkbox\" disabled checked> done</li>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<li class=\"task-list-item\"><input class=\"task-list-checkbox\" type=\"checkbox\" disabled checked> also done</li>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<li>[y] plain item</li>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<ol><li class=\"task-list-item\"><input class=\"task-list-checkbox\" type=\"checkbox\" disabled> ordered task</li></ol>") != null);
 }
 
 test "web markdown renderer rewrites repository relative links" {

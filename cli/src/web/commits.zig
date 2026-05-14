@@ -210,7 +210,6 @@ fn renderMissingCommitPage(allocator: Allocator, repo: Repo, sha: []const u8) ![
 fn appendRepoHeader(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8) !void {
     try appendRepoHeaderShared(buf, allocator, repo, ref, &.{
         .{ .label = "Code", .href = literalHref("/") },
-        .{ .label = "Overview", .href = literalHref("/overview") },
     });
 }
 

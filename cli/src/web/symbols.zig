@@ -23,7 +23,7 @@ pub const SymbolKind = enum {
     field,
     variable,
     constant,
-    @"type",
+    type,
     test_case,
 
     pub fn label(self: SymbolKind) []const u8 {
@@ -37,7 +37,7 @@ pub const SymbolKind = enum {
             .field => "Field",
             .variable => "Variable",
             .constant => "Constant",
-            .@"type" => "Type",
+            .type => "Type",
             .test_case => "Test",
         };
     }
@@ -59,61 +59,139 @@ const QuerySpec = struct {
     source: []const u8,
 };
 
-const LspLanguage = enum {
+const TreeSitterLanguage = enum {
     zig,
-    rust,
-    python,
-    javascript,
-    typescript,
-    bash,
-    css,
-    html,
-    json,
-    yaml,
-    solidity,
 
-    fn id(self: LspLanguage) []const u8 {
+    fn language(self: TreeSitterLanguage) *const c.TSLanguage {
         return switch (self) {
-            .zig => "zig",
-            .rust => "rust",
-            .python => "python",
-            .javascript => "javascript",
-            .typescript => "typescript",
-            .bash => "shellscript",
-            .css => "css",
-            .html => "html",
-            .json => "json",
-            .yaml => "yaml",
-            .solidity => "solidity",
+            .zig => tree_sitter_zig(),
+        };
+    }
+
+    fn query(self: TreeSitterLanguage) []const u8 {
+        return switch (self) {
+            .zig => zig_query,
         };
     }
 };
 
+const Provider = struct {
+    language_id: []const u8,
+    extensions: []const []const u8 = &.{},
+    filenames: []const []const u8 = &.{},
+    lsp_commands: []const []const []const u8 = &.{},
+    tree_sitter: ?TreeSitterLanguage = null,
+};
+
 const zls_cmd = [_][]const u8{"zls"};
 const rust_analyzer_cmd = [_][]const u8{"rust-analyzer"};
+const rustup_stable_rust_analyzer_cmd = [_][]const u8{ "rustup", "run", "stable", "rust-analyzer" };
+const clangd_cmd = [_][]const u8{"clangd"};
+const ccls_cmd = [_][]const u8{"ccls"};
+const gopls_cmd = [_][]const u8{"gopls"};
+const jdtls_cmd = [_][]const u8{"jdtls"};
+const csharp_ls_cmd = [_][]const u8{"csharp-ls"};
+const omnisharp_cmd = [_][]const u8{ "omnisharp", "--languageserver" };
 const pylsp_cmd = [_][]const u8{"pylsp"};
 const pyright_cmd = [_][]const u8{ "pyright-langserver", "--stdio" };
 const basedpyright_cmd = [_][]const u8{ "basedpyright-langserver", "--stdio" };
 const typescript_language_server_cmd = [_][]const u8{ "typescript-language-server", "--stdio" };
-const bash_language_server_cmd = [_][]const u8{ "bash-language-server", "start" };
-const css_language_server_cmd = [_][]const u8{ "vscode-css-language-server", "--stdio" };
-const html_language_server_cmd = [_][]const u8{ "vscode-html-language-server", "--stdio" };
-const json_language_server_cmd = [_][]const u8{ "vscode-json-language-server", "--stdio" };
+const vscode_css_language_server_cmd = [_][]const u8{ "vscode-css-language-server", "--stdio" };
+const vscode_html_language_server_cmd = [_][]const u8{ "vscode-html-language-server", "--stdio" };
+const vscode_json_language_server_cmd = [_][]const u8{ "vscode-json-language-server", "--stdio" };
 const yaml_language_server_cmd = [_][]const u8{ "yaml-language-server", "--stdio" };
+const bash_language_server_cmd = [_][]const u8{ "bash-language-server", "start" };
+const lua_language_server_cmd = [_][]const u8{"lua-language-server"};
+const ruby_lsp_cmd = [_][]const u8{"ruby-lsp"};
+const solargraph_cmd = [_][]const u8{ "solargraph", "stdio" };
+const intelephense_cmd = [_][]const u8{ "intelephense", "--stdio" };
+const phpactor_cmd = [_][]const u8{ "phpactor", "language-server" };
+const docker_langserver_cmd = [_][]const u8{ "docker-langserver", "--stdio" };
+const docker_language_server_cmd = [_][]const u8{ "docker-language-server", "start", "--stdio" };
+const nil_cmd = [_][]const u8{"nil"};
+const nixd_cmd = [_][]const u8{"nixd"};
+const terraform_ls_cmd = [_][]const u8{ "terraform-ls", "serve" };
+const marksman_cmd = [_][]const u8{ "marksman", "server" };
+const markdown_oxide_cmd = [_][]const u8{"markdown-oxide"};
+const taplo_cmd = [_][]const u8{ "taplo", "lsp", "stdio" };
+const sql_language_server_cmd = [_][]const u8{ "sql-language-server", "up", "--method", "stdio" };
+const graphql_lsp_cmd = [_][]const u8{ "graphql-lsp", "server", "-m", "stream" };
+const elixir_ls_cmd = [_][]const u8{"elixir-ls"};
+const erlang_ls_cmd = [_][]const u8{"erlang_ls"};
+const haskell_language_server_cmd = [_][]const u8{ "haskell-language-server-wrapper", "--lsp" };
+const ocamllsp_cmd = [_][]const u8{"ocamllsp"};
+const sourcekit_lsp_cmd = [_][]const u8{"sourcekit-lsp"};
+const dart_language_server_cmd = [_][]const u8{ "dart", "language-server" };
+const kotlin_language_server_cmd = [_][]const u8{"kotlin-language-server"};
+const metals_cmd = [_][]const u8{"metals"};
+const fsautocomplete_cmd = [_][]const u8{ "fsautocomplete", "--adaptive-lsp-server-enabled" };
 const solidity_ls_cmd = [_][]const u8{ "solidity-ls", "--stdio" };
 const solidity_language_server_cmd = [_][]const u8{ "solidity-language-server", "--stdio" };
 
-const zig_lsp_commands = [_][]const []const u8{&zls_cmd};
-const rust_lsp_commands = [_][]const []const u8{&rust_analyzer_cmd};
-const python_lsp_commands = [_][]const []const u8{ &basedpyright_cmd, &pyright_cmd, &pylsp_cmd };
-const javascript_lsp_commands = [_][]const []const u8{&typescript_language_server_cmd};
-const typescript_lsp_commands = [_][]const []const u8{&typescript_language_server_cmd};
-const bash_lsp_commands = [_][]const []const u8{&bash_language_server_cmd};
-const css_lsp_commands = [_][]const []const u8{&css_language_server_cmd};
-const html_lsp_commands = [_][]const []const u8{&html_language_server_cmd};
-const json_lsp_commands = [_][]const []const u8{&json_language_server_cmd};
-const yaml_lsp_commands = [_][]const []const u8{&yaml_language_server_cmd};
-const solidity_lsp_commands = [_][]const []const u8{ &solidity_ls_cmd, &solidity_language_server_cmd };
+const providers = [_]Provider{
+    .{ .language_id = "zig", .extensions = &.{".zig"}, .lsp_commands = &.{&zls_cmd}, .tree_sitter = .zig },
+    .{ .language_id = "rust", .extensions = &.{".rs"}, .lsp_commands = &.{ &rust_analyzer_cmd, &rustup_stable_rust_analyzer_cmd } },
+    .{ .language_id = "c", .extensions = &.{ ".c", ".h" }, .lsp_commands = &.{ &clangd_cmd, &ccls_cmd } },
+    .{ .language_id = "cpp", .extensions = &.{ ".cc", ".cpp", ".cxx", ".c++", ".hh", ".hpp", ".hxx", ".h++" }, .lsp_commands = &.{ &clangd_cmd, &ccls_cmd } },
+    .{ .language_id = "objective-c", .extensions = &.{ ".m", ".mm" }, .lsp_commands = &.{&clangd_cmd} },
+    .{ .language_id = "csharp", .extensions = &.{".cs"}, .lsp_commands = &.{ &csharp_ls_cmd, &omnisharp_cmd } },
+    .{ .language_id = "go", .extensions = &.{".go"}, .lsp_commands = &.{&gopls_cmd} },
+    .{ .language_id = "java", .extensions = &.{".java"}, .lsp_commands = &.{&jdtls_cmd} },
+    .{ .language_id = "javascript", .extensions = &.{ ".js", ".mjs", ".cjs", ".jsx" }, .lsp_commands = &.{&typescript_language_server_cmd} },
+    .{ .language_id = "typescript", .extensions = &.{ ".ts", ".mts", ".cts" }, .lsp_commands = &.{&typescript_language_server_cmd} },
+    .{ .language_id = "typescriptreact", .extensions = &.{".tsx"}, .lsp_commands = &.{&typescript_language_server_cmd} },
+    .{ .language_id = "python", .extensions = &.{ ".py", ".pyw" }, .lsp_commands = &.{ &basedpyright_cmd, &pyright_cmd, &pylsp_cmd } },
+    .{ .language_id = "ruby", .extensions = &.{ ".rb", ".rake" }, .filenames = &.{ "Gemfile", "Rakefile" }, .lsp_commands = &.{ &ruby_lsp_cmd, &solargraph_cmd } },
+    .{ .language_id = "lua", .extensions = &.{".lua"}, .lsp_commands = &.{&lua_language_server_cmd} },
+    .{ .language_id = "shellscript", .extensions = &.{ ".sh", ".bash", ".zsh", ".ksh" }, .filenames = &.{ ".bashrc", ".bash_profile", ".zshrc" }, .lsp_commands = &.{&bash_language_server_cmd} },
+    .{ .language_id = "nix", .extensions = &.{".nix"}, .lsp_commands = &.{ &nil_cmd, &nixd_cmd } },
+    .{ .language_id = "solidity", .extensions = &.{".sol"}, .lsp_commands = &.{ &solidity_ls_cmd, &solidity_language_server_cmd } },
+    .{ .language_id = "php", .extensions = &.{ ".php", ".phtml" }, .lsp_commands = &.{ &intelephense_cmd, &phpactor_cmd } },
+    .{ .language_id = "html", .extensions = &.{ ".html", ".htm" }, .lsp_commands = &.{&vscode_html_language_server_cmd} },
+    .{ .language_id = "css", .extensions = &.{".css"}, .lsp_commands = &.{&vscode_css_language_server_cmd} },
+    .{ .language_id = "scss", .extensions = &.{".scss"}, .lsp_commands = &.{&vscode_css_language_server_cmd} },
+    .{ .language_id = "less", .extensions = &.{".less"}, .lsp_commands = &.{&vscode_css_language_server_cmd} },
+    .{ .language_id = "json", .extensions = &.{ ".json", ".jsonc" }, .lsp_commands = &.{&vscode_json_language_server_cmd} },
+    .{ .language_id = "yaml", .extensions = &.{ ".yaml", ".yml" }, .lsp_commands = &.{&yaml_language_server_cmd} },
+    .{ .language_id = "toml", .extensions = &.{".toml"}, .lsp_commands = &.{&taplo_cmd} },
+    .{ .language_id = "dockerfile", .filenames = &.{ "Dockerfile", "Containerfile" }, .lsp_commands = &.{ &docker_language_server_cmd, &docker_langserver_cmd } },
+    .{ .language_id = "terraform", .extensions = &.{ ".tf", ".tfvars" }, .lsp_commands = &.{&terraform_ls_cmd} },
+    .{ .language_id = "markdown", .extensions = &.{ ".md", ".markdown" }, .lsp_commands = &.{ &marksman_cmd, &markdown_oxide_cmd } },
+    .{ .language_id = "sql", .extensions = &.{".sql"}, .lsp_commands = &.{&sql_language_server_cmd} },
+    .{ .language_id = "graphql", .extensions = &.{ ".graphql", ".gql" }, .lsp_commands = &.{&graphql_lsp_cmd} },
+    .{ .language_id = "elixir", .extensions = &.{ ".ex", ".exs" }, .lsp_commands = &.{&elixir_ls_cmd} },
+    .{ .language_id = "erlang", .extensions = &.{ ".erl", ".hrl" }, .lsp_commands = &.{&erlang_ls_cmd} },
+    .{ .language_id = "haskell", .extensions = &.{ ".hs", ".lhs" }, .lsp_commands = &.{&haskell_language_server_cmd} },
+    .{ .language_id = "ocaml", .extensions = &.{ ".ml", ".mli" }, .lsp_commands = &.{&ocamllsp_cmd} },
+    .{ .language_id = "swift", .extensions = &.{".swift"}, .lsp_commands = &.{&sourcekit_lsp_cmd} },
+    .{ .language_id = "dart", .extensions = &.{".dart"}, .lsp_commands = &.{&dart_language_server_cmd} },
+    .{ .language_id = "kotlin", .extensions = &.{ ".kt", ".kts" }, .lsp_commands = &.{&kotlin_language_server_cmd} },
+    .{ .language_id = "scala", .extensions = &.{ ".scala", ".sbt" }, .lsp_commands = &.{&metals_cmd} },
+    .{ .language_id = "fsharp", .extensions = &.{ ".fs", ".fsi", ".fsx" }, .lsp_commands = &.{&fsautocomplete_cmd} },
+};
+
+fn providerForPath(path: []const u8) ?*const Provider {
+    const name = basename(path);
+    for (&providers) |*provider| {
+        for (provider.filenames) |candidate| {
+            if (std.ascii.eqlIgnoreCase(name, candidate)) return provider;
+        }
+        for (provider.extensions) |extension| {
+            if (endsWithIgnoreCase(path, extension)) return provider;
+        }
+    }
+    return null;
+}
+
+fn endsWithIgnoreCase(value: []const u8, suffix: []const u8) bool {
+    if (value.len < suffix.len) return false;
+    return std.ascii.eqlIgnoreCase(value[value.len - suffix.len ..], suffix);
+}
+
+fn basename(path: []const u8) []const u8 {
+    const index = std.mem.lastIndexOfScalar(u8, path, '/') orelse return path;
+    return path[index + 1 ..];
+}
 
 const zig_query =
     \\(function_declaration
@@ -148,6 +226,11 @@ pub fn extract(allocator: Allocator, repo_root: []const u8, path: []const u8, co
     return extractTreeSitter(allocator, path, content);
 }
 
+pub fn hasProvider(path: []const u8) bool {
+    const provider = providerForPath(path) orelse return false;
+    return provider.lsp_commands.len != 0 or provider.tree_sitter != null;
+}
+
 fn extractTreeSitter(allocator: Allocator, path: []const u8, content: []const u8) ![]Symbol {
     const spec = querySpecForPath(path) orelse return allocator.alloc(Symbol, 0);
     return extractWithQuery(allocator, spec, content);
@@ -159,55 +242,22 @@ pub fn free(allocator: Allocator, items: []Symbol) void {
 }
 
 fn querySpecForPath(path: []const u8) ?QuerySpec {
-    if (std.mem.endsWith(u8, path, ".zig")) {
-        return .{
-            .language = tree_sitter_zig(),
-            .source = zig_query,
-        };
-    }
-    return null;
+    const provider = providerForPath(path) orelse return null;
+    const tree_sitter = provider.tree_sitter orelse return null;
+    return .{
+        .language = tree_sitter.language(),
+        .source = tree_sitter.query(),
+    };
 }
 
 fn extractFromLsp(allocator: Allocator, repo_root: []const u8, path: []const u8, content: []const u8) !?[]Symbol {
-    const language = lspLanguageForPath(path) orelse return null;
-    const commands = lspCommands(language);
-    for (commands) |command| {
-        if (try extractFromLspCommand(allocator, command, repo_root, path, language, content)) |items| {
+    const provider = providerForPath(path) orelse return null;
+    for (provider.lsp_commands) |command| {
+        if (try extractFromLspCommand(allocator, command, repo_root, path, provider.language_id, content)) |items| {
             return items;
         }
     }
     return null;
-}
-
-fn lspLanguageForPath(path: []const u8) ?LspLanguage {
-    if (std.mem.endsWith(u8, path, ".zig")) return .zig;
-    if (std.mem.endsWith(u8, path, ".rs")) return .rust;
-    if (std.mem.endsWith(u8, path, ".py")) return .python;
-    if (std.mem.endsWith(u8, path, ".js") or std.mem.endsWith(u8, path, ".mjs")) return .javascript;
-    if (std.mem.endsWith(u8, path, ".ts")) return .typescript;
-    if (std.mem.endsWith(u8, path, ".sh") or std.mem.endsWith(u8, path, ".bash") or std.mem.endsWith(u8, path, "Makefile")) return .bash;
-    if (std.mem.endsWith(u8, path, ".css")) return .css;
-    if (std.mem.endsWith(u8, path, ".html")) return .html;
-    if (std.mem.endsWith(u8, path, ".json")) return .json;
-    if (std.mem.endsWith(u8, path, ".yaml") or std.mem.endsWith(u8, path, ".yml")) return .yaml;
-    if (std.mem.endsWith(u8, path, ".sol")) return .solidity;
-    return null;
-}
-
-fn lspCommands(language: LspLanguage) []const []const []const u8 {
-    return switch (language) {
-        .zig => &zig_lsp_commands,
-        .rust => &rust_lsp_commands,
-        .python => &python_lsp_commands,
-        .javascript => &javascript_lsp_commands,
-        .typescript => &typescript_lsp_commands,
-        .bash => &bash_lsp_commands,
-        .css => &css_lsp_commands,
-        .html => &html_lsp_commands,
-        .json => &json_lsp_commands,
-        .yaml => &yaml_lsp_commands,
-        .solidity => &solidity_lsp_commands,
-    };
 }
 
 fn extractFromLspCommand(
@@ -215,13 +265,16 @@ fn extractFromLspCommand(
     command: []const []const u8,
     repo_root: []const u8,
     path: []const u8,
-    language: LspLanguage,
+    language_id: []const u8,
     content: []const u8,
 ) !?[]Symbol {
-    const input = try buildLspInput(allocator, repo_root, path, language.id(), content);
+    const workspace_root = try lspWorkspaceRoot(allocator, repo_root, path);
+    defer allocator.free(workspace_root);
+
+    const input = try buildLspInput(allocator, workspace_root, repo_root, path, language_id, content);
     defer allocator.free(input);
 
-    var result = runLspCommand(allocator, command, input, repo_root) catch return null;
+    var result = runLspCommand(allocator, command, input, workspace_root) catch return null;
     defer result.deinit();
 
     if (try parseLspDocumentSymbols(allocator, result.stdout)) |items| return items;
@@ -230,6 +283,7 @@ fn extractFromLspCommand(
 
 fn buildLspInput(
     allocator: Allocator,
+    workspace_root: []const u8,
     repo_root: []const u8,
     path: []const u8,
     language_id: []const u8,
@@ -240,7 +294,7 @@ fn buildLspInput(
 
     var root_uri: std.ArrayList(u8) = .empty;
     defer root_uri.deinit(allocator);
-    try appendFileUri(&root_uri, allocator, repo_root, "");
+    try appendFileUri(&root_uri, allocator, workspace_root, "");
 
     var file_uri: std.ArrayList(u8) = .empty;
     defer file_uri.deinit(allocator);
@@ -253,6 +307,10 @@ fn buildLspInput(
         \\{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"processId":null,"rootUri":
     );
     try appendJsonString(&body, allocator, root_uri.items);
+    try body.appendSlice(allocator,
+        \\,"rootPath":
+    );
+    try appendJsonString(&body, allocator, workspace_root);
     try body.appendSlice(allocator,
         \\,"workspaceFolders":[{"uri":
     );
@@ -291,20 +349,66 @@ fn buildLspInput(
     try appendJsonString(&body, allocator, file_uri.items);
     try body.appendSlice(allocator, "}}}");
     try appendRpcMessage(&input, allocator, body.items);
-    body.clearRetainingCapacity();
-
-    try body.appendSlice(allocator,
-        \\{"jsonrpc":"2.0","id":3,"method":"shutdown"}
-    );
-    try appendRpcMessage(&input, allocator, body.items);
-    body.clearRetainingCapacity();
-
-    try body.appendSlice(allocator,
-        \\{"jsonrpc":"2.0","method":"exit"}
-    );
-    try appendRpcMessage(&input, allocator, body.items);
 
     return input.toOwnedSlice(allocator);
+}
+
+fn lspWorkspaceRoot(allocator: Allocator, repo_root: []const u8, path: []const u8) ![]u8 {
+    const full_path = try std.fs.path.join(allocator, &.{ repo_root, path });
+    defer allocator.free(full_path);
+
+    const start_dir = std.fs.path.dirname(full_path) orelse repo_root;
+    var dir = try allocator.dupe(u8, start_dir);
+    errdefer allocator.free(dir);
+
+    while (true) {
+        if (try hasWorkspaceMarker(allocator, dir)) return dir;
+        if (std.mem.eql(u8, dir, repo_root)) return dir;
+
+        const parent = std.fs.path.dirname(dir) orelse return dir;
+        if (parent.len < repo_root.len or !std.mem.startsWith(u8, parent, repo_root)) {
+            allocator.free(dir);
+            return allocator.dupe(u8, repo_root);
+        }
+
+        const next = try allocator.dupe(u8, parent);
+        allocator.free(dir);
+        dir = next;
+    }
+}
+
+fn hasWorkspaceMarker(allocator: Allocator, dir: []const u8) !bool {
+    const markers = [_][]const u8{
+        "Cargo.toml",
+        "package.json",
+        "tsconfig.json",
+        "deno.json",
+        "deno.jsonc",
+        "pyproject.toml",
+        "setup.py",
+        "go.mod",
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+        "compile_commands.json",
+        "Gemfile",
+        "composer.json",
+        "flake.nix",
+        "mix.exs",
+        "stack.yaml",
+        "cabal.project",
+        "pubspec.yaml",
+    };
+    for (markers) |marker| {
+        const marker_path = try std.fs.path.join(allocator, &.{ dir, marker });
+        defer allocator.free(marker_path);
+        std.fs.cwd().access(marker_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => continue,
+        };
+        return true;
+    }
+    return false;
 }
 
 fn appendRpcMessage(buf: *std.ArrayList(u8), allocator: Allocator, body: []const u8) !void {
@@ -395,6 +499,9 @@ fn parseLspDocumentSymbols(allocator: Allocator, bytes: []const u8) !?[]Symbol {
         const root = jsonObject(parsed.value) orelse continue;
         const id = jsonInteger(root.get("id")) orelse continue;
         if (id != 2) continue;
+        if (root.get("method") != null) continue;
+        if (root.get("error") != null) return null;
+        if (root.get("result") == null) continue;
         return try parseLspSymbolResult(allocator, root.get("result"));
     }
     return null;
@@ -484,7 +591,7 @@ fn lspSymbolKind(kind: i64) SymbolKind {
         6, 9 => .method,
         7 => .property,
         8, 22 => .field,
-        10, 11, 23, 26 => .@"type",
+        10, 11, 23, 26 => .type,
         12 => .function,
         13 => .variable,
         14 => .constant,
@@ -553,7 +660,7 @@ fn extractWithQuery(allocator: Allocator, spec: QuerySpec, content: []const u8) 
         while (index < match.capture_count) : (index += 1) {
             const capture = match.captures[index];
             const capture_name = captureName(query, capture.index);
-            if (std.mem.eql(u8, capture_name, "symbol.name")) {
+            if (std.mem.eql(u8, capture_name, "symbol.name") or std.mem.eql(u8, capture_name, "name")) {
                 name_node = capture.node;
             } else if (kindForCapture(capture_name)) |captured_kind| {
                 kind = captured_kind;
@@ -582,8 +689,22 @@ fn captureName(query: *const c.TSQuery, index: u32) []const u8 {
 
 fn kindForCapture(name: []const u8) ?SymbolKind {
     if (std.mem.eql(u8, name, "symbol.function")) return .function;
-    if (std.mem.eql(u8, name, "symbol.type")) return .@"type";
+    if (std.mem.eql(u8, name, "symbol.method")) return .method;
+    if (std.mem.eql(u8, name, "symbol.module")) return .module;
+    if (std.mem.eql(u8, name, "symbol.type")) return .type;
+    if (std.mem.eql(u8, name, "symbol.constant")) return .constant;
     if (std.mem.eql(u8, name, "symbol.test")) return .test_case;
+    if (std.mem.startsWith(u8, name, "definition.function")) return .function;
+    if (std.mem.startsWith(u8, name, "definition.method")) return .method;
+    if (std.mem.startsWith(u8, name, "definition.module")) return .module;
+    if (std.mem.startsWith(u8, name, "definition.constant")) return .constant;
+    if (std.mem.startsWith(u8, name, "definition.field")) return .field;
+    if (std.mem.startsWith(u8, name, "definition.property")) return .property;
+    if (std.mem.startsWith(u8, name, "definition.var")) return .variable;
+    if (std.mem.startsWith(u8, name, "definition.class")) return .type;
+    if (std.mem.startsWith(u8, name, "definition.interface")) return .type;
+    if (std.mem.startsWith(u8, name, "definition.type")) return .type;
+    if (std.mem.startsWith(u8, name, "definition.macro")) return .function;
     return null;
 }
 
@@ -674,7 +795,7 @@ test "web symbols extracts zig declarations with tree-sitter" {
 
     try std.testing.expectEqual(@as(usize, 4), found.len);
     try std.testing.expectEqualStrings("App", found[0].name);
-    try std.testing.expectEqual(SymbolKind.@"type", found[0].kind);
+    try std.testing.expectEqual(SymbolKind.type, found[0].kind);
     try std.testing.expectEqualStrings("run", found[1].name);
     try std.testing.expectEqual(SymbolKind.method, found[1].kind);
     try std.testing.expectEqualStrings("helper", found[2].name);
@@ -696,11 +817,33 @@ test "web symbols parses LSP document symbol responses" {
 
     try std.testing.expectEqual(@as(usize, 3), found.len);
     try std.testing.expectEqualStrings("App", found[0].name);
-    try std.testing.expectEqual(SymbolKind.@"type", found[0].kind);
+    try std.testing.expectEqual(SymbolKind.type, found[0].kind);
     try std.testing.expectEqual(@as(usize, 1), found[0].line_no);
     try std.testing.expectEqualStrings("run", found[1].name);
     try std.testing.expectEqual(SymbolKind.method, found[1].kind);
     try std.testing.expectEqual(@as(usize, 1), found[1].depth);
     try std.testing.expectEqualStrings("helper", found[2].name);
     try std.testing.expectEqual(SymbolKind.function, found[2].kind);
+}
+
+test "web symbols ignores server requests before document symbol responses" {
+    var framed: std.ArrayList(u8) = .empty;
+    defer framed.deinit(std.testing.allocator);
+    try appendRpcMessage(
+        &framed,
+        std.testing.allocator,
+        \\{"jsonrpc":"2.0","id":2,"method":"workspace/configuration","params":{"items":[]}}
+    );
+    try appendRpcMessage(
+        &framed,
+        std.testing.allocator,
+        \\{"jsonrpc":"2.0","id":2,"result":[{"name":"Config","kind":23,"range":{"start":{"line":4,"character":0},"end":{"line":9,"character":1}}}]}
+    );
+
+    const found = (try parseLspDocumentSymbols(std.testing.allocator, framed.items)).?;
+    defer free(std.testing.allocator, found);
+
+    try std.testing.expectEqual(@as(usize, 1), found.len);
+    try std.testing.expectEqualStrings("Config", found[0].name);
+    try std.testing.expectEqual(@as(usize, 5), found[0].line_no);
 }
