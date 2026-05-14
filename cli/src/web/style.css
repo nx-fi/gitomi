@@ -890,10 +890,7 @@ tbody tr:hover {
 }
 .tree-link .file-icon {
   width: 16px;
-  height: 18px;
-}
-.tree-link .file-icon.dir {
-  height: 12px;
+  height: 16px;
 }
 .tree-name {
   min-width: 0;
@@ -1000,38 +997,28 @@ tbody tr:hover {
 .file-icon {
   position: relative;
   flex: 0 0 auto;
-  width: 16px;
+  width: 18px;
   height: 18px;
-  border: 1px solid var(--border-strong);
-  border-radius: 3px;
-  background: var(--panel);
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
 }
-.file-icon.file::before {
-  content: "";
-  position: absolute;
-  top: -1px;
-  right: -1px;
-  width: 6px;
-  height: 6px;
-  background: linear-gradient(135deg, transparent 50%, var(--border) 50%);
-  border-radius: 0 3px 0 1px;
+.file-icon.file,
+.file-icon.dir {
+  --file-icon-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5'/%3E%3C/svg%3E");
 }
 .file-icon.dir {
-  height: 14px;
-  border-color: var(--folder-border);
-  background: var(--folder-bg);
+  --file-icon-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M3 6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'/%3E%3C/svg%3E");
 }
+.file-icon.file::before,
 .file-icon.dir::before {
   content: "";
   position: absolute;
-  top: -4px;
-  left: 1px;
-  width: 8px;
-  height: 4px;
-  border: 1px solid var(--folder-border);
-  border-bottom: 0;
-  border-radius: 3px 3px 0 0;
-  background: var(--folder-bg);
+  inset: 0;
+  background: currentColor;
+  -webkit-mask: var(--file-icon-mask) center / contain no-repeat;
+  mask: var(--file-icon-mask) center / contain no-repeat;
 }
 .file-icon.devicon-icon {
   display: inline-grid;
@@ -1050,17 +1037,6 @@ tbody tr:hover {
   height: 16px;
   font-size: 16px;
 }
-.file-icon.devicon-zig-original { color: #f7a41d; }
-.file-icon.devicon-javascript-plain { color: #c99a00; }
-.file-icon.devicon-typescript-plain { color: #3178c6; }
-.file-icon.devicon-bash-plain { color: #4eaa25; }
-.file-icon.devicon-yaml-plain { color: #cb171e; }
-.file-icon.devicon-css3-plain { color: #1572b6; }
-.file-icon.devicon-html5-plain { color: #e34f26; }
-.file-icon.devicon-xml-plain { color: #005fad; }
-.file-icon.devicon-rust-plain { color: #dea584; }
-.file-icon.devicon-python-plain { color: #3776ab; }
-.file-icon.devicon-markdown-original { color: #57606a; }
 .file-icon[class*="lang-"] {
   display: inline-grid;
   place-items: center;
