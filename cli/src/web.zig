@@ -120,6 +120,10 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         const body = try explorer.renderCodePage(allocator, repo, request.target);
         defer allocator.free(body);
         try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
+    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/blame")) {
+        const body = try explorer.renderBlamePage(allocator, repo, request.target);
+        defer allocator.free(body);
+        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/commits")) {
         const body = try commits_page.renderCommitsPage(allocator, repo, request.target);
         defer allocator.free(body);

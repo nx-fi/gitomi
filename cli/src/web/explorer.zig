@@ -15,7 +15,7 @@ const appendMarkdown = markdown_render.appendMarkdown;
 const runCommand = git.runCommand;
 
 const max_blob_display_bytes = 512 * 1024;
-const max_tree_sidebar_entries = 600;
+const max_blame_display_bytes = 16 * 1024 * 1024;
 
 const TreeEntry = struct {
     mode: []u8,
@@ -57,6 +57,30 @@ const CommitSummary = struct {
     }
 };
 
+const BlameLine = struct {
+    commit: []u8,
+    short_hash: []u8,
+    author: []u8,
+    date: []u8,
+    summary: []u8,
+    line_no: usize,
+    content: []u8,
+
+    fn deinit(self: BlameLine, allocator: Allocator) void {
+        allocator.free(self.commit);
+        allocator.free(self.short_hash);
+        allocator.free(self.author);
+        allocator.free(self.date);
+        allocator.free(self.summary);
+        allocator.free(self.content);
+    }
+};
+
+const BlameHeader = struct {
+    commit: []const u8,
+    line_no: usize,
+};
+
 pub fn renderCodePage(allocator: Allocator, repo: Repo, target: []const u8) ![]u8 {
     const query_ref = try queryValueOwned(allocator, target, "ref");
     defer if (query_ref) |value| allocator.free(value);
@@ -96,6 +120,75 @@ pub fn renderCodePage(allocator: Allocator, repo: Repo, target: []const u8) ![]u
         return renderTreePage(allocator, repo, ref, path);
     }
     return renderMissingPathPage(allocator, repo, ref, path);
+}
+
+pub fn renderBlamePage(allocator: Allocator, repo: Repo, target: []const u8) ![]u8 {
+    const query_ref = try queryValueOwned(allocator, target, "ref");
+    defer if (query_ref) |value| allocator.free(value);
+    const query_path = try queryValueOwned(allocator, target, "path");
+    defer if (query_path) |value| allocator.free(value);
+
+    const default_ref = try defaultRef(allocator, repo);
+    defer allocator.free(default_ref);
+    const ref = if (query_ref) |value| blk: {
+        const trimmed = std.mem.trim(u8, value, " \t\r\n");
+        break :blk if (trimmed.len == 0) default_ref else trimmed;
+    } else default_ref;
+
+    const path = if (query_path) |value|
+        normalizedPathOwned(allocator, value) catch return renderMissingPathPage(allocator, repo, ref, value)
+    else
+        try allocator.dupe(u8, "");
+    defer allocator.free(path);
+
+    if (path.len == 0) return renderMissingPathPage(allocator, repo, ref, path);
+
+    const spec = try objectSpec(allocator, ref, path);
+    defer allocator.free(spec);
+    const kind_owned = try objectType(allocator, repo, spec);
+    defer if (kind_owned) |kind| allocator.free(kind);
+    const kind = kind_owned orelse return renderMissingPathPage(allocator, repo, ref, path);
+    if (!std.mem.eql(u8, kind, "blob")) return renderMissingPathPage(allocator, repo, ref, path);
+
+    const summary_opt = try loadCommitSummary(allocator, repo, ref, path);
+    defer if (summary_opt) |summary| summary.deinit(allocator);
+    const blame_opt = try loadBlameLines(allocator, repo, ref, path);
+    defer if (blame_opt) |lines| freeBlameLines(allocator, lines);
+
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendShellStart(&buf, allocator, repo, "Blame", "code");
+    try appendRepoHeader(&buf, allocator, repo, ref);
+    try appendCodeLayoutStart(&buf, allocator, repo, ref, path);
+
+    try buf.appendSlice(allocator,
+        \\<section class="panel code-panel">
+        \\  <div class="code-toolbar">
+        \\    <div>
+    );
+    try appendBreadcrumbs(&buf, allocator, repo, ref, path);
+    try buf.appendSlice(allocator, "</div><div class=\"file-actions\"><a class=\"button secondary\" href=\"");
+    try appendCodeHref(&buf, allocator, ref, path);
+    try buf.appendSlice(allocator, "\">Code</a><a class=\"button secondary\" href=\"");
+    try appendCommitsHref(&buf, allocator, ref, path);
+    try buf.appendSlice(allocator, "\">History</a></div></div>");
+    try appendCommitBar(&buf, allocator, summary_opt);
+
+    if (blame_opt) |lines| {
+        if (lines.len == 0) {
+            try appendEmptyState(&buf, allocator, "Empty file.", "This blob has no lines to blame.");
+        } else {
+            try appendBlameLines(&buf, allocator, path, lines);
+        }
+    } else {
+        try appendEmptyState(&buf, allocator, "Blame not available.", "Git could not render blame data for this file.");
+    }
+
+    try buf.appendSlice(allocator, "</section>");
+    try appendCodeLayoutEnd(&buf, allocator);
+    try appendShellEnd(&buf, allocator);
+    return buf.toOwnedSlice(allocator);
 }
 
 fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) ![]u8 {
@@ -163,6 +256,9 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     const raw_selected = !markdown or std.mem.eql(u8, view, "raw");
     if (markdown) try appendMarkdownViewTabs(&buf, allocator, ref, path, raw_selected);
     if (size) |bytes| try appendFmt(&buf, allocator, "{d} bytes", .{bytes});
+    try buf.appendSlice(allocator, "<a class=\"button secondary\" href=\"");
+    try appendBlameHref(&buf, allocator, ref, path);
+    try buf.appendSlice(allocator, "\">Blame</a>");
     try buf.appendSlice(allocator, "<a class=\"button secondary\" href=\"");
     try appendCommitsHref(&buf, allocator, ref, path);
     try buf.appendSlice(allocator, "\">History</a></div></div>");
@@ -318,10 +414,6 @@ fn appendTreeSidebar(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, 
             try appendHtml(buf, allocator, baseName(entry.path));
             try buf.appendSlice(allocator, "</span></a></div>");
         }
-
-        if (entries.len == max_tree_sidebar_entries) {
-            try buf.appendSlice(allocator, "<p class=\"tree-note\">Tree truncated.</p>");
-        }
     } else {
         try buf.appendSlice(allocator, "<p class=\"tree-note\">No files to show.</p>");
     }
@@ -453,6 +545,35 @@ fn appendBlobLines(buf: *std.ArrayList(u8), allocator: Allocator, path: []const 
     try buf.appendSlice(allocator, "</ol>");
 }
 
+fn appendBlameLines(buf: *std.ArrayList(u8), allocator: Allocator, path: []const u8, lines: []const BlameLine) !void {
+    const language = languageForPath(path);
+    try buf.appendSlice(allocator, "<ol class=\"blame-lines\">");
+    for (lines) |line| {
+        try buf.appendSlice(allocator, "<li class=\"blame-row\" id=\"L");
+        try appendFmt(buf, allocator, "{d}", .{line.line_no});
+        try buf.appendSlice(allocator, "\"><span class=\"blame-meta\" title=\"");
+        try appendHtml(buf, allocator, line.summary);
+        try buf.appendSlice(allocator, "\"><a class=\"blame-hash\" href=\"");
+        try appendCommitHref(buf, allocator, line.commit);
+        try buf.appendSlice(allocator, "\">");
+        try appendHtml(buf, allocator, line.short_hash);
+        try buf.appendSlice(allocator, "</a><span class=\"blame-author\">");
+        try appendHtml(buf, allocator, line.author);
+        try buf.appendSlice(allocator, "</span><span class=\"blame-date\">");
+        try appendHtml(buf, allocator, line.date);
+        try buf.appendSlice(allocator, "</span></span><a class=\"line-num\" href=\"#L");
+        try appendFmt(buf, allocator, "{d}", .{line.line_no});
+        try buf.appendSlice(allocator, "\">");
+        try appendFmt(buf, allocator, "{d}", .{line.line_no});
+        try buf.appendSlice(allocator, "</a><code class=\"blame-code language-");
+        try appendHtml(buf, allocator, language);
+        try buf.appendSlice(allocator, "\">");
+        try appendHtml(buf, allocator, line.content);
+        try buf.appendSlice(allocator, "</code></li>");
+    }
+    try buf.appendSlice(allocator, "</ol>");
+}
+
 fn appendReadmePreview(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -515,6 +636,134 @@ fn loadTreeEntries(allocator: Allocator, repo: Repo, ref: []const u8, path: []co
     return try entries.toOwnedSlice(allocator);
 }
 
+fn loadBlameLines(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?[]BlameLine {
+    const pathspec = try std.fmt.allocPrint(allocator, ":(top){s}", .{path});
+    defer allocator.free(pathspec);
+    const raw = try gitMaybe(allocator, repo, &.{
+        "blame",
+        "--line-porcelain",
+        "--root",
+        ref,
+        "--",
+        pathspec,
+    }, max_blame_display_bytes) orelse return null;
+    defer allocator.free(raw);
+    return try parseBlamePorcelain(allocator, raw);
+}
+
+fn parseBlamePorcelain(allocator: Allocator, raw: []const u8) ![]BlameLine {
+    var lines: std.ArrayList(BlameLine) = .empty;
+    errdefer {
+        for (lines.items) |line| line.deinit(allocator);
+        lines.deinit(allocator);
+    }
+
+    var header: ?BlameHeader = null;
+    var author: []const u8 = "";
+    var author_time: []const u8 = "";
+    var author_tz: []const u8 = "";
+    var summary: []const u8 = "";
+
+    var raw_lines = std.mem.splitScalar(u8, raw, '\n');
+    while (raw_lines.next()) |raw_line| {
+        const line = std.mem.trimRight(u8, raw_line, "\r");
+        if (line.len != 0 and line[0] == '\t') {
+            if (header) |value| {
+                try appendBlameRecord(&lines, allocator, value, author, author_time, author_tz, summary, line[1..]);
+            }
+            header = null;
+            author = "";
+            author_time = "";
+            author_tz = "";
+            summary = "";
+            continue;
+        }
+
+        if (header == null) {
+            header = parseBlameHeader(line);
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, line, "author ")) {
+            author = line["author ".len..];
+        } else if (std.mem.startsWith(u8, line, "author-time ")) {
+            author_time = line["author-time ".len..];
+        } else if (std.mem.startsWith(u8, line, "author-tz ")) {
+            author_tz = line["author-tz ".len..];
+        } else if (std.mem.startsWith(u8, line, "summary ")) {
+            summary = line["summary ".len..];
+        }
+    }
+
+    return try lines.toOwnedSlice(allocator);
+}
+
+fn parseBlameHeader(line: []const u8) ?BlameHeader {
+    var fields = std.mem.tokenizeScalar(u8, line, ' ');
+    const commit = fields.next() orelse return null;
+    _ = fields.next() orelse return null;
+    const final_line = fields.next() orelse return null;
+    return .{
+        .commit = commit,
+        .line_no = std.fmt.parseUnsigned(usize, final_line, 10) catch return null,
+    };
+}
+
+fn appendBlameRecord(
+    lines: *std.ArrayList(BlameLine),
+    allocator: Allocator,
+    header: BlameHeader,
+    author: []const u8,
+    author_time: []const u8,
+    author_tz: []const u8,
+    summary: []const u8,
+    content: []const u8,
+) !void {
+    var record = BlameLine{
+        .commit = try allocator.dupe(u8, header.commit),
+        .short_hash = try shortHashOwned(allocator, header.commit),
+        .author = try allocator.dupe(u8, if (author.len == 0) "Unknown" else author),
+        .date = try authorDateOwned(allocator, author_time, author_tz),
+        .summary = try allocator.dupe(u8, summary),
+        .line_no = header.line_no,
+        .content = try allocator.dupe(u8, content),
+    };
+    errdefer record.deinit(allocator);
+    try lines.append(allocator, record);
+}
+
+fn shortHashOwned(allocator: Allocator, hash: []const u8) ![]u8 {
+    return allocator.dupe(u8, hash[0..@min(hash.len, 8)]);
+}
+
+fn authorDateOwned(allocator: Allocator, author_time: []const u8, author_tz: []const u8) ![]u8 {
+    const parsed = std.fmt.parseInt(i64, author_time, 10) catch return allocator.dupe(u8, "unknown");
+    const adjusted = parsed + parseTimezoneOffset(author_tz);
+    const safe_seconds: u64 = if (adjusted < 0) 0 else @intCast(adjusted);
+    const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = safe_seconds };
+    const year_day = epoch_seconds.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const month = month_day.month.numeric();
+    const day = month_day.day_index + 1;
+    return std.fmt.allocPrint(
+        allocator,
+        "{d}-{s}{d}-{s}{d}",
+        .{ year_day.year, if (month < 10) "0" else "", month, if (day < 10) "0" else "", day },
+    );
+}
+
+fn parseTimezoneOffset(value: []const u8) i64 {
+    if (value.len != 5) return 0;
+    const sign: i64 = switch (value[0]) {
+        '+' => 1,
+        '-' => -1,
+        else => return 0,
+    };
+    const hours = std.fmt.parseInt(i64, value[1..3], 10) catch return 0;
+    const minutes = std.fmt.parseInt(i64, value[3..5], 10) catch return 0;
+    return sign * ((hours * 60 * 60) + (minutes * 60));
+}
+
 fn loadCommitSummary(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?CommitSummary {
     const format = "--format=%H%x09%h%x09%s%x09%cr";
     const raw = if (path.len == 0)
@@ -551,7 +800,6 @@ fn loadTreeNavEntries(allocator: Allocator, repo: Repo, ref: []const u8) !?[]Tre
     var records = std.mem.splitScalar(u8, raw, 0);
     while (records.next()) |record| {
         if (record.len == 0) continue;
-        if (entries.items.len >= max_tree_sidebar_entries) break;
         const tab = std.mem.indexOfScalar(u8, record, '\t') orelse continue;
         const meta = record[0..tab];
         const path = record[tab + 1 ..];
@@ -772,6 +1020,13 @@ fn appendCommitsHref(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const
     }
 }
 
+fn appendBlameHref(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, path: []const u8) !void {
+    try buf.appendSlice(allocator, "/blame?ref=");
+    try appendUrlEncoded(buf, allocator, ref);
+    try buf.appendSlice(allocator, "&path=");
+    try appendUrlEncoded(buf, allocator, path);
+}
+
 fn appendCommitHref(buf: *std.ArrayList(u8), allocator: Allocator, hash: []const u8) !void {
     try buf.appendSlice(allocator, "/commit?sha=");
     try appendUrlEncoded(buf, allocator, hash);
@@ -827,6 +1082,11 @@ fn freeTreeNavEntries(allocator: Allocator, entries: []TreeNavEntry) void {
     allocator.free(entries);
 }
 
+fn freeBlameLines(allocator: Allocator, lines: []BlameLine) void {
+    for (lines) |line| line.deinit(allocator);
+    allocator.free(lines);
+}
+
 fn gitMaybe(allocator: Allocator, repo: Repo, git_args: []const []const u8, max_output_bytes: usize) !?[]u8 {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
@@ -873,4 +1133,24 @@ test "web explorer maps file paths to highlight languages" {
     try std.testing.expectEqualStrings("zig", languageForPath("src/main.zig"));
     try std.testing.expectEqualStrings("markdown", languageForPath("README.md"));
     try std.testing.expectEqualStrings("plaintext", languageForPath("LICENSE"));
+}
+
+test "web explorer parses blame porcelain" {
+    const raw =
+        "0123456789abcdef0123456789abcdef01234567 4 7 1\n" ++
+        "author Alice Example\n" ++
+        "author-time 1700000000\n" ++
+        "author-tz +0200\n" ++
+        "summary Touch code\n" ++
+        "filename src/main.zig\n" ++
+        "\tconst x = 1;\n";
+    const lines = try parseBlamePorcelain(std.testing.allocator, raw);
+    defer freeBlameLines(std.testing.allocator, lines);
+    try std.testing.expectEqual(@as(usize, 1), lines.len);
+    try std.testing.expectEqualStrings("0123456789abcdef0123456789abcdef01234567", lines[0].commit);
+    try std.testing.expectEqualStrings("01234567", lines[0].short_hash);
+    try std.testing.expectEqualStrings("Alice Example", lines[0].author);
+    try std.testing.expectEqualStrings("2023-11-15", lines[0].date);
+    try std.testing.expectEqual(@as(usize, 7), lines[0].line_no);
+    try std.testing.expectEqualStrings("const x = 1;", lines[0].content);
 }
