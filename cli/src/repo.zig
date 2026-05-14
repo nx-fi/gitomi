@@ -654,8 +654,8 @@ pub fn loadGenesisManifest(allocator: Allocator, commit: []const u8) !GenesisMan
     const device_principal = jsonString(device.get("principal")) orelse return invalidGenesis(commit, "device.principal must be a string");
     const device_id = jsonString(device.get("id")) orelse return invalidGenesis(commit, "device.id must be a string");
     const signing_key = jsonObject(device.get("signing_key")) orelse return invalidGenesis(commit, "device.signing_key must be an object");
-    const public_key = jsonString(signing_key.get("public_key")) orelse return invalidGenesis(commit, "signing_key.public_key must be a string");
-    const fingerprint = jsonString(signing_key.get("fingerprint")) orelse return invalidGenesis(commit, "signing_key.fingerprint must be a string");
+    const public_key = jsonString(signing_key.get("public_key")) orelse return invalidGenesis(commit, "signing_key.public_key must be a non-empty string");
+    const fingerprint = jsonString(signing_key.get("fingerprint")) orelse return invalidGenesis(commit, "signing_key.fingerprint must be a non-empty string");
 
     var repo_id_owned: ?[]u8 = try allocator.dupe(u8, repo_id);
     errdefer if (repo_id_owned) |value| allocator.free(value);

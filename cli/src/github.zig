@@ -312,7 +312,7 @@ fn writeImportBotIdentity(allocator: Allocator, principal: []const u8, device: [
     const public_key = try repo_mod.signingPublicKey(allocator);
     defer allocator.free(public_key);
     if (std.mem.trim(u8, public_key, " \t\r\n").len == 0) {
-        try eprint("gt github import: signing public key is required to authorize import-bot\n", .{});
+        try eprint("gt github import: signing public key is required to authorize import-bot; configure Git SSH signing with gpg.format=ssh and user.signingkey\n", .{});
         return CliError.MissingArgument;
     }
     const fingerprint = try repo_mod.signingKeyFingerprint(allocator, public_key);

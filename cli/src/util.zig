@@ -19,7 +19,7 @@ pub fn splitCommaFields(allocator: Allocator, raw: []const u8) !std.ArrayList([]
 
 pub fn checkedRefSegment(allocator: Allocator, raw: []const u8, label: []const u8) ![]u8 {
     if (!isRefSafeSegment(raw)) {
-        try eprint("gt init: {s} must be a ref-safe segment using letters, digits, '.', '_' or '-'\n", .{label});
+        try eprint("gt init: {s} must be a ref-safe segment using letters, digits, '.', '_', '-', or '@'\n", .{label});
         return CliError.InvalidArgument;
     }
     return allocator.dupe(u8, raw);
@@ -32,7 +32,7 @@ pub fn sanitizeRefSegment(allocator: Allocator, raw: []const u8) ![]u8 {
     var last_dash = false;
     for (raw) |c| {
         const lower = std.ascii.toLower(c);
-        const keep = (lower >= 'a' and lower <= 'z') or (lower >= '0' and lower <= '9') or lower == '_' or lower == '.';
+        const keep = (lower >= 'a' and lower <= 'z') or (lower >= '0' and lower <= '9') or lower == '_' or lower == '.' or lower == '@';
         if (keep) {
             try out_buf.append(allocator, lower);
             last_dash = false;
@@ -59,13 +59,14 @@ pub fn sanitizeRefSegment(allocator: Allocator, raw: []const u8) ![]u8 {
 pub fn isRefSafeSegment(value: []const u8) bool {
     if (value.len == 0) return false;
     if (std.mem.eql(u8, value, ".") or std.mem.eql(u8, value, "..")) return false;
+    if (std.mem.indexOf(u8, value, "@{") != null) return false;
     if (std.mem.endsWith(u8, value, ".lock")) return false;
     if (std.mem.indexOf(u8, value, "..") != null) return false;
     for (value) |c| {
         const ok = (c >= 'a' and c <= 'z') or
             (c >= 'A' and c <= 'Z') or
             (c >= '0' and c <= '9') or
-            c == '_' or c == '-' or c == '.';
+            c == '_' or c == '-' or c == '.' or c == '@';
         if (!ok) return false;
     }
     return true;
@@ -198,7 +199,8 @@ test "uuid formatter emits canonical lowercase form" {
 test "ref segment sanitization" {
     const sanitized = try sanitizeRefSegment(std.testing.allocator, "Dev User@example.com");
     defer std.testing.allocator.free(sanitized);
-    try std.testing.expectEqualStrings("dev-user-example.com", sanitized);
+    try std.testing.expectEqualStrings("dev-user@example.com", sanitized);
     try std.testing.expect(isRefSafeSegment(sanitized));
     try std.testing.expect(!isRefSafeSegment("../bad"));
+    try std.testing.expect(!isRefSafeSegment("bad@{ref"));
 }
