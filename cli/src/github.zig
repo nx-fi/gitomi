@@ -230,6 +230,7 @@ fn cmdImport(allocator: Allocator, args: []const []const u8) !void {
         }
     }
 
+    try eprint("gt github import: preparing import actor {s}/{s}\n", .{ options.bot_principal, options.bot_device });
     try ensureImportBot(allocator, options.bot_principal, options.bot_device);
 
     var token_owned: ?[]u8 = null;
@@ -241,6 +242,7 @@ fn cmdImport(allocator: Allocator, args: []const []const u8) !void {
 
     var stats = ImportStats{};
     if (options.from_file) |path| {
+        try eprint("gt github import: reading fixture {s}\n", .{path});
         try importFromFile(allocator, path, options, &stats);
     } else {
         const client = GitHubClient{
@@ -250,6 +252,11 @@ fn cmdImport(allocator: Allocator, args: []const []const u8) !void {
             .token = token,
             .use_gh = options.use_gh,
         };
+        if (options.use_gh) {
+            try eprint("gt github import: using local gh current-repository context\n", .{});
+        } else {
+            try eprint("gt github import: using GitHub API repository {s}\n", .{client.repo.slug});
+        }
         try importFromApi(allocator, client, options, &stats);
     }
 
@@ -366,6 +373,7 @@ fn importFromFile(allocator: Allocator, path: []const u8, options: ImportOptions
     };
 
     if (jsonArray(root.get("issues"))) |issues| {
+        try eprint("gt github import: importing {d} fixture issue record{s}\n", .{ issues.items.len, if (issues.items.len == 1) "" else "s" });
         for (issues.items) |item| {
             if (item != .object) continue;
             if (item.object.get("pull_request") != null) continue;
@@ -375,6 +383,7 @@ fn importFromFile(allocator: Allocator, path: []const u8, options: ImportOptions
         }
     }
     if (jsonArray(root.get("pulls"))) |pulls| {
+        try eprint("gt github import: importing {d} fixture pull record{s}\n", .{ pulls.items.len, if (pulls.items.len == 1) "" else "s" });
         for (pulls.items) |item| {
             if (item != .object) continue;
             const pull_id = try importPullObject(allocator, item.object, options, stats);
@@ -402,12 +411,14 @@ fn importFixtureComments(
     const key = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ parent_kind, number });
     defer allocator.free(key);
     const comments = jsonArray(comments_root.get(key)) orelse return;
+    try eprint("gt github import: importing {d} fixture comment{s} for {s} #{d}\n", .{ comments.items.len, if (comments.items.len == 1) "" else "s", parent_kind, number });
     try importCommentsArray(allocator, parent_kind, parent_id, comments, options, stats);
 }
 
 fn importFromApi(allocator: Allocator, client: GitHubClient, options: ImportOptions, stats: *ImportStats) !void {
     var page: usize = 1;
     while (page <= options.max_pages) : (page += 1) {
+        try eprint("gt github import: fetching issues page {d}\n", .{page});
         const suffix = try std.fmt.allocPrint(allocator, "/issues?state=all&per_page=100&page={d}", .{page});
         defer allocator.free(suffix);
         const path = try client.repoPath(allocator, suffix);
@@ -420,6 +431,7 @@ fn importFromApi(allocator: Allocator, client: GitHubClient, options: ImportOpti
             .array => |array| array,
             else => break,
         };
+        try eprint("gt github import: issues page {d}: {d} record{s}\n", .{ page, issues.items.len, if (issues.items.len == 1) "" else "s" });
         if (issues.items.len == 0) break;
         for (issues.items) |item| {
             if (item != .object) continue;
@@ -433,6 +445,7 @@ fn importFromApi(allocator: Allocator, client: GitHubClient, options: ImportOpti
 
     page = 1;
     while (page <= options.max_pages) : (page += 1) {
+        try eprint("gt github import: fetching pulls page {d}\n", .{page});
         const suffix = try std.fmt.allocPrint(allocator, "/pulls?state=all&per_page=100&page={d}", .{page});
         defer allocator.free(suffix);
         const path = try client.repoPath(allocator, suffix);
@@ -445,6 +458,7 @@ fn importFromApi(allocator: Allocator, client: GitHubClient, options: ImportOpti
             .array => |array| array,
             else => break,
         };
+        try eprint("gt github import: pulls page {d}: {d} record{s}\n", .{ page, pulls.items.len, if (pulls.items.len == 1) "" else "s" });
         if (pulls.items.len == 0) break;
         for (pulls.items) |item| {
             if (item != .object) continue;
@@ -466,6 +480,7 @@ fn importApiComments(
     stats: *ImportStats,
 ) !void {
     if (!options.include_comments) return;
+    try eprint("gt github import: fetching comments for {s} #{d}\n", .{ parent_kind, number });
     const suffix = try std.fmt.allocPrint(allocator, "/issues/{d}/comments?per_page=100", .{number});
     defer allocator.free(suffix);
     const path = try client.repoPath(allocator, suffix);
@@ -478,6 +493,7 @@ fn importApiComments(
         .array => |array| array,
         else => return,
     };
+    try eprint("gt github import: {s} #{d}: {d} comment{s}\n", .{ parent_kind, number, comments.items.len, if (comments.items.len == 1) "" else "s" });
     try importCommentsArray(allocator, parent_kind, parent_id, comments, options, stats);
 }
 
@@ -485,7 +501,10 @@ fn importIssueObject(allocator: Allocator, issue: std.json.ObjectMap, options: I
     const number = jsonInteger(issue.get("number")) orelse return null;
     var repo = try repo_mod.discoverRepo(allocator);
     defer repo.deinit();
-    if (try index.lookupLegacyGithubObjectId(allocator, repo, "issue", number)) |existing| return existing;
+    if (try index.lookupLegacyGithubObjectId(allocator, repo, "issue", number)) |existing| {
+        try eprint("gt github import: issue #{d} already imported\n", .{number});
+        return existing;
+    }
 
     const title = try githubSizedString(allocator, event_mod.jsonString(issue.get("title")), "(untitled)", git.max_payload_title_bytes);
     defer allocator.free(title);
@@ -501,6 +520,7 @@ fn importIssueObject(allocator: Allocator, issue: std.json.ObjectMap, options: I
 
     const issue_id = try util.newUuidV7(allocator);
     errdefer allocator.free(issue_id);
+    try eprint("gt github import: importing issue #{d}\n", .{number});
     try writeImportedIssueOpened(allocator, options, issue_id, @intCast(number), occurred_at, title, body, labels, assignees);
     stats.issues += 1;
 
@@ -519,7 +539,10 @@ fn importPullObject(allocator: Allocator, pull: std.json.ObjectMap, options: Imp
     const number = jsonInteger(pull.get("number")) orelse return null;
     var repo = try repo_mod.discoverRepo(allocator);
     defer repo.deinit();
-    if (try index.lookupLegacyGithubObjectId(allocator, repo, "pull", number)) |existing| return existing;
+    if (try index.lookupLegacyGithubObjectId(allocator, repo, "pull", number)) |existing| {
+        try eprint("gt github import: pull #{d} already imported\n", .{number});
+        return existing;
+    }
 
     const title = try githubSizedString(allocator, event_mod.jsonString(pull.get("title")), "(untitled)", git.max_payload_title_bytes);
     defer allocator.free(title);
@@ -535,6 +558,7 @@ fn importPullObject(allocator: Allocator, pull: std.json.ObjectMap, options: Imp
 
     const pull_id = try util.newUuidV7(allocator);
     errdefer allocator.free(pull_id);
+    try eprint("gt github import: importing pull #{d}\n", .{number});
     try writeImportedPullOpened(allocator, options, pull_id, @intCast(number), occurred_at, title, body, base_ref, head_ref, draft);
     stats.pulls += 1;
 
@@ -569,6 +593,7 @@ fn importCommentsArray(
     var db = try index.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
 
+    var imported: usize = 0;
     for (comments.items) |item| {
         if (item != .object) continue;
         const body = try githubSizedString(allocator, event_mod.jsonString(item.object.get("body")), "", git.max_payload_text_bytes);
@@ -578,7 +603,14 @@ fn importCommentsArray(
         defer allocator.free(occurred_at);
         if (try importedCommentExists(&db, parent_kind, parent_id, occurred_at, body)) continue;
         try writeImportedCommentAdded(allocator, options, parent_kind, parent_id, occurred_at, body);
+        imported += 1;
+        if (imported % 10 == 0) {
+            try eprint("gt github import: imported {d} new comment{s} for {s} #{s}\n", .{ imported, if (imported == 1) "" else "s", parent_kind, parent_id[0..@min(parent_id.len, 7)] });
+        }
         stats.comments += 1;
+    }
+    if (comments.items.len != 0 and (imported == 0 or imported % 10 != 0)) {
+        try eprint("gt github import: imported {d} new comment{s} for {s} #{s}\n", .{ imported, if (imported == 1) "" else "s", parent_kind, parent_id[0..@min(parent_id.len, 7)] });
     }
 }
 

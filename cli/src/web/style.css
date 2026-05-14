@@ -521,18 +521,25 @@ tbody tr:hover {
 .tree-sidebar {
   position: sticky;
   top: 84px;
+  display: flex;
+  flex-direction: column;
   max-height: calc(100vh - 108px);
   overflow: hidden;
 }
 .tree-sidebar-head {
+  flex: 0 0 auto;
   padding: 13px 16px;
   border-bottom: 1px solid var(--border);
   background: var(--panel-strong);
   font-weight: 700;
 }
 .tree-nav {
+  flex: 1 1 auto;
+  min-height: 0;
   max-height: calc(100vh - 158px);
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
   padding: 8px;
 }
 .tree-node {
@@ -823,6 +830,63 @@ tbody tr:hover {
 .line-num:hover { text-decoration: none; }
 .blob-lines code {
   display: block;
+  padding: 0 12px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  font: inherit;
+  white-space: pre;
+}
+.blame-lines {
+  margin: 0;
+  padding: 0;
+  overflow-x: auto;
+  list-style: none;
+  font: 12px/1.55 var(--mono);
+  background: var(--panel);
+}
+.blame-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 260px) 64px minmax(max-content, 1fr);
+  min-height: 22px;
+}
+.blame-row:hover .blame-meta,
+.blame-row:hover .line-num,
+.blame-row:hover .blame-code {
+  background: var(--subtle);
+}
+.blame-meta {
+  display: grid;
+  grid-template-columns: 70px minmax(0, 1fr) 78px;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  padding: 0 10px;
+  color: var(--muted);
+  background: var(--panel-strong);
+  border-right: 1px solid var(--border);
+}
+.blame-hash {
+  overflow: hidden;
+  color: var(--blue);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.blame-author {
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.blame-date {
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.blame-code {
+  display: block;
+  min-width: max-content;
   padding: 0 12px;
   background: transparent;
   border: 0;
@@ -1346,6 +1410,14 @@ textarea {
   }
   .blob-lines li {
     grid-template-columns: 48px minmax(max-content, 1fr);
+  }
+  .blame-row {
+    grid-template-columns: minmax(190px, 220px) 48px minmax(max-content, 1fr);
+  }
+  .blame-meta {
+    grid-template-columns: 62px minmax(0, 1fr) 72px;
+    gap: 6px;
+    padding: 0 8px;
   }
   .facts div {
     grid-template-columns: 1fr;
