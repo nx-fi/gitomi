@@ -618,7 +618,11 @@ fn appendCodeSymbolsSidebar(buf: *std.ArrayList(u8), allocator: Allocator, symbo
             try appendCodeSymbolLink(buf, allocator, symbol);
         }
     }
-    try appendTemplate(buf, allocator, "</nav></aside>", .{});
+    try appendTemplate(buf, allocator,
+        \\  </nav>
+        \\  <div class="symbols-resizer" data-symbols-resizer aria-hidden="true"></div>
+        \\</aside>
+    , .{});
 }
 
 fn appendCodeSymbolLink(buf: *std.ArrayList(u8), allocator: Allocator, symbol: code_symbols.Symbol) !void {

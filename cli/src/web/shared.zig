@@ -926,8 +926,8 @@ fn loadWebStats(allocator: Allocator, repo: Repo) !WebStats {
 
     if (!(index.isIndexFresh(allocator, repo) catch false)) return stats;
     stats.events = countIndexedEvents(allocator, repo) catch 0;
-    stats.issues = index.countIssueOpenedEvents(allocator, repo) catch 0;
-    stats.pulls = index.countPulls(allocator, repo) catch 0;
+    stats.issues = index.countOpenIssues(allocator, repo) catch 0;
+    stats.pulls = index.countOpenPulls(allocator, repo) catch 0;
     return stats;
 }
 
