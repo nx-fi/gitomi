@@ -44,7 +44,7 @@ const appendJsonFieldInteger = json_writer.appendJsonFieldInteger;
 const appendJsonFieldUnsigned = json_writer.appendJsonFieldUnsigned;
 const appendJsonString = json_writer.appendJsonString;
 
-const index_schema_version = "2";
+const index_schema_version = "3";
 pub const index_event_columns = index_query.index_event_columns;
 const snapshot_schema = "urn:gitomi:snapshot:v1";
 const snapshot_schema_version: u64 = 1;
@@ -435,6 +435,8 @@ fn rebuildIndexFromScratch(
         \\DROP TABLE IF EXISTS issues;
         \\DROP TABLE IF EXISTS issue_labels;
         \\DROP TABLE IF EXISTS issue_assignees;
+        \\DROP TABLE IF EXISTS issue_metadata;
+        \\DROP TABLE IF EXISTS issue_projects;
         \\DROP TABLE IF EXISTS pulls;
         \\DROP TABLE IF EXISTS pull_labels;
         \\DROP TABLE IF EXISTS pull_assignees;

@@ -135,7 +135,9 @@ repository and credentials from the current Git checkout. Imported
 issue and pull numbers are preserved as `legacy.github_issue_number` and
 `legacy.github_pull_number`, are materialized in the local index, and can be
 used as `#123`, `gh#123`, or `github:123` references. A later import skips
-issues and pulls whose GitHub number is already present locally.
+issues and pulls whose GitHub number is already present locally. Imported
+issues also retain GitHub authors, labels/tags, milestones, and project column
+placements; pass `--no-projects` to skip GitHub project-card discovery.
 
 `gt github export` replays accepted Gitomi issue, pull, and comment transitions
 through the GitHub API. It stores the Gitomi UUID to GitHub number mapping in
@@ -144,6 +146,7 @@ requests without network writes, or `--reuse-legacy` when exporting back to the
 same GitHub repository that was imported.
 
 `gt web` starts a local-only GitHub-like web UI for the current repository. It
-binds to loopback on port 12655 by default, opens on a committed-tree code explorer, also
-serves overview/issues/events/refs pages, and can create signed issue events
+binds to loopback on port 12655 by default, retrying nearby random ports if that
+port is occupied. It opens on a committed-tree code explorer, also serves
+overview/issues/projects/events/refs pages, and can create signed issue events
 through the same storage path as `gt issue open`.

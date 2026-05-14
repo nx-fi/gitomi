@@ -372,7 +372,13 @@ pub fn listIssuesFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
 
-    var stmt = try db.prepare("SELECT id, title, state, author_principal, opened_at, body FROM issues ORDER BY opened_at DESC, id DESC");
+    var stmt = try db.prepare(
+        \\SELECT i.id, i.title, i.state, i.author_principal, i.opened_at, i.body,
+        \\       COALESCE(m.source_author, ''), COALESCE(m.milestone, '')
+        \\FROM issues i
+        \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
+        \\ORDER BY i.opened_at DESC, i.id DESC
+    );
     defer stmt.deinit();
 
     while (try stmt.step()) {
@@ -388,6 +394,10 @@ pub fn listIssuesFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
         defer allocator.free(opened_at);
         const body = try stmt.columnTextDup(allocator, 5);
         defer allocator.free(body);
+        const source_author = try stmt.columnTextDup(allocator, 6);
+        defer allocator.free(source_author);
+        const milestone = try stmt.columnTextDup(allocator, 7);
+        defer allocator.free(milestone);
 
         if (json) {
             var line: std.ArrayList(u8) = .empty;
@@ -398,12 +408,15 @@ pub fn listIssuesFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
             try appendJsonFieldString(&line, allocator, "title", title, true);
             try appendJsonFieldString(&line, allocator, "body", body, true);
             try appendJsonFieldString(&line, allocator, "author_principal", author, true);
+            if (source_author.len != 0) try appendJsonFieldString(&line, allocator, "source_author", source_author, true);
             try appendJsonFieldString(&line, allocator, "opened_at", opened_at, true);
+            if (milestone.len != 0) try appendJsonFieldString(&line, allocator, "milestone", milestone, true);
             if (try legacyGithubNumberForObjectInDb(&db, "issue", id)) |number| {
                 try appendJsonFieldInteger(&line, allocator, "legacy_github_issue_number", number, true);
             }
             try appendIssueCollectionJsonField(&line, allocator, &db, "labels", "SELECT DISTINCT label FROM issue_labels WHERE issue_id = ? ORDER BY label", id, true);
-            try appendIssueCollectionJsonField(&line, allocator, &db, "assignees", "SELECT DISTINCT assignee FROM issue_assignees WHERE issue_id = ? ORDER BY assignee", id, false);
+            try appendIssueCollectionJsonField(&line, allocator, &db, "assignees", "SELECT DISTINCT assignee FROM issue_assignees WHERE issue_id = ? ORDER BY assignee", id, true);
+            try appendIssueProjectsJsonField(&line, allocator, &db, id, false);
             try line.append(allocator, '}');
             try out("{s}\n", .{line.items});
         } else {
@@ -418,9 +431,11 @@ pub fn showIssueFromIndex(allocator: Allocator, repo: Repo, issue_id: []const u8
     defer db.deinit();
 
     var stmt = try db.prepare(
-        \\SELECT id, title, state, author_principal, author_device, opened_at, body
-        \\FROM issues
-        \\WHERE id = ?
+        \\SELECT i.id, i.title, i.state, i.author_principal, i.author_device, i.opened_at, i.body,
+        \\       COALESCE(m.source_author, ''), COALESCE(m.milestone, '')
+        \\FROM issues i
+        \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
+        \\WHERE i.id = ?
     );
     defer stmt.deinit();
     try stmt.bindText(1, issue_id);
@@ -444,6 +459,10 @@ pub fn showIssueFromIndex(allocator: Allocator, repo: Repo, issue_id: []const u8
     defer allocator.free(opened_at);
     const body = try stmt.columnTextDup(allocator, 6);
     defer allocator.free(body);
+    const source_author = try stmt.columnTextDup(allocator, 7);
+    defer allocator.free(source_author);
+    const milestone = try stmt.columnTextDup(allocator, 8);
+    defer allocator.free(milestone);
 
     if (json) {
         var line: std.ArrayList(u8) = .empty;
@@ -455,12 +474,15 @@ pub fn showIssueFromIndex(allocator: Allocator, repo: Repo, issue_id: []const u8
         try appendJsonFieldString(&line, allocator, "body", body, true);
         try appendJsonFieldString(&line, allocator, "author_principal", author_principal, true);
         try appendJsonFieldString(&line, allocator, "author_device", author_device, true);
+        if (source_author.len != 0) try appendJsonFieldString(&line, allocator, "source_author", source_author, true);
         try appendJsonFieldString(&line, allocator, "opened_at", opened_at, true);
+        if (milestone.len != 0) try appendJsonFieldString(&line, allocator, "milestone", milestone, true);
         if (try legacyGithubNumberForObjectInDb(&db, "issue", id)) |number| {
             try appendJsonFieldInteger(&line, allocator, "legacy_github_issue_number", number, true);
         }
         try appendIssueCollectionJsonField(&line, allocator, &db, "labels", "SELECT DISTINCT label FROM issue_labels WHERE issue_id = ? ORDER BY label", id, true);
         try appendIssueCollectionJsonField(&line, allocator, &db, "assignees", "SELECT DISTINCT assignee FROM issue_assignees WHERE issue_id = ? ORDER BY assignee", id, true);
+        try appendIssueProjectsJsonField(&line, allocator, &db, id, true);
         try appendCommitReferencesJsonField(&line, allocator, &db, "commit_references", "issue", id, false);
         try line.append(allocator, '}');
         try out("{s}\n", .{line.items});
@@ -478,12 +500,23 @@ pub fn showIssueFromIndex(allocator: Allocator, repo: Repo, issue_id: []const u8
     try out("state:     {s}\n", .{state});
     try out("title:     {s}\n", .{title});
     try out("author:    {s}/{s}\n", .{ author_principal, author_device });
+    if (source_author.len != 0) {
+        try out("source:    {s}\n", .{source_author});
+    }
     try out("opened_at: {s}\n", .{opened_at});
     if (try legacyGithubNumberForObjectInDb(&db, "issue", id)) |number| {
         try out("github:    #{d}\n", .{number});
     }
     try out("labels:    {s}\n", .{labels});
     try out("assignees: {s}\n", .{assignees});
+    if (milestone.len != 0) {
+        try out("milestone: {s}\n", .{milestone});
+    }
+    const projects = try issueProjectsText(allocator, &db, id);
+    defer allocator.free(projects);
+    if (projects.len != 0) {
+        try out("projects:  {s}\n", .{projects});
+    }
     try out("commits:   {s}\n", .{commit_references});
     try out("\n{s}\n", .{body});
 }
@@ -669,7 +702,7 @@ pub fn listCommentsFromIndex(
     defer db.deinit();
 
     var stmt = try db.prepare(
-        \\SELECT id, body, redacted, author_principal, created_at
+        \\SELECT id, body, redacted, author_principal, created_at, source_author, reply_parent_id, reply_parent_hash
         \\FROM comments
         \\WHERE parent_kind = ? AND parent_id = ?
         \\ORDER BY created_at, id
@@ -688,6 +721,12 @@ pub fn listCommentsFromIndex(
         defer allocator.free(author);
         const created_at = try stmt.columnTextDup(allocator, 4);
         defer allocator.free(created_at);
+        const source_author = try stmt.columnTextDup(allocator, 5);
+        defer allocator.free(source_author);
+        const reply_parent_id = try stmt.columnTextDup(allocator, 6);
+        defer allocator.free(reply_parent_id);
+        const reply_parent_hash = try stmt.columnTextDup(allocator, 7);
+        defer allocator.free(reply_parent_hash);
 
         if (json) {
             var line: std.ArrayList(u8) = .empty;
@@ -697,13 +736,16 @@ pub fn listCommentsFromIndex(
             try appendJsonFieldBool(&line, allocator, "redacted", redacted, true);
             try appendJsonFieldString(&line, allocator, "body", if (redacted) "" else body, true);
             try appendJsonFieldString(&line, allocator, "author_principal", author, true);
+            if (source_author.len != 0) try appendJsonFieldString(&line, allocator, "source_author", source_author, true);
+            if (reply_parent_id.len != 0) try appendJsonFieldString(&line, allocator, "reply_parent_id", reply_parent_id, true);
+            if (reply_parent_hash.len != 0) try appendJsonFieldString(&line, allocator, "reply_parent_hash", reply_parent_hash, true);
             try appendJsonFieldString(&line, allocator, "created_at", created_at, false);
             try line.append(allocator, '}');
             try out("{s}\n", .{line.items});
         } else {
             try out("#{s} {s}: {s}\n", .{
                 id[0..@min(id.len, 7)],
-                author,
+                if (source_author.len != 0) source_author else author,
                 if (redacted) "[redacted]" else body,
             });
         }
@@ -732,6 +774,41 @@ fn appendIssueCollectionJsonField(
         if (!first) try buf.append(allocator, ',');
         first = false;
         try appendJsonString(buf, allocator, value);
+    }
+    try buf.append(allocator, ']');
+    if (comma) try buf.append(allocator, ',');
+}
+
+fn appendIssueProjectsJsonField(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    issue_id: []const u8,
+    comma: bool,
+) !void {
+    try appendJsonString(buf, allocator, "projects");
+    try buf.appendSlice(allocator, ":[");
+    var stmt = try db.prepare(
+        \\SELECT DISTINCT project, column_name
+        \\FROM issue_projects
+        \\WHERE issue_id = ?
+        \\ORDER BY project, column_name
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+
+    var first = true;
+    while (try stmt.step()) {
+        const project = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(project);
+        const column = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(column);
+        if (!first) try buf.append(allocator, ',');
+        first = false;
+        try buf.append(allocator, '{');
+        try appendJsonFieldString(buf, allocator, "project", project, true);
+        try appendJsonFieldString(buf, allocator, "column", column, false);
+        try buf.append(allocator, '}');
     }
     try buf.append(allocator, ']');
     if (comma) try buf.append(allocator, ',');
@@ -768,6 +845,36 @@ fn appendCommitReferencesJsonField(
     }
     try buf.append(allocator, ']');
     if (comma) try buf.append(allocator, ',');
+}
+
+fn issueProjectsText(allocator: Allocator, db: *SqliteDb, issue_id: []const u8) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    var stmt = try db.prepare(
+        \\SELECT DISTINCT project, column_name
+        \\FROM issue_projects
+        \\WHERE issue_id = ?
+        \\ORDER BY project, column_name
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+
+    var first = true;
+    while (try stmt.step()) {
+        const project = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(project);
+        const column = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(column);
+        if (!first) try buf.appendSlice(allocator, ", ");
+        first = false;
+        try buf.appendSlice(allocator, project);
+        if (column.len != 0) {
+            try buf.appendSlice(allocator, " / ");
+            try buf.appendSlice(allocator, column);
+        }
+    }
+    return buf.toOwnedSlice(allocator);
 }
 
 fn collectionText(

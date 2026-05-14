@@ -6,6 +6,7 @@ const explorer = @import("web/explorer.zig");
 const io = @import("io.zig");
 const issues_page = @import("web/issues.zig");
 const overview_page = @import("web/overview.zig");
+const projects_page = @import("web/projects.zig");
 const refs_page = @import("web/refs.zig");
 const repo_mod = @import("repo.zig");
 const shared = @import("web/shared.zig");
@@ -86,7 +87,7 @@ fn listenWeb(bind_host: []const u8, options: Options) !std.net.Server {
             return CliError.InvalidArgument;
         };
 
-        return address.listen(.{ .reuse_address = true, .kernel_backlog = 32 }) catch |err| {
+        return address.listen(.{ .reuse_address = false, .kernel_backlog = 32 }) catch |err| {
             if (options.port_supplied or err != error.AddressInUse) return err;
             attempts += 1;
             if (attempts >= default_port_attempt_limit) {
@@ -170,6 +171,15 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/issues")) {
         const body = try issues_page.renderIssuesPage(allocator, repo);
+        defer allocator.free(body);
+        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
+    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.startsWith(u8, request.path, "/issues/")) {
+        const issue_ref = request.path["/issues/".len..];
+        const body = try issues_page.renderIssueDetailPage(allocator, repo, issue_ref);
+        defer allocator.free(body);
+        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
+    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/projects")) {
+        const body = try projects_page.renderProjectsPage(allocator, repo);
         defer allocator.free(body);
         try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/events")) {

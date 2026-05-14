@@ -1,6 +1,7 @@
 const std = @import("std");
 const index = @import("../index.zig");
 const issue = @import("../issue.zig");
+const markdown_render = @import("markdown_render.zig");
 const repo_mod = @import("../repo.zig");
 const shared = @import("shared.zig");
 const util = @import("../util.zig");
@@ -39,7 +40,14 @@ pub fn renderIssuesPage(allocator: Allocator, repo: Repo) ![]u8 {
     try ensureIndex(allocator, repo);
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
-    var stmt = try db.prepare("SELECT id, title, state, author_principal, opened_at FROM issues ORDER BY opened_at DESC, id DESC");
+    var stmt = try db.prepare(
+        \\SELECT i.id, i.title, i.state,
+        \\       COALESCE(NULLIF(m.source_author, ''), i.author_principal),
+        \\       i.opened_at
+        \\FROM issues i
+        \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
+        \\ORDER BY i.opened_at DESC, i.id DESC
+    );
     defer stmt.deinit();
 
     var shown: usize = 0;
@@ -59,7 +67,7 @@ pub fn renderIssuesPage(allocator: Allocator, repo: Repo) ![]u8 {
         try appendHtml(&buf, allocator, state);
         try buf.appendSlice(allocator, "\">");
         try appendHtml(&buf, allocator, state);
-        try buf.appendSlice(allocator, "</span><a href=\"/events#");
+        try buf.appendSlice(allocator, "</span><a href=\"/issues/");
         try appendHtml(&buf, allocator, id[0..@min(id.len, 7)]);
         try buf.appendSlice(allocator, "\">");
         try appendHtml(&buf, allocator, title);
@@ -83,6 +91,266 @@ pub fn renderIssuesPage(allocator: Allocator, repo: Repo) ![]u8 {
     );
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
+}
+
+pub fn renderIssueDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
+    try ensureIndex(allocator, repo);
+    const issue_id = index.resolveIssueId(allocator, repo, raw_ref) catch {
+        return renderIssueNotFound(allocator, repo, raw_ref);
+    };
+    defer allocator.free(issue_id);
+
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
+    var stmt = try db.prepare(
+        \\SELECT i.id, i.title, i.state, i.author_principal, i.author_device, i.opened_at, i.body,
+        \\       COALESCE(m.source_author, ''), COALESCE(m.milestone, '')
+        \\FROM issues i
+        \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
+        \\WHERE i.id = ?
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    if (!(try stmt.step())) return renderIssueNotFound(allocator, repo, raw_ref);
+
+    const id = try stmt.columnTextDup(allocator, 0);
+    defer allocator.free(id);
+    const title = try stmt.columnTextDup(allocator, 1);
+    defer allocator.free(title);
+    const state = try stmt.columnTextDup(allocator, 2);
+    defer allocator.free(state);
+    const author_principal = try stmt.columnTextDup(allocator, 3);
+    defer allocator.free(author_principal);
+    const author_device = try stmt.columnTextDup(allocator, 4);
+    defer allocator.free(author_device);
+    const opened_at = try stmt.columnTextDup(allocator, 5);
+    defer allocator.free(opened_at);
+    const body = try stmt.columnTextDup(allocator, 6);
+    defer allocator.free(body);
+    const source_author = try stmt.columnTextDup(allocator, 7);
+    defer allocator.free(source_author);
+    const milestone = try stmt.columnTextDup(allocator, 8);
+    defer allocator.free(milestone);
+
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendShellStart(&buf, allocator, repo, title, "issues");
+    try buf.appendSlice(allocator,
+        \\<section class="panel issue-detail">
+        \\  <div class="section-head issue-detail-head">
+        \\    <div>
+        \\      <p class="eyebrow">Issue</p>
+        \\      <h1>
+    );
+    try appendHtml(&buf, allocator, title);
+    try buf.appendSlice(allocator,
+        \\</h1>
+        \\    </div>
+        \\    <a class="button secondary" href="/issues">Back to issues</a>
+        \\  </div>
+        \\  <div class="issue-detail-body">
+        \\    <aside class="issue-sidebar">
+    );
+    try appendIssueFacts(&buf, allocator, &db, id, state, author_principal, author_device, source_author, opened_at, milestone);
+    try buf.appendSlice(allocator,
+        \\    </aside>
+        \\    <div class="issue-thread">
+        \\      <article class="issue-card">
+        \\        <div class="comment-meta"><strong>
+    );
+    try appendHtml(&buf, allocator, if (source_author.len != 0) source_author else author_principal);
+    try buf.appendSlice(allocator, "</strong><span>");
+    try appendHtml(&buf, allocator, opened_at);
+    try buf.appendSlice(allocator,
+        \\</span></div>
+        \\        <div class="markdown-body">
+    );
+    if (body.len == 0) {
+        try buf.appendSlice(allocator, "<p class=\"muted\">No description provided.</p>");
+    } else {
+        try markdown_render.appendMarkdown(&buf, allocator, body);
+    }
+    try buf.appendSlice(allocator,
+        \\        </div>
+        \\      </article>
+    );
+    try appendIssueComments(&buf, allocator, &db, id);
+    try buf.appendSlice(allocator,
+        \\    </div>
+        \\  </div>
+        \\</section>
+    );
+    try appendShellEnd(&buf, allocator);
+    return buf.toOwnedSlice(allocator);
+}
+
+fn renderIssueNotFound(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try appendShellStart(&buf, allocator, repo, "Issue Not Found", "issues");
+    const detail = try std.fmt.allocPrint(allocator, "No issue matches {s}.", .{raw_ref});
+    defer allocator.free(detail);
+    try appendEmptyState(&buf, allocator, "Issue not found.", detail);
+    try appendShellEnd(&buf, allocator);
+    return buf.toOwnedSlice(allocator);
+}
+
+fn appendIssueFacts(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    issue_id: []const u8,
+    state: []const u8,
+    author_principal: []const u8,
+    author_device: []const u8,
+    source_author: []const u8,
+    opened_at: []const u8,
+    milestone: []const u8,
+) !void {
+    try buf.appendSlice(allocator, "<dl class=\"facts issue-facts\"><div><dt>Status</dt><dd><span class=\"state ");
+    try appendHtml(buf, allocator, state);
+    try buf.appendSlice(allocator, "\">");
+    try appendHtml(buf, allocator, state);
+    try buf.appendSlice(allocator, "</span></dd></div><div><dt>ID</dt><dd><code>");
+    try appendHtml(buf, allocator, issue_id);
+    try buf.appendSlice(allocator, "</code></dd></div><div><dt>Opened</dt><dd>");
+    try appendHtml(buf, allocator, opened_at);
+    try buf.appendSlice(allocator, "</dd></div><div><dt>Author</dt><dd>");
+    try appendHtml(buf, allocator, if (source_author.len != 0) source_author else author_principal);
+    if (source_author.len != 0) {
+        try buf.appendSlice(allocator, " <span class=\"muted\">imported by ");
+        try appendHtml(buf, allocator, author_principal);
+        try buf.appendSlice(allocator, "/");
+        try appendHtml(buf, allocator, author_device);
+        try buf.appendSlice(allocator, "</span>");
+    } else {
+        try buf.appendSlice(allocator, "/");
+        try appendHtml(buf, allocator, author_device);
+    }
+    try buf.appendSlice(allocator, "</dd></div>");
+    if (milestone.len != 0) {
+        try buf.appendSlice(allocator, "<div><dt>Milestone</dt><dd>");
+        try appendHtml(buf, allocator, milestone);
+        try buf.appendSlice(allocator, "</dd></div>");
+    }
+    try appendIssueCollectionFact(buf, allocator, db, "Labels", "SELECT DISTINCT label FROM issue_labels WHERE issue_id = ? ORDER BY label", issue_id);
+    try appendIssueCollectionFact(buf, allocator, db, "Assignees", "SELECT DISTINCT assignee FROM issue_assignees WHERE issue_id = ? ORDER BY assignee", issue_id);
+    try appendIssueProjectsFact(buf, allocator, db, issue_id);
+    try buf.appendSlice(allocator, "</dl>");
+}
+
+fn appendIssueCollectionFact(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    label: []const u8,
+    comptime sql_text: []const u8,
+    issue_id: []const u8,
+) !void {
+    try buf.appendSlice(allocator, "<div><dt>");
+    try appendHtml(buf, allocator, label);
+    try buf.appendSlice(allocator, "</dt><dd class=\"pill-list\">");
+    var stmt = try db.prepare(sql_text);
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    var shown = false;
+    while (try stmt.step()) {
+        const value = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(value);
+        try buf.appendSlice(allocator, "<span class=\"pill\">");
+        try appendHtml(buf, allocator, value);
+        try buf.appendSlice(allocator, "</span>");
+        shown = true;
+    }
+    if (!shown) try buf.appendSlice(allocator, "<span class=\"muted\">None</span>");
+    try buf.appendSlice(allocator, "</dd></div>");
+}
+
+fn appendIssueProjectsFact(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8) !void {
+    var stmt = try db.prepare(
+        \\SELECT DISTINCT project, column_name
+        \\FROM issue_projects
+        \\WHERE issue_id = ?
+        \\ORDER BY project, column_name
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    try buf.appendSlice(allocator, "<div><dt>Projects</dt><dd class=\"pill-list\">");
+    var shown = false;
+    while (try stmt.step()) {
+        const project = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(project);
+        const column = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(column);
+        try buf.appendSlice(allocator, "<span class=\"pill\">");
+        try appendHtml(buf, allocator, project);
+        if (column.len != 0) {
+            try buf.appendSlice(allocator, " / ");
+            try appendHtml(buf, allocator, column);
+        }
+        try buf.appendSlice(allocator, "</span>");
+        shown = true;
+    }
+    if (!shown) try buf.appendSlice(allocator, "<span class=\"muted\">None</span>");
+    try buf.appendSlice(allocator, "</dd></div>");
+}
+
+fn appendIssueComments(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8) !void {
+    var stmt = try db.prepare(
+        \\SELECT id, body, redacted, COALESCE(NULLIF(source_author, ''), author_principal), created_at, reply_parent_id, reply_parent_hash
+        \\FROM comments
+        \\WHERE parent_kind = 'issue' AND parent_id = ?
+        \\ORDER BY created_at, id
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    var shown = false;
+    while (try stmt.step()) {
+        const id = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(id);
+        const body = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(body);
+        const redacted = stmt.columnInt(2) != 0;
+        const author = try stmt.columnTextDup(allocator, 3);
+        defer allocator.free(author);
+        const created_at = try stmt.columnTextDup(allocator, 4);
+        defer allocator.free(created_at);
+        const reply_parent_id = try stmt.columnTextDup(allocator, 5);
+        defer allocator.free(reply_parent_id);
+        const reply_parent_hash = try stmt.columnTextDup(allocator, 6);
+        defer allocator.free(reply_parent_hash);
+
+        try buf.appendSlice(allocator, "<article class=\"issue-card comment-card");
+        if (reply_parent_id.len != 0 or reply_parent_hash.len != 0) try buf.appendSlice(allocator, " is-reply");
+        try buf.appendSlice(allocator, "\"><div class=\"comment-meta\"><strong>");
+        try appendHtml(buf, allocator, author);
+        try buf.appendSlice(allocator, "</strong><span>");
+        try appendHtml(buf, allocator, created_at);
+        try buf.appendSlice(allocator, "</span></div>");
+        if (reply_parent_id.len != 0 or reply_parent_hash.len != 0) {
+            try buf.appendSlice(allocator, "<p class=\"reply-note\">Reply to ");
+            if (reply_parent_id.len != 0) {
+                try buf.appendSlice(allocator, "#");
+                try appendHtml(buf, allocator, reply_parent_id[0..@min(reply_parent_id.len, 7)]);
+            } else {
+                try appendHtml(buf, allocator, reply_parent_hash[0..@min(reply_parent_hash.len, 12)]);
+            }
+            try buf.appendSlice(allocator, "</p>");
+        }
+        try buf.appendSlice(allocator, "<div class=\"markdown-body\">");
+        if (redacted) {
+            try buf.appendSlice(allocator, "<p class=\"muted\">Comment redacted.</p>");
+        } else {
+            try markdown_render.appendMarkdown(buf, allocator, body);
+        }
+        try buf.appendSlice(allocator, "</div></article>");
+        shown = true;
+    }
+    if (!shown) {
+        try buf.appendSlice(allocator, "<div class=\"empty inline-empty\"><strong>No comments yet.</strong></div>");
+    }
 }
 
 pub fn renderIssueForm(

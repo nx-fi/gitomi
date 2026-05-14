@@ -135,7 +135,7 @@ fn printUsage() !void {
         \\  gt actions run-requested [RUN] [--dry-run] [--act PATH] [-- ACT_ARGS...]
         \\  gt runs prune [--dry-run] [--max-age-days N] [--max-count N] [--max-bytes N]
         \\  gt sync [--remote REMOTE] [--pull-only|--push-only]
-        \\  gt github import [--repo OWNER/REPO] [--token TOKEN] [--from-file PATH] [--no-comments]
+        \\  gt github import [--repo OWNER/REPO] [--token TOKEN] [--from-file PATH] [--no-comments] [--no-projects]
         \\  gt github export --repo OWNER/REPO [--token TOKEN] [--dry-run] [--map-file PATH] [--reuse-legacy]
         \\  gt web [--host 127.0.0.1] [--port 12655]
         \\
