@@ -1,8 +1,49 @@
 (function () {
   "use strict";
 
+  const symbolsStorageKey = "gitomi.symbolsPanel";
+
   function setButtonState(button, label) {
     button.textContent = label;
+  }
+
+  function storedSymbolsVisible() {
+    try {
+      return window.localStorage.getItem(symbolsStorageKey) !== "hidden";
+    } catch (_) {
+      return true;
+    }
+  }
+
+  function storeSymbolsVisible(visible) {
+    try {
+      if (visible) {
+        window.localStorage.removeItem(symbolsStorageKey);
+      } else {
+        window.localStorage.setItem(symbolsStorageKey, "hidden");
+      }
+    } catch (_) {}
+  }
+
+  function setSymbolsVisible(layout, sidebar, button, visible, persist) {
+    layout.classList.toggle("symbols-collapsed", !visible);
+    sidebar.hidden = !visible;
+    button.setAttribute("aria-expanded", String(visible));
+    button.textContent = visible ? "Hide symbols" : "Show symbols";
+    button.title = visible ? "Hide symbols panel" : "Show symbols panel";
+    if (persist) storeSymbolsVisible(visible);
+  }
+
+  function initSymbolsToggle(button) {
+    const sidebarId = button.getAttribute("aria-controls");
+    const sidebar = sidebarId ? document.getElementById(sidebarId) : document.querySelector("[data-symbols-sidebar]");
+    const layout = button.closest(".code-layout") || document.querySelector(".code-layout.has-symbols");
+    if (!sidebar || !layout) return;
+
+    setSymbolsVisible(layout, sidebar, button, storedSymbolsVisible(), false);
+    button.addEventListener("click", function () {
+      setSymbolsVisible(layout, sidebar, button, button.getAttribute("aria-expanded") !== "true", true);
+    });
   }
 
   async function copyText(text) {
@@ -53,9 +94,18 @@
     document.querySelectorAll("[data-copy-raw]").forEach(initCopyButton);
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", initCopyButtons);
-  } else {
+  function initSymbolsToggles() {
+    document.querySelectorAll("[data-symbols-toggle]").forEach(initSymbolsToggle);
+  }
+
+  function initCodeControls() {
     initCopyButtons();
+    initSymbolsToggles();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initCodeControls);
+  } else {
+    initCodeControls();
   }
 })();
