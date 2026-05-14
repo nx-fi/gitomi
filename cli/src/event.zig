@@ -72,6 +72,27 @@ pub const IssueUpdate = struct {
     }
 };
 
+pub const ProjectUpdate = struct {
+    name: ?[]const u8 = null,
+    description: ?[]const u8 = null,
+    state: ?[]const u8 = null,
+
+    pub fn hasChanges(self: ProjectUpdate) bool {
+        return self.name != null or self.description != null or self.state != null;
+    }
+};
+
+pub const MilestoneUpdate = struct {
+    title: ?[]const u8 = null,
+    description: ?[]const u8 = null,
+    due_at: ?[]const u8 = null,
+    state: ?[]const u8 = null,
+
+    pub fn hasChanges(self: MilestoneUpdate) bool {
+        return self.title != null or self.description != null or self.due_at != null or self.state != null;
+    }
+};
+
 pub const PullUpdate = struct {
     title: ?[]const u8 = null,
     body: ?[]const u8 = null,
@@ -332,6 +353,160 @@ pub fn buildIssueUpdatedJson(
     if (buf.items[buf.items.len - 1] == ',') {
         buf.items.len -= 1;
     }
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildProjectCreatedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    project_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    name: []const u8,
+    description: []const u8,
+    columns: []const []const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, project_id, event_uuid, idem, occurred_at, parents, "project.created", "project");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "name", name, true);
+    if (description.len != 0) try appendJsonFieldString(&buf, allocator, "description", description, true);
+    if (columns.len != 0) try appendJsonFieldStringArray(&buf, allocator, "columns", columns, true);
+    if (buf.items[buf.items.len - 1] == ',') {
+        buf.items.len -= 1;
+    }
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildProjectUpdatedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    project_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    update: ProjectUpdate,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, project_id, event_uuid, idem, occurred_at, parents, "project.updated", "project");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    if (update.name) |value| try appendJsonFieldString(&buf, allocator, "name", value, true);
+    if (update.description) |value| try appendJsonFieldString(&buf, allocator, "description", value, true);
+    if (update.state) |value| try appendJsonFieldString(&buf, allocator, "state", value, true);
+    if (buf.items[buf.items.len - 1] == ',') {
+        buf.items.len -= 1;
+    }
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildProjectColumnEventJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    project_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    event_type: []const u8,
+    column: []const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, project_id, event_uuid, idem, occurred_at, parents, event_type, "project");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "column", column, false);
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildMilestoneCreatedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    milestone_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    title: []const u8,
+    description: []const u8,
+    due_at: []const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, milestone_id, event_uuid, idem, occurred_at, parents, "milestone.created", "milestone");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "title", title, true);
+    if (description.len != 0) try appendJsonFieldString(&buf, allocator, "description", description, true);
+    if (due_at.len != 0) try appendJsonFieldString(&buf, allocator, "due_at", due_at, true);
+    if (buf.items[buf.items.len - 1] == ',') {
+        buf.items.len -= 1;
+    }
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildMilestoneUpdatedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    milestone_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    update: MilestoneUpdate,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, milestone_id, event_uuid, idem, occurred_at, parents, "milestone.updated", "milestone");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    if (update.title) |value| try appendJsonFieldString(&buf, allocator, "title", value, true);
+    if (update.description) |value| try appendJsonFieldString(&buf, allocator, "description", value, true);
+    if (update.due_at) |value| try appendJsonFieldString(&buf, allocator, "due_at", value, true);
+    if (update.state) |value| try appendJsonFieldString(&buf, allocator, "state", value, true);
+    if (buf.items[buf.items.len - 1] == ',') {
+        buf.items.len -= 1;
+    }
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildMilestoneStringPayloadJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    milestone_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    event_type: []const u8,
+    payload_key: []const u8,
+    payload_value: []const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, milestone_id, event_uuid, idem, occurred_at, parents, event_type, "milestone");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, payload_key, payload_value, false);
     try buf.appendSlice(allocator, "}}");
     return try buf.toOwnedSlice(allocator);
 }
@@ -1100,6 +1275,8 @@ fn validateEnvelopeStringArray(allocator: Allocator, object: std.json.ObjectMap,
 pub fn isKnownObjectKind(kind: []const u8) bool {
     return std.mem.eql(u8, kind, "issue") or
         std.mem.eql(u8, kind, "pull") or
+        std.mem.eql(u8, kind, "project") or
+        std.mem.eql(u8, kind, "milestone") or
         std.mem.eql(u8, kind, "comment") or
         std.mem.eql(u8, kind, "acl") or
         std.mem.eql(u8, kind, "identity") or
@@ -1120,6 +1297,12 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
     }
     if (std.mem.startsWith(u8, event_type, "pull.") and !std.mem.eql(u8, object_kind, "pull")) {
         return "pull event object.kind must be pull";
+    }
+    if (std.mem.startsWith(u8, event_type, "project.") and !std.mem.eql(u8, object_kind, "project")) {
+        return "project event object.kind must be project";
+    }
+    if (std.mem.startsWith(u8, event_type, "milestone.") and !std.mem.eql(u8, object_kind, "milestone")) {
+        return "milestone event object.kind must be milestone";
     }
     if (std.mem.startsWith(u8, event_type, "comment.") and !std.mem.eql(u8, object_kind, "comment")) {
         return "comment event object.kind must be comment";
@@ -1179,6 +1362,56 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!stringWithin(payload, "project", git.max_payload_atom_bytes)) return "issue project event payload.project exceeds v1 field size limit";
         if (!hasString(payload, "column")) return "issue project event payload.column must be a string";
         if (!stringWithin(payload, "column", git.max_payload_atom_bytes)) return "issue project event payload.column exceeds v1 field size limit";
+        return null;
+    }
+
+    if (std.mem.eql(u8, event_type, "project.created")) {
+        if (!hasString(payload, "name")) return "project.created payload.name must be a string";
+        if (!stringWithin(payload, "name", git.max_payload_atom_bytes)) return "project.created payload.name exceeds v1 field size limit";
+        if (!optionalStringWithin(payload, "description", git.max_payload_text_bytes)) return "project.created payload.description exceeds v1 text size limit";
+        if (!optionalStringWithin(payload, "slug", git.max_payload_atom_bytes)) return "project.created payload.slug exceeds v1 field size limit";
+        if (!optionalStringArray(payload, "columns")) return "project.created payload.columns must be an array of strings";
+        if (!optionalStringArrayWithin(payload, "columns", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "project.created payload.columns exceeds v1 collection limits";
+        return null;
+    }
+    if (std.mem.eql(u8, event_type, "project.updated")) {
+        if (!optionalString(payload, "name")) return "project.updated payload.name must be a string";
+        if (!optionalStringWithin(payload, "name", git.max_payload_atom_bytes)) return "project.updated payload.name exceeds v1 field size limit";
+        if (!optionalString(payload, "description")) return "project.updated payload.description must be a string";
+        if (!optionalStringWithin(payload, "description", git.max_payload_text_bytes)) return "project.updated payload.description exceeds v1 text size limit";
+        if (!optionalState(payload, "state", &.{ "open", "closed" })) return "project.updated payload.state must be open or closed";
+        if (!hasAnyKey(payload, &.{ "name", "description", "state" })) return "project.updated payload must contain at least one update field";
+        return null;
+    }
+    if (std.mem.eql(u8, event_type, "project.column_added") or std.mem.eql(u8, event_type, "project.column_removed")) {
+        if (!hasString(payload, "column")) return "project column event payload.column must be a string";
+        if (!stringWithin(payload, "column", git.max_payload_atom_bytes)) return "project column event payload.column exceeds v1 field size limit";
+        if (!optionalStringWithin(payload, "column_ref", git.max_payload_atom_bytes)) return "project column event payload.column_ref exceeds v1 field size limit";
+        return null;
+    }
+
+    if (std.mem.eql(u8, event_type, "milestone.created")) {
+        if (!hasString(payload, "title")) return "milestone.created payload.title must be a string";
+        if (!stringWithin(payload, "title", git.max_payload_atom_bytes)) return "milestone.created payload.title exceeds v1 field size limit";
+        if (!optionalString(payload, "description")) return "milestone.created payload.description must be a string";
+        if (!optionalStringWithin(payload, "description", git.max_payload_text_bytes)) return "milestone.created payload.description exceeds v1 text size limit";
+        if (!optionalStringWithin(payload, "slug", git.max_payload_atom_bytes)) return "milestone.created payload.slug exceeds v1 field size limit";
+        if (!optionalStringWithin(payload, "due_at", git.max_payload_atom_bytes)) return "milestone.created payload.due_at exceeds v1 field size limit";
+        if (!optionalState(payload, "state", &.{ "open", "closed" })) return "milestone.created payload.state must be open or closed";
+        return null;
+    }
+    if (std.mem.eql(u8, event_type, "milestone.updated")) {
+        if (!optionalString(payload, "title")) return "milestone.updated payload.title must be a string";
+        if (!optionalStringWithin(payload, "title", git.max_payload_atom_bytes)) return "milestone.updated payload.title exceeds v1 field size limit";
+        if (!optionalString(payload, "description")) return "milestone.updated payload.description must be a string";
+        if (!optionalStringWithin(payload, "description", git.max_payload_text_bytes)) return "milestone.updated payload.description exceeds v1 text size limit";
+        if (!optionalStringWithin(payload, "due_at", git.max_payload_atom_bytes)) return "milestone.updated payload.due_at exceeds v1 field size limit";
+        if (!optionalState(payload, "state", &.{ "open", "closed" })) return "milestone.updated payload.state must be open or closed";
+        if (!hasAnyKey(payload, &.{ "title", "description", "due_at", "state" })) return "milestone.updated payload must contain at least one update field";
+        return null;
+    }
+    if (std.mem.eql(u8, event_type, "milestone.state_set")) {
+        if (!hasState(payload, "state", &.{ "open", "closed" })) return "milestone.state_set payload.state must be open or closed";
         return null;
     }
 
@@ -1316,6 +1549,14 @@ pub fn objectIdRequirementError(event_type: []const u8, object_kind: []const u8,
     }
     if (std.mem.startsWith(u8, event_type, "pull.") and std.mem.eql(u8, object_kind, "pull")) {
         if (!looksLikeUuid(object_id)) return "pull event object.id must be a UUID";
+        return null;
+    }
+    if (std.mem.startsWith(u8, event_type, "project.") and std.mem.eql(u8, object_kind, "project")) {
+        if (!looksLikeUuid(object_id)) return "project event object.id must be a UUID";
+        return null;
+    }
+    if (std.mem.startsWith(u8, event_type, "milestone.") and std.mem.eql(u8, object_kind, "milestone")) {
+        if (!looksLikeUuid(object_id)) return "milestone event object.id must be a UUID";
         return null;
     }
     if (std.mem.startsWith(u8, event_type, "comment.") and std.mem.eql(u8, object_kind, "comment")) {

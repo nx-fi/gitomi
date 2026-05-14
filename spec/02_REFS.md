@@ -29,6 +29,11 @@ refs/gitomi/
 
 Implementations MUST NOT write Gitomi data outside `refs/gitomi/`.
 
+Gitomi object references such as `#018f000`, `@roadmap`, and `^v1.0` are
+human-facing reference tokens, not Git refnames. They MUST NOT be stored as
+refs under `refs/gitomi/`; they are aliases derived from accepted event
+payloads and the local projection.
+
 ### 2.2. Genesis Ref
 
 ```
@@ -190,6 +195,33 @@ When deriving a ref segment from external input (e.g., a Git remote name, email 
 3.  Strip leading and trailing hyphens and periods.
 4.  If the result is empty or invalid, generate a fallback (e.g., a UUID-prefix-based segment).
 
+### 3.4. Human Object Reference Tokens
+
+Gitomi uses a small reference-token grammar for user input, rendered links, and
+payload aliases. These tokens are not Git refs and do not authorize access.
+
+| Token | Target |
+|-------|--------|
+| `#<uuid-prefix>` | Issue in issue context, or issue/pull when the caller resolves both |
+| `issue:<uuid-prefix>` | Issue |
+| `pr:<uuid-prefix>` or `pull:<uuid-prefix>` | Pull request |
+| `project:<uuid-prefix>` | Project by UUID prefix |
+| `@<project-slug>` | Project by slug |
+| `milestone:<uuid-prefix>` | Milestone by UUID prefix |
+| `^<milestone-slug>` | Milestone by slug |
+| `@<project-slug>/<column-slug>` | Kanban column on a project |
+
+UUID prefixes MUST be at least 7 lowercase hexadecimal characters and MUST be
+extended when ambiguous. Project, milestone, and column slugs MUST be ref-safe
+segments (§3.1) generated with the sanitization algorithm in §3.3. If a slug
+would collide in the local projection, the writer MUST append a disambiguating
+suffix, normally `-<uuid-prefix>`.
+
+Accepted event payloads MUST carry display names (`project`, `column`, `name`,
+or `title`) even when they also carry slug or UUID aliases. Reducers MUST treat
+the UUID in `object.id` as authoritative for created project and milestone
+objects.
+
 ## 4. Event Hashes and Inbox Commit Format
 
 ### 4.0. Event Hash Identity
@@ -328,7 +360,7 @@ Every event body MUST be a single JSON object conforming to:
     "event_uuid": "<UUIDv7>",
     "event_type": "<family>.<action>",
     "object": {
-        "kind": "<issue|pull|comment|acl|identity|action>",
+        "kind": "<issue|pull|project|milestone|comment|acl|identity|action>",
         "id": "<object-id>"
     },
     "idempotency_key": "<UUIDv7>",
@@ -357,7 +389,7 @@ Every event body MUST be a single JSON object conforming to:
 | `event_uuid`        | UUIDv7  | Client-generated idempotency/display label. MUST NOT be trusted as the event's authoritative identity. |
 | `event_type`        | string  | Dot-separated family and action (e.g., `issue.opened`). |
 | `object.kind`       | string  | Object type this event targets. MUST match the event family prefix. |
-| `object.id`         | string  | Stable identifier for the logical object. Issue, pull, comment, and action run IDs are UUIDv7. ACL IDs are `acl:<principal>`. Identity IDs are `identity:<principal>:<device>`. |
+| `object.id`         | string  | Stable identifier for the logical object. Issue, pull, project, milestone, comment, and action run IDs are UUIDv7. ACL IDs are `acl:<principal>`. Identity IDs are `identity:<principal>:<device>`. |
 | `idempotency_key`   | UUIDv7  | Deduplication key. Duplicate keys within the same `repo_id` MUST be suppressed. |
 | `actor.principal`   | string  | The acting principal. MUST match the commit signature identity. |
 | `actor.device`      | string  | The device that created the event. MUST be ref-safe. |
@@ -377,6 +409,8 @@ The `object.kind` MUST agree with the `event_type` prefix:
 |-----------------|------------------------|
 | `issue.*`       | `issue`                |
 | `pull.*`        | `pull`                 |
+| `project.*`     | `project`              |
+| `milestone.*`   | `milestone`            |
 | `comment.*`     | `comment`              |
 | `acl.*`         | `acl`                  |
 | `identity.*`    | `identity`             |
@@ -390,6 +424,8 @@ The `object.id` value MUST match the event family:
 |---------------------------|---------------------------|
 | `issue.*`                 | UUIDv7 issue id |
 | `pull.*`                  | UUIDv7 pull id |
+| `project.*`               | UUIDv7 project id |
+| `milestone.*`             | UUIDv7 milestone id |
 | `comment.*`               | UUIDv7 comment id |
 | `acl.role_granted` / `acl.role_revoked` | `acl:<payload.principal>` |
 | `identity.device_added` / `identity.device_revoked` | `identity:<payload.principal>:<payload.device>` |
@@ -419,10 +455,13 @@ fsck, and index rebuild:
 | Issue, pull request, and comment body fields | 64 KiB |
 | Public signing key payload fields | 16 KiB |
 | Principal, device, label, assignee, reviewer, workflow, and conclusion strings | 256 bytes each |
+| Project, milestone, and kanban column names or slugs | 256 bytes each |
 | Data Plane ref or object-id payload strings | 512 bytes each |
 | Collection delta arrays in one event | 128 entries |
 | Visible labels on one issue or pull request | 256 |
 | Visible assignees or reviewers on one issue or pull request | 128 |
+| Visible project placements on one issue | 256 |
+| Visible kanban columns on one project | 128 |
 | Snapshot tree size | 64 MiB |
 | Retained snapshot refs per repository | 32 |
 
@@ -621,5 +660,8 @@ The SQLite index materializes event data from inbox refs for fast querying. Its 
 *   `meta`: Key-value table for schema version tracking.
 *   `ref_heads`: Current OID for each indexed inbox ref (used for staleness detection).
 *   `events`: Ordered event records extracted from inbox commits.
+*   `projects` and `project_columns`: Current project metadata and kanban
+    column projection.
+*   `milestones`: Current milestone metadata.
 
-The index is rebuilt from scratch when the ref heads diverge from the stored snapshot. See the product specification (§6.6) for rebuild rules.
+The index is rebuilt from scratch when the ref heads diverge from the stored snapshot. See the product specification (§6.8) for rebuild rules.

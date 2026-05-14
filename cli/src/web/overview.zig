@@ -53,6 +53,8 @@ const SlocStats = struct {
 };
 
 pub fn renderHomePage(allocator: Allocator, repo: Repo) ![]u8 {
+    if (try shared.renderIndexingPageIfStale(allocator, repo, "Overview", "overview", "/overview")) |body| return body;
+
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 

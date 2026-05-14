@@ -2,6 +2,7 @@ const std = @import("std");
 const errors = @import("../errors.zig");
 const git = @import("../git.zig");
 const index = @import("../index.zig");
+const json_writer = @import("../json_writer.zig");
 const repo_mod = @import("../repo.zig");
 const util = @import("../util.zig");
 
@@ -11,8 +12,8 @@ const Config = repo_mod.Config;
 const Repo = repo_mod.Repo;
 const countIndexedEvents = index.countIndexedEvents;
 const countNonEmptyLines = util.countNonEmptyLines;
-const ensureIndex = index.ensureIndex;
 const gitChecked = git.gitChecked;
+const appendJsonString = json_writer.appendJsonString;
 const loadConfig = repo_mod.loadConfig;
 
 const WebStats = struct {
@@ -150,6 +151,59 @@ pub fn appendEmptyState(buf: *std.ArrayList(u8), allocator: Allocator, title: []
     try buf.appendSlice(allocator, "</p></div>");
 }
 
+pub fn renderIndexingPageIfStale(
+    allocator: Allocator,
+    repo: Repo,
+    title: []const u8,
+    active: []const u8,
+    return_target: []const u8,
+) !?[]u8 {
+    if (index.isIndexFresh(allocator, repo) catch false) return null;
+    return try renderIndexingPage(allocator, repo, title, active, return_target);
+}
+
+fn renderIndexingPage(
+    allocator: Allocator,
+    repo: Repo,
+    title: []const u8,
+    active: []const u8,
+    return_target: []const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendShellStart(&buf, allocator, repo, title, active);
+    try buf.appendSlice(allocator,
+        \\<section class="panel indexing-panel">
+        \\  <div class="indexing-cue">
+        \\    <span class="index-spinner" aria-hidden="true"></span>
+        \\    <div>
+        \\      <p class="eyebrow">Index refresh</p>
+        \\      <h1>Updating Gitomi index</h1>
+        \\      <p class="muted">Reading Gitomi events and refreshing local projections. This page will continue automatically.</p>
+        \\    </div>
+        \\  </div>
+        \\  <div class="index-progress" aria-hidden="true"><span></span></div>
+        \\</section>
+        \\<script>
+        \\(function () {
+        \\  var next =
+    );
+    try appendJsonString(&buf, allocator, return_target);
+    try buf.appendSlice(allocator,
+        \\;
+        \\  fetch("/index/rebuild", { cache: "no-store" }).then(function () {
+        \\    window.location.replace(next);
+        \\  }).catch(function () {
+        \\    setTimeout(function () { window.location.reload(); }, 2500);
+        \\  });
+        \\}());
+        \\</script>
+    );
+    try appendShellEnd(&buf, allocator);
+    return buf.toOwnedSlice(allocator);
+}
+
 pub fn appendHtml(buf: *std.ArrayList(u8), allocator: Allocator, value: []const u8) !void {
     for (value) |c| {
         switch (c) {
@@ -210,17 +264,14 @@ pub fn sendResponse(
 }
 
 fn loadWebStats(allocator: Allocator, repo: Repo) !WebStats {
-    try ensureIndex(allocator, repo);
-    const inbox_refs = try countRefsWithPrefix(allocator, "refs/gitomi/inbox");
-    const staged_refs = try countRefsWithPrefix(allocator, "refs/gitomi/staging");
-    const events = try countIndexedEvents(allocator, repo);
-    const issues = try index.countIssueOpenedEvents(allocator, repo);
-    return .{
-        .inbox_refs = inbox_refs,
-        .staged_refs = staged_refs,
-        .events = events,
-        .issues = issues,
-    };
+    var stats = WebStats{};
+    stats.inbox_refs = countRefsWithPrefix(allocator, "refs/gitomi/inbox") catch 0;
+    stats.staged_refs = countRefsWithPrefix(allocator, "refs/gitomi/staging") catch 0;
+
+    if (!(index.isIndexFresh(allocator, repo) catch false)) return stats;
+    stats.events = countIndexedEvents(allocator, repo) catch 0;
+    stats.issues = index.countIssueOpenedEvents(allocator, repo) catch 0;
+    return stats;
 }
 
 fn countRefsWithPrefix(allocator: Allocator, prefix: []const u8) !usize {

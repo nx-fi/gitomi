@@ -908,6 +908,49 @@ backup_refs="$(git --git-dir="$scope_root/backup.git" for-each-ref '--format=%(r
 assert_contains "$backup_refs" "refs/gitomi/inbox/bob/desktop"
 assert_not_contains "$backup_refs" "refs/gitomi/inbox/alice/laptop"
 
+echo "integration: local clear requires confirmation"
+clear_local="$ROOT/clear-local"
+init_repo "$clear_local"
+(
+  cd "$clear_local"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  gt issue open --title "Local clear issue" >/dev/null
+  if printf 'no\n' | gt clear local >/dev/null 2>&1; then
+    fail "expected local clear to abort on mismatched confirmation"
+  fi
+  refs="$(gt refs)"
+  assert_contains "$refs" "refs/gitomi/genesis"
+  assert_contains "$refs" "refs/gitomi/inbox/alice/laptop"
+  printf 'delete local gitomi refs\n' | gt clear local >/dev/null
+  refs="$(gt refs)"
+  assert_contains "$refs" "no Gitomi refs"
+)
+
+echo "integration: remote reset requires confirmation"
+clear_remote="$ROOT/clear-remote"
+mkdir -p "$clear_remote"
+git -C "$clear_remote" init --bare remote.git >/dev/null
+init_repo "$clear_remote/source"
+git -C "$clear_remote/source" remote add origin "$clear_remote/remote.git"
+(
+  cd "$clear_remote/source"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  gt issue open --title "Remote clear issue" >/dev/null
+  gt sync --push-only >/dev/null
+  if printf 'no\n' | gt reset remote --remote origin >/dev/null 2>&1; then
+    fail "expected remote reset to abort on mismatched confirmation"
+  fi
+)
+remote_refs="$(git --git-dir="$clear_remote/remote.git" for-each-ref '--format=%(refname)' refs/gitomi)"
+assert_contains "$remote_refs" "refs/gitomi/genesis"
+assert_contains "$remote_refs" "refs/gitomi/inbox/alice/laptop"
+(
+  cd "$clear_remote/source"
+  printf 'delete remote gitomi refs from origin\n' | gt reset remote --remote origin >/dev/null
+)
+remote_refs="$(git --git-dir="$clear_remote/remote.git" for-each-ref '--format=%(refname)' refs/gitomi)"
+[[ -z "$remote_refs" ]] || fail "expected remote Gitomi refs to be deleted"$'\n'"$remote_refs"
+
 echo "integration: causal parents are capped"
 cap_repo="$ROOT/causal-cap"
 init_repo "$cap_repo"

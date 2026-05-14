@@ -101,6 +101,55 @@ pub fn createIndexSchema(db: *SqliteDb) !void {
         \\  PRIMARY KEY(issue_id, project, column_name, add_hash)
         \\);
         \\CREATE INDEX issue_projects_project_idx ON issue_projects(project, column_name, issue_id);
+        \\CREATE TABLE projects (
+        \\  id TEXT PRIMARY KEY,
+        \\  name TEXT NOT NULL,
+        \\  name_occurred_at TEXT NOT NULL,
+        \\  name_actor_principal TEXT NOT NULL,
+        \\  name_event_hash TEXT NOT NULL,
+        \\  description TEXT NOT NULL,
+        \\  description_occurred_at TEXT NOT NULL,
+        \\  description_actor_principal TEXT NOT NULL,
+        \\  description_event_hash TEXT NOT NULL,
+        \\  state TEXT NOT NULL,
+        \\  state_occurred_at TEXT NOT NULL,
+        \\  state_actor_principal TEXT NOT NULL,
+        \\  state_event_hash TEXT NOT NULL,
+        \\  created_at TEXT NOT NULL,
+        \\  author_principal TEXT NOT NULL,
+        \\  author_device TEXT NOT NULL
+        \\);
+        \\CREATE INDEX projects_name_idx ON projects(name, id);
+        \\CREATE TABLE project_columns (
+        \\  project_id TEXT NOT NULL,
+        \\  column_name TEXT NOT NULL,
+        \\  add_hash TEXT NOT NULL,
+        \\  PRIMARY KEY(project_id, column_name, add_hash)
+        \\);
+        \\CREATE INDEX project_columns_project_idx ON project_columns(project_id, column_name);
+        \\CREATE TABLE milestones (
+        \\  id TEXT PRIMARY KEY,
+        \\  title TEXT NOT NULL,
+        \\  title_occurred_at TEXT NOT NULL,
+        \\  title_actor_principal TEXT NOT NULL,
+        \\  title_event_hash TEXT NOT NULL,
+        \\  description TEXT NOT NULL,
+        \\  description_occurred_at TEXT NOT NULL,
+        \\  description_actor_principal TEXT NOT NULL,
+        \\  description_event_hash TEXT NOT NULL,
+        \\  due_at TEXT NOT NULL,
+        \\  due_at_occurred_at TEXT NOT NULL,
+        \\  due_at_actor_principal TEXT NOT NULL,
+        \\  due_at_event_hash TEXT NOT NULL,
+        \\  state TEXT NOT NULL,
+        \\  state_occurred_at TEXT NOT NULL,
+        \\  state_actor_principal TEXT NOT NULL,
+        \\  state_event_hash TEXT NOT NULL,
+        \\  created_at TEXT NOT NULL,
+        \\  author_principal TEXT NOT NULL,
+        \\  author_device TEXT NOT NULL
+        \\);
+        \\CREATE INDEX milestones_title_idx ON milestones(title, id);
         \\CREATE TABLE pulls (
         \\  id TEXT PRIMARY KEY,
         \\  title TEXT NOT NULL,

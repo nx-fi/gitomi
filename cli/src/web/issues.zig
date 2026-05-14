@@ -21,6 +21,9 @@ const splitCommaFields = util.splitCommaFields;
 const sqlite = index.sqlite;
 
 pub fn renderIssuesPage(allocator: Allocator, repo: Repo) ![]u8 {
+    if (try shared.renderIndexingPageIfStale(allocator, repo, "Issues", "issues", "/issues")) |body| return body;
+    try ensureIndex(allocator, repo);
+
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
@@ -37,7 +40,6 @@ pub fn renderIssuesPage(allocator: Allocator, repo: Repo) ![]u8 {
         \\  <div class="list">
     );
 
-    try ensureIndex(allocator, repo);
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
     var stmt = try db.prepare(
@@ -94,6 +96,9 @@ pub fn renderIssuesPage(allocator: Allocator, repo: Repo) ![]u8 {
 }
 
 pub fn renderIssueDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
+    const return_target = try std.fmt.allocPrint(allocator, "/issues/{s}", .{raw_ref});
+    defer allocator.free(return_target);
+    if (try shared.renderIndexingPageIfStale(allocator, repo, "Issue", "issues", return_target)) |body| return body;
     try ensureIndex(allocator, repo);
     const issue_id = index.resolveIssueId(allocator, repo, raw_ref) catch {
         return renderIssueNotFound(allocator, repo, raw_ref);

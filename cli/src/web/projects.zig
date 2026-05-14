@@ -13,11 +13,13 @@ const appendShellStart = shared.appendShellStart;
 const sqlite = index.sqlite;
 
 pub fn renderProjectsPage(allocator: Allocator, repo: Repo) ![]u8 {
+    if (try shared.renderIndexingPageIfStale(allocator, repo, "Projects", "projects", "/projects")) |body| return body;
+    try index.ensureIndex(allocator, repo);
+
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
     try appendShellStart(&buf, allocator, repo, "Projects", "projects");
-    try index.ensureIndex(allocator, repo);
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
 

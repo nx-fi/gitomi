@@ -319,6 +319,10 @@ fn projectStoredEvent(allocator: Allocator, db: *SqliteDb, event_hash: []const u
         try projection_objects.applyIssueProjection(allocator, db, event_hash, envelope, body)
     else if (std.mem.startsWith(u8, envelope.event_type, "pull."))
         try projection_objects.applyPullProjection(allocator, db, event_hash, envelope, body)
+    else if (std.mem.startsWith(u8, envelope.event_type, "project."))
+        try projection_objects.applyProjectProjection(allocator, db, event_hash, envelope, body)
+    else if (std.mem.startsWith(u8, envelope.event_type, "milestone."))
+        try projection_objects.applyMilestoneProjection(allocator, db, event_hash, envelope, body)
     else if (std.mem.startsWith(u8, envelope.event_type, "comment."))
         try projection_objects.applyCommentProjection(allocator, db, event_hash, envelope, body)
     else
@@ -392,6 +396,8 @@ fn eventAuthorizationRejection(
         if (!roleAtLeast(role, "reporter")) return "insufficient_role";
         if (payloadContainsNonEmptyArray(payload, "labels") and !roleAtLeast(role, "maintainer")) return "insufficient_role";
         if (payloadContainsNonEmptyArray(payload, "assignees") and !roleAtLeast(role, "maintainer")) return "insufficient_role";
+        if (payloadHasAny(payload, &.{"milestone"}) and !roleAtLeast(role, "maintainer")) return "insufficient_role";
+        if (payloadContainsNonEmptyArray(payload, "projects") and !roleAtLeast(role, "maintainer")) return "insufficient_role";
         return null;
     }
     if (std.mem.eql(u8, envelope.event_type, "issue.updated")) {
@@ -414,6 +420,12 @@ fn eventAuthorizationRejection(
         return if (roleAtLeast(role, "maintainer")) null else "insufficient_role";
     }
     if (std.mem.eql(u8, envelope.event_type, "issue.assignee_added") or std.mem.eql(u8, envelope.event_type, "issue.assignee_removed")) {
+        return if (roleAtLeast(role, "maintainer")) null else "insufficient_role";
+    }
+    if (std.mem.eql(u8, envelope.event_type, "issue.milestone_set") or
+        std.mem.eql(u8, envelope.event_type, "issue.project_added") or
+        std.mem.eql(u8, envelope.event_type, "issue.project_removed"))
+    {
         return if (roleAtLeast(role, "maintainer")) null else "insufficient_role";
     }
 
@@ -445,6 +457,12 @@ fn eventAuthorizationRejection(
         std.mem.eql(u8, envelope.event_type, "pull.assignee_added") or std.mem.eql(u8, envelope.event_type, "pull.assignee_removed") or
         std.mem.eql(u8, envelope.event_type, "pull.reviewer_added") or std.mem.eql(u8, envelope.event_type, "pull.reviewer_removed") or
         std.mem.eql(u8, envelope.event_type, "pull.merged"))
+    {
+        return if (roleAtLeast(role, "maintainer")) null else "insufficient_role";
+    }
+
+    if (std.mem.startsWith(u8, envelope.event_type, "project.") or
+        std.mem.startsWith(u8, envelope.event_type, "milestone."))
     {
         return if (roleAtLeast(role, "maintainer")) null else "insufficient_role";
     }

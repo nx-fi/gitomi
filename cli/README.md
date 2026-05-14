@@ -36,6 +36,10 @@ gt status
 gt fsck
 gt index rebuild|status
 gt refs
+gt clear local [--yes]
+gt clear remote [--remote REMOTE] [--yes]
+gt reset local [--yes]
+gt reset remote [--remote REMOTE] [--yes]
 gt events list [--json] [--limit N] [--ref REF]
 gt issue list [--json]
 gt issue show ISSUE [--json]
@@ -126,6 +130,11 @@ event.
 `gt runs prune` deletes auxiliary refs under `refs/gitomi/runs/*` according to
 age, count, and byte limits. Run refs are not fetched or pushed by default sync;
 the signed `action.run_completed` inbox event is the durable workflow result.
+
+`gt clear local` and `gt reset local` delete all local refs under
+`refs/gitomi/*`. `gt clear remote` and `gt reset remote` delete all refs under
+`refs/gitomi/*` from a remote, using `origin` by default or `--remote REMOTE`.
+All variants require an exact typed confirmation unless `--yes` is supplied.
 
 `gt github import` reads GitHub issues and pull requests from the GitHub API or
 a fixture JSON object with `issues`, `pulls`, and optional `comments` fields,
