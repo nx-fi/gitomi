@@ -190,10 +190,10 @@ pub fn appendShellEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
         \\<script src="/tree.js"></script>
         \\<script src="/code.js"></script>
         \\<script src="/markdown.js"></script>
-        \\<script src="/highlight.js"></script>
-        \\<script src="/highlight-zig.js"></script>
-        \\<script src="/solidity.js"></script>
-        \\<script src="/highlight-init.js"></script>
+        \\<script src="/vendor/hljs/all-languages.js"></script>
+        \\<script src="/highlight/zig.js"></script>
+        \\<script src="/highlight/solidity.js"></script>
+        \\<script src="/highlight/init.js"></script>
         \\<script src="/diff.js"></script>
         \\</body>
         \\</html>
