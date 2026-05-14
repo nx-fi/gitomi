@@ -73,6 +73,18 @@ pub const GenesisManifest = struct {
     }
 };
 
+pub const SigningKey = struct {
+    allocator: Allocator,
+    scheme: []const u8,
+    public_key: []u8,
+    fingerprint: []u8,
+
+    pub fn deinit(self: *SigningKey) void {
+        self.allocator.free(self.public_key);
+        self.allocator.free(self.fingerprint);
+    }
+};
+
 pub fn discoverRepo(allocator: Allocator) !Repo {
     const root_raw = gitChecked(allocator, &.{ "rev-parse", "--show-toplevel" }) catch |err| {
         if (err == CliError.GitFailed) {
@@ -501,28 +513,100 @@ pub fn inboxRef(allocator: Allocator, cfg: Config) ![]u8 {
 }
 
 pub fn signingPublicKey(allocator: Allocator) ![]u8 {
-    const signing_key = gitConfigValue(allocator, "user.signingkey") catch return allocator.dupe(u8, "");
+    const key = try configuredSigningKey(allocator);
+    allocator.free(key.fingerprint);
+    return key.public_key;
+}
+
+pub fn configuredSigningKey(allocator: Allocator) !SigningKey {
+    const signing_key = gitConfigValue(allocator, "user.signingkey") catch return emptySigningKey(allocator, "ssh");
     defer allocator.free(signing_key);
     const trimmed = std.mem.trim(u8, signing_key, " \t\r\n");
-    if (trimmed.len == 0) return allocator.dupe(u8, "");
+    if (trimmed.len == 0) return emptySigningKey(allocator, "ssh");
 
     if (std.mem.startsWith(u8, trimmed, "ssh-")) {
-        return allocator.dupe(u8, trimmed);
+        const public_key = try allocator.dupe(u8, trimmed);
+        errdefer allocator.free(public_key);
+        return .{
+            .allocator = allocator,
+            .scheme = "ssh",
+            .public_key = public_key,
+            .fingerprint = try signingKeyFingerprint(allocator, public_key),
+        };
     }
 
+    const format_owned = gitConfigValue(allocator, "gpg.format") catch null;
+    defer if (format_owned) |value| allocator.free(value);
+    const format = if (format_owned) |value| std.mem.trim(u8, value, " \t\r\n") else "openpgp";
+    if (std.ascii.eqlIgnoreCase(format, "openpgp")) {
+        const public_key = try openPgpPublicKey(allocator, trimmed);
+        errdefer allocator.free(public_key);
+        if (std.mem.trim(u8, public_key, " \t\r\n").len == 0) {
+            allocator.free(public_key);
+            return emptySigningKey(allocator, "openpgp");
+        }
+        return .{
+            .allocator = allocator,
+            .scheme = "openpgp",
+            .public_key = public_key,
+            .fingerprint = try openPgpFingerprint(allocator, public_key),
+        };
+    }
+
+    if (!std.ascii.eqlIgnoreCase(format, "ssh")) return emptySigningKey(allocator, "unsupported");
     const pub_path = if (std.mem.endsWith(u8, trimmed, ".pub"))
         try allocator.dupe(u8, trimmed)
     else
         try std.fmt.allocPrint(allocator, "{s}.pub", .{trimmed});
     defer allocator.free(pub_path);
 
-    const bytes = std.fs.cwd().readFileAlloc(allocator, pub_path, 1024 * 1024) catch return allocator.dupe(u8, "");
-    return trimOwned(allocator, bytes);
+    const bytes = std.fs.cwd().readFileAlloc(allocator, pub_path, 1024 * 1024) catch return emptySigningKey(allocator, "ssh");
+    const public_key = try trimOwned(allocator, bytes);
+    errdefer allocator.free(public_key);
+    return .{
+        .allocator = allocator,
+        .scheme = "ssh",
+        .public_key = public_key,
+        .fingerprint = try signingKeyFingerprint(allocator, public_key),
+    };
+}
+
+fn emptySigningKey(allocator: Allocator, scheme: []const u8) !SigningKey {
+    return .{
+        .allocator = allocator,
+        .scheme = scheme,
+        .public_key = try allocator.dupe(u8, ""),
+        .fingerprint = try allocator.dupe(u8, ""),
+    };
+}
+
+fn openPgpPublicKey(allocator: Allocator, key_id: []const u8) ![]u8 {
+    const program = try gpgProgram(allocator);
+    defer allocator.free(program);
+    var argv = [_][]const u8{ program, "--armor", "--export", key_id };
+    var result = try git.runCommand(allocator, &argv, null, git.max_payload_key_bytes);
+    if (result.exitCode() != 0) {
+        defer result.deinit();
+        return allocator.dupe(u8, "");
+    }
+    const public_key = try trimOwned(allocator, result.stdout);
+    allocator.free(result.stderr);
+    return public_key;
+}
+
+fn gpgProgram(allocator: Allocator) ![]u8 {
+    if (gitConfigValue(allocator, "gpg.openpgp.program")) |program| return program else |_| {}
+    if (gitConfigValue(allocator, "gpg.program")) |program| return program else |_| {}
+    return allocator.dupe(u8, "gpg");
 }
 
 pub fn signingKeyFingerprint(allocator: Allocator, public_key: []const u8) ![]u8 {
     if (public_key.len == 0) return allocator.dupe(u8, "");
     const trimmed = std.mem.trim(u8, public_key, " \t\r\n");
+    if (std.mem.startsWith(u8, trimmed, "-----BEGIN PGP PUBLIC KEY BLOCK-----")) {
+        return openPgpFingerprint(allocator, trimmed);
+    }
+
     var fields = std.mem.tokenizeAny(u8, trimmed, " \t\r\n");
     _ = fields.next() orelse return error.InvalidSigningPublicKey;
     const encoded_key = fields.next() orelse return error.InvalidSigningPublicKey;
@@ -547,11 +631,32 @@ pub fn signingKeyFingerprint(allocator: Allocator, public_key: []const u8) ![]u8
     return fingerprint;
 }
 
+fn openPgpFingerprint(allocator: Allocator, public_key: []const u8) ![]u8 {
+    const program = try gpgProgram(allocator);
+    defer allocator.free(program);
+    var argv = [_][]const u8{ program, "--with-colons", "--show-keys" };
+    var result = try git.runCommand(allocator, &argv, public_key, git.max_git_output);
+    defer result.deinit();
+    if (result.exitCode() != 0) return error.InvalidSigningPublicKey;
+
+    var lines = std.mem.tokenizeScalar(u8, result.stdout, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "fpr:")) continue;
+        var fields = std.mem.splitScalar(u8, line, ':');
+        var index: usize = 0;
+        while (fields.next()) |field| : (index += 1) {
+            if (index == 9 and field.len != 0) return allocator.dupe(u8, field);
+        }
+    }
+    return error.InvalidSigningPublicKey;
+}
+
 pub fn buildGenesisManifestJson(
     allocator: Allocator,
     cfg: Config,
     public_key: []const u8,
     fingerprint: []const u8,
+    scheme: []const u8,
 ) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -567,7 +672,7 @@ pub fn buildGenesisManifestJson(
     try appendJsonFieldString(&buf, allocator, "principal", cfg.principal, true);
     try appendJsonFieldString(&buf, allocator, "id", cfg.device, true);
     try buf.appendSlice(allocator, "\"signing_key\":{");
-    try appendJsonFieldString(&buf, allocator, "scheme", "ssh", true);
+    try appendJsonFieldString(&buf, allocator, "scheme", scheme, true);
     try appendJsonFieldString(&buf, allocator, "public_key", public_key, true);
     try appendJsonFieldString(&buf, allocator, "fingerprint", fingerprint, false);
     try buf.appendSlice(allocator, "}}}");

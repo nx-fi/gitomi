@@ -85,16 +85,23 @@ pub fn createIdentityDeviceAddedEvent(
     var writer = try EventWriter.init(allocator, "gt identity add-device");
     defer writer.deinit();
 
-    const public_key = if (public_key_arg) |value| try allocator.dupe(u8, value) else try repo_mod.signingPublicKey(allocator);
+    var configured_key: ?repo_mod.SigningKey = null;
+    defer if (configured_key) |*key| key.deinit();
+
+    const public_key = if (public_key_arg) |value| try allocator.dupe(u8, value) else blk: {
+        configured_key = try repo_mod.configuredSigningKey(allocator);
+        break :blk try allocator.dupe(u8, configured_key.?.public_key);
+    };
     defer allocator.free(public_key);
     if (std.mem.trim(u8, public_key, " \t\r\n").len == 0) {
         try eprint("gt identity add-device: signing public key is required; configure user.signingkey or pass --public-key\n", .{});
         return CliError.MissingArgument;
     }
-    const fingerprint = if (fingerprint_arg) |value| try allocator.dupe(u8, value) else try repo_mod.signingKeyFingerprint(allocator, public_key);
+    const fingerprint = if (fingerprint_arg) |value| try allocator.dupe(u8, value) else if (configured_key) |key| try allocator.dupe(u8, key.fingerprint) else try repo_mod.signingKeyFingerprint(allocator, public_key);
     defer allocator.free(fingerprint);
+    const effective_scheme = if (configured_key) |key| key.scheme else scheme;
 
-    const event_body = try buildIdentityAddedEvent(allocator, &writer, principal, device, public_key, fingerprint, scheme);
+    const event_body = try buildIdentityAddedEvent(allocator, &writer, principal, device, public_key, fingerprint, effective_scheme);
     defer allocator.free(event_body);
 
     const subject = try std.fmt.allocPrint(allocator, "identity.device_added {s}/{s}", .{ principal, device });

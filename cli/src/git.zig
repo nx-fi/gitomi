@@ -245,7 +245,7 @@ pub fn printGitConfigValue(allocator: Allocator, key: []const u8, label: []const
 }
 
 pub fn verifiedCommitSigningKeyFingerprint(allocator: Allocator, commit: []const u8) !?[]u8 {
-    var argv = [_][]const u8{ "git", "verify-commit", commit };
+    var argv = [_][]const u8{ "git", "verify-commit", "--raw", commit };
     var result = try runCommand(allocator, &argv, null, max_git_output);
     defer result.deinit();
     if (result.exitCode() != 0) return null;
@@ -255,12 +255,31 @@ pub fn verifiedCommitSigningKeyFingerprint(allocator: Allocator, commit: []const
 }
 
 pub fn signingKeyFingerprintFromVerifyOutput(allocator: Allocator, output: []const u8) !?[]u8 {
+    if (try sshSigningKeyFingerprintFromVerifyOutput(allocator, output)) |fingerprint| return fingerprint;
+    return try openPgpSigningKeyFingerprintFromVerifyOutput(allocator, output);
+}
+
+fn sshSigningKeyFingerprintFromVerifyOutput(allocator: Allocator, output: []const u8) !?[]u8 {
     const prefix = "SHA256:";
     const start = std.mem.indexOf(u8, output, prefix) orelse return null;
     var end = start + prefix.len;
     while (end < output.len and !std.ascii.isWhitespace(output[end])) : (end += 1) {}
     if (end == start + prefix.len) return null;
     return try allocator.dupe(u8, output[start..end]);
+}
+
+fn openPgpSigningKeyFingerprintFromVerifyOutput(allocator: Allocator, output: []const u8) !?[]u8 {
+    var lines = std.mem.tokenizeScalar(u8, output, '\n');
+    while (lines.next()) |line| {
+        const marker = "[GNUPG:] VALIDSIG ";
+        const start = std.mem.indexOf(u8, line, marker) orelse continue;
+        var value_start = start + marker.len;
+        while (value_start < line.len and std.ascii.isWhitespace(line[value_start])) : (value_start += 1) {}
+        var value_end = value_start;
+        while (value_end < line.len and !std.ascii.isWhitespace(line[value_end])) : (value_end += 1) {}
+        if (value_end > value_start) return try allocator.dupe(u8, line[value_start..value_end]);
+    }
+    return null;
 }
 
 pub fn gitChecked(allocator: Allocator, git_args: []const []const u8) ![]u8 {
@@ -350,4 +369,16 @@ test "verify-commit output parser extracts SSH signing key fingerprint" {
     const fingerprint = (try signingKeyFingerprintFromVerifyOutput(std.testing.allocator, output)).?;
     defer std.testing.allocator.free(fingerprint);
     try std.testing.expectEqualStrings("SHA256:mNB85dy2QSJT677iHmnJzFXcYQWJatF8y3EUrFuHNYA", fingerprint);
+}
+
+test "verify-commit output parser extracts OpenPGP VALIDSIG fingerprint" {
+    const output =
+        \\[GNUPG:] NEWSIG
+        \\[GNUPG:] GOODSIG 73834AA6FB6DD8B0 Ken M <km@nxfi.app>
+        \\[GNUPG:] VALIDSIG 1D757982030A7898E3FCBF2873834AA6FB6DD8B0 2026-05-14 1778747221 0 4 0 22 10 00 1D757982030A7898E3FCBF2873834AA6FB6DD8B0
+        \\
+    ;
+    const fingerprint = (try signingKeyFingerprintFromVerifyOutput(std.testing.allocator, output)).?;
+    defer std.testing.allocator.free(fingerprint);
+    try std.testing.expectEqualStrings("1D757982030A7898E3FCBF2873834AA6FB6DD8B0", fingerprint);
 }
