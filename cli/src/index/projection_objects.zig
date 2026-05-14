@@ -49,9 +49,11 @@ pub fn applyIssueProjection(allocator: Allocator, db: *SqliteDb, event_hash: []c
         const title = event_mod.jsonString(payload.get("title")) orelse return "invalid_event_envelope";
         const body_value = event_mod.jsonString(payload.get("body")) orelse "";
         try insertIssueOpened(db, event_hash, envelope, title, body_value);
+        try upsertIssueMetadata(db, envelope.object_id, event_mod.jsonString(payload.get("source_author")) orelse "", event_mod.jsonString(payload.get("milestone")) orelse "");
         try insertLegacyAliasFromEnvelope(db, "issue", envelope.object_id, legacy);
         try insertPayloadStringArray(db, payload, "labels", insert_issue_label_sql, envelope.object_id, event_hash);
         try insertPayloadStringArray(db, payload, "assignees", insert_issue_assignee_sql, envelope.object_id, event_hash);
+        try insertPayloadIssueProjects(db, payload, "projects", envelope.object_id, event_hash);
         return try issueCollectionLimitRejection(db, envelope.object_id);
     }
 
@@ -82,12 +84,25 @@ pub fn applyIssueProjection(allocator: Allocator, db: *SqliteDb, event_hash: []c
     } else if (std.mem.eql(u8, envelope.event_type, "issue.assignee_removed")) {
         const assignee = event_mod.jsonString(payload.get("assignee")) orelse return "invalid_event_envelope";
         try deleteIssueCollectionValue(allocator, db, "SELECT add_hash FROM issue_assignees WHERE issue_id = ? AND assignee = ?", "DELETE FROM issue_assignees WHERE issue_id = ? AND assignee = ? AND add_hash = ?", envelope.object_id, assignee, event_hash);
+    } else if (std.mem.eql(u8, envelope.event_type, "issue.milestone_set")) {
+        const milestone = event_mod.jsonString(payload.get("milestone")) orelse return "invalid_event_envelope";
+        try upsertIssueMilestone(db, envelope.object_id, milestone);
+    } else if (std.mem.eql(u8, envelope.event_type, "issue.project_added")) {
+        const project = event_mod.jsonString(payload.get("project")) orelse return "invalid_event_envelope";
+        const column = event_mod.jsonString(payload.get("column")) orelse return "invalid_event_envelope";
+        try insertIssueProject(db, envelope.object_id, project, column, event_hash);
+        if (try issueCollectionLimitRejection(db, envelope.object_id)) |reason| return reason;
+    } else if (std.mem.eql(u8, envelope.event_type, "issue.project_removed")) {
+        const project = event_mod.jsonString(payload.get("project")) orelse return "invalid_event_envelope";
+        const column = event_mod.jsonString(payload.get("column")) orelse return "invalid_event_envelope";
+        try deleteIssueProject(allocator, db, envelope.object_id, project, column, event_hash);
     }
     return null;
 }
 
 const insert_issue_label_sql = "INSERT OR IGNORE INTO issue_labels(issue_id, label, add_hash) VALUES (?, ?, ?)";
 const insert_issue_assignee_sql = "INSERT OR IGNORE INTO issue_assignees(issue_id, assignee, add_hash) VALUES (?, ?, ?)";
+const insert_issue_project_sql = "INSERT OR IGNORE INTO issue_projects(issue_id, project, column_name, add_hash) VALUES (?, ?, ?, ?)";
 
 fn applyIssueUpdated(
     allocator: Allocator,
@@ -139,6 +154,33 @@ fn insertIssueOpened(db: *SqliteDb, event_hash: []const u8, envelope: ValidatedE
     try stmt.bindText(14, envelope.occurred_at);
     try stmt.bindText(15, envelope.actor_principal);
     try stmt.bindText(16, envelope.actor_device);
+    try stmt.stepDone();
+}
+
+fn upsertIssueMetadata(db: *SqliteDb, issue_id: []const u8, source_author: []const u8, milestone: []const u8) !void {
+    var stmt = try db.prepare(
+        \\INSERT INTO issue_metadata(issue_id, source_author, milestone)
+        \\VALUES (?, ?, ?)
+        \\ON CONFLICT(issue_id) DO UPDATE SET
+        \\  source_author = excluded.source_author,
+        \\  milestone = excluded.milestone
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    try stmt.bindText(2, source_author);
+    try stmt.bindText(3, milestone);
+    try stmt.stepDone();
+}
+
+fn upsertIssueMilestone(db: *SqliteDb, issue_id: []const u8, milestone: []const u8) !void {
+    var stmt = try db.prepare(
+        \\INSERT INTO issue_metadata(issue_id, source_author, milestone)
+        \\VALUES (?, '', ?)
+        \\ON CONFLICT(issue_id) DO UPDATE SET milestone = excluded.milestone
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    try stmt.bindText(2, milestone);
     try stmt.stepDone();
 }
 
@@ -256,6 +298,67 @@ fn insertIssueCollectionValue(db: *SqliteDb, comptime sql_text: []const u8, issu
     try stmt.stepDone();
 }
 
+fn insertPayloadIssueProjects(
+    db: *SqliteDb,
+    payload: std.json.ObjectMap,
+    key: []const u8,
+    issue_id: []const u8,
+    event_hash: []const u8,
+) !void {
+    const value = payload.get(key) orelse return;
+    const array = switch (value) {
+        .array => |items| items,
+        else => return,
+    };
+    for (array.items) |item| {
+        const project = switch (item) {
+            .object => |map| map,
+            else => continue,
+        };
+        const project_name = event_mod.jsonString(project.get("project")) orelse continue;
+        const column = event_mod.jsonString(project.get("column")) orelse "";
+        try insertIssueProject(db, issue_id, project_name, column, event_hash);
+    }
+}
+
+fn insertIssueProject(db: *SqliteDb, issue_id: []const u8, project: []const u8, column: []const u8, event_hash: []const u8) !void {
+    if (std.mem.trim(u8, project, " \t\r\n").len == 0) return;
+    var stmt = try db.prepare(insert_issue_project_sql);
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    try stmt.bindText(2, project);
+    try stmt.bindText(3, column);
+    try stmt.bindText(4, event_hash);
+    try stmt.stepDone();
+}
+
+fn deleteIssueProject(
+    allocator: Allocator,
+    db: *SqliteDb,
+    issue_id: []const u8,
+    project: []const u8,
+    column: []const u8,
+    remove_hash: []const u8,
+) !void {
+    var select = try db.prepare("SELECT add_hash FROM issue_projects WHERE issue_id = ? AND project = ? AND column_name = ?");
+    defer select.deinit();
+    try select.bindText(1, issue_id);
+    try select.bindText(2, project);
+    try select.bindText(3, column);
+    while (try select.step()) {
+        const add_hash = try select.columnTextDup(allocator, 0);
+        defer allocator.free(add_hash);
+        if (!(try git.isAncestor(allocator, add_hash, remove_hash))) continue;
+        var delete = try db.prepare("DELETE FROM issue_projects WHERE issue_id = ? AND project = ? AND column_name = ? AND add_hash = ?");
+        defer delete.deinit();
+        try delete.bindText(1, issue_id);
+        try delete.bindText(2, project);
+        try delete.bindText(3, column);
+        try delete.bindText(4, add_hash);
+        try delete.stepDone();
+    }
+}
+
 fn deleteIssueCollectionValue(
     allocator: Allocator,
     db: *SqliteDb,
@@ -287,6 +390,9 @@ fn issueCollectionLimitRejection(db: *SqliteDb, issue_id: []const u8) !?[]const 
         return "collection_limit_exceeded";
     }
     if (try collectionCountExceeds(db, "SELECT COUNT(DISTINCT assignee) FROM issue_assignees WHERE issue_id = ?", issue_id, max_projected_participants)) {
+        return "collection_limit_exceeded";
+    }
+    if (try collectionCountExceeds(db, "SELECT COUNT(DISTINCT project || char(31) || column_name) FROM issue_projects WHERE issue_id = ?", issue_id, max_projected_labels)) {
         return "collection_limit_exceeded";
     }
     return null;
@@ -647,7 +753,13 @@ pub fn applyCommentProjection(allocator: Allocator, db: *SqliteDb, event_hash: [
             if (!(try pullExists(db, parent_id))) return "parent_not_created";
         }
         const comment_body = event_mod.jsonString(payload.get("body")) orelse return "invalid_event_envelope";
-        try insertCommentAdded(db, event_hash, envelope, parent_kind, parent_id, comment_body);
+        const source_author = event_mod.jsonString(payload.get("source_author")) orelse "";
+        const reply_parent_hash = event_mod.jsonString(payload.get("reply_parent_hash")) orelse "";
+        const reply_parent_id = try commentReplyParentId(allocator, db, event_mod.jsonString(payload.get("reply_parent_id")) orelse "", reply_parent_hash);
+        defer allocator.free(reply_parent_id);
+        if (reply_parent_hash.len != 0 and reply_parent_id.len == 0) return "parent_not_created";
+        if (reply_parent_id.len != 0 and !(try commentExists(db, reply_parent_id))) return "parent_not_created";
+        try insertCommentAdded(db, event_hash, envelope, parent_kind, parent_id, comment_body, source_author, reply_parent_id, reply_parent_hash);
     } else if (std.mem.eql(u8, envelope.event_type, "comment.body_set")) {
         if (!(try commentExists(db, envelope.object_id))) return "object_not_created";
         const comment_body = event_mod.jsonString(payload.get("body")) orelse return "invalid_event_envelope";
@@ -666,14 +778,18 @@ fn insertCommentAdded(
     parent_kind: []const u8,
     parent_id: []const u8,
     body: []const u8,
+    source_author: []const u8,
+    reply_parent_id: []const u8,
+    reply_parent_hash: []const u8,
 ) !void {
     var stmt = try db.prepare(
         \\INSERT OR IGNORE INTO comments(
         \\  id, parent_kind, parent_id,
         \\  body, body_occurred_at, body_actor_principal, body_event_hash,
         \\  redacted, redacted_at, redacted_actor_principal, redacted_event_hash,
-        \\  created_at, author_principal, author_device
-        \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        \\  created_at, author_principal, author_device,
+        \\  source_author, reply_parent_id, reply_parent_hash
+        \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     );
     defer stmt.deinit();
     try stmt.bindText(1, envelope.object_id);
@@ -690,7 +806,28 @@ fn insertCommentAdded(
     try stmt.bindText(12, envelope.occurred_at);
     try stmt.bindText(13, envelope.actor_principal);
     try stmt.bindText(14, envelope.actor_device);
+    try stmt.bindText(15, source_author);
+    try stmt.bindText(16, reply_parent_id);
+    try stmt.bindText(17, reply_parent_hash);
     try stmt.stepDone();
+}
+
+fn commentReplyParentId(allocator: Allocator, db: *SqliteDb, payload_parent_id: []const u8, reply_parent_hash: []const u8) ![]u8 {
+    if (payload_parent_id.len != 0) return allocator.dupe(u8, payload_parent_id);
+    if (reply_parent_hash.len == 0) return allocator.dupe(u8, "");
+
+    var stmt = try db.prepare(
+        \\SELECT object_id
+        \\FROM events
+        \\WHERE event_hash = ?
+        \\  AND event_type = 'comment.added'
+        \\  AND domain_status = 'accepted'
+        \\LIMIT 1
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, reply_parent_hash);
+    if (!(try stmt.step())) return allocator.dupe(u8, "");
+    return try stmt.columnTextDup(allocator, 0);
 }
 
 fn commentExists(db: *SqliteDb, comment_id: []const u8) !bool {

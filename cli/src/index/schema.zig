@@ -88,6 +88,19 @@ pub fn createIndexSchema(db: *SqliteDb) !void {
         \\  add_hash TEXT NOT NULL,
         \\  PRIMARY KEY(issue_id, assignee, add_hash)
         \\);
+        \\CREATE TABLE issue_metadata (
+        \\  issue_id TEXT PRIMARY KEY,
+        \\  source_author TEXT NOT NULL,
+        \\  milestone TEXT NOT NULL
+        \\);
+        \\CREATE TABLE issue_projects (
+        \\  issue_id TEXT NOT NULL,
+        \\  project TEXT NOT NULL,
+        \\  column_name TEXT NOT NULL,
+        \\  add_hash TEXT NOT NULL,
+        \\  PRIMARY KEY(issue_id, project, column_name, add_hash)
+        \\);
+        \\CREATE INDEX issue_projects_project_idx ON issue_projects(project, column_name, issue_id);
         \\CREATE TABLE pulls (
         \\  id TEXT PRIMARY KEY,
         \\  title TEXT NOT NULL,
@@ -150,7 +163,10 @@ pub fn createIndexSchema(db: *SqliteDb) !void {
         \\  redacted_event_hash TEXT NOT NULL,
         \\  created_at TEXT NOT NULL,
         \\  author_principal TEXT NOT NULL,
-        \\  author_device TEXT NOT NULL
+        \\  author_device TEXT NOT NULL,
+        \\  source_author TEXT NOT NULL,
+        \\  reply_parent_id TEXT NOT NULL,
+        \\  reply_parent_hash TEXT NOT NULL
         \\);
         \\CREATE INDEX comments_parent_created_idx ON comments(parent_kind, parent_id, created_at);
         \\CREATE TABLE commit_references (

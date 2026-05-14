@@ -168,6 +168,9 @@ init_repo "$github_io"
       "state": "closed",
       "created_at": "2026-01-01T00:00:00Z",
       "closed_at": "2026-01-02T00:00:00Z",
+      "user": { "login": "octocat" },
+      "tags": ["triage"],
+      "milestone": { "title": "v1.0" },
       "labels": [{ "name": "bug" }],
       "assignees": [{ "login": "alice" }]
     }
@@ -187,17 +190,35 @@ init_repo "$github_io"
     }
   ],
   "comments": {
-    "issue:42": [{ "body": "Imported issue comment", "created_at": "2026-01-02T01:00:00Z" }],
+    "issue:42": [
+      { "id": 100, "body": "Imported issue comment", "created_at": "2026-01-02T01:00:00Z", "user": { "login": "commenter" } },
+      { "id": 101, "body": "Imported issue reply", "created_at": "2026-01-02T01:30:00Z", "user": { "login": "reviewer" }, "in_reply_to_id": 100 }
+    ],
     "pull:7": [{ "body": "Imported pull comment", "created_at": "2026-01-04T01:00:00Z" }]
+  },
+  "projects": {
+    "issue:42": [{ "project": "Roadmap", "column": "Done" }]
   }
 }
 JSON
   gt github import --from-file github-fixture.json >/dev/null
   issues="$(gt issue list --json)"
   assert_contains "$issues" '"title":"Legacy bug"'
+  assert_contains "$issues" '"source_author":"octocat"'
+  assert_contains "$issues" '"milestone":"v1.0"'
+  assert_contains "$issues" '"labels":["bug","triage"]'
+  assert_contains "$issues" '"projects":[{"project":"Roadmap","column":"Done"}]'
   assert_contains "$issues" '"legacy_github_issue_number":42'
   issue_show="$(gt issue show '#42')"
   assert_contains "$issue_show" "github:    #42"
+  assert_contains "$issue_show" "source:    octocat"
+  assert_contains "$issue_show" "milestone: v1.0"
+  assert_contains "$issue_show" "projects:  Roadmap / Done"
+  comments="$(gt comment list issue '#42' --json)"
+  assert_contains "$comments" '"source_author":"commenter"'
+  assert_contains "$comments" '"source_author":"reviewer"'
+  assert_contains "$comments" '"reply_parent_id":'
+  assert_contains "$comments" '"reply_parent_hash":'
   pulls="$(gt pr list --json)"
   assert_contains "$pulls" '"title":"Legacy PR"'
   assert_contains "$pulls" '"legacy_github_pull_number":7'
@@ -292,6 +313,9 @@ JSON
 ]
 JSON
     ;;
+  'repos/{owner}/{repo}/projects?per_page=100')
+    printf '[]\n'
+    ;;
   *)
     echo "unexpected endpoint: $endpoint" >&2
     exit 3
@@ -340,7 +364,7 @@ init_repo "$snapshots"
   snapshot_ref="$(git for-each-ref --sort=-committerdate '--format=%(refname)' refs/gitomi/snapshots | head -n 1)"
   manifest="$(git show "$snapshot_ref:manifest.json")"
   assert_contains "$manifest" '"$schema":"urn:gitomi:snapshot:v1"'
-  assert_contains "$manifest" '"index_schema_version":"2"'
+  assert_contains "$manifest" '"index_schema_version":"3"'
   assert_contains "$manifest" '"covered_refs"'
 
   rm -f .git/gitomi/index.sqlite

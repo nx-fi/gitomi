@@ -15,6 +15,7 @@ const appendJsonFieldString = json_writer.appendJsonFieldString;
 const appendJsonFieldUnsigned = json_writer.appendJsonFieldUnsigned;
 const appendJsonFieldStringArray = json_writer.appendJsonFieldStringArray;
 const appendJsonFieldBool = json_writer.appendJsonFieldBool;
+const appendJsonString = json_writer.appendJsonString;
 
 pub const event_schema = "urn:gitomi:event:v1";
 pub const max_related_parents = 256;
@@ -32,6 +33,23 @@ pub const LegacyInfo = struct {
     pub fn isEmpty(self: LegacyInfo) bool {
         return self.github_issue_number == null and self.github_pull_number == null;
     }
+};
+
+pub const IssueProjectPlacement = struct {
+    project: []const u8,
+    column: []const u8,
+};
+
+pub const IssueOpenedMetadata = struct {
+    source_author: ?[]const u8 = null,
+    milestone: ?[]const u8 = null,
+    projects: []const IssueProjectPlacement = &.{},
+};
+
+pub const CommentAddedMetadata = struct {
+    source_author: ?[]const u8 = null,
+    reply_parent_id: ?[]const u8 = null,
+    reply_parent_hash: ?[]const u8 = null,
 };
 
 pub const IssueUpdate = struct {
@@ -174,6 +192,40 @@ pub fn buildIssueOpenedJsonWithLegacy(
     assignees: []const []const u8,
     legacy: LegacyInfo,
 ) ![]u8 {
+    return buildIssueOpenedJsonWithLegacyAndMetadata(
+        allocator,
+        cfg,
+        seq,
+        issue_id,
+        event_uuid,
+        idem,
+        occurred_at,
+        parents,
+        title,
+        body,
+        labels,
+        assignees,
+        legacy,
+        .{},
+    );
+}
+
+pub fn buildIssueOpenedJsonWithLegacyAndMetadata(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    issue_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    title: []const u8,
+    body: []const u8,
+    labels: []const []const u8,
+    assignees: []const []const u8,
+    legacy: LegacyInfo,
+    metadata: IssueOpenedMetadata,
+) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
@@ -189,11 +241,44 @@ pub fn buildIssueOpenedJsonWithLegacy(
     if (assignees.len != 0) {
         try appendJsonFieldStringArray(&buf, allocator, "assignees", assignees, true);
     }
+    if (metadata.source_author) |value| {
+        if (value.len != 0) try appendJsonFieldString(&buf, allocator, "source_author", value, true);
+    }
+    if (metadata.milestone) |value| {
+        if (value.len != 0) try appendJsonFieldString(&buf, allocator, "milestone", value, true);
+    }
+    if (metadata.projects.len != 0) {
+        try appendIssueProjectsField(&buf, allocator, "projects", metadata.projects, true);
+    }
     if (buf.items[buf.items.len - 1] == ',') {
         buf.items.len -= 1;
     }
     try buf.appendSlice(allocator, "}}");
 
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildIssueProjectEventJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    issue_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    event_type: []const u8,
+    project: []const u8,
+    column: []const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, issue_id, event_uuid, idem, occurred_at, parents, event_type, "issue");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "project", project, true);
+    try appendJsonFieldString(&buf, allocator, "column", column, false);
+    try buf.appendSlice(allocator, "}}");
     return try buf.toOwnedSlice(allocator);
 }
 
@@ -264,6 +349,36 @@ pub fn buildCommentAddedJson(
     parent_id: []const u8,
     body: []const u8,
 ) ![]u8 {
+    return buildCommentAddedJsonWithMetadata(
+        allocator,
+        cfg,
+        seq,
+        comment_id,
+        event_uuid,
+        idem,
+        occurred_at,
+        parents,
+        parent_kind,
+        parent_id,
+        body,
+        .{},
+    );
+}
+
+pub fn buildCommentAddedJsonWithMetadata(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    comment_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    parent_kind: []const u8,
+    parent_id: []const u8,
+    body: []const u8,
+    metadata: CommentAddedMetadata,
+) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
@@ -271,6 +386,15 @@ pub fn buildCommentAddedJson(
     try buf.appendSlice(allocator, "\"payload\":{");
     try appendJsonFieldString(&buf, allocator, "parent_kind", parent_kind, true);
     try appendJsonFieldString(&buf, allocator, "parent_id", parent_id, true);
+    if (metadata.source_author) |value| {
+        if (value.len != 0) try appendJsonFieldString(&buf, allocator, "source_author", value, true);
+    }
+    if (metadata.reply_parent_id) |value| {
+        if (value.len != 0) try appendJsonFieldString(&buf, allocator, "reply_parent_id", value, true);
+    }
+    if (metadata.reply_parent_hash) |value| {
+        if (value.len != 0) try appendJsonFieldString(&buf, allocator, "reply_parent_hash", value, true);
+    }
     try appendJsonFieldString(&buf, allocator, "body", body, false);
     try buf.appendSlice(allocator, "}}");
     return try buf.toOwnedSlice(allocator);
@@ -678,6 +802,26 @@ fn appendLegacyInfo(buf: *std.ArrayList(u8), allocator: Allocator, legacy: Legac
     try buf.appendSlice(allocator, "},");
 }
 
+fn appendIssueProjectsField(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    key: []const u8,
+    projects: []const IssueProjectPlacement,
+    comma: bool,
+) !void {
+    try appendJsonString(buf, allocator, key);
+    try buf.appendSlice(allocator, ":[");
+    for (projects, 0..) |project, idx| {
+        if (idx != 0) try buf.append(allocator, ',');
+        try buf.append(allocator, '{');
+        try appendJsonFieldString(buf, allocator, "project", project.project, true);
+        try appendJsonFieldString(buf, allocator, "column", project.column, false);
+        try buf.append(allocator, '}');
+    }
+    try buf.append(allocator, ']');
+    if (comma) try buf.append(allocator, ',');
+}
+
 fn appendParentHashes(buf: *std.ArrayList(u8), allocator: Allocator, parents: EventParents) !void {
     try buf.appendSlice(allocator, "\"parent_hashes\":{");
     try appendJsonFieldString(buf, allocator, "log", parents.log orelse "", true);
@@ -999,6 +1143,9 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!optionalStringArrayWithin(payload, "labels", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "issue.opened payload.labels exceeds v1 collection limits";
         if (!optionalStringArray(payload, "assignees")) return "issue.opened payload.assignees must be an array of strings";
         if (!optionalStringArrayWithin(payload, "assignees", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "issue.opened payload.assignees exceeds v1 collection limits";
+        if (!optionalStringWithin(payload, "source_author", git.max_payload_atom_bytes)) return "issue.opened payload.source_author exceeds v1 field size limit";
+        if (!optionalStringWithin(payload, "milestone", git.max_payload_atom_bytes)) return "issue.opened payload.milestone exceeds v1 field size limit";
+        if (!optionalIssueProjectsWithin(payload, "projects", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "issue.opened payload.projects must be project objects within v1 collection limits";
         return null;
     }
     if (std.mem.eql(u8, event_type, "issue.updated")) {
@@ -1026,6 +1173,14 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
     }
     if (std.mem.eql(u8, event_type, "issue.label_added") or std.mem.eql(u8, event_type, "issue.label_removed")) return requirePayloadStringWithin(payload, event_type, "label", git.max_payload_atom_bytes);
     if (std.mem.eql(u8, event_type, "issue.assignee_added") or std.mem.eql(u8, event_type, "issue.assignee_removed")) return requirePayloadStringWithin(payload, event_type, "assignee", git.max_payload_atom_bytes);
+    if (std.mem.eql(u8, event_type, "issue.milestone_set")) return requirePayloadStringWithin(payload, event_type, "milestone", git.max_payload_atom_bytes);
+    if (std.mem.eql(u8, event_type, "issue.project_added") or std.mem.eql(u8, event_type, "issue.project_removed")) {
+        if (!hasString(payload, "project")) return "issue project event payload.project must be a string";
+        if (!stringWithin(payload, "project", git.max_payload_atom_bytes)) return "issue project event payload.project exceeds v1 field size limit";
+        if (!hasString(payload, "column")) return "issue project event payload.column must be a string";
+        if (!stringWithin(payload, "column", git.max_payload_atom_bytes)) return "issue project event payload.column exceeds v1 field size limit";
+        return null;
+    }
 
     if (std.mem.eql(u8, event_type, "pull.opened")) {
         if (!hasString(payload, "title")) return "pull.opened payload.title must be a string";
@@ -1087,6 +1242,9 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!stringWithin(payload, "parent_kind", git.max_payload_atom_bytes)) return "comment.added payload.parent_kind exceeds v1 field size limit";
         if (!hasString(payload, "parent_id")) return "comment.added payload.parent_id must be a string";
         if (!stringWithin(payload, "parent_id", git.max_payload_ref_bytes)) return "comment.added payload.parent_id exceeds v1 field size limit";
+        if (!optionalStringWithin(payload, "source_author", git.max_payload_atom_bytes)) return "comment.added payload.source_author exceeds v1 field size limit";
+        if (!optionalStringWithin(payload, "reply_parent_id", git.max_payload_ref_bytes)) return "comment.added payload.reply_parent_id exceeds v1 field size limit";
+        if (!optionalStringWithin(payload, "reply_parent_hash", git.max_payload_ref_bytes)) return "comment.added payload.reply_parent_hash exceeds v1 field size limit";
         if (!hasString(payload, "body")) return "comment.added payload.body must be a string";
         if (!stringWithin(payload, "body", git.max_payload_text_bytes)) return "comment.added payload.body exceeds v1 text size limit";
         return null;
@@ -1289,6 +1447,25 @@ fn optionalStringArrayWithin(object: std.json.ObjectMap, key: []const u8, max_it
     if (array.items.len > max_items) return false;
     for (array.items) |item| {
         if (item != .string or item.string.len > max_item_bytes) return false;
+    }
+    return true;
+}
+
+fn optionalIssueProjectsWithin(object: std.json.ObjectMap, key: []const u8, max_items: usize, max_item_bytes: usize) bool {
+    const value = object.get(key) orelse return true;
+    const array = switch (value) {
+        .array => |items| items,
+        else => return false,
+    };
+    if (array.items.len > max_items) return false;
+    for (array.items) |item| {
+        const project = switch (item) {
+            .object => |map| map,
+            else => return false,
+        };
+        const name = jsonString(project.get("project")) orelse return false;
+        const column = jsonString(project.get("column")) orelse return false;
+        if (name.len == 0 or name.len > max_item_bytes or column.len > max_item_bytes) return false;
     }
     return true;
 }

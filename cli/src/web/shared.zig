@@ -73,6 +73,7 @@ pub fn appendShellStart(
     try appendNavLink(buf, allocator, active, "code", "/", "Code", null);
     try appendNavLink(buf, allocator, active, "commits", "/commits", "Commits", null);
     try appendNavLink(buf, allocator, active, "issues", "/issues", "Issues", stats.issues);
+    try appendNavLink(buf, allocator, active, "projects", "/projects", "Projects", null);
     try appendNavLink(buf, allocator, active, "events", "/events", "Events", stats.events);
     try appendNavLink(buf, allocator, active, "refs", "/refs", "Refs", stats.inbox_refs + stats.staged_refs);
     try appendNavLink(buf, allocator, active, "overview", "/overview", "Overview", null);
