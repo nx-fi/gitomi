@@ -87,8 +87,8 @@ pub fn commitHref(hash: []const u8) Href {
     return .{ .commit = hash };
 }
 
-pub fn issueHref(short_id: []const u8) Href {
-    return .{ .issue = short_id };
+pub fn issueHref(issue_ref: []const u8) Href {
+    return .{ .issue = issue_ref };
 }
 
 pub fn class(name: []const u8, enabled: bool) Class {
@@ -152,8 +152,8 @@ pub fn appendShellStart(
     try appendNavLink(buf, allocator, active, "commits", "/commits", "Commits", null);
     try appendNavLink(buf, allocator, active, "issues", "/issues", "Issues", stats.issues);
     try appendNavLink(buf, allocator, active, "projects", "/projects", "Projects", null);
-    try appendNavLink(buf, allocator, active, "events", "/events", "Events", stats.events);
-    try appendNavLink(buf, allocator, active, "refs", "/refs", "Refs", stats.inbox_refs + stats.staged_refs);
+    try appendNavLink(buf, allocator, active, "events", "/events", "Events", null);
+    try appendNavLink(buf, allocator, active, "refs", "/refs", "Refs", null);
     try buf.appendSlice(allocator,
         \\  </nav>
         \\  <div class="topbar-actions">
@@ -572,9 +572,9 @@ pub fn appendHref(buf: *std.ArrayList(u8), allocator: Allocator, href: Href) !vo
             try buf.appendSlice(allocator, "/commit?sha=");
             try appendUrlEncoded(buf, allocator, hash);
         },
-        .issue => |short_id| {
+        .issue => |issue_ref| {
             try buf.appendSlice(allocator, "/issues/");
-            try appendUrlEncoded(buf, allocator, short_id);
+            try appendUrlEncoded(buf, allocator, issue_ref);
         },
     }
 }

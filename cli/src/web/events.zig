@@ -2,6 +2,7 @@ const std = @import("std");
 const index = @import("../index.zig");
 const repo_mod = @import("../repo.zig");
 const shared = @import("shared.zig");
+const util = @import("../util.zig");
 
 const Allocator = std.mem.Allocator;
 const IndexedEvent = index.IndexedEvent;
@@ -63,16 +64,17 @@ pub fn renderEventsPage(allocator: Allocator, repo: Repo) ![]u8 {
 }
 
 fn appendEventTableRow(buf: *std.ArrayList(u8), allocator: Allocator, event: IndexedEvent) !void {
-    const object_short = event.object_id[0..@min(event.object_id.len, 7)];
+    var object_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const object_ref = if (event.object_id.len == 0) "" else util.shortObjectRef(&object_ref_buf, event.object_id);
     try appendTemplate(buf, allocator,
         \\<tr id="{object_id}"><td><span class="event-type">{event_type}</span></td><td>{object_kind}
     , .{
-        .object_id = object_short,
+        .object_id = object_ref,
         .event_type = if (event.valid_json) event.event_type else "invalid-event",
         .object_kind = event.object_kind,
     });
     if (event.object_id.len != 0) {
-        try appendTemplate(buf, allocator, " <code>#{object_id}</code>", .{ .object_id = object_short });
+        try appendTemplate(buf, allocator, " <code>#{object_id}</code>", .{ .object_id = object_ref });
     }
     try appendTemplate(buf, allocator, "</td><td>{actor_principal}", .{
         .actor_principal = event.actor_principal,

@@ -156,20 +156,19 @@
     return url;
   }
 
+  function linePermalinkUrl(row) {
+    const container = lineContainer(row);
+    const href = (container && (container.dataset.permalinkHref || container.dataset.codeHref)) || "";
+    const url = href ? new URL(href, window.location.href) : lineUrl(row);
+    if (row.id) url.hash = row.id;
+    return url;
+  }
+
   function blameUrl(row) {
     const container = lineContainer(row);
     const href = (container && container.dataset.blameHref) || "";
     const url = href ? new URL(href, window.location.href) : new URL(window.location.href);
     url.pathname = "/blame";
-    if (row.id) url.hash = row.id;
-    return url;
-  }
-
-  function githubDevUrl(row) {
-    const container = lineContainer(row);
-    const href = (container && container.dataset.githubDevUrl) || "";
-    if (!href) return null;
-    const url = new URL(href, window.location.href);
     if (row.id) url.hash = row.id;
     return url;
   }
@@ -184,7 +183,7 @@
     const params = new URLSearchParams();
     const reference = lineReference(row);
     params.set("title", `Reference ${reference}`);
-    params.set("body", `${reference}\n\n${lineUrl(row).href}`);
+    params.set("body", `${reference}\n\n${linePermalinkUrl(row).href}`);
     return `/new-issue?${params.toString()}`;
   }
 
@@ -206,7 +205,6 @@
       '<button type="button" role="menuitem" data-line-action="copy-permalink">Copy permalink</button>',
       '<button type="button" role="menuitem" data-line-action="view-blame">View git blame</button>',
       '<button type="button" role="menuitem" data-line-action="new-issue">Reference in new issue</button>',
-      '<button type="button" role="menuitem" data-line-action="github-dev">View file in GitHub.dev</button>',
       '<button type="button" role="menuitem" data-line-action="switch-ref"><span>View file in different branch/tag</span><kbd>W</kbd></button>',
     ].join("");
     document.body.appendChild(lineMenu);
@@ -257,7 +255,6 @@
     ensureLineMenu();
     activeLineButton = button;
     button.setAttribute("aria-expanded", "true");
-    setMenuItemDisabled("github-dev", githubDevUrl(row) === null);
     setMenuItemDisabled("switch-ref", document.querySelector("[data-branch-switcher]") === null);
     lineMenu.hidden = false;
     positionLineMenu(button);
@@ -309,15 +306,12 @@
       await copyText(lineCode(row));
       closeLineMenu();
     } else if (action === "copy-permalink") {
-      await copyText(lineUrl(row).href);
+      await copyText(linePermalinkUrl(row).href);
       closeLineMenu();
     } else if (action === "view-blame") {
       window.location.href = blameUrl(row).href;
     } else if (action === "new-issue") {
       window.location.href = newIssueUrl(row);
-    } else if (action === "github-dev") {
-      const url = githubDevUrl(row);
-      if (url) window.location.href = url.href;
     } else if (action === "switch-ref") {
       focusBranchSwitcher();
     }

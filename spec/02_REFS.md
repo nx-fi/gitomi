@@ -202,23 +202,25 @@ payload aliases. These tokens are not Git refs and do not authorize access.
 
 | Token | Target |
 |-------|--------|
-| `#<uuid-prefix>` | Issue in issue context, or issue/pull when the caller resolves both |
-| `issue:<uuid-prefix>` | Issue |
-| `pr:<uuid-prefix>` or `pull:<uuid-prefix>` | Pull request |
+| `#<object-ref>` | Issue in issue context, or issue/pull when the caller resolves both |
+| `issue:<object-ref>` | Issue |
+| `pr:<object-ref>` or `pull:<object-ref>` | Pull request |
 | `project:<uuid-prefix>` | Project by UUID prefix |
 | `@<project-slug>` | Project by slug |
 | `milestone:<uuid-prefix>` | Milestone by UUID prefix |
 | `^<milestone-slug>` | Milestone by slug |
 | `@<project-slug>/<column-slug>` | Kanban column on a project |
 
-UUID prefixes MUST be at least 7 lowercase hexadecimal characters and MUST be
-extended when ambiguous. Project, milestone, and column slugs MUST be ref-safe
-segments (§3.1) generated with the sanitization algorithm in §3.3. If a slug
-would collide in the local projection, the writer MUST append a disambiguating
+Issue and pull object refs MUST be lowercase hexadecimal prefixes of
+`sha256(object.id)`, where `object.id` is the canonical UUID string from the
+accepted event payload. They MUST be at least 7 characters and MUST be extended
+when ambiguous. Project, milestone, and column slugs MUST be ref-safe segments
+(§3.1) generated with the sanitization algorithm in §3.3. If a slug would
+collide in the local projection, the writer MUST append a disambiguating
 suffix, normally `-<uuid-prefix>`.
 
 CLI and HTTP entry points SHOULD accept the typed long forms
-`issue:<uuid-prefix>`, `pull:<uuid-prefix>`, `project:<uuid-prefix>`, and
+`issue:<object-ref>`, `pull:<object-ref>`, `project:<uuid-prefix>`, and
 `milestone:<uuid-prefix>` whenever the expected object kind is not otherwise
 obvious from command context.
 

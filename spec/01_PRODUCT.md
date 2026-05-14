@@ -162,13 +162,15 @@ than user-facing content objects:
     `object.id`.
 
 Gitomi v1 does not require a native repo-wide integer allocator. The canonical
-human reference form for UUID-backed objects is a unique UUID prefix:
+human reference form for issue and pull UUIDs is a unique SHA-256 prefix derived
+from the UUID:
 
-*   `#<uuid-prefix>` for issues in issue contexts
-*   `pr:<uuid-prefix>` for pull requests outside an explicit pull context
+*   `#<object-ref>` for issues in issue contexts
+*   `pr:<object-ref>` for pull requests outside an explicit pull context
 *   `project:<uuid-prefix>` or `@<slug>` for projects
 *   `milestone:<uuid-prefix>` or `^<slug>` for milestones
-*   minimum prefix length: 7 lowercase hex characters
+*   issue and pull object refs are lowercase hex prefixes of `sha256(object.id)`
+*   minimum issue/pull object-ref length: 7 lowercase hex characters
 *   implementations MUST extend the displayed prefix when 7 characters are ambiguous within the local projection
 
 Project and milestone slugs are display aliases, not Git ref names and not
@@ -552,8 +554,8 @@ invalid.
 
 Implementations MUST parse Data Plane commit messages to derive links from code to Gitomi objects.
 
-*   **Syntax**: `#<uuid-prefix>`, `issue:<uuid-prefix>`, or `pr:<uuid-prefix>`
-*   **Resolution**: the prefix MUST resolve against the local issue and pull index
+*   **Syntax**: `#<object-ref>`, `issue:<object-ref>`, or `pr:<object-ref>`
+*   **Resolution**: the object ref MUST resolve against the local issue and pull index as a lowercase hex prefix of `sha256(object.id)`
 *   **Ambiguity**: if multiple objects share the prefix, the implementation SHOULD prompt for a longer prefix or ignore the reference
 
 These links are derived projection data. They MUST NOT be written back as explicit control-plane events.

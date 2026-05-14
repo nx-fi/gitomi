@@ -4,6 +4,7 @@ const index = @import("../index.zig");
 const repo_mod = @import("../repo.zig");
 const shared = @import("shared.zig");
 const source_stats = @import("source_stats.zig");
+const util = @import("../util.zig");
 
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
@@ -174,8 +175,9 @@ fn appendEventList(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, li
             .actor_principal = event.actor_principal,
         });
         if (event.object_id.len != 0) {
+            var object_ref_buf: [util.short_object_ref_len]u8 = undefined;
             try appendTemplate(buf, allocator, " / #{object_id}", .{
-                .object_id = event.object_id[0..@min(event.object_id.len, 7)],
+                .object_id = util.shortObjectRef(&object_ref_buf, event.object_id),
             });
         }
         try appendTemplate(buf, allocator, "</small></div></article>", .{});

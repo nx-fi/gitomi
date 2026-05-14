@@ -12,6 +12,8 @@ const eprint = io.eprint;
 const EventWriter = event_writer_mod.EventWriter;
 const newUuidV7 = util.newUuidV7;
 const rfc3339Now = util.rfc3339Now;
+const shortObjectRef = util.shortObjectRef;
+const short_object_ref_len = util.short_object_ref_len;
 
 pub fn createPullOpenedEvent(
     allocator: Allocator,
@@ -51,12 +53,14 @@ pub fn createPullOpenedEvent(
     );
     defer allocator.free(event_body);
 
-    const subject = try std.fmt.allocPrint(allocator, "pull.opened #{s} {s}", .{ pull_id[0..7], title });
+    var pull_ref_buf: [short_object_ref_len]u8 = undefined;
+    const pull_ref = shortObjectRef(&pull_ref_buf, pull_id);
+    const subject = try std.fmt.allocPrint(allocator, "pull.opened #{s} {s}", .{ pull_ref, title });
     defer allocator.free(subject);
     const commit_oid = try writer.write("gt pr", subject, event_body);
     defer allocator.free(commit_oid);
 
-    try out("opened pr #{s}\n", .{pull_id[0..7]});
+    try out("opened pr #{s}\n", .{pull_ref});
     try out("  id:     {s}\n", .{pull_id});
     try out("  commit: {s}\n", .{commit_oid});
     try out("  ref:    {s}\n", .{writer.inbox_ref});
@@ -95,12 +99,14 @@ pub fn createPullStringEvent(
     );
     defer allocator.free(event_body);
 
-    const subject = try std.fmt.allocPrint(allocator, "{s} #{s} {s}", .{ event_type, pull_id[0..@min(pull_id.len, 7)], payload_value });
+    var pull_ref_buf: [short_object_ref_len]u8 = undefined;
+    const pull_ref = shortObjectRef(&pull_ref_buf, pull_id);
+    const subject = try std.fmt.allocPrint(allocator, "{s} #{s} {s}", .{ event_type, pull_ref, payload_value });
     defer allocator.free(subject);
     const commit_oid = try writer.write("gt pr", subject, event_body);
     defer allocator.free(commit_oid);
 
-    try out("{s} #{s}\n", .{ event_type, pull_id[0..@min(pull_id.len, 7)] });
+    try out("{s} #{s}\n", .{ event_type, pull_ref });
     try out("  commit: {s}\n", .{commit_oid});
     try out("  ref:    {s}\n", .{writer.inbox_ref});
 }
@@ -136,12 +142,14 @@ pub fn createPullMergedEvent(
     );
     defer allocator.free(event_body);
 
-    const subject = try std.fmt.allocPrint(allocator, "pull.merged #{s}", .{pull_id[0..@min(pull_id.len, 7)]});
+    var pull_ref_buf: [short_object_ref_len]u8 = undefined;
+    const pull_ref = shortObjectRef(&pull_ref_buf, pull_id);
+    const subject = try std.fmt.allocPrint(allocator, "pull.merged #{s}", .{pull_ref});
     defer allocator.free(subject);
     const commit_oid = try writer.write("gt pr", subject, event_body);
     defer allocator.free(commit_oid);
 
-    try out("pull.merged #{s}\n", .{pull_id[0..@min(pull_id.len, 7)]});
+    try out("pull.merged #{s}\n", .{pull_ref});
     try out("  commit: {s}\n", .{commit_oid});
     try out("  ref:    {s}\n", .{writer.inbox_ref});
 }
@@ -180,12 +188,14 @@ pub fn createPullUpdatedEvent(
     );
     defer allocator.free(event_body);
 
-    const subject = try std.fmt.allocPrint(allocator, "pull.updated #{s}", .{pull_id[0..@min(pull_id.len, 7)]});
+    var pull_ref_buf: [short_object_ref_len]u8 = undefined;
+    const pull_ref = shortObjectRef(&pull_ref_buf, pull_id);
+    const subject = try std.fmt.allocPrint(allocator, "pull.updated #{s}", .{pull_ref});
     defer allocator.free(subject);
     const commit_oid = try writer.write("gt pr", subject, event_body);
     defer allocator.free(commit_oid);
 
-    try out("pull.updated #{s}\n", .{pull_id[0..@min(pull_id.len, 7)]});
+    try out("pull.updated #{s}\n", .{pull_ref});
     try out("  commit: {s}\n", .{commit_oid});
     try out("  ref:    {s}\n", .{writer.inbox_ref});
 }

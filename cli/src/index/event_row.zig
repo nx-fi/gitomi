@@ -3,6 +3,7 @@ const std = @import("std");
 const io = @import("../io.zig");
 const json_writer = @import("../json_writer.zig");
 const sqlite_db = @import("sqlite_db.zig");
+const util = @import("../util.zig");
 
 const Allocator = std.mem.Allocator;
 const SqliteStmt = sqlite_db.SqliteStmt;
@@ -137,11 +138,13 @@ pub fn printIndexedEvent(event: IndexedEvent) !void {
     const short = event.commit[0..@min(event.commit.len, 12)];
 
     if (event.valid_json) {
+        var object_ref_buf: [util.short_object_ref_len]u8 = undefined;
+        const object_ref = if (event.object_id.len == 0) "" else util.shortObjectRef(&object_ref_buf, event.object_id);
         try out("{s} {s} {s} #{s} {s}{s}{s}\n", .{
             short,
             event.ref,
             event.event_type,
-            event.object_id[0..@min(event.object_id.len, 7)],
+            object_ref,
             event.subject,
             if (std.mem.eql(u8, event.domain_status, "rejected")) " rejected:" else "",
             if (std.mem.eql(u8, event.domain_status, "rejected")) event.rejection_reason else "",

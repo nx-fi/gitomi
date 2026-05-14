@@ -70,14 +70,15 @@ pub fn renderIssuesPage(allocator: Allocator, repo: Repo) ![]u8 {
         const opened_at = try stmt.columnTextDup(allocator, 4);
         defer allocator.free(opened_at);
 
-        const short_id = id[0..@min(id.len, 7)];
+        var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
+        const issue_ref = util.shortObjectRef(&issue_ref_buf, id);
         try buf.appendSlice(allocator, "<article class=\"issue-row\"><div class=\"issue-main\"><div class=\"issue-title\">");
         try appendStatePill(&buf, allocator, state);
         try appendTemplate(&buf, allocator,
             \\<a href="{href}">{title}</a></div><p class="muted">#{id} opened by {author} at {opened_at}</p></div></article>
         , .{
-            .href = issueHref(short_id),
-            .id = short_id,
+            .href = issueHref(issue_ref),
+            .id = issue_ref,
             .title = title,
             .author = author,
             .opened_at = opened_at,

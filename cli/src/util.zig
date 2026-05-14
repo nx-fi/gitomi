@@ -6,6 +6,9 @@ const Allocator = std.mem.Allocator;
 const CliError = errors.CliError;
 const eprint = io.eprint;
 
+pub const short_object_ref_len: usize = 7;
+pub const max_object_ref_len: usize = 64;
+
 pub fn splitCommaFields(allocator: Allocator, raw: []const u8) !std.ArrayList([]const u8) {
     var list: std.ArrayList([]const u8) = .empty;
     errdefer list.deinit(allocator);
@@ -153,6 +156,30 @@ pub fn sha256Hex(allocator: Allocator, bytes: []const u8) ![]u8 {
     return out_buf;
 }
 
+pub fn shortObjectRef(out_buf: *[short_object_ref_len]u8, object_id: []const u8) []const u8 {
+    return objectRefPrefix(out_buf[0..], object_id);
+}
+
+pub fn objectRefPrefix(out_buf: []u8, object_id: []const u8) []const u8 {
+    std.debug.assert(out_buf.len <= max_object_ref_len);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(object_id, &digest, .{});
+    const hex = "0123456789abcdef";
+    for (out_buf, 0..) |*c, i| {
+        const b = digest[i / 2];
+        c.* = if (i % 2 == 0) hex[b >> 4] else hex[b & 0x0f];
+    }
+    return out_buf;
+}
+
+pub fn isObjectRefPrefix(value: []const u8) bool {
+    if (value.len < short_object_ref_len or value.len > max_object_ref_len) return false;
+    for (value) |c| {
+        if (!std.ascii.isHex(c)) return false;
+    }
+    return true;
+}
+
 pub fn requireValue(args: []const []const u8, index: *usize, name: []const u8) ![]const u8 {
     if (index.* + 1 >= args.len) {
         try eprint("{s} requires a value\n", .{name});
@@ -194,6 +221,19 @@ test "uuid formatter emits canonical lowercase form" {
     var out_buf: [36]u8 = undefined;
     formatUuid(bytes, &out_buf);
     try std.testing.expectEqualStrings("01234567-89ab-cdef-1032-547698badcfe", &out_buf);
+}
+
+test "object refs are sha256 prefixes" {
+    var short_buf: [short_object_ref_len]u8 = undefined;
+    const short = shortObjectRef(&short_buf, "018f0000-0000-7000-8000-000000000002");
+
+    const full = try sha256Hex(std.testing.allocator, "018f0000-0000-7000-8000-000000000002");
+    defer std.testing.allocator.free(full);
+
+    try std.testing.expectEqualStrings(full[0..short_object_ref_len], short);
+    try std.testing.expect(isObjectRefPrefix(short));
+    try std.testing.expect(!isObjectRefPrefix("018f00"));
+    try std.testing.expect(!isObjectRefPrefix("018f00z"));
 }
 
 test "ref segment sanitization" {
