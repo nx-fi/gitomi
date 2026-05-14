@@ -73,10 +73,16 @@ const TreeNavEntry = struct {
 
 const BranchRef = struct {
     name: []u8,
+    scope: BranchScope,
 
     fn deinit(self: BranchRef, allocator: Allocator) void {
         allocator.free(self.name);
     }
+};
+
+const BranchScope = enum {
+    local,
+    remote,
 };
 
 const TreeEntryCommit = struct {
@@ -672,15 +678,16 @@ fn appendBranchOptions(buf: *std.ArrayList(u8), allocator: Allocator, branches: 
         const selected = std.mem.eql(u8, branch.name, selected_ref);
         found_selected = found_selected or selected;
         try appendTemplate(buf, allocator,
-            \\<option value="{name}"{selected_attr}>{name}</option>
+            \\<option value="{name}"{selected_attr}>{name} ({scope})</option>
         , .{
             .name = branch.name,
+            .scope = branchScopeLabel(branch.scope),
             .selected_attr = shared.trustedHtml(if (selected) " selected" else ""),
         });
     }
     if (!found_selected) {
         try appendTemplate(buf, allocator,
-            \\<option value="{name}" selected>{name}</option>
+            \\<option value="{name}" selected>{name} (selected ref)</option>
         , .{ .name = selected_ref });
     }
 }
@@ -1212,6 +1219,7 @@ fn appendRootSidebar(
 
     try appendRootLatestCommit(buf, allocator, summary_opt);
     try appendRootLanguages(buf, allocator, languages_opt);
+    try appendRootSloc(buf, allocator, languages_opt);
     try appendTemplate(buf, allocator, "</section></aside>", .{});
 }
 
@@ -1281,8 +1289,35 @@ fn appendRootLanguages(buf: *std.ArrayList(u8), allocator: Allocator, stats_opt:
         });
     }
     try appendTemplate(buf, allocator,
-        \\</ul><div class="root-sloc-breakdown" aria-label="Source lines of code by language">
+        \\</ul></div>
     , .{});
+}
+
+fn appendRootSloc(buf: *std.ArrayList(u8), allocator: Allocator, stats_opt: ?source_stats.Stats) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="root-sidebar-section">
+        \\  <h2>SLOC</h2>
+    , .{});
+    const stats = stats_opt orelse {
+        try appendTemplate(buf, allocator,
+            \\<p class="root-sidebar-empty">No SLOC data available.</p></div>
+        , .{});
+        return;
+    };
+    const total = stats.total();
+    if (total == 0 or stats.rows.len == 0) {
+        try appendTemplate(buf, allocator,
+            \\<p class="root-sidebar-empty">No source files counted.</p></div>
+        , .{});
+        return;
+    }
+
+    try appendTemplate(buf, allocator,
+        \\<div class="root-sloc-total" aria-label="Total source lines of code"><span>Total SLOC</span><strong>{total} {lines_label}</strong></div><div class="root-sloc-breakdown" aria-label="Top source lines of code by language">
+    , .{
+        .total = shared.groupedUnsigned(total),
+        .lines_label = if (total == 1) "line" else "lines",
+    });
     for (stats.rows[0..@min(stats.rows.len, 3)]) |stat| {
         try appendTemplate(buf, allocator,
             \\<div class="root-sloc-row"><span class="root-sloc-language"><span class="language-dot" style="--language-color: {color};"></span><span>{name}</span></span><span class="root-sloc-metrics"><span><strong>{code}</strong> code</span><span><strong>{test_count}</strong> test</span><span><strong>{comment}</strong> comments</span></span></div>
@@ -1809,7 +1844,7 @@ fn loadTreeNavEntries(allocator: Allocator, repo: Repo, ref: []const u8) !?[]Tre
 }
 
 fn loadBranchRefs(allocator: Allocator, repo: Repo) ![]BranchRef {
-    const raw = try gitMaybe(allocator, repo, &.{ "for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes" }, git.max_git_output) orelse {
+    const raw = try gitMaybe(allocator, repo, &.{ "for-each-ref", "--format=%(refname)%09%(refname:short)", "refs/heads", "refs/remotes" }, git.max_git_output) orelse {
         return allocator.alloc(BranchRef, 0);
     };
     defer allocator.free(raw);
@@ -1822,17 +1857,38 @@ fn loadBranchRefs(allocator: Allocator, repo: Repo) ![]BranchRef {
 
     var lines = std.mem.splitScalar(u8, raw, '\n');
     while (lines.next()) |line| {
-        const name = std.mem.trim(u8, line, " \t\r\n");
-        if (name.len == 0) continue;
-        if (std.mem.endsWith(u8, name, "/HEAD")) continue;
-        try branches.append(allocator, .{ .name = try allocator.dupe(u8, name) });
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        if (trimmed.len == 0) continue;
+        var cols = std.mem.splitScalar(u8, trimmed, '\t');
+        const full_ref = cols.next() orelse continue;
+        const name = cols.next() orelse continue;
+        if (std.mem.endsWith(u8, full_ref, "/HEAD")) continue;
+        const scope = branchScopeForFullRef(full_ref) orelse continue;
+        try branches.append(allocator, .{
+            .name = try allocator.dupe(u8, name),
+            .scope = scope,
+        });
     }
     std.mem.sort(BranchRef, branches.items, {}, struct {
         fn lessThan(_: void, a: BranchRef, b: BranchRef) bool {
+            if (a.scope != b.scope) return @intFromEnum(a.scope) < @intFromEnum(b.scope);
             return std.ascii.lessThanIgnoreCase(a.name, b.name);
         }
     }.lessThan);
     return branches.toOwnedSlice(allocator);
+}
+
+fn branchScopeForFullRef(ref: []const u8) ?BranchScope {
+    if (std.mem.startsWith(u8, ref, "refs/heads/")) return .local;
+    if (std.mem.startsWith(u8, ref, "refs/remotes/")) return .remote;
+    return null;
+}
+
+fn branchScopeLabel(scope: BranchScope) []const u8 {
+    return switch (scope) {
+        .local => "local",
+        .remote => "remote",
+    };
 }
 
 fn treeEntryLessThan(_: void, a: TreeEntry, b: TreeEntry) bool {
@@ -2342,6 +2398,24 @@ test "web explorer parses git log commit headers" {
     try std.testing.expectEqualStrings("fix: path\twith tab", parsed.subject);
     try std.testing.expectEqualStrings("2 hours ago", parsed.relative);
     try std.testing.expect(parseLogCommitHeader("src/main.zig") == null);
+}
+
+test "web explorer labels branch dropdown options by scope" {
+    const local_name = try std.testing.allocator.dupe(u8, "main");
+    defer std.testing.allocator.free(local_name);
+    const remote_name = try std.testing.allocator.dupe(u8, "origin/main");
+    defer std.testing.allocator.free(remote_name);
+    const branches = [_]BranchRef{
+        .{ .name = local_name, .scope = .local },
+        .{ .name = remote_name, .scope = .remote },
+    };
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    try appendBranchOptions(&buf, std.testing.allocator, &branches, "main");
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, ">main (local)</option>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, ">origin/main (remote)</option>") != null);
 }
 
 test "web explorer maps changed paths to direct children" {

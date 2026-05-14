@@ -190,9 +190,10 @@ events and workflow run requests through the same storage path as the CLI. The
 projects page renders kanban boards from signed project and issue placement
 events and can create new project boards.
 
-The web UI supports leader-key click shortcuts across pages. Press Space by
-default to show keystroke hints for the visible clickable elements, then type
-the displayed key sequence to click that element. Customize the keys in
+The web UI supports keyboard shortcuts across pages. Press Space by default to
+show keystroke hints for visible clickable elements, press Space twice to open
+the shortcut reference, and use unleadered Vim-style navigation keys such as
+`h`, `j`, `k`, `l`, `/`, `t`, `n`, and `e`. Customize the click-hint keys in
 `.git/gitomi/config.toml`:
 
 ```toml
