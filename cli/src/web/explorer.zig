@@ -106,26 +106,27 @@ const BlameHeader = struct {
     line_no: usize,
 };
 
+const PathQuery = union(enum) {
+    ok: []u8,
+    invalid: []u8,
+
+    fn deinit(self: PathQuery, allocator: Allocator) void {
+        switch (self) {
+            .ok, .invalid => |path| allocator.free(path),
+        }
+    }
+};
+
 pub fn renderCodePage(allocator: Allocator, repo: Repo, target: []const u8) ![]u8 {
-    const query_ref = try queryValueOwned(allocator, target, "ref");
-    defer if (query_ref) |value| allocator.free(value);
-    const query_path = try queryValueOwned(allocator, target, "path");
-    defer if (query_path) |value| allocator.free(value);
-    const query_view = try queryValueOwned(allocator, target, "view");
-    defer if (query_view) |value| allocator.free(value);
+    const ref = try targetRefOwned(allocator, repo, target);
+    defer allocator.free(ref);
 
-    const default_ref = try defaultRef(allocator, repo);
-    defer allocator.free(default_ref);
-    const ref = if (query_ref) |value| blk: {
-        const trimmed = std.mem.trim(u8, value, " \t\r\n");
-        break :blk if (trimmed.len == 0) default_ref else trimmed;
-    } else default_ref;
-
-    const path = if (query_path) |value|
-        normalizedPathOwned(allocator, value) catch return renderMissingPathPage(allocator, repo, ref, value)
-    else
-        try allocator.dupe(u8, "");
-    defer allocator.free(path);
+    var path_query = try targetPathQueryOwned(allocator, target);
+    defer path_query.deinit(allocator);
+    const path = switch (path_query) {
+        .ok => |value| value,
+        .invalid => |value| return renderMissingPathPage(allocator, repo, ref, value),
+    };
 
     if (path.len == 0) {
         return renderTreePage(allocator, repo, ref, path);
@@ -138,7 +139,8 @@ pub fn renderCodePage(allocator: Allocator, repo: Repo, target: []const u8) ![]u
     const kind = kind_owned orelse return renderMissingPathPage(allocator, repo, ref, path);
 
     if (std.mem.eql(u8, kind, "blob")) {
-        const view = if (query_view) |value| std.mem.trim(u8, value, " \t\r\n") else "";
+        const view = try targetViewOwned(allocator, target);
+        defer allocator.free(view);
         return renderBlobPage(allocator, repo, ref, path, spec, view);
     }
     if (std.mem.eql(u8, kind, "tree")) {
@@ -148,23 +150,15 @@ pub fn renderCodePage(allocator: Allocator, repo: Repo, target: []const u8) ![]u
 }
 
 pub fn renderBlamePage(allocator: Allocator, repo: Repo, target: []const u8) ![]u8 {
-    const query_ref = try queryValueOwned(allocator, target, "ref");
-    defer if (query_ref) |value| allocator.free(value);
-    const query_path = try queryValueOwned(allocator, target, "path");
-    defer if (query_path) |value| allocator.free(value);
+    const ref = try targetRefOwned(allocator, repo, target);
+    defer allocator.free(ref);
 
-    const default_ref = try defaultRef(allocator, repo);
-    defer allocator.free(default_ref);
-    const ref = if (query_ref) |value| blk: {
-        const trimmed = std.mem.trim(u8, value, " \t\r\n");
-        break :blk if (trimmed.len == 0) default_ref else trimmed;
-    } else default_ref;
-
-    const path = if (query_path) |value|
-        normalizedPathOwned(allocator, value) catch return renderMissingPathPage(allocator, repo, ref, value)
-    else
-        try allocator.dupe(u8, "");
-    defer allocator.free(path);
+    var path_query = try targetPathQueryOwned(allocator, target);
+    defer path_query.deinit(allocator);
+    const path = switch (path_query) {
+        .ok => |value| value,
+        .invalid => |value| return renderMissingPathPage(allocator, repo, ref, value),
+    };
 
     if (path.len == 0) return renderMissingPathPage(allocator, repo, ref, path);
 
@@ -187,16 +181,10 @@ pub fn renderBlamePage(allocator: Allocator, repo: Repo, target: []const u8) ![]
     try appendRepoHeader(&buf, allocator, repo, ref);
     try appendCodeLayoutStart(&buf, allocator, repo, ref, path);
 
-    try buf.appendSlice(allocator,
-        \\<section class="panel code-panel">
-        \\  <div class="code-toolbar">
-        \\    <div>
-    );
-    try appendBreadcrumbs(&buf, allocator, repo, ref, path);
-    try buf.appendSlice(allocator, "</div><div class=\"file-actions\">");
+    try appendCodePanelStart(&buf, allocator, repo, ref, path);
     try shared.appendButtonLink(&buf, allocator, Button{ .label = "Code", .href = codeHref(ref, path) });
     try shared.appendButtonLink(&buf, allocator, Button{ .label = "History", .href = commitsHref(ref, path) });
-    try buf.appendSlice(allocator, "</div></div>");
+    try appendCodePanelToolbarEnd(&buf, allocator);
     try appendCommitBar(&buf, allocator, summary_opt);
 
     if (blame_opt) |lines| {
@@ -209,27 +197,22 @@ pub fn renderBlamePage(allocator: Allocator, repo: Repo, target: []const u8) ![]
         try appendEmptyState(&buf, allocator, "Blame not available.", "Git could not render blame data for this file.");
     }
 
-    try buf.appendSlice(allocator, "</section>");
+    try appendCodePanelEnd(&buf, allocator);
     try appendCodeLayoutEnd(&buf, allocator);
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
 }
 
 pub fn loadRawBlob(allocator: Allocator, repo: Repo, target: []const u8) !?RawBlob {
-    const query_ref = try queryValueOwned(allocator, target, "ref");
-    defer if (query_ref) |value| allocator.free(value);
-    const query_path = (try queryValueOwned(allocator, target, "path")) orelse return null;
-    defer allocator.free(query_path);
+    const ref = try targetRefOwned(allocator, repo, target);
+    defer allocator.free(ref);
 
-    const default_ref = try defaultRef(allocator, repo);
-    defer allocator.free(default_ref);
-    const ref = if (query_ref) |value| blk: {
-        const trimmed = std.mem.trim(u8, value, " \t\r\n");
-        break :blk if (trimmed.len == 0) default_ref else trimmed;
-    } else default_ref;
-
-    const path = normalizedPathOwned(allocator, query_path) catch return null;
-    defer allocator.free(path);
+    var path_query = try targetPathQueryOwned(allocator, target);
+    defer path_query.deinit(allocator);
+    const path = switch (path_query) {
+        .ok => |value| value,
+        .invalid => return null,
+    };
     if (path.len == 0) return null;
 
     const spec = try objectSpec(allocator, ref, path);
@@ -263,18 +246,12 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
         const summary_opt = try loadCommitSummary(allocator, repo, ref, path);
         defer if (summary_opt) |summary| summary.deinit(allocator);
 
-        try buf.appendSlice(allocator,
-            \\<section class="panel code-panel">
-            \\  <div class="code-toolbar">
-            \\    <div>
-        );
-        try appendBreadcrumbs(&buf, allocator, repo, ref, path);
-        try buf.appendSlice(allocator, "</div><div class=\"file-actions\">");
+        try appendCodePanelStart(&buf, allocator, repo, ref, path);
         try shared.appendButtonLink(&buf, allocator, Button{ .label = "History", .href = commitsHref(ref, path) });
-        try buf.appendSlice(allocator, "</div></div>");
+        try appendCodePanelToolbarEnd(&buf, allocator);
         try appendCommitBar(&buf, allocator, summary_opt);
         try appendTreeListing(&buf, allocator, ref, path, entries);
-        try buf.appendSlice(allocator, "</section>");
+        try appendCodePanelEnd(&buf, allocator);
 
         try appendReadmePreview(&buf, allocator, repo, ref, path, entries);
     } else {
@@ -303,13 +280,7 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
         null;
     defer if (content) |bytes| allocator.free(bytes);
 
-    try buf.appendSlice(allocator,
-        \\<section class="panel code-panel">
-        \\  <div class="code-toolbar">
-        \\    <div>
-    );
-    try appendBreadcrumbs(&buf, allocator, repo, ref, path);
-    try buf.appendSlice(allocator, "</div><div class=\"file-actions\">");
+    try appendCodePanelStart(&buf, allocator, repo, ref, path);
     const markdown = isMarkdownPath(path);
     const raw_selected = !markdown or std.mem.eql(u8, view, "raw");
     if (markdown) try appendMarkdownViewTabs(&buf, allocator, ref, path, raw_selected);
@@ -319,41 +290,59 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     }
     try shared.appendButtonLink(&buf, allocator, Button{ .label = "Blame", .href = blameHref(ref, path) });
     try shared.appendButtonLink(&buf, allocator, Button{ .label = "History", .href = commitsHref(ref, path) });
-    try buf.appendSlice(allocator, "</div></div>");
+    try appendCodePanelToolbarEnd(&buf, allocator);
 
-    if (media_kind) |kind| {
-        if (can_preview_media) {
-            try appendMediaPreview(&buf, allocator, ref, path, kind);
-        } else {
-            try appendEmptyState(&buf, allocator, "File too large to preview.", "Use Git locally to inspect this media blob.");
-        }
-    } else if (content) |bytes| {
-        if (containsNul(bytes)) {
-            try appendEmptyState(&buf, allocator, "Binary file not displayed.", "This blob contains NUL bytes.");
-        } else if (markdown and !raw_selected) {
-            try buf.appendSlice(allocator, "<div class=\"readme-body markdown-body markdown-preview\">");
-            try appendRepositoryMarkdown(&buf, allocator, ref, path, bytes);
-            try buf.appendSlice(allocator, "</div>");
-        } else {
-            try appendBlobLines(&buf, allocator, path, bytes);
-        }
-    } else {
-        try appendEmptyState(&buf, allocator, "File too large to display.", "Use Git locally to inspect this blob.");
-    }
+    try appendBlobContent(&buf, allocator, ref, path, media_kind, can_preview_media, content, markdown and !raw_selected);
 
-    try buf.appendSlice(allocator, "</section>");
+    try appendCodePanelEnd(&buf, allocator);
     try appendCodeLayoutEnd(&buf, allocator);
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
 }
 
+fn appendBlobContent(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    ref: []const u8,
+    path: []const u8,
+    media_kind: ?MediaKind,
+    can_preview_media: bool,
+    content: ?[]const u8,
+    render_markdown: bool,
+) !void {
+    if (media_kind) |kind| {
+        if (can_preview_media) {
+            try appendMediaPreview(buf, allocator, ref, path, kind);
+        } else {
+            try appendEmptyState(buf, allocator, "File too large to preview.", "Use Git locally to inspect this media blob.");
+        }
+        return;
+    }
+
+    const bytes = content orelse {
+        try appendEmptyState(buf, allocator, "File too large to display.", "Use Git locally to inspect this blob.");
+        return;
+    };
+    if (containsNul(bytes)) {
+        try appendEmptyState(buf, allocator, "Binary file not displayed.", "This blob contains NUL bytes.");
+    } else if (render_markdown) {
+        try appendTemplate(buf, allocator,
+            \\<div class="readme-body markdown-body markdown-preview">
+        , .{});
+        try appendRepositoryMarkdown(buf, allocator, ref, path, bytes);
+        try appendTemplate(buf, allocator, "</div>", .{});
+    } else {
+        try appendBlobLines(buf, allocator, path, bytes);
+    }
+}
+
 fn appendMarkdownViewTabs(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, path: []const u8, raw_selected: bool) !void {
     try appendTemplate(buf, allocator,
-        \\<nav class="view-tabs" aria-label="Markdown view"><a class="{preview_classes}" href="{preview_href}">Preview</a><a class="{raw_classes}" href="{raw_href}">Raw</a></nav>
+        \\<nav class="view-tabs" aria-label="Markdown view"><a{preview_class} href="{preview_href}">Preview</a><a{raw_class} href="{raw_href}">Raw</a></nav>
     , .{
-        .preview_classes = shared.classes("", &.{shared.class("active", !raw_selected)}),
+        .preview_class = shared.classAttr("", &.{shared.class("active", !raw_selected)}),
         .preview_href = codeHrefWithView(ref, path, "preview"),
-        .raw_classes = shared.classes("", &.{shared.class("active", raw_selected)}),
+        .raw_class = shared.classAttr("", &.{shared.class("active", raw_selected)}),
         .raw_href = codeHrefWithView(ref, path, "raw"),
     });
 }
@@ -379,32 +368,74 @@ fn appendRepoHeader(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, r
 }
 
 fn appendCodeLayoutStart(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8, active_path: []const u8) !void {
-    if (active_path.len == 0) {
-        try buf.appendSlice(allocator, "<div class=\"code-layout no-sidebar\">");
-    } else {
-        try buf.appendSlice(allocator, "<div class=\"code-layout\">");
+    try appendTemplate(buf, allocator,
+        \\<div{class_attr}>
+    , .{ .class_attr = shared.classAttr("code-layout", &.{shared.class("no-sidebar", active_path.len == 0)}) });
+    if (active_path.len != 0) {
         try appendTreeSidebar(buf, allocator, repo, ref, active_path);
     }
-    try buf.appendSlice(allocator, "<div class=\"code-main\">");
+    try appendTemplate(buf, allocator,
+        \\<div class="code-main">
+    , .{});
 }
 
 fn appendCodeLayoutEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
-    try buf.appendSlice(allocator, "</div></div>");
+    try appendTemplate(buf, allocator, "</div></div>", .{});
+}
+
+fn appendCodePanelStart(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<section class="panel code-panel">
+        \\  <div class="code-toolbar">
+        \\    <div>
+    , .{});
+    try appendBreadcrumbs(buf, allocator, repo, ref, path);
+    try appendTemplate(buf, allocator,
+        \\    </div>
+        \\    <div class="file-actions">
+    , .{});
+}
+
+fn appendCodePanelToolbarEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try appendTemplate(buf, allocator,
+        \\    </div>
+        \\  </div>
+    , .{});
+}
+
+fn appendCodePanelEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try appendTemplate(buf, allocator, "</section>", .{});
 }
 
 fn appendTreeSidebar(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8, active_path: []const u8) !void {
     const entries_opt = try loadTreeNavEntries(allocator, repo, ref);
     defer if (entries_opt) |entries| freeTreeNavEntries(allocator, entries);
 
-    try buf.appendSlice(allocator,
+    try appendTemplate(buf, allocator,
         \\<aside class="panel tree-sidebar">
         \\  <div class="tree-sidebar-head">Files</div>
         \\  <nav class="tree-nav" data-tree-nav>
-        \\    <div class="tree-node expanded" data-tree-path="" data-tree-depth="0" data-tree-kind="tree">
-        \\      <button class="tree-toggle" type="button" aria-label="Collapse repository" aria-expanded="true" data-tree-toggle></button>
-    );
+    , .{});
+    try appendTreeRootNode(buf, allocator, repo, ref, active_path);
+
+    if (entries_opt) |entries| {
+        for (entries) |entry| {
+            try appendTreeNavEntry(buf, allocator, ref, active_path, entry);
+        }
+    } else {
+        try appendTemplate(buf, allocator,
+            \\<p class="tree-note">No files to show.</p>
+        , .{});
+    }
+
+    try appendTemplate(buf, allocator, "</nav></aside>", .{});
+}
+
+fn appendTreeRootNode(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8, active_path: []const u8) !void {
     try appendTemplate(buf, allocator,
-        \\      <a class="{classes}" href="{href}">
+        \\<div class="tree-node expanded" data-tree-path="" data-tree-depth="0" data-tree-kind="tree">
+        \\  <button class="tree-toggle" type="button" aria-label="Collapse repository" aria-expanded="true" data-tree-toggle></button>
+        \\  <a class="{classes}" href="{href}">
     , .{
         .classes = shared.classes("tree-link", &.{shared.class("active", active_path.len == 0)}),
         .href = codeHref(ref, ""),
@@ -413,61 +444,59 @@ fn appendTreeSidebar(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, 
     try appendTemplate(buf, allocator,
         \\<span class="tree-name">{repo_name}</span></a></div>
     , .{ .repo_name = std.fs.path.basename(repo.root) });
+}
 
-    if (entries_opt) |entries| {
-        for (entries) |entry| {
-            const depth = pathDepth(entry.path) + 1;
-            const active = std.mem.eql(u8, active_path, entry.path);
-            const ancestor = std.mem.eql(u8, entry.kind, "tree") and isAncestorPath(entry.path, active_path);
-            const is_tree = std.mem.eql(u8, entry.kind, "tree");
-            const expanded = is_tree and isAncestorOrSelfPath(entry.path, active_path);
-            const visible = treeEntryInitiallyVisible(entry.path, active_path);
+fn appendTreeNavEntry(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, active_path: []const u8, entry: TreeNavEntry) !void {
+    const depth = pathDepth(entry.path) + 1;
+    const active = std.mem.eql(u8, active_path, entry.path);
+    const is_tree = std.mem.eql(u8, entry.kind, "tree");
+    const ancestor = is_tree and isAncestorPath(entry.path, active_path);
+    const expanded = is_tree and isAncestorOrSelfPath(entry.path, active_path);
 
-            try appendTemplate(buf, allocator,
-                \\<div class="{classes}" data-tree-path="{path}" data-tree-parent="{parent_path}" data-tree-depth="{depth}" data-tree-kind="{kind}" style="--depth: {depth}">
-            , .{
-                .classes = shared.classes("tree-node", &.{
-                    shared.class("active", active),
-                    shared.class("ancestor", ancestor),
-                    shared.class("expanded", expanded),
-                    shared.class("collapsed-child", !visible),
-                }),
-                .path = entry.path,
-                .parent_path = parentPath(entry.path),
-                .depth = depth,
-                .kind = entry.kind,
-            });
+    try appendTemplate(buf, allocator,
+        \\<div class="{classes}" data-tree-path="{path}" data-tree-parent="{parent_path}" data-tree-depth="{depth}" data-tree-kind="{kind}" style="--depth: {depth}">
+    , .{
+        .classes = shared.classes("tree-node", &.{
+            shared.class("active", active),
+            shared.class("ancestor", ancestor),
+            shared.class("expanded", expanded),
+            shared.class("collapsed-child", !treeEntryInitiallyVisible(entry.path, active_path)),
+        }),
+        .path = entry.path,
+        .parent_path = parentPath(entry.path),
+        .depth = depth,
+        .kind = entry.kind,
+    });
 
-            if (is_tree) {
-                try appendTemplate(buf, allocator,
-                    \\<button class="tree-toggle" type="button" aria-label="{label}" aria-expanded="{expanded}" data-tree-toggle></button>
-                , .{
-                    .label = if (expanded) "Collapse folder" else "Expand folder",
-                    .expanded = if (expanded) "true" else "false",
-                });
-            } else {
-                try buf.appendSlice(allocator, "<span class=\"tree-toggle-spacer\" aria-hidden=\"true\"></span>");
-            }
+    try appendTreeToggle(buf, allocator, is_tree, expanded);
+    try appendTemplate(buf, allocator,
+        \\<a class="{classes}" href="{href}">
+    , .{
+        .classes = shared.classes("tree-link", &.{
+            shared.class("active", active),
+            shared.class("ancestor", ancestor),
+        }),
+        .href = codeHref(ref, entry.path),
+    });
+    try appendFileIcon(buf, allocator, entry.path, entry.kind);
+    try appendTemplate(buf, allocator,
+        \\<span class="tree-name">{name}</span></a></div>
+    , .{ .name = baseName(entry.path) });
+}
 
-            try appendTemplate(buf, allocator,
-                \\<a class="{classes}" href="{href}">
-            , .{
-                .classes = shared.classes("tree-link", &.{
-                    shared.class("active", active),
-                    shared.class("ancestor", ancestor),
-                }),
-                .href = codeHref(ref, entry.path),
-            });
-            try appendFileIcon(buf, allocator, entry.path, entry.kind);
-            try appendTemplate(buf, allocator,
-                \\<span class="tree-name">{name}</span></a></div>
-            , .{ .name = baseName(entry.path) });
-        }
-    } else {
-        try buf.appendSlice(allocator, "<p class=\"tree-note\">No files to show.</p>");
+fn appendTreeToggle(buf: *std.ArrayList(u8), allocator: Allocator, is_tree: bool, expanded: bool) !void {
+    if (!is_tree) {
+        try appendTemplate(buf, allocator,
+            \\<span class="tree-toggle-spacer" aria-hidden="true"></span>
+        , .{});
+        return;
     }
-
-    try buf.appendSlice(allocator, "</nav></aside>");
+    try appendTemplate(buf, allocator,
+        \\<button class="tree-toggle" type="button" aria-label="{label}" aria-expanded="{expanded}" data-tree-toggle></button>
+    , .{
+        .label = if (expanded) "Collapse folder" else "Expand folder",
+        .expanded = if (expanded) "true" else "false",
+    });
 }
 
 fn appendTreeListing(
@@ -477,44 +506,52 @@ fn appendTreeListing(
     path: []const u8,
     entries: []const TreeEntry,
 ) !void {
-    try buf.appendSlice(allocator,
+    try appendTemplate(buf, allocator,
         \\<div class="file-list">
         \\  <div class="file-row file-row-head"><span>Name</span><span>Mode</span><span>Size</span></div>
-    );
+    , .{});
 
     if (path.len != 0) {
-        try appendTemplate(buf, allocator,
-            \\<div class="file-row"><a class="file-name" href="{href}">
-        , .{ .href = codeHref(ref, parentPath(path)) });
-        try appendFileIcon(buf, allocator, "", "tree");
-        try appendTemplate(buf, allocator, "..</a><span></span><span></span></div>", .{});
+        try appendParentDirectoryRow(buf, allocator, ref, path);
     }
 
     for (entries) |entry| {
-        const child_path = try childPath(allocator, path, entry.name);
-        defer allocator.free(child_path);
-
-        try appendTemplate(buf, allocator,
-            \\<div class="file-row"><a class="file-name" href="{href}">
-        , .{ .href = codeHref(ref, child_path) });
-        try appendFileIcon(buf, allocator, child_path, entry.kind);
-        try appendTemplate(buf, allocator,
-            \\{name}</a><span><code>{mode}</code></span><span class="file-size">
-        , .{
-            .name = entry.name,
-            .mode = entry.mode,
-        });
-        if (std.mem.eql(u8, entry.kind, "blob")) {
-            try appendSize(buf, allocator, entry.size);
-        }
-        try buf.appendSlice(allocator, "</span></div>");
+        try appendTreeEntryRow(buf, allocator, ref, path, entry);
     }
 
     if (entries.len == 0) {
         try appendEmptyState(buf, allocator, "Empty directory.", "This tree has no entries.");
     }
 
-    try buf.appendSlice(allocator, "</div>");
+    try appendTemplate(buf, allocator, "</div>", .{});
+}
+
+fn appendParentDirectoryRow(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, path: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="file-row"><a class="file-name" href="{href}">
+    , .{ .href = codeHref(ref, parentPath(path)) });
+    try appendFileIcon(buf, allocator, "", "tree");
+    try appendTemplate(buf, allocator, "..</a><span></span><span></span></div>", .{});
+}
+
+fn appendTreeEntryRow(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, parent: []const u8, entry: TreeEntry) !void {
+    const child_path = try childPath(allocator, parent, entry.name);
+    defer allocator.free(child_path);
+
+    try appendTemplate(buf, allocator,
+        \\<div class="file-row"><a class="file-name" href="{href}">
+    , .{ .href = codeHref(ref, child_path) });
+    try appendFileIcon(buf, allocator, child_path, entry.kind);
+    try appendTemplate(buf, allocator,
+        \\{name}</a><span><code>{mode}</code></span><span class="file-size">
+    , .{
+        .name = entry.name,
+        .mode = entry.mode,
+    });
+    if (std.mem.eql(u8, entry.kind, "blob")) {
+        try appendSize(buf, allocator, entry.size);
+    }
+    try appendTemplate(buf, allocator, "</span></div>", .{});
 }
 
 fn appendCommitBar(buf: *std.ArrayList(u8), allocator: Allocator, summary_opt: ?CommitSummary) !void {
@@ -569,24 +606,26 @@ fn appendBreadcrumbs(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, 
 
 fn appendBlobLines(buf: *std.ArrayList(u8), allocator: Allocator, path: []const u8, content: []const u8) !void {
     const language = languageForPath(path);
-    try buf.appendSlice(allocator, "<ol class=\"blob-lines\">");
+    try appendTemplate(buf, allocator, "<ol class=\"blob-lines\">", .{});
     var lines = std.mem.splitScalar(u8, content, '\n');
     var line_no: usize = 1;
     while (lines.next()) |line| : (line_no += 1) {
-        try appendTemplate(buf, allocator,
-            \\<li id="L{line_no}"><a class="line-num" href="#L{line_no}">{line_no}</a><code class="language-{language}">{line}</code></li>
-        , .{
-            .line_no = line_no,
-            .language = language,
-            .line = line,
-        });
+        try appendBlobLine(buf, allocator, language, line_no, line);
     }
     if (content.len == 0) {
-        try appendTemplate(buf, allocator,
-            \\<li id="L1"><a class="line-num" href="#L1">1</a><code class="language-{language}"></code></li>
-        , .{ .language = language });
+        try appendBlobLine(buf, allocator, language, 1, "");
     }
-    try buf.appendSlice(allocator, "</ol>");
+    try appendTemplate(buf, allocator, "</ol>", .{});
+}
+
+fn appendBlobLine(buf: *std.ArrayList(u8), allocator: Allocator, language: []const u8, line_no: usize, line: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<li id="L{line_no}"><a class="line-num" href="#L{line_no}">{line_no}</a><code class="language-{language}">{line}</code></li>
+    , .{
+        .line_no = line_no,
+        .language = language,
+        .line = line,
+    });
 }
 
 fn appendMediaPreview(
@@ -622,26 +661,30 @@ fn appendMediaPreview(
 fn appendBlameLines(buf: *std.ArrayList(u8), allocator: Allocator, path: []const u8, lines: []const BlameLine) !void {
     const language = languageForPath(path);
     const now = std.time.timestamp();
-    try buf.appendSlice(allocator, "<ol class=\"blame-lines\">");
+    try appendTemplate(buf, allocator, "<ol class=\"blame-lines\">", .{});
     for (lines) |line| {
-        const relative_date = try relativeTimeOwned(allocator, line.author_timestamp, now);
-        defer allocator.free(relative_date);
-        try appendTemplate(buf, allocator,
-            \\<li class="blame-row {age_class}" id="L{line_no}"><span class="blame-meta" title="{summary}"><a class="blame-hash" href="{href}">{short_hash}</a><span class="blame-author">{author}</span><span class="blame-date" title="{date}">{relative_date}</span></span><a class="line-num" href="#L{line_no}">{line_no}</a><code class="blame-code language-{language}">{content}</code></li>
-        , .{
-            .age_class = blameAgeClass(line.author_timestamp, now),
-            .line_no = line.line_no,
-            .summary = line.summary,
-            .href = commitHref(line.commit),
-            .short_hash = line.short_hash,
-            .author = line.author,
-            .date = line.date,
-            .relative_date = relative_date,
-            .language = language,
-            .content = line.content,
-        });
+        try appendBlameLine(buf, allocator, language, now, line);
     }
-    try buf.appendSlice(allocator, "</ol>");
+    try appendTemplate(buf, allocator, "</ol>", .{});
+}
+
+fn appendBlameLine(buf: *std.ArrayList(u8), allocator: Allocator, language: []const u8, now: i64, line: BlameLine) !void {
+    const relative_date = try relativeTimeOwned(allocator, line.author_timestamp, now);
+    defer allocator.free(relative_date);
+    try appendTemplate(buf, allocator,
+        \\<li class="blame-row {age_class}" id="L{line_no}"><span class="blame-meta" title="{summary}"><a class="blame-hash" href="{href}">{short_hash}</a><span class="blame-author">{author}</span><span class="blame-date" title="{date}">{relative_date}</span></span><a class="line-num" href="#L{line_no}">{line_no}</a><code class="blame-code language-{language}">{content}</code></li>
+    , .{
+        .age_class = blameAgeClass(line.author_timestamp, now),
+        .line_no = line.line_no,
+        .summary = line.summary,
+        .href = commitHref(line.commit),
+        .short_hash = line.short_hash,
+        .author = line.author,
+        .date = line.date,
+        .relative_date = relative_date,
+        .language = language,
+        .content = line.content,
+    });
 }
 
 fn appendReadmePreview(
@@ -666,7 +709,7 @@ fn appendReadmePreview(
         \\  <div class="section-head"><h2>{readme}</h2></div><div class="readme-body markdown-body">
     , .{ .readme = readme });
     try appendRepositoryMarkdown(buf, allocator, ref, readme_path, content);
-    try buf.appendSlice(allocator, "</div></section>");
+    try appendTemplate(buf, allocator, "</div></section>", .{});
 }
 
 fn appendRepositoryMarkdown(
@@ -976,6 +1019,34 @@ fn defaultRef(allocator: Allocator, repo: Repo) ![]u8 {
     return allocator.dupe(u8, "HEAD");
 }
 
+fn targetRefOwned(allocator: Allocator, repo: Repo, target: []const u8) ![]u8 {
+    const query_ref = try queryValueOwned(allocator, target, "ref");
+    defer if (query_ref) |value| allocator.free(value);
+    if (query_ref) |value| {
+        const trimmed = std.mem.trim(u8, value, " \t\r\n");
+        if (trimmed.len != 0) return allocator.dupe(u8, trimmed);
+    }
+    return defaultRef(allocator, repo);
+}
+
+fn targetPathQueryOwned(allocator: Allocator, target: []const u8) !PathQuery {
+    const query_path = (try queryValueOwned(allocator, target, "path")) orelse return .{ .ok = try allocator.dupe(u8, "") };
+    errdefer allocator.free(query_path);
+
+    const path = normalizedPathOwned(allocator, query_path) catch |err| switch (err) {
+        error.InvalidPath => return .{ .invalid = query_path },
+        else => return err,
+    };
+    allocator.free(query_path);
+    return .{ .ok = path };
+}
+
+fn targetViewOwned(allocator: Allocator, target: []const u8) ![]u8 {
+    const query_view = (try queryValueOwned(allocator, target, "view")) orelse return allocator.dupe(u8, "");
+    defer allocator.free(query_view);
+    return allocator.dupe(u8, std.mem.trim(u8, query_view, " \t\r\n"));
+}
+
 fn objectSpec(allocator: Allocator, ref: []const u8, path: []const u8) ![]u8 {
     if (path.len == 0) return allocator.dupe(u8, ref);
     return std.fmt.allocPrint(allocator, "{s}:{s}", .{ ref, path });
@@ -1019,9 +1090,35 @@ fn treeEntryInitiallyVisible(path: []const u8, active_path: []const u8) bool {
 }
 
 fn appendFileIcon(buf: *std.ArrayList(u8), allocator: Allocator, path: []const u8, kind: []const u8) !void {
+    if (deviconClassForPath(path, kind)) |class| {
+        try appendTemplate(buf, allocator,
+            \\<i class="file-icon devicon-icon {class} colored" aria-hidden="true"></i>
+        , .{ .class = class });
+        return;
+    }
+
     try appendTemplate(buf, allocator,
         \\<span class="file-icon {class}" aria-hidden="true"></span>
     , .{ .class = fileIconClass(path, kind) });
+}
+
+fn deviconClassForPath(path: []const u8, kind: []const u8) ?[]const u8 {
+    if (!std.mem.eql(u8, kind, "blob")) return null;
+    if (mediaKindForPath(path) != null) return null;
+
+    const language = languageForPath(path);
+    if (std.mem.eql(u8, language, "zig")) return "devicon-zig-original";
+    if (std.mem.eql(u8, language, "javascript")) return "devicon-javascript-plain";
+    if (std.mem.eql(u8, language, "typescript")) return "devicon-typescript-plain";
+    if (std.mem.eql(u8, language, "bash")) return "devicon-bash-plain";
+    if (std.mem.eql(u8, language, "yaml")) return "devicon-yaml-plain";
+    if (std.mem.eql(u8, language, "css")) return "devicon-css3-plain";
+    if (std.mem.eql(u8, language, "html")) return "devicon-html5-plain";
+    if (std.mem.eql(u8, language, "xml")) return "devicon-xml-plain";
+    if (std.mem.eql(u8, language, "rust")) return "devicon-rust-plain";
+    if (std.mem.eql(u8, language, "python")) return "devicon-python-plain";
+    if (std.mem.eql(u8, language, "markdown")) return "devicon-markdown-original";
+    return null;
 }
 
 fn fileIconClass(path: []const u8, kind: []const u8) []const u8 {
@@ -1274,6 +1371,14 @@ test "web explorer maps file paths to highlight languages" {
     try std.testing.expectEqualStrings("zig", languageForPath("src/main.zig"));
     try std.testing.expectEqualStrings("markdown", languageForPath("README.md"));
     try std.testing.expectEqualStrings("plaintext", languageForPath("LICENSE"));
+}
+
+test "web explorer maps supported file paths to devicon classes" {
+    try std.testing.expectEqualStrings("devicon-zig-original", deviconClassForPath("src/main.zig", "blob").?);
+    try std.testing.expectEqualStrings("devicon-html5-plain", deviconClassForPath("index.html", "blob").?);
+    try std.testing.expectEqualStrings("devicon-markdown-original", deviconClassForPath("README.md", "blob").?);
+    try std.testing.expectEqual(@as(?[]const u8, null), deviconClassForPath("assets/logo.svg", "blob"));
+    try std.testing.expectEqual(@as(?[]const u8, null), deviconClassForPath("src", "tree"));
 }
 
 test "web explorer maps media paths to preview metadata" {
