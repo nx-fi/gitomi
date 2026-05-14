@@ -23,6 +23,86 @@ const WebStats = struct {
     issues: usize = 0,
 };
 
+pub const Href = union(enum) {
+    literal: []const u8,
+    code: PathHref,
+    raw: PathHref,
+    commits: PathHref,
+    blame: PathHref,
+    commit: []const u8,
+    issue: []const u8,
+};
+
+pub const PathHref = struct {
+    ref: []const u8,
+    path: []const u8 = "",
+    view: ?[]const u8 = null,
+};
+
+pub const Class = struct {
+    name: []const u8,
+    enabled: bool = true,
+};
+
+pub const ClassList = struct {
+    base: []const u8,
+    extra: []const Class = &.{},
+};
+
+pub const ClassAttr = struct {
+    value: ClassList,
+};
+
+pub const Button = struct {
+    label: []const u8,
+    href: Href,
+    kind: []const u8 = "secondary",
+};
+
+pub fn literalHref(value: []const u8) Href {
+    return .{ .literal = value };
+}
+
+pub fn codeHref(ref: []const u8, path: []const u8) Href {
+    return .{ .code = .{ .ref = ref, .path = path } };
+}
+
+pub fn codeHrefWithView(ref: []const u8, path: []const u8, view: []const u8) Href {
+    return .{ .code = .{ .ref = ref, .path = path, .view = view } };
+}
+
+pub fn rawHref(ref: []const u8, path: []const u8) Href {
+    return .{ .raw = .{ .ref = ref, .path = path } };
+}
+
+pub fn commitsHref(ref: []const u8, path: []const u8) Href {
+    return .{ .commits = .{ .ref = ref, .path = path } };
+}
+
+pub fn blameHref(ref: []const u8, path: []const u8) Href {
+    return .{ .blame = .{ .ref = ref, .path = path } };
+}
+
+pub fn commitHref(hash: []const u8) Href {
+    return .{ .commit = hash };
+}
+
+pub fn issueHref(short_id: []const u8) Href {
+    return .{ .issue = short_id };
+}
+
+pub fn class(name: []const u8, enabled: bool) Class {
+    return .{ .name = name, .enabled = enabled };
+}
+
+pub fn classes(base: []const u8, extra: []const Class) ClassList {
+    return .{ .base = base, .extra = extra };
+}
+
+pub fn classAttr(base: []const u8, extra: []const Class) ClassAttr {
+    return .{ .value = classes(base, extra) };
+}
+
 pub fn appendShellStart(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -57,20 +137,16 @@ pub fn appendShellStart(
         \\  <title>
     );
     try appendHtml(buf, allocator, title);
-    try buf.appendSlice(allocator,
+    try appendTemplate(buf, allocator,
         \\ - Gitomi</title>
         \\  <link rel="icon" href="/logo.svg" type="image/svg+xml">
         \\  <link rel="stylesheet" href="/style.css">
         \\</head>
         \\<body>
         \\<header class="topbar">
-        \\  <a class="brand" href="/"><img class="brand-logo" src="/logo.svg" alt="" width="32" height="32"><span>
-    );
-    try appendHtml(buf, allocator, std.fs.path.basename(repo.root));
-    try buf.appendSlice(allocator,
-        \\</span></a>
+        \\  <a class="brand" href="/"><img class="brand-logo" src="/logo.svg" alt="" width="32" height="32"><span>{repo_name}</span></a>
         \\  <nav>
-    );
+    , .{ .repo_name = std.fs.path.basename(repo.root) });
     try appendNavLink(buf, allocator, active, "code", "/", "Code", null);
     try appendNavLink(buf, allocator, active, "commits", "/commits", "Commits", null);
     try appendNavLink(buf, allocator, active, "issues", "/issues", "Issues", stats.issues);
@@ -129,9 +205,9 @@ pub fn appendNavLink(
     count: ?usize,
 ) !void {
     try appendTemplate(buf, allocator,
-        \\<a{active_class} href="{href}">{label}
+        \\<a{class_attr} href="{href}">{label}
     , .{
-        .active_class = trustedHtml(if (std.mem.eql(u8, active, id)) " class=\"active\"" else ""),
+        .class_attr = classAttr("", &.{class("active", std.mem.eql(u8, active, id))}),
         .href = href,
         .label = label,
     });
@@ -152,6 +228,106 @@ pub fn appendEmptyState(buf: *std.ArrayList(u8), allocator: Allocator, title: []
         .title = title,
         .detail = detail,
     });
+}
+
+pub fn appendEmptyCell(buf: *std.ArrayList(u8), allocator: Allocator, colspan: usize, message: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<tr><td colspan="{colspan}" class="empty-cell">{message}</td></tr>
+    , .{
+        .colspan = colspan,
+        .message = message,
+    });
+}
+
+pub fn appendInlineEmpty(buf: *std.ArrayList(u8), allocator: Allocator, message: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="empty inline-empty"><strong>{message}</strong></div>
+    , .{ .message = message });
+}
+
+pub fn appendButtonLink(buf: *std.ArrayList(u8), allocator: Allocator, button: Button) !void {
+    try appendTemplate(buf, allocator,
+        \\<a class="button {kind}" href="{href}">{label}</a>
+    , .{
+        .kind = button.kind,
+        .href = button.href,
+        .label = button.label,
+    });
+}
+
+pub fn appendSectionHead(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    eyebrow: []const u8,
+    title: []const u8,
+    action: ?Button,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="section-head">
+        \\  <div>
+        \\    <p class="eyebrow">{eyebrow}</p>
+        \\    <h1>{title}</h1>
+        \\  </div>
+    , .{
+        .eyebrow = eyebrow,
+        .title = title,
+    });
+    if (action) |button| try appendButtonLink(buf, allocator, button);
+    try buf.appendSlice(allocator, "</div>");
+}
+
+pub fn appendRepoHeader(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    repo: Repo,
+    ref: []const u8,
+    actions: []const Button,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<section class="repo-head">
+        \\  <div>
+        \\    <p class="eyebrow">Repository</p>
+        \\    <h1>{repo_name}</h1>
+        \\  </div>
+        \\  <div class="repo-actions">
+        \\    <span class="branch-pill">{ref}</span>
+    , .{
+        .repo_name = std.fs.path.basename(repo.root),
+        .ref = ref,
+    });
+    for (actions) |button| try appendButtonLink(buf, allocator, button);
+    try buf.appendSlice(allocator, "</div></section>");
+}
+
+pub fn appendStatePill(buf: *std.ArrayList(u8), allocator: Allocator, state: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<span class="state {state}">{state}</span>
+    , .{ .state = state });
+}
+
+pub fn appendPill(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<span class="pill">{label}</span>
+    , .{ .label = label });
+}
+
+pub fn appendFact(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, value: anytype) !void {
+    try appendTemplate(buf, allocator,
+        \\<div><dt>{label}</dt><dd>{value}</dd></div>
+    , .{
+        .label = label,
+        .value = value,
+    });
+}
+
+pub fn appendOptionalAttr(buf: *std.ArrayList(u8), allocator: Allocator, comptime name: []const u8, value: anytype) !void {
+    if (value) |payload| {
+        try buf.append(allocator, ' ');
+        try buf.appendSlice(allocator, name);
+        try buf.appendSlice(allocator, "=\"");
+        try appendTemplateValue(buf, allocator, payload);
+        try buf.append(allocator, '"');
+    }
 }
 
 pub fn renderIndexingPageIfStale(
@@ -228,6 +404,31 @@ pub fn trustedHtml(value: []const u8) TrustedHtml {
     return .{ .value = value };
 }
 
+pub const JsonString = struct {
+    value: []const u8,
+};
+
+pub fn jsonString(value: []const u8) JsonString {
+    return .{ .value = value };
+}
+
+pub const GroupedUnsigned = struct {
+    value: u64,
+};
+
+pub fn groupedUnsigned(value: u64) GroupedUnsigned {
+    return .{ .value = value };
+}
+
+pub const Percent = struct {
+    value: u64,
+    total: u64,
+};
+
+pub fn percent(value: u64, total: u64) Percent {
+    return .{ .value = value, .total = total };
+}
+
 pub fn appendTemplate(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -279,6 +480,30 @@ fn appendTemplateValue(buf: *std.ArrayList(u8), allocator: Allocator, value: any
         try buf.appendSlice(allocator, value.value);
         return;
     }
+    if (T == Href) {
+        try appendHref(buf, allocator, value);
+        return;
+    }
+    if (T == ClassList) {
+        try appendClassValue(buf, allocator, value);
+        return;
+    }
+    if (T == ClassAttr) {
+        try appendClassAttrValue(buf, allocator, value);
+        return;
+    }
+    if (T == JsonString) {
+        try appendJsonString(buf, allocator, value.value);
+        return;
+    }
+    if (T == GroupedUnsigned) {
+        try appendGroupedUnsigned(buf, allocator, value.value);
+        return;
+    }
+    if (T == Percent) {
+        try appendPercent(buf, allocator, value.value, value.total);
+        return;
+    }
 
     switch (@typeInfo(T)) {
         .pointer => |info| switch (info.size) {
@@ -302,6 +527,100 @@ fn appendTemplateValue(buf: *std.ArrayList(u8), allocator: Allocator, value: any
         .optional => if (value) |payload| try appendTemplateValue(buf, allocator, payload),
         else => @compileError("unsupported HTML template value type: " ++ @typeName(T)),
     }
+}
+
+pub fn appendHref(buf: *std.ArrayList(u8), allocator: Allocator, href: Href) !void {
+    switch (href) {
+        .literal => |value| try appendHtml(buf, allocator, value),
+        .code => |value| try appendPathHref(buf, allocator, "/code", value),
+        .raw => |value| try appendPathHref(buf, allocator, "/raw", value),
+        .commits => |value| try appendPathHref(buf, allocator, "/commits", value),
+        .blame => |value| try appendPathHref(buf, allocator, "/blame", value),
+        .commit => |hash| {
+            try buf.appendSlice(allocator, "/commit?sha=");
+            try appendUrlEncoded(buf, allocator, hash);
+        },
+        .issue => |short_id| {
+            try buf.appendSlice(allocator, "/issues/");
+            try appendUrlEncoded(buf, allocator, short_id);
+        },
+    }
+}
+
+fn appendPathHref(buf: *std.ArrayList(u8), allocator: Allocator, route: []const u8, href: PathHref) !void {
+    try buf.appendSlice(allocator, route);
+    try buf.appendSlice(allocator, "?ref=");
+    try appendUrlEncoded(buf, allocator, href.ref);
+    if (href.path.len != 0) {
+        try buf.appendSlice(allocator, "&amp;path=");
+        try appendUrlEncoded(buf, allocator, href.path);
+    }
+    if (href.view) |view| {
+        try buf.appendSlice(allocator, "&amp;view=");
+        try appendUrlEncoded(buf, allocator, view);
+    }
+}
+
+pub fn appendUrlEncoded(buf: *std.ArrayList(u8), allocator: Allocator, value: []const u8) !void {
+    const hex = "0123456789ABCDEF";
+    for (value) |c| {
+        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~' or c == '/') {
+            try buf.append(allocator, c);
+        } else {
+            try buf.append(allocator, '%');
+            try buf.append(allocator, hex[c >> 4]);
+            try buf.append(allocator, hex[c & 0x0f]);
+        }
+    }
+}
+
+fn appendClassValue(buf: *std.ArrayList(u8), allocator: Allocator, value: ClassList) !void {
+    var wrote = false;
+    if (value.base.len != 0) {
+        try appendHtml(buf, allocator, value.base);
+        wrote = true;
+    }
+    for (value.extra) |item| {
+        if (!item.enabled) continue;
+        if (wrote) try buf.append(allocator, ' ');
+        try appendHtml(buf, allocator, item.name);
+        wrote = true;
+    }
+}
+
+fn appendClassAttrValue(buf: *std.ArrayList(u8), allocator: Allocator, attr: ClassAttr) !void {
+    if (!classListHasValue(attr.value)) return;
+    try buf.appendSlice(allocator, " class=\"");
+    try appendClassValue(buf, allocator, attr.value);
+    try buf.append(allocator, '"');
+}
+
+fn classListHasValue(value: ClassList) bool {
+    if (value.base.len != 0) return true;
+    for (value.extra) |item| {
+        if (item.enabled) return true;
+    }
+    return false;
+}
+
+fn appendGroupedUnsigned(buf: *std.ArrayList(u8), allocator: Allocator, value: u64) !void {
+    var digits: [20]u8 = undefined;
+    const text = try std.fmt.bufPrint(&digits, "{d}", .{value});
+    for (text, 0..) |c, i| {
+        if (i != 0 and (text.len - i) % 3 == 0) try buf.append(allocator, ',');
+        try buf.append(allocator, c);
+    }
+}
+
+fn appendPercent(buf: *std.ArrayList(u8), allocator: Allocator, value: u64, total: u64) !void {
+    const tenths = percentTenths(value, total);
+    try std.fmt.format(buf.writer(allocator), "{d}.{d}%", .{ tenths / 10, tenths % 10 });
+}
+
+fn percentTenths(value: u64, total: u64) u64 {
+    if (total == 0) return 0;
+    const scaled = (@as(u128, value) * 1000 + @as(u128, total) / 2) / @as(u128, total);
+    return @intCast(@min(scaled, 1000));
 }
 
 pub fn appendFmt(
@@ -412,4 +731,18 @@ test "web template supports raw values braces and numbers" {
     });
 
     try std.testing.expectEqualStrings("<script>{x:3}</script><span>ok</span>", buf.items);
+}
+
+test "web template supports typed href classes and formatters" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendTemplate(&buf, std.testing.allocator, "<a{class_attr} href=\"{href}\">{lines} {share}</a>", .{
+        .class_attr = classAttr("button", &.{class("active", true)}),
+        .href = codeHrefWithView("feature/test", "src/a b.zig", "preview"),
+        .lines = groupedUnsigned(12_345),
+        .share = percent(5, 6),
+    });
+
+    try std.testing.expectEqualStrings("<a class=\"button active\" href=\"/code?ref=feature/test&amp;path=src/a%20b.zig&amp;view=preview\">12,345 83.3%</a>", buf.items);
 }

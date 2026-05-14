@@ -5,10 +5,17 @@ const shared = @import("shared.zig");
 
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
+const Button = shared.Button;
 const appendEmptyState = shared.appendEmptyState;
+const appendHref = shared.appendHref;
+const appendOptionalAttr = shared.appendOptionalAttr;
+const appendRepoHeaderShared = shared.appendRepoHeader;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
 const appendTemplate = shared.appendTemplate;
+const codeHref = shared.codeHref;
+const commitHref = shared.commitHref;
+const literalHref = shared.literalHref;
 const runCommand = git.runCommand;
 
 const max_commit_diff_bytes = 8 * 1024 * 1024;
@@ -80,13 +87,13 @@ pub fn renderCommitsPage(allocator: Allocator, repo: Repo, target: []const u8) !
     const commits = try loadCommits(allocator, repo, ref, path);
     defer freeCommitList(allocator, commits);
 
-    try buf.appendSlice(allocator,
-        \\<section class="panel commits-panel">
-        \\  <div class="section-head">
-        \\    <div>
-        \\      <p class="eyebrow">History</p>
-        \\      <h1>
-    );
+    try buf.appendSlice(allocator, "<section class=\"panel commits-panel\">");
+    try appendTemplate(&buf, allocator,
+        \\<div class="section-head">
+        \\  <div>
+        \\    <p class="eyebrow">History</p>
+        \\    <h1>
+    , .{});
     if (path.len == 0) {
         try buf.appendSlice(allocator, "Recent commits");
     } else {
@@ -95,29 +102,24 @@ pub fn renderCommitsPage(allocator: Allocator, repo: Repo, target: []const u8) !
     try buf.appendSlice(allocator,
         \\</h1>
         \\    </div>
-        \\    <a class="button secondary" href="
-    );
-    try appendCodeHref(&buf, allocator, ref, path);
-    try buf.appendSlice(allocator,
-        \\">Code</a>
         \\  </div>
+    );
+    try shared.appendButtonLink(&buf, allocator, Button{ .label = "Code", .href = codeHref(ref, path) });
+    try buf.appendSlice(allocator,
+        \\</div>
         \\  <div class="commit-list">
     );
 
     for (commits) |commit| {
-        try buf.appendSlice(allocator, "<article class=\"commit-row\"><div><a class=\"commit-title\" href=\"");
-        try appendCommitHref(&buf, allocator, commit.full_hash);
         try appendTemplate(&buf, allocator,
-            \\">{subject}</a><p>{author} committed {relative}</p></div><a class="commit-sha" href="
+            \\<article class="commit-row"><div><a class="commit-title" href="{href}">{subject}</a><p>{author} committed {relative}</p></div><a class="commit-sha" href="{href}"><code>{short_hash}</code></a></article>
         , .{
+            .href = commitHref(commit.full_hash),
             .subject = commit.subject,
             .author = commit.author,
             .relative = commit.relative,
+            .short_hash = commit.short_hash,
         });
-        try appendCommitHref(&buf, allocator, commit.full_hash);
-        try appendTemplate(&buf, allocator,
-            \\"><code>{short_hash}</code></a></article>
-        , .{ .short_hash = commit.short_hash });
     }
 
     if (commits.len == 0) {
@@ -206,21 +208,9 @@ fn renderMissingCommitPage(allocator: Allocator, repo: Repo, sha: []const u8) ![
 }
 
 fn appendRepoHeader(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8) !void {
-    try appendTemplate(buf, allocator,
-        \\<section class="repo-head">
-        \\  <div>
-        \\    <p class="eyebrow">Repository</p>
-        \\    <h1>{repo_name}</h1>
-        \\  </div>
-        \\  <div class="repo-actions">
-        \\    <span class="branch-pill">{ref}</span>
-        \\    <a class="button secondary" href="/">Code</a>
-        \\    <a class="button secondary" href="/overview">Overview</a>
-        \\  </div>
-        \\</section>
-    , .{
-        .repo_name = std.fs.path.basename(repo.root),
-        .ref = ref,
+    try appendRepoHeaderShared(buf, allocator, repo, ref, &.{
+        .{ .label = "Code", .href = literalHref("/") },
+        .{ .label = "Overview", .href = literalHref("/overview") },
     });
 }
 
@@ -407,16 +397,8 @@ fn appendDiffLine(
     try appendTemplate(buf, allocator,
         \\<div class="diff-row {class}" data-diff-row data-diff-kind="{class}"
     , .{ .class = class });
-    if (old_line) |value| {
-        try appendTemplate(buf, allocator,
-            \\ data-diff-old="{value}"
-        , .{ .value = value });
-    }
-    if (new_line) |value| {
-        try appendTemplate(buf, allocator,
-            \\ data-diff-new="{value}"
-        , .{ .value = value });
-    }
+    try appendOptionalAttr(buf, allocator, "data-diff-old", old_line);
+    try appendOptionalAttr(buf, allocator, "data-diff-new", new_line);
     try buf.appendSlice(allocator, "><span class=\"diff-num old\">");
     try appendLineNumber(buf, allocator, old_line);
     try buf.appendSlice(allocator, "</span><span class=\"diff-num new\">");
@@ -545,39 +527,12 @@ fn percentDecode(allocator: Allocator, value: []const u8) ![]u8 {
     return buf.toOwnedSlice(allocator);
 }
 
-fn appendCodeHref(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, path: []const u8) !void {
-    try buf.appendSlice(allocator, "/code?ref=");
-    try appendUrlEncoded(buf, allocator, ref);
-    if (path.len != 0) {
-        try buf.appendSlice(allocator, "&path=");
-        try appendUrlEncoded(buf, allocator, path);
-    }
-}
-
-fn appendCommitHref(buf: *std.ArrayList(u8), allocator: Allocator, hash: []const u8) !void {
-    try buf.appendSlice(allocator, "/commit?sha=");
-    try appendUrlEncoded(buf, allocator, hash);
-}
-
 fn appendCommitHrefWithContext(buf: *std.ArrayList(u8), allocator: Allocator, hash: []const u8, context: usize, file_index: usize) !void {
-    try appendCommitHref(buf, allocator, hash);
+    try appendHref(buf, allocator, commitHref(hash));
     try buf.appendSlice(allocator, "&amp;context=");
     try std.fmt.format(buf.writer(allocator), "{d}", .{context});
     try buf.appendSlice(allocator, "#diff-file-");
     try std.fmt.format(buf.writer(allocator), "{d}", .{file_index});
-}
-
-fn appendUrlEncoded(buf: *std.ArrayList(u8), allocator: Allocator, value: []const u8) !void {
-    const hex = "0123456789ABCDEF";
-    for (value) |c| {
-        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~' or c == '/') {
-            try buf.append(allocator, c);
-        } else {
-            try buf.append(allocator, '%');
-            try buf.append(allocator, hex[c >> 4]);
-            try buf.append(allocator, hex[c & 0x0f]);
-        }
-    }
 }
 
 fn freeCommitList(allocator: Allocator, commits: []CommitListEntry) void {

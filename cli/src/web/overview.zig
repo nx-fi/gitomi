@@ -7,15 +7,20 @@ const shared = @import("shared.zig");
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
 const SqliteDb = index.SqliteDb;
+const Button = shared.Button;
+const appendButtonLink = shared.appendButtonLink;
 const appendEmptyState = shared.appendEmptyState;
-const appendFmt = shared.appendFmt;
+const appendFact = shared.appendFact;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
 const appendTemplate = shared.appendTemplate;
 const ensureIndex = index.ensureIndex;
 const freeIndexedEvent = index.freeIndexedEvent;
+const groupedUnsigned = shared.groupedUnsigned;
 const indexedEventFromStmt = index.indexedEventFromStmt;
 const index_event_columns = index.index_event_columns;
+const literalHref = shared.literalHref;
+const percent = shared.percent;
 const sqlite = index.sqlite;
 
 const max_sloc_output = 512 * 1024;
@@ -77,90 +82,107 @@ pub fn renderHomePage(allocator: Allocator, repo: Repo) ![]u8 {
         .repo_root = repo.root,
     });
     try appendSlocSummary(&buf, allocator, sloc_stats);
-    try buf.appendSlice(allocator,
+    try appendTemplate(&buf, allocator,
         \\</section>
         \\<section class="grid two">
         \\  <div class="panel">
         \\    <h2>Repository</h2>
         \\    <dl class="facts">
-        \\      <div><dt>Branch</dt><dd>
-    );
-    try appendTemplate(&buf, allocator, "{branch}</dd></div><div><dt>Working tree</dt><dd>", .{ .branch = branch });
-    try appendFmt(&buf, allocator, "{d} change{s}", .{ changes, if (changes == 1) "" else "s" });
+    , .{});
+    try appendFact(&buf, allocator, "Branch", branch);
     try appendTemplate(&buf, allocator,
-        \\</dd></div><div><dt>Git directory</dt><dd>{git_dir}</dd></div>
-    , .{ .git_dir = repo.git_dir });
-    try buf.appendSlice(allocator,
+        \\      <div><dt>Working tree</dt><dd>{changes} {changes_label}</dd></div>
+    , .{
+        .changes = changes,
+        .changes_label = if (changes == 1) "change" else "changes",
+    });
+    try appendFact(&buf, allocator, "Git directory", repo.git_dir);
+    try appendTemplate(&buf, allocator,
         \\    </dl>
         \\  </div>
         \\  <div class="panel">
         \\    <div class="section-head">
         \\      <h2>Recent Activity</h2>
-        \\      <a class="button secondary" href="/events">View all</a>
+    , .{});
+    try appendButtonLink(&buf, allocator, Button{ .label = "View all", .href = literalHref("/events") });
+    try appendTemplate(&buf, allocator,
         \\    </div>
-    );
+    , .{});
     try appendEventList(&buf, allocator, repo, 6);
-    try buf.appendSlice(allocator,
+    try appendTemplate(&buf, allocator,
         \\  </div>
         \\</section>
-    );
+    , .{});
 
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
 }
 
 fn appendSlocSummary(buf: *std.ArrayList(u8), allocator: Allocator, stats_opt: ?SlocStats) !void {
-    try buf.appendSlice(allocator, "<div class=\"sloc-summary\" aria-label=\"Source lines of code\">");
+    try appendTemplate(buf, allocator,
+        \\<div class="sloc-summary" aria-label="Source lines of code">
+    , .{});
     if (stats_opt) |stats| {
         const total = stats.total();
-        try buf.appendSlice(allocator, "<div class=\"sloc-head\"><span>Languages</span><strong>");
-        try appendGroupedUnsigned(buf, allocator, total);
-        try buf.appendSlice(allocator, " lines</strong></div>");
+        try appendTemplate(buf, allocator,
+            \\<div class="sloc-head"><span>Languages</span><strong>{total} lines</strong></div>
+        , .{ .total = groupedUnsigned(total) });
 
         if (total == 0 or stats.rows.len == 0) {
-            try buf.appendSlice(allocator, "<p class=\"sloc-empty\">No counted source files.</p></div>");
+            try appendTemplate(buf, allocator,
+                \\<p class="sloc-empty">No counted source files.</p></div>
+            , .{});
             return;
         }
 
-        try buf.appendSlice(allocator, "<div class=\"language-bar\" aria-hidden=\"true\">");
-        for (stats.rows) |row| {
-            if (row.total() == 0) continue;
-            try buf.appendSlice(allocator, "<span style=\"--share: ");
-            try appendPercent(buf, allocator, row.total(), total);
-            try buf.appendSlice(allocator, "; --language-color: ");
-            try buf.appendSlice(allocator, languageColor(row.ext));
-            try buf.appendSlice(allocator, ";\"></span>");
-        }
-        try buf.appendSlice(allocator, "</div><ul class=\"language-list\">");
+        try appendTemplate(buf, allocator,
+            \\<div class="language-bar" aria-hidden="true">
+        , .{});
         for (stats.rows) |row| {
             if (row.total() == 0) continue;
             try appendTemplate(buf, allocator,
-                \\<li><span class="language-dot" style="--language-color: {color};"></span><span class="language-name">{name}</span><span class="language-percent">
+                \\<span style="--share: {share}; --language-color: {color};"></span>
+            , .{
+                .share = percent(row.total(), total),
+                .color = languageColor(row.ext),
+            });
+        }
+        try appendTemplate(buf, allocator,
+            \\</div><ul class="language-list">
+        , .{});
+        for (stats.rows) |row| {
+            if (row.total() == 0) continue;
+            try appendTemplate(buf, allocator,
+                \\<li><span class="language-dot" style="--language-color: {color};"></span><span class="language-name">{name}</span><span class="language-percent">{share}</span></li>
             , .{
                 .color = languageColor(row.ext),
                 .name = languageName(row.ext),
+                .share = percent(row.total(), total),
             });
-            try appendPercent(buf, allocator, row.total(), total);
-            try buf.appendSlice(allocator, "</span></li>");
         }
-        try buf.appendSlice(allocator, "</ul><div class=\"sloc-totals\">");
+        try appendTemplate(buf, allocator,
+            \\</ul><div class="sloc-totals">
+        , .{});
         try appendSlocTotal(buf, allocator, stats.total_code, "code");
         try appendSlocTotal(buf, allocator, stats.total_test, "tests");
         try appendSlocTotal(buf, allocator, stats.total_comment, "comments");
-        try buf.appendSlice(allocator, "</div>");
+        try appendTemplate(buf, allocator, "</div>", .{});
     } else {
-        try buf.appendSlice(allocator,
+        try appendTemplate(buf, allocator,
             \\<div class="sloc-head"><span>Languages</span><strong>Unavailable</strong></div>
             \\<p class="sloc-empty">No SLOC data available.</p>
-        );
+        , .{});
     }
-    try buf.appendSlice(allocator, "</div>");
+    try appendTemplate(buf, allocator, "</div>", .{});
 }
 
 fn appendSlocTotal(buf: *std.ArrayList(u8), allocator: Allocator, value: u64, label: []const u8) !void {
-    try buf.appendSlice(allocator, "<span><strong>");
-    try appendGroupedUnsigned(buf, allocator, value);
-    try appendTemplate(buf, allocator, "</strong>{label}</span>", .{ .label = label });
+    try appendTemplate(buf, allocator,
+        \\<span><strong>{value}</strong>{label}</span>
+    , .{
+        .value = groupedUnsigned(value),
+        .label = label,
+    });
 }
 
 fn appendEventList(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, limit: usize) !void {
@@ -172,7 +194,7 @@ fn appendEventList(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, li
     if (limit > std.math.maxInt(i64)) return error.ValueTooLarge;
     try stmt.bindInt64(1, @intCast(limit));
 
-    try buf.appendSlice(allocator, "<div class=\"activity-list\">");
+    try appendTemplate(buf, allocator, "<div class=\"activity-list\">", .{});
     var shown: usize = 0;
     while (try stmt.step()) {
         const event = try indexedEventFromStmt(allocator, &stmt);
@@ -189,13 +211,13 @@ fn appendEventList(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, li
                 .object_id = event.object_id[0..@min(event.object_id.len, 7)],
             });
         }
-        try buf.appendSlice(allocator, "</small></div></article>");
+        try appendTemplate(buf, allocator, "</small></div></article>", .{});
         shown += 1;
     }
     if (shown == 0) {
         try appendEmptyState(buf, allocator, "No activity yet.", "Gitomi events will appear here after issues, pull requests, or workflow runs are recorded.");
     }
-    try buf.appendSlice(allocator, "</div>");
+    try appendTemplate(buf, allocator, "</div>", .{});
 }
 
 fn loadSlocStats(allocator: Allocator, repo: Repo) !?SlocStats {
@@ -350,26 +372,6 @@ fn parseSlocNumber(text: []const u8) !u64 {
     return value;
 }
 
-fn appendGroupedUnsigned(buf: *std.ArrayList(u8), allocator: Allocator, value: u64) !void {
-    var digits: [20]u8 = undefined;
-    const text = try std.fmt.bufPrint(&digits, "{d}", .{value});
-    for (text, 0..) |c, i| {
-        if (i != 0 and (text.len - i) % 3 == 0) try buf.append(allocator, ',');
-        try buf.append(allocator, c);
-    }
-}
-
-fn appendPercent(buf: *std.ArrayList(u8), allocator: Allocator, value: u64, total: u64) !void {
-    const tenths = percentTenths(value, total);
-    try appendFmt(buf, allocator, "{d}.{d}%", .{ tenths / 10, tenths % 10 });
-}
-
-fn percentTenths(value: u64, total: u64) u64 {
-    if (total == 0) return 0;
-    const scaled = (@as(u128, value) * 1000 + @as(u128, total) / 2) / @as(u128, total);
-    return @intCast(@min(scaled, 1000));
-}
-
 fn languageName(ext: []const u8) []const u8 {
     if (std.ascii.eqlIgnoreCase(ext, "zig")) return "Zig";
     if (std.ascii.eqlIgnoreCase(ext, "js") or std.ascii.eqlIgnoreCase(ext, "mjs") or std.ascii.eqlIgnoreCase(ext, "cjs")) return "JavaScript";
@@ -428,9 +430,4 @@ test "web overview parses sloc summary rows" {
     try std.testing.expectEqual(@as(usize, 3), stats.rows.len);
     try std.testing.expectEqualStrings("zig", stats.rows[0].ext);
     try std.testing.expectEqual(@as(u64, 13_309), stats.rows[0].total());
-}
-
-test "web overview formats sloc percentages" {
-    try std.testing.expectEqual(@as(u64, 833), percentTenths(5, 6));
-    try std.testing.expectEqual(@as(u64, 0), percentTenths(0, 0));
 }

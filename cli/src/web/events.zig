@@ -7,6 +7,8 @@ const Allocator = std.mem.Allocator;
 const IndexedEvent = index.IndexedEvent;
 const Repo = repo_mod.Repo;
 const SqliteDb = index.SqliteDb;
+const appendEmptyCell = shared.appendEmptyCell;
+const appendSectionHead = shared.appendSectionHead;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
 const appendTemplate = shared.appendTemplate;
@@ -24,14 +26,9 @@ pub fn renderEventsPage(allocator: Allocator, repo: Repo) ![]u8 {
     errdefer buf.deinit(allocator);
 
     try appendShellStart(&buf, allocator, repo, "Events", "events");
+    try buf.appendSlice(allocator, "<section class=\"panel\">");
+    try appendSectionHead(&buf, allocator, "Control plane", "Event Log", null);
     try buf.appendSlice(allocator,
-        \\<section class="panel">
-        \\  <div class="section-head">
-        \\    <div>
-        \\      <p class="eyebrow">Control plane</p>
-        \\      <h1>Event Log</h1>
-        \\    </div>
-        \\  </div>
         \\  <div class="table-wrap">
         \\    <table>
         \\      <thead><tr><th>Event</th><th>Object</th><th>Actor</th><th>Commit</th><th>Ref</th></tr></thead>
@@ -52,7 +49,7 @@ pub fn renderEventsPage(allocator: Allocator, repo: Repo) ![]u8 {
     }
 
     if (shown == 0) {
-        try buf.appendSlice(allocator, "<tr><td colspan=\"5\" class=\"empty-cell\">No Gitomi events found.</td></tr>");
+        try appendEmptyCell(&buf, allocator, 5, "No Gitomi events found.");
     }
 
     try buf.appendSlice(allocator,

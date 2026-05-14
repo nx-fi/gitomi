@@ -9,17 +9,23 @@ const util = @import("../util.zig");
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
 const SqliteDb = index.SqliteDb;
+const Button = shared.Button;
 const appendEmptyState = shared.appendEmptyState;
+const appendInlineEmpty = shared.appendInlineEmpty;
+const appendPill = shared.appendPill;
+const appendSectionHead = shared.appendSectionHead;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
+const appendStatePill = shared.appendStatePill;
 const appendTemplate = shared.appendTemplate;
 const createIssueOpenedEvent = issue.createIssueOpenedEvent;
 const ensureIndex = index.ensureIndex;
+const issueHref = shared.issueHref;
+const literalHref = shared.literalHref;
 const sendRedirect = shared.sendRedirect;
 const sendResponse = shared.sendResponse;
 const splitCommaFields = util.splitCommaFields;
 const sqlite = index.sqlite;
-const trustedHtml = shared.trustedHtml;
 
 pub fn renderIssuesPage(allocator: Allocator, repo: Repo) ![]u8 {
     if (try shared.renderIndexingPageIfStale(allocator, repo, "Issues", "issues", "/issues")) |body| return body;
@@ -29,15 +35,13 @@ pub fn renderIssuesPage(allocator: Allocator, repo: Repo) ![]u8 {
     errdefer buf.deinit(allocator);
 
     try appendShellStart(&buf, allocator, repo, "Issues", "issues");
+    try buf.appendSlice(allocator, "<section class=\"panel\">");
+    try appendSectionHead(&buf, allocator, "Issues", "Local Issue Tracker", Button{
+        .label = "New issue",
+        .href = literalHref("/new-issue"),
+        .kind = "primary",
+    });
     try buf.appendSlice(allocator,
-        \\<section class="panel">
-        \\  <div class="section-head">
-        \\    <div>
-        \\      <p class="eyebrow">Issues</p>
-        \\      <h1>Local Issue Tracker</h1>
-        \\    </div>
-        \\    <a class="button primary" href="/new-issue">New issue</a>
-        \\  </div>
         \\  <div class="list">
     );
 
@@ -67,10 +71,12 @@ pub fn renderIssuesPage(allocator: Allocator, repo: Repo) ![]u8 {
         defer allocator.free(opened_at);
 
         const short_id = id[0..@min(id.len, 7)];
+        try buf.appendSlice(allocator, "<article class=\"issue-row\"><div class=\"issue-main\"><div class=\"issue-title\">");
+        try appendStatePill(&buf, allocator, state);
         try appendTemplate(&buf, allocator,
-            \\<article class="issue-row"><div class="issue-main"><div class="issue-title"><span class="state {state}">{state}</span><a href="/issues/{id}">{title}</a></div><p class="muted">#{id} opened by {author} at {opened_at}</p></div></article>
+            \\<a href="{href}">{title}</a></div><p class="muted">#{id} opened by {author} at {opened_at}</p></div></article>
         , .{
-            .state = state,
+            .href = issueHref(short_id),
             .id = short_id,
             .title = title,
             .author = author,
@@ -204,9 +210,12 @@ fn appendIssueFacts(
     milestone: []const u8,
 ) !void {
     try appendTemplate(buf, allocator,
-        \\<dl class="facts issue-facts"><div><dt>Status</dt><dd><span class="state {state}">{state}</span></dd></div><div><dt>ID</dt><dd><code>{issue_id}</code></dd></div><div><dt>Opened</dt><dd>{opened_at}</dd></div><div><dt>Author</dt><dd>{author}
+        \\<dl class="facts issue-facts"><div><dt>Status</dt><dd>
+    , .{});
+    try appendStatePill(buf, allocator, state);
+    try appendTemplate(buf, allocator,
+        \\</dd></div><div><dt>ID</dt><dd><code>{issue_id}</code></dd></div><div><dt>Opened</dt><dd>{opened_at}</dd></div><div><dt>Author</dt><dd>{author}
     , .{
-        .state = state,
         .issue_id = issue_id,
         .opened_at = opened_at,
         .author = if (source_author.len != 0) source_author else author_principal,
@@ -251,7 +260,7 @@ fn appendIssueCollectionFact(
     while (try stmt.step()) {
         const value = try stmt.columnTextDup(allocator, 0);
         defer allocator.free(value);
-        try appendTemplate(buf, allocator, "<span class=\"pill\">{value}</span>", .{ .value = value });
+        try appendPill(buf, allocator, value);
         shown = true;
     }
     if (!shown) try buf.appendSlice(allocator, "<span class=\"muted\">None</span>");
@@ -274,7 +283,8 @@ fn appendIssueProjectsFact(buf: *std.ArrayList(u8), allocator: Allocator, db: *S
         defer allocator.free(project);
         const column = try stmt.columnTextDup(allocator, 1);
         defer allocator.free(column);
-        try appendTemplate(buf, allocator, "<span class=\"pill\">{project}", .{ .project = project });
+        try buf.appendSlice(allocator, "<span class=\"pill\">");
+        try appendTemplate(buf, allocator, "{project}", .{ .project = project });
         if (column.len != 0) {
             try appendTemplate(buf, allocator, " / {column}", .{ .column = column });
         }
@@ -311,9 +321,9 @@ fn appendIssueComments(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
         defer allocator.free(reply_parent_hash);
 
         try appendTemplate(buf, allocator,
-            \\<article class="issue-card comment-card{reply_class}"><div class="comment-meta"><strong>{author}</strong><span>{created_at}</span></div>
+            \\<article class="{classes}"><div class="comment-meta"><strong>{author}</strong><span>{created_at}</span></div>
         , .{
-            .reply_class = trustedHtml(if (reply_parent_id.len != 0 or reply_parent_hash.len != 0) " is-reply" else ""),
+            .classes = shared.classes("issue-card comment-card", &.{shared.class("is-reply", reply_parent_id.len != 0 or reply_parent_hash.len != 0)}),
             .author = author,
             .created_at = created_at,
         });
@@ -340,7 +350,7 @@ fn appendIssueComments(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
         shown = true;
     }
     if (!shown) {
-        try buf.appendSlice(allocator, "<div class=\"empty inline-empty\"><strong>No comments yet.</strong></div>");
+        try appendInlineEmpty(buf, allocator, "No comments yet.");
     }
 }
 
@@ -357,15 +367,8 @@ pub fn renderIssueForm(
     errdefer buf.deinit(allocator);
 
     try appendShellStart(&buf, allocator, repo, "New Issue", "issues");
-    try buf.appendSlice(allocator,
-        \\<section class="panel form-panel">
-        \\  <div class="section-head">
-        \\    <div>
-        \\      <p class="eyebrow">Issues</p>
-        \\      <h1>New Issue</h1>
-        \\    </div>
-        \\  </div>
-    );
+    try buf.appendSlice(allocator, "<section class=\"panel form-panel\">");
+    try appendSectionHead(&buf, allocator, "Issues", "New Issue", null);
     if (error_message) |message| {
         try appendTemplate(&buf, allocator,
             \\<div class="flash error">{message}</div>

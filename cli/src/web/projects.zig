@@ -9,12 +9,18 @@ const issues_page = @import("issues.zig");
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
 const SqliteDb = index.SqliteDb;
+const Button = shared.Button;
 const appendEmptyState = shared.appendEmptyState;
+const appendPill = shared.appendPill;
+const appendSectionHead = shared.appendSectionHead;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
+const appendStatePill = shared.appendStatePill;
 const appendTemplate = shared.appendTemplate;
 const createProjectCreatedEvent = project_mod.createProjectCreatedEvent;
 const formValueOwned = issues_page.formValueOwned;
+const issueHref = shared.issueHref;
+const literalHref = shared.literalHref;
 const sendRedirect = shared.sendRedirect;
 const sendResponse = shared.sendResponse;
 const splitCommaFields = util.splitCommaFields;
@@ -28,17 +34,13 @@ pub fn renderProjectsPage(allocator: Allocator, repo: Repo) ![]u8 {
     errdefer buf.deinit(allocator);
 
     try appendShellStart(&buf, allocator, repo, "Projects", "projects");
-    try buf.appendSlice(allocator,
-        \\<section class="panel">
-        \\  <div class="section-head">
-        \\    <div>
-        \\      <p class="eyebrow">Projects</p>
-        \\      <h1>Kanban Boards</h1>
-        \\    </div>
-        \\    <a class="button primary" href="/new-project">New project</a>
-        \\  </div>
-        \\</section>
-    );
+    try buf.appendSlice(allocator, "<section class=\"panel\">");
+    try appendSectionHead(&buf, allocator, "Projects", "Kanban Boards", Button{
+        .label = "New project",
+        .href = literalHref("/new-project"),
+        .kind = "primary",
+    });
+    try buf.appendSlice(allocator, "</section>");
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
 
@@ -128,9 +130,8 @@ fn appendProjectSummary(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqli
     defer allocator.free(description);
     const state = try stmt.columnTextDup(allocator, 1);
     defer allocator.free(state);
-    try appendTemplate(buf, allocator,
-        \\<div class="project-summary"><span class="state {state}">{state}</span>
-    , .{ .state = state });
+    try buf.appendSlice(allocator, "<div class=\"project-summary\">");
+    try appendStatePill(buf, allocator, state);
     if (description.len != 0) {
         try appendTemplate(buf, allocator,
             \\<p class="muted">{description}</p>
@@ -175,10 +176,12 @@ fn appendProjectColumn(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
         defer allocator.free(opened_at);
 
         const short_id = id[0..@min(id.len, 7)];
+        try buf.appendSlice(allocator, "<article class=\"kanban-card\"><div>");
+        try appendStatePill(buf, allocator, state);
         try appendTemplate(buf, allocator,
-            \\<article class="kanban-card"><div><span class="state {state}">{state}</span><a href="/issues/{id}">{title}</a></div><p class="muted">#{id} opened by {author} at {opened_at}</p></article>
+            \\<a href="{href}">{title}</a></div><p class="muted">#{id} opened by {author} at {opened_at}</p></article>
         , .{
-            .state = state,
+            .href = issueHref(short_id),
             .id = short_id,
             .title = title,
             .author = author,
@@ -202,15 +205,8 @@ pub fn renderProjectForm(
     errdefer buf.deinit(allocator);
 
     try appendShellStart(&buf, allocator, repo, "New Project", "projects");
-    try buf.appendSlice(allocator,
-        \\<section class="panel form-panel">
-        \\  <div class="section-head">
-        \\    <div>
-        \\      <p class="eyebrow">Projects</p>
-        \\      <h1>New Project</h1>
-        \\    </div>
-        \\  </div>
-    );
+    try buf.appendSlice(allocator, "<section class=\"panel form-panel\">");
+    try appendSectionHead(&buf, allocator, "Projects", "New Project", null);
     if (error_message) |message| {
         try appendTemplate(&buf, allocator,
             \\<div class="flash error">{message}</div>
