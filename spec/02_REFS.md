@@ -229,6 +229,35 @@ or `title`) even when they also carry slug or UUID aliases. Reducers MUST treat
 the UUID in `object.id` as authoritative for created project and milestone
 objects.
 
+### 3.5. Reference Message Directives
+
+Gitomi text fields MAY contain line-oriented reference directives for derived
+relationships between issues and pull requests. A directive has the form:
+
+```
+<relationship-key>: <target-ref>[, <target-ref>...]
+```
+
+`<relationship-key>` is case-insensitive and MUST be one of:
+
+| Key | Meaning |
+|-----|---------|
+| `Refs` | Generic reference |
+| `Relates-To` | Peer relationship |
+| `Blocks` | The source object blocks the target object |
+| `Blocked-By` | The source object is blocked by the target object |
+| `Duplicates` | The source object duplicates the target object |
+| `Duplicate-Of` | The source object is duplicated by the target object |
+
+`<target-ref>` MUST be one of the issue or pull human object reference tokens
+from §3.4, such as `#<object-ref>`, `issue:<object-ref>`,
+`pr:<object-ref>`, or `pull:<object-ref>`. Multiple target refs on the same
+directive line are separated with commas or ASCII whitespace.
+
+Reference directives are derived presentation data. They MUST NOT be treated as
+authorization, MUST NOT create new control-plane events, and MUST be ignored
+when the referenced target is missing or ambiguous in the local projection.
+
 ## 4. Event Hashes and Inbox Commit Format
 
 ### 4.0. Event Hash Identity

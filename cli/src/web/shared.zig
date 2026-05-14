@@ -634,6 +634,7 @@ pub fn appendTemplate(
     comptime template: []const u8,
     values: anytype,
 ) !void {
+    @setEvalBranchQuota(10_000);
     comptime var cursor: usize = 0;
     inline while (cursor < template.len) {
         comptime var token = cursor;

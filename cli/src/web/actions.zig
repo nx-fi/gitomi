@@ -11,22 +11,36 @@ const Allocator = std.mem.Allocator;
 const CliError = errors.CliError;
 const Repo = repo_mod.Repo;
 const SqliteDb = index.SqliteDb;
-const appendEmptyCell = shared.appendEmptyCell;
 const appendEmptyState = shared.appendEmptyState;
-const appendSectionHead = shared.appendSectionHead;
+const appendRelativeTime = shared.appendRelativeTime;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
-const appendStatePill = shared.appendStatePill;
 const appendTemplate = shared.appendTemplate;
+const appendUrlEncoded = shared.appendUrlEncoded;
+const class = shared.class;
+const classAttr = shared.classAttr;
 const ensureIndex = index.ensureIndex;
+const groupedUnsigned = shared.groupedUnsigned;
 const sendPlainResponse = shared.sendPlainResponse;
 const sendRedirect = shared.sendRedirect;
 const sendResponse = shared.sendResponse;
 const sqlite = index.sqlite;
 
+const ActionsFilters = struct {
+    allocator: Allocator,
+    workflow: ?[]u8 = null,
+    query: ?[]u8 = null,
+
+    fn deinit(self: *ActionsFilters) void {
+        if (self.workflow) |value| self.allocator.free(value);
+        if (self.query) |value| self.allocator.free(value);
+    }
+};
+
 const RunRow = struct {
     allocator: Allocator,
     run_id: []u8,
+    actor_principal: []u8,
     workflow: []u8,
     event_name: []u8,
     gitomi_event_type: []u8,
@@ -35,9 +49,11 @@ const RunRow = struct {
     requested_at: []u8,
     completed_at: []u8,
     conclusion: []u8,
+    duration_seconds: ?i64,
 
     fn deinit(self: *RunRow) void {
         self.allocator.free(self.run_id);
+        self.allocator.free(self.actor_principal);
         self.allocator.free(self.workflow);
         self.allocator.free(self.event_name);
         self.allocator.free(self.gitomi_event_type);
@@ -60,9 +76,24 @@ fn renderActionsPageWithMessage(allocator: Allocator, repo: Repo, target: []cons
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
+    const workflows = try loadHeadWorkflowsOrEmpty(allocator);
+    defer actions.freeWorkflows(allocator, workflows);
+
+    var runs = try loadRunRows(allocator, repo);
+    defer {
+        for (runs.items) |*row| row.deinit();
+        runs.deinit(allocator);
+    }
+
+    var filters = try actionsFiltersFromTarget(allocator, target);
+    defer filters.deinit();
+
+    const pending = actions.countPendingRequests(allocator, repo) catch 0;
+
     try appendShellStart(&buf, allocator, repo, "Actions", "actions");
-    try buf.appendSlice(allocator, "<section class=\"panel\">");
-    try appendSectionHead(&buf, allocator, "Automation", "Actions", null);
+    try buf.appendSlice(allocator, "<div class=\"actions-layout\">");
+    try appendActionsSidebar(&buf, allocator, workflows, runs.items, filters, pending);
+    try buf.appendSlice(allocator, "<section class=\"actions-main\">");
     if (message) |value| {
         try appendTemplate(&buf, allocator, "<div class=\"flash error\">{message}</div>", .{ .message = value });
     } else if (std.mem.indexOf(u8, target, "requested=1") != null) {
@@ -70,144 +101,11 @@ fn renderActionsPageWithMessage(allocator: Allocator, repo: Repo, target: []cons
     } else if (std.mem.indexOf(u8, target, "run=1") != null) {
         try buf.appendSlice(allocator, "<div class=\"flash success\">Pending action runs processed.</div>");
     }
-    try appendActionsSummary(&buf, allocator, repo);
-    try buf.appendSlice(allocator, "</section>");
-
-    try buf.appendSlice(allocator, "<section class=\"grid two\">");
-    try appendWorkflowPanel(&buf, allocator);
-    try appendRequestPanel(&buf, allocator);
-    try buf.appendSlice(allocator, "</section>");
-
-    try appendRunsPanel(&buf, allocator, repo);
+    try appendActionsMain(&buf, allocator, workflows, runs.items, filters);
+    try buf.appendSlice(allocator, "</section></div>");
 
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
-}
-
-fn appendActionsSummary(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo) !void {
-    const pending = actions.countPendingRequests(allocator, repo) catch 0;
-    try appendTemplate(buf, allocator,
-        \\<dl class="facts">
-        \\  <div><dt>Scheduler</dt><dd><code>gt actions daemon</code></dd></div>
-        \\  <div><dt>Pending runs</dt><dd>{pending}</dd></div>
-        \\  <div><dt>Runner</dt><dd><code>nektos/act</code></dd></div>
-        \\</dl>
-    , .{ .pending = pending });
-}
-
-fn appendWorkflowPanel(buf: *std.ArrayList(u8), allocator: Allocator) !void {
-    try buf.appendSlice(allocator, "<div class=\"panel\">");
-    try appendSectionHead(buf, allocator, "Workflows", "Discovered", null);
-
-    const workflows = loadHeadWorkflows(allocator) catch |err| switch (err) {
-        CliError.UserError, CliError.GitFailed => {
-            try appendEmptyState(buf, allocator, "No workflows found.", "Add workflow files under .github/workflows in the selected commit.");
-            try buf.appendSlice(allocator, "</div>");
-            return;
-        },
-        else => return err,
-    };
-    defer actions.freeWorkflows(allocator, workflows);
-
-    try buf.appendSlice(allocator,
-        \\<div class="table-wrap"><table>
-        \\  <thead><tr><th>Workflow</th><th>Triggers</th></tr></thead>
-        \\  <tbody>
-    );
-    if (workflows.len == 0) {
-        try appendEmptyCell(buf, allocator, 2, "No workflow files found.");
-    } else {
-        for (workflows) |workflow| {
-            try appendTemplate(buf, allocator, "<tr><td><strong>{name}</strong><br><code>{path}</code></td><td>", .{
-                .name = workflow.name,
-                .path = workflow.path,
-            });
-            if (workflow.triggers.len == 0) {
-                try buf.appendSlice(allocator, "<span class=\"muted\">No triggers detected</span>");
-            } else {
-                for (workflow.triggers, 0..) |trigger, idx| {
-                    if (idx != 0) try buf.append(allocator, ' ');
-                    try appendTemplate(buf, allocator, "<span class=\"pill\">{trigger}</span>", .{ .trigger = trigger });
-                }
-            }
-            try buf.appendSlice(allocator, "</td></tr>");
-        }
-    }
-    try buf.appendSlice(allocator, "</tbody></table></div></div>");
-}
-
-fn appendRequestPanel(buf: *std.ArrayList(u8), allocator: Allocator) !void {
-    try buf.appendSlice(allocator, "<div class=\"panel\">");
-    try appendSectionHead(buf, allocator, "Manual Run", "Request Workflow", null);
-
-    const workflows = loadHeadWorkflows(allocator) catch try allocator.alloc(actions.Workflow, 0);
-    defer actions.freeWorkflows(allocator, workflows);
-
-    try buf.appendSlice(allocator,
-        \\<form method="post" action="/actions/request" class="issue-form">
-        \\  <label>Workflow<select name="workflow" required>
-    );
-    for (workflows) |workflow| {
-        try appendTemplate(buf, allocator, "<option value=\"{path}\">{name}</option>", .{
-            .path = workflow.path,
-            .name = workflow.name,
-        });
-    }
-    try buf.appendSlice(allocator,
-        \\  </select></label>
-        \\  <label>Event<input name="event" value="workflow_dispatch"></label>
-        \\  <label>Ref<input name="ref" value="HEAD"></label>
-        \\  <div class="form-actions">
-        \\    <button class="button primary" type="submit">Request run</button>
-        \\  </div>
-        \\</form>
-        \\<form method="post" action="/actions/run-requested" class="issue-form">
-        \\  <div class="form-actions">
-        \\    <button class="button secondary" type="submit">Run pending</button>
-        \\  </div>
-        \\</form>
-        \\</div>
-    );
-}
-
-fn appendRunsPanel(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo) !void {
-    var runs = try loadRunRows(allocator, repo);
-    defer {
-        for (runs.items) |*row| row.deinit();
-        runs.deinit(allocator);
-    }
-
-    try buf.appendSlice(allocator, "<section class=\"panel\">");
-    try appendSectionHead(buf, allocator, "Runs", "Recent Workflow Runs", null);
-    try buf.appendSlice(allocator,
-        \\<div class="table-wrap"><table>
-        \\  <thead><tr><th>Run</th><th>Workflow</th><th>Event</th><th>Target</th><th>Conclusion</th></tr></thead>
-        \\  <tbody>
-    );
-    if (runs.items.len == 0) {
-        try appendEmptyCell(buf, allocator, 5, "No action runs recorded.");
-    } else {
-        for (runs.items) |row| {
-            try appendTemplate(buf, allocator, "<tr><td><code>{run}</code><br><small>{requested_at}</small></td><td><code>{workflow}</code></td><td>{event_name}", .{
-                .run = row.run_id[0..@min(row.run_id.len, 12)],
-                .requested_at = row.requested_at,
-                .workflow = row.workflow,
-                .event_name = row.event_name,
-            });
-            if (row.gitomi_event_type.len != 0) {
-                try appendTemplate(buf, allocator, "<br><small>{gitomi_event_type}</small>", .{ .gitomi_event_type = row.gitomi_event_type });
-            }
-            try appendTemplate(buf, allocator, "</td><td><code>{target}</code></td><td>", .{
-                .target = if (row.target_ref.len != 0) row.target_ref else row.target_oid,
-            });
-            try appendStatePill(buf, allocator, row.conclusion);
-            if (row.completed_at.len != 0) {
-                try appendTemplate(buf, allocator, "<br><small>{completed_at}</small>", .{ .completed_at = row.completed_at });
-            }
-            try buf.appendSlice(allocator, "</td></tr>");
-        }
-    }
-    try buf.appendSlice(allocator, "</tbody></table></div></section>");
 }
 
 fn loadHeadWorkflows(allocator: Allocator) ![]actions.Workflow {
@@ -216,20 +114,386 @@ fn loadHeadWorkflows(allocator: Allocator) ![]actions.Workflow {
     return try actions.loadWorkflows(allocator, target.target_oid);
 }
 
+fn loadHeadWorkflowsOrEmpty(allocator: Allocator) ![]actions.Workflow {
+    return loadHeadWorkflows(allocator) catch |err| switch (err) {
+        CliError.UserError, CliError.GitFailed => try allocator.alloc(actions.Workflow, 0),
+        else => return err,
+    };
+}
+
+fn appendActionsSidebar(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    workflows: []const actions.Workflow,
+    runs: []const RunRow,
+    filters: ActionsFilters,
+    pending: usize,
+) !void {
+    try buf.appendSlice(allocator,
+        \\<aside class="actions-sidebar">
+        \\  <div class="actions-sidebar-head">
+        \\    <h1>Actions</h1>
+        \\    <a class="button primary actions-new-workflow" href="/code?ref=HEAD&amp;path=.github/workflows">New workflow</a>
+        \\  </div>
+        \\  <nav class="actions-workflow-nav" aria-label="Workflows">
+    );
+    try appendActionsSidebarLink(buf, allocator, "All workflows", null, filters.workflow == null, runs.len);
+    for (workflows) |workflow| {
+        try appendActionsSidebarLink(
+            buf,
+            allocator,
+            workflow.name,
+            workflow.path,
+            if (filters.workflow) |selected| std.mem.eql(u8, selected, workflow.path) else false,
+            workflowRunCount(workflow.path, runs),
+        );
+    }
+    if (workflows.len == 0) {
+        try buf.appendSlice(allocator, "<p class=\"actions-sidebar-empty\">No workflow files found.</p>");
+    }
+    try appendTemplate(buf, allocator,
+        \\  </nav>
+        \\  <details class="actions-manual-run">
+        \\    <summary>Request workflow</summary>
+        \\    <form method="post" action="/actions/request">
+        \\      <label>Workflow<select name="workflow" required>
+    , .{});
+    for (workflows) |workflow| {
+        try appendTemplate(buf, allocator, "<option value=\"{path}\">{name}</option>", .{
+            .path = workflow.path,
+            .name = workflow.name,
+        });
+    }
+    if (workflows.len == 0) {
+        try buf.appendSlice(allocator, "<option value=\"\" disabled selected>No workflows found</option>");
+    }
+    try buf.appendSlice(allocator,
+        \\      </select></label>
+        \\      <label>Event<input name="event" value="workflow_dispatch"></label>
+        \\      <label>Ref<input name="ref" value="HEAD"></label>
+        \\      <div class="form-actions">
+    );
+    if (workflows.len == 0) {
+        try buf.appendSlice(allocator, "<button class=\"button primary\" type=\"submit\" disabled>Request run</button>");
+    } else {
+        try buf.appendSlice(allocator, "<button class=\"button primary\" type=\"submit\">Request run</button>");
+    }
+    try appendTemplate(buf, allocator,
+        \\      </div>
+        \\    </form>
+        \\    <form method="post" action="/actions/run-requested">
+        \\      <button class="button secondary" type="submit">Run pending ({pending})</button>
+        \\    </form>
+        \\  </details>
+        \\  <div class="actions-management">
+        \\    <h2>Management</h2>
+        \\    <span class="actions-management-link actions-icon-caches">Caches</span>
+        \\    <span class="actions-management-link actions-icon-attestations">Attestations</span>
+        \\    <span class="actions-management-link actions-icon-runners">Runners</span>
+        \\    <span class="actions-management-link actions-icon-metrics">Usage metrics</span>
+        \\    <span class="actions-management-link actions-icon-metrics">Performance metrics</span>
+        \\  </div>
+        \\</aside>
+    , .{ .pending = pending });
+}
+
+fn appendActionsSidebarLink(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    label: []const u8,
+    workflow: ?[]const u8,
+    active: bool,
+    count: usize,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<a{class_attr} href="
+    , .{ .class_attr = classAttr("actions-workflow-link", &.{class("active", active)}) });
+    try appendActionsHref(buf, allocator, workflow, null);
+    try appendTemplate(buf, allocator,
+        \\"><span>{label}</span><small>{count}</small></a>
+    , .{
+        .label = label,
+        .count = count,
+    });
+}
+
+fn appendActionsMain(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    workflows: []const actions.Workflow,
+    runs: []const RunRow,
+    filters: ActionsFilters,
+) !void {
+    const visible_count = filteredRunCount(runs, filters);
+    const selected_title = if (filters.workflow) |selected| workflowDisplayName(workflows, selected) else "All workflows";
+    const query = filters.query orelse "";
+
+    try appendTemplate(buf, allocator,
+        \\<div class="actions-main-head">
+        \\  <div>
+        \\    <h1>{title}</h1>
+        \\    <p>{subtitle}</p>
+        \\  </div>
+        \\  <form class="actions-filter" method="get" action="/actions">
+    , .{
+        .title = selected_title,
+        .subtitle = if (filters.workflow == null) "Showing runs from all workflows" else "Showing runs from the selected workflow",
+    });
+    if (filters.workflow) |workflow| {
+        try appendTemplate(buf, allocator, "<input type=\"hidden\" name=\"workflow\" value=\"{workflow}\">", .{ .workflow = workflow });
+    }
+    try appendTemplate(buf, allocator,
+        \\    <span class="actions-filter-icon" aria-hidden="true"></span>
+        \\    <input type="search" name="q" value="{query}" placeholder="Filter workflow runs" aria-label="Filter workflow runs">
+        \\  </form>
+        \\</div>
+        \\<section class="actions-runs-panel">
+        \\  <div class="actions-runs-head">
+        \\    <strong>{count} workflow {run_label}</strong>
+        \\    <div class="actions-runs-filters" aria-hidden="true">
+        \\      <span>Workflow</span>
+        \\      <span>Event</span>
+        \\      <span>Status</span>
+        \\      <span>Branch</span>
+        \\      <span>Actor</span>
+        \\    </div>
+        \\  </div>
+    , .{
+        .query = query,
+        .count = groupedUnsigned(@intCast(visible_count)),
+        .run_label = if (visible_count == 1) "run" else "runs",
+    });
+
+    var shown: usize = 0;
+    for (runs) |row| {
+        if (!runMatchesFilters(row, filters)) continue;
+        try appendRunRow(buf, allocator, workflows, row);
+        shown += 1;
+    }
+    if (shown == 0) {
+        if (filters.workflow != null or filters.query != null) {
+            try appendEmptyState(buf, allocator, "No matching workflow runs.", "Change the workflow or search filter to widen the run list.");
+        } else {
+            try appendEmptyState(buf, allocator, "No workflow runs yet.", "Request a workflow run or start the actions daemon to populate this list.");
+        }
+    }
+    try buf.appendSlice(allocator, "</section>");
+}
+
+fn appendRunRow(buf: *std.ArrayList(u8), allocator: Allocator, workflows: []const actions.Workflow, row: RunRow) !void {
+    const workflow_name = workflowDisplayName(workflows, row.workflow);
+    const title = try runTitleOwned(allocator, workflow_name, row);
+    defer allocator.free(title);
+    const short_run = row.run_id[0..@min(row.run_id.len, 12)];
+    const branch = if (row.target_ref.len != 0) row.target_ref else row.target_oid[0..@min(row.target_oid.len, 12)];
+    const duration = try durationLabelOwned(allocator, row);
+    defer allocator.free(duration);
+
+    try appendTemplate(buf, allocator,
+        \\<article class="actions-run-row">
+        \\  <div class="actions-run-status actions-run-status-{status_class}" title="{conclusion}" aria-label="{conclusion}"></div>
+        \\  <div class="actions-run-content">
+        \\    <div class="actions-run-title-line">
+        \\      <strong>{title}</strong>
+        \\      <span class="actions-run-badge">{event_name}</span>
+        \\    </div>
+        \\    <p><span>{workflow}</span> <span class="actions-run-number">#{run_id}</span> by <strong>{actor}</strong></p>
+        \\  </div>
+        \\  <span class="actions-branch-pill">{branch}</span>
+        \\  <div class="actions-run-time">
+    , .{
+        .status_class = conclusionClass(row.conclusion),
+        .conclusion = row.conclusion,
+        .title = title,
+        .event_name = row.event_name,
+        .workflow = workflow_name,
+        .run_id = short_run,
+        .actor = row.actor_principal,
+        .branch = branch,
+    });
+    if (row.requested_at.len != 0) {
+        try appendRelativeTime(buf, allocator, row.requested_at);
+    } else {
+        try buf.appendSlice(allocator, "<span>Unknown time</span>");
+    }
+    try appendTemplate(buf, allocator,
+        \\    <small>{duration}</small>
+        \\  </div>
+        \\  <button class="actions-run-menu" type="button" aria-label="Run menu" disabled></button>
+        \\</article>
+    , .{ .duration = duration });
+}
+
+fn actionsFiltersFromTarget(allocator: Allocator, target: []const u8) !ActionsFilters {
+    var filters = ActionsFilters{ .allocator = allocator };
+    errdefer filters.deinit();
+
+    if (try queryTextValueOwned(allocator, target, "workflow")) |workflow| {
+        filters.workflow = workflow;
+    }
+    if (try queryTextValueOwned(allocator, target, "q")) |query| {
+        filters.query = query;
+    }
+
+    return filters;
+}
+
+fn queryTextValueOwned(allocator: Allocator, target: []const u8, name: []const u8) !?[]u8 {
+    const owned = try queryValueOwned(allocator, target, name) orelse return null;
+    const trimmed = std.mem.trim(u8, owned, " \t\r\n");
+    if (trimmed.len == 0) {
+        allocator.free(owned);
+        return null;
+    }
+    if (trimmed.ptr == owned.ptr and trimmed.len == owned.len) return owned;
+    const result = try allocator.dupe(u8, trimmed);
+    allocator.free(owned);
+    return result;
+}
+
+fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const u8) !?[]u8 {
+    const query_start = std.mem.indexOfScalar(u8, target, '?') orelse return null;
+    var pairs = std.mem.splitScalar(u8, target[query_start + 1 ..], '&');
+    while (pairs.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
+        const raw_key = pair[0..eq];
+        const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
+        const key = try issues_page.percentDecodeForm(allocator, raw_key);
+        defer allocator.free(key);
+        if (!std.mem.eql(u8, key, wanted_key)) continue;
+        return try issues_page.percentDecodeForm(allocator, raw_value);
+    }
+    return null;
+}
+
+fn appendActionsHref(buf: *std.ArrayList(u8), allocator: Allocator, workflow: ?[]const u8, query: ?[]const u8) !void {
+    try buf.appendSlice(allocator, "/actions");
+    var has_query = false;
+    if (workflow) |value| {
+        try buf.appendSlice(allocator, "?workflow=");
+        try appendUrlEncoded(buf, allocator, value);
+        has_query = true;
+    }
+    if (query) |value| {
+        try buf.appendSlice(allocator, if (has_query) "&amp;q=" else "?q=");
+        try appendUrlEncoded(buf, allocator, value);
+    }
+}
+
+fn workflowRunCount(workflow: []const u8, runs: []const RunRow) usize {
+    var count: usize = 0;
+    for (runs) |row| {
+        if (std.mem.eql(u8, row.workflow, workflow)) count += 1;
+    }
+    return count;
+}
+
+fn filteredRunCount(runs: []const RunRow, filters: ActionsFilters) usize {
+    var count: usize = 0;
+    for (runs) |row| {
+        if (runMatchesFilters(row, filters)) count += 1;
+    }
+    return count;
+}
+
+fn runMatchesFilters(row: RunRow, filters: ActionsFilters) bool {
+    if (filters.workflow) |workflow| {
+        if (!std.mem.eql(u8, row.workflow, workflow)) return false;
+    }
+    if (filters.query) |query| {
+        if (!containsIgnoreCase(row.workflow, query) and
+            !containsIgnoreCase(row.event_name, query) and
+            !containsIgnoreCase(row.gitomi_event_type, query) and
+            !containsIgnoreCase(row.target_ref, query) and
+            !containsIgnoreCase(row.target_oid, query) and
+            !containsIgnoreCase(row.run_id, query) and
+            !containsIgnoreCase(row.actor_principal, query) and
+            !containsIgnoreCase(row.conclusion, query))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (asciiEqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
+    }
+    return false;
+}
+
+fn asciiEqlIgnoreCase(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |left, right| {
+        if (std.ascii.toLower(left) != std.ascii.toLower(right)) return false;
+    }
+    return true;
+}
+
+fn workflowDisplayName(workflows: []const actions.Workflow, workflow_path: []const u8) []const u8 {
+    for (workflows) |workflow| {
+        if (std.mem.eql(u8, workflow.path, workflow_path)) return workflow.name;
+    }
+    return std.fs.path.basename(workflow_path);
+}
+
+fn runTitleOwned(allocator: Allocator, workflow_name: []const u8, row: RunRow) ![]u8 {
+    if (row.gitomi_event_type.len != 0) {
+        return std.fmt.allocPrint(allocator, "{s} for {s}", .{ workflow_name, row.gitomi_event_type });
+    }
+    return std.fmt.allocPrint(allocator, "{s} run", .{workflow_name});
+}
+
+fn durationLabelOwned(allocator: Allocator, row: RunRow) ![]u8 {
+    if (row.duration_seconds) |seconds| {
+        if (seconds < 0) return allocator.dupe(u8, "Completed");
+        if (seconds < 60) return std.fmt.allocPrint(allocator, "{d}s", .{seconds});
+        const minutes = @divFloor(seconds, 60);
+        const remaining_seconds = @mod(seconds, 60);
+        if (minutes < 60) return std.fmt.allocPrint(allocator, "{d}m {d}s", .{ minutes, remaining_seconds });
+        const hours = @divFloor(minutes, 60);
+        const remaining_minutes = @mod(minutes, 60);
+        return std.fmt.allocPrint(allocator, "{d}h {d}m", .{ hours, remaining_minutes });
+    }
+    if (row.completed_at.len != 0) return allocator.dupe(u8, "Completed");
+    return allocator.dupe(u8, "Pending");
+}
+
+fn conclusionClass(conclusion: []const u8) []const u8 {
+    if (std.mem.eql(u8, conclusion, "success")) return "success";
+    if (std.mem.eql(u8, conclusion, "pending")) return "pending";
+    if (std.mem.eql(u8, conclusion, "cancelled")) return "cancelled";
+    if (std.mem.eql(u8, conclusion, "skipped")) return "skipped";
+    return "failure";
+}
+
 fn loadRunRows(allocator: Allocator, repo: Repo) !std.ArrayList(RunRow) {
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
     var stmt = try db.prepare(
-        \\SELECT r.object_id, r.occurred_at, r.body, COALESCE(c.occurred_at, ''), COALESCE(c.body, '')
+        \\WITH completed AS (
+        \\  SELECT object_id, MAX(ordinal) AS ordinal
+        \\  FROM events
+        \\  WHERE event_type = 'action.run_completed'
+        \\    AND domain_status = 'accepted'
+        \\  GROUP BY object_id
+        \\)
+        \\SELECT r.object_id, r.actor_principal, r.occurred_at, r.body, COALESCE(c.occurred_at, ''), COALESCE(c.body, ''),
+        \\       CASE
+        \\         WHEN c.occurred_at IS NULL THEN NULL
+        \\         ELSE CAST(strftime('%s', c.occurred_at) - strftime('%s', r.occurred_at) AS INTEGER)
+        \\       END
         \\FROM events r
-        \\LEFT JOIN events c
-        \\  ON c.event_type = 'action.run_completed'
-        \\ AND c.object_id = r.object_id
-        \\ AND c.domain_status = 'accepted'
+        \\LEFT JOIN completed cc ON cc.object_id = r.object_id
+        \\LEFT JOIN events c ON c.ordinal = cc.ordinal
         \\WHERE r.event_type = 'action.run_requested'
         \\  AND r.domain_status = 'accepted'
         \\ORDER BY r.ordinal DESC
-        \\LIMIT 50
+        \\LIMIT 100
     );
     defer stmt.deinit();
 
@@ -242,14 +506,17 @@ fn loadRunRows(allocator: Allocator, repo: Repo) !std.ArrayList(RunRow) {
     while (try stmt.step()) {
         const run_id = try stmt.columnTextDup(allocator, 0);
         errdefer allocator.free(run_id);
-        const requested_at = try stmt.columnTextDup(allocator, 1);
+        const actor_principal = try stmt.columnTextDup(allocator, 1);
+        errdefer allocator.free(actor_principal);
+        const requested_at = try stmt.columnTextDup(allocator, 2);
         errdefer allocator.free(requested_at);
-        const request_body = try stmt.columnTextDup(allocator, 2);
+        const request_body = try stmt.columnTextDup(allocator, 3);
         defer allocator.free(request_body);
-        const completed_at = try stmt.columnTextDup(allocator, 3);
+        const completed_at = try stmt.columnTextDup(allocator, 4);
         errdefer allocator.free(completed_at);
-        const completed_body = try stmt.columnTextDup(allocator, 4);
+        const completed_body = try stmt.columnTextDup(allocator, 5);
         defer allocator.free(completed_body);
+        const duration_seconds: ?i64 = if (stmt.columnIsNull(6)) null else stmt.columnInt64(6);
 
         const workflow = try payloadStringOwned(allocator, request_body, "workflow", "");
         errdefer allocator.free(workflow);
@@ -270,6 +537,7 @@ fn loadRunRows(allocator: Allocator, repo: Repo) !std.ArrayList(RunRow) {
         try rows.append(allocator, .{
             .allocator = allocator,
             .run_id = run_id,
+            .actor_principal = actor_principal,
             .workflow = workflow,
             .event_name = event_name,
             .gitomi_event_type = gitomi_event_type,
@@ -278,6 +546,7 @@ fn loadRunRows(allocator: Allocator, repo: Repo) !std.ArrayList(RunRow) {
             .requested_at = requested_at,
             .completed_at = completed_at,
             .conclusion = conclusion,
+            .duration_seconds = duration_seconds,
         });
     }
 

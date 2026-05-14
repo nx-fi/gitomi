@@ -596,6 +596,12 @@ Implementations MUST parse Data Plane commit messages to derive links from code 
 
 These links are derived projection data. They MUST NOT be written back as explicit control-plane events.
 
+Issue and pull request bodies and comments MAY also contain reference message
+directives as defined in the ref format specification. Implementations SHOULD
+derive issue and pull relationships from accepted, non-redacted body/comment
+text that uses those directives. These relationships are presentation data and
+MUST NOT change object state or admission decisions.
+
 ### 6.8. Cache Rebuild
 
 `.git/gitomi/index.sqlite` and `.git/gitomi/cursors.sqlite` are disposable caches.

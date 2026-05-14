@@ -221,6 +221,15 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         }
         const issue_ref = request.path[issue_ref_start..issue_ref_end];
         try issues_page.handleIssueCommentPost(allocator, repo, stream, issue_ref, request.body);
+    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.startsWith(u8, request.path, "/issues/") and std.mem.endsWith(u8, request.path, "/sidebar")) {
+        const issue_ref_start = "/issues/".len;
+        const issue_ref_end = request.path.len - "/sidebar".len;
+        if (issue_ref_start >= issue_ref_end or request.path[issue_ref_end - 1] == '/') {
+            try shared.sendPlainResponse(allocator, stream, 404, "Not Found", "Not found\n");
+            return;
+        }
+        const issue_ref = request.path[issue_ref_start..issue_ref_end];
+        try issues_page.handleIssueSidebarPost(allocator, repo, stream, issue_ref, request.body);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.startsWith(u8, request.path, "/issues/")) {
         const issue_ref = request.path["/issues/".len..];
         const body = try issues_page.renderIssueDetailPage(allocator, repo, issue_ref);
