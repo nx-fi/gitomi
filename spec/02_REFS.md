@@ -217,6 +217,11 @@ segments (§3.1) generated with the sanitization algorithm in §3.3. If a slug
 would collide in the local projection, the writer MUST append a disambiguating
 suffix, normally `-<uuid-prefix>`.
 
+CLI and HTTP entry points SHOULD accept the typed long forms
+`issue:<uuid-prefix>`, `pull:<uuid-prefix>`, `project:<uuid-prefix>`, and
+`milestone:<uuid-prefix>` whenever the expected object kind is not otherwise
+obvious from command context.
+
 Accepted event payloads MUST carry display names (`project`, `column`, `name`,
 or `title`) even when they also carry slug or UUID aliases. Reducers MUST treat
 the UUID in `object.id` as authoritative for created project and milestone

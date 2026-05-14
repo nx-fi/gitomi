@@ -186,6 +186,12 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         const body = try projects_page.renderProjectsPage(allocator, repo);
         defer allocator.free(body);
         try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
+    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/new-project")) {
+        const body = try projects_page.renderProjectForm(allocator, repo, null, "", "", "");
+        defer allocator.free(body);
+        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
+    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.eql(u8, request.path, "/projects")) {
+        try projects_page.handleProjectPost(allocator, repo, stream, request.body);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/events")) {
         const body = try events_page.renderEventsPage(allocator, repo);
         defer allocator.free(body);

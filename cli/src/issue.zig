@@ -11,6 +11,7 @@ const out = io.out;
 const eprint = io.eprint;
 const EventWriter = event_writer_mod.EventWriter;
 const buildIssueOpenedJson = event_mod.buildIssueOpenedJson;
+const buildIssueProjectEventJson = event_mod.buildIssueProjectEventJson;
 const buildIssueStringPayloadJson = event_mod.buildIssueStringPayloadJson;
 const buildIssueUpdatedJson = event_mod.buildIssueUpdatedJson;
 const newUuidV7 = util.newUuidV7;
@@ -146,6 +147,50 @@ pub fn createIssueUpdatedEvent(
     defer allocator.free(commit_oid);
 
     try out("issue.updated #{s}\n", .{issue_id[0..@min(issue_id.len, 7)]});
+    try out("  commit: {s}\n", .{commit_oid});
+    try out("  ref:    {s}\n", .{writer.inbox_ref});
+}
+
+pub fn createIssueProjectEvent(
+    allocator: Allocator,
+    issue_id: []const u8,
+    project: []const u8,
+    column: []const u8,
+    add: bool,
+) !void {
+    var writer = try EventWriter.init(allocator, "gt issue project");
+    defer writer.deinit();
+
+    const event_uuid = try newUuidV7(allocator);
+    defer allocator.free(event_uuid);
+    const idem = try newUuidV7(allocator);
+    defer allocator.free(idem);
+    const occurred_at = try rfc3339Now(allocator);
+    defer allocator.free(occurred_at);
+    const event_parents = writer.eventParents();
+    const event_type: []const u8 = if (add) "issue.project_added" else "issue.project_removed";
+
+    const event_body = try buildIssueProjectEventJson(
+        allocator,
+        writer.cfg,
+        writer.nextSeq(),
+        issue_id,
+        event_uuid,
+        idem,
+        occurred_at,
+        event_parents,
+        event_type,
+        project,
+        column,
+    );
+    defer allocator.free(event_body);
+
+    const subject = try std.fmt.allocPrint(allocator, "{s} #{s} {s}", .{ event_type, issue_id[0..@min(issue_id.len, 7)], project });
+    defer allocator.free(subject);
+    const commit_oid = try writer.write("gt issue", subject, event_body);
+    defer allocator.free(commit_oid);
+
+    try out("{s} #{s}\n", .{ event_type, issue_id[0..@min(issue_id.len, 7)] });
     try out("  commit: {s}\n", .{commit_oid});
     try out("  ref:    {s}\n", .{writer.inbox_ref});
 }

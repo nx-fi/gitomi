@@ -1,7 +1,7 @@
 # Gitomi
 
-A local-first, Git-native forge that layers issues, pull requests, ACLs, and
-workflow execution over a standard Git repository.
+A local-first, Git-native forge that layers issues, pull requests, projects,
+milestones, ACLs, and workflow execution over a standard Git repository.
 
 Gitomi stores all social and automation state as signed, append-only event
 commits in ordinary Git refs — no server, no database, no custom transport.

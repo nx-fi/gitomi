@@ -13,6 +13,8 @@ test {
     _ = @import("index.zig");
     _ = @import("comment.zig");
     _ = @import("pull.zig");
+    _ = @import("project.zig");
+    _ = @import("milestone.zig");
     _ = @import("rbac.zig");
     _ = @import("actions.zig");
     _ = @import("runs.zig");

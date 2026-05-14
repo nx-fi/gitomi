@@ -270,6 +270,80 @@ pub fn resolvePullId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u
     return first;
 }
 
+pub fn resolveProjectId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
+    const trimmed = std.mem.trim(u8, raw_ref, " \t\r\n");
+    const value = if (std.mem.startsWith(u8, trimmed, "project:"))
+        trimmed["project:".len..]
+    else if (std.mem.startsWith(u8, trimmed, "@"))
+        trimmed[1..]
+    else
+        trimmed;
+    if (value.len == 0) {
+        try eprint("gt project: project reference must not be empty\n", .{});
+        return CliError.InvalidReference;
+    }
+
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
+    if (isUuidPrefix(value)) {
+        const pattern = try std.fmt.allocPrint(allocator, "{s}%", .{value});
+        defer allocator.free(pattern);
+        var stmt = try db.prepare("SELECT id FROM projects WHERE id LIKE ? ORDER BY id LIMIT 2");
+        defer stmt.deinit();
+        try stmt.bindText(1, pattern);
+        if (try stmt.step()) {
+            const first = try stmt.columnTextDup(allocator, 0);
+            errdefer allocator.free(first);
+            if (try stmt.step()) {
+                const second = try stmt.columnTextDup(allocator, 0);
+                defer allocator.free(second);
+                try eprint("gt project: ambiguous project reference {s} matches {s} and {s}\n", .{ raw_ref, first, second });
+                return CliError.AmbiguousReference;
+            }
+            return first;
+        }
+    }
+
+    var stmt = try db.prepare("SELECT id FROM projects WHERE name = ? ORDER BY id LIMIT 2");
+    defer stmt.deinit();
+    try stmt.bindText(1, value);
+    if (!(try stmt.step())) {
+        try eprint("gt project: no project named {s}\n", .{value});
+        return CliError.NotFound;
+    }
+    const first = try stmt.columnTextDup(allocator, 0);
+    errdefer allocator.free(first);
+    if (try stmt.step()) {
+        const second = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(second);
+        try eprint("gt project: ambiguous project name {s} matches {s} and {s}\n", .{ value, first, second });
+        return CliError.AmbiguousReference;
+    }
+    return first;
+}
+
+pub fn projectNameForId(allocator: Allocator, repo: Repo, project_id: []const u8) ![]u8 {
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    var stmt = try db.prepare("SELECT name FROM projects WHERE id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    if (!(try stmt.step())) {
+        try eprint("gt project: no project matches {s}\n", .{project_id});
+        return CliError.NotFound;
+    }
+    return try stmt.columnTextDup(allocator, 0);
+}
+
+fn isUuidPrefix(value: []const u8) bool {
+    if (value.len < 7) return false;
+    for (value) |c| {
+        if (!std.ascii.isHex(c) and c != '-') return false;
+    }
+    return true;
+}
+
 fn parseLegacyGithubNumber(raw_ref: []const u8) ?i64 {
     const trimmed = std.mem.trim(u8, raw_ref, " \t\r\n");
     const value = if (std.mem.startsWith(u8, trimmed, "github#"))
@@ -519,6 +593,100 @@ pub fn showIssueFromIndex(allocator: Allocator, repo: Repo, issue_id: []const u8
     }
     try out("commits:   {s}\n", .{commit_references});
     try out("\n{s}\n", .{body});
+}
+
+pub fn listProjectsFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
+    if (!fileExists(repo.index_path)) return;
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
+    var stmt = try db.prepare(
+        \\SELECT id, name, description, state, author_principal, created_at
+        \\FROM projects
+        \\ORDER BY created_at DESC, id DESC
+    );
+    defer stmt.deinit();
+
+    while (try stmt.step()) {
+        const id = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(id);
+        const name = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(name);
+        const description = try stmt.columnTextDup(allocator, 2);
+        defer allocator.free(description);
+        const state = try stmt.columnTextDup(allocator, 3);
+        defer allocator.free(state);
+        const author = try stmt.columnTextDup(allocator, 4);
+        defer allocator.free(author);
+        const created_at = try stmt.columnTextDup(allocator, 5);
+        defer allocator.free(created_at);
+
+        if (json) {
+            var line: std.ArrayList(u8) = .empty;
+            defer line.deinit(allocator);
+            try line.append(allocator, '{');
+            try appendJsonFieldString(&line, allocator, "id", id, true);
+            try appendJsonFieldString(&line, allocator, "state", state, true);
+            try appendJsonFieldString(&line, allocator, "name", name, true);
+            try appendJsonFieldString(&line, allocator, "description", description, true);
+            try appendJsonFieldString(&line, allocator, "author_principal", author, true);
+            try appendJsonFieldString(&line, allocator, "created_at", created_at, true);
+            try appendProjectColumnsJsonField(&line, allocator, &db, id, false);
+            try line.append(allocator, '}');
+            try out("{s}\n", .{line.items});
+        } else {
+            try out("@{s} {s} {s}\n", .{ id[0..@min(id.len, 7)], state, name });
+        }
+    }
+}
+
+pub fn listMilestonesFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
+    if (!fileExists(repo.index_path)) return;
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
+    var stmt = try db.prepare(
+        \\SELECT id, title, description, due_at, state, author_principal, created_at
+        \\FROM milestones
+        \\ORDER BY due_at = '', due_at, created_at DESC, id DESC
+    );
+    defer stmt.deinit();
+
+    while (try stmt.step()) {
+        const id = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(id);
+        const title = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(title);
+        const description = try stmt.columnTextDup(allocator, 2);
+        defer allocator.free(description);
+        const due_at = try stmt.columnTextDup(allocator, 3);
+        defer allocator.free(due_at);
+        const state = try stmt.columnTextDup(allocator, 4);
+        defer allocator.free(state);
+        const author = try stmt.columnTextDup(allocator, 5);
+        defer allocator.free(author);
+        const created_at = try stmt.columnTextDup(allocator, 6);
+        defer allocator.free(created_at);
+
+        if (json) {
+            var line: std.ArrayList(u8) = .empty;
+            defer line.deinit(allocator);
+            try line.append(allocator, '{');
+            try appendJsonFieldString(&line, allocator, "id", id, true);
+            try appendJsonFieldString(&line, allocator, "state", state, true);
+            try appendJsonFieldString(&line, allocator, "title", title, true);
+            try appendJsonFieldString(&line, allocator, "description", description, true);
+            try appendJsonFieldString(&line, allocator, "due_at", due_at, true);
+            try appendJsonFieldString(&line, allocator, "author_principal", author, true);
+            try appendJsonFieldString(&line, allocator, "created_at", created_at, false);
+            try line.append(allocator, '}');
+            try out("{s}\n", .{line.items});
+        } else {
+            try out("^{s} {s} {s}", .{ id[0..@min(id.len, 7)], state, title });
+            if (due_at.len != 0) try out(" due {s}", .{due_at});
+            try out("\n", .{});
+        }
+    }
 }
 
 pub fn listPullsFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
@@ -809,6 +977,36 @@ fn appendIssueProjectsJsonField(
         try appendJsonFieldString(buf, allocator, "project", project, true);
         try appendJsonFieldString(buf, allocator, "column", column, false);
         try buf.append(allocator, '}');
+    }
+    try buf.append(allocator, ']');
+    if (comma) try buf.append(allocator, ',');
+}
+
+fn appendProjectColumnsJsonField(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    project_id: []const u8,
+    comma: bool,
+) !void {
+    try appendJsonString(buf, allocator, "columns");
+    try buf.appendSlice(allocator, ":[");
+    var stmt = try db.prepare(
+        \\SELECT DISTINCT column_name
+        \\FROM project_columns
+        \\WHERE project_id = ?
+        \\ORDER BY column_name
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+
+    var first = true;
+    while (try stmt.step()) {
+        const column = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(column);
+        if (!first) try buf.append(allocator, ',');
+        first = false;
+        try appendJsonString(buf, allocator, column);
     }
     try buf.append(allocator, ']');
     if (comma) try buf.append(allocator, ',');
