@@ -6,9 +6,9 @@ const shared = @import("shared.zig");
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
 const appendEmptyState = shared.appendEmptyState;
-const appendHtml = shared.appendHtml;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
+const appendTemplate = shared.appendTemplate;
 const runCommand = git.runCommand;
 
 const max_commit_diff_bytes = 8 * 1024 * 1024;
@@ -90,8 +90,7 @@ pub fn renderCommitsPage(allocator: Allocator, repo: Repo, target: []const u8) !
     if (path.len == 0) {
         try buf.appendSlice(allocator, "Recent commits");
     } else {
-        try buf.appendSlice(allocator, "Commits for ");
-        try appendHtml(&buf, allocator, path);
+        try appendTemplate(&buf, allocator, "Commits for {path}", .{ .path = path });
     }
     try buf.appendSlice(allocator,
         \\</h1>
@@ -108,17 +107,17 @@ pub fn renderCommitsPage(allocator: Allocator, repo: Repo, target: []const u8) !
     for (commits) |commit| {
         try buf.appendSlice(allocator, "<article class=\"commit-row\"><div><a class=\"commit-title\" href=\"");
         try appendCommitHref(&buf, allocator, commit.full_hash);
-        try buf.appendSlice(allocator, "\">");
-        try appendHtml(&buf, allocator, commit.subject);
-        try buf.appendSlice(allocator, "</a><p>");
-        try appendHtml(&buf, allocator, commit.author);
-        try buf.appendSlice(allocator, " committed ");
-        try appendHtml(&buf, allocator, commit.relative);
-        try buf.appendSlice(allocator, "</p></div><a class=\"commit-sha\" href=\"");
+        try appendTemplate(&buf, allocator,
+            \\">{subject}</a><p>{author} committed {relative}</p></div><a class="commit-sha" href="
+        , .{
+            .subject = commit.subject,
+            .author = commit.author,
+            .relative = commit.relative,
+        });
         try appendCommitHref(&buf, allocator, commit.full_hash);
-        try buf.appendSlice(allocator, "\"><code>");
-        try appendHtml(&buf, allocator, commit.short_hash);
-        try buf.appendSlice(allocator, "</code></a></article>");
+        try appendTemplate(&buf, allocator,
+            \\"><code>{short_hash}</code></a></article>
+        , .{ .short_hash = commit.short_hash });
     }
 
     if (commits.len == 0) {
@@ -154,33 +153,27 @@ pub fn renderCommitPage(allocator: Allocator, repo: Repo, target: []const u8) ![
 
     try appendShellStart(&buf, allocator, repo, "Commit", "commits");
     try appendRepoHeader(&buf, allocator, repo, detail.short_hash);
-    try buf.appendSlice(allocator,
+    try appendTemplate(&buf, allocator,
         \\<section class="panel commit-detail">
         \\  <div class="commit-detail-head">
         \\    <div>
         \\      <p class="eyebrow">Commit</p>
-        \\      <h1>
-    );
-    try appendHtml(&buf, allocator, detail.subject);
-    try buf.appendSlice(allocator,
-        \\</h1>
-        \\      <p class="commit-full-hash">
-    );
-    try appendHtml(&buf, allocator, detail.full_hash);
-    try buf.appendSlice(allocator,
-        \\</p>
+        \\      <h1>{subject}</h1>
+        \\      <p class="commit-full-hash">{full_hash}</p>
         \\    </div>
         \\    <a class="button secondary" href="/commits">History</a>
         \\  </div>
         \\  <div class="commit-meta">
-        \\    <strong>
-    );
-    try appendHtml(&buf, allocator, detail.author);
-    try buf.appendSlice(allocator, "</strong><span>");
-    try appendHtml(&buf, allocator, detail.email);
-    try buf.appendSlice(allocator, "</span><span>");
-    try appendHtml(&buf, allocator, detail.relative);
-    try buf.appendSlice(allocator, "</span></div></section>");
+        \\    <strong>{author}</strong><span>{email}</span><span>{relative}</span>
+        \\  </div>
+        \\</section>
+    , .{
+        .subject = detail.subject,
+        .full_hash = detail.full_hash,
+        .author = detail.author,
+        .email = detail.email,
+        .relative = detail.relative,
+    });
 
     try buf.appendSlice(allocator,
         \\<section class="diff-section">
@@ -213,27 +206,22 @@ fn renderMissingCommitPage(allocator: Allocator, repo: Repo, sha: []const u8) ![
 }
 
 fn appendRepoHeader(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8) !void {
-    try buf.appendSlice(allocator,
+    try appendTemplate(buf, allocator,
         \\<section class="repo-head">
         \\  <div>
         \\    <p class="eyebrow">Repository</p>
-        \\    <h1>
-    );
-    try appendHtml(buf, allocator, std.fs.path.basename(repo.root));
-    try buf.appendSlice(allocator,
-        \\</h1>
+        \\    <h1>{repo_name}</h1>
         \\  </div>
         \\  <div class="repo-actions">
-        \\    <span class="branch-pill">
-    );
-    try appendHtml(buf, allocator, ref);
-    try buf.appendSlice(allocator,
-        \\</span>
+        \\    <span class="branch-pill">{ref}</span>
         \\    <a class="button secondary" href="/">Code</a>
         \\    <a class="button secondary" href="/overview">Overview</a>
         \\  </div>
         \\</section>
-    );
+    , .{
+        .repo_name = std.fs.path.basename(repo.root),
+        .ref = ref,
+    });
 }
 
 fn loadCommits(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) ![]CommitListEntry {
@@ -290,6 +278,22 @@ fn loadCommitDetail(allocator: Allocator, repo: Repo, sha: []const u8) !?CommitD
 fn loadCommitDiff(allocator: Allocator, repo: Repo, sha: []const u8, context: usize) !?[]u8 {
     const unified = try std.fmt.allocPrint(allocator, "--unified={d}", .{context});
     defer allocator.free(unified);
+
+    const first_parent = try std.fmt.allocPrint(allocator, "{s}^1", .{sha});
+    defer allocator.free(first_parent);
+
+    if (try gitMaybe(allocator, repo, &.{
+        "diff",
+        "--no-ext-diff",
+        "--find-renames",
+        "--patch",
+        unified,
+        first_parent,
+        sha,
+    }, max_commit_diff_bytes)) |diff| {
+        return diff;
+    }
+
     return gitMaybe(allocator, repo, &.{
         "show",
         "--pretty=format:",
@@ -308,6 +312,8 @@ fn appendDiff(buf: *std.ArrayList(u8), allocator: Allocator, sha: []const u8, co
     }
 
     var in_file = false;
+    var file_index: usize = 0;
+    var current_file_index: usize = 0;
     var rendered_lines: usize = 0;
     var old_line: ?usize = null;
     var new_line: ?usize = null;
@@ -317,28 +323,30 @@ fn appendDiff(buf: *std.ArrayList(u8), allocator: Allocator, sha: []const u8, co
         if (std.mem.startsWith(u8, line, "diff --git ")) {
             if (in_file) try buf.appendSlice(allocator, "</div></section>");
             in_file = true;
+            current_file_index = file_index;
+            file_index += 1;
             rendered_lines = 0;
             old_line = null;
             new_line = null;
-            try buf.appendSlice(allocator, "<section class=\"panel diff-file\"><div class=\"diff-file-head\"><strong>");
-            try appendHtml(buf, allocator, diffFileTitle(line));
-            try buf.appendSlice(allocator, "</strong></div><div class=\"diff-lines\">");
+            try appendDiffFileStart(buf, allocator, current_file_index, diffFileTitle(line));
             continue;
         } else if (!in_file) {
             in_file = true;
+            current_file_index = file_index;
+            file_index += 1;
             rendered_lines = 0;
             old_line = null;
             new_line = null;
-            try buf.appendSlice(allocator, "<section class=\"panel diff-file\"><div class=\"diff-file-head\"><strong>Patch</strong></div><div class=\"diff-lines\">");
+            try appendDiffFileStart(buf, allocator, current_file_index, "Patch");
         }
 
         if (parseHunkHeader(line)) |range| {
             if (rendered_lines == 0) {
                 if (range.old_start > 1 or range.new_start > 1) {
-                    try appendDiffExpandRow(buf, allocator, sha, context, "Expand from file start");
+                    try appendDiffExpandRow(buf, allocator, sha, context, current_file_index, "Expand from file start");
                 }
             } else {
-                try appendDiffExpandRow(buf, allocator, sha, context, "Expand hidden lines");
+                try appendDiffExpandRow(buf, allocator, sha, context, current_file_index, "Expand hidden lines");
             }
             old_line = range.old_start;
             new_line = range.new_start;
@@ -367,14 +375,21 @@ fn appendDiff(buf: *std.ArrayList(u8), allocator: Allocator, sha: []const u8, co
     if (in_file) try buf.appendSlice(allocator, "</div></section>");
 }
 
-fn appendDiffExpandRow(buf: *std.ArrayList(u8), allocator: Allocator, sha: []const u8, context: usize, label: []const u8) !void {
-    try buf.appendSlice(allocator, "<div class=\"diff-row diff-expand\"><span></span><span></span>");
+fn appendDiffFileStart(buf: *std.ArrayList(u8), allocator: Allocator, file_index: usize, title: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<section class="panel diff-file" id="diff-file-{file_index}" data-diff-file data-diff-file-index="{file_index}" data-diff-file-path="{title}"><div class="diff-file-head"><strong>{title}</strong></div><div class="diff-lines">
+    , .{
+        .file_index = file_index,
+        .title = title,
+    });
+}
+
+fn appendDiffExpandRow(buf: *std.ArrayList(u8), allocator: Allocator, sha: []const u8, context: usize, file_index: usize, label: []const u8) !void {
+    try buf.appendSlice(allocator, "<div class=\"diff-row diff-expand\" data-diff-row data-diff-kind=\"expand\"><span></span><span></span>");
     if (context < 200) {
-        try buf.appendSlice(allocator, "<a href=\"");
-        try appendCommitHrefWithContext(buf, allocator, sha, @min(context * 4, @as(usize, 200)));
-        try buf.appendSlice(allocator, "\">");
-        try appendHtml(buf, allocator, label);
-        try buf.appendSlice(allocator, "</a>");
+        try buf.appendSlice(allocator, "<a data-diff-expand href=\"");
+        try appendCommitHrefWithContext(buf, allocator, sha, @min(context * 4, @as(usize, 200)), file_index);
+        try appendTemplate(buf, allocator, "\">{label}</a>", .{ .label = label });
     } else {
         try buf.appendSlice(allocator, "<span>Maximum context shown</span>");
     }
@@ -389,15 +404,26 @@ fn appendDiffLine(
     old_line: ?usize,
     new_line: ?usize,
 ) !void {
-    try buf.appendSlice(allocator, "<div class=\"diff-row ");
-    try appendHtml(buf, allocator, class);
-    try buf.appendSlice(allocator, "\"><span class=\"diff-num old\">");
+    try appendTemplate(buf, allocator,
+        \\<div class="diff-row {class}" data-diff-row data-diff-kind="{class}"
+    , .{ .class = class });
+    if (old_line) |value| {
+        try appendTemplate(buf, allocator,
+            \\ data-diff-old="{value}"
+        , .{ .value = value });
+    }
+    if (new_line) |value| {
+        try appendTemplate(buf, allocator,
+            \\ data-diff-new="{value}"
+        , .{ .value = value });
+    }
+    try buf.appendSlice(allocator, "><span class=\"diff-num old\">");
     try appendLineNumber(buf, allocator, old_line);
     try buf.appendSlice(allocator, "</span><span class=\"diff-num new\">");
     try appendLineNumber(buf, allocator, new_line);
-    try buf.appendSlice(allocator, "</span><code class=\"diff-code\">");
-    try appendHtml(buf, allocator, line);
-    try buf.appendSlice(allocator, "</code></div>");
+    try appendTemplate(buf, allocator,
+        \\</span><code class="diff-code">{line}</code></div>
+    , .{ .line = line });
 }
 
 fn appendLineNumber(buf: *std.ArrayList(u8), allocator: Allocator, line_number: ?usize) !void {
@@ -533,10 +559,12 @@ fn appendCommitHref(buf: *std.ArrayList(u8), allocator: Allocator, hash: []const
     try appendUrlEncoded(buf, allocator, hash);
 }
 
-fn appendCommitHrefWithContext(buf: *std.ArrayList(u8), allocator: Allocator, hash: []const u8, context: usize) !void {
+fn appendCommitHrefWithContext(buf: *std.ArrayList(u8), allocator: Allocator, hash: []const u8, context: usize, file_index: usize) !void {
     try appendCommitHref(buf, allocator, hash);
-    try buf.appendSlice(allocator, "&context=");
+    try buf.appendSlice(allocator, "&amp;context=");
     try std.fmt.format(buf.writer(allocator), "{d}", .{context});
+    try buf.appendSlice(allocator, "#diff-file-");
+    try std.fmt.format(buf.writer(allocator), "{d}", .{file_index});
 }
 
 fn appendUrlEncoded(buf: *std.ArrayList(u8), allocator: Allocator, value: []const u8) !void {
@@ -601,4 +629,7 @@ test "web commits renders diff line classes" {
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "diff-row add") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "diff-num old\">1") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "diff-num new\">1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "id=\"diff-file-0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-diff-row data-diff-kind=\"del\" data-diff-old=\"1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-diff-expand href=\"/commit?sha=abc123&amp;context=12#diff-file-0\"") != null);
 }

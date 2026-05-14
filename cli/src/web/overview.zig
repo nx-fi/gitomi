@@ -9,9 +9,9 @@ const Repo = repo_mod.Repo;
 const SqliteDb = index.SqliteDb;
 const appendEmptyState = shared.appendEmptyState;
 const appendFmt = shared.appendFmt;
-const appendHtml = shared.appendHtml;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
+const appendTemplate = shared.appendTemplate;
 const ensureIndex = index.ensureIndex;
 const freeIndexedEvent = index.freeIndexedEvent;
 const indexedEventFromStmt = index.indexedEventFromStmt;
@@ -66,19 +66,16 @@ pub fn renderHomePage(allocator: Allocator, repo: Repo) ![]u8 {
     var sloc_stats = loadSlocStats(allocator, repo) catch null;
     defer if (sloc_stats) |*stats| stats.deinit(allocator);
 
-    try buf.appendSlice(allocator,
+    try appendTemplate(&buf, allocator,
         \\<section class="panel hero">
         \\  <div>
         \\    <p class="eyebrow">Local repository</p>
-        \\    <h1>
-    );
-    try appendHtml(&buf, allocator, std.fs.path.basename(repo.root));
-    try buf.appendSlice(allocator, "</h1><p class=\"muted\">");
-    try appendHtml(&buf, allocator, repo.root);
-    try buf.appendSlice(allocator,
-        \\</p>
+        \\    <h1>{repo_name}</h1><p class="muted">{repo_root}</p>
         \\  </div>
-    );
+    , .{
+        .repo_name = std.fs.path.basename(repo.root),
+        .repo_root = repo.root,
+    });
     try appendSlocSummary(&buf, allocator, sloc_stats);
     try buf.appendSlice(allocator,
         \\</section>
@@ -88,15 +85,12 @@ pub fn renderHomePage(allocator: Allocator, repo: Repo) ![]u8 {
         \\    <dl class="facts">
         \\      <div><dt>Branch</dt><dd>
     );
-    try appendHtml(&buf, allocator, branch);
-    try buf.appendSlice(allocator, "</dd></div><div><dt>Working tree</dt><dd>");
+    try appendTemplate(&buf, allocator, "{branch}</dd></div><div><dt>Working tree</dt><dd>", .{ .branch = branch });
     try appendFmt(&buf, allocator, "{d} change{s}", .{ changes, if (changes == 1) "" else "s" });
+    try appendTemplate(&buf, allocator,
+        \\</dd></div><div><dt>Git directory</dt><dd>{git_dir}</dd></div>
+    , .{ .git_dir = repo.git_dir });
     try buf.appendSlice(allocator,
-        \\</dd></div><div><dt>Git directory</dt><dd>
-    );
-    try appendHtml(&buf, allocator, repo.git_dir);
-    try buf.appendSlice(allocator,
-        \\</dd></div>
         \\    </dl>
         \\  </div>
         \\  <div class="panel">
@@ -140,11 +134,12 @@ fn appendSlocSummary(buf: *std.ArrayList(u8), allocator: Allocator, stats_opt: ?
         try buf.appendSlice(allocator, "</div><ul class=\"language-list\">");
         for (stats.rows) |row| {
             if (row.total() == 0) continue;
-            try buf.appendSlice(allocator, "<li><span class=\"language-dot\" style=\"--language-color: ");
-            try buf.appendSlice(allocator, languageColor(row.ext));
-            try buf.appendSlice(allocator, ";\"></span><span class=\"language-name\">");
-            try appendHtml(buf, allocator, languageName(row.ext));
-            try buf.appendSlice(allocator, "</span><span class=\"language-percent\">");
+            try appendTemplate(buf, allocator,
+                \\<li><span class="language-dot" style="--language-color: {color};"></span><span class="language-name">{name}</span><span class="language-percent">
+            , .{
+                .color = languageColor(row.ext),
+                .name = languageName(row.ext),
+            });
             try appendPercent(buf, allocator, row.total(), total);
             try buf.appendSlice(allocator, "</span></li>");
         }
@@ -165,9 +160,7 @@ fn appendSlocSummary(buf: *std.ArrayList(u8), allocator: Allocator, stats_opt: ?
 fn appendSlocTotal(buf: *std.ArrayList(u8), allocator: Allocator, value: u64, label: []const u8) !void {
     try buf.appendSlice(allocator, "<span><strong>");
     try appendGroupedUnsigned(buf, allocator, value);
-    try buf.appendSlice(allocator, "</strong>");
-    try appendHtml(buf, allocator, label);
-    try buf.appendSlice(allocator, "</span>");
+    try appendTemplate(buf, allocator, "</strong>{label}</span>", .{ .label = label });
 }
 
 fn appendEventList(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, limit: usize) !void {
@@ -184,15 +177,17 @@ fn appendEventList(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, li
     while (try stmt.step()) {
         const event = try indexedEventFromStmt(allocator, &stmt);
         defer freeIndexedEvent(allocator, event);
-        try buf.appendSlice(allocator, "<article><span class=\"dot\"></span><div><strong>");
-        try appendHtml(buf, allocator, if (event.valid_json) event.event_type else "invalid-event");
-        try buf.appendSlice(allocator, "</strong><p>");
-        try appendHtml(buf, allocator, event.subject);
-        try buf.appendSlice(allocator, "</p><small>");
-        try appendHtml(buf, allocator, event.actor_principal);
+        try appendTemplate(buf, allocator,
+            \\<article><span class="dot"></span><div><strong>{event_type}</strong><p>{subject}</p><small>{actor_principal}
+        , .{
+            .event_type = if (event.valid_json) event.event_type else "invalid-event",
+            .subject = event.subject,
+            .actor_principal = event.actor_principal,
+        });
         if (event.object_id.len != 0) {
-            try buf.appendSlice(allocator, " / #");
-            try appendHtml(buf, allocator, event.object_id[0..@min(event.object_id.len, 7)]);
+            try appendTemplate(buf, allocator, " / #{object_id}", .{
+                .object_id = event.object_id[0..@min(event.object_id.len, 7)],
+            });
         }
         try buf.appendSlice(allocator, "</small></div></article>");
         shown += 1;

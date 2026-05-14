@@ -10,9 +10,9 @@ const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
 const SqliteDb = index.SqliteDb;
 const appendEmptyState = shared.appendEmptyState;
-const appendHtml = shared.appendHtml;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
+const appendTemplate = shared.appendTemplate;
 const createProjectCreatedEvent = project_mod.createProjectCreatedEvent;
 const formValueOwned = issues_page.formValueOwned;
 const sendRedirect = shared.sendRedirect;
@@ -68,19 +68,15 @@ pub fn renderProjectsPage(allocator: Allocator, repo: Repo) ![]u8 {
 }
 
 fn appendProjectBoard(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, project: []const u8) !void {
-    try buf.appendSlice(allocator,
+    try appendTemplate(buf, allocator,
         \\<section class="panel kanban-panel">
         \\  <div class="section-head">
         \\    <div>
         \\      <p class="eyebrow">Project</p>
-        \\      <h1>
-    );
-    try appendHtml(buf, allocator, project);
-    try buf.appendSlice(allocator,
-        \\</h1>
+        \\      <h1>{project}</h1>
         \\    </div>
         \\  </div>
-    );
+    , .{ .project = project });
 
     try appendProjectSummary(buf, allocator, db, project);
     try buf.appendSlice(allocator,
@@ -132,15 +128,13 @@ fn appendProjectSummary(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqli
     defer allocator.free(description);
     const state = try stmt.columnTextDup(allocator, 1);
     defer allocator.free(state);
-    try buf.appendSlice(allocator, "<div class=\"project-summary\"><span class=\"state ");
-    try appendHtml(buf, allocator, state);
-    try buf.appendSlice(allocator, "\">");
-    try appendHtml(buf, allocator, state);
-    try buf.appendSlice(allocator, "</span>");
+    try appendTemplate(buf, allocator,
+        \\<div class="project-summary"><span class="state {state}">{state}</span>
+    , .{ .state = state });
     if (description.len != 0) {
-        try buf.appendSlice(allocator, "<p class=\"muted\">");
-        try appendHtml(buf, allocator, description);
-        try buf.appendSlice(allocator, "</p>");
+        try appendTemplate(buf, allocator,
+            \\<p class="muted">{description}</p>
+        , .{ .description = description });
     }
     try buf.appendSlice(allocator, "</div>");
 }
@@ -150,7 +144,7 @@ fn appendProjectColumn(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
     if (column.len == 0) {
         try buf.appendSlice(allocator, "No column");
     } else {
-        try appendHtml(buf, allocator, column);
+        try appendTemplate(buf, allocator, "{column}", .{ .column = column });
     }
     try buf.appendSlice(allocator, "</h2></header><div class=\"kanban-cards\">");
 
@@ -180,21 +174,16 @@ fn appendProjectColumn(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
         const opened_at = try cards.columnTextDup(allocator, 4);
         defer allocator.free(opened_at);
 
-        try buf.appendSlice(allocator, "<article class=\"kanban-card\"><div><span class=\"state ");
-        try appendHtml(buf, allocator, state);
-        try buf.appendSlice(allocator, "\">");
-        try appendHtml(buf, allocator, state);
-        try buf.appendSlice(allocator, "</span><a href=\"/issues/");
-        try appendHtml(buf, allocator, id[0..@min(id.len, 7)]);
-        try buf.appendSlice(allocator, "\">");
-        try appendHtml(buf, allocator, title);
-        try buf.appendSlice(allocator, "</a></div><p class=\"muted\">#");
-        try appendHtml(buf, allocator, id[0..@min(id.len, 7)]);
-        try buf.appendSlice(allocator, " opened by ");
-        try appendHtml(buf, allocator, author);
-        try buf.appendSlice(allocator, " at ");
-        try appendHtml(buf, allocator, opened_at);
-        try buf.appendSlice(allocator, "</p></article>");
+        const short_id = id[0..@min(id.len, 7)];
+        try appendTemplate(buf, allocator,
+            \\<article class="kanban-card"><div><span class="state {state}">{state}</span><a href="/issues/{id}">{title}</a></div><p class="muted">#{id} opened by {author} at {opened_at}</p></article>
+        , .{
+            .state = state,
+            .id = short_id,
+            .title = title,
+            .author = author,
+            .opened_at = opened_at,
+        });
         shown = true;
     }
     if (!shown) try buf.appendSlice(allocator, "<div class=\"empty-cell\">No issues</div>");
@@ -223,34 +212,26 @@ pub fn renderProjectForm(
         \\  </div>
     );
     if (error_message) |message| {
-        try buf.appendSlice(allocator, "<div class=\"flash error\">");
-        try appendHtml(&buf, allocator, message);
-        try buf.appendSlice(allocator, "</div>");
+        try appendTemplate(&buf, allocator,
+            \\<div class="flash error">{message}</div>
+        , .{ .message = message });
     }
-    try buf.appendSlice(allocator,
+    try appendTemplate(&buf, allocator,
         \\  <form method="post" action="/projects" class="issue-form">
-        \\    <label>Name<input name="name" value="
-    );
-    try appendHtml(&buf, allocator, name_value);
-    try buf.appendSlice(allocator,
-        \\" autofocus required></label>
-        \\    <label>Description<textarea name="description" rows="5">
-    );
-    try appendHtml(&buf, allocator, description_value);
-    try buf.appendSlice(allocator,
-        \\</textarea></label>
-        \\    <label>Columns<input name="columns" value="
-    );
-    try appendHtml(&buf, allocator, columns_value);
-    try buf.appendSlice(allocator,
-        \\" placeholder="Todo, In Progress, Done"></label>
+        \\    <label>Name<input name="name" value="{name_value}" autofocus required></label>
+        \\    <label>Description<textarea name="description" rows="5">{description_value}</textarea></label>
+        \\    <label>Columns<input name="columns" value="{columns_value}" placeholder="Todo, In Progress, Done"></label>
         \\    <div class="form-actions">
         \\      <a class="button secondary" href="/projects">Cancel</a>
         \\      <button class="button primary" type="submit">Create project</button>
         \\    </div>
         \\  </form>
         \\</section>
-    );
+    , .{
+        .name_value = name_value,
+        .description_value = description_value,
+        .columns_value = columns_value,
+    });
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
 }

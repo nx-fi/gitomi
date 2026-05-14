@@ -10,15 +10,16 @@ const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
 const SqliteDb = index.SqliteDb;
 const appendEmptyState = shared.appendEmptyState;
-const appendHtml = shared.appendHtml;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
+const appendTemplate = shared.appendTemplate;
 const createIssueOpenedEvent = issue.createIssueOpenedEvent;
 const ensureIndex = index.ensureIndex;
 const sendRedirect = shared.sendRedirect;
 const sendResponse = shared.sendResponse;
 const splitCommaFields = util.splitCommaFields;
 const sqlite = index.sqlite;
+const trustedHtml = shared.trustedHtml;
 
 pub fn renderIssuesPage(allocator: Allocator, repo: Repo) ![]u8 {
     if (try shared.renderIndexingPageIfStale(allocator, repo, "Issues", "issues", "/issues")) |body| return body;
@@ -65,21 +66,16 @@ pub fn renderIssuesPage(allocator: Allocator, repo: Repo) ![]u8 {
         const opened_at = try stmt.columnTextDup(allocator, 4);
         defer allocator.free(opened_at);
 
-        try buf.appendSlice(allocator, "<article class=\"issue-row\"><div class=\"issue-main\"><div class=\"issue-title\"><span class=\"state ");
-        try appendHtml(&buf, allocator, state);
-        try buf.appendSlice(allocator, "\">");
-        try appendHtml(&buf, allocator, state);
-        try buf.appendSlice(allocator, "</span><a href=\"/issues/");
-        try appendHtml(&buf, allocator, id[0..@min(id.len, 7)]);
-        try buf.appendSlice(allocator, "\">");
-        try appendHtml(&buf, allocator, title);
-        try buf.appendSlice(allocator, "</a></div><p class=\"muted\">#");
-        try appendHtml(&buf, allocator, id[0..@min(id.len, 7)]);
-        try buf.appendSlice(allocator, " opened by ");
-        try appendHtml(&buf, allocator, author);
-        try buf.appendSlice(allocator, " at ");
-        try appendHtml(&buf, allocator, opened_at);
-        try buf.appendSlice(allocator, "</p></div></article>");
+        const short_id = id[0..@min(id.len, 7)];
+        try appendTemplate(&buf, allocator,
+            \\<article class="issue-row"><div class="issue-main"><div class="issue-title"><span class="state {state}">{state}</span><a href="/issues/{id}">{title}</a></div><p class="muted">#{id} opened by {author} at {opened_at}</p></div></article>
+        , .{
+            .state = state,
+            .id = short_id,
+            .title = title,
+            .author = author,
+            .opened_at = opened_at,
+        });
         shown += 1;
     }
 
@@ -142,36 +138,29 @@ pub fn renderIssueDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const 
     errdefer buf.deinit(allocator);
 
     try appendShellStart(&buf, allocator, repo, title, "issues");
-    try buf.appendSlice(allocator,
+    try appendTemplate(&buf, allocator,
         \\<section class="panel issue-detail">
         \\  <div class="section-head issue-detail-head">
         \\    <div>
         \\      <p class="eyebrow">Issue</p>
-        \\      <h1>
-    );
-    try appendHtml(&buf, allocator, title);
-    try buf.appendSlice(allocator,
-        \\</h1>
+        \\      <h1>{title}</h1>
         \\    </div>
         \\    <a class="button secondary" href="/issues">Back to issues</a>
         \\  </div>
         \\  <div class="issue-detail-body">
         \\    <aside class="issue-sidebar">
-    );
+    , .{ .title = title });
     try appendIssueFacts(&buf, allocator, &db, id, state, author_principal, author_device, source_author, opened_at, milestone);
-    try buf.appendSlice(allocator,
+    try appendTemplate(&buf, allocator,
         \\    </aside>
         \\    <div class="issue-thread">
         \\      <article class="issue-card">
-        \\        <div class="comment-meta"><strong>
-    );
-    try appendHtml(&buf, allocator, if (source_author.len != 0) source_author else author_principal);
-    try buf.appendSlice(allocator, "</strong><span>");
-    try appendHtml(&buf, allocator, opened_at);
-    try buf.appendSlice(allocator,
-        \\</span></div>
+        \\        <div class="comment-meta"><strong>{author}</strong><span>{opened_at}</span></div>
         \\        <div class="markdown-body">
-    );
+    , .{
+        .author = if (source_author.len != 0) source_author else author_principal,
+        .opened_at = opened_at,
+    });
     if (body.len == 0) {
         try buf.appendSlice(allocator, "<p class=\"muted\">No description provided.</p>");
     } else {
@@ -214,31 +203,29 @@ fn appendIssueFacts(
     opened_at: []const u8,
     milestone: []const u8,
 ) !void {
-    try buf.appendSlice(allocator, "<dl class=\"facts issue-facts\"><div><dt>Status</dt><dd><span class=\"state ");
-    try appendHtml(buf, allocator, state);
-    try buf.appendSlice(allocator, "\">");
-    try appendHtml(buf, allocator, state);
-    try buf.appendSlice(allocator, "</span></dd></div><div><dt>ID</dt><dd><code>");
-    try appendHtml(buf, allocator, issue_id);
-    try buf.appendSlice(allocator, "</code></dd></div><div><dt>Opened</dt><dd>");
-    try appendHtml(buf, allocator, opened_at);
-    try buf.appendSlice(allocator, "</dd></div><div><dt>Author</dt><dd>");
-    try appendHtml(buf, allocator, if (source_author.len != 0) source_author else author_principal);
+    try appendTemplate(buf, allocator,
+        \\<dl class="facts issue-facts"><div><dt>Status</dt><dd><span class="state {state}">{state}</span></dd></div><div><dt>ID</dt><dd><code>{issue_id}</code></dd></div><div><dt>Opened</dt><dd>{opened_at}</dd></div><div><dt>Author</dt><dd>{author}
+    , .{
+        .state = state,
+        .issue_id = issue_id,
+        .opened_at = opened_at,
+        .author = if (source_author.len != 0) source_author else author_principal,
+    });
     if (source_author.len != 0) {
-        try buf.appendSlice(allocator, " <span class=\"muted\">imported by ");
-        try appendHtml(buf, allocator, author_principal);
-        try buf.appendSlice(allocator, "/");
-        try appendHtml(buf, allocator, author_device);
-        try buf.appendSlice(allocator, "</span>");
+        try appendTemplate(buf, allocator,
+            \\ <span class="muted">imported by {author_principal}/{author_device}</span>
+        , .{
+            .author_principal = author_principal,
+            .author_device = author_device,
+        });
     } else {
-        try buf.appendSlice(allocator, "/");
-        try appendHtml(buf, allocator, author_device);
+        try appendTemplate(buf, allocator, "/{author_device}", .{ .author_device = author_device });
     }
     try buf.appendSlice(allocator, "</dd></div>");
     if (milestone.len != 0) {
-        try buf.appendSlice(allocator, "<div><dt>Milestone</dt><dd>");
-        try appendHtml(buf, allocator, milestone);
-        try buf.appendSlice(allocator, "</dd></div>");
+        try appendTemplate(buf, allocator,
+            \\<div><dt>Milestone</dt><dd>{milestone}</dd></div>
+        , .{ .milestone = milestone });
     }
     try appendIssueCollectionFact(buf, allocator, db, "Labels", "SELECT DISTINCT label FROM issue_labels WHERE issue_id = ? ORDER BY label", issue_id);
     try appendIssueCollectionFact(buf, allocator, db, "Assignees", "SELECT DISTINCT assignee FROM issue_assignees WHERE issue_id = ? ORDER BY assignee", issue_id);
@@ -254,9 +241,9 @@ fn appendIssueCollectionFact(
     comptime sql_text: []const u8,
     issue_id: []const u8,
 ) !void {
-    try buf.appendSlice(allocator, "<div><dt>");
-    try appendHtml(buf, allocator, label);
-    try buf.appendSlice(allocator, "</dt><dd class=\"pill-list\">");
+    try appendTemplate(buf, allocator,
+        \\<div><dt>{label}</dt><dd class="pill-list">
+    , .{ .label = label });
     var stmt = try db.prepare(sql_text);
     defer stmt.deinit();
     try stmt.bindText(1, issue_id);
@@ -264,9 +251,7 @@ fn appendIssueCollectionFact(
     while (try stmt.step()) {
         const value = try stmt.columnTextDup(allocator, 0);
         defer allocator.free(value);
-        try buf.appendSlice(allocator, "<span class=\"pill\">");
-        try appendHtml(buf, allocator, value);
-        try buf.appendSlice(allocator, "</span>");
+        try appendTemplate(buf, allocator, "<span class=\"pill\">{value}</span>", .{ .value = value });
         shown = true;
     }
     if (!shown) try buf.appendSlice(allocator, "<span class=\"muted\">None</span>");
@@ -289,11 +274,9 @@ fn appendIssueProjectsFact(buf: *std.ArrayList(u8), allocator: Allocator, db: *S
         defer allocator.free(project);
         const column = try stmt.columnTextDup(allocator, 1);
         defer allocator.free(column);
-        try buf.appendSlice(allocator, "<span class=\"pill\">");
-        try appendHtml(buf, allocator, project);
+        try appendTemplate(buf, allocator, "<span class=\"pill\">{project}", .{ .project = project });
         if (column.len != 0) {
-            try buf.appendSlice(allocator, " / ");
-            try appendHtml(buf, allocator, column);
+            try appendTemplate(buf, allocator, " / {column}", .{ .column = column });
         }
         try buf.appendSlice(allocator, "</span>");
         shown = true;
@@ -327,20 +310,23 @@ fn appendIssueComments(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
         const reply_parent_hash = try stmt.columnTextDup(allocator, 6);
         defer allocator.free(reply_parent_hash);
 
-        try buf.appendSlice(allocator, "<article class=\"issue-card comment-card");
-        if (reply_parent_id.len != 0 or reply_parent_hash.len != 0) try buf.appendSlice(allocator, " is-reply");
-        try buf.appendSlice(allocator, "\"><div class=\"comment-meta\"><strong>");
-        try appendHtml(buf, allocator, author);
-        try buf.appendSlice(allocator, "</strong><span>");
-        try appendHtml(buf, allocator, created_at);
-        try buf.appendSlice(allocator, "</span></div>");
+        try appendTemplate(buf, allocator,
+            \\<article class="issue-card comment-card{reply_class}"><div class="comment-meta"><strong>{author}</strong><span>{created_at}</span></div>
+        , .{
+            .reply_class = trustedHtml(if (reply_parent_id.len != 0 or reply_parent_hash.len != 0) " is-reply" else ""),
+            .author = author,
+            .created_at = created_at,
+        });
         if (reply_parent_id.len != 0 or reply_parent_hash.len != 0) {
             try buf.appendSlice(allocator, "<p class=\"reply-note\">Reply to ");
             if (reply_parent_id.len != 0) {
-                try buf.appendSlice(allocator, "#");
-                try appendHtml(buf, allocator, reply_parent_id[0..@min(reply_parent_id.len, 7)]);
+                try appendTemplate(buf, allocator, "#{reply_parent_id}", .{
+                    .reply_parent_id = reply_parent_id[0..@min(reply_parent_id.len, 7)],
+                });
             } else {
-                try appendHtml(buf, allocator, reply_parent_hash[0..@min(reply_parent_hash.len, 12)]);
+                try appendTemplate(buf, allocator, "{reply_parent_hash}", .{
+                    .reply_parent_hash = reply_parent_hash[0..@min(reply_parent_hash.len, 12)],
+                });
             }
             try buf.appendSlice(allocator, "</p>");
         }
@@ -381,33 +367,17 @@ pub fn renderIssueForm(
         \\  </div>
     );
     if (error_message) |message| {
-        try buf.appendSlice(allocator, "<div class=\"flash error\">");
-        try appendHtml(&buf, allocator, message);
-        try buf.appendSlice(allocator, "</div>");
+        try appendTemplate(&buf, allocator,
+            \\<div class="flash error">{message}</div>
+        , .{ .message = message });
     }
-    try buf.appendSlice(allocator,
+    try appendTemplate(&buf, allocator,
         \\  <form method="post" action="/issues" class="issue-form">
-        \\    <label>Title<input name="title" value="
-    );
-    try appendHtml(&buf, allocator, title_value);
-    try buf.appendSlice(allocator,
-        \\" autofocus required></label>
-        \\    <label>Body<textarea name="body" rows="8">
-    );
-    try appendHtml(&buf, allocator, body_value);
-    try buf.appendSlice(allocator,
-        \\</textarea></label>
+        \\    <label>Title<input name="title" value="{title_value}" autofocus required></label>
+        \\    <label>Body<textarea name="body" rows="8">{body_value}</textarea></label>
         \\    <div class="grid two">
-        \\      <label>Labels<input name="labels" value="
-    );
-    try appendHtml(&buf, allocator, labels_value);
-    try buf.appendSlice(allocator,
-        \\" placeholder="bug, docs"></label>
-        \\      <label>Assignees<input name="assignees" value="
-    );
-    try appendHtml(&buf, allocator, assignees_value);
-    try buf.appendSlice(allocator,
-        \\" placeholder="alice, bob"></label>
+        \\      <label>Labels<input name="labels" value="{labels_value}" placeholder="bug, docs"></label>
+        \\      <label>Assignees<input name="assignees" value="{assignees_value}" placeholder="alice, bob"></label>
         \\    </div>
         \\    <div class="form-actions">
         \\      <a class="button secondary" href="/issues">Cancel</a>
@@ -415,7 +385,12 @@ pub fn renderIssueForm(
         \\    </div>
         \\  </form>
         \\</section>
-    );
+    , .{
+        .title_value = title_value,
+        .body_value = body_value,
+        .labels_value = labels_value,
+        .assignees_value = assignees_value,
+    });
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
 }
