@@ -279,6 +279,8 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     else
         null;
     defer if (content) |bytes| allocator.free(bytes);
+    const summary_opt = try loadCommitSummary(allocator, repo, ref, path);
+    defer if (summary_opt) |summary| summary.deinit(allocator);
 
     try appendCodePanelStart(&buf, allocator, repo, ref, path);
     const markdown = isMarkdownPath(path);
@@ -292,6 +294,7 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     try shared.appendButtonLink(&buf, allocator, Button{ .label = "History", .href = commitsHref(ref, path) });
     try appendCodePanelToolbarEnd(&buf, allocator);
 
+    try appendCommitBar(&buf, allocator, summary_opt);
     try appendBlobContent(&buf, allocator, ref, path, media_kind, can_preview_media, content, markdown and !raw_selected);
 
     try appendCodePanelEnd(&buf, allocator);
@@ -758,6 +761,7 @@ fn loadTreeEntries(allocator: Allocator, repo: Repo, ref: []const u8, path: []co
             .name = try allocator.dupe(u8, name),
         });
     }
+    std.mem.sort(TreeEntry, entries.items, {}, treeEntryLessThan);
 
     return try entries.toOwnedSlice(allocator);
 }
@@ -992,8 +996,83 @@ fn loadTreeNavEntries(allocator: Allocator, repo: Repo, ref: []const u8) !?[]Tre
             .path = try allocator.dupe(u8, path),
         });
     }
+    std.mem.sort(TreeNavEntry, entries.items, {}, treeNavEntryLessThan);
 
     return try entries.toOwnedSlice(allocator);
+}
+
+fn treeEntryLessThan(_: void, a: TreeEntry, b: TreeEntry) bool {
+    return entryNameLessThan(
+        a.name,
+        std.mem.eql(u8, a.kind, "tree"),
+        b.name,
+        std.mem.eql(u8, b.kind, "tree"),
+    );
+}
+
+fn treeNavEntryLessThan(_: void, a: TreeNavEntry, b: TreeNavEntry) bool {
+    return pathLessThan(
+        a.path,
+        std.mem.eql(u8, a.kind, "tree"),
+        b.path,
+        std.mem.eql(u8, b.kind, "tree"),
+    );
+}
+
+fn pathLessThan(a_path: []const u8, a_is_tree: bool, b_path: []const u8, b_is_tree: bool) bool {
+    var a_cursor: usize = 0;
+    var b_cursor: usize = 0;
+    while (true) {
+        const a_segment = nextPathSegment(a_path, &a_cursor) orelse return b_cursor < b_path.len;
+        const b_segment = nextPathSegment(b_path, &b_cursor) orelse return false;
+        const a_segment_is_tree = !a_segment.terminal or a_is_tree;
+        const b_segment_is_tree = !b_segment.terminal or b_is_tree;
+        switch (entryNameOrder(a_segment.name, a_segment_is_tree, b_segment.name, b_segment_is_tree)) {
+            .lt => return true,
+            .gt => return false,
+            .eq => continue,
+        }
+    }
+}
+
+const PathSegment = struct {
+    name: []const u8,
+    terminal: bool,
+};
+
+fn nextPathSegment(path: []const u8, cursor: *usize) ?PathSegment {
+    if (cursor.* >= path.len) return null;
+    const start = cursor.*;
+    if (std.mem.indexOfScalar(u8, path[start..], '/')) |offset| {
+        cursor.* = start + offset + 1;
+        return .{
+            .name = path[start .. start + offset],
+            .terminal = false,
+        };
+    }
+    cursor.* = path.len;
+    return .{
+        .name = path[start..],
+        .terminal = true,
+    };
+}
+
+fn entryNameLessThan(a_name: []const u8, a_is_tree: bool, b_name: []const u8, b_is_tree: bool) bool {
+    return entryNameOrder(a_name, a_is_tree, b_name, b_is_tree) == .lt;
+}
+
+fn entryNameOrder(a_name: []const u8, a_is_tree: bool, b_name: []const u8, b_is_tree: bool) std.math.Order {
+    const a_rank = entrySortRank(a_name, a_is_tree);
+    const b_rank = entrySortRank(b_name, b_is_tree);
+    if (a_rank < b_rank) return .lt;
+    if (a_rank > b_rank) return .gt;
+    return std.mem.order(u8, a_name, b_name);
+}
+
+fn entrySortRank(name: []const u8, is_tree: bool) u8 {
+    const dot = name.len != 0 and name[0] == '.';
+    if (is_tree) return if (dot) 0 else 1;
+    return if (dot) 2 else 3;
 }
 
 fn objectType(allocator: Allocator, repo: Repo, spec: []const u8) !?[]u8 {
@@ -1092,7 +1171,7 @@ fn treeEntryInitiallyVisible(path: []const u8, active_path: []const u8) bool {
 fn appendFileIcon(buf: *std.ArrayList(u8), allocator: Allocator, path: []const u8, kind: []const u8) !void {
     if (deviconClassForPath(path, kind)) |class| {
         try appendTemplate(buf, allocator,
-            \\<i class="file-icon devicon-icon {class} colored" aria-hidden="true"></i>
+            \\<i class="file-icon devicon-icon {class}" aria-hidden="true"></i>
         , .{ .class = class });
         return;
     }
@@ -1379,6 +1458,52 @@ test "web explorer maps supported file paths to devicon classes" {
     try std.testing.expectEqualStrings("devicon-markdown-original", deviconClassForPath("README.md", "blob").?);
     try std.testing.expectEqual(@as(?[]const u8, null), deviconClassForPath("assets/logo.svg", "blob"));
     try std.testing.expectEqual(@as(?[]const u8, null), deviconClassForPath("src", "tree"));
+}
+
+test "web explorer sorts paths as dot dirs dirs dot files files" {
+    const SortProbe = struct {
+        path: []const u8,
+        kind: []const u8,
+    };
+
+    var entries = [_]SortProbe{
+        .{ .path = "README.md", .kind = "blob" },
+        .{ .path = "src/main.zig", .kind = "blob" },
+        .{ .path = ".env", .kind = "blob" },
+        .{ .path = "src", .kind = "tree" },
+        .{ .path = ".github/workflows", .kind = "tree" },
+        .{ .path = "src/lib", .kind = "tree" },
+        .{ .path = "src/.env", .kind = "blob" },
+        .{ .path = ".github", .kind = "tree" },
+        .{ .path = "src/.config", .kind = "tree" },
+        .{ .path = "src/build.zig", .kind = "blob" },
+    };
+    std.mem.sort(SortProbe, &entries, {}, struct {
+        fn lessThan(_: void, a: SortProbe, b: SortProbe) bool {
+            return pathLessThan(
+                a.path,
+                std.mem.eql(u8, a.kind, "tree"),
+                b.path,
+                std.mem.eql(u8, b.kind, "tree"),
+            );
+        }
+    }.lessThan);
+
+    const expected = [_][]const u8{
+        ".github",
+        ".github/workflows",
+        "src",
+        "src/.config",
+        "src/lib",
+        "src/.env",
+        "src/build.zig",
+        "src/main.zig",
+        ".env",
+        "README.md",
+    };
+    for (expected, 0..) |path, i| {
+        try std.testing.expectEqualStrings(path, entries[i].path);
+    }
 }
 
 test "web explorer maps media paths to preview metadata" {
