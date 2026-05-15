@@ -232,6 +232,15 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         }
         const issue_ref = request.path[issue_ref_start..issue_ref_end];
         try issues_page.handleIssueEditPost(allocator, repo, stream, issue_ref, request.body);
+    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.startsWith(u8, request.path, "/issues/") and std.mem.endsWith(u8, request.path, "/checklist")) {
+        const issue_ref_start = "/issues/".len;
+        const issue_ref_end = request.path.len - "/checklist".len;
+        if (issue_ref_start >= issue_ref_end or request.path[issue_ref_end - 1] == '/') {
+            try shared.sendPlainResponse(allocator, stream, 404, "Not Found", "Not found\n");
+            return;
+        }
+        const issue_ref = request.path[issue_ref_start..issue_ref_end];
+        try issues_page.handleIssueChecklistPost(allocator, repo, stream, issue_ref, request.body);
     } else if (std.mem.eql(u8, request.method, "POST") and std.mem.startsWith(u8, request.path, "/issues/") and std.mem.endsWith(u8, request.path, "/comments")) {
         const issue_ref_start = "/issues/".len;
         const issue_ref_end = request.path.len - "/comments".len;
@@ -292,6 +301,16 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         }
         const pull_ref = request.path[pull_ref_start..pull_ref_end];
         try pulls_page.handlePullConflictPost(allocator, repo, stream, pull_ref, request.body);
+    } else if (std.mem.eql(u8, request.method, "POST") and ((std.mem.startsWith(u8, request.path, "/pulls/") or std.mem.startsWith(u8, request.path, "/prs/")) and std.mem.endsWith(u8, request.path, "/checklist"))) {
+        const prefix = if (std.mem.startsWith(u8, request.path, "/pulls/")) "/pulls/" else "/prs/";
+        const pull_ref_start = prefix.len;
+        const pull_ref_end = request.path.len - "/checklist".len;
+        if (pull_ref_start >= pull_ref_end or request.path[pull_ref_end - 1] == '/') {
+            try shared.sendPlainResponse(allocator, stream, 404, "Not Found", "Not found\n");
+            return;
+        }
+        const pull_ref = request.path[pull_ref_start..pull_ref_end];
+        try pulls_page.handlePullChecklistPost(allocator, repo, stream, pull_ref, request.body);
     } else if (std.mem.eql(u8, request.method, "POST") and ((std.mem.startsWith(u8, request.path, "/pulls/") or std.mem.startsWith(u8, request.path, "/prs/")) and std.mem.endsWith(u8, request.path, "/comments"))) {
         const prefix = if (std.mem.startsWith(u8, request.path, "/pulls/")) "/pulls/" else "/prs/";
         const pull_ref_start = prefix.len;

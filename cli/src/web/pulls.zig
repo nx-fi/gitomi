@@ -1,5 +1,6 @@
 const std = @import("std");
 const comment_mod = @import("../comment.zig");
+const event_mod = @import("../event.zig");
 const git = @import("../git.zig");
 const index = @import("../index.zig");
 const issues_page = @import("issues.zig");
@@ -7,6 +8,7 @@ const pull = @import("../pull.zig");
 const reaction_mod = @import("../reaction.zig");
 const repo_mod = @import("../repo.zig");
 const shared = @import("shared.zig");
+const source_stats = @import("source_stats.zig");
 const util = @import("../util.zig");
 
 const Allocator = std.mem.Allocator;
@@ -267,8 +269,11 @@ pub fn renderPullsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]
         const draft = stmt.columnInt(8) != 0;
         const comment_count = @as(usize, @intCast(stmt.columnInt64(9)));
         const legacy_number = stmt.columnInt64(10);
+        const body = try stmt.columnTextDup(allocator, 11);
+        defer allocator.free(body);
+        const task_summary = shared.markdownTaskSummary(body);
 
-        try appendPullListRow(&buf, allocator, &db, id, title, state, author, opened_at, state_at, base_ref, head_ref, draft, comment_count, legacy_number);
+        try appendPullListRow(&buf, allocator, &db, id, title, state, author, opened_at, state_at, base_ref, head_ref, draft, comment_count, legacy_number, task_summary);
         shown += 1;
     }
 
@@ -311,7 +316,7 @@ fn pullListSql(filter: PullStateFilter) []const u8 {
         \\SELECT p.id, p.title, p.state, COALESCE(NULLIF(pm.source_author, ''), p.author_principal), p.opened_at, p.state_occurred_at,
         \\       p.base_ref, p.head_ref, p.draft,
         \\       (SELECT COUNT(*) FROM comments c WHERE c.parent_kind = 'pull' AND c.parent_id = p.id),
-        \\       COALESCE(a.number, 0)
+        \\       COALESCE(a.number, 0), p.body
         \\FROM pulls p
         \\LEFT JOIN legacy_aliases a
         \\  ON a.provider = 'github' AND a.object_kind = 'pull' AND a.object_id = p.id
@@ -433,6 +438,7 @@ fn appendPullListRow(
     draft: bool,
     comment_count: usize,
     legacy_number: i64,
+    task_summary: shared.MarkdownTaskSummary,
 ) !void {
     var pull_ref_buf: [util.short_object_ref_len]u8 = undefined;
     const pull_ref = util.shortObjectRef(&pull_ref_buf, id);
@@ -465,6 +471,10 @@ fn appendPullListRow(
     });
     try buf.append(allocator, ' ');
     try appendRelativeTime(buf, allocator, if (std.mem.eql(u8, state, "open")) opened_at else state_at);
+    if (task_summary.hasTasks()) {
+        try buf.append(allocator, ' ');
+        try shared.appendMarkdownTaskProgress(buf, allocator, task_summary);
+    }
     try buf.appendSlice(allocator, "</p><p class=\"pull-branch-line\">");
     try appendPullBranchLink(buf, allocator, head_ref);
     try buf.appendSlice(allocator, "<span aria-hidden=\"true\">-&gt;</span>");
@@ -549,8 +559,11 @@ pub fn renderPullDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u
     , .{});
     const current_actor = try shared.currentPrincipalOwned(allocator, repo);
     defer if (current_actor) |actor| allocator.free(actor);
+    const current_role = if (current_actor) |actor| try index.effectiveWriteRoleForPrincipal(allocator, repo, actor) else null;
+    defer if (current_role) |role| allocator.free(role);
+    const can_edit_pull = currentActorCanEditAuthor(current_actor, current_role, detail.author_principal);
     switch (tab) {
-        .conversation => try appendPullConversation(&buf, allocator, &db, detail, raw_ref, current_actor, merge_status),
+        .conversation => try appendPullConversation(&buf, allocator, &db, detail, raw_ref, current_actor, can_edit_pull, merge_status),
         .commits => try appendPullCommits(&buf, allocator, repo, detail),
         .files => try appendPullFiles(&buf, allocator, repo, detail, raw_ref),
     }
@@ -801,6 +814,7 @@ fn appendMergeFileStatus(buf: *std.ArrayList(u8), allocator: Allocator, file: Me
 }
 
 fn appendMergeEditorFile(buf: *std.ArrayList(u8), allocator: Allocator, file: MergeConflictFile, index_value: usize) !void {
+    const language = source_stats.languageForPath(file.path);
     try appendTemplate(buf, allocator,
         \\<section class="{classes}" id="merge-file-{index}" data-merge-file data-file-index="{index}">
         \\  <header class="merge-file-head">
@@ -824,12 +838,13 @@ fn appendMergeEditorFile(buf: *std.ArrayList(u8), allocator: Allocator, file: Me
     if (file.content) |content| {
         try appendTemplate(buf, allocator,
             \\  <textarea class="merge-content-field" name="content_{index}" data-merge-content>{content}</textarea>
-            \\  <div class="merge-code" data-merge-code>
+            \\  <div class="merge-code" data-merge-code data-merge-language="{language}">
         , .{
             .index = index_value,
             .content = content,
+            .language = language,
         });
-        try appendMergeConflictContent(buf, allocator, content);
+        try appendMergeConflictContent(buf, allocator, language, content);
         try buf.appendSlice(allocator, "</div>");
     } else {
         try appendTemplate(buf, allocator,
@@ -839,7 +854,7 @@ fn appendMergeEditorFile(buf: *std.ArrayList(u8), allocator: Allocator, file: Me
     try buf.appendSlice(allocator, "</section>");
 }
 
-fn appendMergeConflictContent(buf: *std.ArrayList(u8), allocator: Allocator, content: []const u8) !void {
+fn appendMergeConflictContent(buf: *std.ArrayList(u8), allocator: Allocator, language: []const u8, content: []const u8) !void {
     var line_number: usize = 1;
     var group_id: usize = 0;
     var side: []const u8 = "";
@@ -850,18 +865,18 @@ fn appendMergeConflictContent(buf: *std.ArrayList(u8), allocator: Allocator, con
             group_id += 1;
             side = "current";
             try appendMergeConflictActions(buf, allocator, group_id);
-            try appendMergeLine(buf, allocator, line_number, line, group_id, "marker", "current", false);
+            try appendMergeLine(buf, allocator, language, line_number, line, group_id, "marker", "current", false);
         } else if (std.mem.startsWith(u8, line, "|||||||")) {
             side = "base";
-            try appendMergeLine(buf, allocator, line_number, line, group_id, "marker", "base", false);
+            try appendMergeLine(buf, allocator, language, line_number, line, group_id, "marker", "base", false);
         } else if (std.mem.startsWith(u8, line, "=======")) {
             side = "incoming";
-            try appendMergeLine(buf, allocator, line_number, line, group_id, "marker", "incoming", false);
+            try appendMergeLine(buf, allocator, language, line_number, line, group_id, "marker", "incoming", false);
         } else if (std.mem.startsWith(u8, line, ">>>>>>>")) {
-            try appendMergeLine(buf, allocator, line_number, line, group_id, "marker", "incoming", false);
+            try appendMergeLine(buf, allocator, language, line_number, line, group_id, "marker", "incoming", false);
             side = "";
         } else {
-            try appendMergeLine(buf, allocator, line_number, line, group_id, "line", side, true);
+            try appendMergeLine(buf, allocator, language, line_number, line, group_id, "line", side, true);
         }
         line_number += 1;
     }
@@ -883,6 +898,7 @@ fn appendMergeConflictActions(buf: *std.ArrayList(u8), allocator: Allocator, gro
 fn appendMergeLine(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
+    language: []const u8,
     line_number: usize,
     line: []const u8,
     group_id: usize,
@@ -901,8 +917,10 @@ fn appendMergeLine(
     if (group_id != 0) try appendTemplate(buf, allocator, " data-conflict-group=\"{group_id}\"", .{ .group_id = group_id });
     if (side.len != 0 and !std.mem.eql(u8, kind, "marker")) try appendTemplate(buf, allocator, " data-conflict-side=\"{side}\"", .{ .side = side });
     try appendTemplate(buf, allocator,
-        \\><span class="merge-line-number">{line_number}</span><code data-merge-line-text
+        \\><span class="merge-line-number">{line_number}</span><code
     , .{ .line_number = line_number });
+    if (!std.mem.eql(u8, kind, "marker")) try appendTemplate(buf, allocator, " class=\"language-{language}\"", .{ .language = language });
+    try buf.appendSlice(allocator, " data-merge-line-text");
     if (editable and !std.mem.eql(u8, kind, "marker")) {
         try buf.appendSlice(allocator, " contenteditable=\"true\" spellcheck=\"false\"");
     }
@@ -1213,6 +1231,21 @@ fn appendPullBranchLink(buf: *std.ArrayList(u8), allocator: Allocator, ref: []co
 
 fn pullDisplayAuthor(detail: PullDetail) []const u8 {
     return if (detail.source_author.len != 0) detail.source_author else detail.author_principal;
+}
+
+fn currentActorCanEditAuthor(current_actor: ?[]const u8, current_role: ?[]const u8, author: []const u8) bool {
+    const role = current_role orelse return false;
+    if (event_mod.roleAtLeast(role, "maintainer")) return true;
+    const actor = current_actor orelse return false;
+    return event_mod.roleAtLeast(role, "contributor") and std.mem.eql(u8, actor, author);
+}
+
+fn currentActorCanEditInRepo(allocator: Allocator, repo: Repo, author: []const u8) !bool {
+    const current_actor = try shared.currentPrincipalOwned(allocator, repo);
+    defer if (current_actor) |actor| allocator.free(actor);
+    const current_role = if (current_actor) |actor| try index.effectiveWriteRoleForPrincipal(allocator, repo, actor) else null;
+    defer if (current_role) |role| allocator.free(role);
+    return currentActorCanEditAuthor(current_actor, current_role, author);
 }
 
 fn optionalCount(value: i64) ?usize {
@@ -1573,6 +1606,7 @@ fn appendPullConversation(
     detail: PullDetail,
     raw_ref: []const u8,
     current_actor: ?[]const u8,
+    can_edit_pull: bool,
     merge_status: PullMergeStatus,
 ) !void {
     try appendTemplate(buf, allocator,
@@ -1592,10 +1626,16 @@ fn appendPullConversation(
         \\</span></div>
     , .{});
     try issues_page.appendIssueActionMenu(buf, allocator, "pull-description", "", detail.body, detail.body.len != 0, "");
-    try appendTemplate(buf, allocator,
+    try buf.appendSlice(allocator,
         \\</header>
-        \\  <div class="markdown-body">
-    , .{});
+        \\  <div class="markdown-body"
+    );
+    if (can_edit_pull) {
+        try buf.appendSlice(allocator, " data-checklist-owner=\"pull\" data-checklist-update-action=\"/pulls/");
+        try shared.appendUrlEncoded(buf, allocator, raw_ref);
+        try buf.appendSlice(allocator, "/checklist\"");
+    }
+    try buf.appendSlice(allocator, ">");
     if (detail.body.len == 0) {
         try buf.appendSlice(allocator, "<p class=\"muted\">No description provided.</p>");
     } else {
@@ -2607,6 +2647,49 @@ pub fn handlePullConflictPost(allocator: Allocator, repo: Repo, stream: std.net.
     const location = try std.fmt.allocPrint(allocator, "/pulls/{s}", .{raw_ref});
     defer allocator.free(location);
     try sendRedirect(allocator, stream, location);
+}
+
+pub fn handlePullChecklistPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
+    try index.ensureIndex(allocator, repo);
+    const pull_id = index.resolvePullId(allocator, repo, raw_ref) catch {
+        try sendPlainResponse(allocator, stream, 404, "Not Found", "Pull request not found\n");
+        return;
+    };
+    defer allocator.free(pull_id);
+
+    const body_owned = (try issues_page.formValueOwned(allocator, form_body, "body")) orelse {
+        try sendPlainResponse(allocator, stream, 400, "Bad Request", "Missing body\n");
+        return;
+    };
+    defer allocator.free(body_owned);
+
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    var stmt = try db.prepare("SELECT body, author_principal FROM pulls WHERE id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, pull_id);
+    if (!(try stmt.step())) {
+        try sendPlainResponse(allocator, stream, 404, "Not Found", "Pull request not found\n");
+        return;
+    }
+    const current_body = try stmt.columnTextDup(allocator, 0);
+    defer allocator.free(current_body);
+    const author_principal = try stmt.columnTextDup(allocator, 1);
+    defer allocator.free(author_principal);
+    if (!(try currentActorCanEditInRepo(allocator, repo, author_principal))) {
+        try sendPlainResponse(allocator, stream, 403, "Forbidden", "Forbidden\n");
+        return;
+    }
+    if (std.mem.eql(u8, body_owned, current_body)) {
+        try sendResponse(allocator, stream, 204, "No Content", "text/plain", "", null);
+        return;
+    }
+
+    pull.createPullUpdatedEvent(allocator, pull_id, .{ .body = body_owned }) catch {
+        try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update checklist\n");
+        return;
+    };
+    try sendResponse(allocator, stream, 204, "No Content", "text/plain", "", null);
 }
 
 fn sendMergeEditorError(

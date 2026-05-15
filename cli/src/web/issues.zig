@@ -201,8 +201,11 @@ pub fn renderIssuesPage(allocator: Allocator, repo: Repo, target: []const u8) ![
         defer allocator.free(milestone);
         const comment_count = @as(usize, @intCast(stmt.columnInt64(7)));
         const legacy_number = stmt.columnInt64(8);
+        const body = try stmt.columnTextDup(allocator, 9);
+        defer allocator.free(body);
+        const task_summary = shared.markdownTaskSummary(body);
 
-        try appendIssueListRow(&buf, allocator, &db, id, title, state, author, opened_at, state_at, milestone, comment_count, legacy_number);
+        try appendIssueListRow(&buf, allocator, &db, id, title, state, author, opened_at, state_at, milestone, comment_count, legacy_number, task_summary);
         shown += 1;
     }
 
@@ -285,7 +288,7 @@ fn issueListSql(allocator: Allocator, filters: IssueFilters) ![]u8 {
         \\       COALESCE(NULLIF(m.source_author, ''), i.author_principal),
         \\       i.opened_at, i.state_occurred_at, COALESCE(m.milestone, ''),
         \\       (SELECT COUNT(*) FROM comments c WHERE c.parent_kind = 'issue' AND c.parent_id = i.id),
-        \\       COALESCE(a.number, 0)
+        \\       COALESCE(a.number, 0), i.body
         \\FROM issues i
         \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
         \\LEFT JOIN legacy_aliases a
@@ -721,6 +724,7 @@ fn appendIssueListRow(
     milestone: []const u8,
     comment_count: usize,
     legacy_number: i64,
+    task_summary: shared.MarkdownTaskSummary,
 ) !void {
     var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
     const issue_ref = util.shortObjectRef(&issue_ref_buf, id);
@@ -755,6 +759,10 @@ fn appendIssueListRow(
     });
     try buf.append(allocator, ' ');
     try appendRelativeTime(buf, allocator, if (closed) state_at else opened_at);
+    if (task_summary.hasTasks()) {
+        try buf.append(allocator, ' ');
+        try shared.appendMarkdownTaskProgress(buf, allocator, task_summary);
+    }
     try buf.appendSlice(allocator,
         \\</p></div>
         \\  <div class="issue-row-side">
@@ -966,10 +974,16 @@ fn renderIssueDetailPageWithCommentForm(
     try appendRelativeTime(&buf, allocator, opened_at);
     try buf.appendSlice(allocator, "</span></div>");
     try appendIssueActionMenu(&buf, allocator, "issue-description", "", body, body.len != 0, issue_edit_href);
-    try appendTemplate(&buf, allocator,
+    try buf.appendSlice(allocator,
         \\          </header>
-        \\          <div class="markdown-body">
-    , .{});
+        \\          <div class="markdown-body"
+    );
+    if (can_edit_issue) {
+        try buf.appendSlice(allocator, " data-checklist-owner=\"issue\" data-checklist-update-action=\"/issues/");
+        try shared.appendUrlEncoded(&buf, allocator, raw_ref);
+        try buf.appendSlice(allocator, "/checklist\"");
+    }
+    try buf.appendSlice(allocator, ">");
     if (body.len == 0) {
         try buf.appendSlice(allocator, "<p class=\"muted\">No description provided.</p>");
     } else {
@@ -3085,6 +3099,49 @@ fn handleIssueBodyEditPost(
     const location = try std.fmt.allocPrint(allocator, "/issues/{s}", .{raw_ref});
     defer allocator.free(location);
     try sendRedirect(allocator, stream, location);
+}
+
+pub fn handleIssueChecklistPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
+    try ensureIndex(allocator, repo);
+    const issue_id = index.resolveIssueId(allocator, repo, raw_ref) catch {
+        try sendPlainResponse(allocator, stream, 404, "Not Found", "Issue not found\n");
+        return;
+    };
+    defer allocator.free(issue_id);
+
+    const body_owned = (try formValueOwned(allocator, form_body, "body")) orelse {
+        try sendPlainResponse(allocator, stream, 400, "Bad Request", "Missing body\n");
+        return;
+    };
+    defer allocator.free(body_owned);
+
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    var stmt = try db.prepare("SELECT body, author_principal FROM issues WHERE id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    if (!(try stmt.step())) {
+        try sendPlainResponse(allocator, stream, 404, "Not Found", "Issue not found\n");
+        return;
+    }
+    const current_body = try stmt.columnTextDup(allocator, 0);
+    defer allocator.free(current_body);
+    const author_principal = try stmt.columnTextDup(allocator, 1);
+    defer allocator.free(author_principal);
+    if (!(try currentActorCanEditInRepo(allocator, repo, author_principal))) {
+        try sendPlainResponse(allocator, stream, 403, "Forbidden", "Forbidden\n");
+        return;
+    }
+    if (std.mem.eql(u8, body_owned, current_body)) {
+        try sendResponse(allocator, stream, 204, "No Content", "text/plain", "", null);
+        return;
+    }
+
+    createIssueUpdatedEvent(allocator, issue_id, .{ .body = body_owned }) catch {
+        try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update checklist\n");
+        return;
+    };
+    try sendResponse(allocator, stream, 204, "No Content", "text/plain", "", null);
 }
 
 fn handleCommentBodyEditPost(
