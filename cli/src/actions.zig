@@ -49,6 +49,7 @@ pub const Workflow = struct {
     allocator: Allocator,
     path: []u8,
     name: []u8,
+    source_oid: []u8,
     triggers: [][]u8,
     trigger_defs: []WorkflowTrigger,
     dialect: WorkflowDialect,
@@ -60,6 +61,7 @@ pub const Workflow = struct {
     pub fn deinit(self: *Workflow) void {
         self.allocator.free(self.path);
         self.allocator.free(self.name);
+        self.allocator.free(self.source_oid);
         for (self.triggers) |trigger| self.allocator.free(trigger);
         self.allocator.free(self.triggers);
         for (self.trigger_defs) |*trigger| trigger.deinit();
@@ -88,6 +90,8 @@ pub const WorkflowDialect = enum {
 pub const WorkflowSourcePolicy = struct {
     workflow_from: []u8,
     code_from: []u8,
+    workflow_from_explicit: bool = false,
+    code_from_explicit: bool = false,
 
     fn initDefaults(allocator: Allocator) !WorkflowSourcePolicy {
         return .{
@@ -105,9 +109,25 @@ pub const WorkflowSourcePolicy = struct {
         const owned = try allocator.dupe(u8, value);
         allocator.free(self.workflow_from);
         self.workflow_from = owned;
+        self.workflow_from_explicit = true;
     }
 
     fn setCodeFrom(self: *WorkflowSourcePolicy, allocator: Allocator, value: []const u8) !void {
+        const owned = try allocator.dupe(u8, value);
+        allocator.free(self.code_from);
+        self.code_from = owned;
+        self.code_from_explicit = true;
+    }
+
+    fn setWorkflowFromDefault(self: *WorkflowSourcePolicy, allocator: Allocator, value: []const u8) !void {
+        if (self.workflow_from_explicit) return;
+        const owned = try allocator.dupe(u8, value);
+        allocator.free(self.workflow_from);
+        self.workflow_from = owned;
+    }
+
+    fn setCodeFromDefault(self: *WorkflowSourcePolicy, allocator: Allocator, value: []const u8) !void {
+        if (self.code_from_explicit) return;
         const owned = try allocator.dupe(u8, value);
         allocator.free(self.code_from);
         self.code_from = owned;
@@ -186,6 +206,8 @@ pub const RunRequest = struct {
     allocator: Allocator,
     run_id: []u8,
     workflow: []u8,
+    workflow_source_ref: ?[]u8 = null,
+    workflow_source_oid: ?[]u8 = null,
     target_ref: ?[]u8,
     target_oid: ?[]u8,
     event_name: []u8,
@@ -195,6 +217,8 @@ pub const RunRequest = struct {
     pub fn deinit(self: *RunRequest) void {
         self.allocator.free(self.run_id);
         self.allocator.free(self.workflow);
+        if (self.workflow_source_ref) |value| self.allocator.free(value);
+        if (self.workflow_source_oid) |value| self.allocator.free(value);
         if (self.target_ref) |value| self.allocator.free(value);
         if (self.target_oid) |value| self.allocator.free(value);
         self.allocator.free(self.event_name);
@@ -286,6 +310,27 @@ const RunMetadata = struct {
     permission_grant_json: ?[]const u8 = null,
 };
 
+const PullRefs = struct {
+    allocator: Allocator,
+    base_ref: []u8,
+    head_ref: []u8,
+
+    fn deinit(self: *PullRefs) void {
+        self.allocator.free(self.base_ref);
+        self.allocator.free(self.head_ref);
+    }
+};
+
+const RunTargets = struct {
+    workflow: ResolvedTarget,
+    code: ResolvedTarget,
+
+    fn deinit(self: *RunTargets) void {
+        self.workflow.deinit();
+        self.code.deinit();
+    }
+};
+
 const RunClaim = struct {
     allocator: Allocator,
     path: []u8,
@@ -327,17 +372,20 @@ const DiagnosticFile = struct {
 const RunDiagnostics = struct {
     allocator: Allocator,
     attempt_id: []u8,
+    started_at: []u8,
     files: std.ArrayList(DiagnosticFile) = .empty,
 
     fn init(allocator: Allocator) !RunDiagnostics {
         return .{
             .allocator = allocator,
             .attempt_id = try util.newUuidV7(allocator),
+            .started_at = try util.rfc3339Now(allocator),
         };
     }
 
     fn deinit(self: *RunDiagnostics) void {
         self.allocator.free(self.attempt_id);
+        self.allocator.free(self.started_at);
         for (self.files.items) |file| {
             self.allocator.free(file.path);
             self.allocator.free(file.bytes);
@@ -398,6 +446,14 @@ pub fn resolveTarget(allocator: Allocator, target_ref: ?[]const u8, target_oid: 
     };
 }
 
+fn duplicateTarget(allocator: Allocator, target: ResolvedTarget) !ResolvedTarget {
+    return .{
+        .allocator = allocator,
+        .target_ref = if (target.target_ref) |value| try allocator.dupe(u8, value) else null,
+        .target_oid = try allocator.dupe(u8, target.target_oid),
+    };
+}
+
 pub fn loadWorkflows(allocator: Allocator, rev: []const u8) ![]Workflow {
     const raw = git.gitChecked(allocator, &.{ "ls-tree", "-r", "--name-only", rev, ".gitomi/workflows", ".github/workflows" }) catch |err| {
         if (err == CliError.GitFailed) {
@@ -424,11 +480,26 @@ pub fn loadWorkflows(allocator: Allocator, rev: []const u8) ![]Workflow {
         const contents = try git.gitChecked(allocator, &.{ "show", spec });
         defer allocator.free(contents);
 
-        const workflow = try parseWorkflow(allocator, path, contents);
+        const workflow = try parseWorkflow(allocator, rev, path, contents);
+        try validateLoadedWorkflow(workflow);
         try workflows.append(allocator, workflow);
     }
 
     return workflows.toOwnedSlice(allocator);
+}
+
+fn loadWorkflowAtPath(allocator: Allocator, rev: []const u8, path: []const u8) !?Workflow {
+    if (!isWorkflowPath(path)) return null;
+    const spec = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ rev, path });
+    defer allocator.free(spec);
+    const contents = git.gitChecked(allocator, &.{ "show", spec }) catch |err| {
+        if (err == CliError.GitFailed) return null;
+        return err;
+    };
+    defer allocator.free(contents);
+    const workflow = try parseWorkflow(allocator, rev, path, contents);
+    try validateLoadedWorkflow(workflow);
+    return workflow;
 }
 
 pub fn freeWorkflows(allocator: Allocator, workflows: []Workflow) void {
@@ -536,14 +607,20 @@ fn scheduleEventWithContext(
     var repo = try repo_mod.discoverRepo(allocator);
     defer repo.deinit();
 
-    var target = try resolveTarget(allocator, target_ref, target_oid);
-    defer target.deinit();
+    var selected_target = try resolveTarget(allocator, target_ref, target_oid);
+    defer selected_target.deinit();
 
-    const workflows = try loadWorkflows(allocator, target.target_oid);
+    var pull_refs = try loadPullRefsForEvent(allocator, repo, event_type, object_id);
+    defer if (pull_refs) |*refs| refs.deinit();
+
+    var workflow_target = try defaultWorkflowTargetForEvent(allocator, selected_target, pull_refs, event_type, target_ref != null or target_oid != null);
+    defer workflow_target.deinit();
+
+    const workflows = try loadWorkflows(allocator, workflow_target.target_oid);
     defer freeWorkflows(allocator, workflows);
 
     const event_name = githubEventName(event_type);
-    const branch = context_extra.branch orelse branchNameFromRef(target.target_ref);
+    const branch = context_extra.branch orelse branchNameFromRef(workflow_target.target_ref);
     const context = EventContext{
         .event_type = event_type,
         .event_name = event_name,
@@ -554,15 +631,34 @@ fn scheduleEventWithContext(
     };
     var matched: usize = 0;
     var failed = false;
-    for (workflows) |workflow| {
-        if (!workflowMatchesContext(workflow, context)) continue;
+    for (workflows) |*workflow| {
+        try applyEventDefaultSourcePolicy(workflow, event_type);
+        if (!workflowMatchesContext(workflow.*, context)) continue;
         matched += 1;
         if (options.dry_run) {
-            try io.out("would run {s} for {s} at {s}\n", .{ workflow.path, event_type, target.target_oid });
+            try io.out("would run {s} for {s} at {s}\n", .{ workflow.path, event_type, workflow_target.target_oid });
             continue;
         }
 
-        if (try requestAndExecuteWorkflow(allocator, repo, workflow, target, event_name, event_type, object_id, .{}, options)) {
+        var run_targets = try resolveRunTargetsForWorkflow(allocator, selected_target, pull_refs, workflow.*);
+        defer run_targets.deinit();
+        var active_workflow = workflow.*;
+        var reloaded_workflow: ?Workflow = null;
+        defer if (reloaded_workflow) |*value| value.deinit();
+        if (!std.mem.eql(u8, run_targets.workflow.target_oid, workflow.source_oid)) {
+            reloaded_workflow = try loadWorkflowAtPath(allocator, run_targets.workflow.target_oid, workflow.path);
+            if (reloaded_workflow == null) {
+                try io.eprint("gt actions: workflow {s} is not present at source {s}\n", .{ workflow.path, run_targets.workflow.target_oid });
+                failed = true;
+                continue;
+            }
+            if (reloaded_workflow) |*loaded| {
+                try loaded.source.setWorkflowFrom(loaded.allocator, workflow.source.workflow_from);
+                try loaded.source.setCodeFrom(loaded.allocator, workflow.source.code_from);
+                active_workflow = loaded.*;
+            }
+        }
+        if (try requestAndExecuteWorkflow(allocator, repo, active_workflow, run_targets, event_name, event_type, object_id, .{}, options)) {
             failed = true;
         }
     }
@@ -605,7 +701,8 @@ fn runRequestedWithRepo(allocator: Allocator, repo: repo_mod.Repo, run_filter: ?
         } else try resolveTarget(allocator, request.target_ref, null);
         defer target.deinit();
 
-        const workflows = try loadWorkflows(allocator, target.target_oid);
+        const workflow_source_oid = request.workflow_source_oid orelse target.target_oid;
+        const workflows = try loadWorkflows(allocator, workflow_source_oid);
         defer freeWorkflows(allocator, workflows);
         const workflow = try resolveWorkflowSelector(workflows, request.workflow);
 
@@ -614,12 +711,23 @@ fn runRequestedWithRepo(allocator: Allocator, repo: repo_mod.Repo, run_filter: ?
             continue;
         }
 
+        const workflow_target = ResolvedTarget{
+            .allocator = allocator,
+            .target_ref = if (request.workflow_source_ref) |value| try allocator.dupe(u8, value) else null,
+            .target_oid = try allocator.dupe(u8, workflow_source_oid),
+        };
+        var run_targets = RunTargets{
+            .workflow = workflow_target,
+            .code = try duplicateTarget(allocator, target),
+        };
+        defer run_targets.deinit();
+
         var execution = executeWorkflow(
             allocator,
             repo,
             request.run_id,
             workflow,
-            target,
+            run_targets,
             request.event_name,
             if (request.gitomi_event_type.len == 0) "action.run_requested" else request.gitomi_event_type,
             null,
@@ -840,7 +948,8 @@ fn scheduleDueWorkflows(
     var failed = false;
     var minute = start_minute;
     while (minute <= current_minute) : (minute += 1) {
-        for (workflows) |workflow| {
+        for (workflows) |*workflow| {
+            try applyEventDefaultSourcePolicy(workflow, "workflow.schedule");
             for (workflow.schedules) |cron| {
                 if (!cronMatches(cron, minute * 60)) continue;
                 const slot = try scheduleSlotKey(allocator, workflow.path, cron, minute);
@@ -849,11 +958,16 @@ fn scheduleDueWorkflows(
                     try io.out("would run scheduled {s} for minute {d}\n", .{ workflow.path, minute });
                     continue;
                 }
+                var run_targets = RunTargets{
+                    .workflow = try duplicateTarget(allocator, target),
+                    .code = try duplicateTarget(allocator, target),
+                };
+                defer run_targets.deinit();
                 if (try requestAndExecuteWorkflow(
                     allocator,
                     repo,
-                    workflow,
-                    target,
+                    workflow.*,
+                    run_targets,
                     "schedule",
                     "workflow.schedule",
                     null,
@@ -882,7 +996,7 @@ fn requestAndExecuteWorkflow(
     allocator: Allocator,
     repo: repo_mod.Repo,
     workflow: Workflow,
-    target: ResolvedTarget,
+    targets: RunTargets,
     event_name: []const u8,
     event_type: []const u8,
     object_id: ?[]const u8,
@@ -894,8 +1008,8 @@ fn requestAndExecuteWorkflow(
     const metadata = RunMetadata{
         .workflow_name = workflow.name,
         .workflow_dialect = workflow.dialect.label(),
-        .workflow_source_ref = target.target_ref,
-        .workflow_source_oid = target.target_oid,
+        .workflow_source_ref = targets.workflow.target_ref,
+        .workflow_source_oid = targets.workflow.target_oid,
         .backend_kind = workflowBackendSummary(workflow),
         .pipeline = workflowPipelineSummary(workflow),
         .schedule_slot = metadata_extra.schedule_slot,
@@ -906,8 +1020,8 @@ fn requestAndExecuteWorkflow(
     var request = try createRunRequestedEventWithMetadata(
         allocator,
         workflow.path,
-        target.target_ref,
-        target.target_oid,
+        targets.code.target_ref,
+        targets.code.target_oid,
         event_name,
         event_type,
         metadata,
@@ -920,7 +1034,7 @@ fn requestAndExecuteWorkflow(
         repo,
         request.run_id,
         workflow,
-        target,
+        targets,
         event_name,
         event_type,
         object_id,
@@ -936,8 +1050,8 @@ fn requestAndExecuteWorkflow(
         allocator,
         request.run_id,
         execution.conclusion,
-        target.target_ref,
-        target.target_oid,
+        targets.code.target_ref,
+        targets.code.target_oid,
         workflow.path,
         event_name,
         execution.diagnostics_ref,
@@ -1001,6 +1115,92 @@ fn changedPathsBetween(allocator: Allocator, before_oid: []const u8, after_oid: 
         if (path.len != 0) try appendStringToSlice(allocator, &paths, path);
     }
     return paths;
+}
+
+fn isPullEvent(event_type: []const u8) bool {
+    return std.mem.startsWith(u8, event_type, "pull.");
+}
+
+fn loadPullRefsForEvent(allocator: Allocator, repo: repo_mod.Repo, event_type: []const u8, object_id: ?[]const u8) !?PullRefs {
+    if (!isPullEvent(event_type)) return null;
+    const pull_id = object_id orelse return null;
+    try index.ensureIndex(allocator, repo);
+    var db = try index.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    var stmt = try db.prepare("SELECT base_ref, head_ref FROM pulls WHERE id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, pull_id);
+    if (!(try stmt.step())) return null;
+    return .{
+        .allocator = allocator,
+        .base_ref = try stmt.columnTextDup(allocator, 0),
+        .head_ref = try stmt.columnTextDup(allocator, 1),
+    };
+}
+
+fn applyEventDefaultSourcePolicy(workflow: *Workflow, event_type: []const u8) !void {
+    if (!isPullEvent(event_type)) return;
+    try workflow.source.setWorkflowFromDefault(workflow.allocator, "base");
+    try workflow.source.setCodeFromDefault(workflow.allocator, "head");
+}
+
+fn defaultWorkflowTargetForEvent(
+    allocator: Allocator,
+    selected: ResolvedTarget,
+    pull_refs: ?PullRefs,
+    event_type: []const u8,
+    explicit_target: bool,
+) !ResolvedTarget {
+    if (!explicit_target and isPullEvent(event_type)) {
+        if (pull_refs) |refs| {
+            return resolveTarget(allocator, refs.base_ref, null) catch |err| {
+                if (errors.isUserError(err)) return duplicateTarget(allocator, selected);
+                return err;
+            };
+        }
+    }
+    return duplicateTarget(allocator, selected);
+}
+
+fn resolveRunTargetsForWorkflow(
+    allocator: Allocator,
+    selected: ResolvedTarget,
+    pull_refs: ?PullRefs,
+    workflow: Workflow,
+) !RunTargets {
+    return .{
+        .workflow = try resolvePolicyTarget(allocator, selected, pull_refs, workflow.source.workflow_from),
+        .code = try resolvePolicyTarget(allocator, selected, pull_refs, workflow.source.code_from),
+    };
+}
+
+fn resolvePolicyTarget(
+    allocator: Allocator,
+    selected: ResolvedTarget,
+    pull_refs: ?PullRefs,
+    policy: []const u8,
+) !ResolvedTarget {
+    if (std.mem.eql(u8, policy, "target")) return duplicateTarget(allocator, selected);
+    if (std.mem.eql(u8, policy, "base")) {
+        if (pull_refs) |refs| {
+            return resolveTarget(allocator, refs.base_ref, null) catch |err| {
+                if (errors.isUserError(err)) return duplicateTarget(allocator, selected);
+                return err;
+            };
+        }
+        return duplicateTarget(allocator, selected);
+    }
+    if (std.mem.eql(u8, policy, "head")) {
+        if (pull_refs) |refs| {
+            return resolveTarget(allocator, refs.head_ref, null) catch |err| {
+                if (errors.isUserError(err)) return duplicateTarget(allocator, selected);
+                return err;
+            };
+        }
+        return duplicateTarget(allocator, selected);
+    }
+    try io.eprint("gt actions: unsupported workflow source policy '{s}'\n", .{policy});
+    return CliError.UserError;
 }
 
 fn branchNameFromRef(ref: ?[]const u8) ?[]const u8 {
@@ -1307,7 +1507,7 @@ fn executeWorkflow(
     repo: repo_mod.Repo,
     run_id: []const u8,
     workflow: Workflow,
-    target: ResolvedTarget,
+    targets: RunTargets,
     event_name: []const u8,
     gitomi_event_type: []const u8,
     object_id: ?[]const u8,
@@ -1319,7 +1519,7 @@ fn executeWorkflow(
 
     const permission_grant_json = try buildPermissionGrantJson(allocator, workflow);
     defer allocator.free(permission_grant_json);
-    const event_path = try writeActEventPayload(allocator, repo, run_id, workflow, target, event_name, gitomi_event_type, object_id, schedule_slot, permission_grant_json);
+    const event_path = try writeActEventPayload(allocator, repo, run_id, workflow, targets, event_name, gitomi_event_type, object_id, schedule_slot, permission_grant_json);
     defer {
         std.fs.deleteFileAbsolute(event_path) catch {};
         allocator.free(event_path);
@@ -1328,12 +1528,12 @@ fn executeWorkflow(
     var diagnostics = try RunDiagnostics.init(allocator);
     defer diagnostics.deinit();
 
-    const worktree_path = try std.fmt.allocPrint(allocator, "/tmp/gitomi-act-{s}", .{run_id});
+    const worktree_path = try std.fmt.allocPrint(allocator, "/tmp/gitomi-code-{s}", .{run_id});
     defer allocator.free(worktree_path);
 
-    const added = git.gitChecked(allocator, &.{ "worktree", "add", "--detach", "--quiet", worktree_path, target.target_oid }) catch |err| {
+    const added = git.gitChecked(allocator, &.{ "worktree", "add", "--detach", "--quiet", worktree_path, targets.code.target_oid }) catch |err| {
         if (err == CliError.GitFailed) {
-            try io.eprint("gt actions: failed to create temporary worktree for {s}\n", .{target.target_oid});
+            try io.eprint("gt actions: failed to create temporary worktree for {s}\n", .{targets.code.target_oid});
             return CliError.UserError;
         }
         return err;
@@ -1346,14 +1546,37 @@ fn executeWorkflow(
         } else |_| {}
     }
 
+    var workflow_worktree_path: ?[]u8 = null;
+    defer if (workflow_worktree_path) |path| {
+        if (git.gitChecked(allocator, &.{ "worktree", "remove", "--force", path })) |removed| {
+            allocator.free(removed);
+        } else |_| {}
+        allocator.free(path);
+    };
+    const workflow_tree = if (std.mem.eql(u8, targets.workflow.target_oid, targets.code.target_oid))
+        worktree_path
+    else blk: {
+        const path = try std.fmt.allocPrint(allocator, "/tmp/gitomi-workflow-{s}", .{run_id});
+        workflow_worktree_path = path;
+        const workflow_added = git.gitChecked(allocator, &.{ "worktree", "add", "--detach", "--quiet", path, targets.workflow.target_oid }) catch |err| {
+            if (err == CliError.GitFailed) {
+                try io.eprint("gt actions: failed to create workflow worktree for {s}\n", .{targets.workflow.target_oid});
+                return CliError.UserError;
+            }
+            return err;
+        };
+        allocator.free(workflow_added);
+        break :blk path;
+    };
+
     const conclusion = switch (workflow.dialect) {
-        .github_actions => try executeGithubActionsWorkflow(allocator, workflow, event_name, event_path, worktree_path, options, &diagnostics),
-        .gitomi => try executeGitomiWorkflow(allocator, repo, run_id, workflow, target, event_name, gitomi_event_type, event_path, worktree_path, options, &diagnostics),
+        .github_actions => try executeGithubActionsWorkflow(allocator, workflow, event_name, event_path, worktree_path, workflow_tree, options, &diagnostics),
+        .gitomi => try executeGitomiWorkflow(allocator, repo, run_id, workflow, event_name, gitomi_event_type, event_path, worktree_path, workflow_tree, options, &diagnostics),
     };
 
     var result = ExecuteResult{ .allocator = allocator, .conclusion = conclusion };
     result.attempt_id = try allocator.dupe(u8, diagnostics.attempt_id);
-    if (writeRunDiagnostics(allocator, repo, run_id, workflow, target, conclusion, diagnostics)) |diag_ref_value| {
+    if (writeRunDiagnostics(allocator, repo, run_id, workflow, targets, conclusion, diagnostics)) |diag_ref_value| {
         var diag_ref = diag_ref_value;
         defer diag_ref.deinit();
         result.diagnostics_ref = try allocator.dupe(u8, diag_ref.ref);
@@ -1371,15 +1594,22 @@ fn executeGithubActionsWorkflow(
     event_name: []const u8,
     event_path: []const u8,
     worktree_path: []const u8,
+    workflow_worktree_path: []const u8,
     options: Options,
     diagnostics: *RunDiagnostics,
 ) ![]const u8 {
+    const workflow_path_arg = if (std.mem.eql(u8, worktree_path, workflow_worktree_path))
+        workflow.path
+    else
+        try std.fs.path.join(allocator, &.{ workflow_worktree_path, workflow.path });
+    defer if (!std.mem.eql(u8, workflow_path_arg, workflow.path)) allocator.free(workflow_path_arg);
+
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
     try argv.append(allocator, options.act_path);
     try argv.append(allocator, event_name);
     try argv.append(allocator, "-W");
-    try argv.append(allocator, workflow.path);
+    try argv.append(allocator, workflow_path_arg);
     try argv.append(allocator, "-e");
     try argv.append(allocator, event_path);
     for (options.extra_args) |arg| try argv.append(allocator, arg);
@@ -1405,16 +1635,15 @@ fn executeGitomiWorkflow(
     repo: repo_mod.Repo,
     run_id: []const u8,
     workflow: Workflow,
-    target: ResolvedTarget,
     event_name: []const u8,
     gitomi_event_type: []const u8,
     event_path: []const u8,
     worktree_path: []const u8,
+    workflow_worktree_path: []const u8,
     options: Options,
     diagnostics: *RunDiagnostics,
 ) ![]const u8 {
     _ = repo;
-    _ = target;
     _ = event_name;
     _ = gitomi_event_type;
 
@@ -1448,7 +1677,7 @@ fn executeGitomiWorkflow(
                 progressed = true;
                 continue;
             }
-            const conclusion = try executeGitomiJob(allocator, run_id, workflow, job, event_path, worktree_path, options, diagnostics);
+            const conclusion = try executeGitomiJob(allocator, run_id, workflow, job, event_path, worktree_path, workflow_worktree_path, options, diagnostics);
             if (std.mem.eql(u8, conclusion, "failure")) return "failure";
             if (std.mem.eql(u8, conclusion, "action_required")) action_required = true;
             states[idx] = .completed;
@@ -1497,6 +1726,7 @@ fn executeGitomiJob(
     job: WorkflowJob,
     event_path: []const u8,
     worktree_path: []const u8,
+    workflow_worktree_path: []const u8,
     options: Options,
     diagnostics: *RunDiagnostics,
 ) ![]const u8 {
@@ -1508,7 +1738,7 @@ fn executeGitomiJob(
         return try executeContainerJob(allocator, job, worktree_path, diagnostics);
     }
     if (std.mem.eql(u8, backend, "agent")) {
-        return try executeAgentJob(allocator, run_id, workflow, job, event_path, worktree_path, options, diagnostics);
+        return try executeAgentJob(allocator, run_id, workflow, job, event_path, worktree_path, workflow_worktree_path, options, diagnostics);
     }
     if (std.mem.eql(u8, backend, "github-actions")) {
         try io.eprint("gt actions: native job {s} uses github-actions backend; use .github/workflows for act-backed workflows\n", .{job.id});
@@ -1532,7 +1762,7 @@ fn executeShellJob(
         const command = step.run orelse continue;
         const step_label = step.name orelse command;
         try io.out("gt actions: {s}[{d}] {s}\n", .{ job.id, idx + 1, step_label });
-        var result = try runCommandInDir(allocator, &.{ "sh", "-lc", command }, worktree_path, null, git.max_git_output);
+        var result = try runCommandInDirWithEnv(allocator, &.{ "sh", "-lc", command }, worktree_path, null, git.max_git_output, job.env);
         defer result.deinit();
         if (result.stdout.len != 0) try io.out("{s}", .{result.stdout});
         if (result.stderr.len != 0) try io.eprint("{s}", .{result.stderr});
@@ -1564,7 +1794,23 @@ fn executeContainerJob(
         const command = step.run orelse continue;
         const step_label = step.name orelse command;
         try io.out("gt actions: {s}[{d}] {s}\n", .{ job.id, idx + 1, step_label });
-        var result = try runCommandInDir(allocator, &.{ "docker", "run", "--rm", "-v", volume, "-w", "/workspace", image, "sh", "-lc", command }, worktree_path, null, git.max_git_output);
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(allocator);
+        var env_args: std.ArrayList([]u8) = .empty;
+        defer {
+            for (env_args.items) |value| allocator.free(value);
+            env_args.deinit(allocator);
+        }
+        try argv.appendSlice(allocator, &.{ "docker", "run", "--rm", "-v", volume, "-w", "/workspace" });
+        for (job.env) |entry| {
+            const env_arg = try std.fmt.allocPrint(allocator, "{s}={s}", .{ entry.key, entry.value });
+            errdefer allocator.free(env_arg);
+            try env_args.append(allocator, env_arg);
+            try argv.append(allocator, "-e");
+            try argv.append(allocator, env_arg);
+        }
+        try argv.appendSlice(allocator, &.{ image, "sh", "-lc", command });
+        var result = try runCommandInDir(allocator, argv.items, worktree_path, null, git.max_git_output);
         defer result.deinit();
         if (result.stdout.len != 0) try io.out("{s}", .{result.stdout});
         if (result.stderr.len != 0) try io.eprint("{s}", .{result.stderr});
@@ -1581,6 +1827,7 @@ fn executeAgentJob(
     job: WorkflowJob,
     event_path: []const u8,
     worktree_path: []const u8,
+    workflow_worktree_path: []const u8,
     options: Options,
     diagnostics: *RunDiagnostics,
 ) ![]const u8 {
@@ -1592,7 +1839,7 @@ fn executeAgentJob(
         try io.eprint("gt actions: agent job {s} requires uses: .gitomi/pipelines/<name>\n", .{job.id});
         return "failure";
     };
-    var manifest = validateAgentPipelinePackage(allocator, worktree_path, pipeline) catch |err| switch (err) {
+    var manifest = validateAgentPipelinePackage(allocator, workflow_worktree_path, pipeline) catch |err| switch (err) {
         error.InvalidPipelinePath => {
             try io.eprint("gt actions: agent job {s} uses invalid pipeline path '{s}'\n", .{ job.id, pipeline });
             return "failure";
@@ -1627,6 +1874,8 @@ fn executeAgentJob(
         event_path,
         "--worktree",
         worktree_path,
+        "--workflow-worktree",
+        workflow_worktree_path,
     }, worktree_path, null, git.max_git_output);
     defer result.deinit();
     if (result.stdout.len != 0) try io.out("{s}", .{result.stdout});
@@ -1764,7 +2013,7 @@ fn writeRunDiagnostics(
     repo: repo_mod.Repo,
     run_id: []const u8,
     workflow: Workflow,
-    target: ResolvedTarget,
+    targets: RunTargets,
     conclusion: []const u8,
     diagnostics: RunDiagnostics,
 ) !DiagnosticRef {
@@ -1780,13 +2029,16 @@ fn writeRunDiagnostics(
         allocator.free(index_path);
     }
 
-    const run_json = try buildRunDiagnosticJson(allocator, run_id, workflow, target, conclusion, runner_id, diagnostics.attempt_id);
+    const completed_at = try util.rfc3339Now(allocator);
+    defer allocator.free(completed_at);
+
+    const run_json = try buildRunDiagnosticJson(allocator, run_id, workflow, targets, conclusion, runner_id, diagnostics.attempt_id, diagnostics.started_at, completed_at);
     defer allocator.free(run_json);
     try writeDiagnosticBlobToIndex(allocator, repo, index_path, "run.json", run_json);
 
     const manifest_path = try std.fmt.allocPrint(allocator, "attempts/{s}/manifest.json", .{diagnostics.attempt_id});
     defer allocator.free(manifest_path);
-    const manifest_json = try buildAttemptManifestJson(allocator, run_id, workflow, target, conclusion, runner_id, diagnostics.attempt_id);
+    const manifest_json = try buildAttemptManifestJson(allocator, run_id, workflow, targets, conclusion, runner_id, diagnostics.attempt_id, diagnostics.started_at, completed_at);
     defer allocator.free(manifest_json);
     try writeDiagnosticBlobToIndex(allocator, repo, index_path, manifest_path, manifest_json);
 
@@ -1846,23 +2098,33 @@ fn buildRunDiagnosticJson(
     allocator: Allocator,
     run_id: []const u8,
     workflow: Workflow,
-    target: ResolvedTarget,
+    targets: RunTargets,
     conclusion: []const u8,
     runner_id: []const u8,
     attempt_id: []const u8,
+    started_at: []const u8,
+    completed_at: []const u8,
 ) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     try buf.append(allocator, '{');
     try appendJsonFieldString(&buf, allocator, "schema", "urn:gitomi:workflow-run:v1", true);
+    try appendJsonFieldUnsigned(&buf, allocator, "schema_version", 1, true);
     try appendJsonFieldString(&buf, allocator, "run_id", run_id, true);
     try appendJsonFieldString(&buf, allocator, "attempt_id", attempt_id, true);
     try appendJsonFieldString(&buf, allocator, "runner_id", runner_id, true);
     try appendJsonFieldString(&buf, allocator, "workflow", workflow.path, true);
     try appendJsonFieldString(&buf, allocator, "workflow_name", workflow.name, true);
+    try appendJsonFieldString(&buf, allocator, "workflow_source_oid", targets.workflow.target_oid, true);
     try appendJsonFieldString(&buf, allocator, "dialect", workflow.dialect.label(), true);
-    try appendJsonFieldString(&buf, allocator, "target_ref", target.target_ref orelse "", true);
-    try appendJsonFieldString(&buf, allocator, "target_oid", target.target_oid, true);
+    try appendJsonFieldString(&buf, allocator, "target_ref", targets.code.target_ref orelse "", true);
+    try appendJsonFieldString(&buf, allocator, "target_oid", targets.code.target_oid, true);
+    try appendJsonFieldString(&buf, allocator, "started_at", started_at, true);
+    try appendJsonFieldString(&buf, allocator, "completed_at", completed_at, true);
+    try appendJsonString(&buf, allocator, "known_attempts");
+    try buf.appendSlice(allocator, ":[");
+    try appendJsonString(&buf, allocator, attempt_id);
+    try buf.appendSlice(allocator, "],");
     try appendJsonString(&buf, allocator, "source");
     try buf.appendSlice(allocator, ":{");
     try appendJsonFieldString(&buf, allocator, "workflow_from", workflow.source.workflow_from, true);
@@ -1889,10 +2151,12 @@ fn buildAttemptManifestJson(
     allocator: Allocator,
     run_id: []const u8,
     workflow: Workflow,
-    target: ResolvedTarget,
+    targets: RunTargets,
     conclusion: []const u8,
     runner_id: []const u8,
     attempt_id: []const u8,
+    started_at: []const u8,
+    completed_at: []const u8,
 ) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -1902,7 +2166,12 @@ fn buildAttemptManifestJson(
     try appendJsonFieldString(&buf, allocator, "attempt_id", attempt_id, true);
     try appendJsonFieldString(&buf, allocator, "runner_id", runner_id, true);
     try appendJsonFieldString(&buf, allocator, "workflow", workflow.path, true);
-    try appendJsonFieldString(&buf, allocator, "target_oid", target.target_oid, true);
+    try appendJsonFieldString(&buf, allocator, "workflow_source_oid", targets.workflow.target_oid, true);
+    try appendJsonFieldString(&buf, allocator, "target_oid", targets.code.target_oid, true);
+    try appendJsonFieldString(&buf, allocator, "started_at", started_at, true);
+    try appendJsonFieldString(&buf, allocator, "completed_at", completed_at, true);
+    try appendJsonFieldString(&buf, allocator, "backend_kind", workflowBackendSummary(workflow) orelse "", true);
+    try appendJsonFieldString(&buf, allocator, "backend_version", "gitomi-v1", true);
     try appendJsonString(&buf, allocator, "jobs");
     try buf.appendSlice(allocator, ":[");
     for (workflow.jobs, 0..) |job, idx| {
@@ -2105,7 +2374,7 @@ fn writeActEventPayload(
     repo: repo_mod.Repo,
     run_id: []const u8,
     workflow: Workflow,
-    target: ResolvedTarget,
+    targets: RunTargets,
     event_name: []const u8,
     gitomi_event_type: []const u8,
     object_id: ?[]const u8,
@@ -2128,8 +2397,8 @@ fn writeActEventPayload(
     try payload.append(allocator, '{');
     try appendJsonFieldString(&payload, allocator, "action", githubActionValue(gitomi_event_type), true);
     try appendJsonFieldString(&payload, allocator, "event_name", event_name, true);
-    try appendJsonFieldString(&payload, allocator, "ref", target.target_ref orelse "", true);
-    try appendJsonFieldString(&payload, allocator, "after", target.target_oid, true);
+    try appendJsonFieldString(&payload, allocator, "ref", targets.code.target_ref orelse "", true);
+    try appendJsonFieldString(&payload, allocator, "after", targets.code.target_oid, true);
     try payload.appendSlice(allocator, "\"repository\":{");
     try appendJsonFieldString(&payload, allocator, "name", repo_name, true);
     try appendJsonFieldString(&payload, allocator, "full_name", repo_name, false);
@@ -2142,12 +2411,16 @@ fn writeActEventPayload(
         if (std.mem.eql(u8, event_name, "issues")) {
             try appendMinimalIssuePayload(&payload, allocator, value);
         } else if (std.mem.eql(u8, event_name, "pull_request")) {
-            try appendMinimalPullRequestPayload(&payload, allocator, value, target);
+            try appendMinimalPullRequestPayload(&payload, allocator, value, targets.code);
         }
     }
     try payload.appendSlice(allocator, "\"gitomi\":{");
     try appendJsonFieldString(&payload, allocator, "run_id", run_id, true);
     try appendJsonFieldString(&payload, allocator, "event_type", gitomi_event_type, true);
+    try appendJsonFieldString(&payload, allocator, "workflow_source_oid", targets.workflow.target_oid, true);
+    if (targets.workflow.target_ref) |value| try appendJsonFieldString(&payload, allocator, "workflow_source_ref", value, true);
+    try appendJsonFieldString(&payload, allocator, "target_oid", targets.code.target_oid, true);
+    if (targets.code.target_ref) |value| try appendJsonFieldString(&payload, allocator, "target_ref", value, true);
     if (object_id) |value| try appendJsonFieldString(&payload, allocator, "object_id", value, true);
     if (schedule_slot) |value| try appendJsonFieldString(&payload, allocator, "schedule_slot", value, true);
     try appendJsonString(&payload, allocator, "permission_grant");
@@ -2191,11 +2464,32 @@ fn runCommandInDir(
     input: ?[]const u8,
     max_output_bytes: usize,
 ) !git.RunOutput {
+    return runCommandInDirWithEnv(allocator, argv, cwd, input, max_output_bytes, &.{});
+}
+
+fn runCommandInDirWithEnv(
+    allocator: Allocator,
+    argv: []const []const u8,
+    cwd: []const u8,
+    input: ?[]const u8,
+    max_output_bytes: usize,
+    env: []const KeyValuePair,
+) !git.RunOutput {
     var child = std.process.Child.init(argv, allocator);
     child.cwd = cwd;
     child.stdin_behavior = if (input == null) .Ignore else .Pipe;
     child.stdout_behavior = .Pipe;
     child.stderr_behavior = .Pipe;
+
+    var env_map: std.process.EnvMap = undefined;
+    var has_env_map = false;
+    defer if (has_env_map) env_map.deinit();
+    if (env.len != 0) {
+        env_map = try std.process.getEnvMap(allocator);
+        has_env_map = true;
+        for (env) |entry| try env_map.put(entry.key, entry.value);
+        child.env_map = &env_map;
+    }
 
     var stdout: std.ArrayList(u8) = .empty;
     errdefer stdout.deinit(allocator);
@@ -2277,11 +2571,15 @@ fn parseRunRequest(allocator: Allocator, run_id: []const u8, body: []const u8) !
     const event_name = event_mod.jsonString(payload.get("event_name")) orelse "workflow_dispatch";
     const gitomi_event_type = event_mod.jsonString(payload.get("gitomi_event_type")) orelse "";
     const schedule_slot = event_mod.jsonString(payload.get("schedule_slot"));
+    const workflow_source_ref = event_mod.jsonString(payload.get("workflow_source_ref"));
+    const workflow_source_oid = event_mod.jsonString(payload.get("workflow_source_oid"));
 
     return .{
         .allocator = allocator,
         .run_id = try allocator.dupe(u8, run_id),
         .workflow = try allocator.dupe(u8, workflow),
+        .workflow_source_ref = if (workflow_source_ref) |value| try allocator.dupe(u8, value) else null,
+        .workflow_source_oid = if (workflow_source_oid) |value| try allocator.dupe(u8, value) else null,
         .target_ref = if (event_mod.jsonString(payload.get("target_ref"))) |value| try allocator.dupe(u8, value) else null,
         .target_oid = if (event_mod.jsonString(payload.get("target_oid"))) |value| try allocator.dupe(u8, value) else null,
         .event_name = try allocator.dupe(u8, event_name),
@@ -2323,7 +2621,35 @@ fn workflowDialect(path: []const u8) WorkflowDialect {
     return .github_actions;
 }
 
-fn parseWorkflow(allocator: Allocator, path: []const u8, bytes: []const u8) !Workflow {
+fn validateLoadedWorkflow(workflow: Workflow) !void {
+    if (workflow.triggers.len == 0) {
+        try io.eprint("gt actions: workflow {s} must declare at least one trigger\n", .{workflow.path});
+        return CliError.UserError;
+    }
+    if (workflow.dialect != .gitomi) return;
+    if (workflow.jobs.len == 0) {
+        try io.eprint("gt actions: native workflow {s} must declare jobs\n", .{workflow.path});
+        return CliError.UserError;
+    }
+    for (workflow.jobs) |job| {
+        if (job.backend.len == 0) {
+            try io.eprint("gt actions: native job {s} in {s} must declare backend\n", .{ job.id, workflow.path });
+            return CliError.UserError;
+        }
+        if (std.mem.eql(u8, job.backend, "shell") or std.mem.eql(u8, job.backend, "container")) {
+            if (job.steps.len == 0) {
+                try io.eprint("gt actions: native job {s} in {s} must declare steps\n", .{ job.id, workflow.path });
+                return CliError.UserError;
+            }
+        }
+        if (std.mem.eql(u8, job.backend, "agent") and job.uses == null) {
+            try io.eprint("gt actions: native agent job {s} in {s} must declare uses\n", .{ job.id, workflow.path });
+            return CliError.UserError;
+        }
+    }
+}
+
+fn parseWorkflow(allocator: Allocator, source_oid: []const u8, path: []const u8, bytes: []const u8) !Workflow {
     const dialect = workflowDialect(path);
     var name: ?[]u8 = null;
     errdefer if (name) |value| allocator.free(value);
@@ -2514,6 +2840,7 @@ fn parseWorkflow(allocator: Allocator, path: []const u8, bytes: []const u8) !Wor
         .allocator = allocator,
         .path = try allocator.dupe(u8, path),
         .name = display_name,
+        .source_oid = try allocator.dupe(u8, source_oid),
         .triggers = try triggers.toOwnedSlice(allocator),
         .trigger_defs = trigger_defs,
         .dialect = dialect,
@@ -2957,6 +3284,11 @@ fn parseJobField(allocator: Allocator, job: *WorkflowJob, line: []const u8) !voi
                 try appendKeyValueToSlice(allocator, &job.permissions, "*", unquoteScalar(kv.value));
             }
         }
+    } else if (std.mem.eql(u8, kv.key, "steps")) {
+        return;
+    } else {
+        try io.eprint("gt actions: native job {s} has unsupported field '{s}'\n", .{ job.id, kv.key });
+        return CliError.UserError;
     }
 }
 
@@ -3404,7 +3736,7 @@ test "workflow parser supports common on syntaxes" {
         \\  pull_request:
         \\  - issues
     ;
-    var workflow = try parseWorkflow(std.testing.allocator, ".github/workflows/ci.yml", bytes);
+    var workflow = try parseWorkflow(std.testing.allocator, "test-source", ".github/workflows/ci.yml", bytes);
     defer workflow.deinit();
     try std.testing.expectEqualStrings("CI", workflow.name);
     try std.testing.expect(!workflowMatches(workflow, "push", "push"));
@@ -3422,7 +3754,7 @@ test "workflow parser supports inline trigger arrays" {
         \\name: Inline
         \\on: [push, workflow_dispatch]
     ;
-    var workflow = try parseWorkflow(std.testing.allocator, ".github/workflows/inline.yaml", bytes);
+    var workflow = try parseWorkflow(std.testing.allocator, "test-source", ".github/workflows/inline.yaml", bytes);
     defer workflow.deinit();
     try std.testing.expect(workflowMatches(workflow, "push", "push"));
     try std.testing.expect(workflowMatches(workflow, "action.run_requested", "workflow_dispatch"));
@@ -3433,7 +3765,7 @@ test "workflow parser supports inline trigger maps with filters" {
         \\name: Filtered
         \\on: { push: { branches: [main, release] }, pull_request: { types: [opened, synchronize] } }
     ;
-    var workflow = try parseWorkflow(std.testing.allocator, ".github/workflows/filtered.yml", bytes);
+    var workflow = try parseWorkflow(std.testing.allocator, "test-source", ".github/workflows/filtered.yml", bytes);
     defer workflow.deinit();
     try std.testing.expect(!workflowMatches(workflow, "push", "push"));
     try std.testing.expect(workflowMatchesContext(workflow, .{
@@ -3462,7 +3794,7 @@ test "workflow filters match paths actors labels and ignores" {
         \\    actors: [alice]
         \\    labels: [ci]
     ;
-    var workflow = try parseWorkflow(std.testing.allocator, ".gitomi/workflows/filtered.yml", bytes);
+    var workflow = try parseWorkflow(std.testing.allocator, "test-source", ".gitomi/workflows/filtered.yml", bytes);
     defer workflow.deinit();
     const src_paths = [_][]u8{try std.testing.allocator.dupe(u8, "src/main.zig")};
     defer std.testing.allocator.free(src_paths[0]);
@@ -3511,7 +3843,7 @@ test "native workflow parser supports shell jobs and schedules" {
         \\        run: zig build test
         \\      - run: echo done
     ;
-    var workflow = try parseWorkflow(std.testing.allocator, ".gitomi/workflows/ci.yml", bytes);
+    var workflow = try parseWorkflow(std.testing.allocator, "test-source", ".gitomi/workflows/ci.yml", bytes);
     defer workflow.deinit();
     try std.testing.expectEqual(WorkflowDialect.gitomi, workflow.dialect);
     try std.testing.expect(workflowMatches(workflow, "push", "push"));
@@ -3532,13 +3864,30 @@ test "workflow parser initializes optional policy fields" {
         \\name: Defaults
         \\on: workflow_dispatch
     ;
-    var workflow = try parseWorkflow(std.testing.allocator, ".gitomi/workflows/defaults.yml", bytes);
+    var workflow = try parseWorkflow(std.testing.allocator, "test-source", ".gitomi/workflows/defaults.yml", bytes);
     defer workflow.deinit();
     try std.testing.expectEqual(@as(usize, 1), workflow.trigger_defs.len);
     try std.testing.expectEqualStrings("workflow_dispatch", workflow.trigger_defs[0].name);
     try std.testing.expectEqualStrings("target", workflow.source.workflow_from);
     try std.testing.expectEqualStrings("target", workflow.source.code_from);
     try std.testing.expectEqual(@as(usize, 0), workflow.permissions.len);
+}
+
+test "pull events default workflow source to base and code source to head" {
+    const bytes =
+        \\name: Pull Review
+        \\on: pull.updated
+        \\jobs:
+        \\  review:
+        \\    backend: shell
+        \\    steps:
+        \\      - run: echo review
+    ;
+    var workflow = try parseWorkflow(std.testing.allocator, "test-source", ".gitomi/workflows/review.yml", bytes);
+    defer workflow.deinit();
+    try applyEventDefaultSourcePolicy(&workflow, "pull.updated");
+    try std.testing.expectEqualStrings("base", workflow.source.workflow_from);
+    try std.testing.expectEqualStrings("head", workflow.source.code_from);
 }
 
 test "native workflow parser supports source permissions and job metadata" {
@@ -3568,7 +3917,7 @@ test "native workflow parser supports source permissions and job metadata" {
         \\    permissions:
         \\      issues: write
     ;
-    var workflow = try parseWorkflow(std.testing.allocator, ".gitomi/workflows/review.yml", bytes);
+    var workflow = try parseWorkflow(std.testing.allocator, "test-source", ".gitomi/workflows/review.yml", bytes);
     defer workflow.deinit();
     try std.testing.expectEqualStrings("base", workflow.source.workflow_from);
     try std.testing.expectEqualStrings("head", workflow.source.code_from);
@@ -3589,13 +3938,13 @@ test "workflow runtime helpers are semantically checked" {
     if (std.time.timestamp() == std.math.minInt(i64)) {
         const repo: repo_mod.Repo = undefined;
         const workflow: Workflow = undefined;
-        const target: ResolvedTarget = undefined;
+        const targets: RunTargets = undefined;
         var result = try executeWorkflow(
             std.testing.allocator,
             repo,
             "018f0000-0000-7000-8000-000000000000",
             workflow,
-            target,
+            targets,
             "workflow_dispatch",
             "workflow.manual",
             null,
@@ -3622,11 +3971,11 @@ test "github action value uses event suffix" {
 
 test "workflow selectors match exact paths names basenames and detect ambiguity" {
     var workflows = [_]Workflow{
-        try parseWorkflow(std.testing.allocator, ".github/workflows/ci.yml",
+        try parseWorkflow(std.testing.allocator, "test-source", ".github/workflows/ci.yml",
             \\name: CI
             \\on: push
         ),
-        try parseWorkflow(std.testing.allocator, ".gitomi/workflows/ci.yml",
+        try parseWorkflow(std.testing.allocator, "test-source", ".gitomi/workflows/ci.yml",
             \\name: Native CI
             \\on: workflow_dispatch
         ),

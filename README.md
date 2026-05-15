@@ -34,8 +34,8 @@ the source of truth.
 | Pull requests | Track base/head refs, reviewers, labels, assignees, comments, reactions, and merges |
 | Projects | Create kanban boards and move issue cards across columns |
 | Milestones | Create, edit, close, reopen, and assign milestones |
-| Actions | Discover GitHub Actions-style workflows and run them locally with `act` |
-| Web UI | Browse code, issues, projects, actions, events, and refs from a local web interface |
+| Workflows | Discover GitHub Actions-style workflows and run them locally with `act` |
+| Web UI | Browse code, issues, projects, workflows, events, and refs from a local web interface |
 | Sync | Fetch, validate, quarantine, and publish Gitomi refs through a normal Git remote |
 | Integrity | Verify signed event logs with `gt fsck` and rebuild disposable local indexes |
 
@@ -88,6 +88,8 @@ before `gt init`. The remote genesis ref becomes the local trust anchor.
 Gitomi reads native workflow files from `.gitomi/workflows/*.yml` and
 `.gitomi/workflows/*.yaml`, and can also run GitHub Actions-compatible workflow
 files from `.github/workflows/*.yml` and `.github/workflows/*.yaml`.
+Pull-triggered workflows default to trusted base-side definitions running
+against head-side code, with both source OIDs recorded in run metadata.
 
 ```sh
 gt actions workflows

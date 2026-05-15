@@ -172,7 +172,10 @@ schedules matching workflows for a Gitomi or data-plane event, emits a signed
 `action.run_requested` event, creates a detached worktree at the target commit,
 executes native shell/container/agent jobs or runs GitHub-compatible workflows
 through `nektos/act` as `act <event> -W <workflow> -e <payload>`, then emits a
-signed `action.run_completed` event. `gt actions request` and
+signed `action.run_completed` event. For pull events, workflows without an
+explicit `source:` policy default to `workflow_from: base` and
+`code_from: head`; the run request and diagnostics record both the workflow
+source OID and the code target OID. `gt actions request` and
 `gt actions complete` expose the same event emission manually, and
 `gt actions run-requested` executes accepted pending run requests from the local
 event projection. Extra act flags can be passed after `--`; `--act PATH`

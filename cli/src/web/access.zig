@@ -149,8 +149,9 @@ fn renderAccessPageWithFlash(allocator: Allocator, repo: Repo, flash: ?Flash) ![
     errdefer buf.deinit(allocator);
 
     try appendShellStart(&buf, allocator, repo, "Access", "access");
+    try shared.appendSettingsLayoutStart(&buf, allocator, "access");
     try buf.appendSlice(allocator, "<section class=\"panel access-panel\">");
-    try appendSectionHead(&buf, allocator, "Access", "Roles and Devices", null);
+    try appendSectionHead(&buf, allocator, "Settings", "Access", null);
     if (flash) |item| {
         try appendTemplate(&buf, allocator,
             \\<div class="flash {kind}">{message}</div>
@@ -172,6 +173,7 @@ fn renderAccessPageWithFlash(allocator: Allocator, repo: Repo, flash: ?Flash) ![
     try appendRoleTable(&buf, allocator, &db);
     try appendDeviceTable(&buf, allocator, &db);
 
+    try shared.appendSettingsLayoutEnd(&buf, allocator);
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
 }
