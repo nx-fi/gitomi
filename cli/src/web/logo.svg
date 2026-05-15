@@ -1,13 +1,54 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 405 275" role="img" aria-labelledby="title desc">
   <title id="title">Gitomi logo</title>
-  <desc id="desc">An eye-shaped mark with a Git branch motif in the pupil.</desc>
-  <rect x="8" y="8" width="112" height="112" rx="26" fill="#1f883d"/>
-  <path d="M24 64c10.4-17.5 24.1-26 40-26s29.6 8.5 40 26c-10.4 17.5-24.1 26-40 26S34.4 81.5 24 64Z" fill="#ffffff"/>
-  <circle cx="64" cy="64" r="24" fill="#0d1117"/>
-  <circle cx="64" cy="64" r="12" fill="#2da44e"/>
-  <path d="M64 52v24m0-12h18" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="64" cy="52" r="5.5" fill="#ffffff"/>
-  <circle cx="64" cy="76" r="5.5" fill="#ffffff"/>
-  <circle cx="82" cy="64" r="5.5" fill="#ffffff"/>
-  <circle cx="64" cy="64" r="3.5" fill="#0d1117"/>
+  <desc id="desc">A stylized eye logo with teal circular nodes and a navy pupil.</desc>
+  <defs>
+    <style>
+      .navy {
+        fill: none;
+        stroke: #0b234a;
+        stroke-width: 15;
+        stroke-linecap: butt;
+        stroke-linejoin: round;
+      }
+
+      .teal-stroke {
+        fill: none;
+        stroke: #14b3a7;
+        stroke-width: 13;
+        stroke-linecap: butt;
+        stroke-linejoin: round;
+      }
+
+      .teal-node {
+        fill: #fff;
+        stroke: #14b3a7;
+        stroke-width: 12;
+      }
+
+      .pupil {
+        fill: #081f49;
+      }
+
+      .highlight {
+        fill: #fff;
+      }
+    </style>
+  </defs>
+
+  <path class="navy" d="M20 137.5C68 68 115 43 166 37" />
+  <path class="navy" d="M231 37C282 43 318 62 352 104" />
+  <path class="navy" d="M20 137.5C68 207 115 232 166 238" />
+  <path class="navy" d="M231 238C282 232 318 213 352 171" />
+
+  <path class="teal-stroke" d="M198 55V36" />
+  <path class="teal-stroke" d="M198 219V240" />
+  <path class="teal-stroke" d="M259 137.5H336" />
+  <path class="teal-stroke" d="M180 204A66 66 0 1 1 259 137.5A66 66 0 0 1 198 203" />
+
+  <circle class="teal-node" cx="198" cy="34" r="17" />
+  <circle class="teal-node" cx="198" cy="241" r="17" />
+  <circle class="teal-node" cx="356" cy="137.5" r="17" />
+
+  <circle class="pupil" cx="198" cy="137.5" r="44" />
+  <circle class="highlight" cx="213" cy="123" r="14" />
 </svg>

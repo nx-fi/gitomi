@@ -328,7 +328,7 @@ pub fn appendShellStart(
         \\</head>
         \\<body>
         \\<header class="topbar">
-        \\  <a class="brand" href="/"><img class="brand-logo" src="/logo.svg" alt="" width="32" height="32"><span>{repo_name}</span></a>
+        \\  <a class="brand" href="/"><img class="brand-logo" src="/logo.svg" alt="" width="47" height="32"><span>{repo_name}</span></a>
         \\  <nav>
     , .{ .repo_name = std.fs.path.basename(repo.root) });
     try appendNavLink(buf, allocator, active, "code", "/", "Code", null);
