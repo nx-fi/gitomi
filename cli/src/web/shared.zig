@@ -320,6 +320,7 @@ pub fn appendShellStart(
         \\ - Gitomi</title>
         \\  <link rel="icon" href="/logo.svg" type="image/svg+xml">
         \\  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/devicons/devicon@latest/devicon.min.css">
+        \\  <link rel="stylesheet" href="/vendor/katex/katex.min.css">
         \\  <link rel="stylesheet" href="/style.css">
     , .{});
     try appendShortcutConfigScript(buf, allocator, cfg_opt);
@@ -533,6 +534,11 @@ pub fn appendShellEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
         \\<script src="/shortcuts.js"></script>
         \\<script src="/tree.js"></script>
         \\<script src="/code.js"></script>
+        \\<script src="/vendor/marked/marked.umd.js"></script>
+        \\<script src="/vendor/dompurify/purify.min.js"></script>
+        \\<script src="/vendor/katex/katex.min.js"></script>
+        \\<script src="/vendor/katex/auto-render.min.js"></script>
+        \\<script src="/vendor/mermaid/mermaid.min.js"></script>
         \\<script src="/markdown.js"></script>
         \\<script src="/vendor/hljs/all-languages.js"></script>
         \\<script src="/highlight/zig.js"></script>
@@ -588,6 +594,38 @@ pub const MarkdownEditorOptions = struct {
     value: []const u8 = "",
     required: bool = true,
 };
+
+pub const MarkdownSourceOptions = struct {
+    ref: ?[]const u8 = null,
+    path: ?[]const u8 = null,
+};
+
+pub fn appendMarkdownSource(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    markdown: []const u8,
+    options: MarkdownSourceOptions,
+) !void {
+    const encoded_len = std.base64.standard.Encoder.calcSize(markdown.len);
+    const encoded = try allocator.alloc(u8, encoded_len);
+    defer allocator.free(encoded);
+    _ = std.base64.standard.Encoder.encode(encoded, markdown);
+
+    try buf.appendSlice(allocator, "<script type=\"application/octet-stream\" data-markdown-source data-markdown-encoding=\"base64\"");
+    if (options.ref) |value| {
+        try buf.appendSlice(allocator, " data-markdown-ref=\"");
+        try appendHtml(buf, allocator, value);
+        try buf.appendSlice(allocator, "\"");
+    }
+    if (options.path) |value| {
+        try buf.appendSlice(allocator, " data-markdown-path=\"");
+        try appendHtml(buf, allocator, value);
+        try buf.appendSlice(allocator, "\"");
+    }
+    try buf.append(allocator, '>');
+    try buf.appendSlice(allocator, encoded);
+    try buf.appendSlice(allocator, "</script>");
+}
 
 pub fn appendMarkdownEditor(buf: *std.ArrayList(u8), allocator: Allocator, options: MarkdownEditorOptions) !void {
     try appendTemplate(buf, allocator,

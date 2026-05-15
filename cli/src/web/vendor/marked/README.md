@@ -1,0 +1,6 @@
+Vendored browser build of marked 18.0.3.
+
+Source package: https://www.npmjs.com/package/marked
+Files copied:
+- lib/marked.umd.js
+- LICENSE

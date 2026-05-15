@@ -1,6 +1,5 @@
 const std = @import("std");
 const git = @import("../git.zig");
-const markdown_render = @import("markdown_render.zig");
 const repo_mod = @import("../repo.zig");
 const shared = @import("shared.zig");
 
@@ -175,7 +174,7 @@ pub fn renderCommitPage(allocator: Allocator, repo: Repo, target: []const u8) ![
     });
     if (std.mem.trim(u8, detail.body, " \t\r\n").len != 0) {
         try buf.appendSlice(allocator, "<div class=\"commit-message markdown-body\">");
-        try markdown_render.appendMarkdown(&buf, allocator, detail.body);
+        try shared.appendMarkdownSource(&buf, allocator, detail.body, .{});
         try buf.appendSlice(allocator, "</div>");
     }
     try buf.appendSlice(allocator, "</section>");

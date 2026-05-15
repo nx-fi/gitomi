@@ -8,7 +8,6 @@ const index = @import("index.zig");
 const io = @import("io.zig");
 const access_page = @import("web/access.zig");
 const issues_page = @import("web/issues.zig");
-const markdown_render = @import("web/markdown_render.zig");
 const milestones_page = @import("web/milestones.zig");
 const overview_page = @import("web/overview.zig");
 const projects_page = @import("web/projects.zig");
@@ -165,11 +164,7 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", code_js, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/markdown.js")) {
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", markdown_js, null);
-    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.eql(u8, request.path, "/markdown/preview")) {
-        var body: std.ArrayList(u8) = .empty;
-        defer body.deinit(allocator);
-        try markdown_render.appendMarkdown(&body, allocator, request.body);
-        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body.items, null);
+    } else if (try sendVendorAsset(allocator, stream, request.method, request.path)) {
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/vendor/hljs/all-languages.js")) {
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", highlight_js, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/highlight/zig.js")) {
@@ -546,6 +541,46 @@ fn sendRawBlobResponse(
     try shared.sendBinaryResponse(allocator, stream, 200, "OK", blob.content_type, blob.body, raw_blob_headers);
 }
 
+fn sendVendorAsset(
+    allocator: Allocator,
+    stream: std.net.Stream,
+    method: []const u8,
+    path: []const u8,
+) !bool {
+    if (!std.mem.eql(u8, method, "GET")) return false;
+    if (std.mem.eql(u8, path, "/vendor/marked/marked.umd.js")) {
+        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", marked_js, null);
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/vendor/dompurify/purify.min.js")) {
+        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", dompurify_js, null);
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/vendor/katex/katex.min.js")) {
+        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", katex_js, null);
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/vendor/katex/auto-render.min.js")) {
+        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", katex_auto_render_js, null);
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/vendor/katex/katex.min.css")) {
+        try shared.sendResponse(allocator, stream, 200, "OK", "text/css", katex_css, null);
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/vendor/mermaid/mermaid.min.js")) {
+        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", mermaid_js, null);
+        return true;
+    }
+    for (katex_fonts) |font| {
+        if (std.mem.eql(u8, path, font.path)) {
+            try shared.sendBinaryResponse(allocator, stream, 200, "OK", "font/woff2", font.body, null);
+            return true;
+        }
+    }
+    return false;
+}
+
 fn resolveByteRange(range: ByteRange, len: usize) ?ResolvedRange {
     if (len == 0) return null;
 
@@ -577,6 +612,12 @@ const shortcuts_js = @embedFile("web/shortcuts.js");
 const tree_js = @embedFile("web/tree.js");
 const code_js = @embedFile("web/code.js");
 const markdown_js = @embedFile("web/markdown.js");
+const marked_js = @embedFile("web/vendor/marked/marked.umd.js");
+const dompurify_js = @embedFile("web/vendor/dompurify/purify.min.js");
+const katex_js = @embedFile("web/vendor/katex/katex.min.js");
+const katex_auto_render_js = @embedFile("web/vendor/katex/auto-render.min.js");
+const katex_css = @embedFile("web/vendor/katex/katex.min.css");
+const mermaid_js = @embedFile("web/vendor/mermaid/mermaid.min.js");
 const highlight_js = @embedFile("web/vendor/hljs/all-languages.js");
 const highlight_zig_js = @embedFile("web/highlight/zig.js");
 const solidity_js = @embedFile("web/highlight/solidity.js");
@@ -584,6 +625,34 @@ const tla_js = @embedFile("web/highlight/tla.js");
 const highlight_init_js = @embedFile("web/highlight/init.js");
 const diff_js = @embedFile("web/diff.js");
 const merge_js = @embedFile("web/merge.js");
+
+const FontAsset = struct {
+    path: []const u8,
+    body: []const u8,
+};
+
+const katex_fonts = [_]FontAsset{
+    .{ .path = "/vendor/katex/fonts/KaTeX_AMS-Regular.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_AMS-Regular.woff2") },
+    .{ .path = "/vendor/katex/fonts/KaTeX_Caligraphic-Bold.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Caligraphic-Bold.woff2") },
+    .{ .path = "/vendor/katex/fonts/KaTeX_Caligraphic-Regular.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Caligraphic-Regular.woff2") },
+    .{ .path = "/vendor/katex/fonts/KaTeX_Fraktur-Bold.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Fraktur-Bold.woff2") },
+    .{ .path = "/vendor/katex/fonts/KaTeX_Fraktur-Regular.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Fraktur-Regular.woff2") },
+    .{ .path = "/vendor/katex/fonts/KaTeX_Main-Bold.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Main-Bold.woff2") },
+    .{ .path = "/vendor/katex/fonts/KaTeX_Main-BoldItalic.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Main-BoldItalic.woff2") },
+    .{ .path = "/vendor/katex/fonts/KaTeX_Main-Italic.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Main-Italic.woff2") },
+    .{ .path = "/vendor/katex/fonts/KaTeX_Main-Regular.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Main-Regular.woff2") },
+    .{ .path = "/vendor/katex/fonts/KaTeX_Math-BoldItalic.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Math-BoldItalic.woff2") },
+    .{ .path = "/vendor/katex/fonts/KaTeX_Math-Italic.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Math-Italic.woff2") },
+    .{ .path = "/vendor/katex/fonts/KaTeX_SansSerif-Bold.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_SansSerif-Bold.woff2") },
+    .{ .path = "/vendor/katex/fonts/KaTeX_SansSerif-Italic.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_SansSerif-Italic.woff2") },
+    .{ .path = "/vendor/katex/fonts/KaTeX_SansSerif-Regular.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_SansSerif-Regular.woff2") },
+    .{ .path = "/vendor/katex/fonts/KaTeX_Script-Regular.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Script-Regular.woff2") },
+    .{ .path = "/vendor/katex/fonts/KaTeX_Size1-Regular.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Size1-Regular.woff2") },
+    .{ .path = "/vendor/katex/fonts/KaTeX_Size2-Regular.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Size2-Regular.woff2") },
+    .{ .path = "/vendor/katex/fonts/KaTeX_Size3-Regular.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Size3-Regular.woff2") },
+    .{ .path = "/vendor/katex/fonts/KaTeX_Size4-Regular.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Size4-Regular.woff2") },
+    .{ .path = "/vendor/katex/fonts/KaTeX_Typewriter-Regular.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Typewriter-Regular.woff2") },
+};
 
 test "web request parser separates method path and body" {
     const raw =

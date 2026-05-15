@@ -3,7 +3,6 @@ const comment_mod = @import("../comment.zig");
 const event_mod = @import("../event.zig");
 const index = @import("../index.zig");
 const issue = @import("../issue.zig");
-const markdown_render = @import("markdown_render.zig");
 const reaction_mod = @import("../reaction.zig");
 const repo_mod = @import("../repo.zig");
 const shared = @import("shared.zig");
@@ -974,7 +973,7 @@ fn renderIssueDetailPageWithCommentForm(
     if (body.len == 0) {
         try buf.appendSlice(allocator, "<p class=\"muted\">No description provided.</p>");
     } else {
-        try markdown_render.appendMarkdown(&buf, allocator, body);
+        try shared.appendMarkdownSource(&buf, allocator, body, .{});
     }
     try buf.appendSlice(allocator,
         \\          </div>
@@ -1396,7 +1395,7 @@ fn appendIssueComments(
         if (redacted) {
             try buf.appendSlice(allocator, "<p class=\"muted\">Comment redacted.</p>");
         } else {
-            try markdown_render.appendMarkdown(buf, allocator, body);
+            try shared.appendMarkdownSource(buf, allocator, body, .{});
         }
         try buf.appendSlice(allocator, "</div>");
         try appendReactionBar(buf, allocator, db, "comment", id, raw_ref, comment_ref_value, current_actor);

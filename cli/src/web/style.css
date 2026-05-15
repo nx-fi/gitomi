@@ -6935,6 +6935,11 @@ main.page-code:has(.root-code-toolbar) .repo-actions {
 .math-block {
   font-family: "Cambria Math", "STIX Two Math", "Times New Roman", serif;
 }
+.markdown-body .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 2px;
+}
 .math-inline {
   padding: 0 2px;
   color: var(--text);
@@ -6987,6 +6992,11 @@ main.page-code:has(.root-code-toolbar) .repo-actions {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 6px;
+}
+.mermaid-diagram svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
 }
 .mermaid-edge {
   stroke: var(--muted);
