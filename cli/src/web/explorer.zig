@@ -4,6 +4,7 @@ const repo_mod = @import("../repo.zig");
 const shared = @import("shared.zig");
 const code_symbols = @import("symbols.zig");
 const source_stats = @import("source_stats.zig");
+const sync = @import("../sync.zig");
 
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
@@ -21,6 +22,9 @@ const commitHref = shared.commitHref;
 const commitsHref = shared.commitsHref;
 const rawHref = shared.rawHref;
 const runCommand = git.runCommand;
+const sendPlainResponse = shared.sendPlainResponse;
+const sendRedirect = shared.sendRedirect;
+const sendResponse = shared.sendResponse;
 
 const max_blob_display_bytes = 512 * 1024;
 const max_blame_display_bytes = 16 * 1024 * 1024;
@@ -147,6 +151,34 @@ const RootEntryCounts = struct {
     directories: usize = 0,
 };
 
+const RepositoryOperationState = enum {
+    clean,
+    merge,
+    rebase,
+    cherry_pick,
+    revert,
+};
+
+const RootGitStatus = struct {
+    branch: []u8,
+    ahead: usize = 0,
+    behind: usize = 0,
+    staged_paths: usize = 0,
+    unstaged_paths: usize = 0,
+    untracked_paths: usize = 0,
+    conflict_paths: usize = 0,
+    lines_added: u64 = 0,
+    lines_removed: u64 = 0,
+    worktree_count: usize = 0,
+    stash_count: usize = 0,
+    disk_size_bytes: ?usize = null,
+    operation_state: RepositoryOperationState = .clean,
+
+    fn deinit(self: RootGitStatus, allocator: Allocator) void {
+        allocator.free(self.branch);
+    }
+};
+
 const RootMarkdownDoc = struct {
     id: []const u8,
     label: []const u8,
@@ -170,6 +202,22 @@ const PathQuery = union(enum) {
     }
 };
 
+const CodeSyncMode = enum {
+    both,
+    pull,
+    push,
+};
+
+const CodeSyncFlashKind = enum {
+    success,
+    failure,
+};
+
+const CodeSyncFlash = struct {
+    kind: CodeSyncFlashKind,
+    message: []const u8,
+};
+
 pub fn renderCodePage(allocator: Allocator, repo: Repo, target: []const u8) ![]u8 {
     const ref = try targetRefOwned(allocator, repo, target);
     defer allocator.free(ref);
@@ -182,7 +230,8 @@ pub fn renderCodePage(allocator: Allocator, repo: Repo, target: []const u8) ![]u
     };
 
     if (path.len == 0) {
-        return renderTreePage(allocator, repo, ref, path);
+        const sync_flash = try codeSyncFlashFromTarget(allocator, target);
+        return renderTreePage(allocator, repo, ref, path, sync_flash);
     }
 
     const spec = try objectSpec(allocator, ref, path);
@@ -197,9 +246,98 @@ pub fn renderCodePage(allocator: Allocator, repo: Repo, target: []const u8) ![]u
         return renderBlobPage(allocator, repo, ref, path, spec, view);
     }
     if (std.mem.eql(u8, kind, "tree")) {
-        return renderTreePage(allocator, repo, ref, path);
+        return renderTreePage(allocator, repo, ref, path, null);
     }
     return renderMissingPathPage(allocator, repo, ref, path);
+}
+
+pub fn handleCodeSyncPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
+    const action_owned = (try formValueOwned(allocator, form_body, "action")) orelse try allocator.dupe(u8, "both");
+    defer allocator.free(action_owned);
+    const ref_owned = (try formValueOwned(allocator, form_body, "ref")) orelse try defaultRef(allocator, repo);
+    defer allocator.free(ref_owned);
+
+    const action = std.mem.trim(u8, action_owned, " \t\r\n");
+    const mode = parseCodeSyncMode(action) orelse {
+        try sendPlainResponse(allocator, stream, 400, "Bad Request", "Unknown sync action\n");
+        return;
+    };
+
+    runCodeSync(allocator, mode) catch |err| {
+        try sendCodeSyncFailure(allocator, repo, stream, ref_owned, err);
+        return;
+    };
+
+    const location = try codeSyncRedirectOwned(allocator, ref_owned, mode);
+    defer allocator.free(location);
+    try sendRedirect(allocator, stream, location);
+}
+
+fn runCodeSync(allocator: Allocator, mode: CodeSyncMode) !void {
+    switch (mode) {
+        .both => {
+            try sync.syncPull(allocator, "origin");
+            try sync.syncPush(allocator, "origin");
+        },
+        .pull => try sync.syncPull(allocator, "origin"),
+        .push => try sync.syncPush(allocator, "origin"),
+    }
+}
+
+fn sendCodeSyncFailure(
+    allocator: Allocator,
+    repo: Repo,
+    stream: std.net.Stream,
+    ref: []const u8,
+    err: anyerror,
+) !void {
+    const message = try std.fmt.allocPrint(allocator, "Sync failed: {s}. Check that origin is reachable and the Gitomi refs are valid.", .{@errorName(err)});
+    defer allocator.free(message);
+    const body = try renderTreePage(allocator, repo, ref, "", .{ .kind = .failure, .message = message });
+    defer allocator.free(body);
+    try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", body, null);
+}
+
+fn codeSyncRedirectOwned(allocator: Allocator, ref: []const u8, mode: CodeSyncMode) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try buf.appendSlice(allocator, "/code?ref=");
+    try shared.appendUrlEncoded(&buf, allocator, ref);
+    try buf.appendSlice(allocator, "&sync=");
+    try shared.appendUrlEncoded(&buf, allocator, codeSyncModeQueryValue(mode));
+    return buf.toOwnedSlice(allocator);
+}
+
+fn codeSyncFlashFromTarget(allocator: Allocator, target: []const u8) !?CodeSyncFlash {
+    const sync_value = try queryValueOwned(allocator, target, "sync");
+    defer if (sync_value) |value| allocator.free(value);
+    const value = sync_value orelse return null;
+    const mode = parseCodeSyncMode(std.mem.trim(u8, value, " \t\r\n")) orelse return null;
+    return .{ .kind = .success, .message = codeSyncSuccessMessage(mode) };
+}
+
+fn parseCodeSyncMode(value: []const u8) ?CodeSyncMode {
+    if (std.mem.eql(u8, value, "both") or std.mem.eql(u8, value, "sync") or std.mem.eql(u8, value, "ok")) return .both;
+    if (std.mem.eql(u8, value, "pull")) return .pull;
+    if (std.mem.eql(u8, value, "push")) return .push;
+    return null;
+}
+
+fn codeSyncModeQueryValue(mode: CodeSyncMode) []const u8 {
+    return switch (mode) {
+        .both => "both",
+        .pull => "pull",
+        .push => "push",
+    };
+}
+
+fn codeSyncSuccessMessage(mode: CodeSyncMode) []const u8 {
+    return switch (mode) {
+        .both => "Sync completed against origin.",
+        .pull => "Pulled Gitomi refs from origin.",
+        .push => "Pushed Gitomi refs to origin.",
+    };
 }
 
 pub fn renderBlamePage(allocator: Allocator, repo: Repo, target: []const u8) ![]u8 {
@@ -293,7 +431,7 @@ pub fn loadRawBlob(allocator: Allocator, repo: Repo, target: []const u8) !?RawBl
     };
 }
 
-fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) ![]u8 {
+fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8, sync_flash: ?CodeSyncFlash) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
@@ -325,6 +463,7 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
 
             try appendRootPageGridStart(&buf, allocator);
             try appendRootCodeToolbar(&buf, allocator, ref, branches, branch_count, tag_count, search_entries_opt);
+            if (sync_flash) |flash| try appendCodeSyncFlash(&buf, allocator, flash);
             try appendRootCodePanelStart(&buf, allocator);
             try appendRootCommitBar(&buf, allocator, ref, summary_opt, commit_count);
             try appendRootTreeListing(&buf, allocator, ref, entries);
@@ -906,16 +1045,30 @@ fn appendRootCodeToolbar(
         \\        <button type="button" role="menuitem">Upload files</button>
         \\      </div>
         \\    </details>
-        \\    <details class="root-action-menu root-code-menu" data-popover-menu>
-        \\      <summary class="button primary root-menu-button"><span class="button-icon icon-code" aria-hidden="true"></span>Code<span class="root-caret" aria-hidden="true"></span></summary>
-        \\      <div class="root-action-popover root-code-popover" role="menu">
-        \\        <div class="root-code-popover-head">Clone</div>
-        \\        <code>git clone .</code>
-        \\      </div>
+        \\    <details class="root-action-menu root-sync-menu" data-popover-menu>
+        \\      <summary class="button primary root-menu-button" title="Sync Gitomi refs with origin"><span class="button-icon icon-sync" aria-hidden="true"></span>Sync<span class="root-caret" aria-hidden="true"></span></summary>
+        \\      <form class="root-action-popover root-sync-popover" method="post" action="/code/sync" role="menu">
+        \\        <input type="hidden" name="ref" value="{ref}">
+        \\        <button type="submit" name="action" value="both" role="menuitem">Pull and push</button>
+        \\        <button type="submit" name="action" value="pull" role="menuitem">Pull from origin</button>
+        \\        <button type="submit" name="action" value="push" role="menuitem">Push to origin</button>
+        \\      </form>
         \\    </details>
         \\  </div>
         \\</div>
-    , .{});
+    , .{ .ref = ref });
+}
+
+fn appendCodeSyncFlash(buf: *std.ArrayList(u8), allocator: Allocator, flash: CodeSyncFlash) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="flash {kind}">{message}</div>
+    , .{
+        .kind = switch (flash.kind) {
+            .success => "success",
+            .failure => "error",
+        },
+        .message = flash.message,
+    });
 }
 
 fn appendRootSearchIndex(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, entries: []const TreeNavEntry) !void {
@@ -1340,7 +1493,8 @@ fn appendRootSidebar(
     entries: []const TreeEntry,
 ) !void {
     const counts = rootEntryCounts(entries);
-    const changes = git.workingTreeChangeCount(allocator) catch 0;
+    const git_status = loadRootGitStatus(allocator, repo) catch null;
+    defer if (git_status) |status| status.deinit(allocator);
     const about_summary = loadReadmeSummaryOwned(allocator, repo, ref, entries) catch null;
     defer if (about_summary) |summary| allocator.free(summary);
     var languages_opt = source_stats.loadRepositoryStats(allocator, repo) catch null;
@@ -1362,22 +1516,266 @@ fn appendRootSidebar(
         \\      <dl class="root-meta-list">
         \\        <div><dt>Ref</dt><dd><code>{ref}</code></dd></div>
         \\        <div><dt>Root</dt><dd>{files} {files_label}, {directories} {directories_label}</dd></div>
-        \\        <div><dt>Working tree</dt><dd>{changes} {changes_label}</dd></div>
-        \\      </dl>
-        \\    </div>
     , .{
         .ref = ref,
         .files = counts.files,
         .files_label = if (counts.files == 1) "file" else "files",
         .directories = counts.directories,
         .directories_label = if (counts.directories == 1) "folder" else "folders",
-        .changes = changes,
-        .changes_label = if (changes == 1) "change" else "changes",
     });
+    if (git_status) |status| {
+        try appendRootRepositoryStats(buf, allocator, status);
+    } else {
+        try appendTemplate(buf, allocator,
+            \\        <div><dt>Checkout</dt><dd>Unavailable</dd></div>
+        , .{});
+    }
+    try appendTemplate(buf, allocator,
+        \\      </dl>
+        \\    </div>
+    , .{});
 
     try appendRootLanguages(buf, allocator, languages_opt);
     try appendRootSloc(buf, allocator, languages_opt);
     try appendTemplate(buf, allocator, "</section></aside>", .{});
+}
+
+fn appendRootRepositoryStats(buf: *std.ArrayList(u8), allocator: Allocator, status: RootGitStatus) !void {
+    try appendTemplate(buf, allocator,
+        \\        <div><dt>Checkout</dt><dd><code class="root-git-status-line">
+    , .{});
+    try appendRootGitStatusCompact(buf, allocator, status);
+    try appendTemplate(buf, allocator,
+        \\</code></dd></div>
+        \\        <div><dt>Changes</dt><dd>{staged} staged, {modified} modified, {untracked} untracked</dd></div>
+        \\        <div><dt>Diff</dt><dd><span class="root-diffstat"><span class="root-diffstat-added">+{added}</span><span class="root-diffstat-removed">-{removed}</span></span></dd></div>
+        \\        <div><dt>State</dt><dd>
+    , .{
+        .staged = shared.groupedUnsigned(@intCast(status.staged_paths)),
+        .modified = shared.groupedUnsigned(@intCast(status.unstaged_paths)),
+        .untracked = shared.groupedUnsigned(@intCast(status.untracked_paths)),
+        .added = shared.groupedUnsigned(status.lines_added),
+        .removed = shared.groupedUnsigned(status.lines_removed),
+    });
+    try appendRootRepositoryState(buf, allocator, status);
+    try appendTemplate(buf, allocator,
+        \\</dd></div>
+        \\        <div><dt>Worktrees</dt><dd>{worktrees}</dd></div>
+        \\        <div><dt>Stashes</dt><dd>{stashes}</dd></div>
+        \\        <div><dt>Size</dt><dd>
+    , .{
+        .worktrees = shared.groupedUnsigned(@intCast(status.worktree_count)),
+        .stashes = shared.groupedUnsigned(@intCast(status.stash_count)),
+    });
+    if (status.disk_size_bytes) |bytes| {
+        try appendByteSize(buf, allocator, bytes);
+    } else {
+        try appendTemplate(buf, allocator, "Unknown", .{});
+    }
+    try appendTemplate(buf, allocator, "</dd></div>", .{});
+}
+
+fn appendRootGitStatusCompact(buf: *std.ArrayList(u8), allocator: Allocator, status: RootGitStatus) !void {
+    try buf.append(allocator, '(');
+    try shared.appendHtml(buf, allocator, status.branch);
+    try buf.append(allocator, ')');
+    if (status.ahead != 0) try appendStatusMarker(buf, allocator, "^", status.ahead);
+    if (status.behind != 0) try appendStatusMarker(buf, allocator, "v", status.behind);
+    if (status.staged_paths != 0) try appendStatusMarker(buf, allocator, "+", status.staged_paths);
+    if (status.unstaged_paths != 0) try appendStatusMarker(buf, allocator, "!", status.unstaged_paths);
+    if (status.untracked_paths != 0) try appendStatusMarker(buf, allocator, "?", status.untracked_paths);
+    if (status.conflict_paths != 0) try appendStatusMarker(buf, allocator, "U", status.conflict_paths);
+    if (status.lines_added != 0 or status.lines_removed != 0) {
+        try appendTemplate(buf, allocator, "(+{added}-{removed})", .{
+            .added = shared.groupedUnsigned(status.lines_added),
+            .removed = shared.groupedUnsigned(status.lines_removed),
+        });
+    }
+}
+
+fn appendStatusMarker(buf: *std.ArrayList(u8), allocator: Allocator, marker: []const u8, count: usize) !void {
+    try buf.appendSlice(allocator, marker);
+    try appendTemplate(buf, allocator, "{count}", .{ .count = shared.groupedUnsigned(@intCast(count)) });
+}
+
+fn appendRootRepositoryState(buf: *std.ArrayList(u8), allocator: Allocator, status: RootGitStatus) !void {
+    if (status.conflict_paths != 0) {
+        try appendTemplate(buf, allocator, "{conflicts} {label}", .{
+            .conflicts = shared.groupedUnsigned(@intCast(status.conflict_paths)),
+            .label = if (status.conflict_paths == 1) "conflict" else "conflicts",
+        });
+        if (status.operation_state != .clean) {
+            try appendTemplate(buf, allocator, ", {operation}", .{
+                .operation = repositoryOperationLabel(status.operation_state),
+            });
+        }
+        return;
+    }
+    try appendTemplate(buf, allocator, "{state}", .{
+        .state = if (status.operation_state == .clean) "clean" else repositoryOperationLabel(status.operation_state),
+    });
+}
+
+fn repositoryOperationLabel(state: RepositoryOperationState) []const u8 {
+    return switch (state) {
+        .clean => "clean",
+        .merge => "merge in progress",
+        .rebase => "rebase in progress",
+        .cherry_pick => "cherry-pick in progress",
+        .revert => "revert in progress",
+    };
+}
+
+fn loadRootGitStatus(allocator: Allocator, repo: Repo) !RootGitStatus {
+    var status = RootGitStatus{ .branch = try allocator.dupe(u8, "HEAD") };
+    errdefer status.deinit(allocator);
+
+    if (try gitMaybe(allocator, repo, &.{ "status", "--porcelain=v2", "--branch" }, git.max_git_output)) |raw| {
+        defer allocator.free(raw);
+        try parseRootGitStatusV2(allocator, &status, raw);
+    }
+    try loadRootDiffStats(allocator, repo, &status);
+    status.worktree_count = loadWorktreeCount(allocator, repo) catch 1;
+    if (status.worktree_count == 0) status.worktree_count = 1;
+    status.stash_count = loadStashCount(allocator, repo) catch 0;
+    status.disk_size_bytes = loadDiskSizeBytes(allocator, repo) catch null;
+    status.operation_state = loadRepositoryOperationState(allocator, repo) catch .clean;
+
+    return status;
+}
+
+fn parseRootGitStatusV2(allocator: Allocator, status: *RootGitStatus, raw: []const u8) !void {
+    status.ahead = 0;
+    status.behind = 0;
+    status.staged_paths = 0;
+    status.unstaged_paths = 0;
+    status.untracked_paths = 0;
+    status.conflict_paths = 0;
+
+    var lines = std.mem.splitScalar(u8, raw, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trimRight(u8, raw_line, "\r");
+        if (line.len == 0) continue;
+        if (std.mem.startsWith(u8, line, "# branch.head ")) {
+            const branch = line["# branch.head ".len..];
+            const replacement = try allocator.dupe(u8, if (std.mem.eql(u8, branch, "(detached)")) "HEAD" else branch);
+            allocator.free(status.branch);
+            status.branch = replacement;
+            continue;
+        }
+        if (std.mem.startsWith(u8, line, "# branch.ab ")) {
+            parseStatusAheadBehind(status, line["# branch.ab ".len..]);
+            continue;
+        }
+        switch (line[0]) {
+            '1', '2' => parseOrdinaryStatusRecord(status, line),
+            'u' => status.conflict_paths += 1,
+            '?' => status.untracked_paths += 1,
+            else => {},
+        }
+    }
+}
+
+fn parseStatusAheadBehind(status: *RootGitStatus, value: []const u8) void {
+    var fields = std.mem.tokenizeAny(u8, value, " \t\r\n");
+    if (fields.next()) |ahead| status.ahead = parseSignedStatusCount(ahead, '+') orelse 0;
+    if (fields.next()) |behind| status.behind = parseSignedStatusCount(behind, '-') orelse 0;
+}
+
+fn parseSignedStatusCount(value: []const u8, sign: u8) ?usize {
+    if (value.len < 2 or value[0] != sign) return null;
+    return std.fmt.parseUnsigned(usize, value[1..], 10) catch null;
+}
+
+fn parseOrdinaryStatusRecord(status: *RootGitStatus, line: []const u8) void {
+    if (line.len < 4 or line[1] != ' ') return;
+    const index_status = line[2];
+    const worktree_status = line[3];
+    if (index_status != '.' and index_status != ' ') status.staged_paths += 1;
+    if (worktree_status != '.' and worktree_status != ' ') status.unstaged_paths += 1;
+}
+
+fn loadRootDiffStats(allocator: Allocator, repo: Repo, status: *RootGitStatus) !void {
+    const raw = try gitMaybe(allocator, repo, &.{ "diff", "--numstat", "HEAD", "--" }, git.max_git_output) orelse return;
+    defer allocator.free(raw);
+    parseRootDiffNumstat(status, raw);
+}
+
+fn parseRootDiffNumstat(status: *RootGitStatus, raw: []const u8) void {
+    status.lines_added = 0;
+    status.lines_removed = 0;
+
+    var lines = std.mem.splitScalar(u8, raw, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        var fields = std.mem.splitScalar(u8, line, '\t');
+        const added_raw = fields.next() orelse continue;
+        const removed_raw = fields.next() orelse continue;
+        if (std.mem.eql(u8, added_raw, "-") or std.mem.eql(u8, removed_raw, "-")) continue;
+        const added = std.fmt.parseUnsigned(u64, added_raw, 10) catch continue;
+        const removed = std.fmt.parseUnsigned(u64, removed_raw, 10) catch continue;
+        status.lines_added +|= added;
+        status.lines_removed +|= removed;
+    }
+}
+
+fn loadWorktreeCount(allocator: Allocator, repo: Repo) !usize {
+    const raw = try gitMaybe(allocator, repo, &.{ "worktree", "list", "--porcelain" }, git.max_git_output) orelse return 0;
+    defer allocator.free(raw);
+
+    var count: usize = 0;
+    var lines = std.mem.splitScalar(u8, raw, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "worktree ")) count += 1;
+    }
+    return count;
+}
+
+fn loadStashCount(allocator: Allocator, repo: Repo) !usize {
+    const raw = try gitMaybe(allocator, repo, &.{ "stash", "list" }, git.max_git_output) orelse return 0;
+    defer allocator.free(raw);
+    return countNonEmptyLines(raw);
+}
+
+fn loadDiskSizeBytes(allocator: Allocator, repo: Repo) !?usize {
+    var argv = [_][]const u8{ "du", "-sk", repo.root };
+    var result = try runCommand(allocator, &argv, null, 1024);
+    defer result.deinit();
+    if (result.exitCode() != 0) return null;
+
+    var fields = std.mem.tokenizeAny(u8, result.stdout, " \t\r\n");
+    const kibibytes_raw = fields.next() orelse return null;
+    const kibibytes = std.fmt.parseUnsigned(usize, kibibytes_raw, 10) catch return null;
+    const max = std.math.maxInt(usize);
+    if (kibibytes > max / 1024) return max;
+    return kibibytes * 1024;
+}
+
+fn loadRepositoryOperationState(allocator: Allocator, repo: Repo) !RepositoryOperationState {
+    if (try gitPathExists(allocator, repo, "rebase-merge")) return .rebase;
+    if (try gitPathExists(allocator, repo, "rebase-apply")) return .rebase;
+    if (try gitPathExists(allocator, repo, "MERGE_HEAD")) return .merge;
+    if (try gitPathExists(allocator, repo, "CHERRY_PICK_HEAD")) return .cherry_pick;
+    if (try gitPathExists(allocator, repo, "REVERT_HEAD")) return .revert;
+    return .clean;
+}
+
+fn gitPathExists(allocator: Allocator, repo: Repo, git_path: []const u8) !bool {
+    const raw = try gitMaybe(allocator, repo, &.{ "rev-parse", "--path-format=absolute", "--git-path", git_path }, 1024) orelse return false;
+    defer allocator.free(raw);
+    const path = std.mem.trim(u8, raw, " \t\r\n");
+    if (path.len == 0) return false;
+    std.fs.accessAbsolute(path, .{}) catch return false;
+    return true;
+}
+
+fn countNonEmptyLines(raw: []const u8) usize {
+    var count: usize = 0;
+    var lines = std.mem.splitScalar(u8, raw, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.trim(u8, line, " \t\r\n").len != 0) count += 1;
+    }
+    return count;
 }
 
 fn appendRootLanguages(buf: *std.ArrayList(u8), allocator: Allocator, stats_opt: ?source_stats.Stats) !void {
@@ -2783,6 +3181,20 @@ fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const
     return null;
 }
 
+fn formValueOwned(allocator: Allocator, body: []const u8, wanted_key: []const u8) !?[]u8 {
+    var pairs = std.mem.splitScalar(u8, body, '&');
+    while (pairs.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
+        const raw_key = pair[0..eq];
+        const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
+        const key = try percentDecode(allocator, raw_key);
+        defer allocator.free(key);
+        if (!std.mem.eql(u8, key, wanted_key)) continue;
+        return try percentDecode(allocator, raw_value);
+    }
+    return null;
+}
+
 fn percentDecode(allocator: Allocator, value: []const u8) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -3007,6 +3419,57 @@ test "web explorer parses remote-tracking branch names" {
     try std.testing.expectEqualStrings("fix/sync-bootstrap-flow", remoteTrackingBranchName("refs/remotes/origin/fix/sync-bootstrap-flow").?);
     try std.testing.expect(remoteTrackingBranchName("refs/heads/main") == null);
     try std.testing.expect(remoteTrackingBranchName("refs/remotes/origin") == null);
+}
+
+test "web explorer parses code sync modes" {
+    try std.testing.expectEqual(CodeSyncMode.both, parseCodeSyncMode("both").?);
+    try std.testing.expectEqual(CodeSyncMode.both, parseCodeSyncMode("ok").?);
+    try std.testing.expectEqual(CodeSyncMode.pull, parseCodeSyncMode("pull").?);
+    try std.testing.expectEqual(CodeSyncMode.push, parseCodeSyncMode("push").?);
+    try std.testing.expect(parseCodeSyncMode("clone") == null);
+}
+
+test "web explorer parses prompt-style repository status" {
+    var status = RootGitStatus{ .branch = try std.testing.allocator.dupe(u8, "HEAD") };
+    defer status.deinit(std.testing.allocator);
+
+    try parseRootGitStatusV2(std.testing.allocator, &status,
+        \\# branch.oid 0123456789abcdef
+        \\# branch.head main
+        \\# branch.upstream origin/main
+        \\# branch.ab +2 -1
+        \\1 M. N... 100644 100644 100644 a b cli/src/web.zig
+        \\1 .M N... 100644 100644 100644 a b README.md
+        \\? scratch.txt
+        \\u UU N... 100644 100644 100644 100644 a b c d conflict.txt
+        \\
+    );
+    parseRootDiffNumstat(&status, "24\t16\tcli/src/web.zig\n-\t-\tassets/logo.png\n");
+
+    try std.testing.expectEqualStrings("main", status.branch);
+    try std.testing.expectEqual(@as(usize, 2), status.ahead);
+    try std.testing.expectEqual(@as(usize, 1), status.behind);
+    try std.testing.expectEqual(@as(usize, 1), status.staged_paths);
+    try std.testing.expectEqual(@as(usize, 1), status.unstaged_paths);
+    try std.testing.expectEqual(@as(usize, 1), status.untracked_paths);
+    try std.testing.expectEqual(@as(usize, 1), status.conflict_paths);
+    try std.testing.expectEqual(@as(u64, 24), status.lines_added);
+    try std.testing.expectEqual(@as(u64, 16), status.lines_removed);
+}
+
+test "web explorer renders compact repository status" {
+    var status = RootGitStatus{
+        .branch = try std.testing.allocator.dupe(u8, "main"),
+        .staged_paths = 3,
+        .lines_added = 189,
+        .lines_removed = 26,
+    };
+    defer status.deinit(std.testing.allocator);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    try appendRootGitStatusCompact(&buf, std.testing.allocator, status);
+    try std.testing.expectEqualStrings("(main)+3(+189-26)", buf.items);
 }
 
 test "web explorer only falls back to remote tracking for branch shorthands" {
