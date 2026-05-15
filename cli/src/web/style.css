@@ -999,6 +999,7 @@ main.page-code:has(.root-page-grid) {
 }
 .issue-row-milestone,
 .issue-comments,
+.issue-task-progress,
 .issue-row-assignees {
   display: inline-flex;
   align-items: center;
@@ -1013,6 +1014,17 @@ main.page-code:has(.root-page-grid) {
   max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.issue-task-progress {
+  color: var(--muted);
+}
+.issue-task-progress-icon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  border: 2px solid var(--blue);
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 2px var(--panel);
 }
 .issue-milestone-icon {
   position: relative;
@@ -7074,12 +7086,35 @@ main.page-code:has(.root-code-toolbar) .repo-actions {
 .markdown-body .task-list-item {
   list-style: none;
 }
+.markdown-body .task-list-item[draggable="true"] {
+  position: relative;
+  border-radius: 6px;
+  cursor: grab;
+}
+.markdown-body .task-list-item[draggable="true"]:active {
+  cursor: grabbing;
+}
+.markdown-body .task-list-item.is-dragging {
+  opacity: 0.55;
+}
+.markdown-body .task-list-item.is-drop-before {
+  box-shadow: inset 0 2px 0 var(--blue);
+}
+.markdown-body .task-list-item.is-drop-after {
+  box-shadow: inset 0 -2px 0 var(--blue);
+}
 .markdown-body .task-list-checkbox {
   width: 1em;
   height: 1em;
   margin: 0 0.45em 0 0;
   vertical-align: -0.12em;
   accent-color: var(--green);
+}
+.markdown-body[data-checklist-update-action] .task-list-checkbox:not(:disabled) {
+  cursor: pointer;
+}
+.markdown-body.markdown-checklist-saving .task-list-checkbox {
+  cursor: progress;
 }
 .markdown-body li + li {
   margin-top: 4px;

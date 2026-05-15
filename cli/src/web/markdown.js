@@ -533,17 +533,264 @@
     });
   }
 
-  function normalizeTaskListInputs(root) {
+  function splitMarkdownLines(source) {
+    return String(source || "").split("\n");
+  }
+
+  function trimLineEndCarriage(line) {
+    return String(line || "").replace(/\r$/, "");
+  }
+
+  function markdownFenceMarker(line) {
+    const match = /^( {0,3})(`{3,}|~{3,})/.exec(trimLineEndCarriage(line));
+    if (!match) return null;
+    return { char: match[2].charAt(0), length: match[2].length };
+  }
+
+  function markdownTaskLineInfo(line) {
+    const match = /^([ \t]*)(?:[-*+]|\d+[.)])([ \t]+)\[([ xX])\](?=$|[ \t])/.exec(trimLineEndCarriage(line));
+    if (!match) return null;
+    return {
+      checked: match[3] === "x" || match[3] === "X",
+      indent: match[1].replace(/\t/g, "    ").length,
+    };
+  }
+
+  function markdownTaskItemsFromLines(lines) {
+    const items = [];
+    let inFence = false;
+    let fence = null;
+    lines.forEach(function (line, lineIndex) {
+      const marker = markdownFenceMarker(line);
+      if (marker) {
+        if (!inFence) {
+          inFence = true;
+          fence = marker;
+        } else if (fence && marker.char === fence.char && marker.length >= fence.length) {
+          inFence = false;
+          fence = null;
+        }
+        return;
+      }
+      if (inFence) return;
+
+      const task = markdownTaskLineInfo(line);
+      if (task) {
+        items.push({
+          lineIndex: lineIndex,
+          checked: task.checked,
+          indent: task.indent,
+        });
+      }
+    });
+    return items;
+  }
+
+  function markdownTaskItems(source) {
+    return markdownTaskItemsFromLines(splitMarkdownLines(source));
+  }
+
+  function setMarkdownTaskChecked(source, taskIndex, checked) {
+    const lines = splitMarkdownLines(source);
+    const items = markdownTaskItemsFromLines(lines);
+    const item = items[taskIndex];
+    if (!item) return source;
+    lines[item.lineIndex] = lines[item.lineIndex].replace(
+      /^([ \t]*(?:[-*+]|\d+[.)])[ \t]+\[)[ xX](\](?=$|[ \t]))/,
+      "$1" + (checked ? "x" : " ") + "$2",
+    );
+    return lines.join("\n");
+  }
+
+  function taskBlockFromItems(lines, items, taskIndex) {
+    const item = items[taskIndex];
+    if (!item) return null;
+    let end = lines.length;
+    for (let index = item.lineIndex + 1; index < lines.length; index += 1) {
+      const next = markdownTaskLineInfo(lines[index]);
+      if (next && next.indent <= item.indent) {
+        end = index;
+        break;
+      }
+    }
+    return {
+      start: item.lineIndex,
+      end: end,
+    };
+  }
+
+  function moveMarkdownTask(source, fromIndex, toIndex, after) {
+    if (fromIndex === toIndex) return source;
+    const lines = splitMarkdownLines(source);
+    const items = markdownTaskItemsFromLines(lines);
+    const from = taskBlockFromItems(lines, items, fromIndex);
+    const to = taskBlockFromItems(lines, items, toIndex);
+    if (!from || !to) return source;
+    if (from.start <= to.start && to.start < from.end) return source;
+
+    const moved = lines.splice(from.start, from.end - from.start);
+    let insertAt = after ? to.end : to.start;
+    if (from.start < insertAt) insertAt -= moved.length;
+    lines.splice(insertAt, 0, ...moved);
+    return lines.join("\n");
+  }
+
+  function updateIssueMenuMarkdown(root, source) {
+    const article = root.closest(".issue-comment-box");
+    const template = article ? article.querySelector("template[data-issue-markdown]") : null;
+    if (template) template.textContent = source || "";
+  }
+
+  async function saveChecklistMarkdown(root, source) {
+    const action = root.dataset.checklistUpdateAction || "";
+    if (!action) throw new Error("Checklist update action is missing.");
+
+    const params = new URLSearchParams();
+    params.set("body", source);
+    const response = await fetch(action, {
+      method: "POST",
+      headers: {
+        "Accept": "text/plain",
+        "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+      },
+      body: params.toString(),
+    });
+    if (!response.ok) throw new Error("Checklist update failed.");
+  }
+
+  function markdownRenderContext(root) {
+    return root.gitomiMarkdownContext || { ref: "", path: "" };
+  }
+
+  async function applyChecklistMarkdown(root, nextSource) {
+    if (root.gitomiChecklistSaving) return;
+    const previousSource = root.gitomiMarkdownSource || "";
+    if (nextSource === previousSource) return;
+
+    root.gitomiChecklistSaving = true;
+    root.classList.add("markdown-checklist-saving");
+    root.gitomiMarkdownSource = nextSource;
+    renderMarkdownToElement(root, nextSource, markdownRenderContext(root));
+    try {
+      await saveChecklistMarkdown(root, nextSource);
+    } catch (_) {
+      root.gitomiMarkdownSource = previousSource;
+      window.alert("Could not update checklist.");
+    } finally {
+      root.gitomiChecklistSaving = false;
+      root.classList.remove("markdown-checklist-saving");
+      renderMarkdownToElement(root, root.gitomiMarkdownSource || "", markdownRenderContext(root));
+    }
+  }
+
+  function clearTaskDropClasses(root) {
+    root.querySelectorAll(".task-list-item.is-dragging, .task-list-item.is-drop-before, .task-list-item.is-drop-after").forEach(function (item) {
+      item.classList.remove("is-dragging", "is-drop-before", "is-drop-after");
+    });
+  }
+
+  function eventTaskListItem(event, root) {
+    const target = event.target instanceof Element ? event.target : null;
+    const item = target ? target.closest(".task-list-item[data-task-index]") : null;
+    return item && root.contains(item) ? item : null;
+  }
+
+  function numericTaskIndex(value) {
+    const index = Number(value);
+    return Number.isInteger(index) && index >= 0 ? index : -1;
+  }
+
+  function initMarkdownChecklistRoot(root) {
+    if (root.dataset.checklistReady === "yes") return;
+    root.dataset.checklistReady = "yes";
+
+    root.addEventListener("change", function (event) {
+      const input = event.target instanceof HTMLInputElement ? event.target : null;
+      if (!input || !input.classList.contains("task-list-checkbox") || input.disabled) return;
+      const taskIndex = numericTaskIndex(input.dataset.taskIndex);
+      if (taskIndex < 0) return;
+      const nextSource = setMarkdownTaskChecked(root.gitomiMarkdownSource || "", taskIndex, input.checked);
+      applyChecklistMarkdown(root, nextSource);
+    });
+
+    root.addEventListener("dragstart", function (event) {
+      const item = eventTaskListItem(event, root);
+      if (!item || root.gitomiChecklistSaving) {
+        event.preventDefault();
+        return;
+      }
+      root.gitomiTaskDragIndex = item.dataset.taskIndex || "";
+      item.classList.add("is-dragging");
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", root.gitomiTaskDragIndex);
+      }
+    });
+
+    root.addEventListener("dragover", function (event) {
+      const item = eventTaskListItem(event, root);
+      if (!item || root.gitomiTaskDragIndex === undefined) return;
+      event.preventDefault();
+      clearTaskDropClasses(root);
+      const rect = item.getBoundingClientRect();
+      const after = event.clientY > rect.top + rect.height / 2;
+      item.classList.add(after ? "is-drop-after" : "is-drop-before");
+      root.gitomiTaskDropIndex = item.dataset.taskIndex || "";
+      root.gitomiTaskDropAfter = after ? "yes" : "no";
+    });
+
+    root.addEventListener("drop", function (event) {
+      const item = eventTaskListItem(event, root);
+      if (!item) return;
+      event.preventDefault();
+      const fromIndex = numericTaskIndex(root.gitomiTaskDragIndex);
+      const toIndex = numericTaskIndex(item.dataset.taskIndex);
+      const after = root.gitomiTaskDropAfter === "yes";
+      clearTaskDropClasses(root);
+      delete root.gitomiTaskDragIndex;
+      delete root.gitomiTaskDropIndex;
+      delete root.gitomiTaskDropAfter;
+      if (fromIndex < 0 || toIndex < 0) return;
+      const nextSource = moveMarkdownTask(root.gitomiMarkdownSource || "", fromIndex, toIndex, after);
+      applyChecklistMarkdown(root, nextSource);
+    });
+
+    root.addEventListener("dragend", function () {
+      clearTaskDropClasses(root);
+      delete root.gitomiTaskDragIndex;
+      delete root.gitomiTaskDropIndex;
+      delete root.gitomiTaskDropAfter;
+    });
+  }
+
+  function normalizeTaskListInputs(root, source) {
+    const taskItems = markdownTaskItems(source);
+    const editable = Boolean(root.dataset.checklistUpdateAction) && !root.gitomiChecklistSaving;
+    let taskIndex = 0;
     root.querySelectorAll("input").forEach(function (input) {
       if (input.type !== "checkbox") {
         input.remove();
         return;
       }
-      input.disabled = true;
       input.classList.add("task-list-checkbox");
       const item = input.closest("li");
       if (item) item.classList.add("task-list-item");
+
+      const hasSourceTask = taskIndex < taskItems.length;
+      input.dataset.taskIndex = String(taskIndex);
+      input.disabled = !editable || !hasSourceTask;
+      input.draggable = false;
+      if (item) {
+        item.dataset.taskIndex = String(taskIndex);
+        if (editable && hasSourceTask) {
+          item.setAttribute("draggable", "true");
+        } else {
+          item.removeAttribute("draggable");
+        }
+      }
+      taskIndex += 1;
     });
+    if (editable && taskItems.length > 0) initMarkdownChecklistRoot(root);
   }
 
   function isReferenceTrailingIdentifier(value) {
@@ -637,15 +884,18 @@
   }
 
   function renderMarkdownToElement(root, source, context) {
+    root.gitomiMarkdownSource = String(source || "");
+    root.gitomiMarkdownContext = context || { ref: "", path: "" };
     root.innerHTML = markdownHtml(source);
     rewriteMarkdownLinks(root, context);
     rewriteMarkdownMedia(root, context);
     normalizeMarkdownTables(root);
-    normalizeTaskListInputs(root);
+    normalizeTaskListInputs(root, source);
     renderMath(root);
     autolinkIssueReferences(root);
     renderMermaid(root);
     renderCodeCopyButtons(root);
+    updateIssueMenuMarkdown(root, source);
     if (window.gitomiHighlightAll) window.gitomiHighlightAll();
   }
 

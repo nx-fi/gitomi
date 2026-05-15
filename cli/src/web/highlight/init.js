@@ -20,7 +20,7 @@
 
   function highlightAll() {
     registerLocalAliases();
-    document.querySelectorAll("pre code, .blob-lines code, .blame-lines code").forEach(highlightElement);
+    document.querySelectorAll("pre code, .blob-lines code, .blame-lines code, .merge-code code[class*='language-']").forEach(highlightElement);
   }
 
   window.gitomiHighlightAll = highlightAll;

@@ -600,6 +600,123 @@ pub const MarkdownSourceOptions = struct {
     path: ?[]const u8 = null,
 };
 
+pub const MarkdownTaskSummary = struct {
+    done: usize = 0,
+    total: usize = 0,
+
+    pub fn hasTasks(self: MarkdownTaskSummary) bool {
+        return self.total != 0;
+    }
+};
+
+const MarkdownFenceMarker = struct {
+    char: u8,
+    len: usize,
+};
+
+const MarkdownTaskMarker = struct {
+    checked: bool,
+};
+
+pub fn markdownTaskSummary(markdown: []const u8) MarkdownTaskSummary {
+    var summary: MarkdownTaskSummary = .{};
+    var in_fence = false;
+    var fence: MarkdownFenceMarker = .{ .char = 0, .len = 0 };
+
+    var lines = std.mem.splitScalar(u8, markdown, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trimRight(u8, raw_line, "\r");
+        if (markdownFenceMarker(line)) |marker| {
+            if (!in_fence) {
+                in_fence = true;
+                fence = marker;
+            } else if (marker.char == fence.char and marker.len >= fence.len) {
+                in_fence = false;
+            }
+            continue;
+        }
+        if (in_fence) continue;
+
+        if (markdownTaskMarker(line)) |marker| {
+            summary.total += 1;
+            if (marker.checked) summary.done += 1;
+        }
+    }
+
+    return summary;
+}
+
+pub fn appendMarkdownTaskProgress(buf: *std.ArrayList(u8), allocator: Allocator, summary: MarkdownTaskSummary) !void {
+    if (!summary.hasTasks()) return;
+
+    try appendTemplate(buf, allocator,
+        \\<span class="issue-task-progress" title="{done} of {total} tasks done"><span class="issue-task-progress-icon" aria-hidden="true"></span>
+    , .{
+        .done = summary.done,
+        .total = summary.total,
+    });
+    if (summary.done == summary.total) {
+        try appendTemplate(buf, allocator, "{total} {task_word} done", .{
+            .total = summary.total,
+            .task_word = if (summary.total == 1) "task" else "tasks",
+        });
+    } else {
+        try appendTemplate(buf, allocator, "{done} of {total} {task_word}", .{
+            .done = summary.done,
+            .total = summary.total,
+            .task_word = if (summary.total == 1) "task" else "tasks",
+        });
+    }
+    try buf.appendSlice(allocator, "</span>");
+}
+
+fn markdownFenceMarker(line: []const u8) ?MarkdownFenceMarker {
+    var i: usize = 0;
+    while (i < line.len and i < 4 and line[i] == ' ') : (i += 1) {}
+    if (i >= line.len) return null;
+
+    const char = line[i];
+    if (char != '`' and char != '~') return null;
+
+    var len: usize = 0;
+    while (i + len < line.len and line[i + len] == char) : (len += 1) {}
+    if (len < 3) return null;
+    return .{ .char = char, .len = len };
+}
+
+fn markdownTaskMarker(line: []const u8) ?MarkdownTaskMarker {
+    var i: usize = 0;
+    while (i < line.len and isMarkdownWhitespace(line[i])) : (i += 1) {}
+    if (i >= line.len) return null;
+
+    switch (line[i]) {
+        '-', '*', '+' => {
+            i += 1;
+            if (i >= line.len or !isMarkdownWhitespace(line[i])) return null;
+            while (i < line.len and isMarkdownWhitespace(line[i])) : (i += 1) {}
+        },
+        '0'...'9' => {
+            while (i < line.len and std.ascii.isDigit(line[i])) : (i += 1) {}
+            if (i >= line.len or (line[i] != '.' and line[i] != ')')) return null;
+            i += 1;
+            if (i >= line.len or !isMarkdownWhitespace(line[i])) return null;
+            while (i < line.len and isMarkdownWhitespace(line[i])) : (i += 1) {}
+        },
+        else => return null,
+    }
+
+    if (i + 2 >= line.len or line[i] != '[' or line[i + 2] != ']') return null;
+    const marker = line[i + 1];
+    if (marker != ' ' and marker != 'x' and marker != 'X') return null;
+    if (i + 3 < line.len and !isMarkdownWhitespace(line[i + 3])) return null;
+
+    return .{ .checked = marker == 'x' or marker == 'X' };
+}
+
+fn isMarkdownWhitespace(char: u8) bool {
+    return char == ' ' or char == '\t';
+}
+
 pub fn appendMarkdownSource(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -1172,6 +1289,22 @@ test "web template supports raw values braces and numbers" {
     });
 
     try std.testing.expectEqualStrings("<script>{x:3}</script><span>ok</span>", buf.items);
+}
+
+test "markdownTaskSummary counts tasks outside fenced code blocks" {
+    const summary = markdownTaskSummary(
+        \\- [ ] Open task
+        \\- [x] Done task
+        \\  - [X] Nested done task
+        \\1. [ ] Ordered task
+        \\```
+        \\- [x] Ignored task
+        \\```
+        \\Paragraph
+    );
+
+    try std.testing.expectEqual(@as(usize, 4), summary.total);
+    try std.testing.expectEqual(@as(usize, 2), summary.done);
 }
 
 test "web template supports typed href classes and formatters" {
