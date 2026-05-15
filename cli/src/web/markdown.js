@@ -1,9 +1,6 @@
 (function () {
   "use strict";
 
-  const svgNS = "http://www.w3.org/2000/svg";
-  let diagramCount = 0;
-
   function escapeHtml(value) {
     return String(value)
       .replace(/&/g, "&amp;")
@@ -281,6 +278,378 @@
     });
   }
 
+  function decodeBase64Utf8(value) {
+    const raw = window.atob(String(value || "").replace(/\s+/g, ""));
+    const bytes = new Uint8Array(raw.length);
+    for (let index = 0; index < raw.length; index += 1) {
+      bytes[index] = raw.charCodeAt(index);
+    }
+    if (window.TextDecoder) return new TextDecoder("utf-8").decode(bytes);
+
+    let escaped = "";
+    for (let index = 0; index < bytes.length; index += 1) {
+      escaped += "%" + bytes[index].toString(16).padStart(2, "0");
+    }
+    return decodeURIComponent(escaped);
+  }
+
+  function markdownSource(block) {
+    if ((block.dataset.markdownEncoding || "") === "base64") {
+      return decodeBase64Utf8(block.textContent || "");
+    }
+    return block.textContent || "";
+  }
+
+  function markdownParser() {
+    if (!window.marked) return null;
+    if (typeof window.marked.parse === "function") return window.marked;
+    if (typeof window.marked.marked === "function") return { parse: window.marked.marked };
+    if (typeof window.marked === "function") return { parse: window.marked };
+    return null;
+  }
+
+  function sanitizeMarkdownHtml(html) {
+    if (!window.DOMPurify) return "<pre>" + escapeHtml(html) + "</pre>";
+    return window.DOMPurify.sanitize(html, {
+      USE_PROFILES: { html: true },
+      ADD_TAGS: ["input", "source", "video"],
+      ADD_ATTR: [
+        "aria-hidden",
+        "aria-label",
+        "checked",
+        "class",
+        "controls",
+        "disabled",
+        "preload",
+        "rel",
+        "target",
+        "type",
+      ],
+      FORBID_TAGS: ["embed", "iframe", "object", "script", "style"],
+    });
+  }
+
+  function markdownHtml(source) {
+    const parser = markdownParser();
+    if (!parser) return "<pre>" + escapeHtml(source) + "</pre>";
+    const html = parser.parse(String(source || ""), {
+      async: false,
+      breaks: false,
+      gfm: true,
+      pedantic: false,
+      silent: true,
+    });
+    return sanitizeMarkdownHtml(html);
+  }
+
+  function isSafeHref(href) {
+    const prefix = String(href || "").trimStart().slice(0, 12).toLowerCase();
+    return prefix !== "" && !prefix.startsWith("javascript:") && !prefix.startsWith("data:");
+  }
+
+  function hasUriScheme(value) {
+    return /^[A-Za-z][A-Za-z0-9+.-]*:/.test(String(value || ""));
+  }
+
+  function isRepositoryRelativeHref(href) {
+    const value = String(href || "");
+    if (!value || value[0] === "#" || value[0] === "?") return false;
+    if (value.startsWith("//")) return false;
+    return !hasUriScheme(value);
+  }
+
+  function hrefPathPart(href) {
+    const value = String(href || "");
+    const query = value.indexOf("?") === -1 ? value.length : value.indexOf("?");
+    const fragment = value.indexOf("#") === -1 ? value.length : value.indexOf("#");
+    return value.slice(0, Math.min(query, fragment));
+  }
+
+  function hrefFragmentPart(href) {
+    const value = String(href || "");
+    const index = value.indexOf("#");
+    return index === -1 ? "" : value.slice(index);
+  }
+
+  function parentPath(path) {
+    const value = String(path || "");
+    const slash = value.lastIndexOf("/");
+    return slash === -1 ? "" : value.slice(0, slash);
+  }
+
+  function resolveRepositoryPath(currentPath, hrefPath) {
+    const rootRelative = String(hrefPath || "").startsWith("/");
+    const segments = rootRelative ? [] : parentPath(currentPath).split("/").filter(Boolean);
+    const parts = String(hrefPath || "").replace(/^\/+|\/+$/g, "").split("/");
+    for (let index = 0; index < parts.length; index += 1) {
+      const part = parts[index];
+      if (!part || part === ".") continue;
+      if (part === "..") {
+        if (!segments.length) return null;
+        segments.pop();
+      } else {
+        segments.push(part);
+      }
+    }
+    return segments.join("/");
+  }
+
+  function decodeUrlPath(path) {
+    try {
+      return decodeURIComponent(String(path || ""));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function encodePathQuery(value) {
+    return String(value || "").split("/").map(encodeURIComponent).join("/");
+  }
+
+  function baseName(path) {
+    const value = String(path || "");
+    const slash = value.lastIndexOf("/");
+    return slash === -1 ? value : value.slice(slash + 1);
+  }
+
+  function isMarkdownPath(path) {
+    const value = String(path || "").toLowerCase();
+    return value.endsWith(".md") || value.endsWith(".markdown") || baseName(value) === "readme";
+  }
+
+  function codeHref(ref, path, view) {
+    let href = "/code?ref=" + encodeURIComponent(ref || "");
+    if (path) href += "&path=" + encodePathQuery(path);
+    if (view) href += "&view=" + encodeURIComponent(view);
+    return href;
+  }
+
+  function rawHref(ref, path) {
+    let href = "/raw?ref=" + encodeURIComponent(ref || "");
+    if (path) href += "&path=" + encodePathQuery(path);
+    return href;
+  }
+
+  function repositoryHref(href, context, raw) {
+    if (!context || !context.ref || !context.path || !isRepositoryRelativeHref(href)) return "";
+    const pathPart = hrefPathPart(href);
+    if (!pathPart && href !== "/") return "";
+    const decoded = decodeUrlPath(pathPart);
+    if (decoded === null) return "";
+    const target = resolveRepositoryPath(context.path, decoded);
+    if (target === null) return "";
+    const fragment = hrefFragmentPart(href);
+    if (raw) return rawHref(context.ref, target) + fragment;
+    return codeHref(context.ref, target, isMarkdownPath(target) ? "preview" : "") + fragment;
+  }
+
+  function isVideoHref(href) {
+    return /\.(mp4|m4v|webm|ogv|ogg|mov)$/i.test(hrefPathPart(href));
+  }
+
+  function mediaContentType(href) {
+    const path = hrefPathPart(href).toLowerCase();
+    if (path.endsWith(".mp4") || path.endsWith(".m4v")) return "video/mp4";
+    if (path.endsWith(".webm")) return "video/webm";
+    if (path.endsWith(".ogv") || path.endsWith(".ogg")) return "video/ogg";
+    if (path.endsWith(".mov")) return "video/quicktime";
+    return "";
+  }
+
+  function rewriteMarkdownLinks(root, context) {
+    root.querySelectorAll("a[href]").forEach(function (link) {
+      const href = link.getAttribute("href") || "";
+      if (!isSafeHref(href)) {
+        link.removeAttribute("href");
+        return;
+      }
+      const rewritten = repositoryHref(href, context, false);
+      if (rewritten) link.setAttribute("href", rewritten);
+    });
+  }
+
+  function rewriteMarkdownMedia(root, context) {
+    root.querySelectorAll("img[src]").forEach(function (image) {
+      const src = image.getAttribute("src") || "";
+      if (!isSafeHref(src)) {
+        image.remove();
+        return;
+      }
+      const rewritten = repositoryHref(src, context, true) || src;
+      if (isVideoHref(src)) {
+        const video = document.createElement("video");
+        video.className = "markdown-media";
+        video.controls = true;
+        video.preload = "metadata";
+        const source = document.createElement("source");
+        source.src = rewritten;
+        const type = mediaContentType(src);
+        if (type) source.type = type;
+        video.appendChild(source);
+        video.appendChild(document.createTextNode(image.getAttribute("alt") || ""));
+        image.replaceWith(video);
+        return;
+      }
+      image.classList.add("markdown-media");
+      image.setAttribute("src", rewritten);
+    });
+
+    root.querySelectorAll("video").forEach(function (video) {
+      video.classList.add("markdown-media");
+      video.setAttribute("controls", "");
+      if (!video.getAttribute("preload")) video.setAttribute("preload", "metadata");
+    });
+
+    root.querySelectorAll("video source[src]").forEach(function (source) {
+      const src = source.getAttribute("src") || "";
+      if (!isSafeHref(src)) {
+        source.remove();
+        return;
+      }
+      const rewritten = repositoryHref(src, context, true);
+      if (rewritten) source.setAttribute("src", rewritten);
+    });
+  }
+
+  function normalizeMarkdownTables(root) {
+    root.querySelectorAll("table").forEach(function (table) {
+      table.classList.add("markdown-table");
+      if (table.parentElement && table.parentElement.classList.contains("markdown-table-wrap")) return;
+      const wrapper = document.createElement("div");
+      wrapper.className = "table-wrap markdown-table-wrap";
+      table.parentNode.insertBefore(wrapper, table);
+      wrapper.appendChild(table);
+    });
+  }
+
+  function normalizeTaskListInputs(root) {
+    root.querySelectorAll("input").forEach(function (input) {
+      if (input.type !== "checkbox") {
+        input.remove();
+        return;
+      }
+      input.disabled = true;
+      input.classList.add("task-list-checkbox");
+      const item = input.closest("li");
+      if (item) item.classList.add("task-list-item");
+    });
+  }
+
+  function isReferenceTrailingIdentifier(value) {
+    return /[A-Za-z0-9_-]/.test(value || "");
+  }
+
+  function isPositiveDecimalReference(value) {
+    return /^[0-9]+$/.test(value) && /[1-9]/.test(value);
+  }
+
+  function isObjectRefPrefix(value) {
+    return /^[0-9A-Fa-f]{7,64}$/.test(value || "");
+  }
+
+  function issueReferenceEnd(value, start) {
+    if (value[start] !== "#") return 0;
+    let end = start + 1;
+    if (end >= value.length || !/[0-9A-Fa-f]/.test(value[end])) return 0;
+    while (end < value.length && /[0-9A-Fa-f]/.test(value[end])) end += 1;
+    if (end < value.length && isReferenceTrailingIdentifier(value[end])) return 0;
+    const token = value.slice(start + 1, end);
+    return isPositiveDecimalReference(token) || isObjectRefPrefix(token) ? end : 0;
+  }
+
+  function shouldSkipIssueAutolink(node) {
+    const parent = node.parentElement;
+    if (!parent) return true;
+    return Boolean(parent.closest("a, code, pre, kbd, samp, script, style, textarea, .katex, .mermaid"));
+  }
+
+  function autolinkIssueTextNode(node) {
+    const text = node.nodeValue || "";
+    let cursor = 0;
+    let changed = false;
+    const fragment = document.createDocumentFragment();
+    for (let index = 0; index < text.length; index += 1) {
+      const end = issueReferenceEnd(text, index);
+      if (!end) continue;
+      if (cursor < index) fragment.appendChild(document.createTextNode(text.slice(cursor, index)));
+      const token = text.slice(index + 1, end);
+      const link = document.createElement("a");
+      link.href = "/issues/" + encodeURIComponent(token);
+      link.textContent = "#" + token;
+      fragment.appendChild(link);
+      cursor = end;
+      index = end - 1;
+      changed = true;
+    }
+    if (!changed) return;
+    if (cursor < text.length) fragment.appendChild(document.createTextNode(text.slice(cursor)));
+    node.replaceWith(fragment);
+  }
+
+  function autolinkIssueReferences(root) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode: function (node) {
+        if ((node.nodeValue || "").indexOf("#") === -1) return NodeFilter.FILTER_REJECT;
+        return shouldSkipIssueAutolink(node) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    nodes.forEach(autolinkIssueTextNode);
+  }
+
+  function prepareMermaidBlocks(root) {
+    root.querySelectorAll("pre[data-mermaid], pre > code.language-mermaid, pre > code.language-mmd").forEach(function (node) {
+      const pre = node.tagName === "PRE" ? node : node.closest("pre");
+      if (!pre || pre.dataset.mermaidPrepared === "yes") return;
+      const source = node.tagName === "PRE" ? pre.textContent || "" : node.textContent || "";
+      const container = document.createElement("div");
+      container.className = "mermaid mermaid-diagram";
+      container.textContent = source;
+      pre.dataset.mermaidPrepared = "yes";
+      pre.replaceWith(container);
+    });
+  }
+
+  let mermaidConfigured = false;
+
+  function configureMermaid() {
+    if (mermaidConfigured || !window.mermaid || typeof window.mermaid.initialize !== "function") return;
+    window.mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: "strict",
+      theme: document.documentElement.dataset.theme === "dark" ? "dark" : "default",
+      flowchart: { htmlLabels: false, useMaxWidth: true },
+      sequence: { useMaxWidth: true },
+    });
+    mermaidConfigured = true;
+  }
+
+  function renderMarkdownToElement(root, source, context) {
+    root.innerHTML = markdownHtml(source);
+    rewriteMarkdownLinks(root, context);
+    rewriteMarkdownMedia(root, context);
+    normalizeMarkdownTables(root);
+    normalizeTaskListInputs(root);
+    renderMath(root);
+    autolinkIssueReferences(root);
+    renderMermaid(root);
+    renderCodeCopyButtons(root);
+    if (window.gitomiHighlightAll) window.gitomiHighlightAll();
+  }
+
+  function renderMarkdownSourceBlocks() {
+    document.querySelectorAll("[data-markdown-source]").forEach(function (block) {
+      const root = block.closest(".markdown-body") || block.parentElement;
+      if (!root) return;
+      const context = {
+        ref: block.dataset.markdownRef || "",
+        path: block.dataset.markdownPath || "",
+      };
+      renderMarkdownToElement(root, markdownSource(block), context);
+    });
+  }
+
   function renderLatex(value) {
     let html = escapeHtml(String(value || "").trim());
     html = html.replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, '<span class="math-frac"><span>$1</span><span>$2</span></span>');
@@ -335,243 +704,53 @@
     return html;
   }
 
-  function renderMath() {
-    document.querySelectorAll("[data-latex-inline], [data-latex-display]").forEach(function (element) {
+  function renderMath(root) {
+    const scope = root || document;
+    if (typeof window.renderMathInElement === "function") {
+      window.renderMathInElement(scope, {
+        delimiters: [
+          { left: "$$", right: "$$", display: true },
+          { left: "\\[", right: "\\]", display: true },
+          { left: "\\(", right: "\\)", display: false },
+          { left: "$", right: "$", display: false },
+        ],
+        ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"],
+        throwOnError: false,
+        trust: false,
+        strict: "ignore",
+      });
+      return;
+    }
+
+    scope.querySelectorAll("[data-latex-inline], [data-latex-display]").forEach(function (element) {
       if (element.dataset.rendered === "yes") return;
       element.innerHTML = renderLatex(element.textContent || "");
       element.dataset.rendered = "yes";
     });
   }
 
-  function parseNode(raw, nodes) {
-    const value = String(raw || "").trim().replace(/;$/, "");
-    const match = value.match(/^([A-Za-z0-9_.:-]+)\s*(?:\["?([^"\]]+)"?\]|\(([^)]+)\)|\{([^}]+)\})?$/);
-    if (!match) return null;
-    const id = match[1];
-    const label = (match[2] || match[3] || match[4] || id).trim();
-    if (!nodes.has(id)) nodes.set(id, { id: id, label: label });
-    if (label !== id) nodes.get(id).label = label;
-    return id;
-  }
-
-  function parseStatement(statement, nodes, edges) {
-    const edgeMatch = statement.match(/^(.+?)\s*(-\.->|-->|---|==>)\s*(?:\|([^|]+)\|\s*)?(.+)$/);
-    if (edgeMatch) {
-      const from = parseNode(edgeMatch[1], nodes);
-      const to = parseNode(edgeMatch[4], nodes);
-      if (from && to) {
-        edges.push({
-          from: from,
-          to: to,
-          label: (edgeMatch[3] || "").trim(),
-          dashed: edgeMatch[2] === "-.->",
-          directed: edgeMatch[2] !== "---",
-        });
-        return true;
-      }
-    }
-    return parseNode(statement, nodes) !== null;
-  }
-
-  function parseMermaid(source) {
-    const lines = String(source || "")
-      .split(/\r?\n/)
-      .map(function (line) { return line.trim(); })
-      .filter(function (line) { return line && !line.startsWith("%%"); });
-    if (!lines.length) return null;
-
-    const header = lines[0].match(/^(?:graph|flowchart)\s+(TD|TB|BT|LR|RL)\b/i);
-    if (!header) return null;
-
-    const nodes = new Map();
-    const edges = [];
-    lines.slice(1).forEach(function (line) {
-      line.split(";").forEach(function (part) {
-        const statement = part.trim();
-        if (statement) parseStatement(statement, nodes, edges);
-      });
-    });
-
-    if (!nodes.size) return null;
-    return { direction: header[1].toUpperCase(), nodes: nodes, edges: edges };
-  }
-
-  function buildRanks(diagram) {
-    const ranks = new Map();
-    const incoming = new Map();
-    diagram.nodes.forEach(function (_, id) { incoming.set(id, 0); });
-    diagram.edges.forEach(function (edge) {
-      incoming.set(edge.to, (incoming.get(edge.to) || 0) + 1);
-    });
-
-    const roots = Array.from(diagram.nodes.keys()).filter(function (id) {
-      return (incoming.get(id) || 0) === 0;
-    });
-    if (!roots.length) roots.push(Array.from(diagram.nodes.keys())[0]);
-    roots.forEach(function (id) { ranks.set(id, 0); });
-
-    for (let pass = 0; pass < diagram.nodes.size; pass += 1) {
-      let changed = false;
-      diagram.edges.forEach(function (edge) {
-        if (!ranks.has(edge.from)) return;
-        const nextRank = Math.min((ranks.get(edge.from) || 0) + 1, diagram.nodes.size - 1);
-        if (!ranks.has(edge.to) || nextRank > ranks.get(edge.to)) {
-          ranks.set(edge.to, nextRank);
-          changed = true;
-        }
-      });
-      if (!changed) break;
-    }
-
-    diagram.nodes.forEach(function (_, id) {
-      if (!ranks.has(id)) ranks.set(id, 0);
-    });
-    return ranks;
-  }
-
-  function layoutDiagram(diagram) {
-    const nodeWidth = 156;
-    const nodeHeight = 48;
-    const rankGap = 116;
-    const nodeGap = 32;
-    const padding = 28;
-    const horizontal = diagram.direction === "LR" || diagram.direction === "RL";
-    const reverse = diagram.direction === "RL" || diagram.direction === "BT";
-    const ranks = buildRanks(diagram);
-    const groups = new Map();
-
-    diagram.nodes.forEach(function (node, id) {
-      const rank = ranks.get(id) || 0;
-      if (!groups.has(rank)) groups.set(rank, []);
-      groups.get(rank).push(node);
-    });
-
-    const rankKeys = Array.from(groups.keys()).sort(function (a, b) { return a - b; });
-    const rankCount = rankKeys.length;
-    const maxGroup = Math.max.apply(null, rankKeys.map(function (rank) { return groups.get(rank).length; }));
-    const width = horizontal
-      ? padding * 2 + nodeWidth + (rankCount - 1) * rankGap
-      : padding * 2 + maxGroup * nodeWidth + (maxGroup - 1) * nodeGap;
-    const height = horizontal
-      ? padding * 2 + maxGroup * nodeHeight + (maxGroup - 1) * nodeGap
-      : padding * 2 + nodeHeight + (rankCount - 1) * rankGap;
-    const positions = new Map();
-
-    rankKeys.forEach(function (rank, rankIndex) {
-      const visualRank = reverse ? rankCount - rankIndex - 1 : rankIndex;
-      groups.get(rank).forEach(function (node, itemIndex) {
-        const x = horizontal ? padding + visualRank * rankGap : padding + itemIndex * (nodeWidth + nodeGap);
-        const y = horizontal ? padding + itemIndex * (nodeHeight + nodeGap) : padding + visualRank * rankGap;
-        positions.set(node.id, { x: x, y: y, width: nodeWidth, height: nodeHeight });
-      });
-    });
-
-    return { width: width, height: height, positions: positions };
-  }
-
-  function shortLabel(label) {
-    const value = String(label || "");
-    return value.length > 28 ? value.slice(0, 25) + "..." : value;
-  }
-
-  function addSvgElement(parent, name, attrs, text) {
-    const element = document.createElementNS(svgNS, name);
-    Object.keys(attrs || {}).forEach(function (key) {
-      element.setAttribute(key, String(attrs[key]));
-    });
-    if (text !== undefined) element.textContent = text;
-    parent.appendChild(element);
-    return element;
-  }
-
-  function edgePoints(from, to) {
-    if (Math.abs(from.x - to.x) > Math.abs(from.y - to.y)) {
-      if (from.x < to.x) {
-        return [from.x + from.width, from.y + from.height / 2, to.x, to.y + to.height / 2];
-      }
-      return [from.x, from.y + from.height / 2, to.x + to.width, to.y + to.height / 2];
-    }
-    if (from.y < to.y) {
-      return [from.x + from.width / 2, from.y + from.height, to.x + to.width / 2, to.y];
-    }
-    return [from.x + from.width / 2, from.y, to.x + to.width / 2, to.y + to.height];
-  }
-
   function renderMermaidBlock(pre) {
     if (pre.dataset.rendered === "yes") return;
-    const diagram = parseMermaid(pre.textContent || "");
-    if (!diagram) return;
-
-    const layout = layoutDiagram(diagram);
-    const markerId = "mermaid-arrow-" + (++diagramCount);
-    const svg = document.createElementNS(svgNS, "svg");
-    svg.setAttribute("class", "mermaid-diagram");
-    svg.setAttribute("role", "img");
-    svg.setAttribute("aria-label", "Mermaid diagram");
-    svg.setAttribute("width", String(layout.width));
-    svg.setAttribute("height", String(layout.height));
-    svg.setAttribute("viewBox", "0 0 " + layout.width + " " + layout.height);
-
-    const defs = addSvgElement(svg, "defs", {});
-    const marker = addSvgElement(defs, "marker", {
-      id: markerId,
-      markerWidth: "10",
-      markerHeight: "10",
-      refX: "8",
-      refY: "3",
-      orient: "auto",
-      markerUnits: "strokeWidth",
-    });
-    addSvgElement(marker, "path", { d: "M0,0 L0,6 L9,3 z", class: "mermaid-arrow" });
-
-    diagram.edges.forEach(function (edge) {
-      const from = layout.positions.get(edge.from);
-      const to = layout.positions.get(edge.to);
-      if (!from || !to) return;
-      const points = edgePoints(from, to);
-      const attrs = {
-        x1: points[0],
-        y1: points[1],
-        x2: points[2],
-        y2: points[3],
-        class: edge.dashed ? "mermaid-edge dashed" : "mermaid-edge",
-      };
-      if (edge.directed) attrs["marker-end"] = "url(#" + markerId + ")";
-      addSvgElement(svg, "line", attrs);
-      if (edge.label) {
-        addSvgElement(svg, "text", {
-          x: (points[0] + points[2]) / 2,
-          y: (points[1] + points[3]) / 2 - 8,
-          class: "mermaid-edge-label",
-          "text-anchor": "middle",
-        }, shortLabel(edge.label));
-      }
-    });
-
-    diagram.nodes.forEach(function (node) {
-      const box = layout.positions.get(node.id);
-      if (!box) return;
-      addSvgElement(svg, "rect", {
-        x: box.x,
-        y: box.y,
-        width: box.width,
-        height: box.height,
-        rx: "7",
-        class: "mermaid-node",
-      });
-      addSvgElement(svg, "text", {
-        x: box.x + box.width / 2,
-        y: box.y + box.height / 2 + 5,
-        class: "mermaid-label",
-        "text-anchor": "middle",
-      }, shortLabel(node.label));
-    });
-
-    pre.replaceWith(svg);
+    const container = document.createElement("div");
+    container.className = "mermaid mermaid-diagram";
+    container.textContent = pre.textContent || "";
+    pre.dataset.rendered = "yes";
+    pre.replaceWith(container);
   }
 
-  function renderMermaid() {
-    document.querySelectorAll("pre[data-mermaid]").forEach(renderMermaidBlock);
+  function renderMermaid(root) {
+    const scope = root || document;
+    scope.querySelectorAll("pre[data-mermaid]").forEach(renderMermaidBlock);
+    prepareMermaidBlocks(scope);
+    configureMermaid();
+    if (!window.mermaid || typeof window.mermaid.run !== "function") return;
+    const nodes = Array.prototype.slice.call(scope.querySelectorAll(".mermaid:not([data-processed])"));
+    if (!nodes.length) return;
+    window.mermaid.run({ nodes: nodes, suppressErrors: true }).catch(function () {
+      nodes.forEach(function (node) {
+        if (!node.getAttribute("data-processed")) node.classList.add("mermaid-source");
+      });
+    });
   }
 
   function codeElementForPre(pre) {
@@ -616,8 +795,11 @@
     pre.dataset.copyEnhanced = "yes";
   }
 
-  function renderCodeCopyButtons() {
-    document.querySelectorAll(".markdown-body pre").forEach(enhanceCodeBlock);
+  function renderCodeCopyButtons(root) {
+    const scope = root || document;
+    scope.querySelectorAll(".markdown-body pre, pre").forEach(function (pre) {
+      if (pre.closest(".markdown-body") || scope !== document) enhanceCodeBlock(pre);
+    });
   }
 
   function slugifyHeading(text) {
@@ -911,18 +1093,8 @@
       preview.innerHTML = '<p class="muted">Nothing to preview.</p>';
       return;
     }
-    preview.innerHTML = '<p class="muted">Loading preview...</p>';
     try {
-      const response = await fetch("/markdown/preview", {
-        method: "POST",
-        headers: { "Content-Type": "text/plain; charset=utf-8" },
-        body: source,
-      });
-      if (!response.ok) throw new Error("preview failed");
-      preview.innerHTML = await response.text();
-      renderMath();
-      renderMermaid();
-      renderCodeCopyButtons();
+      renderMarkdownToElement(preview, source, {});
     } catch (_) {
       preview.innerHTML = '<p class="muted">Preview failed.</p>';
     }
@@ -953,9 +1125,10 @@
   }
 
   function renderMarkdownEnhancements() {
-    renderMath();
-    renderMermaid();
-    renderCodeCopyButtons();
+    renderMarkdownSourceBlocks();
+    renderMath(document);
+    renderMermaid(document);
+    renderCodeCopyButtons(document);
     renderMarkdownOutlines();
     renderRelativeTimes();
     initIssueActionMenus();

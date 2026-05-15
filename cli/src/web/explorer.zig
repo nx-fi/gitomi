@@ -1,6 +1,5 @@
 const std = @import("std");
 const git = @import("../git.zig");
-const markdown_render = @import("markdown_render.zig");
 const repo_mod = @import("../repo.zig");
 const shared = @import("shared.zig");
 const code_symbols = @import("symbols.zig");
@@ -1525,11 +1524,9 @@ fn appendRepositoryMarkdown(
     path: []const u8,
     content: []const u8,
 ) !void {
-    try markdown_render.appendMarkdownWithOptions(buf, allocator, content, .{
-        .link_context = .{
-            .ref = ref,
-            .current_path = path,
-        },
+    try shared.appendMarkdownSource(buf, allocator, content, .{
+        .ref = ref,
+        .path = path,
     });
 }
 
