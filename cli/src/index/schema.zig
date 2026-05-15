@@ -198,6 +198,14 @@ pub fn createIndexSchema(db: *SqliteDb) !void {
         \\  add_hash TEXT NOT NULL,
         \\  PRIMARY KEY(pull_id, reviewer, add_hash)
         \\);
+        \\CREATE TABLE pull_metadata (
+        \\  pull_id TEXT PRIMARY KEY,
+        \\  source_author TEXT NOT NULL,
+        \\  commit_count INTEGER NOT NULL,
+        \\  changed_files INTEGER NOT NULL,
+        \\  additions INTEGER NOT NULL,
+        \\  deletions INTEGER NOT NULL
+        \\);
         \\CREATE TABLE comments (
         \\  id TEXT PRIMARY KEY,
         \\  parent_kind TEXT NOT NULL,

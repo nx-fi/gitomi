@@ -56,12 +56,40 @@ const PullCounts = struct {
     all: usize = 0,
 };
 
+const ReactionChoice = struct {
+    value: []const u8,
+    label: []const u8,
+    title: []const u8,
+};
+
+const ReactionSummary = struct {
+    emoji: []u8,
+    count: i64,
+    reacted: bool,
+
+    fn deinit(self: *ReactionSummary, allocator: Allocator) void {
+        allocator.free(self.emoji);
+    }
+};
+
+const reaction_choices = [_]ReactionChoice{
+    .{ .value = "\xF0\x9F\x91\x8D", .label = "\xF0\x9F\x91\x8D", .title = "Thumbs up" },
+    .{ .value = "\xF0\x9F\x91\x8E", .label = "\xF0\x9F\x91\x8E", .title = "Thumbs down" },
+    .{ .value = "\xF0\x9F\x98\x84", .label = "\xF0\x9F\x98\x84", .title = "Laugh" },
+    .{ .value = "\xF0\x9F\x8E\x89", .label = "\xF0\x9F\x8E\x89", .title = "Hooray" },
+    .{ .value = "\xF0\x9F\x98\x95", .label = "\xF0\x9F\x98\x95", .title = "Confused" },
+    .{ .value = "\xE2\x9D\xA4\xEF\xB8\x8F", .label = "\xE2\x9D\xA4\xEF\xB8\x8F", .title = "Heart" },
+    .{ .value = "\xF0\x9F\x9A\x80", .label = "\xF0\x9F\x9A\x80", .title = "Rocket" },
+    .{ .value = "\xF0\x9F\x91\x80", .label = "\xF0\x9F\x91\x80", .title = "Eyes" },
+};
+
 const PullDetail = struct {
     id: []u8,
     title: []u8,
     state: []u8,
     author_principal: []u8,
     author_device: []u8,
+    source_author: []u8,
     opened_at: []u8,
     state_occurred_at: []u8,
     state_actor_principal: []u8,
@@ -72,6 +100,10 @@ const PullDetail = struct {
     merge_oid: []u8,
     target_oid: []u8,
     legacy_number: i64,
+    commit_count: ?usize,
+    changed_files: ?usize,
+    additions: ?usize,
+    deletions: ?usize,
 
     fn deinit(self: PullDetail, allocator: Allocator) void {
         allocator.free(self.id);
@@ -79,6 +111,7 @@ const PullDetail = struct {
         allocator.free(self.state);
         allocator.free(self.author_principal);
         allocator.free(self.author_device);
+        allocator.free(self.source_author);
         allocator.free(self.opened_at);
         allocator.free(self.state_occurred_at);
         allocator.free(self.state_actor_principal);
@@ -94,6 +127,8 @@ const PullTabCounts = struct {
     comments: usize = 0,
     commits: ?usize = null,
     files: ?usize = null,
+    additions: ?usize = null,
+    deletions: ?usize = null,
 };
 
 const PullCommit = struct {
@@ -201,13 +236,14 @@ fn pullDetailTabFromTarget(allocator: Allocator, target: []const u8) !PullDetail
 
 fn pullListSql(filter: PullStateFilter) []const u8 {
     const select =
-        \\SELECT p.id, p.title, p.state, p.author_principal, p.opened_at, p.state_occurred_at,
+        \\SELECT p.id, p.title, p.state, COALESCE(NULLIF(pm.source_author, ''), p.author_principal), p.opened_at, p.state_occurred_at,
         \\       p.base_ref, p.head_ref, p.draft,
         \\       (SELECT COUNT(*) FROM comments c WHERE c.parent_kind = 'pull' AND c.parent_id = p.id),
         \\       COALESCE(a.number, 0)
         \\FROM pulls p
         \\LEFT JOIN legacy_aliases a
         \\  ON a.provider = 'github' AND a.object_kind = 'pull' AND a.object_id = p.id
+        \\LEFT JOIN pull_metadata pm ON pm.pull_id = p.id
     ;
     return switch (filter) {
         .open => select ++
@@ -440,8 +476,8 @@ pub fn renderPullDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u
     defer if (current_actor) |actor| allocator.free(actor);
     switch (tab) {
         .conversation => try appendPullConversation(&buf, allocator, &db, detail, raw_ref, current_actor),
-        .commits => try appendPullCommits(&buf, allocator, repo, detail.base_ref, detail.head_ref),
-        .files => try appendPullFiles(&buf, allocator, repo, detail.base_ref, detail.head_ref),
+        .commits => try appendPullCommits(&buf, allocator, repo, detail),
+        .files => try appendPullFiles(&buf, allocator, repo, detail),
     }
     try buf.appendSlice(allocator, "</div><aside class=\"issue-meta-sidebar pull-sidebar\">");
     try appendPullSidebar(&buf, allocator, repo, &db, detail, pull_ref);
@@ -454,10 +490,13 @@ fn loadPullDetail(allocator: Allocator, db: *SqliteDb, pull_id: []const u8) !?Pu
     var stmt = try db.prepare(
         \\SELECT p.id, p.title, p.state, p.author_principal, p.author_device, p.opened_at, p.body,
         \\       p.base_ref, p.head_ref, p.draft, p.merge_oid, p.target_oid, COALESCE(a.number, 0),
-        \\       p.state_occurred_at, p.state_actor_principal
+        \\       p.state_occurred_at, p.state_actor_principal,
+        \\       COALESCE(pm.source_author, ''), COALESCE(pm.commit_count, -1), COALESCE(pm.changed_files, -1),
+        \\       COALESCE(pm.additions, -1), COALESCE(pm.deletions, -1)
         \\FROM pulls p
         \\LEFT JOIN legacy_aliases a
         \\  ON a.provider = 'github' AND a.object_kind = 'pull' AND a.object_id = p.id
+        \\LEFT JOIN pull_metadata pm ON pm.pull_id = p.id
         \\WHERE p.id = ?
     );
     defer stmt.deinit();
@@ -469,6 +508,7 @@ fn loadPullDetail(allocator: Allocator, db: *SqliteDb, pull_id: []const u8) !?Pu
         .state = try stmt.columnTextDup(allocator, 2),
         .author_principal = try stmt.columnTextDup(allocator, 3),
         .author_device = try stmt.columnTextDup(allocator, 4),
+        .source_author = try stmt.columnTextDup(allocator, 15),
         .opened_at = try stmt.columnTextDup(allocator, 5),
         .state_occurred_at = try stmt.columnTextDup(allocator, 13),
         .state_actor_principal = try stmt.columnTextDup(allocator, 14),
@@ -479,6 +519,10 @@ fn loadPullDetail(allocator: Allocator, db: *SqliteDb, pull_id: []const u8) !?Pu
         .merge_oid = try stmt.columnTextDup(allocator, 10),
         .target_oid = try stmt.columnTextDup(allocator, 11),
         .legacy_number = stmt.columnInt64(12),
+        .commit_count = optionalCount(stmt.columnInt64(16)),
+        .changed_files = optionalCount(stmt.columnInt64(17)),
+        .additions = optionalCount(stmt.columnInt64(18)),
+        .deletions = optionalCount(stmt.columnInt64(19)),
     };
 }
 
@@ -499,10 +543,14 @@ fn loadPullTabCounts(allocator: Allocator, repo: Repo, db: *SqliteDb, detail: Pu
     defer comments.deinit();
     try comments.bindText(1, detail.id);
     if (try comments.step()) counts.comments = @as(usize, @intCast(comments.columnInt64(0)));
+    counts.commits = detail.commit_count;
+    counts.files = detail.changed_files;
+    counts.additions = detail.additions;
+    counts.deletions = detail.deletions;
 
     const git_counts = try loadPullGitTabCounts(allocator, repo, detail.base_ref, detail.head_ref);
-    counts.commits = git_counts.commits;
-    counts.files = git_counts.files;
+    if (git_counts.commits) |value| counts.commits = value;
+    if (git_counts.files) |value| counts.files = value;
     return counts;
 }
 
@@ -567,11 +615,14 @@ fn appendPullDisplayRef(buf: *std.ArrayList(u8), allocator: Allocator, detail: P
 fn appendPullHeaderSummary(buf: *std.ArrayList(u8), allocator: Allocator, detail: PullDetail, counts: PullTabCounts) !void {
     if (std.mem.eql(u8, detail.state, "merged")) {
         try appendTemplate(buf, allocator,
-            \\<span><strong>{actor}</strong> merged {commit_count} {commit_word} into <code>{base_ref}</code> from <code>{head_ref}</code>
+            \\<span><strong>{actor}</strong> merged 
         , .{
             .actor = if (detail.state_actor_principal.len != 0) detail.state_actor_principal else detail.author_principal,
-            .commit_count = counts.commits orelse 0,
-            .commit_word = commitWord(counts.commits orelse 0),
+        });
+        try appendPullCommitSummary(buf, allocator, counts.commits);
+        try appendTemplate(buf, allocator,
+            \\ into <code>{base_ref}</code> from <code>{head_ref}</code>
+        , .{
             .base_ref = detail.base_ref,
             .head_ref = detail.head_ref,
         });
@@ -592,13 +643,35 @@ fn appendPullHeaderSummary(buf: *std.ArrayList(u8), allocator: Allocator, detail
     }
 
     try appendTemplate(buf, allocator,
-        \\<span><strong>{author}</strong> wants to merge {commit_count} {commit_word} into <code>{base_ref}</code> from <code>{head_ref}</code></span>
+        \\<span><strong>{author}</strong> wants to merge 
     , .{
-        .author = detail.author_principal,
-        .commit_count = counts.commits orelse 0,
-        .commit_word = commitWord(counts.commits orelse 0),
+        .author = pullDisplayAuthor(detail),
+    });
+    try appendPullCommitSummary(buf, allocator, counts.commits);
+    try appendTemplate(buf, allocator,
+        \\ into <code>{base_ref}</code> from <code>{head_ref}</code></span>
+    , .{
         .base_ref = detail.base_ref,
         .head_ref = detail.head_ref,
+    });
+}
+
+fn pullDisplayAuthor(detail: PullDetail) []const u8 {
+    return if (detail.source_author.len != 0) detail.source_author else detail.author_principal;
+}
+
+fn optionalCount(value: i64) ?usize {
+    return if (value >= 0) @intCast(value) else null;
+}
+
+fn appendPullCommitSummary(buf: *std.ArrayList(u8), allocator: Allocator, count: ?usize) !void {
+    const value = count orelse {
+        try buf.appendSlice(allocator, "changes");
+        return;
+    };
+    try appendTemplate(buf, allocator, "{commit_count} {commit_word}", .{
+        .commit_count = value,
+        .commit_word = commitWord(value),
     });
 }
 
@@ -812,6 +885,18 @@ fn appendPullSidebarDevelopment(buf: *std.ArrayList(u8), allocator: Allocator, r
         .base_ref = detail.base_ref,
         .head_ref = detail.head_ref,
     });
+    if (detail.commit_count != null or detail.changed_files != null or detail.additions != null or detail.deletions != null) {
+        try buf.appendSlice(allocator, "<div class=\"pull-sidebar-metrics\">");
+        if (detail.commit_count) |count| try appendTemplate(buf, allocator, "<span>{count} {word}</span>", .{ .count = count, .word = commitWord(count) });
+        if (detail.changed_files) |count| try appendTemplate(buf, allocator, "<span>{count} changed {word}</span>", .{ .count = count, .word = if (count == 1) "file" else "files" });
+        if (detail.additions != null or detail.deletions != null) {
+            try appendTemplate(buf, allocator, "<span><strong>+{additions}</strong> <em>-{deletions}</em></span>", .{
+                .additions = detail.additions orelse 0,
+                .deletions = detail.deletions orelse 0,
+            });
+        }
+        try buf.appendSlice(allocator, "</div>");
+    }
     if (detail.merge_oid.len != 0) {
         try appendTemplate(buf, allocator,
             \\<a class="issue-sidebar-link-row" href="{href}"><span class="issue-sidebar-row-kind">merge</span><code>{short_oid}</code></a>
@@ -855,7 +940,7 @@ fn appendPullSidebarParticipants(buf: *std.ArrayList(u8), allocator: Allocator, 
         while (keys.next()) |key| allocator.free(key.*);
         seen.deinit();
     }
-    try appendPullSidebarParticipant(buf, allocator, &seen, detail.author_principal);
+    try appendPullSidebarParticipant(buf, allocator, &seen, pullDisplayAuthor(detail));
     try appendPullSidebarParticipantQuery(buf, allocator, db, &seen, "SELECT DISTINCT assignee FROM pull_assignees WHERE pull_id = ? ORDER BY assignee", detail.id);
     try appendPullSidebarParticipantQuery(buf, allocator, db, &seen, "SELECT DISTINCT reviewer FROM pull_reviewers WHERE pull_id = ? ORDER BY reviewer", detail.id);
     try buf.appendSlice(allocator, "</div>");
@@ -907,12 +992,12 @@ fn appendPullConversation(
         \\  <div class="issue-timeline-item">
         \\    <div class="issue-timeline-avatar">
     , .{});
-    try appendAvatar(buf, allocator, detail.author_principal, "issue-detail-avatar");
+    try appendAvatar(buf, allocator, pullDisplayAuthor(detail), "issue-detail-avatar");
     try appendTemplate(buf, allocator,
         \\    </div>
         \\    <article class="issue-comment-box pull-card" id="pull-description">
         \\      <header class="issue-comment-head"><div><strong>{author}</strong><span>opened
-    , .{ .author = detail.author_principal });
+    , .{ .author = pullDisplayAuthor(detail) });
     try buf.append(allocator, ' ');
     try appendRelativeTime(buf, allocator, detail.opened_at);
     try appendTemplate(buf, allocator,
@@ -1064,6 +1149,12 @@ fn appendPullReactionBar(
     target_ref: []const u8,
     current_actor: ?[]const u8,
 ) !void {
+    var reactions: std.ArrayList(ReactionSummary) = .empty;
+    defer {
+        for (reactions.items) |*item| item.deinit(allocator);
+        reactions.deinit(allocator);
+    }
+
     try buf.appendSlice(allocator, "<div class=\"reaction-bar\">");
     var stmt = try db.prepare(
         \\SELECT emoji, COUNT(DISTINCT actor_principal),
@@ -1078,21 +1169,66 @@ fn appendPullReactionBar(
     try stmt.bindText(2, object_kind);
     try stmt.bindText(3, object_id);
 
-    var shown = false;
     while (try stmt.step()) {
         const emoji = try stmt.columnTextDup(allocator, 0);
-        defer allocator.free(emoji);
         const count = stmt.columnInt64(1);
         const reacted = current_actor != null and stmt.columnInt64(2) > 0;
-        try appendPullReactionButton(buf, allocator, raw_pull_ref, object_kind, target_ref, emoji, emoji, count, reacted);
-        shown = true;
+        errdefer allocator.free(emoji);
+        try reactions.append(allocator, .{
+            .emoji = emoji,
+            .count = count,
+            .reacted = reacted,
+        });
     }
-    if (!shown) {
-        try appendPullReactionButton(buf, allocator, raw_pull_ref, object_kind, target_ref, "+1", "\xF0\x9F\x91\x8D", 0, false);
-        try appendPullReactionButton(buf, allocator, raw_pull_ref, object_kind, target_ref, "heart", "\xE2\x9D\xA4\xEF\xB8\x8F", 0, false);
-        try appendPullReactionButton(buf, allocator, raw_pull_ref, object_kind, target_ref, "eyes", "\xF0\x9F\x91\x80", 0, false);
+
+    try appendPullReactionPicker(buf, allocator, raw_pull_ref, object_kind, target_ref, reactions.items);
+    for (reactions.items) |item| {
+        try appendPullReactionButton(buf, allocator, raw_pull_ref, object_kind, target_ref, item.emoji, item.emoji, item.count, item.reacted);
     }
     try buf.appendSlice(allocator, "</div>");
+}
+
+fn appendPullReactionPicker(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    raw_pull_ref: []const u8,
+    object_kind: []const u8,
+    target_ref: []const u8,
+    reactions: []const ReactionSummary,
+) !void {
+    try buf.appendSlice(allocator,
+        \\<details class="reaction-picker" data-popover-menu>
+        \\  <summary class="reaction-add-button" aria-label="Add reaction" title="Add reaction"><span class="reaction-add-icon" aria-hidden="true"></span></summary>
+        \\  <div class="reaction-popover" role="menu" aria-label="Add reaction">
+    );
+    for (reaction_choices) |choice| {
+        try appendPullReactionChoiceButton(buf, allocator, raw_pull_ref, object_kind, target_ref, choice, pullReactionWasSelected(reactions, choice.value));
+    }
+    try buf.appendSlice(allocator, "</div></details>");
+}
+
+fn appendPullReactionChoiceButton(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    raw_pull_ref: []const u8,
+    object_kind: []const u8,
+    target_ref: []const u8,
+    choice: ReactionChoice,
+    reacted: bool,
+) !void {
+    try appendPullReactionFormOpen(buf, allocator, raw_pull_ref, "reaction-choice-form", if (reacted) "remove-reaction" else "add-reaction", object_kind, target_ref, choice.value);
+    try appendTemplate(buf, allocator,
+        \\<button{class_attr} type="submit" role="menuitem" aria-pressed="{pressed}" title="{title}"><span class="reaction-emoji">
+    , .{
+        .class_attr = shared.classAttr("reaction-choice-button", &.{
+            shared.class("selected", reacted),
+            shared.class("is-selected", reacted),
+        }),
+        .pressed = reacted,
+        .title = if (reacted) "Remove your reaction" else choice.title,
+    });
+    try shared.appendHtml(buf, allocator, choice.label);
+    try buf.appendSlice(allocator, "</span></button></form>");
 }
 
 fn appendPullReactionButton(
@@ -1106,12 +1242,37 @@ fn appendPullReactionButton(
     count: i64,
     reacted: bool,
 ) !void {
-    try buf.appendSlice(allocator, "<form class=\"reaction-form\" method=\"post\" action=\"/pulls/");
+    try appendPullReactionFormOpen(buf, allocator, raw_pull_ref, "reaction-form", if (reacted) "remove-reaction" else "add-reaction", object_kind, target_ref, emoji_value);
+    try appendTemplate(buf, allocator,
+        \\<button{class_attr} type="submit" aria-pressed="{pressed}" title="{title}"><span class="reaction-emoji">
+    , .{
+        .class_attr = shared.classAttr("reaction-button", &.{
+            shared.class("selected", reacted),
+            shared.class("is-selected", reacted),
+        }),
+        .pressed = reacted,
+        .title = if (reacted) "Remove your reaction" else "Add reaction",
+    });
+    try shared.appendHtml(buf, allocator, emoji_label);
+    try appendTemplate(buf, allocator, "</span><span class=\"reaction-count\">{count}</span></button></form>", .{ .count = count });
+}
+
+fn appendPullReactionFormOpen(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    raw_pull_ref: []const u8,
+    form_class: []const u8,
+    action: []const u8,
+    object_kind: []const u8,
+    target_ref: []const u8,
+    emoji_value: []const u8,
+) !void {
+    try appendTemplate(buf, allocator, "<form class=\"{form_class}\" method=\"post\" action=\"/pulls/", .{ .form_class = form_class });
     try shared.appendUrlEncoded(buf, allocator, raw_pull_ref);
     try appendTemplate(buf, allocator,
         \\/comments"><input type="hidden" name="action" value="{action}"><input type="hidden" name="target_kind" value="{object_kind}">
     , .{
-        .action = if (reacted) "remove-reaction" else "add-reaction",
+        .action = action,
         .object_kind = object_kind,
     });
     if (target_ref.len != 0) {
@@ -1120,21 +1281,15 @@ fn appendPullReactionButton(
         , .{ .target_ref = target_ref });
     }
     try appendTemplate(buf, allocator,
-        \\<input type="hidden" name="emoji" value="{emoji_value}"><button{class_attr} type="submit" aria-pressed="{pressed}" title="{title}"><span class="reaction-emoji">
-    , .{
-        .emoji_value = emoji_value,
-        .class_attr = shared.classAttr("reaction-button", &.{shared.class("selected", reacted)}),
-        .pressed = reacted,
-        .title = if (reacted) "Remove reaction" else "Add reaction",
-    });
-    try shared.appendHtml(buf, allocator, emoji_label);
-    try appendTemplate(buf, allocator,
-        \\</span>
-    , .{});
-    if (count > 0) {
-        try appendTemplate(buf, allocator, "<span>{count}</span>", .{ .count = count });
+        \\<input type="hidden" name="emoji" value="{emoji_value}">
+    , .{ .emoji_value = emoji_value });
+}
+
+fn pullReactionWasSelected(reactions: []const ReactionSummary, emoji: []const u8) bool {
+    for (reactions) |item| {
+        if (std.mem.eql(u8, item.emoji, emoji)) return item.reacted;
     }
-    try buf.appendSlice(allocator, "</button></form>");
+    return false;
 }
 
 fn appendPullCommentForm(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8, current_actor: ?[]const u8) !void {
@@ -1160,10 +1315,16 @@ fn appendPullCommentForm(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref:
     );
 }
 
-fn appendPullCommits(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, base_ref: []const u8, head_ref: []const u8) !void {
-    const commits_opt = try loadPullCommits(allocator, repo, base_ref, head_ref);
+fn appendPullCommits(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, detail: PullDetail) !void {
+    const commits_opt = try loadPullCommits(allocator, repo, detail.base_ref, detail.head_ref);
     const commits = commits_opt orelse {
-        try appendEmptyState(buf, allocator, "Commit range unavailable.", "Fetch or create the base and head refs locally to inspect this pull request.");
+        if (detail.commit_count) |count| {
+            const detail_text = try std.fmt.allocPrint(allocator, "GitHub reported {d} {s}. Fetch or create the base and head refs locally to inspect the commit list.", .{ count, commitWord(count) });
+            defer allocator.free(detail_text);
+            try appendEmptyState(buf, allocator, "Commit range unavailable.", detail_text);
+        } else {
+            try appendEmptyState(buf, allocator, "Commit range unavailable.", "Fetch or create the base and head refs locally to inspect this pull request.");
+        }
         return;
     };
     defer freePullCommits(allocator, commits);
@@ -1186,16 +1347,32 @@ fn appendPullCommits(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, 
     try buf.appendSlice(allocator, "</div></section>");
 }
 
-fn appendPullFiles(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, base_ref: []const u8, head_ref: []const u8) !void {
-    const diff_opt = try loadPullDiff(allocator, repo, base_ref, head_ref, 3);
+fn appendPullFiles(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, detail: PullDetail) !void {
+    const diff_opt = try loadPullDiff(allocator, repo, detail.base_ref, detail.head_ref, 3);
     const diff = diff_opt orelse {
-        try appendEmptyState(buf, allocator, "File changes unavailable.", "Fetch or create the base and head refs locally to inspect this pull request.");
+        if (detail.changed_files != null or detail.additions != null or detail.deletions != null) {
+            const detail_text = try pullImportedFileSummary(allocator, detail);
+            defer allocator.free(detail_text);
+            try appendEmptyState(buf, allocator, "File changes unavailable.", detail_text);
+        } else {
+            try appendEmptyState(buf, allocator, "File changes unavailable.", "Fetch or create the base and head refs locally to inspect this pull request.");
+        }
         return;
     };
     defer allocator.free(diff);
     try buf.appendSlice(allocator, "<section class=\"diff-section pull-diff-section\">");
     try appendPullDiff(buf, allocator, diff);
     try buf.appendSlice(allocator, "</section>");
+}
+
+fn pullImportedFileSummary(allocator: Allocator, detail: PullDetail) ![]u8 {
+    const file_count = detail.changed_files orelse 0;
+    const additions = detail.additions orelse 0;
+    const deletions = detail.deletions orelse 0;
+    if (detail.additions != null or detail.deletions != null) {
+        return std.fmt.allocPrint(allocator, "GitHub reported {d} changed {s} with +{d} -{d}. Fetch or create the base and head refs locally to inspect the patch.", .{ file_count, if (file_count == 1) "file" else "files", additions, deletions });
+    }
+    return std.fmt.allocPrint(allocator, "GitHub reported {d} changed {s}. Fetch or create the base and head refs locally to inspect the patch.", .{ file_count, if (file_count == 1) "file" else "files" });
 }
 
 fn loadPullCommits(allocator: Allocator, repo: Repo, base_ref: []const u8, head_ref: []const u8) !?[]PullCommit {

@@ -102,16 +102,54 @@ const RelationshipKind = enum {
     duplicate_of,
 };
 
+const ReactionChoice = struct {
+    value: []const u8,
+    label: []const u8,
+    title: []const u8,
+};
+
+const ReactionSummary = struct {
+    emoji: []u8,
+    count: i64,
+    reacted: bool,
+
+    fn deinit(self: *ReactionSummary, allocator: Allocator) void {
+        allocator.free(self.emoji);
+    }
+};
+
+const reaction_choices = [_]ReactionChoice{
+    .{ .value = "\xF0\x9F\x91\x8D", .label = "\xF0\x9F\x91\x8D", .title = "Thumbs up" },
+    .{ .value = "\xF0\x9F\x91\x8E", .label = "\xF0\x9F\x91\x8E", .title = "Thumbs down" },
+    .{ .value = "\xF0\x9F\x98\x84", .label = "\xF0\x9F\x98\x84", .title = "Laugh" },
+    .{ .value = "\xF0\x9F\x8E\x89", .label = "\xF0\x9F\x8E\x89", .title = "Hooray" },
+    .{ .value = "\xF0\x9F\x98\x95", .label = "\xF0\x9F\x98\x95", .title = "Confused" },
+    .{ .value = "\xE2\x9D\xA4\xEF\xB8\x8F", .label = "\xE2\x9D\xA4\xEF\xB8\x8F", .title = "Heart" },
+    .{ .value = "\xF0\x9F\x9A\x80", .label = "\xF0\x9F\x9A\x80", .title = "Rocket" },
+    .{ .value = "\xF0\x9F\x91\x80", .label = "\xF0\x9F\x91\x80", .title = "Eyes" },
+};
+
 const ResolvedObjectRef = struct {
     allocator: Allocator,
     object_kind: []const u8,
     object_id: []u8,
     title: []u8,
+    state: []u8,
     legacy_number: i64,
 
     fn deinit(self: *ResolvedObjectRef) void {
         self.allocator.free(self.object_id);
         self.allocator.free(self.title);
+        self.allocator.free(self.state);
+    }
+};
+
+const RelationshipItem = struct {
+    kind: RelationshipKind,
+    target: ResolvedObjectRef,
+
+    fn deinit(self: *RelationshipItem) void {
+        self.target.deinit();
     }
 };
 
@@ -1407,6 +1445,12 @@ fn appendReactionBar(
     target_ref: []const u8,
     current_actor: ?[]const u8,
 ) !void {
+    var reactions: std.ArrayList(ReactionSummary) = .empty;
+    defer {
+        for (reactions.items) |*item| item.deinit(allocator);
+        reactions.deinit(allocator);
+    }
+
     try buf.appendSlice(allocator, "<div class=\"reaction-bar\">");
     var stmt = try db.prepare(
         \\SELECT emoji, COUNT(DISTINCT actor_principal),
@@ -1421,21 +1465,66 @@ fn appendReactionBar(
     try stmt.bindText(2, object_kind);
     try stmt.bindText(3, object_id);
 
-    var shown = false;
     while (try stmt.step()) {
         const emoji = try stmt.columnTextDup(allocator, 0);
-        defer allocator.free(emoji);
         const count = stmt.columnInt64(1);
         const reacted = current_actor != null and stmt.columnInt64(2) > 0;
-        try appendReactionButton(buf, allocator, raw_issue_ref, object_kind, target_ref, emoji, emoji, count, reacted);
-        shown = true;
+        errdefer allocator.free(emoji);
+        try reactions.append(allocator, .{
+            .emoji = emoji,
+            .count = count,
+            .reacted = reacted,
+        });
     }
-    if (!shown) {
-        try appendReactionButton(buf, allocator, raw_issue_ref, object_kind, target_ref, "+1", "\xF0\x9F\x91\x8D", 0, false);
-        try appendReactionButton(buf, allocator, raw_issue_ref, object_kind, target_ref, "heart", "\xE2\x9D\xA4\xEF\xB8\x8F", 0, false);
-        try appendReactionButton(buf, allocator, raw_issue_ref, object_kind, target_ref, "eyes", "\xF0\x9F\x91\x80", 0, false);
+
+    try appendReactionPicker(buf, allocator, raw_issue_ref, object_kind, target_ref, reactions.items);
+    for (reactions.items) |item| {
+        try appendReactionButton(buf, allocator, raw_issue_ref, object_kind, target_ref, item.emoji, item.emoji, item.count, item.reacted);
     }
     try buf.appendSlice(allocator, "</div>");
+}
+
+fn appendReactionPicker(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    raw_issue_ref: []const u8,
+    object_kind: []const u8,
+    target_ref: []const u8,
+    reactions: []const ReactionSummary,
+) !void {
+    try buf.appendSlice(allocator,
+        \\<details class="reaction-picker" data-popover-menu>
+        \\  <summary class="reaction-add-button" aria-label="Add reaction" title="Add reaction"><span class="reaction-add-icon" aria-hidden="true"></span></summary>
+        \\  <div class="reaction-popover" role="menu" aria-label="Add reaction">
+    );
+    for (reaction_choices) |choice| {
+        try appendReactionChoiceButton(buf, allocator, raw_issue_ref, object_kind, target_ref, choice, reactionWasSelected(reactions, choice.value));
+    }
+    try buf.appendSlice(allocator, "</div></details>");
+}
+
+fn appendReactionChoiceButton(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    raw_issue_ref: []const u8,
+    object_kind: []const u8,
+    target_ref: []const u8,
+    choice: ReactionChoice,
+    reacted: bool,
+) !void {
+    try appendReactionFormOpen(buf, allocator, raw_issue_ref, "reaction-choice-form", if (reacted) "remove-reaction" else "add-reaction", object_kind, target_ref, choice.value);
+    try appendTemplate(buf, allocator,
+        \\<button{class_attr} type="submit" role="menuitem" aria-pressed="{pressed}" title="{title}"><span class="reaction-emoji">
+    , .{
+        .class_attr = shared.classAttr("reaction-choice-button", &.{
+            shared.class("selected", reacted),
+            shared.class("is-selected", reacted),
+        }),
+        .pressed = reacted,
+        .title = if (reacted) "Remove your reaction" else choice.title,
+    });
+    try shared.appendHtml(buf, allocator, choice.label);
+    try buf.appendSlice(allocator, "</span></button></form>");
 }
 
 fn appendReactionButton(
@@ -1449,12 +1538,37 @@ fn appendReactionButton(
     count: i64,
     reacted: bool,
 ) !void {
-    try buf.appendSlice(allocator, "<form class=\"reaction-form\" method=\"post\" action=\"/issues/");
+    try appendReactionFormOpen(buf, allocator, raw_issue_ref, "reaction-form", if (reacted) "remove-reaction" else "add-reaction", object_kind, target_ref, emoji_value);
+    try appendTemplate(buf, allocator,
+        \\<button{class_attr} type="submit" aria-pressed="{pressed}" title="{title}"><span class="reaction-emoji">
+    , .{
+        .class_attr = shared.classAttr("reaction-button", &.{
+            shared.class("selected", reacted),
+            shared.class("is-selected", reacted),
+        }),
+        .pressed = reacted,
+        .title = if (reacted) "Remove your reaction" else "Add reaction",
+    });
+    try shared.appendHtml(buf, allocator, emoji_label);
+    try appendTemplate(buf, allocator, "</span><span class=\"reaction-count\">{count}</span></button></form>", .{ .count = count });
+}
+
+fn appendReactionFormOpen(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    raw_issue_ref: []const u8,
+    form_class: []const u8,
+    action: []const u8,
+    object_kind: []const u8,
+    target_ref: []const u8,
+    emoji_value: []const u8,
+) !void {
+    try appendTemplate(buf, allocator, "<form class=\"{form_class}\" method=\"post\" action=\"/issues/", .{ .form_class = form_class });
     try shared.appendUrlEncoded(buf, allocator, raw_issue_ref);
     try appendTemplate(buf, allocator,
         \\/comments"><input type="hidden" name="action" value="{action}"><input type="hidden" name="target_kind" value="{object_kind}">
     , .{
-        .action = if (reacted) "remove-reaction" else "add-reaction",
+        .action = action,
         .object_kind = object_kind,
     });
     if (target_ref.len != 0) {
@@ -1463,21 +1577,15 @@ fn appendReactionButton(
         , .{ .target_ref = target_ref });
     }
     try appendTemplate(buf, allocator,
-        \\<input type="hidden" name="emoji" value="{emoji_value}"><button{class_attr} type="submit" aria-pressed="{pressed}" title="{title}"><span class="reaction-emoji">
-    , .{
-        .emoji_value = emoji_value,
-        .class_attr = shared.classAttr("reaction-button", &.{shared.class("selected", reacted)}),
-        .pressed = reacted,
-        .title = if (reacted) "Remove reaction" else "Add reaction",
-    });
-    try shared.appendHtml(buf, allocator, emoji_label);
-    try appendTemplate(buf, allocator,
-        \\</span>
-    , .{});
-    if (count > 0) {
-        try appendTemplate(buf, allocator, "<span>{count}</span>", .{ .count = count });
+        \\<input type="hidden" name="emoji" value="{emoji_value}">
+    , .{ .emoji_value = emoji_value });
+}
+
+fn reactionWasSelected(reactions: []const ReactionSummary, emoji: []const u8) bool {
+    for (reactions) |item| {
+        if (std.mem.eql(u8, item.emoji, emoji)) return item.reacted;
     }
-    try buf.appendSlice(allocator, "</button></form>");
+    return false;
 }
 
 pub fn appendIssueActionMenu(
@@ -1722,14 +1830,18 @@ fn appendIssueSidebarRelationships(buf: *std.ArrayList(u8), allocator: Allocator
     try appendIssueSidebarEditableSectionStart(buf, allocator, "Relationships", "Add relationship");
     try appendIssueSidebarRelationshipsMenu(buf, allocator);
     try appendIssueSidebarEditableSectionBodyStart(buf, allocator);
+    var relationships: std.ArrayList(RelationshipItem) = .empty;
+    defer {
+        for (relationships.items) |*item| item.deinit();
+        relationships.deinit(allocator);
+    }
     var seen = std.StringHashMap(void).init(allocator);
     defer {
         var keys = seen.keyIterator();
         while (keys.next()) |key| allocator.free(key.*);
         seen.deinit();
     }
-    var shown = false;
-    try appendRelationshipDirectivesFromText(buf, allocator, db, issue_id, body, &seen, &shown);
+    try collectRelationshipDirectivesFromText(allocator, db, issue_id, body, &seen, &relationships);
 
     var stmt = try db.prepare(
         \\SELECT body
@@ -1744,10 +1856,14 @@ fn appendIssueSidebarRelationships(buf: *std.ArrayList(u8), allocator: Allocator
     while (try stmt.step()) {
         const comment_body = try stmt.columnTextDup(allocator, 0);
         defer allocator.free(comment_body);
-        try appendRelationshipDirectivesFromText(buf, allocator, db, issue_id, comment_body, &seen, &shown);
+        try collectRelationshipDirectivesFromText(allocator, db, issue_id, comment_body, &seen, &relationships);
     }
 
-    if (!shown) try buf.appendSlice(allocator, "<p class=\"issue-sidebar-empty\">None yet</p>");
+    if (relationships.items.len == 0) {
+        try buf.appendSlice(allocator, "<p class=\"issue-sidebar-empty\">None yet</p>");
+    } else {
+        try appendRelationshipGroups(buf, allocator, relationships.items);
+    }
     try appendIssueSidebarSectionEnd(buf, allocator);
 }
 
@@ -2297,14 +2413,13 @@ fn appendIssueSidebarAction(buf: *std.ArrayList(u8), allocator: Allocator, raw_r
     try buf.appendSlice(allocator, "/sidebar");
 }
 
-fn appendRelationshipDirectivesFromText(
-    buf: *std.ArrayList(u8),
+fn collectRelationshipDirectivesFromText(
     allocator: Allocator,
     db: *SqliteDb,
     issue_id: []const u8,
     text: []const u8,
     seen: *std.StringHashMap(void),
-    shown: *bool,
+    relationships: *std.ArrayList(RelationshipItem),
 ) !void {
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw_line| {
@@ -2316,11 +2431,39 @@ fn appendRelationshipDirectivesFromText(
             const token = trimRelationshipToken(raw_token);
             if (token.len == 0) continue;
             var target = (try resolveRelationshipTarget(allocator, db, token)) orelse continue;
-            defer target.deinit();
-            if (std.mem.eql(u8, target.object_kind, "issue") and std.mem.eql(u8, target.object_id, issue_id)) continue;
-            try appendRelationshipTarget(buf, allocator, kind, target, seen, shown);
+            if (std.mem.eql(u8, target.object_kind, "issue") and std.mem.eql(u8, target.object_id, issue_id)) {
+                target.deinit();
+                continue;
+            }
+            try collectRelationshipTarget(allocator, kind, target, seen, relationships);
         }
     }
+}
+
+fn collectRelationshipTarget(
+    allocator: Allocator,
+    kind: RelationshipKind,
+    target: ResolvedObjectRef,
+    seen: *std.StringHashMap(void),
+    relationships: *std.ArrayList(RelationshipItem),
+) !void {
+    errdefer {
+        var cleanup = target;
+        cleanup.deinit();
+    }
+
+    const key = try std.fmt.allocPrint(allocator, "{s}\x1f{s}\x1f{s}", .{ @tagName(kind), target.object_kind, target.object_id });
+    errdefer allocator.free(key);
+    const entry = try seen.getOrPut(key);
+    if (entry.found_existing) {
+        allocator.free(key);
+        var duplicate = target;
+        duplicate.deinit();
+        return;
+    }
+    entry.value_ptr.* = {};
+    errdefer _ = seen.remove(key);
+    try relationships.append(allocator, .{ .kind = kind, .target = target });
 }
 
 fn trimRelationshipToken(raw: []const u8) []const u8 {
@@ -2337,45 +2480,93 @@ fn relationshipKindFromKey(key: []const u8) ?RelationshipKind {
     return null;
 }
 
-fn relationshipKindLabel(kind: RelationshipKind) []const u8 {
+fn relationshipGroupTitle(kind: RelationshipKind, object_kind: []const u8) []const u8 {
+    const is_pull = std.mem.eql(u8, object_kind, "pull");
     return switch (kind) {
-        .refs => "references",
-        .relates_to => "relates to",
-        .blocks => "blocks",
-        .blocked_by => "blocked by",
-        .duplicates => "duplicates",
-        .duplicate_of => "duplicate of",
+        .refs => if (is_pull) "Referenced pull request" else "Referenced issue",
+        .relates_to => if (is_pull) "Related pull request" else "Related issue",
+        .blocks => if (is_pull) "Blocking pull request" else "Blocking issue",
+        .blocked_by => if (is_pull) "Blocked by pull request" else "Blocked by issue",
+        .duplicates => if (is_pull) "Duplicate pull request" else "Duplicate issue",
+        .duplicate_of => if (is_pull) "Original pull request" else "Original issue",
     };
 }
 
-fn appendRelationshipTarget(
+fn appendRelationshipGroups(buf: *std.ArrayList(u8), allocator: Allocator, relationships: []const RelationshipItem) !void {
+    try buf.appendSlice(allocator, "<div class=\"issue-relationships\">");
+    inline for (.{ RelationshipKind.blocked_by, .blocks, .duplicate_of, .duplicates, .relates_to, .refs }) |kind| {
+        try appendRelationshipGroup(buf, allocator, relationships, kind, "issue");
+        try appendRelationshipGroup(buf, allocator, relationships, kind, "pull");
+    }
+    try buf.appendSlice(allocator, "</div>");
+}
+
+fn appendRelationshipGroup(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
+    relationships: []const RelationshipItem,
     kind: RelationshipKind,
-    target: ResolvedObjectRef,
-    seen: *std.StringHashMap(void),
-    shown: *bool,
+    object_kind: []const u8,
 ) !void {
-    const key = try std.fmt.allocPrint(allocator, "{s}\x1f{s}\x1f{s}", .{ @tagName(kind), target.object_kind, target.object_id });
-    errdefer allocator.free(key);
-    const entry = try seen.getOrPut(key);
-    if (entry.found_existing) {
-        allocator.free(key);
-        return;
+    var shown = false;
+    for (relationships) |item| {
+        if (item.kind != kind or !std.mem.eql(u8, item.target.object_kind, object_kind)) continue;
+        if (!shown) {
+            try appendTemplate(buf, allocator,
+                \\<div class="issue-relationship-group"><div class="issue-relationship-group-title">{title}</div><div class="issue-relationship-list">
+            , .{ .title = relationshipGroupTitle(kind, object_kind) });
+            shown = true;
+        }
+        try appendRelationshipRow(buf, allocator, item.target);
     }
-    entry.value_ptr.* = {};
+    if (shown) try buf.appendSlice(allocator, "</div></div>");
+}
 
+fn appendRelationshipRow(buf: *std.ArrayList(u8), allocator: Allocator, target: ResolvedObjectRef) !void {
+    const is_pull = std.mem.eql(u8, target.object_kind, "pull");
     var object_ref_buf: [util.short_object_ref_len]u8 = undefined;
     const object_ref = util.shortObjectRef(&object_ref_buf, target.object_id);
-    try buf.appendSlice(allocator, "<a class=\"issue-sidebar-link-row\" href=\"");
-    if (std.mem.eql(u8, target.object_kind, "pull")) {
-        try shared.appendHref(buf, allocator, pullHref(object_ref));
-    } else {
-        try shared.appendHref(buf, allocator, issueHref(object_ref));
-    }
+    try buf.appendSlice(allocator, "<a class=\"issue-relationship-row\" href=\"");
+    try appendRelationshipTargetHref(buf, allocator, target, object_ref);
     try appendTemplate(buf, allocator,
-        \\"><span class="issue-sidebar-row-kind">{relation}</span><span class="issue-sidebar-row-ref">
-    , .{ .relation = relationshipKindLabel(kind) });
+        \\" aria-label="{kind} {title}">
+        \\  <span class="{icon_classes}" aria-hidden="true"></span>
+        \\  <span class="issue-relationship-main"><span class="issue-relationship-title">{title}</span><span class="issue-relationship-ref">
+    , .{
+        .kind = if (is_pull) "Pull request" else "Issue",
+        .title = target.title,
+        .icon_classes = shared.classes("issue-relationship-icon", &.{
+            shared.class("is-issue", !is_pull),
+            shared.class("is-pull", is_pull),
+            shared.class("is-open", std.mem.eql(u8, target.state, "open")),
+            shared.class("is-closed", std.mem.eql(u8, target.state, "closed")),
+            shared.class("is-merged", std.mem.eql(u8, target.state, "merged")),
+        }),
+    });
+    try appendRelationshipDisplayRef(buf, allocator, target, object_ref);
+    try appendTemplate(buf, allocator,
+        \\</span></span><span class="{badge_classes}">{state}</span></a>
+    , .{
+        .badge_classes = shared.classes("issue-relationship-badge", &.{
+            shared.class("is-open", std.mem.eql(u8, target.state, "open")),
+            shared.class("is-closed", std.mem.eql(u8, target.state, "closed")),
+            shared.class("is-merged", std.mem.eql(u8, target.state, "merged")),
+        }),
+        .state = relationshipStateLabel(target.state),
+    });
+}
+
+fn appendRelationshipTargetHref(buf: *std.ArrayList(u8), allocator: Allocator, target: ResolvedObjectRef, object_ref: []const u8) !void {
+    if (target.legacy_number > 0) {
+        const number_ref = try std.fmt.allocPrint(allocator, "{d}", .{target.legacy_number});
+        defer allocator.free(number_ref);
+        try shared.appendHref(buf, allocator, if (std.mem.eql(u8, target.object_kind, "pull")) pullHref(number_ref) else issueHref(number_ref));
+        return;
+    }
+    try shared.appendHref(buf, allocator, if (std.mem.eql(u8, target.object_kind, "pull")) pullHref(object_ref) else issueHref(object_ref));
+}
+
+fn appendRelationshipDisplayRef(buf: *std.ArrayList(u8), allocator: Allocator, target: ResolvedObjectRef, object_ref: []const u8) !void {
     if (std.mem.eql(u8, target.object_kind, "pull")) try buf.appendSlice(allocator, "PR ");
     try buf.append(allocator, '#');
     if (target.legacy_number > 0) {
@@ -2383,10 +2574,13 @@ fn appendRelationshipTarget(
     } else {
         try shared.appendHtml(buf, allocator, object_ref);
     }
-    try appendTemplate(buf, allocator,
-        \\</span><span class="issue-sidebar-row-title">{title}</span></a>
-    , .{ .title = target.title });
-    shown.* = true;
+}
+
+fn relationshipStateLabel(state: []const u8) []const u8 {
+    if (std.mem.eql(u8, state, "open")) return "Open";
+    if (std.mem.eql(u8, state, "closed")) return "Closed";
+    if (std.mem.eql(u8, state, "merged")) return "Merged";
+    return state;
 }
 
 fn resolveRelationshipTarget(allocator: Allocator, db: *SqliteDb, token: []const u8) !?ResolvedObjectRef {
@@ -2429,13 +2623,13 @@ fn resolveSpecificRelationshipTarget(allocator: Allocator, db: *SqliteDb, object
 
 fn lookupResolvedObjectById(allocator: Allocator, db: *SqliteDb, object_kind: []const u8, object_id: []const u8) !?ResolvedObjectRef {
     const sql_text: []const u8 = if (std.mem.eql(u8, object_kind, "pull"))
-        \\SELECT p.id, p.title, COALESCE(a.number, 0)
+        \\SELECT p.id, p.title, p.state, COALESCE(a.number, 0)
         \\FROM pulls p
         \\LEFT JOIN legacy_aliases a
         \\  ON a.provider = 'github' AND a.object_kind = 'pull' AND a.object_id = p.id
         \\WHERE p.id = ?
     else
-        \\SELECT i.id, i.title, COALESCE(a.number, 0)
+        \\SELECT i.id, i.title, i.state, COALESCE(a.number, 0)
         \\FROM issues i
         \\LEFT JOIN legacy_aliases a
         \\  ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
@@ -2450,7 +2644,8 @@ fn lookupResolvedObjectById(allocator: Allocator, db: *SqliteDb, object_kind: []
         .object_kind = object_kind,
         .object_id = try stmt.columnTextDup(allocator, 0),
         .title = try stmt.columnTextDup(allocator, 1),
-        .legacy_number = stmt.columnInt64(2),
+        .state = try stmt.columnTextDup(allocator, 2),
+        .legacy_number = stmt.columnInt64(3),
     };
 }
 
@@ -3012,6 +3207,28 @@ test "relationship directive keys are case-insensitive" {
     try std.testing.expectEqual(RelationshipKind.relates_to, relationshipKindFromKey("related-to").?);
     try std.testing.expect(relationshipKindFromKey("mentions") == null);
     try std.testing.expectEqualStrings("#abc123", trimRelationshipToken("(#abc123,"));
+}
+
+test "relationship groups render stateful issue rows" {
+    var target = ResolvedObjectRef{
+        .allocator = std.testing.allocator,
+        .object_kind = "issue",
+        .object_id = try std.testing.allocator.dupe(u8, "018f0000-0000-7000-8000-000000000010"),
+        .title = try std.testing.allocator.dupe(u8, "Parent issue"),
+        .state = try std.testing.allocator.dupe(u8, "open"),
+        .legacy_number = 1,
+    };
+    defer target.deinit();
+
+    const relationships = [_]RelationshipItem{.{ .kind = .blocked_by, .target = target }};
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendRelationshipGroups(&buf, std.testing.allocator, relationships[0..]);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Blocked by issue") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "issue-relationship-row") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, ">#1<") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, ">Open<") != null);
 }
 
 test "web issue titles come from issue opened subjects" {

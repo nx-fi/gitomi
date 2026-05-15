@@ -722,11 +722,40 @@ fn importPullObject(allocator: Allocator, pull: std.json.ObjectMap, options: Imp
     const draft = jsonBool(pull.get("draft")) orelse false;
     const occurred_at = try githubTimestampOrNow(allocator, pull.get("created_at"));
     defer allocator.free(occurred_at);
+    const source_author = try githubSizedString(allocator, githubAuthorLogin(pull), "", git.max_payload_atom_bytes);
+    defer allocator.free(source_author);
+    const labels = try githubIssueLabels(allocator, pull);
+    defer freeStringList(allocator, labels);
+    const assignees = try githubNamedArray(allocator, pull.get("assignees"), "login");
+    defer freeStringList(allocator, assignees);
+    const reviewers = try githubPullReviewers(allocator, pull);
+    defer freeStringList(allocator, reviewers);
 
     const pull_id = try util.newUuidV7(allocator);
     errdefer allocator.free(pull_id);
     try eprint("gt github import: importing pull #{d}\n", .{number});
-    try writeImportedPullOpened(allocator, options, pull_id, @intCast(number), occurred_at, title, body, base_ref, head_ref, draft);
+    try writeImportedPullOpened(
+        allocator,
+        options,
+        pull_id,
+        @intCast(number),
+        occurred_at,
+        title,
+        body,
+        base_ref,
+        head_ref,
+        draft,
+        .{
+            .source_author = if (source_author.len == 0) null else source_author,
+            .labels = labels,
+            .assignees = assignees,
+            .reviewers = reviewers,
+            .commit_count = jsonOptionalUnsigned(pull.get("commits")),
+            .changed_files = jsonOptionalUnsigned(pull.get("changed_files")),
+            .additions = jsonOptionalUnsigned(pull.get("additions")),
+            .deletions = jsonOptionalUnsigned(pull.get("deletions")),
+        },
+    );
     stats.pulls += 1;
 
     if (event_mod.jsonString(pull.get("state"))) |state| {
@@ -917,6 +946,7 @@ fn writeImportedPullOpened(
     base_ref: []const u8,
     head_ref: []const u8,
     draft: bool,
+    metadata: event_mod.PullOpenedMetadata,
 ) !void {
     var writer = try EventWriter.initForActor(allocator, "gt github import", options.bot_principal, options.bot_device);
     defer writer.deinit();
@@ -925,7 +955,23 @@ fn writeImportedPullOpened(
     defer allocator.free(event_uuid);
     const idem = try util.newUuidV7(allocator);
     defer allocator.free(idem);
-    const body = try event_mod.buildPullOpenedJsonWithLegacy(allocator, writer.cfg, writer.nextSeq(), pull_id, event_uuid, idem, occurred_at, writer.eventParents(), title, body_text, base_ref, head_ref, draft, .{ .github_pull_number = number });
+    const body = try event_mod.buildPullOpenedJsonWithLegacyAndMetadata(
+        allocator,
+        writer.cfg,
+        writer.nextSeq(),
+        pull_id,
+        event_uuid,
+        idem,
+        occurred_at,
+        writer.eventParents(),
+        title,
+        body_text,
+        base_ref,
+        head_ref,
+        draft,
+        .{ .github_pull_number = number },
+        metadata,
+    );
     defer allocator.free(body);
     var pull_ref_buf: [util.short_object_ref_len]u8 = undefined;
     const pull_ref = util.shortObjectRef(&pull_ref_buf, pull_id);
@@ -1807,6 +1853,14 @@ fn githubIssueLabels(allocator: Allocator, issue: std.json.ObjectMap) ![][]u8 {
     return list.toOwnedSlice(allocator);
 }
 
+fn githubPullReviewers(allocator: Allocator, pull: std.json.ObjectMap) ![][]u8 {
+    var list: std.ArrayList([]u8) = .empty;
+    errdefer freeStringList(allocator, list.items);
+    try appendGithubNamedArray(allocator, &list, pull.get("requested_reviewers"), "login");
+    try appendGithubNamedArray(allocator, &list, pull.get("reviewers"), "login");
+    return list.toOwnedSlice(allocator);
+}
+
 fn githubNamedArray(allocator: Allocator, value: ?std.json.Value, key: []const u8) ![][]u8 {
     var list: std.ArrayList([]u8) = .empty;
     errdefer freeStringList(allocator, list.items);
@@ -1949,6 +2003,12 @@ fn jsonInteger(value: ?std.json.Value) ?i64 {
         };
     }
     return null;
+}
+
+fn jsonOptionalUnsigned(value: ?std.json.Value) ?u64 {
+    const integer = jsonInteger(value) orelse return null;
+    if (integer < 0) return null;
+    return @intCast(integer);
 }
 
 fn urlPathEscape(allocator: Allocator, value: []const u8) ![]u8 {

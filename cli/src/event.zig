@@ -47,6 +47,17 @@ pub const IssueOpenedMetadata = struct {
     projects: []const IssueProjectPlacement = &.{},
 };
 
+pub const PullOpenedMetadata = struct {
+    source_author: ?[]const u8 = null,
+    labels: []const []const u8 = &.{},
+    assignees: []const []const u8 = &.{},
+    reviewers: []const []const u8 = &.{},
+    commit_count: ?u64 = null,
+    changed_files: ?u64 = null,
+    additions: ?u64 = null,
+    deletions: ?u64 = null,
+};
+
 pub const CommentAddedMetadata = struct {
     source_author: ?[]const u8 = null,
     reply_parent_id: ?[]const u8 = null,
@@ -704,6 +715,42 @@ pub fn buildPullOpenedJsonWithLegacy(
     draft: bool,
     legacy: LegacyInfo,
 ) ![]u8 {
+    return buildPullOpenedJsonWithLegacyAndMetadata(
+        allocator,
+        cfg,
+        seq,
+        pull_id,
+        event_uuid,
+        idem,
+        occurred_at,
+        parents,
+        title,
+        body,
+        base_ref,
+        head_ref,
+        draft,
+        legacy,
+        .{},
+    );
+}
+
+pub fn buildPullOpenedJsonWithLegacyAndMetadata(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    pull_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    title: []const u8,
+    body: []const u8,
+    base_ref: []const u8,
+    head_ref: []const u8,
+    draft: bool,
+    legacy: LegacyInfo,
+    metadata: PullOpenedMetadata,
+) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
@@ -718,6 +765,16 @@ pub fn buildPullOpenedJsonWithLegacy(
     if (draft) {
         try appendJsonFieldBool(&buf, allocator, "draft", true, true);
     }
+    if (metadata.source_author) |value| {
+        if (value.len != 0) try appendJsonFieldString(&buf, allocator, "source_author", value, true);
+    }
+    if (metadata.labels.len != 0) try appendJsonFieldStringArray(&buf, allocator, "labels", metadata.labels, true);
+    if (metadata.assignees.len != 0) try appendJsonFieldStringArray(&buf, allocator, "assignees", metadata.assignees, true);
+    if (metadata.reviewers.len != 0) try appendJsonFieldStringArray(&buf, allocator, "reviewers", metadata.reviewers, true);
+    if (metadata.commit_count) |value| try appendJsonFieldUnsigned(&buf, allocator, "commits", value, true);
+    if (metadata.changed_files) |value| try appendJsonFieldUnsigned(&buf, allocator, "changed_files", value, true);
+    if (metadata.additions) |value| try appendJsonFieldUnsigned(&buf, allocator, "additions", value, true);
+    if (metadata.deletions) |value| try appendJsonFieldUnsigned(&buf, allocator, "deletions", value, true);
     if (buf.items[buf.items.len - 1] == ',') {
         buf.items.len -= 1;
     }
@@ -1530,6 +1587,17 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!optionalString(payload, "body")) return "pull.opened payload.body must be a string";
         if (!optionalStringWithin(payload, "body", git.max_payload_text_bytes)) return "pull.opened payload.body exceeds v1 text size limit";
         if (!optionalBool(payload, "draft")) return "pull.opened payload.draft must be a boolean";
+        if (!optionalStringWithin(payload, "source_author", git.max_payload_atom_bytes)) return "pull.opened payload.source_author exceeds v1 field size limit";
+        if (!optionalStringArray(payload, "labels")) return "pull.opened payload.labels must be an array of strings";
+        if (!optionalStringArrayWithin(payload, "labels", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "pull.opened payload.labels exceeds v1 collection limits";
+        if (!optionalStringArray(payload, "assignees")) return "pull.opened payload.assignees must be an array of strings";
+        if (!optionalStringArrayWithin(payload, "assignees", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "pull.opened payload.assignees exceeds v1 collection limits";
+        if (!optionalStringArray(payload, "reviewers")) return "pull.opened payload.reviewers must be an array of strings";
+        if (!optionalStringArrayWithin(payload, "reviewers", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "pull.opened payload.reviewers exceeds v1 collection limits";
+        if (!optionalNonNegativeInteger(payload, "commits")) return "pull.opened payload.commits must be a non-negative integer";
+        if (!optionalNonNegativeInteger(payload, "changed_files")) return "pull.opened payload.changed_files must be a non-negative integer";
+        if (!optionalNonNegativeInteger(payload, "additions")) return "pull.opened payload.additions must be a non-negative integer";
+        if (!optionalNonNegativeInteger(payload, "deletions")) return "pull.opened payload.deletions must be a non-negative integer";
         return null;
     }
     if (std.mem.eql(u8, event_type, "pull.updated")) {
@@ -1824,6 +1892,15 @@ fn isActionConclusion(value: []const u8) bool {
 fn optionalBool(object: std.json.ObjectMap, key: []const u8) bool {
     const value = object.get(key) orelse return true;
     return value == .bool;
+}
+
+fn optionalNonNegativeInteger(object: std.json.ObjectMap, key: []const u8) bool {
+    const value = object.get(key) orelse return true;
+    const integer = switch (value) {
+        .integer => |i| i,
+        else => return false,
+    };
+    return integer >= 0;
 }
 
 fn optionalStringArray(object: std.json.ObjectMap, key: []const u8) bool {
