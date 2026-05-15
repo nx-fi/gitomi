@@ -334,7 +334,7 @@ fn roleAtLeastMaintainer(role: []const u8) bool {
 }
 
 fn writeImportBotIdentity(allocator: Allocator, principal: []const u8, device: []const u8) !void {
-    var writer = try EventWriter.initForInboxRef(allocator, "gt github import", principal, device);
+    var writer = try EventWriter.initForActor(allocator, "gt github import", principal, device);
     defer writer.deinit();
 
     var signing_key = try repo_mod.configuredSigningKey(allocator);
@@ -354,12 +354,12 @@ fn writeImportBotIdentity(allocator: Allocator, principal: []const u8, device: [
     defer allocator.free(body);
     const subject = try std.fmt.allocPrint(allocator, "identity.device_added {s}/{s}", .{ principal, device });
     defer allocator.free(subject);
-    const commit = try writer.write("gt github import", subject, body);
+    const commit = try writer.writeSkipAuthz("gt github import", subject, body);
     allocator.free(commit);
 }
 
 fn writeImportBotRole(allocator: Allocator, principal: []const u8, device: []const u8) !void {
-    var writer = try EventWriter.initForInboxRef(allocator, "gt github import", principal, device);
+    var writer = try EventWriter.initForActor(allocator, "gt github import", principal, device);
     defer writer.deinit();
 
     const event_uuid = try util.newUuidV7(allocator);
@@ -372,7 +372,7 @@ fn writeImportBotRole(allocator: Allocator, principal: []const u8, device: []con
     defer allocator.free(body);
     const subject = try std.fmt.allocPrint(allocator, "acl.role_granted {s} maintainer", .{principal});
     defer allocator.free(subject);
-    const commit = try writer.write("gt github import", subject, body);
+    const commit = try writer.writeSkipAuthz("gt github import", subject, body);
     allocator.free(commit);
 }
 

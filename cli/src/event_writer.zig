@@ -134,6 +134,26 @@ pub const EventWriter = struct {
         }
         return commit_oid;
     }
+
+    pub fn writeSkipAuthz(self: *EventWriter, command_context: []const u8, subject: []const u8, event_body: []const u8) ![]u8 {
+        const committed_seq = self.nextSeq();
+        const commit_oid = try writeSignedEvent(
+            self.allocator,
+            command_context,
+            self.inbox_ref,
+            subject,
+            event_body,
+            self.prepared_parents.old_head,
+            self.prepared_parents.causal_heads,
+        );
+        errdefer self.allocator.free(commit_oid);
+
+        self.cfg.seq = committed_seq;
+        if (self.persist_config) {
+            try repo_mod.writeConfig(self.repo.config_path, self.cfg);
+        }
+        return commit_oid;
+    }
 };
 
 pub fn writeSignedEvent(

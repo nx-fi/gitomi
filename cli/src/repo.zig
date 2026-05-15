@@ -645,6 +645,17 @@ fn emptySigningKey(allocator: Allocator, scheme: []const u8) !SigningKey {
     };
 }
 
+pub fn importOpenPgpPublicKey(allocator: Allocator, public_key: []const u8) !void {
+    const trimmed = std.mem.trim(u8, public_key, " \t\r\n");
+    if (!std.mem.startsWith(u8, trimmed, "-----BEGIN PGP PUBLIC KEY BLOCK-----")) return;
+
+    const program = try gpgProgram(allocator);
+    defer allocator.free(program);
+    var argv = [_][]const u8{ program, "--import" };
+    var result = try git.runCommand(allocator, &argv, trimmed, git.max_git_output);
+    defer result.deinit();
+}
+
 fn openPgpPublicKey(allocator: Allocator, key_id: []const u8) ![]u8 {
     const program = try gpgProgram(allocator);
     defer allocator.free(program);
