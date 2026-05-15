@@ -13,8 +13,6 @@
   --green-bg: #dff8e7;
   --red: #cf222e;
   --red-bg: #ffebe9;
-  --danger-button-bg: #cf222e;
-  --danger-button-hover: #a40e26;
   --warning-bg: #fff5cc;
   --warning-border: #d29922;
   --info-bg: #ddf4ff;
@@ -70,8 +68,6 @@
   --green-bg: #123b24;
   --red: #ff7b72;
   --red-bg: #3d1517;
-  --danger-button-bg: #da3633;
-  --danger-button-hover: #b62324;
   --warning-bg: #392a05;
   --warning-border: #9e6a03;
   --info-bg: #0b3551;
@@ -1427,14 +1423,14 @@ main.page-code:has(.root-page-grid) {
 }
 .button.secondary.pull-conflicts-button {
   gap: 8px;
-  color: #ffffff;
-  background: var(--danger-button-bg);
-  border-color: var(--danger-button-bg);
+  color: var(--text);
+  background: color-mix(in srgb, var(--warning-bg) 45%, var(--button-secondary-bg));
+  border-color: color-mix(in srgb, var(--warning-border) 58%, var(--border-strong));
 }
 .button.secondary.pull-conflicts-button:hover {
-  color: #ffffff;
-  background: var(--danger-button-hover);
-  border-color: var(--danger-button-hover);
+  color: var(--text);
+  background: color-mix(in srgb, var(--warning-bg) 70%, var(--panel));
+  border-color: var(--warning-border);
 }
 .pull-mergeability-item {
   align-items: start;
@@ -1465,10 +1461,10 @@ main.page-code:has(.root-page-grid) {
   line-height: 1;
 }
 .pull-mergeability-icon.is-conflicts {
-  color: #ffffff;
-  background: var(--danger-button-bg);
-  border-color: var(--red-bg);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 20%, transparent);
+  color: var(--warning-border);
+  background: color-mix(in srgb, var(--warning-bg) 65%, var(--panel));
+  border-color: color-mix(in srgb, var(--warning-border) 45%, var(--bg));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning-border) 16%, transparent);
 }
 .pull-mergeability-box {
   min-width: 0;
@@ -1478,11 +1474,9 @@ main.page-code:has(.root-page-grid) {
   border-radius: 6px;
 }
 .pull-mergeability-box.is-conflicts {
-  background: color-mix(in srgb, var(--red-bg) 48%, var(--panel));
-  border-color: color-mix(in srgb, var(--red) 72%, var(--border));
-  box-shadow:
-    inset 4px 0 0 var(--danger-button-bg),
-    0 0 0 1px color-mix(in srgb, var(--red) 20%, transparent);
+  background: var(--panel);
+  border-color: color-mix(in srgb, var(--warning-border) 52%, var(--border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--warning-border) 16%, transparent);
 }
 .pull-mergeability-head {
   display: flex;
@@ -1497,7 +1491,7 @@ main.page-code:has(.root-page-grid) {
   line-height: 1.35;
 }
 .pull-mergeability-box.is-conflicts .pull-mergeability-head h2 {
-  color: var(--red);
+  color: var(--text);
 }
 .pull-mergeability-head p,
 .pull-mergeability-empty {
@@ -1508,13 +1502,13 @@ main.page-code:has(.root-page-grid) {
   flex: 0 0 auto;
 }
 .pull-mergeability-box.is-conflicts .button.secondary.pull-mergeability-action {
-  color: #ffffff;
-  background: var(--danger-button-bg);
-  border-color: var(--danger-button-bg);
+  color: var(--text);
+  background: color-mix(in srgb, var(--warning-bg) 45%, var(--button-secondary-bg));
+  border-color: color-mix(in srgb, var(--warning-border) 58%, var(--border-strong));
 }
 .pull-mergeability-box.is-conflicts .button.secondary.pull-mergeability-action:hover {
-  background: var(--danger-button-hover);
-  border-color: var(--danger-button-hover);
+  background: color-mix(in srgb, var(--warning-bg) 70%, var(--panel));
+  border-color: var(--warning-border);
 }
 .pull-conflict-file-list {
   display: grid;
@@ -1550,7 +1544,7 @@ main.page-code:has(.root-page-grid) {
   border-radius: 2px;
 }
 .pull-mergeability-box.is-conflicts .pull-conflict-file-icon {
-  color: var(--red);
+  color: var(--warning-border);
 }
 .pull-conflict-file-icon::before {
   content: "";
@@ -1565,6 +1559,7 @@ main.page-code:has(.root-page-grid) {
 }
 .merge-editor {
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   min-height: calc(100vh - var(--sticky-top));
   margin: -24px;
   background: var(--bg);
@@ -1628,16 +1623,46 @@ main.page-code:has(.root-page-grid) {
 .merge-editor-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 8px;
   flex: 0 0 auto;
 }
-.merge-editor-count {
+.merge-editor-progress {
+  display: grid;
+  grid-template-columns: auto minmax(112px, 180px);
+  align-items: center;
+  gap: 10px;
   margin-right: 6px;
+}
+.merge-editor-count {
   color: var(--red);
   font-weight: 700;
+  white-space: nowrap;
+}
+.merge-editor-progress-bar {
+  display: block;
+  width: 100%;
+  height: 8px;
+  overflow: hidden;
+  background: var(--subtle);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.merge-editor-progress-bar span {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: var(--green);
+  transition: width 140ms ease;
 }
 .merge-editor-step {
-  min-width: 48px;
+  gap: 6px;
+  min-width: 92px;
+}
+.merge-editor-submit {
+  gap: 7px;
+  min-width: 162px;
 }
 .merge-editor-layout {
   display: grid;
@@ -1663,7 +1688,8 @@ main.page-code:has(.root-page-grid) {
   display: grid;
 }
 .merge-editor-file-link {
-  display: flex;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   min-width: 0;
@@ -1671,13 +1697,17 @@ main.page-code:has(.root-page-grid) {
   color: var(--text);
   border-bottom: 1px solid var(--border);
 }
-.merge-editor-file-link span:last-child {
+.merge-editor-file-name {
   min-width: 0;
   overflow-wrap: anywhere;
 }
 .merge-editor-file-link:hover {
   background: var(--panel-strong);
   text-decoration: none;
+}
+.merge-editor-file-link.is-active {
+  background: color-mix(in srgb, var(--blue) 8%, var(--panel-strong));
+  box-shadow: inset 3px 0 0 var(--blue);
 }
 .merge-editor-file-link.is-resolved {
   color: var(--muted);
@@ -1687,6 +1717,21 @@ main.page-code:has(.root-page-grid) {
 }
 .merge-editor-file-link.is-unsupported {
   color: var(--muted);
+}
+.merge-editor-file-meta {
+  padding: 2px 6px;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.merge-editor-file-link.is-resolved .merge-editor-file-meta {
+  color: var(--green);
+  background: color-mix(in srgb, var(--green-bg) 58%, var(--panel));
+  border-color: color-mix(in srgb, var(--green) 38%, var(--border));
 }
 .merge-editor-files {
   display: grid;
@@ -1701,6 +1746,9 @@ main.page-code:has(.root-page-grid) {
 .merge-file-editor {
   overflow: hidden;
   scroll-margin-top: calc(var(--sticky-top) + 90px);
+}
+.merge-file-editor.is-active {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--blue) 24%, transparent);
 }
 .merge-file-head {
   display: flex;
@@ -1797,27 +1845,53 @@ main.page-code:has(.root-page-grid) {
   background: color-mix(in srgb, var(--green-bg) 36%, var(--panel));
 }
 .merge-conflict-actions {
+  position: sticky;
+  left: 0;
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: 10px;
   min-width: max-content;
-  padding: 8px 12px 8px 76px;
+  padding: 9px 12px 9px 76px;
   color: var(--muted);
   background: var(--panel-strong);
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
   font: 600 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
+.merge-conflict-label {
+  color: var(--text);
+}
+.merge-conflict-buttons {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
 .merge-conflict-actions button {
-  padding: 0;
-  color: var(--blue);
-  background: transparent;
-  border: 0;
+  min-height: 28px;
+  padding: 0 10px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
   font: inherit;
   cursor: pointer;
 }
 .merge-conflict-actions button:hover {
-  text-decoration: underline;
+  border-color: var(--border-strong);
+  text-decoration: none;
+}
+.merge-conflict-actions .merge-action-current {
+  color: var(--red);
+  background: color-mix(in srgb, var(--red-bg) 62%, var(--panel));
+}
+.merge-conflict-actions .merge-action-incoming {
+  color: var(--green);
+  background: color-mix(in srgb, var(--green-bg) 62%, var(--panel));
+}
+.merge-conflict-actions .merge-action-both {
+  color: var(--blue);
+  background: color-mix(in srgb, var(--blue) 9%, var(--panel));
 }
 .merge-unsupported-message {
   padding: 18px;
@@ -4935,9 +5009,6 @@ main.page-code:has(.root-code-toolbar) .repo-actions {
   vertical-align: middle;
   white-space: nowrap;
 }
-.root-git-status-line {
-  font-variant-ligatures: none;
-}
 .root-diffstat {
   display: inline-flex;
   flex-wrap: wrap;
@@ -5730,6 +5801,15 @@ main.page-code:has(.root-code-toolbar) .repo-actions {
 }
 .icon-conflict {
   --button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='m15 9-6 6M9 9l6 6'/%3E%3C/g%3E%3C/svg%3E");
+}
+.icon-chevron-up {
+  --button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m18 15-6-6-6 6'/%3E%3C/svg%3E");
+}
+.icon-chevron-down {
+  --button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+}
+.icon-check {
+  --button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m20 6-11 11-5-5'/%3E%3C/svg%3E");
 }
 .icon-blame {
   --button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Ccircle cx='12' cy='12' r='3'/%3E%3Cpath d='M12 3v6M12 15v6M3 12h6M15 12h6'/%3E%3C/g%3E%3C/svg%3E");
@@ -7688,8 +7768,18 @@ textarea {
     align-items: stretch;
     flex-wrap: wrap;
   }
+  .merge-editor-progress {
+    grid-template-columns: 1fr;
+    flex: 1 1 100%;
+  }
   .merge-editor-count {
     flex-basis: 100%;
+    white-space: normal;
+  }
+  .merge-editor-step,
+  .merge-editor-submit {
+    flex: 1 1 auto;
+    min-width: min(100%, 132px);
   }
   .merge-editor-layout {
     grid-template-columns: 1fr;
@@ -7709,6 +7799,9 @@ textarea {
     flex-direction: column;
     gap: 6px;
     padding-left: 12px;
+  }
+  .merge-conflict-buttons {
+    flex-wrap: wrap;
   }
   .issue-conversation-layout {
     grid-template-columns: 1fr;

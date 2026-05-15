@@ -669,9 +669,13 @@ fn appendMergeEditor(
     error_message: ?[]const u8,
 ) !void {
     const editable = mergeEditorEditable(files);
+    const total_conflicts = mergeEditorConflictCount(files);
     try appendTemplate(buf, allocator,
-        \\<form class="merge-editor" data-merge-editor data-merge-unsupported="{unsupported}" method="post" action="/pulls/
-    , .{ .unsupported = !editable });
+        \\<form class="merge-editor" data-merge-editor data-merge-unsupported="{unsupported}" data-merge-total-conflicts="{total_conflicts}" method="post" action="/pulls/
+    , .{
+        .unsupported = !editable,
+        .total_conflicts = total_conflicts,
+    });
     try shared.appendUrlEncoded(buf, allocator, raw_ref);
     try appendTemplate(buf, allocator,
         \\/conflicts">
@@ -684,10 +688,13 @@ fn appendMergeEditor(
         \\      </div>
         \\    </div>
         \\    <div class="merge-editor-actions">
-        \\      <span class="merge-editor-count">{file_count} {file_word}</span>
-        \\      <button class="button secondary merge-editor-step" type="button" data-merge-prev>Prev</button>
-        \\      <button class="button secondary merge-editor-step" type="button" data-merge-next>Next</button>
-        \\      <button class="button primary" type="submit" data-merge-submit disabled>Commit resolution</button>
+        \\      <div class="merge-editor-progress" aria-live="polite">
+        \\        <span class="merge-editor-count" data-merge-progress>0 of {total_conflicts} conflicts resolved</span>
+        \\        <span class="merge-editor-progress-bar" aria-hidden="true"><span data-merge-progress-bar></span></span>
+        \\      </div>
+        \\      <button class="button secondary merge-editor-step" type="button" data-merge-prev><span class="button-icon icon-chevron-up" aria-hidden="true"></span><span>Previous</span></button>
+        \\      <button class="button secondary merge-editor-step" type="button" data-merge-next><span class="button-icon icon-chevron-down" aria-hidden="true"></span><span>Next</span></button>
+        \\      <button class="button primary merge-editor-submit" type="submit" data-merge-submit disabled><span class="button-icon icon-check" aria-hidden="true"></span><span data-merge-submit-label>Commit resolution</span></button>
         \\    </div>
         \\  </header>
     , .{
@@ -696,6 +703,7 @@ fn appendMergeEditor(
         .base_ref = detail.base_ref,
         .file_count = files.len,
         .file_word = if (files.len == 1) "conflicting file" else "conflicting files",
+        .total_conflicts = total_conflicts,
     });
 
     if (error_message) |message| {
@@ -718,12 +726,14 @@ fn appendMergeEditor(
     });
     for (files, 0..) |file, index_value| {
         try appendTemplate(buf, allocator,
-            \\<a class="{classes}" href="#merge-file-{index}" data-merge-file-link data-file-index="{index}"><span class="pull-conflict-file-icon" aria-hidden="true"></span><span>{path}</span></a>
+            \\<a class="{classes}" href="#merge-file-{index}" data-merge-file-link data-file-index="{index}"><span class="pull-conflict-file-icon" aria-hidden="true"></span><span class="merge-editor-file-name">{path}</span><span class="merge-editor-file-meta" data-merge-link-status>
         , .{
             .classes = shared.classes("merge-editor-file-link", &.{shared.class("is-unsupported", !file.editable())}),
             .index = index_value,
             .path = file.path,
         });
+        try appendMergeFileNavStatus(buf, allocator, file);
+        try buf.appendSlice(allocator, "</span></a>");
     }
     try buf.appendSlice(allocator,
         \\      </nav>
@@ -744,19 +754,71 @@ fn mergeEditorEditable(files: []const MergeConflictFile) bool {
     return true;
 }
 
+fn mergeEditorConflictCount(files: []const MergeConflictFile) usize {
+    var count: usize = 0;
+    for (files) |file| count += mergeFileConflictCount(file);
+    return count;
+}
+
+fn mergeFileConflictCount(file: MergeConflictFile) usize {
+    const content = file.content orelse return 0;
+    return countConflictGroups(content);
+}
+
+fn countConflictGroups(content: []const u8) usize {
+    var count: usize = 0;
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trimRight(u8, raw_line, "\r");
+        if (std.mem.startsWith(u8, line, "<<<<<<<")) count += 1;
+    }
+    return count;
+}
+
+fn appendMergeFileNavStatus(buf: *std.ArrayList(u8), allocator: Allocator, file: MergeConflictFile) !void {
+    if (!file.editable()) {
+        try buf.appendSlice(allocator, "Unsupported");
+        return;
+    }
+    const count = mergeFileConflictCount(file);
+    try appendTemplate(buf, allocator, "{count} {label}", .{
+        .count = count,
+        .label = if (count == 1) "conflict" else "conflicts",
+    });
+}
+
+fn appendMergeFileStatus(buf: *std.ArrayList(u8), allocator: Allocator, file: MergeConflictFile) !void {
+    if (!file.editable()) {
+        try buf.appendSlice(allocator, "Unsupported");
+        return;
+    }
+    const count = mergeFileConflictCount(file);
+    if (count == 0) {
+        try buf.appendSlice(allocator, "Resolved");
+        return;
+    }
+    try appendTemplate(buf, allocator, "{count} unresolved", .{ .count = count });
+}
+
 fn appendMergeEditorFile(buf: *std.ArrayList(u8), allocator: Allocator, file: MergeConflictFile, index_value: usize) !void {
     try appendTemplate(buf, allocator,
         \\<section class="{classes}" id="merge-file-{index}" data-merge-file data-file-index="{index}">
         \\  <header class="merge-file-head">
         \\    <div><span class="pull-conflict-file-icon" aria-hidden="true"></span><strong>{path}</strong></div>
-        \\    <span class="merge-file-status" data-merge-file-status>{status}</span>
-        \\  </header>
-        \\  <input type="hidden" name="path_{index}" value="{path}">
+        \\    <span class="merge-file-status" data-merge-file-status>
     , .{
         .classes = shared.classes("panel merge-file-editor", &.{shared.class("is-unsupported", !file.editable())}),
         .index = index_value,
         .path = file.path,
-        .status = if (file.editable()) "Unresolved" else "Unsupported",
+    });
+    try appendMergeFileStatus(buf, allocator, file);
+    try appendTemplate(buf, allocator,
+        \\</span>
+        \\  </header>
+        \\  <input type="hidden" name="path_{index}" value="{path}">
+    , .{
+        .index = index_value,
+        .path = file.path,
     });
 
     if (file.content) |content| {
@@ -807,10 +869,13 @@ fn appendMergeConflictContent(buf: *std.ArrayList(u8), allocator: Allocator, con
 
 fn appendMergeConflictActions(buf: *std.ArrayList(u8), allocator: Allocator, group_id: usize) !void {
     try appendTemplate(buf, allocator,
-        \\<div class="merge-conflict-actions" data-conflict-group="{group_id}">
-        \\  <button type="button" data-merge-action="current">Accept current change</button>
-        \\  <button type="button" data-merge-action="incoming">Accept incoming change</button>
-        \\  <button type="button" data-merge-action="both">Accept both changes</button>
+        \\<div class="merge-conflict-actions" data-conflict-group="{group_id}" data-conflict-actions>
+        \\  <span class="merge-conflict-label">Conflict {group_id}</span>
+        \\  <span class="merge-conflict-buttons">
+        \\    <button class="merge-action-current" type="button" data-merge-action="current">Use current</button>
+        \\    <button class="merge-action-incoming" type="button" data-merge-action="incoming">Use incoming</button>
+        \\    <button class="merge-action-both" type="button" data-merge-action="both">Use both</button>
+        \\  </span>
         \\</div>
     , .{ .group_id = group_id });
 }
@@ -2990,6 +3055,23 @@ test "format diff comment body includes file and line range" {
 test "content conflict marker detection" {
     try std.testing.expect(contentHasConflictMarkers("a\n<<<<<<< head\nb\n=======\nc\n>>>>>>> main\n"));
     try std.testing.expect(!contentHasConflictMarkers("const divider = \"=======\";\n"));
+}
+
+test "merge editor counts conflict groups" {
+    try std.testing.expectEqual(@as(usize, 2), countConflictGroups(
+        \\<<<<<<< ours
+        \\a
+        \\=======
+        \\b
+        \\>>>>>>> theirs
+        \\ok
+        \\<<<<<<< ours
+        \\c
+        \\=======
+        \\d
+        \\>>>>>>> theirs
+    ));
+    try std.testing.expectEqual(@as(usize, 0), countConflictGroups("const divider = \"=======\";\n"));
 }
 
 test "merge editor path safety" {
