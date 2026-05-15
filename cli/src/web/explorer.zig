@@ -160,9 +160,6 @@ const RepositoryOperationState = enum {
 };
 
 const RootGitStatus = struct {
-    branch: []u8,
-    ahead: usize = 0,
-    behind: usize = 0,
     staged_paths: usize = 0,
     unstaged_paths: usize = 0,
     untracked_paths: usize = 0,
@@ -173,10 +170,6 @@ const RootGitStatus = struct {
     stash_count: usize = 0,
     disk_size_bytes: ?usize = null,
     operation_state: RepositoryOperationState = .clean,
-
-    fn deinit(self: RootGitStatus, allocator: Allocator) void {
-        allocator.free(self.branch);
-    }
 };
 
 const RootMarkdownDoc = struct {
@@ -1494,7 +1487,6 @@ fn appendRootSidebar(
 ) !void {
     const counts = rootEntryCounts(entries);
     const git_status = loadRootGitStatus(allocator, repo) catch null;
-    defer if (git_status) |status| status.deinit(allocator);
     const about_summary = loadReadmeSummaryOwned(allocator, repo, ref, entries) catch null;
     defer if (about_summary) |summary| allocator.free(summary);
     var languages_opt = source_stats.loadRepositoryStats(allocator, repo) catch null;
@@ -1542,11 +1534,6 @@ fn appendRootSidebar(
 
 fn appendRootRepositoryStats(buf: *std.ArrayList(u8), allocator: Allocator, status: RootGitStatus) !void {
     try appendTemplate(buf, allocator,
-        \\        <div><dt>Checkout</dt><dd><code class="root-git-status-line">
-    , .{});
-    try appendRootGitStatusCompact(buf, allocator, status);
-    try appendTemplate(buf, allocator,
-        \\</code></dd></div>
         \\        <div><dt>Changes</dt><dd>{staged} staged, {modified} modified, {untracked} untracked</dd></div>
         \\        <div><dt>Diff</dt><dd><span class="root-diffstat"><span class="root-diffstat-added">+{added}</span><span class="root-diffstat-removed">-{removed}</span></span></dd></div>
         \\        <div><dt>State</dt><dd>
@@ -1573,29 +1560,6 @@ fn appendRootRepositoryStats(buf: *std.ArrayList(u8), allocator: Allocator, stat
         try appendTemplate(buf, allocator, "Unknown", .{});
     }
     try appendTemplate(buf, allocator, "</dd></div>", .{});
-}
-
-fn appendRootGitStatusCompact(buf: *std.ArrayList(u8), allocator: Allocator, status: RootGitStatus) !void {
-    try buf.append(allocator, '(');
-    try shared.appendHtml(buf, allocator, status.branch);
-    try buf.append(allocator, ')');
-    if (status.ahead != 0) try appendStatusMarker(buf, allocator, "^", status.ahead);
-    if (status.behind != 0) try appendStatusMarker(buf, allocator, "v", status.behind);
-    if (status.staged_paths != 0) try appendStatusMarker(buf, allocator, "+", status.staged_paths);
-    if (status.unstaged_paths != 0) try appendStatusMarker(buf, allocator, "!", status.unstaged_paths);
-    if (status.untracked_paths != 0) try appendStatusMarker(buf, allocator, "?", status.untracked_paths);
-    if (status.conflict_paths != 0) try appendStatusMarker(buf, allocator, "U", status.conflict_paths);
-    if (status.lines_added != 0 or status.lines_removed != 0) {
-        try appendTemplate(buf, allocator, "(+{added}-{removed})", .{
-            .added = shared.groupedUnsigned(status.lines_added),
-            .removed = shared.groupedUnsigned(status.lines_removed),
-        });
-    }
-}
-
-fn appendStatusMarker(buf: *std.ArrayList(u8), allocator: Allocator, marker: []const u8, count: usize) !void {
-    try buf.appendSlice(allocator, marker);
-    try appendTemplate(buf, allocator, "{count}", .{ .count = shared.groupedUnsigned(@intCast(count)) });
 }
 
 fn appendRootRepositoryState(buf: *std.ArrayList(u8), allocator: Allocator, status: RootGitStatus) !void {
@@ -1627,12 +1591,11 @@ fn repositoryOperationLabel(state: RepositoryOperationState) []const u8 {
 }
 
 fn loadRootGitStatus(allocator: Allocator, repo: Repo) !RootGitStatus {
-    var status = RootGitStatus{ .branch = try allocator.dupe(u8, "HEAD") };
-    errdefer status.deinit(allocator);
+    var status = RootGitStatus{};
 
-    if (try gitMaybe(allocator, repo, &.{ "status", "--porcelain=v2", "--branch" }, git.max_git_output)) |raw| {
+    if (try gitMaybe(allocator, repo, &.{ "status", "--porcelain=v2" }, git.max_git_output)) |raw| {
         defer allocator.free(raw);
-        try parseRootGitStatusV2(allocator, &status, raw);
+        parseRootGitStatusV2(&status, raw);
     }
     try loadRootDiffStats(allocator, repo, &status);
     status.worktree_count = loadWorktreeCount(allocator, repo) catch 1;
@@ -1644,9 +1607,7 @@ fn loadRootGitStatus(allocator: Allocator, repo: Repo) !RootGitStatus {
     return status;
 }
 
-fn parseRootGitStatusV2(allocator: Allocator, status: *RootGitStatus, raw: []const u8) !void {
-    status.ahead = 0;
-    status.behind = 0;
+fn parseRootGitStatusV2(status: *RootGitStatus, raw: []const u8) void {
     status.staged_paths = 0;
     status.unstaged_paths = 0;
     status.untracked_paths = 0;
@@ -1656,17 +1617,6 @@ fn parseRootGitStatusV2(allocator: Allocator, status: *RootGitStatus, raw: []con
     while (lines.next()) |raw_line| {
         const line = std.mem.trimRight(u8, raw_line, "\r");
         if (line.len == 0) continue;
-        if (std.mem.startsWith(u8, line, "# branch.head ")) {
-            const branch = line["# branch.head ".len..];
-            const replacement = try allocator.dupe(u8, if (std.mem.eql(u8, branch, "(detached)")) "HEAD" else branch);
-            allocator.free(status.branch);
-            status.branch = replacement;
-            continue;
-        }
-        if (std.mem.startsWith(u8, line, "# branch.ab ")) {
-            parseStatusAheadBehind(status, line["# branch.ab ".len..]);
-            continue;
-        }
         switch (line[0]) {
             '1', '2' => parseOrdinaryStatusRecord(status, line),
             'u' => status.conflict_paths += 1,
@@ -1674,17 +1624,6 @@ fn parseRootGitStatusV2(allocator: Allocator, status: *RootGitStatus, raw: []con
             else => {},
         }
     }
-}
-
-fn parseStatusAheadBehind(status: *RootGitStatus, value: []const u8) void {
-    var fields = std.mem.tokenizeAny(u8, value, " \t\r\n");
-    if (fields.next()) |ahead| status.ahead = parseSignedStatusCount(ahead, '+') orelse 0;
-    if (fields.next()) |behind| status.behind = parseSignedStatusCount(behind, '-') orelse 0;
-}
-
-fn parseSignedStatusCount(value: []const u8, sign: u8) ?usize {
-    if (value.len < 2 or value[0] != sign) return null;
-    return std.fmt.parseUnsigned(usize, value[1..], 10) catch null;
 }
 
 fn parseOrdinaryStatusRecord(status: *RootGitStatus, line: []const u8) void {
@@ -3430,10 +3369,9 @@ test "web explorer parses code sync modes" {
 }
 
 test "web explorer parses prompt-style repository status" {
-    var status = RootGitStatus{ .branch = try std.testing.allocator.dupe(u8, "HEAD") };
-    defer status.deinit(std.testing.allocator);
+    var status = RootGitStatus{};
 
-    try parseRootGitStatusV2(std.testing.allocator, &status,
+    parseRootGitStatusV2(&status,
         \\# branch.oid 0123456789abcdef
         \\# branch.head main
         \\# branch.upstream origin/main
@@ -3446,30 +3384,12 @@ test "web explorer parses prompt-style repository status" {
     );
     parseRootDiffNumstat(&status, "24\t16\tcli/src/web.zig\n-\t-\tassets/logo.png\n");
 
-    try std.testing.expectEqualStrings("main", status.branch);
-    try std.testing.expectEqual(@as(usize, 2), status.ahead);
-    try std.testing.expectEqual(@as(usize, 1), status.behind);
     try std.testing.expectEqual(@as(usize, 1), status.staged_paths);
     try std.testing.expectEqual(@as(usize, 1), status.unstaged_paths);
     try std.testing.expectEqual(@as(usize, 1), status.untracked_paths);
     try std.testing.expectEqual(@as(usize, 1), status.conflict_paths);
     try std.testing.expectEqual(@as(u64, 24), status.lines_added);
     try std.testing.expectEqual(@as(u64, 16), status.lines_removed);
-}
-
-test "web explorer renders compact repository status" {
-    var status = RootGitStatus{
-        .branch = try std.testing.allocator.dupe(u8, "main"),
-        .staged_paths = 3,
-        .lines_added = 189,
-        .lines_removed = 26,
-    };
-    defer status.deinit(std.testing.allocator);
-
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    try appendRootGitStatusCompact(&buf, std.testing.allocator, status);
-    try std.testing.expectEqualStrings("(main)+3(+189-26)", buf.items);
 }
 
 test "web explorer only falls back to remote tracking for branch shorthands" {
