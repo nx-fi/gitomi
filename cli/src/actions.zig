@@ -2101,6 +2101,46 @@ test "workflow parser supports inline trigger maps with filters" {
     try std.testing.expect(workflowMatches(workflow, "pull.opened", "pull_request"));
 }
 
+test "native workflow parser supports shell jobs and schedules" {
+    const bytes =
+        \\name: Native CI
+        \\on:
+        \\  push:
+        \\  schedule:
+        \\    - cron: "*/5 * * * *"
+        \\jobs:
+        \\  test:
+        \\    backend: shell
+        \\    steps:
+        \\      - name: unit tests
+        \\        run: zig build test
+        \\      - run: echo done
+    ;
+    var workflow = try parseWorkflow(std.testing.allocator, ".gitomi/workflows/ci.yml", bytes);
+    defer workflow.deinit();
+    try std.testing.expectEqual(WorkflowDialect.gitomi, workflow.dialect);
+    try std.testing.expect(workflowMatches(workflow, "push", "push"));
+    try std.testing.expect(workflowMatches(workflow, "workflow.schedule", "schedule"));
+    try std.testing.expectEqual(@as(usize, 1), workflow.schedules.len);
+    try std.testing.expectEqualStrings("*/5 * * * *", workflow.schedules[0]);
+    try std.testing.expectEqual(@as(usize, 1), workflow.jobs.len);
+    try std.testing.expectEqualStrings("test", workflow.jobs[0].id);
+    try std.testing.expectEqualStrings("shell", workflow.jobs[0].backend);
+    try std.testing.expectEqual(@as(usize, 2), workflow.jobs[0].steps.len);
+    try std.testing.expectEqualStrings("unit tests", workflow.jobs[0].steps[0].name.?);
+    try std.testing.expectEqualStrings("zig build test", workflow.jobs[0].steps[0].run.?);
+    try std.testing.expectEqualStrings("echo done", workflow.jobs[0].steps[1].run.?);
+}
+
+test "cron matcher supports wildcards ranges lists and steps" {
+    // 2026-05-15 12:10:00 UTC is Friday.
+    const ts: i64 = 1_778_847_000;
+    try std.testing.expect(cronMatches("*/5 12 * * 5", ts));
+    try std.testing.expect(cronMatches("10 10-12 * 5 1,5", ts));
+    try std.testing.expect(!cronMatches("11 12 * * 5", ts));
+    try std.testing.expect(!cronMatches("*/15 12 * * 5", ts));
+}
+
 test "github action value uses event suffix" {
     try std.testing.expectEqualStrings("opened", githubActionValue("issue.opened"));
     try std.testing.expectEqualStrings("push", githubActionValue("push"));

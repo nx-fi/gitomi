@@ -10,6 +10,7 @@ const repo_mod = @import("../repo.zig");
 const shared = @import("shared.zig");
 const source_stats = @import("source_stats.zig");
 const util = @import("../util.zig");
+const work_items = @import("../work_items.zig");
 
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
@@ -35,16 +36,11 @@ const sendPlainResponse = shared.sendPlainResponse;
 const sendResponse = shared.sendResponse;
 const sqlite = index.sqlite;
 
-const max_pull_diff_bytes = 8 * 1024 * 1024;
+const max_pull_diff_bytes = work_items.max_pull_diff_bytes;
 const max_merge_blob_bytes = 2 * 1024 * 1024;
 const merge_context_radius = 15;
 
-const PullStateFilter = enum {
-    open,
-    merged,
-    closed,
-    all,
-};
+const PullStateFilter = work_items.PullStateFilter;
 
 const PullDetailTab = enum {
     conversation,
@@ -52,12 +48,7 @@ const PullDetailTab = enum {
     files,
 };
 
-const PullCounts = struct {
-    open: usize = 0,
-    merged: usize = 0,
-    closed: usize = 0,
-    all: usize = 0,
-};
+const PullCounts = work_items.PullCounts;
 
 const ReactionChoice = struct {
     value: []const u8,
@@ -86,45 +77,7 @@ const reaction_choices = [_]ReactionChoice{
     .{ .value = "\xF0\x9F\x91\x80", .label = "\xF0\x9F\x91\x80", .title = "Eyes" },
 };
 
-const PullDetail = struct {
-    id: []u8,
-    title: []u8,
-    state: []u8,
-    author_principal: []u8,
-    author_device: []u8,
-    source_author: []u8,
-    opened_at: []u8,
-    state_occurred_at: []u8,
-    state_actor_principal: []u8,
-    body: []u8,
-    base_ref: []u8,
-    head_ref: []u8,
-    draft: bool,
-    merge_oid: []u8,
-    target_oid: []u8,
-    legacy_number: i64,
-    commit_count: ?usize,
-    changed_files: ?usize,
-    additions: ?usize,
-    deletions: ?usize,
-
-    fn deinit(self: PullDetail, allocator: Allocator) void {
-        allocator.free(self.id);
-        allocator.free(self.title);
-        allocator.free(self.state);
-        allocator.free(self.author_principal);
-        allocator.free(self.author_device);
-        allocator.free(self.source_author);
-        allocator.free(self.opened_at);
-        allocator.free(self.state_occurred_at);
-        allocator.free(self.state_actor_principal);
-        allocator.free(self.body);
-        allocator.free(self.base_ref);
-        allocator.free(self.head_ref);
-        allocator.free(self.merge_oid);
-        allocator.free(self.target_oid);
-    }
-};
+const PullDetail = work_items.PullDetail;
 
 const PullTabCounts = struct {
     comments: usize = 0,
@@ -134,15 +87,7 @@ const PullTabCounts = struct {
     deletions: ?usize = null,
 };
 
-const PullGitRefs = struct {
-    base: []u8,
-    head: []u8,
-
-    fn deinit(self: PullGitRefs, allocator: Allocator) void {
-        allocator.free(self.base);
-        allocator.free(self.head);
-    }
-};
+const PullGitRefs = work_items.PullGitRefs;
 
 const PullMergeStatusKind = enum {
     unavailable,
@@ -199,17 +144,8 @@ const FormField = struct {
     }
 };
 
-const DiffCommentSide = enum {
-    old,
-    new,
-};
-
-const DiffCommentContext = struct {
-    file: []const u8,
-    side: DiffCommentSide,
-    start_line: usize,
-    end_line: usize,
-};
+const DiffCommentSide = work_items.DiffCommentSide;
+const DiffCommentContext = work_items.DiffCommentContext;
 
 const ResolvedConflictFile = struct {
     path: []const u8,
@@ -256,35 +192,15 @@ pub fn renderPullsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]
     try buf.appendSlice(allocator, "<section class=\"panel pulls-panel\">");
     try appendPullsListHeader(&buf, allocator, filter, counts);
 
-    var stmt = try db.prepare(pullListSql(filter));
+    var stmt = try work_items.preparePullListStmt(&db, .{ .state = filter });
     defer stmt.deinit();
 
     var shown: usize = 0;
     while (try stmt.step()) {
-        const id = try stmt.columnTextDup(allocator, 0);
-        defer allocator.free(id);
-        const title = try stmt.columnTextDup(allocator, 1);
-        defer allocator.free(title);
-        const state = try stmt.columnTextDup(allocator, 2);
-        defer allocator.free(state);
-        const author = try stmt.columnTextDup(allocator, 3);
-        defer allocator.free(author);
-        const opened_at = try stmt.columnTextDup(allocator, 4);
-        defer allocator.free(opened_at);
-        const state_at = try stmt.columnTextDup(allocator, 5);
-        defer allocator.free(state_at);
-        const base_ref = try stmt.columnTextDup(allocator, 6);
-        defer allocator.free(base_ref);
-        const head_ref = try stmt.columnTextDup(allocator, 7);
-        defer allocator.free(head_ref);
-        const draft = stmt.columnInt(8) != 0;
-        const comment_count = @as(usize, @intCast(stmt.columnInt64(9)));
-        const legacy_number = stmt.columnInt64(10);
-        const body = try stmt.columnTextDup(allocator, 11);
-        defer allocator.free(body);
-        const task_summary = shared.markdownTaskSummary(body);
-
-        try appendPullListRow(&buf, allocator, &db, id, title, state, author, opened_at, state_at, base_ref, head_ref, draft, comment_count, legacy_number, task_summary);
+        const row = try work_items.pullListRowFromStmt(allocator, &stmt);
+        defer row.deinit(allocator);
+        const task_summary = shared.markdownTaskSummary(row.body);
+        try appendPullListRow(&buf, allocator, &db, row.id, row.title, row.state, row.author, row.opened_at, row.state_at, row.base_ref, row.head_ref, row.draft, row.comment_count, row.legacy_number, task_summary);
         shown += 1;
     }
 
@@ -323,53 +239,11 @@ fn pullDetailTabFromTarget(allocator: Allocator, target: []const u8) !PullDetail
 }
 
 fn pullListSql(filter: PullStateFilter) []const u8 {
-    const select =
-        \\SELECT p.id, p.title, p.state, COALESCE(NULLIF(pm.source_author, ''), p.author_principal), p.opened_at, p.state_occurred_at,
-        \\       p.base_ref, p.head_ref, p.draft,
-        \\       (SELECT COUNT(*) FROM comments c WHERE c.parent_kind = 'pull' AND c.parent_id = p.id),
-        \\       COALESCE(a.number, 0), p.body
-        \\FROM pulls p
-        \\LEFT JOIN legacy_aliases a
-        \\  ON a.provider = 'github' AND a.object_kind = 'pull' AND a.object_id = p.id
-        \\LEFT JOIN pull_metadata pm ON pm.pull_id = p.id
-    ;
-    return switch (filter) {
-        .open => select ++
-            \\ WHERE p.state = 'open'
-            \\ ORDER BY p.opened_at DESC, p.id DESC
-        ,
-        .merged => select ++
-            \\ WHERE p.state = 'merged'
-            \\ ORDER BY p.state_occurred_at DESC, p.opened_at DESC, p.id DESC
-        ,
-        .closed => select ++
-            \\ WHERE p.state = 'closed'
-            \\ ORDER BY p.state_occurred_at DESC, p.opened_at DESC, p.id DESC
-        ,
-        .all => select ++
-            \\ ORDER BY p.state_occurred_at DESC, p.opened_at DESC, p.id DESC
-        ,
-    };
+    return work_items.pullListSql(.{ .state = filter });
 }
 
 fn loadPullCounts(db: *SqliteDb) !PullCounts {
-    var counts: PullCounts = .{};
-    var stmt = try db.prepare("SELECT state, COUNT(*) FROM pulls GROUP BY state");
-    defer stmt.deinit();
-    while (try stmt.step()) {
-        const state = try stmt.columnTextDup(db.allocator, 0);
-        defer db.allocator.free(state);
-        const count = @as(usize, @intCast(stmt.columnInt64(1)));
-        counts.all += count;
-        if (std.mem.eql(u8, state, "open")) {
-            counts.open = count;
-        } else if (std.mem.eql(u8, state, "merged")) {
-            counts.merged = count;
-        } else if (std.mem.eql(u8, state, "closed")) {
-            counts.closed = count;
-        }
-    }
-    return counts;
+    return work_items.loadPullCounts(db);
 }
 
 fn appendPullsToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filter: PullStateFilter) !void {
@@ -586,43 +460,7 @@ pub fn renderPullDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u
 }
 
 fn loadPullDetail(allocator: Allocator, db: *SqliteDb, pull_id: []const u8) !?PullDetail {
-    var stmt = try db.prepare(
-        \\SELECT p.id, p.title, p.state, p.author_principal, p.author_device, p.opened_at, p.body,
-        \\       p.base_ref, p.head_ref, p.draft, p.merge_oid, p.target_oid, COALESCE(a.number, 0),
-        \\       p.state_occurred_at, p.state_actor_principal,
-        \\       COALESCE(pm.source_author, ''), COALESCE(pm.commit_count, -1), COALESCE(pm.changed_files, -1),
-        \\       COALESCE(pm.additions, -1), COALESCE(pm.deletions, -1)
-        \\FROM pulls p
-        \\LEFT JOIN legacy_aliases a
-        \\  ON a.provider = 'github' AND a.object_kind = 'pull' AND a.object_id = p.id
-        \\LEFT JOIN pull_metadata pm ON pm.pull_id = p.id
-        \\WHERE p.id = ?
-    );
-    defer stmt.deinit();
-    try stmt.bindText(1, pull_id);
-    if (!(try stmt.step())) return null;
-    return .{
-        .id = try stmt.columnTextDup(allocator, 0),
-        .title = try stmt.columnTextDup(allocator, 1),
-        .state = try stmt.columnTextDup(allocator, 2),
-        .author_principal = try stmt.columnTextDup(allocator, 3),
-        .author_device = try stmt.columnTextDup(allocator, 4),
-        .source_author = try stmt.columnTextDup(allocator, 15),
-        .opened_at = try stmt.columnTextDup(allocator, 5),
-        .state_occurred_at = try stmt.columnTextDup(allocator, 13),
-        .state_actor_principal = try stmt.columnTextDup(allocator, 14),
-        .body = try stmt.columnTextDup(allocator, 6),
-        .base_ref = try stmt.columnTextDup(allocator, 7),
-        .head_ref = try stmt.columnTextDup(allocator, 8),
-        .draft = stmt.columnInt(9) != 0,
-        .merge_oid = try stmt.columnTextDup(allocator, 10),
-        .target_oid = try stmt.columnTextDup(allocator, 11),
-        .legacy_number = stmt.columnInt64(12),
-        .commit_count = optionalCount(stmt.columnInt64(16)),
-        .changed_files = optionalCount(stmt.columnInt64(17)),
-        .additions = optionalCount(stmt.columnInt64(18)),
-        .deletions = optionalCount(stmt.columnInt64(19)),
-    };
+    return work_items.loadPullDetail(allocator, db, pull_id);
 }
 
 fn renderPullNotFound(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
@@ -1303,7 +1141,7 @@ fn appendPullBranchLink(buf: *std.ArrayList(u8), allocator: Allocator, ref: []co
 }
 
 fn pullDisplayAuthor(detail: PullDetail) []const u8 {
-    return if (detail.source_author.len != 0) detail.source_author else detail.author_principal;
+    return detail.displayAuthor();
 }
 
 fn currentActorCanEditAuthor(current_actor: ?[]const u8, current_role: ?[]const u8, author: []const u8) bool {
@@ -1322,7 +1160,7 @@ fn currentActorCanEditInRepo(allocator: Allocator, repo: Repo, author: []const u
 }
 
 fn optionalCount(value: i64) ?usize {
-    return if (value >= 0) @intCast(value) else null;
+    return work_items.optionalCount(value);
 }
 
 fn appendPullCommitSummary(buf: *std.ArrayList(u8), allocator: Allocator, count: ?usize) !void {
@@ -1732,72 +1570,54 @@ fn appendPullComments(
     pull_id: []const u8,
     current_actor: ?[]const u8,
 ) !void {
-    var stmt = try db.prepare(
-        \\SELECT id, body, redacted, COALESCE(NULLIF(source_author, ''), author_principal), created_at, reply_parent_id, reply_parent_hash
-        \\FROM comments
-        \\WHERE parent_kind = 'pull' AND parent_id = ?
-        \\ORDER BY created_at, id
-    );
+    var stmt = try work_items.prepareCommentsStmt(db, "pull", pull_id);
     defer stmt.deinit();
-    try stmt.bindText(1, pull_id);
     while (try stmt.step()) {
-        const id = try stmt.columnTextDup(allocator, 0);
-        defer allocator.free(id);
-        const body = try stmt.columnTextDup(allocator, 1);
-        defer allocator.free(body);
-        const redacted = stmt.columnInt(2) != 0;
-        const author = try stmt.columnTextDup(allocator, 3);
-        defer allocator.free(author);
-        const created_at = try stmt.columnTextDup(allocator, 4);
-        defer allocator.free(created_at);
-        const reply_parent_id = try stmt.columnTextDup(allocator, 5);
-        defer allocator.free(reply_parent_id);
-        const reply_parent_hash = try stmt.columnTextDup(allocator, 6);
-        defer allocator.free(reply_parent_hash);
-        const anchor = try std.fmt.allocPrint(allocator, "comment-{s}", .{id[0..@min(id.len, 7)]});
+        const row = try work_items.commentRowFromStmt(allocator, &stmt);
+        defer row.deinit(allocator);
+        const anchor = try std.fmt.allocPrint(allocator, "comment-{s}", .{row.id[0..@min(row.id.len, 7)]});
         defer allocator.free(anchor);
         var comment_ref_buf: [util.short_object_ref_len]u8 = undefined;
-        const comment_ref = util.shortObjectRef(&comment_ref_buf, id);
+        const comment_ref = util.shortObjectRef(&comment_ref_buf, row.id);
         const comment_ref_value = try std.fmt.allocPrint(allocator, "comment:{s}", .{comment_ref});
         defer allocator.free(comment_ref_value);
 
-        const is_reply = reply_parent_id.len != 0 or reply_parent_hash.len != 0;
         try appendTemplate(buf, allocator,
             \\<div class="{classes}" id="{anchor}"><div class="issue-timeline-avatar">
         , .{
-            .classes = shared.classes("issue-timeline-item", &.{shared.class("is-reply", is_reply)}),
+            .classes = shared.classes("issue-timeline-item", &.{shared.class("is-reply", row.isReply())}),
             .anchor = anchor,
         });
-        try appendAvatar(buf, allocator, author, "issue-detail-avatar");
+        try appendAvatar(buf, allocator, row.display_author, "issue-detail-avatar");
         try appendTemplate(buf, allocator,
             \\</div><article class="issue-comment-box comment-card"><header class="issue-comment-head"><div><strong>{author}</strong><span>commented
         , .{
-            .author = author,
+            .author = row.display_author,
         });
         try buf.append(allocator, ' ');
-        try appendRelativeTime(buf, allocator, created_at);
+        try appendRelativeTime(buf, allocator, row.created_at);
         try buf.appendSlice(allocator, "</span></div>");
-        try issues_page.appendIssueActionMenu(buf, allocator, anchor, comment_ref_value, body, !redacted and body.len != 0, "");
+        try issues_page.appendIssueActionMenu(buf, allocator, anchor, comment_ref_value, row.body, !row.redacted and row.body.len != 0, "");
         try buf.appendSlice(allocator, "</header>");
-        if (reply_parent_id.len != 0 or reply_parent_hash.len != 0) {
+        if (row.isReply()) {
             try buf.appendSlice(allocator, "<p class=\"reply-note\">Reply to ");
-            if (reply_parent_id.len != 0) {
+            if (row.reply_parent_id.len != 0) {
                 var reply_ref_buf: [util.short_object_ref_len]u8 = undefined;
-                const reply_ref = util.shortObjectRef(&reply_ref_buf, reply_parent_id);
+                const reply_ref = util.shortObjectRef(&reply_ref_buf, row.reply_parent_id);
                 try appendTemplate(buf, allocator, "comment:{reply_ref}", .{ .reply_ref = reply_ref });
             } else {
-                try appendTemplate(buf, allocator, "{reply_parent_hash}", .{ .reply_parent_hash = reply_parent_hash[0..@min(reply_parent_hash.len, 12)] });
+                try appendTemplate(buf, allocator, "{reply_parent_hash}", .{ .reply_parent_hash = row.reply_parent_hash[0..@min(row.reply_parent_hash.len, 12)] });
             }
             try buf.appendSlice(allocator, "</p>");
         }
         try buf.appendSlice(allocator, "<div class=\"markdown-body\">");
-        if (redacted) {
+        if (row.redacted) {
             try buf.appendSlice(allocator, "<p class=\"muted\">Comment redacted.</p>");
         } else {
-            try shared.appendMarkdownSource(buf, allocator, body, .{});
+            try shared.appendMarkdownSource(buf, allocator, row.body, .{});
         }
         try buf.appendSlice(allocator, "</div>");
-        try appendPullReactionBar(buf, allocator, db, "comment", id, raw_ref, comment_ref_value, current_actor);
+        try appendPullReactionBar(buf, allocator, db, "comment", row.id, raw_ref, comment_ref_value, current_actor);
         try buf.appendSlice(allocator, "</article></div>");
     }
 }
@@ -2173,41 +1993,15 @@ fn loadPullCommits(allocator: Allocator, repo: Repo, detail: PullDetail) !?[]Pul
 }
 
 fn loadPullDiff(allocator: Allocator, repo: Repo, detail: PullDetail, context: usize) !?[]u8 {
-    const git_refs = (try loadPullGitRefs(allocator, repo, detail)) orelse return null;
-    defer git_refs.deinit(allocator);
-
-    const merge_base = try loadMergeBase(allocator, repo, git_refs.base, git_refs.head);
-    defer if (merge_base) |value| allocator.free(value);
-    const base = merge_base orelse return null;
-    const unified = try std.fmt.allocPrint(allocator, "--unified={d}", .{context});
-    defer allocator.free(unified);
-    return gitMaybe(allocator, repo, &.{ "diff", "--no-ext-diff", "--find-renames", "--patch", unified, base, git_refs.head }, max_pull_diff_bytes);
+    return work_items.loadPullDiff(allocator, repo, detail, context);
 }
 
 fn loadMergeBase(allocator: Allocator, repo: Repo, base_ref: []const u8, head_ref: []const u8) !?[]u8 {
-    const raw = try gitMaybe(allocator, repo, &.{ "merge-base", base_ref, head_ref }, 1024 * 1024) orelse return null;
-    defer allocator.free(raw);
-    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
-    if (trimmed.len == 0) return null;
-    return try allocator.dupe(u8, trimmed);
+    return work_items.loadMergeBase(allocator, repo, base_ref, head_ref);
 }
 
 fn loadPullGitRefs(allocator: Allocator, repo: Repo, detail: PullDetail) !?PullGitRefs {
-    const prefer_remote = detail.legacy_number > 0;
-    const base = (try resolvePullGitCommit(allocator, repo, detail.base_ref, prefer_remote)) orelse return null;
-    errdefer allocator.free(base);
-    const head: ?[]u8 = if (detail.legacy_number > 0) blk: {
-        if (try resolveGithubPullHeadCommit(allocator, repo, detail.legacy_number)) |oid| break :blk oid;
-        break :blk try resolvePullGitCommit(allocator, repo, detail.head_ref, prefer_remote);
-    } else try resolvePullGitCommit(allocator, repo, detail.head_ref, prefer_remote);
-    const owned_head = head orelse {
-        allocator.free(base);
-        return null;
-    };
-    return .{
-        .base = base,
-        .head = owned_head,
-    };
+    return work_items.loadPullGitRefs(allocator, repo, detail);
 }
 
 fn resolveGithubPullHeadCommit(allocator: Allocator, repo: Repo, number: i64) !?[]u8 {
@@ -2538,21 +2332,11 @@ fn commitWord(count: usize) []const u8 {
 }
 
 fn pullSearchQuery(filter: PullStateFilter) []const u8 {
-    return switch (filter) {
-        .open => "is:pr state:open",
-        .merged => "is:pr state:merged",
-        .closed => "is:pr state:closed",
-        .all => "is:pr",
-    };
+    return work_items.pullSearchQuery(filter);
 }
 
 fn pullStateValue(filter: PullStateFilter) []const u8 {
-    return switch (filter) {
-        .open => "open",
-        .merged => "merged",
-        .closed => "closed",
-        .all => "all",
-    };
+    return work_items.pullStateValue(filter);
 }
 
 pub fn renderPullForm(
@@ -2953,7 +2737,7 @@ fn parseDiffCommentContext(fields: []const FormField) !?DiffCommentContext {
     if (raw_file == null or raw_side == null or raw_start == null or raw_end == null) return error.InvalidDiffCommentContext;
 
     const file = std.mem.trim(u8, raw_file.?, " \t\r\n");
-    if (file.len == 0 or file.len > 4096 or containsLineBreakOrNul(file)) return error.InvalidDiffCommentContext;
+    if (!work_items.validateDiffCommentPath(file)) return error.InvalidDiffCommentContext;
 
     const side_name = std.mem.trim(u8, raw_side.?, " \t\r\n");
     const side: DiffCommentSide = if (std.mem.eql(u8, side_name, "old"))
@@ -2982,27 +2766,8 @@ fn parseDiffCommentLine(value: []const u8) ?usize {
     return if (parsed == 0) null else parsed;
 }
 
-fn containsLineBreakOrNul(value: []const u8) bool {
-    return std.mem.indexOfAny(u8, value, "\r\n\x00") != null;
-}
-
 fn formatDiffCommentBody(allocator: Allocator, context: DiffCommentContext, body: []const u8) ![]u8 {
-    const side_label = switch (context.side) {
-        .old => "old",
-        .new => "new",
-    };
-    if (context.start_line == context.end_line) {
-        return std.fmt.allocPrint(
-            allocator,
-            "Review comment on `{s}` ({s} line {d}).\n\n{s}",
-            .{ context.file, side_label, context.start_line, body },
-        );
-    }
-    return std.fmt.allocPrint(
-        allocator,
-        "Review comment on `{s}` ({s} lines {d}-{d}).\n\n{s}",
-        .{ context.file, side_label, context.start_line, context.end_line, body },
-    );
+    return work_items.formatDiffCommentBody(allocator, context, body);
 }
 
 fn contentHasConflictMarkers(content: []const u8) bool {
@@ -3132,22 +2897,7 @@ fn gitCheckedAt(allocator: Allocator, root: []const u8, git_args: []const []cons
 }
 
 fn gitMaybe(allocator: Allocator, repo: Repo, git_args: []const []const u8, max_output_bytes: usize) !?[]u8 {
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(allocator);
-    try argv.append(allocator, "git");
-    try argv.append(allocator, "-C");
-    try argv.append(allocator, repo.root);
-    for (git_args) |arg| try argv.append(allocator, arg);
-
-    var result = try runCommand(allocator, argv.items, null, max_output_bytes);
-    if (result.exitCode() == 0) {
-        const stdout = result.stdout;
-        allocator.free(result.stderr);
-        return stdout;
-    }
-
-    result.deinit();
-    return null;
+    return work_items.gitMaybe(allocator, repo, git_args, max_output_bytes);
 }
 
 fn freePullCommits(allocator: Allocator, commits: []PullCommit) void {
