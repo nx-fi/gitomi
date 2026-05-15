@@ -132,6 +132,16 @@ const PullTabCounts = struct {
     deletions: ?usize = null,
 };
 
+const PullGitRefs = struct {
+    base: []u8,
+    head: []u8,
+
+    fn deinit(self: PullGitRefs, allocator: Allocator) void {
+        allocator.free(self.base);
+        allocator.free(self.head);
+    }
+};
+
 const PullMergeStatusKind = enum {
     unavailable,
     clean,
@@ -841,16 +851,27 @@ fn loadMergeConflictFiles(allocator: Allocator, repo: Repo, detail: PullDetail, 
         files.deinit(allocator);
     }
 
-    const merge_base = try loadMergeBase(allocator, repo, detail.base_ref, detail.head_ref);
+    const git_refs = (try loadPullGitRefs(allocator, repo, detail)) orelse return try files.toOwnedSlice(allocator);
+    defer git_refs.deinit(allocator);
+
+    const merge_base = try loadMergeBase(allocator, repo, git_refs.base, git_refs.head);
     defer if (merge_base) |value| allocator.free(value);
 
     for (conflict_paths) |path| {
-        try files.append(allocator, try loadMergeConflictFile(allocator, repo, detail, merge_base, path));
+        try files.append(allocator, try loadMergeConflictFile(allocator, repo, detail, git_refs.base, git_refs.head, merge_base, path));
     }
     return try files.toOwnedSlice(allocator);
 }
 
-fn loadMergeConflictFile(allocator: Allocator, repo: Repo, detail: PullDetail, merge_base: ?[]const u8, path: []const u8) !MergeConflictFile {
+fn loadMergeConflictFile(
+    allocator: Allocator,
+    repo: Repo,
+    detail: PullDetail,
+    base_commit: []const u8,
+    head_commit: []const u8,
+    merge_base: ?[]const u8,
+    path: []const u8,
+) !MergeConflictFile {
     const owned_path = try allocator.dupe(u8, path);
     errdefer allocator.free(owned_path);
 
@@ -868,11 +889,11 @@ fn loadMergeConflictFile(allocator: Allocator, repo: Repo, detail: PullDetail, m
         };
     };
 
-    const current = try loadBlobAtRef(allocator, repo, detail.head_ref, path);
+    const current = try loadBlobAtRef(allocator, repo, head_commit, path);
     defer if (current) |value| allocator.free(value);
     const ancestor = try loadBlobAtRef(allocator, repo, base_oid, path);
     defer if (ancestor) |value| allocator.free(value);
-    const incoming = try loadBlobAtRef(allocator, repo, detail.base_ref, path);
+    const incoming = try loadBlobAtRef(allocator, repo, base_commit, path);
     defer if (incoming) |value| allocator.free(value);
 
     if (current == null or ancestor == null or incoming == null) {
@@ -1003,19 +1024,22 @@ fn loadPullTabCounts(allocator: Allocator, repo: Repo, db: *SqliteDb, detail: Pu
     counts.additions = detail.additions;
     counts.deletions = detail.deletions;
 
-    const git_counts = try loadPullGitTabCounts(allocator, repo, detail.base_ref, detail.head_ref);
+    const git_counts = try loadPullGitTabCounts(allocator, repo, detail);
     if (git_counts.commits) |value| counts.commits = value;
     if (git_counts.files) |value| counts.files = value;
     return counts;
 }
 
-fn loadPullGitTabCounts(allocator: Allocator, repo: Repo, base_ref: []const u8, head_ref: []const u8) !PullTabCounts {
+fn loadPullGitTabCounts(allocator: Allocator, repo: Repo, detail: PullDetail) !PullTabCounts {
     var counts: PullTabCounts = .{};
-    const merge_base = try loadMergeBase(allocator, repo, base_ref, head_ref);
+    const git_refs = (try loadPullGitRefs(allocator, repo, detail)) orelse return counts;
+    defer git_refs.deinit(allocator);
+
+    const merge_base = try loadMergeBase(allocator, repo, git_refs.base, git_refs.head);
     defer if (merge_base) |value| allocator.free(value);
     const base = merge_base orelse return counts;
 
-    const range = try std.fmt.allocPrint(allocator, "{s}..{s}", .{ base, head_ref });
+    const range = try std.fmt.allocPrint(allocator, "{s}..{s}", .{ base, git_refs.head });
     defer allocator.free(range);
     if (try gitMaybe(allocator, repo, &.{ "rev-list", "--count", range }, 64 * 1024)) |raw_count| {
         defer allocator.free(raw_count);
@@ -1023,7 +1047,7 @@ fn loadPullGitTabCounts(allocator: Allocator, repo: Repo, base_ref: []const u8, 
         counts.commits = std.fmt.parseUnsigned(usize, trimmed, 10) catch null;
     }
 
-    if (try gitMaybe(allocator, repo, &.{ "diff", "--name-only", "--find-renames", base, head_ref }, max_pull_diff_bytes)) |raw_files| {
+    if (try gitMaybe(allocator, repo, &.{ "diff", "--name-only", "--find-renames", base, git_refs.head }, max_pull_diff_bytes)) |raw_files| {
         defer allocator.free(raw_files);
         var files: usize = 0;
         var lines = std.mem.splitScalar(u8, raw_files, '\n');
@@ -1160,7 +1184,48 @@ fn appendPullTabs(buf: *std.ArrayList(u8), allocator: Allocator, pull_ref: []con
     try appendPullTab(buf, allocator, pull_ref, "Conversation", .conversation, active, counts.comments);
     try appendPullTabOptionalCount(buf, allocator, pull_ref, "Commits", .commits, active, counts.commits);
     try appendPullTabOptionalCount(buf, allocator, pull_ref, "Files changed", .files, active, counts.files);
+    try appendPullTabDiffstat(buf, allocator, counts);
     try buf.appendSlice(allocator, "</nav>");
+}
+
+fn appendPullTabDiffstat(buf: *std.ArrayList(u8), allocator: Allocator, counts: PullTabCounts) !void {
+    if (counts.additions == null and counts.deletions == null) return;
+
+    const additions = counts.additions orelse 0;
+    const deletions = counts.deletions orelse 0;
+    try appendTemplate(buf, allocator,
+        \\<span class="pull-tab-diffstat" aria-label="{additions} additions and {deletions} deletions"><strong>+{additions}</strong><em>-{deletions}</em><span class="pull-tab-diffstat-bars" aria-hidden="true">
+    , .{
+        .additions = additions,
+        .deletions = deletions,
+    });
+
+    const total = additions + deletions;
+    const bar_count: usize = 5;
+    var add_bars: usize = 0;
+    if (total > 0 and additions > 0) {
+        add_bars = (additions * bar_count + total - 1) / total;
+        if (add_bars > bar_count) add_bars = bar_count;
+    }
+    var del_bars: usize = 0;
+    if (total > 0 and deletions > 0) {
+        del_bars = bar_count - add_bars;
+        if (del_bars == 0) del_bars = 1;
+    }
+    if (add_bars + del_bars > bar_count) {
+        if (add_bars >= del_bars) {
+            add_bars = bar_count - del_bars;
+        } else {
+            del_bars = bar_count - add_bars;
+        }
+    }
+
+    var i: usize = 0;
+    while (i < bar_count) : (i += 1) {
+        const class_name = if (i < add_bars) "is-add" else if (i < add_bars + del_bars) "is-del" else "is-empty";
+        try appendTemplate(buf, allocator, "<i class=\"{class_name}\"></i>", .{ .class_name = class_name });
+    }
+    try buf.appendSlice(allocator, "</span></span>");
 }
 
 fn appendPullTabOptionalCount(buf: *std.ArrayList(u8), allocator: Allocator, pull_ref: []const u8, label: []const u8, tab: PullDetailTab, active: PullDetailTab, count: ?usize) !void {
@@ -1347,18 +1412,6 @@ fn appendPullSidebarDevelopment(buf: *std.ArrayList(u8), allocator: Allocator, r
         .base_ref = detail.base_ref,
         .head_ref = detail.head_ref,
     });
-    if (detail.commit_count != null or detail.changed_files != null or detail.additions != null or detail.deletions != null) {
-        try buf.appendSlice(allocator, "<div class=\"pull-sidebar-metrics\">");
-        if (detail.commit_count) |count| try appendTemplate(buf, allocator, "<span>{count} {word}</span>", .{ .count = count, .word = commitWord(count) });
-        if (detail.changed_files) |count| try appendTemplate(buf, allocator, "<span>{count} changed {word}</span>", .{ .count = count, .word = if (count == 1) "file" else "files" });
-        if (detail.additions != null or detail.deletions != null) {
-            try appendTemplate(buf, allocator, "<span><strong>+{additions}</strong> <em>-{deletions}</em></span>", .{
-                .additions = detail.additions orelse 0,
-                .deletions = detail.deletions orelse 0,
-            });
-        }
-        try buf.appendSlice(allocator, "</div>");
-    }
     if (detail.merge_oid.len != 0) {
         try appendTemplate(buf, allocator,
             \\<a class="issue-sidebar-link-row" href="{href}"><span class="issue-sidebar-row-kind">merge</span><code>{short_oid}</code></a>
@@ -1466,7 +1519,7 @@ fn appendPullConversation(
     try appendTemplate(buf, allocator,
         \\</span></div>
     , .{});
-    try issues_page.appendIssueActionMenu(buf, allocator, "pull-description", "", detail.body, detail.body.len != 0, false);
+    try issues_page.appendIssueActionMenu(buf, allocator, "pull-description", "", detail.body, detail.body.len != 0, "");
     try appendTemplate(buf, allocator,
         \\</header>
         \\  <div class="markdown-body">
@@ -1539,7 +1592,7 @@ fn appendPullComments(
         try buf.append(allocator, ' ');
         try appendRelativeTime(buf, allocator, created_at);
         try buf.appendSlice(allocator, "</span></div>");
-        try issues_page.appendIssueActionMenu(buf, allocator, anchor, comment_ref_value, body, !redacted and body.len != 0, false);
+        try issues_page.appendIssueActionMenu(buf, allocator, anchor, comment_ref_value, body, !redacted and body.len != 0, "");
         try buf.appendSlice(allocator, "</header>");
         if (reply_parent_id.len != 0 or reply_parent_hash.len != 0) {
             try buf.appendSlice(allocator, "<p class=\"reply-note\">Reply to ");
@@ -1825,10 +1878,12 @@ fn appendPullCommentForm(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref:
 }
 
 fn appendPullCommits(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, detail: PullDetail) !void {
-    const commits_opt = try loadPullCommits(allocator, repo, detail.base_ref, detail.head_ref);
+    const commits_opt = try loadPullCommits(allocator, repo, detail);
     const commits = commits_opt orelse {
         if (detail.commit_count) |count| {
-            const detail_text = try std.fmt.allocPrint(allocator, "GitHub reported {d} {s}. Fetch or create the base and head refs locally to inspect the commit list.", .{ count, commitWord(count) });
+            const hint = try pullGitDataFetchHint(allocator, detail);
+            defer allocator.free(hint);
+            const detail_text = try std.fmt.allocPrint(allocator, "GitHub reported {d} {s}. {s}", .{ count, commitWord(count), hint });
             defer allocator.free(detail_text);
             try appendEmptyState(buf, allocator, "Commit range unavailable.", detail_text);
         } else {
@@ -1857,7 +1912,7 @@ fn appendPullCommits(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, 
 }
 
 fn appendPullFiles(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, detail: PullDetail, raw_ref: []const u8) !void {
-    const diff_opt = try loadPullDiff(allocator, repo, detail.base_ref, detail.head_ref, 3);
+    const diff_opt = try loadPullDiff(allocator, repo, detail, 3);
     const diff = diff_opt orelse {
         if (detail.changed_files != null or detail.additions != null or detail.deletions != null) {
             const detail_text = try pullImportedFileSummary(allocator, detail);
@@ -1880,17 +1935,33 @@ fn pullImportedFileSummary(allocator: Allocator, detail: PullDetail) ![]u8 {
     const file_count = detail.changed_files orelse 0;
     const additions = detail.additions orelse 0;
     const deletions = detail.deletions orelse 0;
+    const hint = try pullGitDataFetchHint(allocator, detail);
+    defer allocator.free(hint);
     if (detail.additions != null or detail.deletions != null) {
-        return std.fmt.allocPrint(allocator, "GitHub reported {d} changed {s} with +{d} -{d}. Fetch or create the base and head refs locally to inspect the patch.", .{ file_count, if (file_count == 1) "file" else "files", additions, deletions });
+        return std.fmt.allocPrint(allocator, "GitHub reported {d} changed {s} with +{d} -{d}. {s}", .{ file_count, if (file_count == 1) "file" else "files", additions, deletions, hint });
     }
-    return std.fmt.allocPrint(allocator, "GitHub reported {d} changed {s}. Fetch or create the base and head refs locally to inspect the patch.", .{ file_count, if (file_count == 1) "file" else "files" });
+    return std.fmt.allocPrint(allocator, "GitHub reported {d} changed {s}. {s}", .{ file_count, if (file_count == 1) "file" else "files", hint });
 }
 
-fn loadPullCommits(allocator: Allocator, repo: Repo, base_ref: []const u8, head_ref: []const u8) !?[]PullCommit {
-    const merge_base = try loadMergeBase(allocator, repo, base_ref, head_ref);
+fn pullGitDataFetchHint(allocator: Allocator, detail: PullDetail) ![]u8 {
+    if (detail.legacy_number > 0) {
+        return std.fmt.allocPrint(
+            allocator,
+            "Fetch the PR head with `git fetch origin pull/{d}/head:refs/remotes/origin/pr/{d}`, then reload this page.",
+            .{ detail.legacy_number, detail.legacy_number },
+        );
+    }
+    return allocator.dupe(u8, "Fetch or create the base and head refs locally, then reload this page.");
+}
+
+fn loadPullCommits(allocator: Allocator, repo: Repo, detail: PullDetail) !?[]PullCommit {
+    const git_refs = (try loadPullGitRefs(allocator, repo, detail)) orelse return null;
+    defer git_refs.deinit(allocator);
+
+    const merge_base = try loadMergeBase(allocator, repo, git_refs.base, git_refs.head);
     defer if (merge_base) |value| allocator.free(value);
     const base = merge_base orelse return null;
-    const range = try std.fmt.allocPrint(allocator, "{s}..{s}", .{ base, head_ref });
+    const range = try std.fmt.allocPrint(allocator, "{s}..{s}", .{ base, git_refs.head });
     defer allocator.free(range);
     const raw = try gitMaybe(allocator, repo, &.{ "log", "--reverse", "--format=%H%x00%h%x00%an%x00%cr%x00%s", range }, git.max_git_output) orelse return null;
     defer allocator.free(raw);
@@ -1916,13 +1987,16 @@ fn loadPullCommits(allocator: Allocator, repo: Repo, base_ref: []const u8, head_
     return try commits.toOwnedSlice(allocator);
 }
 
-fn loadPullDiff(allocator: Allocator, repo: Repo, base_ref: []const u8, head_ref: []const u8, context: usize) !?[]u8 {
-    const merge_base = try loadMergeBase(allocator, repo, base_ref, head_ref);
+fn loadPullDiff(allocator: Allocator, repo: Repo, detail: PullDetail, context: usize) !?[]u8 {
+    const git_refs = (try loadPullGitRefs(allocator, repo, detail)) orelse return null;
+    defer git_refs.deinit(allocator);
+
+    const merge_base = try loadMergeBase(allocator, repo, git_refs.base, git_refs.head);
     defer if (merge_base) |value| allocator.free(value);
     const base = merge_base orelse return null;
     const unified = try std.fmt.allocPrint(allocator, "--unified={d}", .{context});
     defer allocator.free(unified);
-    return gitMaybe(allocator, repo, &.{ "diff", "--no-ext-diff", "--find-renames", "--patch", unified, base, head_ref }, max_pull_diff_bytes);
+    return gitMaybe(allocator, repo, &.{ "diff", "--no-ext-diff", "--find-renames", "--patch", unified, base, git_refs.head }, max_pull_diff_bytes);
 }
 
 fn loadMergeBase(allocator: Allocator, repo: Repo, base_ref: []const u8, head_ref: []const u8) !?[]u8 {
@@ -1933,10 +2007,86 @@ fn loadMergeBase(allocator: Allocator, repo: Repo, base_ref: []const u8, head_re
     return try allocator.dupe(u8, trimmed);
 }
 
+fn loadPullGitRefs(allocator: Allocator, repo: Repo, detail: PullDetail) !?PullGitRefs {
+    const prefer_remote = detail.legacy_number > 0;
+    const base = (try resolvePullGitCommit(allocator, repo, detail.base_ref, prefer_remote)) orelse return null;
+    errdefer allocator.free(base);
+    const head: ?[]u8 = if (detail.legacy_number > 0) blk: {
+        if (try resolveGithubPullHeadCommit(allocator, repo, detail.legacy_number)) |oid| break :blk oid;
+        break :blk try resolvePullGitCommit(allocator, repo, detail.head_ref, prefer_remote);
+    } else try resolvePullGitCommit(allocator, repo, detail.head_ref, prefer_remote);
+    const owned_head = head orelse {
+        allocator.free(base);
+        return null;
+    };
+    return .{
+        .base = base,
+        .head = owned_head,
+    };
+}
+
+fn resolveGithubPullHeadCommit(allocator: Allocator, repo: Repo, number: i64) !?[]u8 {
+    if (try resolveFormattedGithubPullRef(allocator, repo, "refs/remotes/origin/pr/{d}", number)) |oid| return oid;
+    if (try resolveFormattedGithubPullRef(allocator, repo, "refs/remotes/origin/pull/{d}/head", number)) |oid| return oid;
+    if (try resolveFormattedGithubPullRef(allocator, repo, "refs/pull/{d}/head", number)) |oid| return oid;
+    if (try resolveFormattedGithubPullRef(allocator, repo, "refs/gitomi/github/pull/{d}/head", number)) |oid| return oid;
+    return null;
+}
+
+fn resolveFormattedGithubPullRef(allocator: Allocator, repo: Repo, comptime pattern: []const u8, number: i64) !?[]u8 {
+    const ref = try std.fmt.allocPrint(allocator, pattern, .{number});
+    defer allocator.free(ref);
+    return try resolveGitCommit(allocator, repo, ref);
+}
+
+fn resolvePullGitCommit(allocator: Allocator, repo: Repo, raw_ref: []const u8, prefer_remote: bool) !?[]u8 {
+    if (prefer_remote and isBranchShorthand(raw_ref)) {
+        const remote_ref = try std.fmt.allocPrint(allocator, "refs/remotes/origin/{s}", .{raw_ref});
+        defer allocator.free(remote_ref);
+        if (try resolveGitCommit(allocator, repo, remote_ref)) |oid| return oid;
+    }
+
+    if (try resolveGitCommit(allocator, repo, raw_ref)) |oid| return oid;
+
+    if (!prefer_remote and isBranchShorthand(raw_ref)) {
+        const remote_ref = try std.fmt.allocPrint(allocator, "refs/remotes/origin/{s}", .{raw_ref});
+        defer allocator.free(remote_ref);
+        if (try resolveGitCommit(allocator, repo, remote_ref)) |oid| return oid;
+    }
+
+    return null;
+}
+
+fn resolveGitCommit(allocator: Allocator, repo: Repo, ref: []const u8) !?[]u8 {
+    const commit_ref = try std.fmt.allocPrint(allocator, "{s}^{{commit}}", .{ref});
+    defer allocator.free(commit_ref);
+    const raw = try gitMaybe(allocator, repo, &.{ "rev-parse", "--verify", "--quiet", commit_ref }, 1024 * 1024) orelse return null;
+    defer allocator.free(raw);
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    return try allocator.dupe(u8, trimmed);
+}
+
+fn isBranchShorthand(ref: []const u8) bool {
+    if (ref.len == 0) return false;
+    if (std.mem.startsWith(u8, ref, "refs/")) return false;
+    if (std.mem.startsWith(u8, ref, "origin/")) return false;
+    if (std.mem.startsWith(u8, ref, "-")) return false;
+    if (std.mem.endsWith(u8, ref, ".lock")) return false;
+    if (std.mem.indexOf(u8, ref, "..") != null) return false;
+    if (std.mem.indexOf(u8, ref, "//") != null) return false;
+    if (std.mem.indexOf(u8, ref, "@{") != null) return false;
+    if (std.mem.indexOfAny(u8, ref, " \t\r\n\x00:^~?*[\\") != null) return false;
+    return true;
+}
+
 fn loadPullMergeStatus(allocator: Allocator, repo: Repo, detail: PullDetail) !PullMergeStatus {
     if (!std.mem.eql(u8, detail.state, "open")) return .{ .kind = .unavailable };
 
-    const merge_base = try loadMergeBase(allocator, repo, detail.base_ref, detail.head_ref);
+    const git_refs = (try loadPullGitRefs(allocator, repo, detail)) orelse return .{ .kind = .unavailable };
+    defer git_refs.deinit(allocator);
+
+    const merge_base = try loadMergeBase(allocator, repo, git_refs.base, git_refs.head);
     defer if (merge_base) |value| allocator.free(value);
     if (merge_base == null) return .{ .kind = .unavailable };
 
@@ -1951,8 +2101,8 @@ fn loadPullMergeStatus(allocator: Allocator, repo: Repo, detail: PullDetail) !Pu
         "--name-only",
         "--no-messages",
         "-z",
-        detail.base_ref,
-        detail.head_ref,
+        git_refs.head,
+        git_refs.base,
     });
 
     var result = try runCommand(allocator, argv.items, null, max_pull_diff_bytes);

@@ -19,10 +19,12 @@ const appendShellStart = shared.appendShellStart;
 const appendRelativeTime = shared.appendRelativeTime;
 const appendTemplate = shared.appendTemplate;
 const createCommentAddedEvent = comment_mod.createCommentAddedEvent;
+const createCommentBodySetEvent = comment_mod.createCommentBodySetEvent;
 const createCommentReplyEvent = comment_mod.createCommentReplyEvent;
 const createIssueOpenedEvent = issue.createIssueOpenedEvent;
 const createIssueProjectEvent = issue.createIssueProjectEvent;
 const createIssueStringEvent = issue.createIssueStringEvent;
+const createIssueUpdatedEvent = issue.createIssueUpdatedEvent;
 const createReactionEvent = reaction_mod.createReactionEvent;
 const ensureIndex = index.ensureIndex;
 const commitHref = shared.commitHref;
@@ -937,10 +939,15 @@ fn renderIssueDetailPageWithCommentForm(
     const display_author = if (source_author.len != 0) source_author else author_principal;
     const current_actor = try shared.currentPrincipalOwned(allocator, repo);
     defer if (current_actor) |actor| allocator.free(actor);
+    const current_role = if (current_actor) |actor| try index.effectiveWriteRoleForPrincipal(allocator, repo, actor) else null;
+    defer if (current_role) |role| allocator.free(role);
+    const can_edit_issue = currentActorCanEditAuthor(current_actor, current_role, author_principal);
+    const issue_edit_href = if (can_edit_issue) try issueEditHrefOwned(allocator, raw_ref, null) else "";
+    defer if (can_edit_issue) allocator.free(issue_edit_href);
 
     try appendShellStart(&buf, allocator, repo, title, "issues");
     try buf.appendSlice(allocator, "<section class=\"issue-page\">");
-    try appendIssuePageHeader(&buf, allocator, id, title, state, display_author, opened_at, state_at, comment_count, legacy_number);
+    try appendIssuePageHeader(&buf, allocator, raw_ref, id, title, state, display_author, opened_at, state_at, comment_count, legacy_number, can_edit_issue);
     try appendTemplate(&buf, allocator,
         \\  <div class="issue-conversation-layout">
         \\    <div class="issue-conversation">
@@ -959,7 +966,7 @@ fn renderIssueDetailPageWithCommentForm(
     try buf.append(allocator, ' ');
     try appendRelativeTime(&buf, allocator, opened_at);
     try buf.appendSlice(allocator, "</span></div>");
-    try appendIssueActionMenu(&buf, allocator, "issue-description", "", body, body.len != 0, false);
+    try appendIssueActionMenu(&buf, allocator, "issue-description", "", body, body.len != 0, issue_edit_href);
     try appendTemplate(&buf, allocator,
         \\          </header>
         \\          <div class="markdown-body">
@@ -977,7 +984,7 @@ fn renderIssueDetailPageWithCommentForm(
         \\        </article>
         \\      </div>
     );
-    try appendIssueComments(&buf, allocator, &db, raw_ref, id, current_actor);
+    try appendIssueComments(&buf, allocator, &db, raw_ref, id, current_actor, current_role);
     try appendIssueTimelineEvents(&buf, allocator, &db, id);
     try appendIssueCommentForm(&buf, allocator, raw_ref, state, current_actor, comment_error, comment_value);
     try buf.appendSlice(allocator, "    </div><aside class=\"issue-meta-sidebar\">");
@@ -990,6 +997,7 @@ fn renderIssueDetailPageWithCommentForm(
 fn appendIssuePageHeader(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
+    raw_ref: []const u8,
     issue_id: []const u8,
     title: []const u8,
     state: []const u8,
@@ -998,6 +1006,7 @@ fn appendIssuePageHeader(
     state_at: []const u8,
     comment_count: usize,
     legacy_number: i64,
+    can_edit: bool,
 ) !void {
     try appendTemplate(buf, allocator,
         \\  <header class="issue-page-head">
@@ -1008,7 +1017,16 @@ fn appendIssuePageHeader(
     try appendTemplate(buf, allocator,
         \\</span></h1>
         \\      <div class="issue-page-actions">
-        \\        <button class="button secondary" type="button" disabled>Edit</button>
+    , .{});
+    if (can_edit) {
+        try buf.appendSlice(allocator, "        <a class=\"button secondary\" href=\"/issues/");
+        try shared.appendUrlEncoded(buf, allocator, raw_ref);
+        try buf.appendSlice(allocator, "/edit\">Edit</a>\n");
+    } else {
+        try buf.appendSlice(allocator, "        <button class=\"button secondary\" type=\"button\" disabled>Edit</button>\n");
+    }
+    try appendTemplate(buf, allocator,
+        \\
         \\        <a class="button primary" href="/new-issue">New issue</a>
         \\        <button class="issue-copy-button" type="button" disabled aria-label="Copy issue link"><span class="button-icon icon-copy" aria-hidden="true"></span></button>
         \\      </div>
@@ -1079,6 +1097,221 @@ fn renderIssueNotFound(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![
     return buf.toOwnedSlice(allocator);
 }
 
+pub fn renderIssueEditPage(allocator: Allocator, repo: Repo, raw_ref: []const u8, target: []const u8) ![]u8 {
+    const target_ref_owned = try queryValueOwned(allocator, target, "target");
+    defer if (target_ref_owned) |value| allocator.free(value);
+    const target_ref = if (target_ref_owned) |value| std.mem.trim(u8, value, " \t\r\n") else "issue";
+    if (target_ref.len == 0 or std.mem.eql(u8, target_ref, "issue")) {
+        return renderIssueEditIssuePage(allocator, repo, raw_ref, null, null, null);
+    }
+    return renderIssueEditCommentPage(allocator, repo, raw_ref, target_ref, null, null);
+}
+
+fn renderIssueEditIssuePage(
+    allocator: Allocator,
+    repo: Repo,
+    raw_ref: []const u8,
+    error_message: ?[]const u8,
+    title_override: ?[]const u8,
+    body_override: ?[]const u8,
+) ![]u8 {
+    try ensureIndex(allocator, repo);
+    const issue_id = index.resolveIssueId(allocator, repo, raw_ref) catch {
+        return renderIssueNotFound(allocator, repo, raw_ref);
+    };
+    defer allocator.free(issue_id);
+
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    var stmt = try db.prepare("SELECT title, body, author_principal FROM issues WHERE id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    if (!(try stmt.step())) return renderIssueNotFound(allocator, repo, raw_ref);
+
+    const title = try stmt.columnTextDup(allocator, 0);
+    defer allocator.free(title);
+    const body = try stmt.columnTextDup(allocator, 1);
+    defer allocator.free(body);
+    const author_principal = try stmt.columnTextDup(allocator, 2);
+    defer allocator.free(author_principal);
+
+    if (!(try currentActorCanEditInRepo(allocator, repo, author_principal))) {
+        return renderIssueEditAccessDenied(allocator, repo, raw_ref, "Edit issue", "You do not have permission to edit this issue.");
+    }
+
+    return renderIssueEditIssueForm(
+        allocator,
+        repo,
+        raw_ref,
+        error_message,
+        title_override orelse title,
+        body_override orelse body,
+    );
+}
+
+fn renderIssueEditIssueForm(
+    allocator: Allocator,
+    repo: Repo,
+    raw_ref: []const u8,
+    error_message: ?[]const u8,
+    title_value: []const u8,
+    body_value: []const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendShellStart(&buf, allocator, repo, "Edit Issue", "issues");
+    try buf.appendSlice(allocator, "<section class=\"panel form-panel\">");
+    try appendSectionHead(&buf, allocator, "Issues", "Edit Issue", null);
+    if (error_message) |message| {
+        try appendTemplate(&buf, allocator, "<div class=\"flash error\">{message}</div>", .{ .message = message });
+    }
+    try buf.appendSlice(allocator, "<form method=\"post\" action=\"/issues/");
+    try shared.appendUrlEncoded(&buf, allocator, raw_ref);
+    try buf.appendSlice(allocator, "/edit\" class=\"issue-form\">");
+    try appendTemplate(&buf, allocator,
+        \\<input type="hidden" name="target_ref" value="issue">
+        \\<label>Title<input name="title" value="{title_value}" autofocus required></label>
+        \\<label>Body</label>
+    , .{ .title_value = title_value });
+    try shared.appendMarkdownEditor(&buf, allocator, .{
+        .rows = 10,
+        .placeholder = "Update issue description",
+        .value = body_value,
+        .required = false,
+    });
+    try buf.appendSlice(allocator, "<div class=\"form-actions\">");
+    try appendIssueCancelLink(&buf, allocator, raw_ref, null);
+    try buf.appendSlice(allocator, "<button class=\"button primary\" type=\"submit\">Save changes</button></div></form></section>");
+    try appendShellEnd(&buf, allocator);
+    return buf.toOwnedSlice(allocator);
+}
+
+fn renderIssueEditCommentPage(
+    allocator: Allocator,
+    repo: Repo,
+    raw_ref: []const u8,
+    target_ref: []const u8,
+    error_message: ?[]const u8,
+    body_override: ?[]const u8,
+) ![]u8 {
+    try ensureIndex(allocator, repo);
+    const issue_id = index.resolveIssueId(allocator, repo, raw_ref) catch {
+        return renderIssueNotFound(allocator, repo, raw_ref);
+    };
+    defer allocator.free(issue_id);
+    const comment_id = index.resolveCommentId(allocator, repo, target_ref) catch {
+        return renderIssueEditAccessDenied(allocator, repo, raw_ref, "Edit comment", "Comment not found.");
+    };
+    defer allocator.free(comment_id);
+    var parent = try index.commentParentInfo(allocator, repo, comment_id);
+    defer parent.deinit();
+    if (!std.mem.eql(u8, parent.parent_kind, "issue") or !std.mem.eql(u8, parent.parent_id, issue_id)) {
+        return renderIssueEditAccessDenied(allocator, repo, raw_ref, "Edit comment", "Comment is not in this issue.");
+    }
+
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    var stmt = try db.prepare("SELECT body, redacted, author_principal FROM comments WHERE id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, comment_id);
+    if (!(try stmt.step())) return renderIssueEditAccessDenied(allocator, repo, raw_ref, "Edit comment", "Comment not found.");
+
+    const body = try stmt.columnTextDup(allocator, 0);
+    defer allocator.free(body);
+    const redacted = stmt.columnInt(1) != 0;
+    const author_principal = try stmt.columnTextDup(allocator, 2);
+    defer allocator.free(author_principal);
+    if (redacted or !(try currentActorCanEditInRepo(allocator, repo, author_principal))) {
+        return renderIssueEditAccessDenied(allocator, repo, raw_ref, "Edit comment", "You do not have permission to edit this comment.");
+    }
+
+    var comment_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const comment_ref = util.shortObjectRef(&comment_ref_buf, comment_id);
+    const comment_ref_value = try std.fmt.allocPrint(allocator, "comment:{s}", .{comment_ref});
+    defer allocator.free(comment_ref_value);
+    const anchor = try std.fmt.allocPrint(allocator, "comment-{s}", .{comment_ref});
+    defer allocator.free(anchor);
+    return renderIssueEditCommentForm(
+        allocator,
+        repo,
+        raw_ref,
+        comment_ref_value,
+        anchor,
+        error_message,
+        body_override orelse body,
+    );
+}
+
+fn renderIssueEditCommentForm(
+    allocator: Allocator,
+    repo: Repo,
+    raw_ref: []const u8,
+    target_ref: []const u8,
+    anchor: []const u8,
+    error_message: ?[]const u8,
+    body_value: []const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendShellStart(&buf, allocator, repo, "Edit Comment", "issues");
+    try buf.appendSlice(allocator, "<section class=\"panel form-panel\">");
+    try appendSectionHead(&buf, allocator, "Issues", "Edit Comment", null);
+    if (error_message) |message| {
+        try appendTemplate(&buf, allocator, "<div class=\"flash error\">{message}</div>", .{ .message = message });
+    }
+    try buf.appendSlice(allocator, "<form method=\"post\" action=\"/issues/");
+    try shared.appendUrlEncoded(&buf, allocator, raw_ref);
+    try buf.appendSlice(allocator, "/edit\" class=\"issue-form\">");
+    try appendTemplate(&buf, allocator,
+        \\<input type="hidden" name="target_ref" value="{target_ref}">
+        \\<label>Comment</label>
+    , .{ .target_ref = target_ref });
+    try shared.appendMarkdownEditor(&buf, allocator, .{
+        .rows = 10,
+        .placeholder = "Update comment",
+        .value = body_value,
+        .required = false,
+    });
+    try buf.appendSlice(allocator, "<div class=\"form-actions\">");
+    try appendIssueCancelLink(&buf, allocator, raw_ref, anchor);
+    try buf.appendSlice(allocator, "<button class=\"button primary\" type=\"submit\">Save changes</button></div></form></section>");
+    try appendShellEnd(&buf, allocator);
+    return buf.toOwnedSlice(allocator);
+}
+
+fn renderIssueEditAccessDenied(allocator: Allocator, repo: Repo, raw_ref: []const u8, title: []const u8, message: []const u8) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try appendShellStart(&buf, allocator, repo, title, "issues");
+    try buf.appendSlice(allocator, "<section class=\"panel form-panel\">");
+    try appendSectionHead(&buf, allocator, "Issues", title, null);
+    try appendTemplate(&buf, allocator, "<div class=\"flash error\">{message}</div><div class=\"form-actions\">", .{ .message = message });
+    try appendIssueCancelLink(&buf, allocator, raw_ref, null);
+    try buf.appendSlice(allocator, "</div></section>");
+    try appendShellEnd(&buf, allocator);
+    return buf.toOwnedSlice(allocator);
+}
+
+fn appendIssueCancelLink(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8, anchor: ?[]const u8) !void {
+    try buf.appendSlice(allocator, "<a class=\"button secondary\" href=\"/issues/");
+    try shared.appendUrlEncoded(buf, allocator, raw_ref);
+    if (anchor) |value| {
+        try buf.append(allocator, '#');
+        try shared.appendHtml(buf, allocator, value);
+    }
+    try buf.appendSlice(allocator, "\">Cancel</a>");
+}
+
+fn currentActorCanEditInRepo(allocator: Allocator, repo: Repo, author: []const u8) !bool {
+    const current_actor = try shared.currentPrincipalOwned(allocator, repo);
+    defer if (current_actor) |actor| allocator.free(actor);
+    const current_role = if (current_actor) |actor| try index.effectiveWriteRoleForPrincipal(allocator, repo, actor) else null;
+    defer if (current_role) |role| allocator.free(role);
+    return currentActorCanEditAuthor(current_actor, current_role, author);
+}
+
 fn appendLegacyIssueLink(buf: *std.ArrayList(u8), allocator: Allocator, legacy_number: i64) !void {
     const issue_ref = try std.fmt.allocPrint(allocator, "{d}", .{legacy_number});
     defer allocator.free(issue_ref);
@@ -1092,9 +1325,10 @@ fn appendIssueComments(
     raw_ref: []const u8,
     issue_id: []const u8,
     current_actor: ?[]const u8,
+    current_role: ?[]const u8,
 ) !void {
     var stmt = try db.prepare(
-        \\SELECT id, body, redacted, COALESCE(NULLIF(source_author, ''), author_principal), created_at, reply_parent_id, reply_parent_hash
+        \\SELECT id, body, redacted, COALESCE(NULLIF(source_author, ''), author_principal), author_principal, created_at, reply_parent_id, reply_parent_hash
         \\FROM comments
         \\WHERE parent_kind = 'issue' AND parent_id = ?
         \\ORDER BY created_at, id
@@ -1109,11 +1343,13 @@ fn appendIssueComments(
         const redacted = stmt.columnInt(2) != 0;
         const author = try stmt.columnTextDup(allocator, 3);
         defer allocator.free(author);
-        const created_at = try stmt.columnTextDup(allocator, 4);
+        const author_principal = try stmt.columnTextDup(allocator, 4);
+        defer allocator.free(author_principal);
+        const created_at = try stmt.columnTextDup(allocator, 5);
         defer allocator.free(created_at);
-        const reply_parent_id = try stmt.columnTextDup(allocator, 5);
+        const reply_parent_id = try stmt.columnTextDup(allocator, 6);
         defer allocator.free(reply_parent_id);
-        const reply_parent_hash = try stmt.columnTextDup(allocator, 6);
+        const reply_parent_hash = try stmt.columnTextDup(allocator, 7);
         defer allocator.free(reply_parent_hash);
         const anchor = try std.fmt.allocPrint(allocator, "comment-{s}", .{id[0..@min(id.len, 7)]});
         defer allocator.free(anchor);
@@ -1121,6 +1357,9 @@ fn appendIssueComments(
         const comment_ref = util.shortObjectRef(&comment_ref_buf, id);
         const comment_ref_value = try std.fmt.allocPrint(allocator, "comment:{s}", .{comment_ref});
         defer allocator.free(comment_ref_value);
+        const can_edit_comment = !redacted and currentActorCanEditAuthor(current_actor, current_role, author_principal);
+        const comment_edit_href = if (can_edit_comment) try issueEditHrefOwned(allocator, raw_ref, comment_ref_value) else "";
+        defer if (can_edit_comment) allocator.free(comment_edit_href);
 
         const is_reply = reply_parent_id.len != 0 or reply_parent_hash.len != 0;
         try appendTemplate(buf, allocator,
@@ -1138,7 +1377,7 @@ fn appendIssueComments(
         try buf.append(allocator, ' ');
         try appendRelativeTime(buf, allocator, created_at);
         try buf.appendSlice(allocator, "</span></div>");
-        try appendIssueActionMenu(buf, allocator, anchor, comment_ref_value, body, !redacted and body.len != 0, false);
+        try appendIssueActionMenu(buf, allocator, anchor, comment_ref_value, body, !redacted and body.len != 0, comment_edit_href);
         try buf.appendSlice(allocator, "</header>");
         if (reply_parent_id.len != 0 or reply_parent_hash.len != 0) {
             try buf.appendSlice(allocator, "<p class=\"reply-note\">Reply to ");
@@ -1581,24 +1820,45 @@ pub fn appendIssueActionMenu(
     reply_ref: []const u8,
     markdown: []const u8,
     markdown_available: bool,
-    edit_available: bool,
+    edit_href: []const u8,
 ) !void {
     try appendTemplate(buf, allocator,
-        \\<details class="issue-action-menu" data-issue-menu data-issue-anchor="{anchor}" data-issue-reply-ref="{reply_ref}">
+        \\<details class="issue-action-menu" data-issue-menu data-issue-anchor="{anchor}" data-issue-reply-ref="{reply_ref}" data-issue-edit-href="{edit_href}">
         \\  <summary class="issue-kebab-button" aria-label="Comment actions" title="Comment actions"></summary>
         \\  <template data-issue-markdown>{markdown}</template>
         \\  <div class="issue-action-popover" role="menu">
     , .{
         .anchor = anchor,
         .reply_ref = reply_ref,
+        .edit_href = edit_href,
         .markdown = markdown,
     });
     try appendIssueActionMenuItem(buf, allocator, "copy-link", "issue-menu-icon-link", "Copy link", false);
     try appendIssueActionMenuItem(buf, allocator, "copy-markdown", "issue-menu-icon-markdown", "Copy Markdown", !markdown_available);
     try appendIssueActionMenuItem(buf, allocator, "quote-reply", "issue-menu-icon-quote", "Quote reply", !markdown_available);
     try buf.appendSlice(allocator, "<div class=\"issue-action-divider\" role=\"separator\"></div>");
-    try appendIssueActionMenuItem(buf, allocator, "edit", "issue-menu-icon-edit", "Edit", !edit_available);
+    try appendIssueActionMenuItem(buf, allocator, "edit", "issue-menu-icon-edit", "Edit", edit_href.len == 0);
     try buf.appendSlice(allocator, "</div></details>");
+}
+
+fn currentActorCanEditAuthor(current_actor: ?[]const u8, current_role: ?[]const u8, author: []const u8) bool {
+    const role = current_role orelse return false;
+    if (event_mod.roleAtLeast(role, "maintainer")) return true;
+    const actor = current_actor orelse return false;
+    return event_mod.roleAtLeast(role, "contributor") and std.mem.eql(u8, actor, author);
+}
+
+fn issueEditHrefOwned(allocator: Allocator, raw_ref: []const u8, target_ref: ?[]const u8) ![]u8 {
+    var href: std.ArrayList(u8) = .empty;
+    errdefer href.deinit(allocator);
+    try href.appendSlice(allocator, "/issues/");
+    try shared.appendUrlEncoded(&href, allocator, raw_ref);
+    try href.appendSlice(allocator, "/edit");
+    if (target_ref) |target| {
+        try href.appendSlice(allocator, "?target=");
+        try shared.appendUrlEncoded(&href, allocator, target);
+    }
+    return href.toOwnedSlice(allocator);
 }
 
 fn appendIssueActionMenuItem(
@@ -2738,6 +2998,143 @@ pub fn handleIssueSidebarPost(allocator: Allocator, repo: Repo, stream: std.net.
     }
 
     const location = try std.fmt.allocPrint(allocator, "/issues/{s}", .{raw_ref});
+    defer allocator.free(location);
+    try sendRedirect(allocator, stream, location);
+}
+
+pub fn handleIssueEditPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
+    try ensureIndex(allocator, repo);
+    const issue_id = index.resolveIssueId(allocator, repo, raw_ref) catch {
+        const page = try renderIssueNotFound(allocator, repo, raw_ref);
+        defer allocator.free(page);
+        try sendResponse(allocator, stream, 404, "Not Found", "text/html", page, null);
+        return;
+    };
+    defer allocator.free(issue_id);
+
+    const target_ref_owned = (try formValueOwned(allocator, form_body, "target_ref")) orelse try allocator.dupe(u8, "issue");
+    defer allocator.free(target_ref_owned);
+    const target_ref = std.mem.trim(u8, target_ref_owned, " \t\r\n");
+    if (target_ref.len == 0 or std.mem.eql(u8, target_ref, "issue")) {
+        try handleIssueBodyEditPost(allocator, repo, stream, raw_ref, issue_id, form_body);
+        return;
+    }
+    try handleCommentBodyEditPost(allocator, repo, stream, raw_ref, issue_id, target_ref, form_body);
+}
+
+fn handleIssueBodyEditPost(
+    allocator: Allocator,
+    repo: Repo,
+    stream: std.net.Stream,
+    raw_ref: []const u8,
+    issue_id: []const u8,
+    form_body: []const u8,
+) !void {
+    const title_owned = (try formValueOwned(allocator, form_body, "title")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(title_owned);
+    const body_owned = (try formValueOwned(allocator, form_body, "body")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(body_owned);
+    const title = std.mem.trim(u8, title_owned, " \t\r\n");
+    if (title.len == 0) {
+        const page = try renderIssueEditIssuePage(allocator, repo, raw_ref, "Title is required.", title_owned, body_owned);
+        defer allocator.free(page);
+        try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", page, null);
+        return;
+    }
+
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    var stmt = try db.prepare("SELECT author_principal FROM issues WHERE id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    if (!(try stmt.step())) {
+        const page = try renderIssueNotFound(allocator, repo, raw_ref);
+        defer allocator.free(page);
+        try sendResponse(allocator, stream, 404, "Not Found", "text/html", page, null);
+        return;
+    }
+    const author_principal = try stmt.columnTextDup(allocator, 0);
+    defer allocator.free(author_principal);
+    if (!(try currentActorCanEditInRepo(allocator, repo, author_principal))) {
+        const page = try renderIssueEditAccessDenied(allocator, repo, raw_ref, "Edit issue", "You do not have permission to edit this issue.");
+        defer allocator.free(page);
+        try sendResponse(allocator, stream, 403, "Forbidden", "text/html", page, null);
+        return;
+    }
+
+    createIssueUpdatedEvent(allocator, issue_id, .{
+        .title = title,
+        .body = body_owned,
+    }) catch {
+        const page = try renderIssueEditIssuePage(allocator, repo, raw_ref, "Could not save the issue. Check that Gitomi is initialized and Git commit signing is configured.", title, body_owned);
+        defer allocator.free(page);
+        try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", page, null);
+        return;
+    };
+
+    const location = try std.fmt.allocPrint(allocator, "/issues/{s}", .{raw_ref});
+    defer allocator.free(location);
+    try sendRedirect(allocator, stream, location);
+}
+
+fn handleCommentBodyEditPost(
+    allocator: Allocator,
+    repo: Repo,
+    stream: std.net.Stream,
+    raw_ref: []const u8,
+    issue_id: []const u8,
+    target_ref: []const u8,
+    form_body: []const u8,
+) !void {
+    const body_owned = (try formValueOwned(allocator, form_body, "body")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(body_owned);
+    const comment_id = index.resolveCommentId(allocator, repo, target_ref) catch {
+        const page = try renderIssueEditAccessDenied(allocator, repo, raw_ref, "Edit comment", "Comment not found.");
+        defer allocator.free(page);
+        try sendResponse(allocator, stream, 404, "Not Found", "text/html", page, null);
+        return;
+    };
+    defer allocator.free(comment_id);
+    var parent = try index.commentParentInfo(allocator, repo, comment_id);
+    defer parent.deinit();
+    if (!std.mem.eql(u8, parent.parent_kind, "issue") or !std.mem.eql(u8, parent.parent_id, issue_id)) {
+        const page = try renderIssueEditAccessDenied(allocator, repo, raw_ref, "Edit comment", "Comment is not in this issue.");
+        defer allocator.free(page);
+        try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", page, null);
+        return;
+    }
+
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    var stmt = try db.prepare("SELECT redacted, author_principal FROM comments WHERE id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, comment_id);
+    if (!(try stmt.step())) {
+        const page = try renderIssueEditAccessDenied(allocator, repo, raw_ref, "Edit comment", "Comment not found.");
+        defer allocator.free(page);
+        try sendResponse(allocator, stream, 404, "Not Found", "text/html", page, null);
+        return;
+    }
+    const redacted = stmt.columnInt(0) != 0;
+    const author_principal = try stmt.columnTextDup(allocator, 1);
+    defer allocator.free(author_principal);
+    if (redacted or !(try currentActorCanEditInRepo(allocator, repo, author_principal))) {
+        const page = try renderIssueEditAccessDenied(allocator, repo, raw_ref, "Edit comment", "You do not have permission to edit this comment.");
+        defer allocator.free(page);
+        try sendResponse(allocator, stream, 403, "Forbidden", "text/html", page, null);
+        return;
+    }
+
+    createCommentBodySetEvent(allocator, comment_id, body_owned) catch {
+        const page = try renderIssueEditCommentPage(allocator, repo, raw_ref, target_ref, "Could not save the comment. Check that Gitomi is initialized and Git commit signing is configured.", body_owned);
+        defer allocator.free(page);
+        try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", page, null);
+        return;
+    };
+
+    var comment_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const comment_ref = util.shortObjectRef(&comment_ref_buf, comment_id);
+    const location = try std.fmt.allocPrint(allocator, "/issues/{s}#comment-{s}", .{ raw_ref, comment_ref });
     defer allocator.free(location);
     try sendRedirect(allocator, stream, location);
 }

@@ -329,7 +329,7 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
         try appendReadmePreview(&buf, allocator, repo, ref, path, entries);
         if (is_root) {
             try appendRootPageMainEnd(&buf, allocator);
-            try appendRootSidebar(&buf, allocator, repo, ref, entries, summary_opt);
+            try appendRootSidebar(&buf, allocator, repo, ref, entries);
             try appendRootPageGridEnd(&buf, allocator);
         }
     } else {
@@ -827,7 +827,6 @@ fn appendRootCodeToolbar(
         \\        <button type="button" role="menuitem">Upload files</button>
         \\      </div>
         \\    </details>
-        \\    <button class="button secondary root-icon-button" type="button" aria-label="Download repository" title="Download repository"><span class="button-icon icon-download" aria-hidden="true"></span></button>
         \\    <details class="root-action-menu root-code-menu" data-popover-menu>
         \\      <summary class="button primary root-menu-button"><span class="button-icon icon-code" aria-hidden="true"></span>Code<span class="root-caret" aria-hidden="true"></span></summary>
         \\      <div class="root-action-popover root-code-popover" role="menu">
@@ -1143,10 +1142,9 @@ fn appendReadmePreview(
 
     try appendTemplate(buf, allocator,
         \\<section class="panel readme-panel">
-        \\  <div class="section-head readme-head"><div><p class="eyebrow">Documentation</p><h2>{readme}</h2></div><a class="button secondary" href="{href}">Open file</a></div><div class="readme-body markdown-body">
+        \\  <div class="section-head readme-head"><h2>{readme}</h2></div><div class="readme-body markdown-body">
     , .{
         .readme = readme,
-        .href = codeHrefWithView(ref, readme_path, "preview"),
     });
     try appendRepositoryMarkdown(buf, allocator, ref, readme_path, content);
     try appendTemplate(buf, allocator, "</div></section>", .{});
@@ -1172,10 +1170,8 @@ fn appendRootSidebar(
     repo: Repo,
     ref: []const u8,
     entries: []const TreeEntry,
-    summary_opt: ?CommitSummary,
 ) !void {
     const counts = rootEntryCounts(entries);
-    const readme_name = findReadme(entries);
     const changes = git.workingTreeChangeCount(allocator) catch 0;
     const about_summary = loadReadmeSummaryOwned(allocator, repo, ref, entries) catch null;
     defer if (about_summary) |summary| allocator.free(summary);
@@ -1189,19 +1185,9 @@ fn appendRootSidebar(
         \\    <div class="root-sidebar-section">
         \\      <h2>About</h2>
         \\      <p class="root-about-text">{about}</p>
-        \\      <div class="root-link-list">
     , .{ .about = about_text });
 
-    if (readme_name) |name| {
-        try appendTemplate(buf, allocator,
-            \\<a href="{href}">README</a>
-        , .{ .href = codeHrefWithView(ref, name, "preview") });
-    }
     try appendTemplate(buf, allocator,
-        \\        <a href="/commits">Commits</a>
-        \\        <a href="/issues">Issues</a>
-        \\        <a href="/projects">Projects</a>
-        \\      </div>
         \\    </div>
         \\    <div class="root-sidebar-section">
         \\      <h2>Repository</h2>
@@ -1221,32 +1207,9 @@ fn appendRootSidebar(
         .changes_label = if (changes == 1) "change" else "changes",
     });
 
-    try appendRootLatestCommit(buf, allocator, summary_opt);
     try appendRootLanguages(buf, allocator, languages_opt);
     try appendRootSloc(buf, allocator, languages_opt);
     try appendTemplate(buf, allocator, "</section></aside>", .{});
-}
-
-fn appendRootLatestCommit(buf: *std.ArrayList(u8), allocator: Allocator, summary_opt: ?CommitSummary) !void {
-    try appendTemplate(buf, allocator,
-        \\<div class="root-sidebar-section">
-        \\  <h2>Latest commit</h2>
-    , .{});
-    if (summary_opt) |summary| {
-        try appendTemplate(buf, allocator,
-            \\<a class="root-latest-commit" href="{href}"><strong>{subject}</strong><small><code>{hash}</code>{relative}</small></a>
-        , .{
-            .href = commitHref(summary.full_hash),
-            .subject = summary.subject,
-            .hash = summary.hash,
-            .relative = summary.relative,
-        });
-    } else {
-        try appendTemplate(buf, allocator,
-            \\<p class="root-sidebar-empty">No commits found for this ref.</p>
-        , .{});
-    }
-    try appendTemplate(buf, allocator, "</div>", .{});
 }
 
 fn appendRootLanguages(buf: *std.ArrayList(u8), allocator: Allocator, stats_opt: ?source_stats.Stats) !void {
