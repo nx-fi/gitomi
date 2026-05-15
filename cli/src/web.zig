@@ -197,6 +197,10 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/index/rebuild")) {
         try index.ensureIndex(allocator, repo);
         try shared.sendResponse(allocator, stream, 204, "No Content", "text/plain", "", null);
+    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/nav/stats")) {
+        const body = try shared.renderNavStatsJson(allocator, repo);
+        defer allocator.free(body);
+        try shared.sendResponse(allocator, stream, 200, "OK", "application/json", body, "Cache-Control: no-store\r\n");
     } else if (std.mem.eql(u8, request.method, "GET") and (std.mem.eql(u8, request.path, "/") or std.mem.eql(u8, request.path, "/code"))) {
         const body = try explorer.renderCodePage(allocator, repo, request.target);
         defer allocator.free(body);

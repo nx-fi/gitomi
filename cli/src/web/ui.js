@@ -58,9 +58,53 @@
     }, true);
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", initPopoverMenus);
-  } else {
+  function setNavBadge(link, value) {
+    let badge = link.querySelector(".nav-badge");
+    if (value > 0) {
+      if (!badge) {
+        badge = document.createElement("span");
+        badge.className = "nav-badge";
+        link.appendChild(badge);
+      }
+      badge.textContent = String(value);
+    } else if (badge) {
+      badge.remove();
+    }
+  }
+
+  function updateNavStats(stats) {
+    ["issues", "pulls"].forEach(function (key) {
+      const value = Number(stats && stats[key]);
+      if (!Number.isFinite(value)) return;
+      document.querySelectorAll('[data-nav-count="' + key + '"]').forEach(function (link) {
+        setNavBadge(link, value);
+      });
+    });
+  }
+
+  function initNavStats() {
+    if (!window.fetch || document.body.dataset.navStatsReady === "yes") return;
+    if (!document.querySelector("[data-nav-count]")) return;
+    document.body.dataset.navStatsReady = "yes";
+
+    fetch("/nav/stats", { cache: "no-store" })
+      .then(function (response) {
+        return response.ok ? response.json() : null;
+      })
+      .then(function (stats) {
+        if (stats) updateNavStats(stats);
+      })
+      .catch(function () {});
+  }
+
+  function initUi() {
     initPopoverMenus();
+    initNavStats();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initUi);
+  } else {
+    initUi();
   }
 }());

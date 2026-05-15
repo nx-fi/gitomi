@@ -10,17 +10,8 @@
     return count === 1 ? singular : pluralValue;
   }
 
-  function conflictIds(scope) {
-    const ids = new Set();
-    scope.querySelectorAll("[data-conflict-group]").forEach((node) => {
-      const id = node.dataset.conflictGroup || "";
-      if (id) ids.add(id);
-    });
-    return ids;
-  }
-
   function unresolvedConflictCount(scope) {
-    return conflictIds(scope).size;
+    return scope.querySelectorAll("[data-conflict-actions]").length;
   }
 
   function mergeFiles(form) {
@@ -53,7 +44,9 @@
   function syncFile(file) {
     const textarea = file.querySelector("[data-merge-content]");
     if (textarea) {
-      const lines = Array.from(file.querySelectorAll("[data-merge-line]")).map(lineText);
+      const lines = Array.from(file.querySelectorAll("[data-merge-line]"))
+        .filter((row) => row.dataset.mergeDeleted !== "true")
+        .map(lineText);
       textarea.value = lines.join("\n");
     }
 
@@ -113,10 +106,27 @@
   }
 
   function cleanupResolvedRow(row) {
-    row.classList.remove("merge-current", "merge-incoming", "merge-base");
+    row.classList.remove("merge-current", "merge-incoming", "merge-base", "merge-context-edited");
     row.classList.add("merge-resolved");
     row.removeAttribute("data-conflict-group");
     row.removeAttribute("data-conflict-side");
+    const code = row.querySelector("[data-merge-line-text]");
+    if (code) code.dataset.originalText = code.textContent;
+  }
+
+  function updateLineState(row) {
+    if (!row || row.classList.contains("merge-marker") || row.dataset.mergeDeleted === "true") return;
+    const code = row.querySelector("[data-merge-line-text]");
+    if (!code) return;
+    const original = code.dataset.originalText || "";
+    const edited = code.textContent !== original || row.dataset.mergeInserted === "true";
+    const contextEdit = edited && !row.hasAttribute("data-conflict-group");
+    row.classList.toggle("merge-edited", edited);
+    row.classList.toggle("merge-context-edited", contextEdit);
+  }
+
+  function updateFileLineStates(file) {
+    file.querySelectorAll("[data-merge-line]").forEach(updateLineState);
   }
 
   function acceptConflict(button, mode) {
@@ -143,6 +153,7 @@
     }
 
     syncFile(file);
+    updateFileLineStates(file);
     const form = file.closest("[data-merge-editor]");
     if (form) {
       refreshProgress(form);
@@ -153,23 +164,171 @@
   function scrollToRelativeConflict(form, direction) {
     const groups = unresolvedActions(form);
     if (groups.length === 0) return;
-    const edge = 120;
-    let current;
-    if (direction > 0) {
-      current = groups.findIndex((group) => group.getBoundingClientRect().top > edge);
-    } else {
-      current = -1;
-      for (let index = groups.length - 1; index >= 0; index -= 1) {
-        if (groups[index].getBoundingClientRect().top < edge) {
-          current = index;
-          break;
-        }
+    const edge = Math.max(120, Math.round(window.innerHeight * 0.28));
+    let current = -1;
+    for (let index = 0; index < groups.length; index += 1) {
+      const rect = groups[index].getBoundingClientRect();
+      if (rect.top <= edge) {
+        current = index;
       }
     }
-    const next = current < 0
-      ? (direction > 0 ? 0 : groups.length - 1)
-      : Math.max(0, Math.min(groups.length - 1, current));
+
+    let next;
+    if (direction > 0) {
+      next = current < 0 ? 0 : Math.min(groups.length - 1, current + 1);
+    } else {
+      next = current < 0 ? groups.length - 1 : Math.max(0, current - 1);
+    }
     groups[next].scrollIntoView({ block: "center", behavior: "smooth" });
+  }
+
+  function setCaret(element, offset) {
+    const selection = window.getSelection();
+    if (!selection) return;
+    const text = element.firstChild || element;
+    const range = document.createRange();
+    range.setStart(text, Math.min(offset, text.textContent.length));
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  function textSelectionOffsets(element) {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) {
+      const length = element.textContent.length;
+      return { start: length, end: length };
+    }
+    const range = selection.getRangeAt(0);
+    if (!element.contains(range.commonAncestorContainer)) {
+      const length = element.textContent.length;
+      return { start: length, end: length };
+    }
+
+    const beforeStart = range.cloneRange();
+    beforeStart.selectNodeContents(element);
+    beforeStart.setEnd(range.startContainer, range.startOffset);
+    const beforeEnd = range.cloneRange();
+    beforeEnd.selectNodeContents(element);
+    beforeEnd.setEnd(range.endContainer, range.endOffset);
+    return { start: beforeStart.toString().length, end: beforeEnd.toString().length };
+  }
+
+  function cloneEditableRow(row, text) {
+    const next = document.createElement("div");
+    next.className = row.className;
+    next.classList.remove("merge-edited", "merge-context-edited", "merge-line-deleted");
+    next.classList.add("merge-inserted");
+    next.dataset.mergeLine = "";
+    next.dataset.mergeInserted = "true";
+    if (row.hasAttribute("data-conflict-group")) next.dataset.conflictGroup = row.dataset.conflictGroup || "";
+    if (row.hasAttribute("data-conflict-side")) next.dataset.conflictSide = row.dataset.conflictSide || "";
+
+    const number = document.createElement("span");
+    number.className = "merge-line-number";
+    number.textContent = "+";
+
+    const sourceCode = row.querySelector("[data-merge-line-text]");
+    const code = document.createElement("code");
+    code.className = sourceCode ? sourceCode.className.replace(/\bhljs\b/g, "").trim() : "";
+    code.dataset.mergeLineText = "";
+    code.dataset.originalText = "";
+    code.contentEditable = "true";
+    code.spellcheck = false;
+    code.setAttribute("role", "textbox");
+    code.setAttribute("aria-label", "Inserted merge line");
+    code.textContent = text;
+
+    next.appendChild(number);
+    next.appendChild(code);
+    return next;
+  }
+
+  function splitLineAtSelection(code) {
+    const row = code.closest("[data-merge-line]");
+    if (!row || row.classList.contains("merge-marker") || row.dataset.mergeDeleted === "true") return;
+
+    const value = code.textContent;
+    const offsets = textSelectionOffsets(code);
+    const before = value.slice(0, offsets.start);
+    const after = value.slice(offsets.end);
+    code.textContent = before;
+
+    const inserted = cloneEditableRow(row, after);
+    row.parentNode.insertBefore(inserted, row.nextSibling);
+    updateLineState(row);
+    updateLineState(inserted);
+    syncFile(row.closest("[data-merge-file]"));
+
+    const nextCode = inserted.querySelector("[data-merge-line-text]");
+    if (nextCode) {
+      nextCode.focus();
+      setCaret(nextCode, 0);
+    }
+  }
+
+  function markLineDeleted(row) {
+    const code = row.querySelector("[data-merge-line-text]");
+    if (!code || row.classList.contains("merge-marker")) return false;
+
+    if (row.dataset.mergeInserted === "true") {
+      const focusTarget = row.previousElementSibling || row.nextElementSibling;
+      row.remove();
+      const nextCode = focusTarget && focusTarget.querySelector("[data-merge-line-text]");
+      if (nextCode && nextCode.isContentEditable) nextCode.focus();
+      return true;
+    }
+
+    row.dataset.mergeDeleted = "true";
+    row.classList.remove("merge-edited", "merge-context-edited");
+    row.classList.add("merge-line-deleted");
+    code.dataset.deletedText = code.dataset.deletedText || code.textContent;
+    code.removeAttribute("contenteditable");
+    code.removeAttribute("role");
+    code.textContent = "";
+
+    const label = document.createElement("span");
+    label.className = "merge-deleted-label";
+    label.textContent = "Deleted line";
+    const restore = document.createElement("button");
+    restore.type = "button";
+    restore.dataset.mergeRestoreLine = "";
+    restore.textContent = "Restore";
+    code.appendChild(label);
+    code.appendChild(restore);
+    return true;
+  }
+
+  function restoreDeletedLine(button) {
+    const row = button.closest("[data-merge-line]");
+    if (!row) return;
+    const code = row.querySelector("[data-merge-line-text]");
+    if (!code) return;
+    const text = code.dataset.deletedText || code.dataset.originalText || "";
+    delete row.dataset.mergeDeleted;
+    row.classList.remove("merge-line-deleted");
+    code.textContent = text;
+    code.contentEditable = "true";
+    code.spellcheck = false;
+    code.setAttribute("role", "textbox");
+    updateLineState(row);
+    syncFile(row.closest("[data-merge-file]"));
+    code.focus();
+    setCaret(code, code.textContent.length);
+  }
+
+  function toggleFold(button) {
+    const file = button.closest("[data-merge-file]");
+    if (!file) return;
+    const target = button.dataset.mergeFoldTarget || "";
+    const rows = Array.from(file.querySelectorAll('[data-merge-fold-id="' + target + '"]'));
+    const expanded = button.getAttribute("aria-expanded") === "true";
+    rows.forEach((row) => {
+      row.hidden = expanded;
+    });
+    button.setAttribute("aria-expanded", String(!expanded));
+    const count = button.dataset.mergeFoldCount || String(rows.length);
+    button.textContent = (expanded ? "Show " : "Hide ") + count + " unchanged " + plural(Number(count), "line", "lines");
   }
 
   function firstBlockingFile(form) {
@@ -212,11 +371,30 @@
     const form = document.querySelector("[data-merge-editor]");
     if (!form) return;
 
-    for (const file of form.querySelectorAll("[data-merge-file]")) syncFile(file);
+    for (const file of form.querySelectorAll("[data-merge-file]")) {
+      updateFileLineStates(file);
+      syncFile(file);
+    }
     refreshProgress(form);
     updateActiveFile(form);
 
     form.addEventListener("click", (event) => {
+      const restore = event.target.closest("[data-merge-restore-line]");
+      if (restore) {
+        event.preventDefault();
+        restoreDeletedLine(restore);
+        refreshProgress(form);
+        return;
+      }
+
+      const fold = event.target.closest("[data-merge-fold-toggle]");
+      if (fold) {
+        event.preventDefault();
+        toggleFold(fold);
+        updateActiveFile(form);
+        return;
+      }
+
       const action = event.target.closest("[data-merge-action]");
       if (action) {
         event.preventDefault();
@@ -236,10 +414,31 @@
       }
     });
 
+    form.addEventListener("keydown", (event) => {
+      const code = event.target.closest("[data-merge-line-text]");
+      const currentRow = code ? code.closest("[data-merge-line]") : null;
+      if (!code || (currentRow && currentRow.dataset.mergeDeleted === "true")) return;
+      if (event.key === "Enter") {
+        event.preventDefault();
+        splitLineAtSelection(code);
+        return;
+      }
+
+      if ((event.key === "Backspace" || event.key === "Delete") && code.textContent.length === 0) {
+        const row = code.closest("[data-merge-line]");
+        if (row && markLineDeleted(row)) {
+          event.preventDefault();
+          syncFile(row.closest("[data-merge-file]"));
+        }
+      }
+    });
+
     form.addEventListener("input", (event) => {
-      if (!event.target.matches("[data-merge-line-text]")) return;
-      const file = event.target.closest("[data-merge-file]");
+      const code = event.target.closest("[data-merge-line-text]");
+      if (!code) return;
+      const file = code.closest("[data-merge-file]");
       if (!file) return;
+      updateLineState(code.closest("[data-merge-line]"));
       syncFile(file);
       refreshProgress(form);
     });
@@ -254,7 +453,10 @@
     });
 
     form.addEventListener("submit", (event) => {
-      for (const file of form.querySelectorAll("[data-merge-file]")) syncFile(file);
+      for (const file of form.querySelectorAll("[data-merge-file]")) {
+        updateFileLineStates(file);
+        syncFile(file);
+      }
       refreshProgress(form);
       const blocked = firstBlockingFile(form);
       if (blocked) {
