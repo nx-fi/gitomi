@@ -145,6 +145,18 @@ const RootEntryCounts = struct {
     directories: usize = 0,
 };
 
+const RootMarkdownDoc = struct {
+    id: []const u8,
+    label: []const u8,
+    path: []u8,
+    content: []u8,
+
+    fn deinit(self: RootMarkdownDoc, allocator: Allocator) void {
+        allocator.free(self.path);
+        allocator.free(self.content);
+    }
+};
+
 const PathQuery = union(enum) {
     ok: []u8,
     invalid: []u8,
@@ -363,6 +375,7 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     const raw_selected = !markdown or std.mem.eql(u8, view, "raw");
     const render_markdown = markdown and !raw_selected;
     const show_symbols_panel = text_content != null and media_kind == null and !render_markdown and code_symbols.hasProvider(path);
+    const show_markdown_outline = render_markdown;
     const symbol_items = if (text_content) |bytes|
         if (show_symbols_panel)
             try code_symbols.extract(allocator, repo.root, path, bytes)
@@ -372,13 +385,14 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
         try allocator.alloc(code_symbols.Symbol, 0);
     defer code_symbols.free(allocator, symbol_items);
 
-    try appendCodeLayoutStartWithSymbols(&buf, allocator, repo, ref, path, show_symbols_panel);
+    try appendCodeLayoutStartWithPanels(&buf, allocator, repo, ref, path, show_symbols_panel, show_markdown_outline);
 
     try appendCodePanelStart(&buf, allocator, repo, ref, path);
     try appendCodeBlameSwitch(&buf, allocator, ref, path, false);
     if (markdown) try appendMarkdownViewTabs(&buf, allocator, ref, path, raw_selected);
     try appendBlobMetrics(&buf, allocator, size, text_content, sloc_counts);
     if (show_symbols_panel) try appendSymbolsToggleButton(&buf, allocator);
+    if (show_markdown_outline) try appendMarkdownOutlineToggleButton(&buf, allocator);
     try appendCodeActionLink(&buf, allocator, "Raw", rawHref(ref, path), "icon-file-code");
     if (text_content != null) try appendCopyButton(&buf, allocator, ref, path);
     try appendCodeActionLink(&buf, allocator, "History", commitsHref(ref, path), "icon-history");
@@ -390,7 +404,7 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     try appendBlobContent(&buf, allocator, ref, permalink_ref, path, media_kind, can_preview_media, content, render_markdown);
 
     try appendCodePanelEnd(&buf, allocator);
-    try appendCodeLayoutEndWithSymbols(&buf, allocator, show_symbols_panel, symbol_items);
+    try appendCodeLayoutEndWithPanels(&buf, allocator, show_symbols_panel, symbol_items, show_markdown_outline);
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
 }
@@ -423,7 +437,7 @@ fn appendBlobContent(
         try appendEmptyState(buf, allocator, "Binary file not displayed.", "This blob contains NUL bytes.");
     } else if (render_markdown) {
         try appendTemplate(buf, allocator,
-            \\<div class="readme-body markdown-body markdown-preview">
+            \\<div id="markdown-document" class="readme-body markdown-body markdown-preview" data-markdown-document data-markdown-outline="panel">
         , .{});
         try appendRepositoryMarkdown(buf, allocator, ref, path, bytes);
         try appendTemplate(buf, allocator, "</div>", .{});
@@ -506,6 +520,12 @@ fn appendSymbolsToggleButton(buf: *std.ArrayList(u8), allocator: Allocator) !voi
     , .{});
 }
 
+fn appendMarkdownOutlineToggleButton(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try appendTemplate(buf, allocator,
+        \\<button class="button secondary code-action markdown-outline-toggle" type="button" data-markdown-outline-toggle aria-controls="markdown-outline-sidebar" aria-expanded="true" title="Hide outline" aria-label="Hide outline"><span class="button-icon icon-outline" aria-hidden="true"></span><span class="button-label" data-button-label>Outline</span></button>
+    , .{});
+}
+
 fn appendCodeActionLink(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, href: Href, icon: []const u8) !void {
     try appendTemplate(buf, allocator,
         \\<a class="button secondary code-action" href="{href}" title="{label}" aria-label="{label}"><span class="button-icon {icon}" aria-hidden="true"></span><span class="button-label">{label}</span></a>
@@ -547,12 +567,25 @@ fn appendCodeLayoutStartWithSymbols(
     active_path: []const u8,
     has_symbols: bool,
 ) !void {
+    try appendCodeLayoutStartWithPanels(buf, allocator, repo, ref, active_path, has_symbols, false);
+}
+
+fn appendCodeLayoutStartWithPanels(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    repo: Repo,
+    ref: []const u8,
+    active_path: []const u8,
+    has_symbols: bool,
+    has_markdown_outline: bool,
+) !void {
     try appendTemplate(buf, allocator,
         \\<div{class_attr}>
     , .{
         .class_attr = shared.classAttr("code-layout", &.{
             shared.class("no-sidebar", active_path.len == 0),
             shared.class("has-symbols", has_symbols),
+            shared.class("has-markdown-outline", has_markdown_outline),
         }),
     });
     if (active_path.len != 0) {
@@ -568,8 +601,19 @@ fn appendCodeLayoutEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
 }
 
 fn appendCodeLayoutEndWithSymbols(buf: *std.ArrayList(u8), allocator: Allocator, show_symbols_panel: bool, symbols: []const code_symbols.Symbol) !void {
+    try appendCodeLayoutEndWithPanels(buf, allocator, show_symbols_panel, symbols, false);
+}
+
+fn appendCodeLayoutEndWithPanels(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    show_symbols_panel: bool,
+    symbols: []const code_symbols.Symbol,
+    show_markdown_outline: bool,
+) !void {
     try appendTemplate(buf, allocator, "</div>", .{});
     if (show_symbols_panel) try appendCodeSymbolsSidebar(buf, allocator, symbols);
+    if (show_markdown_outline) try appendMarkdownOutlineSidebar(buf, allocator);
     try appendTemplate(buf, allocator, "</div>", .{});
 }
 
@@ -621,6 +665,16 @@ fn appendCodeSymbolsSidebar(buf: *std.ArrayList(u8), allocator: Allocator, symbo
     try appendTemplate(buf, allocator,
         \\  </nav>
         \\  <div class="symbols-resizer" data-symbols-resizer aria-hidden="true"></div>
+        \\</aside>
+    , .{});
+}
+
+fn appendMarkdownOutlineSidebar(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try appendTemplate(buf, allocator,
+        \\<aside id="markdown-outline-sidebar" class="panel markdown-outline-sidebar" aria-label="Outline" data-markdown-outline-panel>
+        \\  <div class="markdown-outline-head"><h2>Outline</h2><button class="markdown-outline-close" type="button" data-markdown-outline-close aria-label="Hide outline">&times;</button></div>
+        \\  <label class="markdown-outline-search" aria-label="Filter headings"><span class="button-icon icon-filter" aria-hidden="true"></span><input type="search" data-markdown-outline-filter placeholder="Filter headings" autocomplete="off" spellcheck="false"></label>
+        \\  <nav class="markdown-outline-nav" data-markdown-outline-list></nav>
         \\</aside>
     , .{});
 }
@@ -1140,6 +1194,22 @@ fn appendReadmePreview(
     defer allocator.free(content);
     if (containsNul(content)) return;
 
+    if (path.len == 0) {
+        const readme_doc = RootMarkdownDoc{
+            .id = "readme",
+            .label = "README",
+            .path = try allocator.dupe(u8, readme_path),
+            .content = try allocator.dupe(u8, content),
+        };
+        defer readme_doc.deinit(allocator);
+
+        const license_doc_opt = try loadRootLicenseDoc(allocator, repo, ref, entries);
+        defer if (license_doc_opt) |doc| doc.deinit(allocator);
+
+        try appendRootDocsPreview(buf, allocator, ref, readme_doc, license_doc_opt);
+        return;
+    }
+
     try appendTemplate(buf, allocator,
         \\<section class="panel readme-panel">
         \\  <div class="section-head readme-head"><h2>{readme}</h2></div><div class="readme-body markdown-body">
@@ -1148,6 +1218,64 @@ fn appendReadmePreview(
     });
     try appendRepositoryMarkdown(buf, allocator, ref, readme_path, content);
     try appendTemplate(buf, allocator, "</div></section>", .{});
+}
+
+fn appendRootDocsPreview(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    ref: []const u8,
+    readme_doc: RootMarkdownDoc,
+    license_doc_opt: ?RootMarkdownDoc,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<section class="panel readme-panel root-docs-panel" data-root-docs>
+        \\  <div class="section-head readme-head root-docs-head">
+        \\    <nav class="root-doc-tabs" aria-label="Repository documents">
+        \\      <button class="root-doc-tab active" type="button" data-root-doc-tab="readme" aria-selected="true"><span class="button-icon icon-book" aria-hidden="true"></span><span>README</span></button>
+    , .{});
+    if (license_doc_opt) |license_doc| {
+        try appendTemplate(buf, allocator,
+            \\      <button class="root-doc-tab" type="button" data-root-doc-tab="license" aria-selected="false"><span class="button-icon icon-scale" aria-hidden="true"></span><span>{label}</span></button>
+        , .{ .label = license_doc.label });
+    }
+    try appendTemplate(buf, allocator,
+        \\    </nav>
+        \\    <details class="markdown-toc-menu" data-markdown-toc-menu hidden>
+        \\      <summary aria-label="Table of contents" title="Table of contents"><span class="button-icon icon-outline" aria-hidden="true"></span></summary>
+        \\      <div class="markdown-toc-popover"><nav class="markdown-toc-list" data-markdown-toc-list></nav></div>
+        \\    </details>
+        \\  </div>
+        \\  <div class="root-doc-panel readme-body markdown-body" data-root-doc-panel="readme" data-markdown-document data-markdown-outline="menu">
+    , .{});
+    try appendRepositoryMarkdown(buf, allocator, ref, readme_doc.path, readme_doc.content);
+    try appendTemplate(buf, allocator, "</div>", .{});
+    if (license_doc_opt) |license_doc| {
+        try appendTemplate(buf, allocator,
+            \\  <div class="root-doc-panel readme-body markdown-body" data-root-doc-panel="license" data-markdown-document data-markdown-outline="menu" hidden>
+        , .{});
+        try appendRepositoryMarkdown(buf, allocator, ref, license_doc.path, license_doc.content);
+        try appendTemplate(buf, allocator, "</div>", .{});
+    }
+    try appendTemplate(buf, allocator, "</section>", .{});
+}
+
+fn loadRootLicenseDoc(allocator: Allocator, repo: Repo, ref: []const u8, entries: []const TreeEntry) !?RootMarkdownDoc {
+    const license = findLicense(entries) orelse return null;
+    const spec = try objectSpec(allocator, ref, license);
+    defer allocator.free(spec);
+    const content = try gitMaybe(allocator, repo, &.{ "show", spec }, max_blob_display_bytes + 1) orelse return null;
+    errdefer allocator.free(content);
+    if (containsNul(content)) {
+        allocator.free(content);
+        return null;
+    }
+    const label = licenseLabel(content);
+    return .{
+        .id = "license",
+        .label = label,
+        .path = try allocator.dupe(u8, license),
+        .content = content,
+    };
 }
 
 fn appendRootPageGridStart(buf: *std.ArrayList(u8), allocator: Allocator) !void {
@@ -2094,6 +2222,29 @@ fn findReadme(entries: []const TreeEntry) ?[]const u8 {
         }
     }
     return null;
+}
+
+fn findLicense(entries: []const TreeEntry) ?[]const u8 {
+    const names = [_][]const u8{ "LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING", "COPYING.md", "COPYING.txt" };
+    for (names) |wanted| {
+        for (entries) |entry| {
+            if (std.mem.eql(u8, entry.kind, "blob") and std.ascii.eqlIgnoreCase(entry.name, wanted)) return entry.name;
+        }
+    }
+    return null;
+}
+
+fn licenseLabel(content: []const u8) []const u8 {
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r\n");
+        if (line.len == 0) continue;
+        if (std.ascii.eqlIgnoreCase(line, "MIT License")) return "MIT license";
+        if (std.ascii.eqlIgnoreCase(line, "Apache License")) return "Apache license";
+        if (line.len <= 80 and endsWithIgnoreCase(line, "License")) return line;
+        break;
+    }
+    return "License";
 }
 
 fn isMarkdownPath(path: []const u8) bool {

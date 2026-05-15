@@ -3044,7 +3044,7 @@ fn handleIssueBodyEditPost(
 
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
-    var stmt = try db.prepare("SELECT author_principal FROM issues WHERE id = ?");
+    var stmt = try db.prepare("SELECT title, body, author_principal FROM issues WHERE id = ?");
     defer stmt.deinit();
     try stmt.bindText(1, issue_id);
     if (!(try stmt.step())) {
@@ -3053,7 +3053,11 @@ fn handleIssueBodyEditPost(
         try sendResponse(allocator, stream, 404, "Not Found", "text/html", page, null);
         return;
     }
-    const author_principal = try stmt.columnTextDup(allocator, 0);
+    const current_title = try stmt.columnTextDup(allocator, 0);
+    defer allocator.free(current_title);
+    const current_body = try stmt.columnTextDup(allocator, 1);
+    defer allocator.free(current_body);
+    const author_principal = try stmt.columnTextDup(allocator, 2);
     defer allocator.free(author_principal);
     if (!(try currentActorCanEditInRepo(allocator, repo, author_principal))) {
         const page = try renderIssueEditAccessDenied(allocator, repo, raw_ref, "Edit issue", "You do not have permission to edit this issue.");
@@ -3062,10 +3066,17 @@ fn handleIssueBodyEditPost(
         return;
     }
 
-    createIssueUpdatedEvent(allocator, issue_id, .{
-        .title = title,
-        .body = body_owned,
-    }) catch {
+    var update: event_mod.IssueUpdate = .{};
+    if (!std.mem.eql(u8, title, current_title)) update.title = title;
+    if (!std.mem.eql(u8, body_owned, current_body)) update.body = body_owned;
+    if (!update.hasChanges()) {
+        const location = try std.fmt.allocPrint(allocator, "/issues/{s}", .{raw_ref});
+        defer allocator.free(location);
+        try sendRedirect(allocator, stream, location);
+        return;
+    }
+
+    createIssueUpdatedEvent(allocator, issue_id, update) catch {
         const page = try renderIssueEditIssuePage(allocator, repo, raw_ref, "Could not save the issue. Check that Gitomi is initialized and Git commit signing is configured.", title, body_owned);
         defer allocator.free(page);
         try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", page, null);
@@ -3106,7 +3117,7 @@ fn handleCommentBodyEditPost(
 
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
-    var stmt = try db.prepare("SELECT redacted, author_principal FROM comments WHERE id = ?");
+    var stmt = try db.prepare("SELECT body, redacted, author_principal FROM comments WHERE id = ?");
     defer stmt.deinit();
     try stmt.bindText(1, comment_id);
     if (!(try stmt.step())) {
@@ -3115,13 +3126,24 @@ fn handleCommentBodyEditPost(
         try sendResponse(allocator, stream, 404, "Not Found", "text/html", page, null);
         return;
     }
-    const redacted = stmt.columnInt(0) != 0;
-    const author_principal = try stmt.columnTextDup(allocator, 1);
+    const current_body = try stmt.columnTextDup(allocator, 0);
+    defer allocator.free(current_body);
+    const redacted = stmt.columnInt(1) != 0;
+    const author_principal = try stmt.columnTextDup(allocator, 2);
     defer allocator.free(author_principal);
     if (redacted or !(try currentActorCanEditInRepo(allocator, repo, author_principal))) {
         const page = try renderIssueEditAccessDenied(allocator, repo, raw_ref, "Edit comment", "You do not have permission to edit this comment.");
         defer allocator.free(page);
         try sendResponse(allocator, stream, 403, "Forbidden", "text/html", page, null);
+        return;
+    }
+
+    var comment_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const comment_ref = util.shortObjectRef(&comment_ref_buf, comment_id);
+    if (std.mem.eql(u8, body_owned, current_body)) {
+        const location = try std.fmt.allocPrint(allocator, "/issues/{s}#comment-{s}", .{ raw_ref, comment_ref });
+        defer allocator.free(location);
+        try sendRedirect(allocator, stream, location);
         return;
     }
 
@@ -3132,8 +3154,6 @@ fn handleCommentBodyEditPost(
         return;
     };
 
-    var comment_ref_buf: [util.short_object_ref_len]u8 = undefined;
-    const comment_ref = util.shortObjectRef(&comment_ref_buf, comment_id);
     const location = try std.fmt.allocPrint(allocator, "/issues/{s}#comment-{s}", .{ raw_ref, comment_ref });
     defer allocator.free(location);
     try sendRedirect(allocator, stream, location);

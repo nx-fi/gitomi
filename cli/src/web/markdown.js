@@ -620,6 +620,183 @@
     document.querySelectorAll(".markdown-body pre").forEach(enhanceCodeBlock);
   }
 
+  function slugifyHeading(text) {
+    const slug = String(text || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    return slug || "section";
+  }
+
+  function ensureHeadingIds(root) {
+    const used = Object.create(null);
+    root.querySelectorAll("h1, h2, h3, h4, h5, h6").forEach(function (heading) {
+      let id = heading.id || slugifyHeading(heading.textContent || "");
+      const base = id;
+      let count = used[base] || 0;
+      while (count > 0 || (document.getElementById(id) && document.getElementById(id) !== heading)) {
+        count += 1;
+        id = base + "-" + count;
+        if (!document.getElementById(id) || document.getElementById(id) === heading) break;
+      }
+      used[base] = count + 1;
+      heading.id = id;
+    });
+  }
+
+  function markdownHeadings(root) {
+    if (!root) return [];
+    ensureHeadingIds(root);
+    const headings = Array.prototype.slice.call(root.querySelectorAll("h1, h2, h3, h4, h5, h6"))
+      .filter(function (heading) { return (heading.textContent || "").trim(); });
+    if (!headings.length) return [];
+    const minLevel = headings.reduce(function (min, heading) {
+      const level = Number(heading.tagName.slice(1)) || 1;
+      return Math.min(min, level);
+    }, 6);
+    return headings.map(function (heading) {
+      const level = Number(heading.tagName.slice(1)) || 1;
+      return {
+        id: heading.id,
+        text: (heading.textContent || "").trim(),
+        depth: Math.max(0, level - minLevel),
+      };
+    });
+  }
+
+  function fillOutlineLinks(container, headings) {
+    if (!container) return;
+    container.innerHTML = "";
+    headings.forEach(function (heading) {
+      const link = document.createElement("a");
+      link.className = "markdown-outline-link";
+      link.href = "#" + heading.id;
+      link.textContent = heading.text;
+      link.style.setProperty("--depth", String(heading.depth));
+      container.appendChild(link);
+    });
+  }
+
+  function filterOutlineLinks(container, query) {
+    if (!container) return;
+    const value = String(query || "").trim().toLowerCase();
+    container.querySelectorAll(".markdown-outline-link").forEach(function (link) {
+      link.hidden = value !== "" && (link.textContent || "").toLowerCase().indexOf(value) === -1;
+    });
+  }
+
+  function setMarkdownOutlineOpen(panel, open) {
+    if (!panel) return;
+    const layout = panel.closest(".code-layout");
+    const button = layout ? layout.querySelector("[data-markdown-outline-toggle]") : null;
+    panel.hidden = !open;
+    if (layout) layout.classList.toggle("markdown-outline-collapsed", !open);
+    if (button) {
+      button.setAttribute("aria-expanded", open ? "true" : "false");
+      button.setAttribute("aria-label", open ? "Hide outline" : "Show outline");
+      button.setAttribute("title", open ? "Hide outline" : "Show outline");
+      const label = button.querySelector("[data-button-label]");
+      if (label) label.textContent = "Outline";
+    }
+  }
+
+  function initMarkdownOutlinePanel(panel) {
+    const layout = panel.closest(".code-layout") || document;
+    const documentRoot = layout.querySelector('[data-markdown-document][data-markdown-outline="panel"]');
+    const list = panel.querySelector("[data-markdown-outline-list]");
+    const input = panel.querySelector("[data-markdown-outline-filter]");
+    const button = layout.querySelector("[data-markdown-outline-toggle]");
+    const headings = markdownHeadings(documentRoot);
+
+    if (!headings.length) {
+      panel.hidden = true;
+      if (button) button.hidden = true;
+      if (layout.classList) layout.classList.add("markdown-outline-collapsed");
+      return;
+    }
+
+    fillOutlineLinks(list, headings);
+    filterOutlineLinks(list, input ? input.value : "");
+    if (button) button.hidden = false;
+    setMarkdownOutlineOpen(panel, !panel.hidden);
+
+    if (panel.dataset.markdownOutlineReady === "yes") return;
+    panel.dataset.markdownOutlineReady = "yes";
+    if (input) {
+      input.addEventListener("input", function () {
+        filterOutlineLinks(list, input.value);
+      });
+    }
+    const close = panel.querySelector("[data-markdown-outline-close]");
+    if (close) {
+      close.addEventListener("click", function () {
+        setMarkdownOutlineOpen(panel, false);
+      });
+    }
+    if (button) {
+      button.addEventListener("click", function () {
+        setMarkdownOutlineOpen(panel, panel.hidden);
+      });
+    }
+  }
+
+  function activeRootMarkdownDocument(root) {
+    return root.querySelector("[data-root-doc-panel]:not([hidden])");
+  }
+
+  function renderRootTocMenu(root) {
+    const menu = root.querySelector("[data-markdown-toc-menu]");
+    const list = root.querySelector("[data-markdown-toc-list]");
+    const documentRoot = activeRootMarkdownDocument(root);
+    if (!menu || !list || !documentRoot) return;
+    const headings = markdownHeadings(documentRoot);
+    menu.hidden = headings.length === 0;
+    fillOutlineLinks(list, headings);
+    list.querySelectorAll("a").forEach(function (link) {
+      link.addEventListener("click", function () {
+        menu.open = false;
+      });
+    });
+  }
+
+  function setRootDocTab(root, id) {
+    root.querySelectorAll("[data-root-doc-tab]").forEach(function (tab) {
+      const active = tab.getAttribute("data-root-doc-tab") === id;
+      tab.classList.toggle("active", active);
+      tab.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    root.querySelectorAll("[data-root-doc-panel]").forEach(function (panel) {
+      panel.hidden = panel.getAttribute("data-root-doc-panel") !== id;
+    });
+    renderRootTocMenu(root);
+  }
+
+  function initRootDocTabs(root) {
+    if (root.dataset.rootDocsReady !== "yes") {
+      root.dataset.rootDocsReady = "yes";
+      root.querySelectorAll("[data-root-doc-tab]").forEach(function (tab) {
+        tab.addEventListener("click", function () {
+          setRootDocTab(root, tab.getAttribute("data-root-doc-tab") || "readme");
+        });
+      });
+    }
+    renderRootTocMenu(root);
+  }
+
+  function renderMarkdownOutlines() {
+    document.querySelectorAll("[data-markdown-outline-panel]").forEach(initMarkdownOutlinePanel);
+    document.querySelectorAll("[data-root-docs]").forEach(initRootDocTabs);
+    if (window.location.hash) {
+      const id = decodeURIComponent(window.location.hash.slice(1));
+      const target = document.getElementById(id);
+      if (target && !renderMarkdownOutlines.scrolledHash) {
+        renderMarkdownOutlines.scrolledHash = true;
+        target.scrollIntoView();
+      }
+    }
+  }
+
   function selectionBounds(textarea) {
     return {
       start: textarea.selectionStart || 0,
@@ -779,6 +956,7 @@
     renderMath();
     renderMermaid();
     renderCodeCopyButtons();
+    renderMarkdownOutlines();
     renderRelativeTimes();
     initIssueActionMenus();
     initIssueSidebarMenus();
