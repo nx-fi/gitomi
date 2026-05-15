@@ -148,3 +148,9 @@ pub fn parsePruneNumber(raw: []const u8, label: []const u8) !u64 {
         return CliError.UserError;
     };
 }
+
+test "run retention defaults cap diagnostics at 256 MiB" {
+    const options = PruneOptions{};
+    try std.testing.expectEqual(@as(u64, 256 * 1024 * 1024), default_max_bytes);
+    try std.testing.expectEqual(default_max_bytes, options.max_bytes);
+}

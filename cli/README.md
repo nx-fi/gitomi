@@ -136,16 +136,17 @@ To join an existing Gitomi repository, clone or add the remote and run
 locally and a local config is created from it. A replica that has already
 created a different local genesis must clear or recreate its local Gitomi state
 before it can trust and project the remote issues.
-Default push publishes local genesis and all authoritative inbox refs under
-`refs/gitomi/inbox/*`, so a replica can relay the durable event logs it has
-accepted. Sync does not publish local cache or diagnostic namespaces such as
+Default push publishes local genesis and, when present, the configured actor's
+own inbox ref under `refs/gitomi/inbox/<principal>/<device>`. It does not relay
+locally replicated inbox refs for other principals or devices. Sync does not
+publish local cache or diagnostic namespaces such as
 `refs/gitomi/staging/*`, `refs/gitomi/quarantine/*`, `refs/gitomi/snapshots/*`,
 or `refs/gitomi/runs/*`.
 
 `gt fsck` verifies authoritative inbox refs for ref-safe names, empty-tree event
-commits, native Git signatures, v1 event envelopes, matching repo IDs, unique
-and strictly increasing `(principal, device, seq)` tuples, and first-parent
-inbox-chain shape.
+commits, native Git signatures, signing-key bindings to actor identities, v1
+event envelopes, matching repo IDs, unique and strictly increasing `(principal,
+device, seq)` tuples, and first-parent inbox-chain shape.
 
 `gt actions workflows` reads GitHub Actions-compatible workflow definitions from
 `.github/workflows/*.yml` and `.github/workflows/*.yaml` in the selected commit.
@@ -181,8 +182,10 @@ default. `gt index snapshots prune` applies the same retention rules manually,
 with optional count, total-byte, and per-snapshot byte limits.
 
 `gt runs prune` deletes auxiliary refs under `refs/gitomi/runs/*` according to
-age, count, and byte limits. Run refs are not fetched or pushed by default sync;
-the signed `action.run_completed` inbox event is the durable workflow result.
+age, count, and byte limits. By default it retains run diagnostics no older than
+30 days, at most 100 run refs, and at most 256 MiB. Run refs are not fetched or
+pushed by default sync; the signed `action.run_completed` inbox event is the
+durable workflow result.
 
 `gt clear local` deletes all local refs under `refs/gitomi/*` while leaving
 `.git/gitomi/config.toml` and local caches in place. `gt reset local` deletes

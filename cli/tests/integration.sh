@@ -374,6 +374,8 @@ git -C "$github_sync/replica" remote add origin "$github_sync/remote.git"
 (
   cd "$github_io"
   gt sync --remote import-sync --push-only >/dev/null
+  write_gt_config "$REPO_ID" import-bot github 0
+  gt sync --remote import-sync --push-only >/dev/null
 )
 (
   cd "$github_sync/replica"
@@ -676,6 +678,34 @@ init_repo "$issue_edit"
   assert_contains "$issues" '"body":"Batch body"'
   assert_contains "$issues" '"labels":["regression"]'
   assert_contains "$issues" '"assignees":["bob"]'
+  events="$(gt events list --json)"
+  assert_line_count "$events" 2
+  assert_contains "$events" '"event_type":"issue.updated"'
+  gt fsck >/dev/null
+)
+
+echo "integration: issue.updated applies milestone and projects"
+issue_updated_metadata="$ROOT/issue-updated-metadata"
+init_repo "$issue_updated_metadata"
+(
+  cd "$issue_updated_metadata"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  gt issue open --title "Metadata batch" >/dev/null
+  first_event="$(gt events list --json)"
+  issue_id="$(json_field "$first_event" object_id)"
+  [[ -n "$issue_id" ]] || fail "expected issue id from event list"
+  base_commit="$(git rev-parse refs/gitomi/inbox/alice/laptop)"
+  empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
+  update_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000000901","event_type":"issue.updated","object":{"kind":"issue","id":"'"$issue_id"'"},"idempotency_key":"018f0000-0000-7000-8000-000000000902","actor":{"principal":"alice","device":"laptop"},"seq":2,"occurred_at":"2026-05-13T18:31:00Z","parent_hashes":{"log":"'"$base_commit"'","anchor":"","causal":[],"related":[]},"legacy":{},"payload":{"milestone":"v2.0","projects":[{"project":"Roadmap","column":"Doing"}]}}'
+  update_commit="$(git commit-tree -S -m "issue.updated metadata batch" -m "$update_body" "$empty_tree" -p "$base_commit")"
+  git update-ref refs/gitomi/inbox/alice/laptop "$update_commit" "$base_commit"
+  issues="$(gt issue list --json)"
+  assert_line_count "$issues" 1
+  assert_contains "$issues" '"milestone":"v2.0"'
+  assert_contains "$issues" '"projects":[{"project":"Roadmap","column":"Doing"}]'
+  issue_show="$(gt issue show "#$(object_ref "$issue_id")")"
+  assert_contains "$issue_show" "milestone: v2.0"
+  assert_contains "$issue_show" "projects:  Roadmap / Doing"
   events="$(gt events list --json)"
   assert_line_count "$events" 2
   assert_contains "$events" '"event_type":"issue.updated"'
@@ -1013,6 +1043,49 @@ init_repo "$rbac_repo"
   assert_not_contains "$issues" '"title":"Reader cannot open"'
 )
 
+echo "integration: RBAC pre-flight blocks unauthorized ACL and identity events"
+rbac_preflight="$ROOT/rbac-preflight"
+init_repo "$rbac_preflight"
+(
+  cd "$rbac_preflight"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  gt identity add-device bob desktop --public-key "$BOB_PUBLIC_KEY" --fingerprint "$BOB_FINGERPRINT" --scheme ssh >/dev/null
+  gt acl grant bob maintainer >/dev/null
+  write_gt_config "$REPO_ID" bob desktop 0
+  configure_bob_signing "$PWD"
+
+  if gt acl grant charlie owner >acl-escalate.out 2>&1; then
+    fail "expected non-owner ACL grant owner to fail pre-flight"
+  fi
+  assert_contains "$(cat acl-escalate.out)" "refusing to grant owner; current actor bob has role maintainer"
+
+  if gt acl grant charlie reader >acl-grant.out 2>&1; then
+    fail "expected non-owner ACL grant to fail pre-flight"
+  fi
+  assert_contains "$(cat acl-grant.out)" "owner role required to grant ACL roles"
+
+  if gt acl revoke alice >acl-revoke.out 2>&1; then
+    fail "expected non-owner ACL revoke to fail pre-flight"
+  fi
+  assert_contains "$(cat acl-revoke.out)" "owner role required to revoke ACL roles"
+
+  if gt identity add-device charlie phone >identity-add.out 2>&1; then
+    fail "expected non-owner identity add-device to fail pre-flight"
+  fi
+  assert_contains "$(cat identity-add.out)" "owner role required to add identity devices"
+
+  if gt identity revoke-device alice laptop >identity-revoke.out 2>&1; then
+    fail "expected non-owner identity revoke-device to fail pre-flight"
+  fi
+  assert_contains "$(cat identity-revoke.out)" "owner role required to revoke identity devices"
+
+  events="$(gt events list --json)"
+  assert_line_count "$events" 2
+  assert_not_contains "$events" "charlie"
+  assert_not_contains "$events" "acl.role_revoked alice"
+  assert_not_contains "$events" "identity.device_revoked alice/laptop"
+)
+
 echo "integration: open access accepts signed writers without explicit roles"
 open_rbac="$ROOT/open-rbac"
 init_repo "$open_rbac"
@@ -1198,6 +1271,36 @@ init_repo "$frontier_auth"
   gt fsck >/dev/null
 )
 
+echo "integration: related auth hashes do not authorize without causal ancestry"
+related_frontier="$ROOT/related-frontier"
+init_repo "$related_frontier"
+(
+  cd "$related_frontier"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
+  genesis_head="$(git rev-parse refs/gitomi/genesis)"
+
+  grant_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002111","event_type":"acl.role_granted","object":{"kind":"acl","id":"acl:charlie"},"idempotency_key":"018f0000-0000-7000-8000-000000002211","actor":{"principal":"alice","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:33:10Z","parent_hashes":{"log":"","anchor":"'"$genesis_head"'","causal":[],"related":[]},"legacy":{},"payload":{"principal":"charlie","role":"reporter"}}'
+  grant_commit="$(git commit-tree -S -m "acl.role_granted charlie reporter" -m "$grant_body" "$empty_tree" -p "$genesis_head")"
+  identity_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002112","event_type":"identity.device_added","object":{"kind":"identity","id":"identity:charlie:desktop"},"idempotency_key":"018f0000-0000-7000-8000-000000002212","actor":{"principal":"alice","device":"laptop"},"seq":2,"occurred_at":"2026-05-13T18:33:11Z","parent_hashes":{"log":"'"$grant_commit"'","anchor":"","causal":[],"related":[]},"legacy":{},"payload":{"principal":"charlie","device":"desktop","signing_key":{"scheme":"ssh","public_key":"'"$BOB_PUBLIC_KEY"'","fingerprint":"'"$BOB_FINGERPRINT"'"}}}'
+  identity_commit="$(git commit-tree -S -m "identity.device_added charlie/desktop" -m "$identity_body" "$empty_tree" -p "$grant_commit")"
+  charlie_issue_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002113","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000002114"},"idempotency_key":"018f0000-0000-7000-8000-000000002213","actor":{"principal":"charlie","device":"desktop"},"seq":1,"occurred_at":"2026-05-13T18:33:12Z","parent_hashes":{"log":"","anchor":"'"$genesis_head"'","causal":[],"related":["'"$identity_commit"'"]},"legacy":{},"payload":{"title":"Related only should not authorize"}}'
+  git config user.name "Bob"
+  git config user.email "bob@example.com"
+  git config user.signingkey "$BOB_KEY"
+  charlie_issue_commit="$(git commit-tree -S -m "issue.opened related-only auth" -m "$charlie_issue_body" "$empty_tree" -p "$genesis_head")"
+
+  git update-ref refs/gitomi/inbox/alice/laptop "$identity_commit"
+  git update-ref refs/gitomi/inbox/charlie/desktop "$charlie_issue_commit"
+  events="$(gt events list --json)"
+  charlie_line="$(printf '%s\n' "$events" | grep '"actor_principal":"charlie"')"
+  assert_contains "$charlie_line" '"domain_status":"rejected"'
+  assert_contains "$charlie_line" '"rejection_reason":"unauthorized_principal"'
+  issues="$(gt issue list --json)"
+  assert_not_contains "$issues" '"title":"Related only should not authorize"'
+  gt fsck >/dev/null
+)
+
 echo "integration: signing key must match actor device"
 signature_binding="$ROOT/signature-binding"
 init_repo "$signature_binding"
@@ -1219,6 +1322,69 @@ init_repo "$signature_binding"
   assert_contains "$events" '"rejection_reason":"signing_key_mismatch"'
   issues="$(gt issue list --json)"
   assert_line_count "$issues" 0
+  if gt fsck >fsck-binding.out 2>&1; then
+    fail "expected fsck to reject wrong signer for actor device"
+  fi
+  assert_contains "$(cat fsck-binding.out)" "signing_key_mismatch"
+)
+
+echo "integration: sync quarantines signer and actor device binding mismatches"
+sync_binding="$ROOT/sync-binding"
+mkdir -p "$sync_binding"
+git -C "$sync_binding" init --bare remote.git >/dev/null
+init_repo "$sync_binding/source"
+init_repo "$sync_binding/replica"
+git -C "$sync_binding/source" remote add origin "$sync_binding/remote.git"
+git -C "$sync_binding/replica" remote add origin "$sync_binding/remote.git"
+(
+  cd "$sync_binding/source"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
+  genesis_head="$(git rev-parse refs/gitomi/genesis)"
+  git config user.name "Bob"
+  git config user.email "bob@example.com"
+  git config user.signingkey "$BOB_KEY"
+  bad_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002402","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000002401"},"idempotency_key":"018f0000-0000-7000-8000-000000002403","actor":{"principal":"alice","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:34:10Z","parent_hashes":{"log":"","anchor":"'"$genesis_head"'","causal":[],"related":[]},"legacy":{},"payload":{"title":"Wrong signer from remote"}}'
+  bad_commit="$(git commit-tree -S -m "issue.opened wrong remote signer" -m "$bad_body" "$empty_tree" -p "$genesis_head")"
+  git update-ref refs/gitomi/inbox/alice/laptop "$bad_commit"
+  git push origin refs/gitomi/genesis:refs/gitomi/genesis refs/gitomi/inbox/alice/laptop:refs/gitomi/inbox/alice/laptop >/dev/null
+)
+(
+  cd "$sync_binding/replica"
+  gt sync --pull-only >sync-binding.out 2>&1
+  assert_contains "$(cat sync-binding.out)" "signing_key_mismatch"
+  assert_contains "$(cat sync-binding.out)" "quarantined"
+  if git show-ref --verify --quiet refs/gitomi/inbox/alice/laptop; then
+    fail "expected signer mismatch inbox ref to stay out of authoritative refs"
+  fi
+)
+
+echo "integration: sync quarantines inactive actor devices"
+sync_device_binding="$ROOT/sync-device-binding"
+mkdir -p "$sync_device_binding"
+git -C "$sync_device_binding" init --bare remote.git >/dev/null
+init_repo "$sync_device_binding/source"
+init_repo "$sync_device_binding/replica"
+git -C "$sync_device_binding/source" remote add origin "$sync_device_binding/remote.git"
+git -C "$sync_device_binding/replica" remote add origin "$sync_device_binding/remote.git"
+(
+  cd "$sync_device_binding/source"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
+  genesis_head="$(git rev-parse refs/gitomi/genesis)"
+  bad_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002412","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000002411"},"idempotency_key":"018f0000-0000-7000-8000-000000002413","actor":{"principal":"alice","device":"phone"},"seq":1,"occurred_at":"2026-05-13T18:34:20Z","parent_hashes":{"log":"","anchor":"'"$genesis_head"'","causal":[],"related":[]},"legacy":{},"payload":{"title":"Inactive device from remote"}}'
+  bad_commit="$(git commit-tree -S -m "issue.opened inactive remote device" -m "$bad_body" "$empty_tree" -p "$genesis_head")"
+  git update-ref refs/gitomi/inbox/alice/phone "$bad_commit"
+  git push origin refs/gitomi/genesis:refs/gitomi/genesis refs/gitomi/inbox/alice/phone:refs/gitomi/inbox/alice/phone >/dev/null
+)
+(
+  cd "$sync_device_binding/replica"
+  gt sync --pull-only >sync-device-binding.out 2>&1
+  assert_contains "$(cat sync-device-binding.out)" "unauthorized_device"
+  assert_contains "$(cat sync-device-binding.out)" "quarantined"
+  if git show-ref --verify --quiet refs/gitomi/inbox/alice/phone; then
+    fail "expected inactive actor device inbox ref to stay out of authoritative refs"
+  fi
 )
 
 echo "integration: unauthorized remote event is audited and not projected"
@@ -1257,6 +1423,20 @@ init_repo "$seq_recovery"
   events="$(gt events list --json)"
   assert_line_count "$events" 2
   assert_contains "$events" '"seq":2'
+  gt fsck >/dev/null
+)
+
+echo "integration: missing inbox ref resets stale config seq before writing"
+seq_missing="$ROOT/seq-missing"
+init_repo "$seq_missing"
+(
+  cd "$seq_missing"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  write_gt_config "$REPO_ID" alice laptop 99
+  gt issue open --title "Missing inbox seq reset" >/dev/null
+  events="$(gt events list --json)"
+  assert_line_count "$events" 1
+  assert_contains "$events" '"seq":1'
   gt fsck >/dev/null
 )
 
@@ -1448,7 +1628,7 @@ fi
   gt fsck >/dev/null
 )
 
-echo "integration: default push publishes authoritative inbox refs"
+echo "integration: default push publishes only configured actor inbox ref"
 scope_root="$ROOT/sync-push-scope"
 mkdir -p "$scope_root"
 git -C "$scope_root" init --bare upstream.git >/dev/null
@@ -1467,11 +1647,15 @@ git -C "$scope_root/replica" remote add backup "$scope_root/backup.git"
 (
   cd "$scope_root/replica"
   gt sync --pull-only >/dev/null
+  write_gt_config "$REPO_ID" bob desktop 0
+  configure_bob_signing "$scope_root/replica"
+  gt issue open --title "Bob local issue" >/dev/null
   gt sync --remote backup --push-only >/dev/null
 )
 backup_refs="$(git --git-dir="$scope_root/backup.git" for-each-ref '--format=%(refname)' refs/gitomi)"
 assert_contains "$backup_refs" "refs/gitomi/genesis"
-assert_contains "$backup_refs" "refs/gitomi/inbox/alice/laptop"
+assert_contains "$backup_refs" "refs/gitomi/inbox/bob/desktop"
+assert_not_contains "$backup_refs" "refs/gitomi/inbox/alice/laptop"
 assert_not_contains "$backup_refs" "refs/gitomi/staging"
 assert_not_contains "$backup_refs" "refs/gitomi/quarantine"
 assert_not_contains "$backup_refs" "refs/gitomi/snapshots"

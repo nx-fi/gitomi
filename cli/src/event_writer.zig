@@ -75,6 +75,9 @@ pub const EventWriter = struct {
             break :blk try std.fmt.allocPrint(allocator, "refs/gitomi/inbox/{s}/{s}", .{ checked_principal, checked_device });
         } else try repo_mod.inboxRef(allocator, cfg);
         errdefer allocator.free(inbox_ref);
+        if (inbox_principal != null) {
+            try repo_mod.recoverConfigSeqFromInboxRef(allocator, &cfg, inbox_ref);
+        }
 
         const genesis_oid = (try git.resolveOptionalRef(allocator, repo_mod.genesis_ref)) orelse {
             try eprint("{s}: Gitomi genesis ref is missing; run `gt init` or `gt sync`\n", .{command_context});

@@ -536,26 +536,31 @@ pub fn validateConfigRepoId(allocator: Allocator, cfg: Config) !void {
 pub fn recoverConfigSeq(allocator: Allocator, cfg: *Config) !void {
     const ref = try inboxRef(allocator, cfg.*);
     defer allocator.free(ref);
+    try recoverConfigSeqFromInboxRef(allocator, cfg, ref);
+}
+
+pub fn recoverConfigSeqFromInboxRef(allocator: Allocator, cfg: *Config, ref: []const u8) !void {
     const head = try git.resolveOptionalRef(allocator, ref);
     defer if (head) |oid| allocator.free(oid);
-    if (head == null) return;
+    if (head == null) {
+        cfg.seq = 0;
+        return;
+    }
 
     const log = try git.gitChecked(allocator, &.{ "log", "--first-parent", "--reverse", "--format=%b%x1e", ref });
     defer allocator.free(log);
 
     var max_seq: u64 = 0;
-    var found = false;
     var records = std.mem.splitScalar(u8, log, 0x1e);
     while (records.next()) |record_raw| {
         const body = std.mem.trim(u8, record_raw, " \t\r\n");
         if (body.len == 0) continue;
         const seq = parseSeqForActor(allocator, body, cfg.principal, cfg.device) catch null;
         if (seq) |value| {
-            found = true;
             if (value > max_seq) max_seq = value;
         }
     }
-    if (found) cfg.seq = max_seq;
+    cfg.seq = max_seq;
 }
 
 fn genesisRepoId(allocator: Allocator, commit: []const u8) ![]u8 {

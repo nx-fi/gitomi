@@ -130,6 +130,10 @@ fn applyIssueUpdated(
     if (event_mod.jsonString(payload.get("state"))) |state| {
         try updateIssueScalar(allocator, db, envelope.object_id, state, event_hash, envelope, "state", "state_occurred_at", "state_actor_principal", "state_event_hash");
     }
+    if (event_mod.jsonString(payload.get("milestone"))) |milestone| {
+        try upsertIssueMilestone(db, envelope.object_id, milestone);
+    }
+    try insertPayloadIssueProjects(db, payload, "projects", envelope.object_id, event_hash);
     try insertPayloadStringArray(db, payload, "labels_added", insert_issue_label_sql, envelope.object_id, event_hash);
     try insertPayloadStringArray(db, payload, "assignees_added", insert_issue_assignee_sql, envelope.object_id, event_hash);
     try deleteIssuePayloadStringArray(allocator, db, payload, "labels_removed", "SELECT add_hash FROM issue_labels WHERE issue_id = ? AND label = ?", "DELETE FROM issue_labels WHERE issue_id = ? AND label = ? AND add_hash = ?", envelope.object_id, event_hash);
