@@ -15,7 +15,6 @@ const Repo = repo_mod.Repo;
 const SqliteDb = index.SqliteDb;
 const appendEmptyState = shared.appendEmptyState;
 const appendHref = shared.appendHref;
-const appendInlineEmpty = shared.appendInlineEmpty;
 const appendOptionalAttr = shared.appendOptionalAttr;
 const appendPill = shared.appendPill;
 const appendSectionHead = shared.appendSectionHead;
@@ -64,6 +63,8 @@ const PullDetail = struct {
     author_principal: []u8,
     author_device: []u8,
     opened_at: []u8,
+    state_occurred_at: []u8,
+    state_actor_principal: []u8,
     body: []u8,
     base_ref: []u8,
     head_ref: []u8,
@@ -79,12 +80,20 @@ const PullDetail = struct {
         allocator.free(self.author_principal);
         allocator.free(self.author_device);
         allocator.free(self.opened_at);
+        allocator.free(self.state_occurred_at);
+        allocator.free(self.state_actor_principal);
         allocator.free(self.body);
         allocator.free(self.base_ref);
         allocator.free(self.head_ref);
         allocator.free(self.merge_oid);
         allocator.free(self.target_oid);
     }
+};
+
+const PullTabCounts = struct {
+    comments: usize = 0,
+    commits: ?usize = null,
+    files: ?usize = null,
 };
 
 const PullCommit = struct {
@@ -414,42 +423,29 @@ pub fn renderPullDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u
 
     var pull_ref_buf: [util.short_object_ref_len]u8 = undefined;
     const pull_ref = util.shortObjectRef(&pull_ref_buf, detail.id);
+    const tab_counts = try loadPullTabCounts(allocator, repo, &db, detail);
 
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
     try appendShellStart(&buf, allocator, repo, detail.title, "pulls");
+    try buf.appendSlice(allocator, "<section class=\"pull-detail issue-page\">");
+    try appendPullPageHeader(&buf, allocator, detail, pull_ref, tab_counts);
+    try appendPullTabs(&buf, allocator, pull_ref, tab, tab_counts);
     try appendTemplate(&buf, allocator,
-        \\<section class="panel pull-detail">
-        \\  <div class="pull-detail-head">
-        \\    <div>
-        \\      <div class="pull-title-line">
+        \\<div class="issue-conversation-layout pull-conversation-layout">
+        \\  <div class="pull-tab-content">
     , .{});
-    try appendPullStatePill(&buf, allocator, detail.state, detail.draft);
-    try appendTemplate(&buf, allocator,
-        \\        <h1>{title}</h1>
-        \\      </div>
-        \\      <p class="pull-subtitle">#{pull_ref} by {author} wants to merge <code>{head_ref}</code> into <code>{base_ref}</code></p>
-        \\    </div>
-        \\    <a class="button secondary" href="/pulls">Back to PRs</a>
-        \\  </div>
-    , .{
-        .title = detail.title,
-        .pull_ref = pull_ref,
-        .author = detail.author_principal,
-        .head_ref = detail.head_ref,
-        .base_ref = detail.base_ref,
-    });
-    try appendPullTabs(&buf, allocator, pull_ref, tab);
-    try buf.appendSlice(allocator, "<div class=\"pull-detail-body\">");
-    try appendPullFacts(&buf, allocator, repo, &db, detail, pull_ref);
-    try buf.appendSlice(allocator, "<div class=\"pull-tab-content\">");
+    const current_actor = try shared.currentPrincipalOwned(allocator, repo);
+    defer if (current_actor) |actor| allocator.free(actor);
     switch (tab) {
-        .conversation => try appendPullConversation(&buf, allocator, &db, detail, raw_ref),
+        .conversation => try appendPullConversation(&buf, allocator, &db, detail, raw_ref, current_actor),
         .commits => try appendPullCommits(&buf, allocator, repo, detail.base_ref, detail.head_ref),
         .files => try appendPullFiles(&buf, allocator, repo, detail.base_ref, detail.head_ref),
     }
-    try buf.appendSlice(allocator, "</div></div></section>");
+    try buf.appendSlice(allocator, "</div><aside class=\"issue-meta-sidebar pull-sidebar\">");
+    try appendPullSidebar(&buf, allocator, repo, &db, detail, pull_ref);
+    try buf.appendSlice(allocator, "</aside></div></section>");
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
 }
@@ -457,7 +453,8 @@ pub fn renderPullDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u
 fn loadPullDetail(allocator: Allocator, db: *SqliteDb, pull_id: []const u8) !?PullDetail {
     var stmt = try db.prepare(
         \\SELECT p.id, p.title, p.state, p.author_principal, p.author_device, p.opened_at, p.body,
-        \\       p.base_ref, p.head_ref, p.draft, p.merge_oid, p.target_oid, COALESCE(a.number, 0)
+        \\       p.base_ref, p.head_ref, p.draft, p.merge_oid, p.target_oid, COALESCE(a.number, 0),
+        \\       p.state_occurred_at, p.state_actor_principal
         \\FROM pulls p
         \\LEFT JOIN legacy_aliases a
         \\  ON a.provider = 'github' AND a.object_kind = 'pull' AND a.object_id = p.id
@@ -473,6 +470,8 @@ fn loadPullDetail(allocator: Allocator, db: *SqliteDb, pull_id: []const u8) !?Pu
         .author_principal = try stmt.columnTextDup(allocator, 3),
         .author_device = try stmt.columnTextDup(allocator, 4),
         .opened_at = try stmt.columnTextDup(allocator, 5),
+        .state_occurred_at = try stmt.columnTextDup(allocator, 13),
+        .state_actor_principal = try stmt.columnTextDup(allocator, 14),
         .body = try stmt.columnTextDup(allocator, 6),
         .base_ref = try stmt.columnTextDup(allocator, 7),
         .head_ref = try stmt.columnTextDup(allocator, 8),
@@ -494,22 +493,162 @@ fn renderPullNotFound(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]
     return buf.toOwnedSlice(allocator);
 }
 
-fn appendPullTabs(buf: *std.ArrayList(u8), allocator: Allocator, pull_ref: []const u8, active: PullDetailTab) !void {
+fn loadPullTabCounts(allocator: Allocator, repo: Repo, db: *SqliteDb, detail: PullDetail) !PullTabCounts {
+    var counts: PullTabCounts = .{};
+    var comments = try db.prepare("SELECT COUNT(*) FROM comments WHERE parent_kind = 'pull' AND parent_id = ?");
+    defer comments.deinit();
+    try comments.bindText(1, detail.id);
+    if (try comments.step()) counts.comments = @as(usize, @intCast(comments.columnInt64(0)));
+
+    const git_counts = try loadPullGitTabCounts(allocator, repo, detail.base_ref, detail.head_ref);
+    counts.commits = git_counts.commits;
+    counts.files = git_counts.files;
+    return counts;
+}
+
+fn loadPullGitTabCounts(allocator: Allocator, repo: Repo, base_ref: []const u8, head_ref: []const u8) !PullTabCounts {
+    var counts: PullTabCounts = .{};
+    const merge_base = try loadMergeBase(allocator, repo, base_ref, head_ref);
+    defer if (merge_base) |value| allocator.free(value);
+    const base = merge_base orelse return counts;
+
+    const range = try std.fmt.allocPrint(allocator, "{s}..{s}", .{ base, head_ref });
+    defer allocator.free(range);
+    if (try gitMaybe(allocator, repo, &.{ "rev-list", "--count", range }, 64 * 1024)) |raw_count| {
+        defer allocator.free(raw_count);
+        const trimmed = std.mem.trim(u8, raw_count, " \t\r\n");
+        counts.commits = std.fmt.parseUnsigned(usize, trimmed, 10) catch null;
+    }
+
+    if (try gitMaybe(allocator, repo, &.{ "diff", "--name-only", "--find-renames", base, head_ref }, max_pull_diff_bytes)) |raw_files| {
+        defer allocator.free(raw_files);
+        var files: usize = 0;
+        var lines = std.mem.splitScalar(u8, raw_files, '\n');
+        while (lines.next()) |raw_line| {
+            if (std.mem.trim(u8, raw_line, " \t\r\n").len != 0) files += 1;
+        }
+        counts.files = files;
+    }
+
+    return counts;
+}
+
+fn appendPullPageHeader(buf: *std.ArrayList(u8), allocator: Allocator, detail: PullDetail, pull_ref: []const u8, counts: PullTabCounts) !void {
+    try appendTemplate(buf, allocator,
+        \\<header class="issue-page-head pull-page-head">
+        \\  <div class="issue-title-line">
+        \\    <h1><span>{title}</span> <span class="issue-page-number">
+    , .{ .title = detail.title });
+    try appendPullDisplayRef(buf, allocator, detail, pull_ref);
+    try appendTemplate(buf, allocator,
+        \\</span></h1>
+        \\    <div class="issue-page-actions">
+        \\      <a class="button secondary" href="/pulls">Back to PRs</a>
+        \\      <a class="button primary" href="/new-pull">New pull request</a>
+        \\      <button class="issue-copy-button" type="button" disabled aria-label="Copy pull request link"><span class="button-icon icon-copy" aria-hidden="true"></span></button>
+        \\    </div>
+        \\  </div>
+        \\  <div class="issue-status-line pull-status-line">
+    , .{});
+    try appendPullStateBadge(buf, allocator, detail.state, detail.draft);
+    try appendPullHeaderSummary(buf, allocator, detail, counts);
+    try buf.appendSlice(allocator, "</div></header>");
+}
+
+fn appendPullDisplayRef(buf: *std.ArrayList(u8), allocator: Allocator, detail: PullDetail, pull_ref: []const u8) !void {
+    try buf.append(allocator, '#');
+    if (detail.legacy_number > 0) {
+        try std.fmt.format(buf.writer(allocator), "{d}", .{detail.legacy_number});
+    } else {
+        try shared.appendHtml(buf, allocator, pull_ref);
+    }
+}
+
+fn appendPullHeaderSummary(buf: *std.ArrayList(u8), allocator: Allocator, detail: PullDetail, counts: PullTabCounts) !void {
+    if (std.mem.eql(u8, detail.state, "merged")) {
+        try appendTemplate(buf, allocator,
+            \\<span><strong>{actor}</strong> merged {commit_count} {commit_word} into <code>{base_ref}</code> from <code>{head_ref}</code>
+        , .{
+            .actor = if (detail.state_actor_principal.len != 0) detail.state_actor_principal else detail.author_principal,
+            .commit_count = counts.commits orelse 0,
+            .commit_word = commitWord(counts.commits orelse 0),
+            .base_ref = detail.base_ref,
+            .head_ref = detail.head_ref,
+        });
+        try buf.append(allocator, ' ');
+        try appendRelativeTime(buf, allocator, detail.state_occurred_at);
+        try buf.appendSlice(allocator, "</span>");
+        return;
+    }
+
+    if (std.mem.eql(u8, detail.state, "closed")) {
+        try appendTemplate(buf, allocator,
+            \\<span><strong>{actor}</strong> closed this pull request
+        , .{ .actor = if (detail.state_actor_principal.len != 0) detail.state_actor_principal else detail.author_principal });
+        try buf.append(allocator, ' ');
+        try appendRelativeTime(buf, allocator, detail.state_occurred_at);
+        try buf.appendSlice(allocator, "</span>");
+        return;
+    }
+
+    try appendTemplate(buf, allocator,
+        \\<span><strong>{author}</strong> wants to merge {commit_count} {commit_word} into <code>{base_ref}</code> from <code>{head_ref}</code></span>
+    , .{
+        .author = detail.author_principal,
+        .commit_count = counts.commits orelse 0,
+        .commit_word = commitWord(counts.commits orelse 0),
+        .base_ref = detail.base_ref,
+        .head_ref = detail.head_ref,
+    });
+}
+
+fn appendPullStateBadge(buf: *std.ArrayList(u8), allocator: Allocator, state: []const u8, draft: bool) !void {
+    const badge_state = if (draft and std.mem.eql(u8, state, "open")) "draft" else state;
+    try appendTemplate(buf, allocator,
+        \\<span class="issue-state-badge pull-state-badge is-{state}"><span class="issue-state-mark" aria-hidden="true"></span>{label}</span>
+    , .{
+        .state = badge_state,
+        .label = pullStateLabel(badge_state),
+    });
+}
+
+fn pullStateLabel(state: []const u8) []const u8 {
+    if (std.mem.eql(u8, state, "open")) return "Open";
+    if (std.mem.eql(u8, state, "merged")) return "Merged";
+    if (std.mem.eql(u8, state, "closed")) return "Closed";
+    if (std.mem.eql(u8, state, "draft")) return "Draft";
+    return state;
+}
+
+fn appendPullTabs(buf: *std.ArrayList(u8), allocator: Allocator, pull_ref: []const u8, active: PullDetailTab, counts: PullTabCounts) !void {
     try buf.appendSlice(allocator, "<nav class=\"view-tabs pull-tabs\" aria-label=\"Pull request view\">");
-    try appendPullTab(buf, allocator, pull_ref, "Conversation", .conversation, active);
-    try appendPullTab(buf, allocator, pull_ref, "Commits", .commits, active);
-    try appendPullTab(buf, allocator, pull_ref, "Files changed", .files, active);
+    try appendPullTab(buf, allocator, pull_ref, "Conversation", .conversation, active, counts.comments);
+    try appendPullTabOptionalCount(buf, allocator, pull_ref, "Commits", .commits, active, counts.commits);
+    try appendPullTabOptionalCount(buf, allocator, pull_ref, "Files changed", .files, active, counts.files);
     try buf.appendSlice(allocator, "</nav>");
 }
 
-fn appendPullTab(buf: *std.ArrayList(u8), allocator: Allocator, pull_ref: []const u8, label: []const u8, tab: PullDetailTab, active: PullDetailTab) !void {
+fn appendPullTabOptionalCount(buf: *std.ArrayList(u8), allocator: Allocator, pull_ref: []const u8, label: []const u8, tab: PullDetailTab, active: PullDetailTab, count: ?usize) !void {
+    try appendPullTabStart(buf, allocator, pull_ref, label, tab, active);
+    if (count) |value| try appendTemplate(buf, allocator, "<span class=\"issue-count-badge\">{count}</span>", .{ .count = value });
+    try buf.appendSlice(allocator, "</a>");
+}
+
+fn appendPullTab(buf: *std.ArrayList(u8), allocator: Allocator, pull_ref: []const u8, label: []const u8, tab: PullDetailTab, active: PullDetailTab, count: usize) !void {
+    try appendPullTabStart(buf, allocator, pull_ref, label, tab, active);
+    try appendTemplate(buf, allocator, "<span class=\"issue-count-badge\">{count}</span>", .{ .count = count });
+    try buf.appendSlice(allocator, "</a>");
+}
+
+fn appendPullTabStart(buf: *std.ArrayList(u8), allocator: Allocator, pull_ref: []const u8, label: []const u8, tab: PullDetailTab, active: PullDetailTab) !void {
     try appendTemplate(buf, allocator,
-        \\<a class="{classes}" href="/pulls/{pull_ref}{suffix}">{label}</a>
+        \\<a class="{classes}" href="/pulls/{pull_ref}{suffix}"><span class="pull-tab-icon {icon}" aria-hidden="true"></span><span>{label}</span>
     , .{
         .classes = shared.classes("", &.{shared.class("active", tab == active)}),
         .pull_ref = pull_ref,
         .suffix = pullTabSuffix(tab),
         .label = label,
+        .icon = pullTabIconClass(tab),
     });
 }
 
@@ -518,6 +657,14 @@ fn pullTabSuffix(tab: PullDetailTab) []const u8 {
         .conversation => "",
         .commits => "?tab=commits",
         .files => "?tab=files",
+    };
+}
+
+fn pullTabIconClass(tab: PullDetailTab) []const u8 {
+    return switch (tab) {
+        .conversation => "pull-tab-conversation-icon",
+        .commits => "pull-tab-commits-icon",
+        .files => "pull-tab-files-icon",
     };
 }
 
@@ -578,10 +725,193 @@ fn appendPullCollectionFact(buf: *std.ArrayList(u8), allocator: Allocator, db: *
     try buf.appendSlice(allocator, "</dd></div>");
 }
 
-fn appendPullConversation(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, detail: PullDetail, raw_ref: []const u8) !void {
+fn appendPullSidebar(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, db: *SqliteDb, detail: PullDetail, pull_ref: []const u8) !void {
+    try appendPullSidebarPeopleSection(buf, allocator, db, "Reviewers", "Manage reviewers", "SELECT DISTINCT reviewer FROM pull_reviewers WHERE pull_id = ? ORDER BY reviewer", detail.id, "No reviewers");
+    try appendPullSidebarPeopleSection(buf, allocator, db, "Assignees", "Manage assignees", "SELECT DISTINCT assignee FROM pull_assignees WHERE pull_id = ? ORDER BY assignee", detail.id, "No one assigned");
+    try appendPullSidebarLabels(buf, allocator, db, detail.id);
+    try appendPullSidebarEmptySection(buf, allocator, "Projects", "Manage projects", "No projects");
+    try appendPullSidebarEmptySection(buf, allocator, "Milestone", "Set milestone", "No milestone");
+    try appendPullSidebarDevelopment(buf, allocator, repo, detail, pull_ref);
+    try appendPullSidebarNotifications(buf, allocator);
+    try appendPullSidebarParticipants(buf, allocator, db, detail);
+}
+
+fn appendPullSidebarSectionStart(buf: *std.ArrayList(u8), allocator: Allocator, title: []const u8, menu_label: []const u8) !void {
     try appendTemplate(buf, allocator,
-        \\<article class="issue-card pull-card">
-        \\  <header class="comment-meta"><div><strong>{author}</strong><span>opened
+        \\<section class="issue-sidebar-section"><div class="issue-sidebar-heading"><h2>{title}</h2><button class="pull-sidebar-gear" type="button" disabled aria-label="{menu_label}" title="{menu_label}"><span class="issue-sidebar-menu-icon" aria-hidden="true"></span></button></div>
+    , .{
+        .title = title,
+        .menu_label = menu_label,
+    });
+}
+
+fn appendPullSidebarSectionEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try buf.appendSlice(allocator, "</section>");
+}
+
+fn appendPullSidebarPeopleSection(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    title: []const u8,
+    menu_label: []const u8,
+    comptime sql_text: []const u8,
+    pull_id: []const u8,
+    empty_text: []const u8,
+) !void {
+    try appendPullSidebarSectionStart(buf, allocator, title, menu_label);
+    var stmt = try db.prepare(sql_text);
+    defer stmt.deinit();
+    try stmt.bindText(1, pull_id);
+    var shown = false;
+    while (try stmt.step()) {
+        const person = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(person);
+        try appendPullSidebarPerson(buf, allocator, person);
+        shown = true;
+    }
+    if (!shown) try appendTemplate(buf, allocator, "<p class=\"issue-sidebar-empty\">{empty_text}</p>", .{ .empty_text = empty_text });
+    try appendPullSidebarSectionEnd(buf, allocator);
+}
+
+fn appendPullSidebarLabels(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, pull_id: []const u8) !void {
+    try appendPullSidebarSectionStart(buf, allocator, "Labels", "Manage labels");
+    var stmt = try db.prepare("SELECT DISTINCT label FROM pull_labels WHERE pull_id = ? ORDER BY label");
+    defer stmt.deinit();
+    try stmt.bindText(1, pull_id);
+    var shown = false;
+    while (try stmt.step()) {
+        const label = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(label);
+        if (!shown) {
+            try buf.appendSlice(allocator, "<div class=\"issue-sidebar-labels\">");
+            shown = true;
+        }
+        try appendLabel(buf, allocator, label);
+    }
+    if (shown) {
+        try buf.appendSlice(allocator, "</div>");
+    } else {
+        try buf.appendSlice(allocator, "<p class=\"issue-sidebar-empty\">None yet</p>");
+    }
+    try appendPullSidebarSectionEnd(buf, allocator);
+}
+
+fn appendPullSidebarEmptySection(buf: *std.ArrayList(u8), allocator: Allocator, title: []const u8, menu_label: []const u8, empty_text: []const u8) !void {
+    try appendPullSidebarSectionStart(buf, allocator, title, menu_label);
+    try appendTemplate(buf, allocator, "<p class=\"issue-sidebar-empty\">{empty_text}</p>", .{ .empty_text = empty_text });
+    try appendPullSidebarSectionEnd(buf, allocator);
+}
+
+fn appendPullSidebarDevelopment(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, detail: PullDetail, pull_ref: []const u8) !void {
+    try appendPullSidebarSectionStart(buf, allocator, "Development", "Link development");
+    try appendTemplate(buf, allocator,
+        \\<p class="issue-sidebar-empty">Successfully merging this pull request may close linked issues.</p>
+        \\<div class="pull-sidebar-branches"><span><strong>Base</strong><code>{base_ref}</code></span><span><strong>Head</strong><code>{head_ref}</code></span></div>
+    , .{
+        .base_ref = detail.base_ref,
+        .head_ref = detail.head_ref,
+    });
+    if (detail.merge_oid.len != 0) {
+        try appendTemplate(buf, allocator,
+            \\<a class="issue-sidebar-link-row" href="{href}"><span class="issue-sidebar-row-kind">merge</span><code>{short_oid}</code></a>
+        , .{
+            .href = commitHref(detail.merge_oid),
+            .short_oid = detail.merge_oid[0..@min(detail.merge_oid.len, 12)],
+        });
+    }
+    if (detail.target_oid.len != 0) {
+        try appendTemplate(buf, allocator,
+            \\<a class="issue-sidebar-link-row" href="{href}"><span class="issue-sidebar-row-kind">target</span><code>{short_oid}</code></a>
+        , .{
+            .href = commitHref(detail.target_oid),
+            .short_oid = detail.target_oid[0..@min(detail.target_oid.len, 12)],
+        });
+    }
+    if (detail.merge_oid.len != 0 or detail.target_oid.len != 0) {
+        try buf.appendSlice(allocator, "<p class=\"pull-sidebar-note\">");
+        try appendLocalMergeCheck(buf, allocator, repo, detail);
+        try buf.appendSlice(allocator, "</p>");
+    }
+    try appendTemplate(buf, allocator, "<p class=\"pull-sidebar-note\"><a href=\"/pulls/{pull_ref}\">/pulls/{pull_ref}</a></p>", .{ .pull_ref = pull_ref });
+    try appendPullSidebarSectionEnd(buf, allocator);
+}
+
+fn appendPullSidebarNotifications(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try appendPullSidebarSectionStart(buf, allocator, "Notifications", "Customize notifications");
+    try buf.appendSlice(allocator,
+        \\<button class="button secondary issue-sidebar-full-button" type="button" disabled>Subscribe</button>
+        \\<p class="issue-sidebar-empty">You're receiving notifications because you modified this pull request.</p>
+    );
+    try appendPullSidebarSectionEnd(buf, allocator);
+}
+
+fn appendPullSidebarParticipants(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, detail: PullDetail) !void {
+    try appendPullSidebarSectionStart(buf, allocator, "Participants", "Manage participants");
+    try buf.appendSlice(allocator, "<div class=\"issue-participants\">");
+    var seen = std.StringHashMap(void).init(allocator);
+    defer {
+        var keys = seen.keyIterator();
+        while (keys.next()) |key| allocator.free(key.*);
+        seen.deinit();
+    }
+    try appendPullSidebarParticipant(buf, allocator, &seen, detail.author_principal);
+    try appendPullSidebarParticipantQuery(buf, allocator, db, &seen, "SELECT DISTINCT assignee FROM pull_assignees WHERE pull_id = ? ORDER BY assignee", detail.id);
+    try appendPullSidebarParticipantQuery(buf, allocator, db, &seen, "SELECT DISTINCT reviewer FROM pull_reviewers WHERE pull_id = ? ORDER BY reviewer", detail.id);
+    try buf.appendSlice(allocator, "</div>");
+    try appendPullSidebarSectionEnd(buf, allocator);
+}
+
+fn appendPullSidebarParticipantQuery(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    seen: *std.StringHashMap(void),
+    comptime sql_text: []const u8,
+    pull_id: []const u8,
+) !void {
+    var stmt = try db.prepare(sql_text);
+    defer stmt.deinit();
+    try stmt.bindText(1, pull_id);
+    while (try stmt.step()) {
+        const person = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(person);
+        try appendPullSidebarParticipant(buf, allocator, seen, person);
+    }
+}
+
+fn appendPullSidebarParticipant(buf: *std.ArrayList(u8), allocator: Allocator, seen: *std.StringHashMap(void), person: []const u8) !void {
+    if (person.len == 0 or seen.contains(person)) return;
+    const key = try allocator.dupe(u8, person);
+    errdefer allocator.free(key);
+    try seen.put(key, {});
+    try appendAvatar(buf, allocator, person, "");
+}
+
+fn appendPullSidebarPerson(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8) !void {
+    try buf.appendSlice(allocator, "<div class=\"issue-sidebar-person\">");
+    try appendAvatar(buf, allocator, name, "");
+    try appendTemplate(buf, allocator, "<span>{name}</span></div>", .{ .name = name });
+}
+
+fn appendPullConversation(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    detail: PullDetail,
+    raw_ref: []const u8,
+    current_actor: ?[]const u8,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="issue-conversation pull-conversation">
+        \\  <div class="issue-timeline-item">
+        \\    <div class="issue-timeline-avatar">
+    , .{});
+    try appendAvatar(buf, allocator, detail.author_principal, "issue-detail-avatar");
+    try appendTemplate(buf, allocator,
+        \\    </div>
+        \\    <article class="issue-comment-box pull-card" id="pull-description">
+        \\      <header class="issue-comment-head"><div><strong>{author}</strong><span>opened
     , .{ .author = detail.author_principal });
     try buf.append(allocator, ' ');
     try appendRelativeTime(buf, allocator, detail.opened_at);
@@ -599,13 +929,22 @@ fn appendPullConversation(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sq
         try markdown_render.appendMarkdown(buf, allocator, detail.body);
     }
     try buf.appendSlice(allocator, "</div>");
-    try appendPullReactionBar(buf, allocator, db, "pull", detail.id, raw_ref, "");
-    try buf.appendSlice(allocator, "</article>");
-    try appendPullComments(buf, allocator, db, raw_ref, detail.id);
-    try appendPullCommentForm(buf, allocator, raw_ref);
+    try appendPullReactionBar(buf, allocator, db, "pull", detail.id, raw_ref, "", current_actor);
+    try buf.appendSlice(allocator, "</article></div>");
+    try appendPullComments(buf, allocator, db, raw_ref, detail.id, current_actor);
+    try appendPullResolutionTimeline(buf, allocator, detail);
+    try appendPullCommentForm(buf, allocator, raw_ref, current_actor);
+    try buf.appendSlice(allocator, "</div>");
 }
 
-fn appendPullComments(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, raw_ref: []const u8, pull_id: []const u8) !void {
+fn appendPullComments(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    raw_ref: []const u8,
+    pull_id: []const u8,
+    current_actor: ?[]const u8,
+) !void {
     var stmt = try db.prepare(
         \\SELECT id, body, redacted, COALESCE(NULLIF(source_author, ''), author_principal), created_at, reply_parent_id, reply_parent_hash
         \\FROM comments
@@ -614,7 +953,6 @@ fn appendPullComments(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlite
     );
     defer stmt.deinit();
     try stmt.bindText(1, pull_id);
-    var shown = false;
     while (try stmt.step()) {
         const id = try stmt.columnTextDup(allocator, 0);
         defer allocator.free(id);
@@ -636,11 +974,17 @@ fn appendPullComments(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlite
         const comment_ref_value = try std.fmt.allocPrint(allocator, "comment:{s}", .{comment_ref});
         defer allocator.free(comment_ref_value);
 
+        const is_reply = reply_parent_id.len != 0 or reply_parent_hash.len != 0;
         try appendTemplate(buf, allocator,
-            \\<article class="{classes}" id="{anchor}"><header class="comment-meta"><div><strong>{author}</strong><span>commented
+            \\<div class="{classes}" id="{anchor}"><div class="issue-timeline-avatar">
         , .{
-            .classes = shared.classes("issue-card comment-card", &.{shared.class("is-reply", reply_parent_id.len != 0 or reply_parent_hash.len != 0)}),
+            .classes = shared.classes("issue-timeline-item", &.{shared.class("is-reply", is_reply)}),
             .anchor = anchor,
+        });
+        try appendAvatar(buf, allocator, author, "issue-detail-avatar");
+        try appendTemplate(buf, allocator,
+            \\</div><article class="issue-comment-box comment-card"><header class="issue-comment-head"><div><strong>{author}</strong><span>commented
+        , .{
             .author = author,
         });
         try buf.append(allocator, ' ');
@@ -666,11 +1010,48 @@ fn appendPullComments(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlite
             try markdown_render.appendMarkdown(buf, allocator, body);
         }
         try buf.appendSlice(allocator, "</div>");
-        try appendPullReactionBar(buf, allocator, db, "comment", id, raw_ref, comment_ref_value);
-        try buf.appendSlice(allocator, "</article>");
-        shown = true;
+        try appendPullReactionBar(buf, allocator, db, "comment", id, raw_ref, comment_ref_value, current_actor);
+        try buf.appendSlice(allocator, "</article></div>");
     }
-    if (!shown) try appendInlineEmpty(buf, allocator, "No comments yet.");
+}
+
+fn appendPullResolutionTimeline(buf: *std.ArrayList(u8), allocator: Allocator, detail: PullDetail) !void {
+    if (!std.mem.eql(u8, detail.state, "merged") and !std.mem.eql(u8, detail.state, "closed")) return;
+
+    try appendTemplate(buf, allocator,
+        \\<div class="issue-timeline-item pull-event-item">
+        \\  <div class="issue-timeline-avatar"><span class="pull-timeline-icon is-{state}" aria-hidden="true"></span></div>
+        \\  <div class="pull-event-text"><strong>{actor}</strong> {verb} this pull request
+    , .{
+        .state = detail.state,
+        .actor = if (detail.state_actor_principal.len != 0) detail.state_actor_principal else detail.author_principal,
+        .verb = if (std.mem.eql(u8, detail.state, "merged")) "merged" else "closed",
+    });
+    if (std.mem.eql(u8, detail.state, "merged") and detail.merge_oid.len != 0) {
+        try appendTemplate(buf, allocator,
+            \\ with commit <a href="{href}"><code>{short_oid}</code></a>
+        , .{
+            .href = commitHref(detail.merge_oid),
+            .short_oid = detail.merge_oid[0..@min(detail.merge_oid.len, 12)],
+        });
+    }
+    try buf.append(allocator, ' ');
+    try appendRelativeTime(buf, allocator, detail.state_occurred_at);
+    try buf.appendSlice(allocator, "</div></div>");
+
+    try appendTemplate(buf, allocator,
+        \\<div class="issue-timeline-item pull-resolution-item">
+        \\  <div class="issue-timeline-avatar"><span class="pull-timeline-icon is-{state}" aria-hidden="true"></span></div>
+        \\  <div class="pull-resolution-box">
+        \\    <h2>{title}</h2>
+        \\    <p>{body}</p>
+        \\  </div>
+        \\</div>
+    , .{
+        .state = detail.state,
+        .title = if (std.mem.eql(u8, detail.state, "merged")) "Pull request successfully merged and closed" else "Pull request closed",
+        .body = if (std.mem.eql(u8, detail.state, "merged")) "The branch has been merged into the base ref." else "This pull request was closed without being merged.",
+    });
 }
 
 fn appendPullReactionBar(
@@ -681,31 +1062,35 @@ fn appendPullReactionBar(
     object_id: []const u8,
     raw_pull_ref: []const u8,
     target_ref: []const u8,
+    current_actor: ?[]const u8,
 ) !void {
     try buf.appendSlice(allocator, "<div class=\"reaction-bar\">");
     var stmt = try db.prepare(
-        \\SELECT emoji, COUNT(DISTINCT actor_principal)
+        \\SELECT emoji, COUNT(DISTINCT actor_principal),
+        \\       SUM(CASE WHEN actor_principal = ? THEN 1 ELSE 0 END)
         \\FROM reactions
         \\WHERE object_kind = ? AND object_id = ?
         \\GROUP BY emoji
         \\ORDER BY MIN(created_at), emoji
     );
     defer stmt.deinit();
-    try stmt.bindText(1, object_kind);
-    try stmt.bindText(2, object_id);
+    try stmt.bindText(1, current_actor orelse "");
+    try stmt.bindText(2, object_kind);
+    try stmt.bindText(3, object_id);
 
     var shown = false;
     while (try stmt.step()) {
         const emoji = try stmt.columnTextDup(allocator, 0);
         defer allocator.free(emoji);
         const count = stmt.columnInt64(1);
-        try appendPullReactionButton(buf, allocator, raw_pull_ref, object_kind, target_ref, emoji, emoji, count);
+        const reacted = current_actor != null and stmt.columnInt64(2) > 0;
+        try appendPullReactionButton(buf, allocator, raw_pull_ref, object_kind, target_ref, emoji, emoji, count, reacted);
         shown = true;
     }
     if (!shown) {
-        try appendPullReactionButton(buf, allocator, raw_pull_ref, object_kind, target_ref, "+1", "\xF0\x9F\x91\x8D", 0);
-        try appendPullReactionButton(buf, allocator, raw_pull_ref, object_kind, target_ref, "heart", "\xE2\x9D\xA4\xEF\xB8\x8F", 0);
-        try appendPullReactionButton(buf, allocator, raw_pull_ref, object_kind, target_ref, "eyes", "\xF0\x9F\x91\x80", 0);
+        try appendPullReactionButton(buf, allocator, raw_pull_ref, object_kind, target_ref, "+1", "\xF0\x9F\x91\x8D", 0, false);
+        try appendPullReactionButton(buf, allocator, raw_pull_ref, object_kind, target_ref, "heart", "\xE2\x9D\xA4\xEF\xB8\x8F", 0, false);
+        try appendPullReactionButton(buf, allocator, raw_pull_ref, object_kind, target_ref, "eyes", "\xF0\x9F\x91\x80", 0, false);
     }
     try buf.appendSlice(allocator, "</div>");
 }
@@ -719,20 +1104,29 @@ fn appendPullReactionButton(
     emoji_value: []const u8,
     emoji_label: []const u8,
     count: i64,
+    reacted: bool,
 ) !void {
     try buf.appendSlice(allocator, "<form class=\"reaction-form\" method=\"post\" action=\"/pulls/");
     try shared.appendUrlEncoded(buf, allocator, raw_pull_ref);
     try appendTemplate(buf, allocator,
-        \\/comments"><input type="hidden" name="action" value="add-reaction"><input type="hidden" name="target_kind" value="{object_kind}">
-    , .{ .object_kind = object_kind });
+        \\/comments"><input type="hidden" name="action" value="{action}"><input type="hidden" name="target_kind" value="{object_kind}">
+    , .{
+        .action = if (reacted) "remove-reaction" else "add-reaction",
+        .object_kind = object_kind,
+    });
     if (target_ref.len != 0) {
         try appendTemplate(buf, allocator,
             \\<input type="hidden" name="target_ref" value="{target_ref}">
         , .{ .target_ref = target_ref });
     }
     try appendTemplate(buf, allocator,
-        \\<input type="hidden" name="emoji" value="{emoji_value}"><button class="reaction-button" type="submit"><span class="reaction-emoji">
-    , .{ .emoji_value = emoji_value });
+        \\<input type="hidden" name="emoji" value="{emoji_value}"><button{class_attr} type="submit" aria-pressed="{pressed}" title="{title}"><span class="reaction-emoji">
+    , .{
+        .emoji_value = emoji_value,
+        .class_attr = shared.classAttr("reaction-button", &.{shared.class("selected", reacted)}),
+        .pressed = reacted,
+        .title = if (reacted) "Remove reaction" else "Add reaction",
+    });
     try shared.appendHtml(buf, allocator, emoji_label);
     try appendTemplate(buf, allocator,
         \\</span>
@@ -743,9 +1137,15 @@ fn appendPullReactionButton(
     try buf.appendSlice(allocator, "</button></form>");
 }
 
-fn appendPullCommentForm(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8) !void {
+fn appendPullCommentForm(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8, current_actor: ?[]const u8) !void {
     try buf.appendSlice(allocator,
-        \\<form class="issue-card comment-card issue-comment-form" method="post" action="/pulls/
+        \\<div class="issue-timeline-item issue-comment-form-item">
+        \\  <div class="issue-timeline-avatar">
+    );
+    try appendAvatar(buf, allocator, current_actor orelse "Current user", "issue-detail-avatar issue-comment-form-avatar");
+    try buf.appendSlice(allocator,
+        \\  </div>
+        \\  <form class="issue-comment-box issue-comment-form" method="post" action="/pulls/
     );
     try shared.appendUrlEncoded(buf, allocator, raw_ref);
     try buf.appendSlice(allocator,
@@ -756,6 +1156,7 @@ fn appendPullCommentForm(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref:
         \\    <button class="button primary" type="submit">Comment</button>
         \\  </div>
         \\</form>
+        \\</div>
     );
 }
 
@@ -1047,6 +1448,10 @@ fn asciiEqlIgnoreCase(a: []const u8, b: []const u8) bool {
         if (std.ascii.toLower(left) != std.ascii.toLower(right)) return false;
     }
     return true;
+}
+
+fn commitWord(count: usize) []const u8 {
+    return if (count == 1) "commit" else "commits";
 }
 
 fn pullSearchQuery(filter: PullStateFilter) []const u8 {

@@ -615,6 +615,161 @@
     document.querySelectorAll(".markdown-body pre").forEach(enhanceCodeBlock);
   }
 
+  function selectionBounds(textarea) {
+    return {
+      start: textarea.selectionStart || 0,
+      end: textarea.selectionEnd || 0,
+      value: textarea.value || "",
+    };
+  }
+
+  function replaceSelection(textarea, replacement, selectStart, selectEnd) {
+    const bounds = selectionBounds(textarea);
+    textarea.value = bounds.value.slice(0, bounds.start) + replacement + bounds.value.slice(bounds.end);
+    const start = bounds.start + (selectStart || replacement.length);
+    const end = bounds.start + (selectEnd || replacement.length);
+    textarea.focus();
+    textarea.setSelectionRange(start, end);
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  function wrapSelection(textarea, before, after, fallback) {
+    const bounds = selectionBounds(textarea);
+    const selected = bounds.value.slice(bounds.start, bounds.end) || fallback || "";
+    replaceSelection(textarea, before + selected + after, before.length, before.length + selected.length);
+  }
+
+  function selectedLines(textarea) {
+    const bounds = selectionBounds(textarea);
+    const lineStart = bounds.value.lastIndexOf("\n", Math.max(0, bounds.start - 1)) + 1;
+    let lineEnd = bounds.value.indexOf("\n", bounds.end);
+    if (lineEnd === -1) lineEnd = bounds.value.length;
+    return {
+      value: bounds.value,
+      start: lineStart,
+      end: lineEnd,
+      text: bounds.value.slice(lineStart, lineEnd),
+    };
+  }
+
+  function prefixSelectedLines(textarea, prefixForLine) {
+    const lines = selectedLines(textarea);
+    const replacement = lines.text
+      .split("\n")
+      .map(function (line, index) { return prefixForLine(line, index); })
+      .join("\n");
+    textarea.value = lines.value.slice(0, lines.start) + replacement + lines.value.slice(lines.end);
+    textarea.focus();
+    textarea.setSelectionRange(lines.start, lines.start + replacement.length);
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  function insertMarkdown(textarea, action) {
+    if (!textarea) return;
+    if (action === "heading") {
+      prefixSelectedLines(textarea, function (line) {
+        const stripped = line.replace(/^#{1,6}\s+/, "");
+        return "### " + stripped;
+      });
+    } else if (action === "bold") {
+      wrapSelection(textarea, "**", "**", "bold text");
+    } else if (action === "italic") {
+      wrapSelection(textarea, "_", "_", "italic text");
+    } else if (action === "quote") {
+      prefixSelectedLines(textarea, function (line) { return "> " + line.replace(/^>\s?/, ""); });
+    } else if (action === "code") {
+      const bounds = selectionBounds(textarea);
+      const selected = bounds.value.slice(bounds.start, bounds.end);
+      if (selected.indexOf("\n") === -1) {
+        wrapSelection(textarea, "`", "`", "code");
+      } else {
+        replaceSelection(textarea, "```\n" + selected + "\n```", 4, 4 + selected.length);
+      }
+    } else if (action === "link") {
+      const bounds = selectionBounds(textarea);
+      const selected = bounds.value.slice(bounds.start, bounds.end) || "link text";
+      const replacement = "[" + selected + "](url)";
+      replaceSelection(textarea, replacement, replacement.length - 4, replacement.length - 1);
+    } else if (action === "unordered-list") {
+      prefixSelectedLines(textarea, function (line) { return line.match(/^\s*[-*]\s+/) ? line : "- " + line; });
+    } else if (action === "ordered-list") {
+      prefixSelectedLines(textarea, function (line, index) {
+        return line.match(/^\s*\d+\.\s+/) ? line : (index + 1) + ". " + line;
+      });
+    } else if (action === "task-list") {
+      prefixSelectedLines(textarea, function (line) { return line.match(/^\s*-\s+\[[ xX]\]\s+/) ? line : "- [ ] " + line; });
+    } else if (action === "mention") {
+      replaceSelection(textarea, "@", 1, 1);
+    } else if (action === "reference") {
+      replaceSelection(textarea, "#", 1, 1);
+    }
+  }
+
+  function setMarkdownEditorTab(editor, mode) {
+    const textarea = editor.querySelector("[data-markdown-input]");
+    const preview = editor.querySelector("[data-markdown-preview]");
+    if (!textarea || !preview) return;
+    const writeMode = mode !== "preview";
+    editor.querySelectorAll("[data-markdown-tab]").forEach(function (tab) {
+      const active = (tab.getAttribute("data-markdown-tab") === (writeMode ? "write" : "preview"));
+      tab.classList.toggle("active", active);
+      tab.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    textarea.hidden = !writeMode;
+    preview.hidden = writeMode;
+    if (!writeMode) renderMarkdownPreview(editor);
+  }
+
+  async function renderMarkdownPreview(editor) {
+    const textarea = editor.querySelector("[data-markdown-input]");
+    const preview = editor.querySelector("[data-markdown-preview]");
+    if (!textarea || !preview) return;
+    const source = textarea.value || "";
+    if (!source.trim()) {
+      preview.innerHTML = '<p class="muted">Nothing to preview.</p>';
+      return;
+    }
+    preview.innerHTML = '<p class="muted">Loading preview...</p>';
+    try {
+      const response = await fetch("/markdown/preview", {
+        method: "POST",
+        headers: { "Content-Type": "text/plain; charset=utf-8" },
+        body: source,
+      });
+      if (!response.ok) throw new Error("preview failed");
+      preview.innerHTML = await response.text();
+      renderMath();
+      renderMermaid();
+      renderCodeCopyButtons();
+    } catch (_) {
+      preview.innerHTML = '<p class="muted">Preview failed.</p>';
+    }
+  }
+
+  function initMarkdownEditors() {
+    document.querySelectorAll("[data-markdown-editor]").forEach(function (editor) {
+      if (editor.dataset.markdownEditorReady === "yes") return;
+      editor.dataset.markdownEditorReady = "yes";
+      const textarea = editor.querySelector("[data-markdown-input]");
+      editor.querySelectorAll("[data-markdown-action]").forEach(function (button) {
+        button.addEventListener("click", function () {
+          insertMarkdown(textarea, button.getAttribute("data-markdown-action") || "");
+        });
+      });
+      editor.querySelectorAll("[data-markdown-tab]").forEach(function (tab) {
+        tab.addEventListener("click", function () {
+          setMarkdownEditorTab(editor, tab.getAttribute("data-markdown-tab") || "write");
+        });
+      });
+      if (textarea) {
+        textarea.addEventListener("input", function () {
+          const preview = editor.querySelector("[data-markdown-preview]");
+          if (preview && !preview.hidden) renderMarkdownPreview(editor);
+        });
+      }
+    });
+  }
+
   function renderMarkdownEnhancements() {
     renderMath();
     renderMermaid();
@@ -622,6 +777,7 @@
     renderRelativeTimes();
     initIssueActionMenus();
     initIssueSidebarMenus();
+    initMarkdownEditors();
   }
 
   if (document.readyState === "loading") {

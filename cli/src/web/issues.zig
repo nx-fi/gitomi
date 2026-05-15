@@ -1,5 +1,6 @@
 const std = @import("std");
 const comment_mod = @import("../comment.zig");
+const event_mod = @import("../event.zig");
 const index = @import("../index.zig");
 const issue = @import("../issue.zig");
 const markdown_render = @import("markdown_render.zig");
@@ -85,6 +86,11 @@ const IssueHrefOverride = struct {
     sort: ?IssueSort = null,
     param_name: ?[]const u8 = null,
     param_value: ?[]const u8 = null,
+};
+
+const IssueProjectSummary = struct {
+    project: []const u8,
+    column: []const u8,
 };
 
 const RelationshipKind = enum {
@@ -367,7 +373,7 @@ fn appendIssuesToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filters: I
         \\  </form>
         \\  <div class="issues-toolbar-actions">
         \\    <button class="button secondary issue-tool-button" type="button" disabled><span class="button-icon icon-labels" aria-hidden="true"></span><span>Labels</span></button>
-        \\    <button class="button secondary issue-tool-button" type="button" disabled><span class="button-icon icon-milestones" aria-hidden="true"></span><span>Milestones</span></button>
+        \\    <a class="button secondary issue-tool-button" href="/milestones"><span class="button-icon icon-milestones" aria-hidden="true"></span><span>Milestones</span></a>
         \\    <a class="button primary" href="/new-issue">New issue</a>
         \\  </div>
         \\</div>
@@ -905,6 +911,8 @@ fn renderIssueDetailPageWithCommentForm(
     errdefer buf.deinit(allocator);
 
     const display_author = if (source_author.len != 0) source_author else author_principal;
+    const current_actor = try shared.currentPrincipalOwned(allocator, repo);
+    defer if (current_actor) |actor| allocator.free(actor);
 
     try appendShellStart(&buf, allocator, repo, title, "issues");
     try buf.appendSlice(allocator, "<section class=\"issue-page\">");
@@ -940,13 +948,14 @@ fn renderIssueDetailPageWithCommentForm(
     try buf.appendSlice(allocator,
         \\          </div>
     );
-    try appendReactionBar(&buf, allocator, &db, "issue", id, raw_ref, "");
+    try appendReactionBar(&buf, allocator, &db, "issue", id, raw_ref, "", current_actor);
     try buf.appendSlice(allocator,
         \\        </article>
         \\      </div>
     );
-    try appendIssueComments(&buf, allocator, &db, raw_ref, id);
-    try appendIssueCommentForm(&buf, allocator, raw_ref, comment_error, comment_value);
+    try appendIssueComments(&buf, allocator, &db, raw_ref, id, current_actor);
+    try appendIssueTimelineEvents(&buf, allocator, &db, id);
+    try appendIssueCommentForm(&buf, allocator, raw_ref, state, current_actor, comment_error, comment_value);
     try buf.appendSlice(allocator, "    </div><aside class=\"issue-meta-sidebar\">");
     try appendIssueSidebar(&buf, allocator, &db, raw_ref, id, display_author, milestone, body);
     try buf.appendSlice(allocator, "</aside></div></section>");
@@ -1052,7 +1061,14 @@ fn appendLegacyIssueLink(buf: *std.ArrayList(u8), allocator: Allocator, legacy_n
     try shared.appendIssueReferenceLink(buf, allocator, issue_ref);
 }
 
-fn appendIssueComments(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, raw_ref: []const u8, issue_id: []const u8) !void {
+fn appendIssueComments(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    raw_ref: []const u8,
+    issue_id: []const u8,
+    current_actor: ?[]const u8,
+) !void {
     var stmt = try db.prepare(
         \\SELECT id, body, redacted, COALESCE(NULLIF(source_author, ''), author_principal), created_at, reply_parent_id, reply_parent_hash
         \\FROM comments
@@ -1120,9 +1136,265 @@ fn appendIssueComments(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
             try markdown_render.appendMarkdown(buf, allocator, body);
         }
         try buf.appendSlice(allocator, "</div>");
-        try appendReactionBar(buf, allocator, db, "comment", id, raw_ref, comment_ref_value);
+        try appendReactionBar(buf, allocator, db, "comment", id, raw_ref, comment_ref_value, current_actor);
         try buf.appendSlice(allocator, "</article></div>");
     }
+}
+
+fn appendIssueTimelineEvents(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    issue_id: []const u8,
+) !void {
+    var stmt = try db.prepare(
+        \\SELECT event_type, actor_principal, occurred_at, body, event_hash
+        \\FROM events
+        \\WHERE object_kind = 'issue'
+        \\  AND object_id = ?
+        \\  AND domain_status = 'accepted'
+        \\  AND event_type IN (
+        \\    'issue.title_set',
+        \\    'issue.body_set',
+        \\    'issue.state_set',
+        \\    'issue.updated',
+        \\    'issue.label_added',
+        \\    'issue.label_removed',
+        \\    'issue.assignee_added',
+        \\    'issue.assignee_removed',
+        \\    'issue.milestone_set',
+        \\    'issue.project_added',
+        \\    'issue.project_removed'
+        \\  )
+        \\ORDER BY occurred_at, ordinal
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+
+    while (try stmt.step()) {
+        const event_type = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(event_type);
+        const actor = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(actor);
+        const occurred_at = try stmt.columnTextDup(allocator, 2);
+        defer allocator.free(occurred_at);
+        const body = try stmt.columnTextDup(allocator, 3);
+        defer allocator.free(body);
+        const event_hash = try stmt.columnTextDup(allocator, 4);
+        defer allocator.free(event_hash);
+
+        try appendIssueTimelineEvent(buf, allocator, event_type, actor, occurred_at, body, event_hash);
+    }
+}
+
+fn appendIssueTimelineEvent(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    event_type: []const u8,
+    actor: []const u8,
+    occurred_at: []const u8,
+    body: []const u8,
+    event_hash: []const u8,
+) !void {
+    const anchor = event_hash[0..@min(event_hash.len, 12)];
+    try appendTemplate(buf, allocator,
+        \\<div class="issue-timeline-item issue-event-item" id="event-{anchor}">
+        \\  <div class="issue-timeline-avatar"><span class="issue-event-icon {icon_class}" aria-hidden="true"></span></div>
+        \\  <div class="issue-event-content"><strong>{actor}</strong>
+    , .{
+        .anchor = anchor,
+        .icon_class = issueTimelineEventIcon(event_type, body),
+        .actor = actor,
+    });
+    try buf.append(allocator, ' ');
+    try appendIssueTimelineEventMessage(buf, allocator, event_type, body);
+    try buf.append(allocator, ' ');
+    try appendRelativeTime(buf, allocator, occurred_at);
+    try buf.appendSlice(allocator, "</div></div>");
+}
+
+fn issueTimelineEventIcon(event_type: []const u8, body: []const u8) []const u8 {
+    if (std.mem.eql(u8, event_type, "issue.state_set")) {
+        if (issueEventPayloadStringEquals(body, "state", "closed")) return "is-closed";
+        if (issueEventPayloadStringEquals(body, "state", "open")) return "is-open";
+        return "is-state";
+    }
+    if (std.mem.eql(u8, event_type, "issue.updated")) {
+        if (issueEventPayloadStringEquals(body, "state", "closed")) return "is-closed";
+        if (issueEventPayloadStringEquals(body, "state", "open")) return "is-open";
+        return "is-edit";
+    }
+    if (std.mem.indexOf(u8, event_type, "label") != null) return "is-label";
+    if (std.mem.indexOf(u8, event_type, "assignee") != null) return "is-assignee";
+    if (std.mem.indexOf(u8, event_type, "milestone") != null) return "is-milestone";
+    if (std.mem.indexOf(u8, event_type, "project") != null) return "is-project";
+    return "is-edit";
+}
+
+fn appendIssueTimelineEventMessage(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    event_type: []const u8,
+    body: []const u8,
+) !void {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch {
+        try appendTemplate(buf, allocator, "recorded <code>{event_type}</code>", .{ .event_type = event_type });
+        return;
+    };
+    defer parsed.deinit();
+    const payload = issueEventPayload(parsed.value) orelse {
+        try appendTemplate(buf, allocator, "recorded <code>{event_type}</code>", .{ .event_type = event_type });
+        return;
+    };
+
+    if (std.mem.eql(u8, event_type, "issue.title_set")) {
+        try buf.appendSlice(allocator, "changed the title");
+    } else if (std.mem.eql(u8, event_type, "issue.body_set")) {
+        try buf.appendSlice(allocator, "edited the description");
+    } else if (std.mem.eql(u8, event_type, "issue.state_set")) {
+        try appendIssueStateTimelineMessage(buf, allocator, event_mod.jsonString(payload.get("state")) orelse "");
+    } else if (std.mem.eql(u8, event_type, "issue.label_added")) {
+        try buf.appendSlice(allocator, "added ");
+        try appendIssueLabel(buf, allocator, event_mod.jsonString(payload.get("label")) orelse "label");
+    } else if (std.mem.eql(u8, event_type, "issue.label_removed")) {
+        try buf.appendSlice(allocator, "removed ");
+        try appendIssueLabel(buf, allocator, event_mod.jsonString(payload.get("label")) orelse "label");
+    } else if (std.mem.eql(u8, event_type, "issue.assignee_added")) {
+        try appendTemplate(buf, allocator, "assigned <span class=\"issue-event-value\">{assignee}</span>", .{
+            .assignee = event_mod.jsonString(payload.get("assignee")) orelse "someone",
+        });
+    } else if (std.mem.eql(u8, event_type, "issue.assignee_removed")) {
+        try appendTemplate(buf, allocator, "unassigned <span class=\"issue-event-value\">{assignee}</span>", .{
+            .assignee = event_mod.jsonString(payload.get("assignee")) orelse "someone",
+        });
+    } else if (std.mem.eql(u8, event_type, "issue.milestone_set")) {
+        try appendIssueMilestoneTimelineMessage(buf, allocator, event_mod.jsonString(payload.get("milestone")) orelse "");
+    } else if (std.mem.eql(u8, event_type, "issue.project_added")) {
+        try appendIssueProjectTimelineMessage(buf, allocator, "added this to", .{
+            .project = event_mod.jsonString(payload.get("project")) orelse "project",
+            .column = event_mod.jsonString(payload.get("column")) orelse "",
+        });
+    } else if (std.mem.eql(u8, event_type, "issue.project_removed")) {
+        try appendIssueProjectTimelineMessage(buf, allocator, "removed this from", .{
+            .project = event_mod.jsonString(payload.get("project")) orelse "project",
+            .column = event_mod.jsonString(payload.get("column")) orelse "",
+        });
+    } else if (std.mem.eql(u8, event_type, "issue.updated")) {
+        try appendIssueUpdatedTimelineMessage(buf, allocator, payload);
+    } else {
+        try appendTemplate(buf, allocator, "recorded <code>{event_type}</code>", .{ .event_type = event_type });
+    }
+}
+
+fn issueEventPayload(value: std.json.Value) ?std.json.ObjectMap {
+    const root = switch (value) {
+        .object => |object| object,
+        else => return null,
+    };
+    const payload_value = root.get("payload") orelse return null;
+    return switch (payload_value) {
+        .object => |object| object,
+        else => null,
+    };
+}
+
+fn issueEventPayloadStringEquals(body: []const u8, key: []const u8, expected: []const u8) bool {
+    var parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, body, .{}) catch return false;
+    defer parsed.deinit();
+    const payload = issueEventPayload(parsed.value) orelse return false;
+    const value = event_mod.jsonString(payload.get(key)) orelse return false;
+    return std.mem.eql(u8, value, expected);
+}
+
+fn appendIssueStateTimelineMessage(buf: *std.ArrayList(u8), allocator: Allocator, state: []const u8) !void {
+    if (std.mem.eql(u8, state, "closed")) {
+        try buf.appendSlice(allocator, "closed this as completed");
+    } else if (std.mem.eql(u8, state, "open")) {
+        try buf.appendSlice(allocator, "reopened this");
+    } else {
+        try appendTemplate(buf, allocator, "changed state to <span class=\"issue-event-value\">{state}</span>", .{ .state = state });
+    }
+}
+
+fn appendIssueMilestoneTimelineMessage(buf: *std.ArrayList(u8), allocator: Allocator, milestone: []const u8) !void {
+    if (milestone.len == 0) {
+        try buf.appendSlice(allocator, "cleared the milestone");
+    } else {
+        try appendTemplate(buf, allocator, "set milestone to <span class=\"issue-sidebar-pill\">{milestone}</span>", .{ .milestone = milestone });
+    }
+}
+
+fn appendIssueProjectTimelineMessage(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    verb: []const u8,
+    project: IssueProjectSummary,
+) !void {
+    try appendTemplate(buf, allocator, "{verb} <span class=\"issue-sidebar-pill\">{project}", .{
+        .verb = verb,
+        .project = project.project,
+    });
+    if (project.column.len != 0) {
+        try appendTemplate(buf, allocator, " / {column}", .{ .column = project.column });
+    }
+    try buf.appendSlice(allocator, "</span>");
+}
+
+fn appendIssueUpdatedTimelineMessage(buf: *std.ArrayList(u8), allocator: Allocator, payload: std.json.ObjectMap) !void {
+    if (event_mod.jsonString(payload.get("state"))) |state| {
+        try appendIssueStateTimelineMessage(buf, allocator, state);
+    } else if (event_mod.jsonString(payload.get("milestone"))) |milestone| {
+        try appendIssueMilestoneTimelineMessage(buf, allocator, milestone);
+    } else if (firstStringFromJsonArray(payload, "labels_added")) |label| {
+        try buf.appendSlice(allocator, "added ");
+        try appendIssueLabel(buf, allocator, label);
+    } else if (firstStringFromJsonArray(payload, "labels_removed")) |label| {
+        try buf.appendSlice(allocator, "removed ");
+        try appendIssueLabel(buf, allocator, label);
+    } else if (firstStringFromJsonArray(payload, "assignees_added")) |assignee| {
+        try appendTemplate(buf, allocator, "assigned <span class=\"issue-event-value\">{assignee}</span>", .{ .assignee = assignee });
+    } else if (firstStringFromJsonArray(payload, "assignees_removed")) |assignee| {
+        try appendTemplate(buf, allocator, "unassigned <span class=\"issue-event-value\">{assignee}</span>", .{ .assignee = assignee });
+    } else if (firstProjectFromJsonArray(payload, "projects")) |project| {
+        try appendIssueProjectTimelineMessage(buf, allocator, "added this to", project);
+    } else if (payload.get("title") != null) {
+        try buf.appendSlice(allocator, "changed the title");
+    } else if (payload.get("body") != null) {
+        try buf.appendSlice(allocator, "edited the description");
+    } else {
+        try buf.appendSlice(allocator, "updated this issue");
+    }
+}
+
+fn firstStringFromJsonArray(payload: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    const value = payload.get(key) orelse return null;
+    const array = switch (value) {
+        .array => |items| items,
+        else => return null,
+    };
+    for (array.items) |item| {
+        if (item == .string) return item.string;
+    }
+    return null;
+}
+
+fn firstProjectFromJsonArray(payload: std.json.ObjectMap, key: []const u8) ?IssueProjectSummary {
+    const value = payload.get(key) orelse return null;
+    const array = switch (value) {
+        .array => |items| items,
+        else => return null,
+    };
+    for (array.items) |item| {
+        const object = switch (item) {
+            .object => |project| project,
+            else => continue,
+        };
+        return .{
+            .project = event_mod.jsonString(object.get("project")) orelse "project",
+            .column = event_mod.jsonString(object.get("column")) orelse "",
+        };
+    }
+    return null;
 }
 
 fn appendReactionBar(
@@ -1133,31 +1405,35 @@ fn appendReactionBar(
     object_id: []const u8,
     raw_issue_ref: []const u8,
     target_ref: []const u8,
+    current_actor: ?[]const u8,
 ) !void {
     try buf.appendSlice(allocator, "<div class=\"reaction-bar\">");
     var stmt = try db.prepare(
-        \\SELECT emoji, COUNT(DISTINCT actor_principal)
+        \\SELECT emoji, COUNT(DISTINCT actor_principal),
+        \\       SUM(CASE WHEN actor_principal = ? THEN 1 ELSE 0 END)
         \\FROM reactions
         \\WHERE object_kind = ? AND object_id = ?
         \\GROUP BY emoji
         \\ORDER BY MIN(created_at), emoji
     );
     defer stmt.deinit();
-    try stmt.bindText(1, object_kind);
-    try stmt.bindText(2, object_id);
+    try stmt.bindText(1, current_actor orelse "");
+    try stmt.bindText(2, object_kind);
+    try stmt.bindText(3, object_id);
 
     var shown = false;
     while (try stmt.step()) {
         const emoji = try stmt.columnTextDup(allocator, 0);
         defer allocator.free(emoji);
         const count = stmt.columnInt64(1);
-        try appendReactionButton(buf, allocator, raw_issue_ref, object_kind, target_ref, emoji, emoji, count);
+        const reacted = current_actor != null and stmt.columnInt64(2) > 0;
+        try appendReactionButton(buf, allocator, raw_issue_ref, object_kind, target_ref, emoji, emoji, count, reacted);
         shown = true;
     }
     if (!shown) {
-        try appendReactionButton(buf, allocator, raw_issue_ref, object_kind, target_ref, "+1", "\xF0\x9F\x91\x8D", 0);
-        try appendReactionButton(buf, allocator, raw_issue_ref, object_kind, target_ref, "heart", "\xE2\x9D\xA4\xEF\xB8\x8F", 0);
-        try appendReactionButton(buf, allocator, raw_issue_ref, object_kind, target_ref, "eyes", "\xF0\x9F\x91\x80", 0);
+        try appendReactionButton(buf, allocator, raw_issue_ref, object_kind, target_ref, "+1", "\xF0\x9F\x91\x8D", 0, false);
+        try appendReactionButton(buf, allocator, raw_issue_ref, object_kind, target_ref, "heart", "\xE2\x9D\xA4\xEF\xB8\x8F", 0, false);
+        try appendReactionButton(buf, allocator, raw_issue_ref, object_kind, target_ref, "eyes", "\xF0\x9F\x91\x80", 0, false);
     }
     try buf.appendSlice(allocator, "</div>");
 }
@@ -1171,20 +1447,29 @@ fn appendReactionButton(
     emoji_value: []const u8,
     emoji_label: []const u8,
     count: i64,
+    reacted: bool,
 ) !void {
     try buf.appendSlice(allocator, "<form class=\"reaction-form\" method=\"post\" action=\"/issues/");
     try shared.appendUrlEncoded(buf, allocator, raw_issue_ref);
     try appendTemplate(buf, allocator,
-        \\/comments"><input type="hidden" name="action" value="add-reaction"><input type="hidden" name="target_kind" value="{object_kind}">
-    , .{ .object_kind = object_kind });
+        \\/comments"><input type="hidden" name="action" value="{action}"><input type="hidden" name="target_kind" value="{object_kind}">
+    , .{
+        .action = if (reacted) "remove-reaction" else "add-reaction",
+        .object_kind = object_kind,
+    });
     if (target_ref.len != 0) {
         try appendTemplate(buf, allocator,
             \\<input type="hidden" name="target_ref" value="{target_ref}">
         , .{ .target_ref = target_ref });
     }
     try appendTemplate(buf, allocator,
-        \\<input type="hidden" name="emoji" value="{emoji_value}"><button class="reaction-button" type="submit"><span class="reaction-emoji">
-    , .{ .emoji_value = emoji_value });
+        \\<input type="hidden" name="emoji" value="{emoji_value}"><button{class_attr} type="submit" aria-pressed="{pressed}" title="{title}"><span class="reaction-emoji">
+    , .{
+        .emoji_value = emoji_value,
+        .class_attr = shared.classAttr("reaction-button", &.{shared.class("selected", reacted)}),
+        .pressed = reacted,
+        .title = if (reacted) "Remove reaction" else "Add reaction",
+    });
     try shared.appendHtml(buf, allocator, emoji_label);
     try appendTemplate(buf, allocator,
         \\</span>
@@ -1246,28 +1531,68 @@ fn appendIssueCommentForm(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
     raw_ref: []const u8,
+    state: []const u8,
+    current_actor: ?[]const u8,
     error_message: ?[]const u8,
     body_value: []const u8,
 ) !void {
     try buf.appendSlice(allocator,
         \\<div class="issue-timeline-item issue-comment-form-item">
-        \\  <div class="issue-timeline-avatar"><span class="issue-avatar issue-detail-avatar issue-comment-form-avatar" title="Current user" aria-label="Current user">Y</span></div>
+    );
+    try buf.appendSlice(allocator, "  <div class=\"issue-timeline-avatar\">");
+    try appendIssueAvatar(buf, allocator, current_actor orelse "Current user", "issue-detail-avatar issue-comment-form-avatar");
+    try buf.appendSlice(allocator, "</div>");
+    try buf.appendSlice(allocator,
         \\  <form class="issue-comment-box issue-comment-form" method="post" action="/issues/
     );
     try shared.appendUrlEncoded(buf, allocator, raw_ref);
     try appendTemplate(buf, allocator,
         \\/comments">
         \\    <input type="hidden" name="reply_parent_ref" value="" data-reply-parent-ref>
-        \\    <textarea name="body" rows="5" placeholder="Leave a comment" required>{body_value}</textarea>
+        \\    <div class="markdown-editor" data-markdown-editor>
+        \\      <div class="markdown-editor-tabs" role="tablist" aria-label="Markdown editor mode">
+        \\        <button class="active" type="button" role="tab" aria-selected="true" data-markdown-tab="write">Write</button>
+        \\        <button type="button" role="tab" aria-selected="false" data-markdown-tab="preview">Preview</button>
+        \\      </div>
+        \\      <div class="markdown-editor-toolbar" aria-label="Markdown formatting">
+        \\        <button type="button" data-markdown-action="heading" aria-label="Heading" title="Heading">H</button>
+        \\        <button type="button" data-markdown-action="bold" aria-label="Bold" title="Bold"><strong>B</strong></button>
+        \\        <button type="button" data-markdown-action="italic" aria-label="Italic" title="Italic"><em>I</em></button>
+        \\        <button type="button" data-markdown-action="quote" aria-label="Quote" title="Quote"><span class="md-icon md-icon-quote" aria-hidden="true"></span></button>
+        \\        <button type="button" data-markdown-action="code" aria-label="Code" title="Code"><span class="md-icon md-icon-code" aria-hidden="true"></span></button>
+        \\        <button type="button" data-markdown-action="link" aria-label="Link" title="Link"><span class="md-icon md-icon-link" aria-hidden="true"></span></button>
+        \\        <span class="markdown-editor-divider" aria-hidden="true"></span>
+        \\        <button type="button" data-markdown-action="unordered-list" aria-label="Bulleted list" title="Bulleted list"><span class="md-icon md-icon-ul" aria-hidden="true"></span></button>
+        \\        <button type="button" data-markdown-action="ordered-list" aria-label="Numbered list" title="Numbered list"><span class="md-icon md-icon-ol" aria-hidden="true"></span></button>
+        \\        <button type="button" data-markdown-action="task-list" aria-label="Task list" title="Task list"><span class="md-icon md-icon-task" aria-hidden="true"></span></button>
+        \\        <span class="markdown-editor-divider" aria-hidden="true"></span>
+        \\        <button type="button" data-markdown-action="mention" aria-label="Mention" title="Mention">@</button>
+        \\        <button type="button" data-markdown-action="reference" aria-label="Issue reference" title="Issue reference">#</button>
+        \\      </div>
+        \\      <textarea name="body" rows="7" placeholder="Leave a comment" required data-markdown-input>{body_value}</textarea>
+        \\      <div class="markdown-editor-preview markdown-body" data-markdown-preview hidden></div>
+        \\    </div>
     , .{ .body_value = body_value });
     if (error_message) |message| {
         try appendTemplate(buf, allocator,
             \\    <p class="issue-comment-error">{message}</p>
         , .{ .message = message });
     }
+    const state_action = if (std.mem.eql(u8, state, "closed")) "reopen-issue" else "close-issue";
+    const state_label = if (std.mem.eql(u8, state, "closed")) "Reopen issue" else "Close issue";
+    const state_class = if (std.mem.eql(u8, state, "closed")) "primary is-reopen" else "secondary is-close";
     try buf.appendSlice(allocator,
         \\    <div class="issue-comment-form-actions">
-        \\      <button class="button primary" type="submit">Comment</button>
+        \\      <button class="button secondary" type="submit" name="action" value="comment">Comment</button>
+    );
+    try appendTemplate(buf, allocator,
+        \\      <button class="button {state_class} issue-state-submit" type="submit" name="action" value="{state_action}" formnovalidate>{state_label}</button>
+    , .{
+        .state_class = state_class,
+        .state_action = state_action,
+        .state_label = state_label,
+    });
+    try buf.appendSlice(allocator,
         \\    </div>
         \\  </form>
         \\</div>
@@ -2353,11 +2678,23 @@ pub fn handleIssueCommentPost(allocator: Allocator, repo: Repo, stream: std.net.
         }
     }
 
+    const submit_action = if (action_owned) |raw_action| std.mem.trim(u8, raw_action, " \t\r\n") else "comment";
+    const target_state: ?[]const u8 = if (std.mem.eql(u8, submit_action, "close-issue"))
+        "closed"
+    else if (std.mem.eql(u8, submit_action, "reopen-issue"))
+        "open"
+    else
+        null;
+    if (!std.mem.eql(u8, submit_action, "comment") and target_state == null) {
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Unknown issue action\n");
+        return;
+    }
+
     const body_owned = (try formValueOwned(allocator, form_body, "body")) orelse try allocator.dupe(u8, "");
     defer allocator.free(body_owned);
 
     const body = std.mem.trim(u8, body_owned, " \t\r\n");
-    if (body.len == 0) {
+    if (body.len == 0 and target_state == null) {
         const page = try renderIssueDetailPageWithCommentForm(allocator, repo, raw_ref, "Comment is required.", body_owned);
         defer allocator.free(page);
         try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", page, null);
@@ -2373,44 +2710,64 @@ pub fn handleIssueCommentPost(allocator: Allocator, repo: Repo, stream: std.net.
     };
     defer allocator.free(issue_id);
 
-    const reply_ref_owned = try formValueOwned(allocator, form_body, "reply_parent_ref");
-    defer if (reply_ref_owned) |value| allocator.free(value);
-    const reply_ref = if (reply_ref_owned) |value| std.mem.trim(u8, value, " \t\r\n") else "";
-    if (reply_ref.len != 0) {
-        const reply_parent_id = index.resolveCommentId(allocator, repo, reply_ref) catch {
-            const page = try renderIssueDetailPageWithCommentForm(allocator, repo, raw_ref, "Reply target was not found.", body_owned);
-            defer allocator.free(page);
-            try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", page, null);
-            return;
-        };
-        defer allocator.free(reply_parent_id);
-        var parent = try index.commentParentInfo(allocator, repo, reply_parent_id);
-        defer parent.deinit();
-        if (!std.mem.eql(u8, parent.parent_kind, "issue") or !std.mem.eql(u8, parent.parent_id, issue_id)) {
-            const page = try renderIssueDetailPageWithCommentForm(allocator, repo, raw_ref, "Reply target is not in this issue.", body_owned);
-            defer allocator.free(page);
-            try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", page, null);
-            return;
+    if (body.len != 0) {
+        const reply_ref_owned = try formValueOwned(allocator, form_body, "reply_parent_ref");
+        defer if (reply_ref_owned) |value| allocator.free(value);
+        const reply_ref = if (reply_ref_owned) |value| std.mem.trim(u8, value, " \t\r\n") else "";
+        if (reply_ref.len != 0) {
+            const reply_parent_id = index.resolveCommentId(allocator, repo, reply_ref) catch {
+                const page = try renderIssueDetailPageWithCommentForm(allocator, repo, raw_ref, "Reply target was not found.", body_owned);
+                defer allocator.free(page);
+                try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", page, null);
+                return;
+            };
+            defer allocator.free(reply_parent_id);
+            var parent = try index.commentParentInfo(allocator, repo, reply_parent_id);
+            defer parent.deinit();
+            if (!std.mem.eql(u8, parent.parent_kind, "issue") or !std.mem.eql(u8, parent.parent_id, issue_id)) {
+                const page = try renderIssueDetailPageWithCommentForm(allocator, repo, raw_ref, "Reply target is not in this issue.", body_owned);
+                defer allocator.free(page);
+                try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", page, null);
+                return;
+            }
+            createCommentReplyEvent(allocator, "issue", issue_id, reply_parent_id, parent.add_hash, body_owned) catch {
+                const page = try renderIssueDetailPageWithCommentForm(
+                    allocator,
+                    repo,
+                    raw_ref,
+                    "Could not add the reply. Check that Gitomi is initialized and Git commit signing is configured.",
+                    body_owned,
+                );
+                defer allocator.free(page);
+                try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", page, null);
+                return;
+            };
+        } else {
+            createCommentAddedEvent(allocator, "issue", issue_id, body_owned) catch {
+                const page = try renderIssueDetailPageWithCommentForm(
+                    allocator,
+                    repo,
+                    raw_ref,
+                    "Could not add the comment. Check that Gitomi is initialized and Git commit signing is configured.",
+                    body_owned,
+                );
+                defer allocator.free(page);
+                try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", page, null);
+                return;
+            };
         }
-        createCommentReplyEvent(allocator, "issue", issue_id, reply_parent_id, parent.add_hash, body_owned) catch {
+    }
+
+    if (target_state) |state_value| {
+        createIssueStringEvent(allocator, issue_id, "issue.state_set", "state", state_value) catch {
             const page = try renderIssueDetailPageWithCommentForm(
                 allocator,
                 repo,
                 raw_ref,
-                "Could not add the reply. Check that Gitomi is initialized and Git commit signing is configured.",
-                body_owned,
-            );
-            defer allocator.free(page);
-            try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", page, null);
-            return;
-        };
-    } else {
-        createCommentAddedEvent(allocator, "issue", issue_id, body_owned) catch {
-            const page = try renderIssueDetailPageWithCommentForm(
-                allocator,
-                repo,
-                raw_ref,
-                "Could not add the comment. Check that Gitomi is initialized and Git commit signing is configured.",
+                if (std.mem.eql(u8, state_value, "closed"))
+                    "Could not close the issue. Check that Gitomi is initialized and Git commit signing is configured."
+                else
+                    "Could not reopen the issue. Check that Gitomi is initialized and Git commit signing is configured.",
                 body_owned,
             );
             defer allocator.free(page);

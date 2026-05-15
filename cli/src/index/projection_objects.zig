@@ -1074,7 +1074,7 @@ pub fn applyCommentProjection(allocator: Allocator, db: *SqliteDb, event_hash: [
     } else if (std.mem.eql(u8, envelope.event_type, "comment.body_set")) {
         if (!(try commentExists(db, envelope.object_id))) return "object_not_created";
         const comment_body = event_mod.jsonString(payload.get("body")) orelse return "invalid_event_envelope";
-        try updateCommentBody(allocator, db, envelope.object_id, comment_body, event_hash, envelope);
+        if (try updateCommentBody(allocator, db, envelope.object_id, comment_body, event_hash, envelope)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "comment.redacted")) {
         if (!(try commentExists(db, envelope.object_id))) return "object_not_created";
         try redactComment(allocator, db, envelope.object_id, event_hash, envelope);
@@ -1182,20 +1182,21 @@ fn commentCreationHashMatches(db: *SqliteDb, comment_id: []const u8, event_hash:
     return try stmt.step();
 }
 
-fn updateCommentBody(allocator: Allocator, db: *SqliteDb, comment_id: []const u8, body: []const u8, event_hash: []const u8, envelope: ValidatedEnvelope) !void {
-    var select = try db.prepare("SELECT body_occurred_at, body_actor_principal, body_event_hash FROM comments WHERE id = ?");
+fn updateCommentBody(allocator: Allocator, db: *SqliteDb, comment_id: []const u8, body: []const u8, event_hash: []const u8, envelope: ValidatedEnvelope) !?[]const u8 {
+    var select = try db.prepare("SELECT redacted, body_occurred_at, body_actor_principal, body_event_hash FROM comments WHERE id = ?");
     defer select.deinit();
     try select.bindText(1, comment_id);
-    if (!(try select.step())) return;
-    const old_occurred_at = try select.columnTextDup(allocator, 0);
+    if (!(try select.step())) return null;
+    if (select.columnInt(0) != 0) return "object_redacted";
+    const old_occurred_at = try select.columnTextDup(allocator, 1);
     defer allocator.free(old_occurred_at);
-    const old_actor = try select.columnTextDup(allocator, 1);
+    const old_actor = try select.columnTextDup(allocator, 2);
     defer allocator.free(old_actor);
-    const old_event_hash = try select.columnTextDup(allocator, 2);
+    const old_event_hash = try select.columnTextDup(allocator, 3);
     defer allocator.free(old_event_hash);
 
     if (!(try eventWins(allocator, event_hash, old_event_hash))) {
-        return;
+        return null;
     }
 
     var update = try db.prepare("UPDATE comments SET body = ?, body_occurred_at = ?, body_actor_principal = ?, body_event_hash = ? WHERE id = ?");
@@ -1206,6 +1207,7 @@ fn updateCommentBody(allocator: Allocator, db: *SqliteDb, comment_id: []const u8
     try update.bindText(4, event_hash);
     try update.bindText(5, comment_id);
     try update.stepDone();
+    return null;
 }
 
 fn redactComment(allocator: Allocator, db: *SqliteDb, comment_id: []const u8, event_hash: []const u8, envelope: ValidatedEnvelope) !void {
@@ -1220,7 +1222,7 @@ fn redactComment(allocator: Allocator, db: *SqliteDb, comment_id: []const u8, ev
     }
     var update = try db.prepare(
         \\UPDATE comments
-        \\SET redacted = 1, redacted_at = ?, redacted_actor_principal = ?, redacted_event_hash = ?
+        \\SET body = '', redacted = 1, redacted_at = ?, redacted_actor_principal = ?, redacted_event_hash = ?
         \\WHERE id = ?
     );
     defer update.deinit();

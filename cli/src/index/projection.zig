@@ -121,6 +121,16 @@ const DerivedReferenceTarget = struct {
     }
 };
 
+const DerivedReferenceToken = struct {
+    allocator: Allocator,
+    prefix: []u8,
+    object_kind: ?[]const u8,
+
+    fn deinit(self: *DerivedReferenceToken) void {
+        self.allocator.free(self.prefix);
+    }
+};
+
 pub fn rebuildDerivedCommitReferences(allocator: Allocator, db: *SqliteDb, refs_raw: []const u8) !void {
     try db.exec("DELETE FROM commit_references");
 
@@ -146,14 +156,14 @@ pub fn rebuildDerivedCommitReferences(allocator: Allocator, db: *SqliteDb, refs_
         const message = record[first + 1 ..];
         if (commit_oid.len == 0 or message.len == 0) continue;
 
-        var prefixes: std.ArrayList([]u8) = .empty;
-        defer freeStringArrayList(allocator, &prefixes);
-        try collectReferencePrefixes(allocator, message, &prefixes);
+        var tokens: std.ArrayList(DerivedReferenceToken) = .empty;
+        defer freeDerivedReferenceTokens(allocator, &tokens);
+        try collectReferenceTokens(allocator, message, &tokens);
 
-        for (prefixes.items) |prefix| {
-            var target = (try resolveDerivedReference(allocator, db, prefix)) orelse continue;
+        for (tokens.items) |token| {
+            var target = (try resolveDerivedReference(allocator, db, token.prefix, token.object_kind)) orelse continue;
             defer target.deinit();
-            try insertDerivedCommitReference(&insert, commit_oid, target.object_kind, target.object_id, prefix);
+            try insertDerivedCommitReference(&insert, commit_oid, target.object_kind, target.object_id, token.prefix);
         }
     }
 }
@@ -184,21 +194,49 @@ fn dataPlaneCommitLog(allocator: Allocator, data_refs: []const []u8) ![]u8 {
     return gitCheckedMax(allocator, argv.items, max_derived_commit_log_bytes);
 }
 
-fn collectReferencePrefixes(allocator: Allocator, message: []const u8, prefixes: *std.ArrayList([]u8)) !void {
+fn collectReferenceTokens(allocator: Allocator, message: []const u8, tokens: *std.ArrayList(DerivedReferenceToken)) !void {
     var i: usize = 0;
-    while (i < message.len) : (i += 1) {
-        if (message[i] != '#') continue;
-        const start = i + 1;
-        if (start >= message.len or !std.ascii.isHex(message[start])) continue;
-
-        var end = start;
-        while (end < message.len and std.ascii.isHex(message[end])) : (end += 1) {}
-        if (end < message.len and isReferenceTrailingIdentifier(message[end])) continue;
-        const raw_prefix = message[start..end];
-        i = end;
-        if (!isReferencePrefixCandidate(raw_prefix)) continue;
-        try appendUniqueLowerPrefix(allocator, prefixes, raw_prefix);
+    while (i < message.len) {
+        if (message[i] == '#') {
+            if (try appendReferenceTokenAt(allocator, message, i + 1, null, tokens)) |end| {
+                i = end;
+                continue;
+            }
+        } else if (startsWithAt(message, i, "issue:")) {
+            if (try appendReferenceTokenAt(allocator, message, i + "issue:".len, "issue", tokens)) |end| {
+                i = end;
+                continue;
+            }
+        } else if (startsWithAt(message, i, "pr:")) {
+            if (try appendReferenceTokenAt(allocator, message, i + "pr:".len, "pull", tokens)) |end| {
+                i = end;
+                continue;
+            }
+        }
+        i += 1;
     }
+}
+
+fn appendReferenceTokenAt(
+    allocator: Allocator,
+    message: []const u8,
+    start: usize,
+    object_kind: ?[]const u8,
+    tokens: *std.ArrayList(DerivedReferenceToken),
+) !?usize {
+    if (start >= message.len or !std.ascii.isHex(message[start])) return null;
+
+    var end = start;
+    while (end < message.len and std.ascii.isHex(message[end])) : (end += 1) {}
+    if (end < message.len and isReferenceTrailingIdentifier(message[end])) return null;
+    const raw_prefix = message[start..end];
+    if (!isReferencePrefixCandidate(raw_prefix)) return null;
+    try appendUniqueReferenceToken(allocator, tokens, raw_prefix, object_kind);
+    return end;
+}
+
+fn startsWithAt(value: []const u8, index: usize, prefix: []const u8) bool {
+    return index <= value.len and value.len - index >= prefix.len and std.mem.eql(u8, value[index .. index + prefix.len], prefix);
 }
 
 fn isReferenceTrailingIdentifier(c: u8) bool {
@@ -209,32 +247,49 @@ fn isReferencePrefixCandidate(prefix: []const u8) bool {
     return util.isObjectRefPrefix(prefix) or parsePositiveDecimal(prefix) != null;
 }
 
-fn appendUniqueLowerPrefix(allocator: Allocator, prefixes: *std.ArrayList([]u8), raw_prefix: []const u8) !void {
+fn appendUniqueReferenceToken(
+    allocator: Allocator,
+    tokens: *std.ArrayList(DerivedReferenceToken),
+    raw_prefix: []const u8,
+    object_kind: ?[]const u8,
+) !void {
     var prefix = try allocator.alloc(u8, raw_prefix.len);
     errdefer allocator.free(prefix);
     for (raw_prefix, 0..) |c, idx| prefix[idx] = std.ascii.toLower(c);
 
-    for (prefixes.items) |existing| {
-        if (std.mem.eql(u8, existing, prefix)) {
+    for (tokens.items) |existing| {
+        if (optionalStringEql(existing.object_kind, object_kind) and std.mem.eql(u8, existing.prefix, prefix)) {
             allocator.free(prefix);
             return;
         }
     }
 
-    try prefixes.append(allocator, prefix);
+    try tokens.append(allocator, .{
+        .allocator = allocator,
+        .prefix = prefix,
+        .object_kind = object_kind,
+    });
 }
 
-fn resolveDerivedReference(allocator: Allocator, db: *SqliteDb, prefix: []const u8) !?DerivedReferenceTarget {
+fn optionalStringEql(left: ?[]const u8, right: ?[]const u8) bool {
+    if (left) |left_value| {
+        const right_value = right orelse return false;
+        return std.mem.eql(u8, left_value, right_value);
+    }
+    return right == null;
+}
+
+fn resolveDerivedReference(allocator: Allocator, db: *SqliteDb, prefix: []const u8, object_kind: ?[]const u8) !?DerivedReferenceTarget {
     if (util.isObjectRefPrefix(prefix)) {
-        if (try resolveDerivedHashReference(allocator, db, prefix)) |target| return target;
+        if (try resolveDerivedHashReference(allocator, db, prefix, object_kind)) |target| return target;
     }
     if (parsePositiveDecimal(prefix)) |number| {
-        return try resolveDerivedLegacyReference(allocator, db, number);
+        return try resolveDerivedLegacyReference(allocator, db, number, object_kind);
     }
     return null;
 }
 
-fn resolveDerivedHashReference(allocator: Allocator, db: *SqliteDb, prefix: []const u8) !?DerivedReferenceTarget {
+fn resolveDerivedHashReference(allocator: Allocator, db: *SqliteDb, prefix: []const u8, expected_kind: ?[]const u8) !?DerivedReferenceTarget {
     var stmt = try db.prepare(
         \\SELECT object_kind, id FROM (
         \\  SELECT 'issue' AS object_kind, id FROM issues
@@ -254,6 +309,13 @@ fn resolveDerivedHashReference(allocator: Allocator, db: *SqliteDb, prefix: []co
         errdefer allocator.free(candidate_kind);
         const candidate_id = try stmt.columnTextDup(allocator, 1);
         errdefer allocator.free(candidate_id);
+        if (expected_kind) |kind| {
+            if (!std.mem.eql(u8, candidate_kind, kind)) {
+                allocator.free(candidate_kind);
+                allocator.free(candidate_id);
+                continue;
+            }
+        }
 
         var ref_buf: [util.max_object_ref_len]u8 = undefined;
         const object_ref = util.objectRefPrefix(ref_buf[0..prefix.len], candidate_id);
@@ -288,7 +350,7 @@ fn resolveDerivedHashReference(allocator: Allocator, db: *SqliteDb, prefix: []co
     return target;
 }
 
-fn resolveDerivedLegacyReference(allocator: Allocator, db: *SqliteDb, number: i64) !?DerivedReferenceTarget {
+fn resolveDerivedLegacyReference(allocator: Allocator, db: *SqliteDb, number: i64, expected_kind: ?[]const u8) !?DerivedReferenceTarget {
     var stmt = try db.prepare(
         \\SELECT object_kind, object_id
         \\FROM legacy_aliases
@@ -309,6 +371,13 @@ fn resolveDerivedLegacyReference(allocator: Allocator, db: *SqliteDb, number: i6
         errdefer allocator.free(candidate_kind);
         const candidate_id = try stmt.columnTextDup(allocator, 1);
         errdefer allocator.free(candidate_id);
+        if (expected_kind) |kind| {
+            if (!std.mem.eql(u8, candidate_kind, kind)) {
+                allocator.free(candidate_kind);
+                allocator.free(candidate_id);
+                continue;
+            }
+        }
 
         if (object_id != null) {
             allocator.free(candidate_kind);
@@ -362,6 +431,11 @@ fn insertDerivedCommitReference(
 fn freeStringArrayList(allocator: Allocator, list: *std.ArrayList([]u8)) void {
     for (list.items) |value| allocator.free(value);
     list.deinit(allocator);
+}
+
+fn freeDerivedReferenceTokens(allocator: Allocator, tokens: *std.ArrayList(DerivedReferenceToken)) void {
+    for (tokens.items) |*token| token.deinit();
+    tokens.deinit(allocator);
 }
 
 pub fn projectStoredEvent(allocator: Allocator, db: *SqliteDb, event_hash: []const u8, body: []const u8, auth_phase: bool) !void {
@@ -1551,18 +1625,25 @@ pub fn insertIndexedEvent(
     try stmt.stepDone();
 }
 
-test "data commit reference parser extracts unique hash and legacy refs" {
-    var prefixes: std.ArrayList([]u8) = .empty;
-    defer freeStringArrayList(std.testing.allocator, &prefixes);
+test "data commit reference parser extracts unique typed hash and legacy refs" {
+    var tokens: std.ArrayList(DerivedReferenceToken) = .empty;
+    defer freeDerivedReferenceTokens(std.testing.allocator, &tokens);
 
-    try collectReferencePrefixes(
+    try collectReferenceTokens(
         std.testing.allocator,
-        "Fix #A1B2C3D and refs #a1b2c3d #42 #not-a-ref #abcdef0g #018f000",
-        &prefixes,
+        "Fix #A1B2C3D and refs #a1b2c3d #42 issue:0ABCDEF pr:123 #not-a-ref #abcdef0g #018f000 issue:0abcdef",
+        &tokens,
     );
 
-    try std.testing.expectEqual(@as(usize, 3), prefixes.items.len);
-    try std.testing.expectEqualStrings("a1b2c3d", prefixes.items[0]);
-    try std.testing.expectEqualStrings("42", prefixes.items[1]);
-    try std.testing.expectEqualStrings("018f000", prefixes.items[2]);
+    try std.testing.expectEqual(@as(usize, 5), tokens.items.len);
+    try std.testing.expectEqualStrings("a1b2c3d", tokens.items[0].prefix);
+    try std.testing.expect(tokens.items[0].object_kind == null);
+    try std.testing.expectEqualStrings("42", tokens.items[1].prefix);
+    try std.testing.expect(tokens.items[1].object_kind == null);
+    try std.testing.expectEqualStrings("0abcdef", tokens.items[2].prefix);
+    try std.testing.expectEqualStrings("issue", tokens.items[2].object_kind.?);
+    try std.testing.expectEqualStrings("123", tokens.items[3].prefix);
+    try std.testing.expectEqualStrings("pull", tokens.items[3].object_kind.?);
+    try std.testing.expectEqualStrings("018f000", tokens.items[4].prefix);
+    try std.testing.expect(tokens.items[4].object_kind == null);
 }

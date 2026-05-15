@@ -272,6 +272,15 @@ pub fn classAttr(base: []const u8, extra: []const Class) ClassAttr {
     return .{ .value = classes(base, extra) };
 }
 
+pub fn currentPrincipalOwned(allocator: Allocator, repo: Repo) !?[]u8 {
+    var cfg = loadConfig(allocator, repo.config_path) catch |err| switch (err) {
+        CliError.ConfigNotFound, CliError.ConfigInvalid => return null,
+        else => return err,
+    };
+    defer cfg.deinit();
+    return try allocator.dupe(u8, cfg.principal);
+}
+
 pub fn appendShellStart(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -325,6 +334,8 @@ pub fn appendShellStart(
     try appendNavLink(buf, allocator, active, "issues", "/issues", "Issues", stats.issues);
     try appendNavLink(buf, allocator, active, "pulls", "/pulls", "PRs", stats.pulls);
     try appendNavLink(buf, allocator, active, "projects", "/projects", "Projects", null);
+    try appendNavLink(buf, allocator, active, "milestones", "/milestones", "Milestones", null);
+    try appendNavLink(buf, allocator, active, "access", "/access", "Access", null);
     try appendNavLink(buf, allocator, active, "actions", "/actions", "Actions", null);
     try appendNavLink(buf, allocator, active, "events", "/events", "Events", null);
     try appendNavLink(buf, allocator, active, "refs", "/refs", "Refs", null);
