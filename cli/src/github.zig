@@ -786,10 +786,10 @@ fn importPullObject(allocator: Allocator, pull: std.json.ObjectMap, options: Imp
             .labels = labels,
             .assignees = assignees,
             .reviewers = reviewers,
-            .commit_count = jsonOptionalUnsigned(pull.get("commits")),
-            .changed_files = jsonOptionalUnsigned(pull.get("changed_files")),
-            .additions = jsonOptionalUnsigned(pull.get("additions")),
-            .deletions = jsonOptionalUnsigned(pull.get("deletions")),
+            .commit_count = githubOptionalUnsignedField(pull, &.{ "commits", "commit_count" }),
+            .changed_files = githubOptionalUnsignedField(pull, &.{ "changed_files", "files_changed", "file_count" }),
+            .additions = githubOptionalUnsignedField(pull, &.{"additions"}),
+            .deletions = githubOptionalUnsignedField(pull, &.{"deletions"}),
         },
     );
     stats.pulls += 1;
@@ -1923,10 +1923,20 @@ fn freeStringList(allocator: Allocator, values: [][]u8) void {
 }
 
 fn githubAuthorLogin(object: std.json.ObjectMap) ?[]const u8 {
+    if (event_mod.jsonString(object.get("source_author"))) |value| return value;
+    if (event_mod.jsonString(object.get("author_login"))) |value| return value;
+    if (event_mod.jsonString(object.get("user_login"))) |value| return value;
     if (nestedString(object, "user", "login")) |value| return value;
     if (nestedString(object, "author", "login")) |value| return value;
     if (event_mod.jsonString(object.get("author"))) |value| return value;
     if (event_mod.jsonString(object.get("user"))) |value| return value;
+    return null;
+}
+
+fn githubOptionalUnsignedField(object: std.json.ObjectMap, keys: []const []const u8) ?u64 {
+    for (keys) |key| {
+        if (jsonOptionalUnsigned(object.get(key))) |value| return value;
+    }
     return null;
 }
 

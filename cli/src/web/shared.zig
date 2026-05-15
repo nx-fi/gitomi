@@ -5,6 +5,7 @@ const index = @import("../index.zig");
 const json_writer = @import("../json_writer.zig");
 const repo_mod = @import("../repo.zig");
 const util = @import("../util.zig");
+const nouns_assets = @import("vendor/nouns-assets/image_data.zig");
 
 const Allocator = std.mem.Allocator;
 const CliError = errors.CliError;
@@ -421,118 +422,21 @@ fn appendAvatarContainer(
 }
 
 const NounsAvatarSeed = struct {
-    background: []const u8,
-    body: []const u8,
-    body_shadow: []const u8,
-    head: []const u8,
-    head_shadow: []const u8,
-    accent: []const u8,
-    glasses: []const u8,
-    lens: []const u8,
-    body_kind: u8,
-    head_kind: u8,
-    accessory_kind: u8,
-};
-
-const nouns_avatar_backgrounds = [_][]const u8{
-    "#d5d7e1",
-    "#e8d7ff",
-    "#c8edf0",
-    "#f7dfb1",
-    "#f3c9d7",
-    "#cde7be",
-    "#f4e8c1",
-    "#bfd2ff",
-};
-
-const nouns_avatar_bodies = [_][]const u8{
-    "#d13c5f",
-    "#2380c3",
-    "#29a37a",
-    "#f2a900",
-    "#6f56d9",
-    "#ef6b2e",
-    "#2c8f99",
-    "#d94ca7",
-};
-
-const nouns_avatar_body_shadows = [_][]const u8{
-    "#8f2440",
-    "#155179",
-    "#17634c",
-    "#9b6b00",
-    "#44328e",
-    "#9b421d",
-    "#195c63",
-    "#8f2d70",
-};
-
-const nouns_avatar_heads = [_][]const u8{
-    "#f9f871",
-    "#7bdff2",
-    "#ff8fab",
-    "#b8f2a5",
-    "#f6bd60",
-    "#cdb4db",
-    "#90dbf4",
-    "#ffafcc",
-};
-
-const nouns_avatar_head_shadows = [_][]const u8{
-    "#c8be32",
-    "#2e9db3",
-    "#cf5878",
-    "#73b862",
-    "#c37a18",
-    "#9871ad",
-    "#4fa9c3",
-    "#d46f97",
-};
-
-const nouns_avatar_accents = [_][]const u8{
-    "#111111",
-    "#ffffff",
-    "#e5484d",
-    "#2f6fed",
-    "#28a745",
-    "#f2cc60",
-    "#9b5de5",
-    "#00bbf9",
-};
-
-const nouns_avatar_glasses = [_][]const u8{
-    "#111111",
-    "#e5484d",
-    "#2f6fed",
-    "#1f883d",
-    "#f78166",
-    "#8250df",
-};
-
-const nouns_avatar_lenses = [_][]const u8{
-    "#f6f8fa",
-    "#fffbdd",
-    "#ddf4ff",
-    "#dafbe1",
-    "#fbefff",
+    background: usize,
+    body: usize,
+    accessory: usize,
+    head: usize,
+    glasses: usize,
 };
 
 fn nounsAvatarSeed(name: []const u8) NounsAvatarSeed {
     const hash = fnv1a64(name);
-    const body_index: usize = @intCast((hash >> 8) % nouns_avatar_bodies.len);
-    const head_index: usize = @intCast((hash >> 16) % nouns_avatar_heads.len);
     return .{
-        .background = nouns_avatar_backgrounds[@intCast(hash % nouns_avatar_backgrounds.len)],
-        .body = nouns_avatar_bodies[body_index],
-        .body_shadow = nouns_avatar_body_shadows[body_index],
-        .head = nouns_avatar_heads[head_index],
-        .head_shadow = nouns_avatar_head_shadows[head_index],
-        .accent = nouns_avatar_accents[@intCast((hash >> 24) % nouns_avatar_accents.len)],
-        .glasses = nouns_avatar_glasses[@intCast((hash >> 32) % nouns_avatar_glasses.len)],
-        .lens = nouns_avatar_lenses[@intCast((hash >> 40) % nouns_avatar_lenses.len)],
-        .body_kind = @intCast((hash >> 48) % 4),
-        .head_kind = @intCast((hash >> 52) % 4),
-        .accessory_kind = @intCast((hash >> 56) % 5),
+        .background = @intCast(hash % nouns_assets.bgcolors.len),
+        .body = @intCast((hash >> 8) % nouns_assets.bodies.len),
+        .accessory = @intCast((hash >> 20) % nouns_assets.accessories.len),
+        .head = @intCast((hash >> 32) % nouns_assets.heads.len),
+        .glasses = @intCast((hash >> 48) % nouns_assets.glasses.len),
     };
 }
 
@@ -547,98 +451,59 @@ fn fnv1a64(value: []const u8) u64 {
 
 fn appendNounsAvatarSvg(buf: *std.ArrayList(u8), allocator: Allocator, seed: NounsAvatarSeed) !void {
     try appendTemplate(buf, allocator,
-        \\<svg class="nouns-avatar-svg" viewBox="0 0 32 32" width="32" height="32" aria-hidden="true" focusable="false" shape-rendering="crispEdges" xmlns="http://www.w3.org/2000/svg">
-        \\<rect width="32" height="32" fill="{background}"/>
-    , .{ .background = seed.background });
-    try appendNounsAvatarBody(buf, allocator, seed);
-    try appendNounsAvatarHead(buf, allocator, seed);
-    try appendNounsAvatarAccessory(buf, allocator, seed);
-    try appendTemplate(buf, allocator,
-        \\<rect x="7" y="12" width="8" height="6" fill="{glasses}"/>
-        \\<rect x="17" y="12" width="8" height="6" fill="{glasses}"/>
-        \\<rect x="15" y="14" width="2" height="2" fill="{glasses}"/>
-        \\<rect x="9" y="14" width="4" height="2" fill="{lens}"/>
-        \\<rect x="19" y="14" width="4" height="2" fill="{lens}"/>
-        \\<rect x="13" y="20" width="6" height="2" fill="#111111" opacity="0.65"/>
+        \\<svg class="nouns-avatar-svg" width="320" height="320" viewBox="0 0 320 320" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
+        \\<rect width="100%" height="100%" fill="#{background}" />
+    , .{ .background = nouns_assets.bgcolors[seed.background] });
+    try appendNounsAvatarPartSvg(buf, allocator, nouns_assets.bodies[seed.body]);
+    try appendNounsAvatarPartSvg(buf, allocator, nouns_assets.accessories[seed.accessory]);
+    try appendNounsAvatarPartSvg(buf, allocator, nouns_assets.heads[seed.head]);
+    try appendNounsAvatarPartSvg(buf, allocator, nouns_assets.glasses[seed.glasses]);
+    try buf.appendSlice(allocator,
         \\</svg>
-    , .{
-        .glasses = seed.glasses,
-        .lens = seed.lens,
-    });
+    );
 }
 
-fn appendNounsAvatarBody(buf: *std.ArrayList(u8), allocator: Allocator, seed: NounsAvatarSeed) !void {
-    try appendTemplate(buf, allocator,
-        \\<rect x="8" y="22" width="16" height="10" fill="{body}"/>
-        \\<rect x="6" y="25" width="20" height="7" fill="{body}"/>
-        \\<rect x="6" y="29" width="20" height="3" fill="{body_shadow}" opacity="0.45"/>
-    , .{
-        .body = seed.body,
-        .body_shadow = seed.body_shadow,
-    });
-    switch (seed.body_kind) {
-        0 => try appendTemplate(buf, allocator,
-            \\<rect x="12" y="23" width="8" height="3" fill="{accent}" opacity="0.8"/>
-        , .{ .accent = seed.accent }),
-        1 => try appendTemplate(buf, allocator,
-            \\<rect x="8" y="25" width="16" height="2" fill="{accent}" opacity="0.72"/>
-            \\<rect x="8" y="30" width="16" height="2" fill="{accent}" opacity="0.72"/>
-        , .{ .accent = seed.accent }),
-        2 => try appendTemplate(buf, allocator,
-            \\<rect x="15" y="22" width="2" height="10" fill="{accent}" opacity="0.82"/>
-            \\<rect x="11" y="25" width="10" height="2" fill="{accent}" opacity="0.82"/>
-        , .{ .accent = seed.accent }),
-        else => try appendTemplate(buf, allocator,
-            \\<rect x="9" y="23" width="5" height="5" fill="{body_shadow}" opacity="0.7"/>
-            \\<rect x="18" y="23" width="5" height="5" fill="{body_shadow}" opacity="0.7"/>
-        , .{ .body_shadow = seed.body_shadow }),
+fn appendNounsAvatarPartSvg(buf: *std.ArrayList(u8), allocator: Allocator, data: []const u8) !void {
+    if (!std.mem.startsWith(u8, data, "0x") or data.len < 12) return error.InvalidNounsAsset;
+
+    const top: u16 = try hexByteAt(data, 4);
+    const right: u16 = try hexByteAt(data, 6);
+    const left: u16 = try hexByteAt(data, 10);
+    if (right <= left) return;
+
+    var current_x: u16 = left;
+    var current_y: u16 = top;
+    var cursor: usize = 12;
+    while (cursor + 4 <= data.len) : (cursor += 4) {
+        var draw_length: u16 = try hexByteAt(data, cursor);
+        const color_index: usize = try hexByteAt(data, cursor + 2);
+        while (draw_length > 0) {
+            const length = @min(draw_length, right - current_x);
+            if (length == 0) return error.InvalidNounsAsset;
+            if (color_index != 0) {
+                if (color_index >= nouns_assets.palette.len) return error.InvalidNounsAsset;
+                try appendTemplate(buf, allocator,
+                    \\<rect width="{width}" height="10" x="{x}" y="{y}" fill="#{color}" />
+                , .{
+                    .width = length * 10,
+                    .x = current_x * 10,
+                    .y = current_y * 10,
+                    .color = nouns_assets.palette[color_index],
+                });
+            }
+            current_x += length;
+            if (current_x == right) {
+                current_x = left;
+                current_y += 1;
+            }
+            draw_length -= length;
+        }
     }
 }
 
-fn appendNounsAvatarHead(buf: *std.ArrayList(u8), allocator: Allocator, seed: NounsAvatarSeed) !void {
-    switch (seed.head_kind) {
-        0 => try appendTemplate(buf, allocator,
-            \\<rect x="9" y="7" width="14" height="14" fill="{head}"/>
-            \\<rect x="21" y="10" width="3" height="7" fill="{head_shadow}" opacity="0.5"/>
-        , .{ .head = seed.head, .head_shadow = seed.head_shadow }),
-        1 => try appendTemplate(buf, allocator,
-            \\<rect x="8" y="10" width="16" height="10" fill="{head}"/>
-            \\<rect x="10" y="7" width="12" height="4" fill="{head}"/>
-            \\<rect x="22" y="11" width="3" height="7" fill="{head_shadow}" opacity="0.45"/>
-        , .{ .head = seed.head, .head_shadow = seed.head_shadow }),
-        2 => try appendTemplate(buf, allocator,
-            \\<rect x="10" y="6" width="12" height="15" fill="{head}"/>
-            \\<rect x="8" y="10" width="16" height="8" fill="{head}"/>
-            \\<rect x="20" y="8" width="3" height="11" fill="{head_shadow}" opacity="0.48"/>
-        , .{ .head = seed.head, .head_shadow = seed.head_shadow }),
-        else => try appendTemplate(buf, allocator,
-            \\<rect x="8" y="8" width="16" height="12" fill="{head}"/>
-            \\<rect x="10" y="5" width="10" height="4" fill="{head}"/>
-            \\<rect x="6" y="12" width="4" height="5" fill="{head}"/>
-            \\<rect x="21" y="9" width="3" height="10" fill="{head_shadow}" opacity="0.48"/>
-        , .{ .head = seed.head, .head_shadow = seed.head_shadow }),
-    }
-}
-
-fn appendNounsAvatarAccessory(buf: *std.ArrayList(u8), allocator: Allocator, seed: NounsAvatarSeed) !void {
-    switch (seed.accessory_kind) {
-        0 => {},
-        1 => try appendTemplate(buf, allocator,
-            \\<rect x="10" y="5" width="12" height="2" fill="{accent}"/>
-        , .{ .accent = seed.accent }),
-        2 => try appendTemplate(buf, allocator,
-            \\<rect x="11" y="4" width="10" height="3" fill="{accent}"/>
-            \\<rect x="9" y="7" width="14" height="2" fill="{accent}"/>
-        , .{ .accent = seed.accent }),
-        3 => try appendTemplate(buf, allocator,
-            \\<rect x="13" y="3" width="6" height="4" fill="{accent}"/>
-            \\<rect x="11" y="6" width="10" height="2" fill="{accent}"/>
-        , .{ .accent = seed.accent }),
-        else => try appendTemplate(buf, allocator,
-            \\<rect x="8" y="7" width="16" height="2" fill="{accent}"/>
-            \\<rect x="20" y="5" width="4" height="2" fill="{accent}"/>
-        , .{ .accent = seed.accent }),
-    }
+fn hexByteAt(data: []const u8, offset: usize) !u8 {
+    if (offset + 2 > data.len) return error.InvalidNounsAsset;
+    return std.fmt.parseInt(u8, data[offset .. offset + 2], 16) catch error.InvalidNounsAsset;
 }
 
 fn appendShortcutConfigScript(buf: *std.ArrayList(u8), allocator: Allocator, cfg_opt: ?Config) !void {
@@ -714,6 +579,50 @@ pub fn appendEmptyState(buf: *std.ArrayList(u8), allocator: Allocator, title: []
         .title = title,
         .detail = detail,
     });
+}
+
+pub const MarkdownEditorOptions = struct {
+    name: []const u8 = "body",
+    rows: usize = 7,
+    placeholder: []const u8 = "Leave a comment",
+    value: []const u8 = "",
+    required: bool = true,
+};
+
+pub fn appendMarkdownEditor(buf: *std.ArrayList(u8), allocator: Allocator, options: MarkdownEditorOptions) !void {
+    try appendTemplate(buf, allocator,
+        \\    <div class="markdown-editor" data-markdown-editor>
+        \\      <div class="markdown-editor-tabs" role="tablist" aria-label="Markdown editor mode">
+        \\        <button class="active" type="button" role="tab" aria-selected="true" data-markdown-tab="write">Write</button>
+        \\        <button type="button" role="tab" aria-selected="false" data-markdown-tab="preview">Preview</button>
+        \\      </div>
+        \\      <div class="markdown-editor-toolbar" aria-label="Markdown formatting">
+        \\        <button type="button" data-markdown-action="heading" aria-label="Heading" title="Heading">H</button>
+        \\        <button type="button" data-markdown-action="bold" aria-label="Bold" title="Bold"><strong>B</strong></button>
+        \\        <button type="button" data-markdown-action="italic" aria-label="Italic" title="Italic"><em>I</em></button>
+        \\        <button type="button" data-markdown-action="quote" aria-label="Quote" title="Quote"><span class="md-icon md-icon-quote" aria-hidden="true"></span></button>
+        \\        <button type="button" data-markdown-action="code" aria-label="Code" title="Code"><span class="md-icon md-icon-code" aria-hidden="true"></span></button>
+        \\        <button type="button" data-markdown-action="link" aria-label="Link" title="Link"><span class="md-icon md-icon-link" aria-hidden="true"></span></button>
+        \\        <span class="markdown-editor-divider" aria-hidden="true"></span>
+        \\        <button type="button" data-markdown-action="unordered-list" aria-label="Bulleted list" title="Bulleted list"><span class="md-icon md-icon-ul" aria-hidden="true"></span></button>
+        \\        <button type="button" data-markdown-action="ordered-list" aria-label="Numbered list" title="Numbered list"><span class="md-icon md-icon-ol" aria-hidden="true"></span></button>
+        \\        <button type="button" data-markdown-action="task-list" aria-label="Task list" title="Task list"><span class="md-icon md-icon-task" aria-hidden="true"></span></button>
+        \\        <span class="markdown-editor-divider" aria-hidden="true"></span>
+        \\        <button type="button" data-markdown-action="mention" aria-label="Mention" title="Mention">@</button>
+        \\        <button type="button" data-markdown-action="reference" aria-label="Issue reference" title="Issue reference">#</button>
+        \\      </div>
+        \\      <textarea name="{name}" rows="{rows}" placeholder="{placeholder}"
+    , .{
+        .name = options.name,
+        .rows = options.rows,
+        .placeholder = options.placeholder,
+    });
+    if (options.required) try buf.appendSlice(allocator, " required");
+    try appendTemplate(buf, allocator,
+        \\ data-markdown-input>{value}</textarea>
+        \\      <div class="markdown-editor-preview markdown-body" data-markdown-preview hidden></div>
+        \\    </div>
+    , .{ .value = options.value });
 }
 
 pub fn appendEmptyCell(buf: *std.ArrayList(u8), allocator: Allocator, colspan: usize, message: []const u8) !void {
@@ -1241,7 +1150,7 @@ test "web template supports typed href classes and formatters" {
     try std.testing.expectEqualStrings("<a class=\"button active\" href=\"/code?ref=feature/test&amp;path=src/a%20b.zig&amp;view=preview\">12,345 83.3%</a>", buf.items);
 }
 
-test "web avatar renders offline nouns-style svg" {
+test "web avatar renders vendored nouns asset svg" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
 
@@ -1249,7 +1158,9 @@ test "web avatar renders offline nouns-style svg" {
 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "nouns-avatar-svg") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "title=\"A&amp;B &lt;user&gt;\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<rect x=\"7\" y=\"12\" width=\"8\" height=\"6\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "viewBox=\"0 0 320 320\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<rect width=\"100%\" height=\"100%\" fill=\"#") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<rect width=\"") != null);
 }
 
 test "web issue linked text autolinks legacy and hash references" {

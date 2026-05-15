@@ -1643,30 +1643,8 @@ fn appendIssueCommentForm(
     try appendTemplate(buf, allocator,
         \\/comments">
         \\    <input type="hidden" name="reply_parent_ref" value="" data-reply-parent-ref>
-        \\    <div class="markdown-editor" data-markdown-editor>
-        \\      <div class="markdown-editor-tabs" role="tablist" aria-label="Markdown editor mode">
-        \\        <button class="active" type="button" role="tab" aria-selected="true" data-markdown-tab="write">Write</button>
-        \\        <button type="button" role="tab" aria-selected="false" data-markdown-tab="preview">Preview</button>
-        \\      </div>
-        \\      <div class="markdown-editor-toolbar" aria-label="Markdown formatting">
-        \\        <button type="button" data-markdown-action="heading" aria-label="Heading" title="Heading">H</button>
-        \\        <button type="button" data-markdown-action="bold" aria-label="Bold" title="Bold"><strong>B</strong></button>
-        \\        <button type="button" data-markdown-action="italic" aria-label="Italic" title="Italic"><em>I</em></button>
-        \\        <button type="button" data-markdown-action="quote" aria-label="Quote" title="Quote"><span class="md-icon md-icon-quote" aria-hidden="true"></span></button>
-        \\        <button type="button" data-markdown-action="code" aria-label="Code" title="Code"><span class="md-icon md-icon-code" aria-hidden="true"></span></button>
-        \\        <button type="button" data-markdown-action="link" aria-label="Link" title="Link"><span class="md-icon md-icon-link" aria-hidden="true"></span></button>
-        \\        <span class="markdown-editor-divider" aria-hidden="true"></span>
-        \\        <button type="button" data-markdown-action="unordered-list" aria-label="Bulleted list" title="Bulleted list"><span class="md-icon md-icon-ul" aria-hidden="true"></span></button>
-        \\        <button type="button" data-markdown-action="ordered-list" aria-label="Numbered list" title="Numbered list"><span class="md-icon md-icon-ol" aria-hidden="true"></span></button>
-        \\        <button type="button" data-markdown-action="task-list" aria-label="Task list" title="Task list"><span class="md-icon md-icon-task" aria-hidden="true"></span></button>
-        \\        <span class="markdown-editor-divider" aria-hidden="true"></span>
-        \\        <button type="button" data-markdown-action="mention" aria-label="Mention" title="Mention">@</button>
-        \\        <button type="button" data-markdown-action="reference" aria-label="Issue reference" title="Issue reference">#</button>
-        \\      </div>
-        \\      <textarea name="body" rows="7" placeholder="Leave a comment" required data-markdown-input>{body_value}</textarea>
-        \\      <div class="markdown-editor-preview markdown-body" data-markdown-preview hidden></div>
-        \\    </div>
-    , .{ .body_value = body_value });
+    , .{});
+    try shared.appendMarkdownEditor(buf, allocator, .{ .value = body_value });
     if (error_message) |message| {
         try appendTemplate(buf, allocator,
             \\    <p class="issue-comment-error">{message}</p>
