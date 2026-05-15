@@ -1458,9 +1458,10 @@ fn appendRootSloc(buf: *std.ArrayList(u8), allocator: Allocator, stats_opt: ?sou
     });
     for (stats.rows[0..@min(stats.rows.len, 3)]) |stat| {
         try appendTemplate(buf, allocator,
-            \\<div class="root-sloc-row"><span class="root-sloc-language"><span class="language-dot" style="--language-color: {color};"></span><span>{name}</span></span><span class="root-sloc-metrics"><span><strong>{code}</strong> code</span><span><strong>{test_count}</strong> test</span><span><strong>{comment}</strong> comments</span></span></div>
+            \\<div class="root-sloc-row" style="--language-color: {color}; --share: {share};"><span class="root-sloc-language"><span class="language-dot"></span><span>{name}</span></span><span class="root-sloc-metrics"><span><strong>{code}</strong> code</span><span><strong>{test_count}</strong> test</span><span><strong>{comment}</strong> comments</span></span></div>
         , .{
             .color = source_stats.languageColor(stat.language),
+            .share = shared.percent(stat.total(), total),
             .name = source_stats.languageDisplayName(stat.language),
             .code = shared.groupedUnsigned(stat.code),
             .test_count = shared.groupedUnsigned(stat.test_count),
