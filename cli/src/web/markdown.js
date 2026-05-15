@@ -192,6 +192,11 @@
         setReplyTarget(menu.dataset.issueReplyRef || "");
         closeIssueMenus(null);
       }
+      return;
+    }
+    if (action === "edit") {
+      const href = menu.dataset.issueEditHref || "";
+      if (href) window.location.href = href;
     }
   }
 

@@ -226,6 +226,15 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         const body = try issues_page.renderIssuesPage(allocator, repo, request.target);
         defer allocator.free(body);
         try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
+    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.startsWith(u8, request.path, "/issues/") and std.mem.endsWith(u8, request.path, "/edit")) {
+        const issue_ref_start = "/issues/".len;
+        const issue_ref_end = request.path.len - "/edit".len;
+        if (issue_ref_start >= issue_ref_end or request.path[issue_ref_end - 1] == '/') {
+            try shared.sendPlainResponse(allocator, stream, 404, "Not Found", "Not found\n");
+            return;
+        }
+        const issue_ref = request.path[issue_ref_start..issue_ref_end];
+        try issues_page.handleIssueEditPost(allocator, repo, stream, issue_ref, request.body);
     } else if (std.mem.eql(u8, request.method, "POST") and std.mem.startsWith(u8, request.path, "/issues/") and std.mem.endsWith(u8, request.path, "/comments")) {
         const issue_ref_start = "/issues/".len;
         const issue_ref_end = request.path.len - "/comments".len;
@@ -244,6 +253,17 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         }
         const issue_ref = request.path[issue_ref_start..issue_ref_end];
         try issues_page.handleIssueSidebarPost(allocator, repo, stream, issue_ref, request.body);
+    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.startsWith(u8, request.path, "/issues/") and std.mem.endsWith(u8, request.path, "/edit")) {
+        const issue_ref_start = "/issues/".len;
+        const issue_ref_end = request.path.len - "/edit".len;
+        if (issue_ref_start >= issue_ref_end or request.path[issue_ref_end - 1] == '/') {
+            try shared.sendPlainResponse(allocator, stream, 404, "Not Found", "Not found\n");
+            return;
+        }
+        const issue_ref = request.path[issue_ref_start..issue_ref_end];
+        const body = try issues_page.renderIssueEditPage(allocator, repo, issue_ref, request.target);
+        defer allocator.free(body);
+        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.startsWith(u8, request.path, "/issues/")) {
         const issue_ref = request.path["/issues/".len..];
         const body = try issues_page.renderIssueDetailPage(allocator, repo, issue_ref);
