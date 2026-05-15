@@ -48,7 +48,8 @@ gt issue open --title TITLE [--body BODY] [--label LABEL] [--assignee PRINCIPAL]
 gt issue edit ISSUE [--title TITLE] [--body BODY] [--state open|closed] [--label LABEL] [--unlabel LABEL] [--assignee PRINCIPAL] [--unassign PRINCIPAL]
 gt issue title ISSUE --title TITLE
 gt issue body ISSUE --body BODY
-gt issue close|reopen ISSUE
+gt issue comment ISSUE --body BODY [--reply COMMENT]
+gt issue close|reopen ISSUE [--body BODY]
 gt issue label ISSUE add|remove LABEL
 gt issue assignee ISSUE add|remove PRINCIPAL
 gt issue milestone ISSUE --milestone MILESTONE
@@ -74,7 +75,9 @@ gt pr head PR --head HEAD
 gt pr label PR add|remove LABEL
 gt pr assignee PR add|remove PRINCIPAL
 gt pr reviewer PR add|remove PRINCIPAL
-gt pr comment PR --body BODY
+gt pr comment PR --body BODY [--reply COMMENT]
+gt pr comment PR --body BODY --file PATH --side old|new --line LINE
+gt pr comment PR --body BODY --file PATH --side old|new --start-line LINE [--end-line LINE]
 gt pr react|unreact PR EMOJI
 gt pr merge PR [--merge-oid OID] [--target-oid OID]
 gt comment list issue|pr OBJECT [--json]
@@ -113,7 +116,10 @@ client UUIDs are retained only as labels/idempotency keys. New events include
 causal heads.
 
 `gt issue edit` and `gt pr edit` batch multiple scalar and collection updates
-into one signed `issue.updated` or `pull.updated` event.
+into one signed `issue.updated` or `pull.updated` event. `gt issue comment`
+mirrors the issue conversation form, including replies, and `gt issue close`
+or `gt issue reopen` can write the same optional note that the web UI accepts
+when changing issue state.
 
 `gt project create` creates a signed project board event with kanban columns.
 When no columns are supplied it creates `Todo`, `In Progress`, and `Done`.
@@ -125,6 +131,8 @@ state, and `gt milestone close` / `gt milestone reopen` change milestone state.
 
 `gt pull` remains accepted as a compatibility alias for `gt pr`. `gt pr view`
 also accepts `show`, and `gt pr create` also accepts `open` and `new`.
+`gt pr comment` can reply to an existing comment or add the same file/line
+review note produced from the pull request Files tab.
 
 `gt sync` fetches remote genesis and inbox refs into `refs/gitomi/staging/*`,
 then admits only compatible genesis refs and new or fast-forward inbox refs into

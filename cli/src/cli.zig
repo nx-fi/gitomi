@@ -21,6 +21,7 @@ const runs = @import("runs.zig");
 const sync = @import("sync.zig");
 const util = @import("util.zig");
 const web = @import("web.zig");
+const work_items = @import("work_items.zig");
 
 const Allocator = std.mem.Allocator;
 const CliError = errors.CliError;
@@ -111,13 +112,14 @@ fn printUsage() !void {
         \\  gt reset local [--yes]
         \\  gt reset remote [--remote REMOTE] [--yes]
         \\  gt events list [--json] [--limit N] [--ref REF]
-        \\  gt issue list [--json]
-        \\  gt issue show ISSUE [--json]
+        \\  gt issue list [--json] [--view agent] [--state open|closed|all] [--author PRINCIPAL] [--label LABEL] [--project PROJECT] [--milestone MILESTONE] [--assignee PRINCIPAL] [--sort newest|oldest|updated] [--limit N]
+        \\  gt issue show ISSUE [--json] [--view agent]
         \\  gt issue open --title TITLE [--body BODY] [--label LABEL] [--assignee PRINCIPAL]
         \\  gt issue edit ISSUE [--title TITLE] [--body BODY] [--state open|closed] [--label LABEL] [--unlabel LABEL] [--assignee PRINCIPAL] [--unassign PRINCIPAL]
         \\  gt issue title ISSUE --title TITLE
         \\  gt issue body ISSUE --body BODY
-        \\  gt issue close|reopen ISSUE
+        \\  gt issue comment ISSUE --body BODY [--reply COMMENT]
+        \\  gt issue close|reopen ISSUE [--body BODY]
         \\  gt issue label ISSUE add|remove LABEL
         \\  gt issue assignee ISSUE add|remove PRINCIPAL
         \\  gt issue milestone ISSUE --milestone MILESTONE
@@ -131,8 +133,8 @@ fn printUsage() !void {
         \\  gt milestone create --title TITLE [--description TEXT] [--due DATE]
         \\  gt milestone edit MILESTONE [--title TITLE] [--description TEXT] [--due DATE] [--state open|closed]
         \\  gt milestone close|reopen MILESTONE
-        \\  gt pr list [--json]
-        \\  gt pr view PR [--json]
+        \\  gt pr list [--json] [--view agent] [--state open|merged|closed|all] [--limit N]
+        \\  gt pr view PR [--json] [--view agent] [--include-diff]
         \\  gt pr create --title TITLE --base BASE --head HEAD [--body BODY] [--draft]
         \\  gt pr edit PR [--title TITLE] [--body BODY] [--state open|closed] [--base BASE] [--head HEAD] [--add-label LABEL] [--remove-label LABEL] [--add-assignee PRINCIPAL] [--remove-assignee PRINCIPAL] [--add-reviewer PRINCIPAL] [--remove-reviewer PRINCIPAL]
         \\  gt pr title PR --title TITLE
@@ -143,7 +145,9 @@ fn printUsage() !void {
         \\  gt pr label PR add|remove LABEL
         \\  gt pr assignee PR add|remove PRINCIPAL
         \\  gt pr reviewer PR add|remove PRINCIPAL
-        \\  gt pr comment PR --body BODY
+        \\  gt pr comment PR --body BODY [--reply COMMENT]
+        \\  gt pr comment PR --body BODY --file PATH --side old|new --line LINE
+        \\  gt pr comment PR --body BODY --file PATH --side old|new --start-line LINE [--end-line LINE]
         \\  gt pr react|unreact PR EMOJI
         \\  gt pr merge PR [--merge-oid OID] [--target-oid OID]
         \\  gt comment list issue|pr OBJECT [--json]
@@ -161,9 +165,9 @@ fn printUsage() !void {
         \\  gt actions workflows [--json] [--ref REF|--oid OID]
         \\  gt actions request --workflow WORKFLOW [--ref REF|--oid OID] [--event EVENT]
         \\  gt actions complete RUN --conclusion CONCLUSION [--workflow WORKFLOW] [--ref REF|--oid OID] [--event EVENT]
-        \\  gt actions run --event EVENT [--ref REF|--oid OID] [--object-id ID] [--dry-run] [--act PATH] [-- ACT_ARGS...]
-        \\  gt actions run-requested [RUN] [--dry-run] [--act PATH] [-- ACT_ARGS...]
-        \\  gt actions daemon [--once] [--replay] [--interval-ms N] [--dry-run] [--act PATH] [-- ACT_ARGS...]
+        \\  gt actions run --event EVENT [--ref REF|--oid OID] [--object-id ID] [--dry-run] [--act PATH] [--agent-runner PATH] [-- ACT_ARGS...]
+        \\  gt actions run-requested [RUN] [--dry-run] [--act PATH] [--agent-runner PATH] [-- ACT_ARGS...]
+        \\  gt actions daemon [--once] [--replay] [--interval-ms N] [--dry-run] [--act PATH] [--agent-runner PATH] [-- ACT_ARGS...]
         \\  gt runs prune [--dry-run] [--max-age-days N] [--max-count N] [--max-bytes N]
         \\  gt sync [--remote REMOTE] [--pull-only|--push-only]
         \\  gt github import [--repo OWNER/REPO] [--token TOKEN] [--from-file PATH] [--no-comments] [--no-projects]
@@ -536,17 +540,65 @@ fn cmdEvents(allocator: Allocator, args: []const []const u8) !void {
 
 fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
     if (args.len == 0) {
-        try io.eprint("gt issue: expected subcommand 'list', 'show', 'open', or an issue update command\n", .{});
+        try io.eprint("gt issue: expected subcommand 'list', 'show', 'open', 'comment', or an issue update command\n", .{});
         return CliError.UserError;
     }
 
     if (std.mem.eql(u8, args[0], "list")) {
         var json = false;
+        var agent_view = false;
+        var filters = work_items.IssueListOptions{ .allocator = allocator };
+        defer filters.deinit();
+        var filtered = false;
         var i: usize = 1;
         while (i < args.len) : (i += 1) {
             const arg = args[i];
             if (std.mem.eql(u8, arg, "--json")) {
                 json = true;
+            } else if (std.mem.eql(u8, arg, "--view")) {
+                const value = try util.requireValue(args, &i, "--view");
+                if (std.mem.eql(u8, value, "agent") or std.mem.eql(u8, value, "full")) {
+                    agent_view = true;
+                } else if (std.mem.eql(u8, value, "summary")) {
+                    agent_view = false;
+                } else {
+                    try io.eprint("gt issue list: --view must be summary or agent\n", .{});
+                    return CliError.UserError;
+                }
+            } else if (std.mem.eql(u8, arg, "--agent")) {
+                agent_view = true;
+            } else if (std.mem.eql(u8, arg, "--state")) {
+                const value = try util.requireValue(args, &i, "--state");
+                filters.state = work_items.issueStateFilterFromValue(value) orelse {
+                    try io.eprint("gt issue list: --state must be open, closed, or all\n", .{});
+                    return CliError.UserError;
+                };
+                filtered = true;
+            } else if (std.mem.eql(u8, arg, "--author")) {
+                filters.author = try dupeNonEmptyOption(allocator, "gt issue list", "--author", try util.requireValue(args, &i, "--author"));
+                filtered = true;
+            } else if (std.mem.eql(u8, arg, "--label")) {
+                filters.label = try dupeNonEmptyOption(allocator, "gt issue list", "--label", try util.requireValue(args, &i, "--label"));
+                filtered = true;
+            } else if (std.mem.eql(u8, arg, "--project")) {
+                filters.project = try dupeNonEmptyOption(allocator, "gt issue list", "--project", try util.requireValue(args, &i, "--project"));
+                filtered = true;
+            } else if (std.mem.eql(u8, arg, "--milestone")) {
+                filters.milestone = try dupeNonEmptyOption(allocator, "gt issue list", "--milestone", try util.requireValue(args, &i, "--milestone"));
+                filtered = true;
+            } else if (std.mem.eql(u8, arg, "--assignee")) {
+                filters.assignee = try dupeNonEmptyOption(allocator, "gt issue list", "--assignee", try util.requireValue(args, &i, "--assignee"));
+                filtered = true;
+            } else if (std.mem.eql(u8, arg, "--sort")) {
+                const value = try util.requireValue(args, &i, "--sort");
+                filters.sort = work_items.issueSortFromValue(value) orelse {
+                    try io.eprint("gt issue list: --sort must be newest, oldest, or updated\n", .{});
+                    return CliError.UserError;
+                };
+                filtered = true;
+            } else if (std.mem.eql(u8, arg, "--limit")) {
+                filters.limit = try parsePositiveIntegerOption("gt issue list", "--limit", try util.requireValue(args, &i, "--limit"));
+                filtered = true;
             } else {
                 try io.eprint("gt issue list: unknown option '{s}'\n", .{arg});
                 return CliError.UserError;
@@ -556,6 +608,47 @@ fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
         var repo = try repo_mod.discoverRepo(allocator);
         defer repo.deinit();
         try index.ensureIndex(allocator, repo);
+        if (agent_view) {
+            var db = try work_items.SqliteDb.open(allocator, repo.index_path, work_items.sqlite_db.sqlite.SQLITE_OPEN_READONLY, false);
+            defer db.deinit();
+            var buf: std.ArrayList(u8) = .empty;
+            defer buf.deinit(allocator);
+            try work_items.appendIssueListAgentJson(&buf, allocator, &db, filters);
+            try io.out("{s}\n", .{buf.items});
+            return;
+        }
+        if (filtered) {
+            var db = try work_items.SqliteDb.open(allocator, repo.index_path, work_items.sqlite_db.sqlite.SQLITE_OPEN_READONLY, false);
+            defer db.deinit();
+            var stmt = try work_items.prepareIssueListStmt(allocator, &db, filters);
+            defer stmt.deinit();
+            while (try stmt.step()) {
+                var row = try work_items.issueListRowFromStmt(allocator, &stmt);
+                defer row.deinit(allocator);
+                if (json) {
+                    var buf: std.ArrayList(u8) = .empty;
+                    defer buf.deinit(allocator);
+                    try work_items.appendIssueListAgentJson(&buf, allocator, &db, .{
+                        .allocator = allocator,
+                        .state = filters.state,
+                        .q = filters.q,
+                        .author = filters.author,
+                        .label = filters.label,
+                        .project = filters.project,
+                        .milestone = filters.milestone,
+                        .assignee = filters.assignee,
+                        .sort = filters.sort,
+                        .limit = filters.limit,
+                    });
+                    try io.out("{s}\n", .{buf.items});
+                    return;
+                } else {
+                    var ref_buf: [util.short_object_ref_len]u8 = undefined;
+                    try io.out("#{s} {s} {s}\n", .{ util.shortObjectRef(&ref_buf, row.id), row.state, row.title });
+                }
+            }
+            return;
+        }
         try index.listIssuesFromIndex(allocator, repo, json);
         return;
     }
@@ -566,11 +659,24 @@ fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
             return CliError.UserError;
         }
         var json = false;
+        var agent_view = false;
         var i: usize = 2;
         while (i < args.len) : (i += 1) {
             const arg = args[i];
             if (std.mem.eql(u8, arg, "--json")) {
                 json = true;
+            } else if (std.mem.eql(u8, arg, "--view")) {
+                const value = try util.requireValue(args, &i, "--view");
+                if (std.mem.eql(u8, value, "agent") or std.mem.eql(u8, value, "full")) {
+                    agent_view = true;
+                } else if (std.mem.eql(u8, value, "summary")) {
+                    agent_view = false;
+                } else {
+                    try io.eprint("gt issue show: --view must be summary or agent\n", .{});
+                    return CliError.UserError;
+                }
+            } else if (std.mem.eql(u8, arg, "--agent")) {
+                agent_view = true;
             } else {
                 try io.eprint("gt issue show: unknown option '{s}'\n", .{arg});
                 return CliError.UserError;
@@ -582,6 +688,20 @@ fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
         try index.ensureIndex(allocator, repo);
         const issue_id = try index.resolveIssueId(allocator, repo, args[1]);
         defer allocator.free(issue_id);
+        if (agent_view) {
+            var db = try work_items.SqliteDb.open(allocator, repo.index_path, work_items.sqlite_db.sqlite.SQLITE_OPEN_READONLY, false);
+            defer db.deinit();
+            const detail = (try work_items.loadIssueDetail(allocator, &db, issue_id)) orelse {
+                try io.eprint("gt issue: no issue matches {s}\n", .{issue_id});
+                return CliError.NotFound;
+            };
+            defer detail.deinit(allocator);
+            var buf: std.ArrayList(u8) = .empty;
+            defer buf.deinit(allocator);
+            try work_items.appendIssueAgentJson(&buf, allocator, &db, detail);
+            try io.out("{s}\n", .{buf.items});
+            return;
+        }
         try index.showIssueFromIndex(allocator, repo, issue_id, json);
         return;
     }
@@ -685,13 +805,41 @@ fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
         return;
     }
 
+    if (std.mem.eql(u8, args[0], "comment")) {
+        if (args.len < 2) {
+            try io.eprint("gt issue comment: ISSUE is required\n", .{});
+            return CliError.UserError;
+        }
+        const options = try parseBodyReplyOptions("gt issue comment", args, 2);
+        const body = try requireBodyOption("gt issue comment", options.body);
+        const issue_id = try resolveIssueIdForCommand(allocator, args[1]);
+        defer allocator.free(issue_id);
+        try createCommentForParentCommand(allocator, "gt issue comment", "issue", "issue", issue_id, body, options.reply_ref);
+        return;
+    }
+
     if (std.mem.eql(u8, args[0], "close") or std.mem.eql(u8, args[0], "reopen")) {
-        if (args.len != 2) {
+        if (args.len < 2) {
             try io.eprint("gt issue {s}: expected ISSUE\n", .{args[0]});
             return CliError.UserError;
         }
+        var body: ?[]const u8 = null;
+        var i: usize = 2;
+        while (i < args.len) : (i += 1) {
+            const arg = args[i];
+            if (std.mem.eql(u8, arg, "--body") or std.mem.eql(u8, arg, "-b")) {
+                body = try util.requireValue(args, &i, "--body");
+            } else {
+                try io.eprint("gt issue {s}: unknown option '{s}'\n", .{ args[0], arg });
+                return CliError.UserError;
+            }
+        }
         const issue_id = try resolveIssueIdForCommand(allocator, args[1]);
         defer allocator.free(issue_id);
+        if (body) |comment_body| {
+            try requireNonEmptyOption(if (std.mem.eql(u8, args[0], "close")) "gt issue close" else "gt issue reopen", "--body", comment_body);
+            try comment.createCommentAddedEvent(allocator, "issue", issue_id, comment_body);
+        }
         const state: []const u8 = if (std.mem.eql(u8, args[0], "close")) "closed" else "open";
         try issue.createIssueStringEvent(allocator, issue_id, "issue.state_set", "state", state);
         return;
@@ -794,7 +942,7 @@ fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
     }
 
     if (!std.mem.eql(u8, args[0], "open")) {
-        try io.eprint("gt issue: expected subcommand 'list', 'show', 'open', or an issue update command\n", .{});
+        try io.eprint("gt issue: expected subcommand 'list', 'show', 'open', 'comment', or an issue update command\n", .{});
         return CliError.UserError;
     }
 
@@ -1094,6 +1242,155 @@ fn requireNonEmptyOption(context: []const u8, option: []const u8, value: []const
     return CliError.UserError;
 }
 
+const BodyReplyOptions = struct {
+    body: ?[]const u8 = null,
+    reply_ref: ?[]const u8 = null,
+};
+
+fn parseBodyReplyOptions(context: []const u8, args: []const []const u8, start: usize) !BodyReplyOptions {
+    var options = BodyReplyOptions{};
+    var i: usize = start;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--body") or std.mem.eql(u8, arg, "-b")) {
+            options.body = try util.requireValue(args, &i, "--body");
+        } else if (std.mem.eql(u8, arg, "--reply")) {
+            options.reply_ref = try util.requireValue(args, &i, "--reply");
+        } else {
+            try io.eprint("{s}: unknown option '{s}'\n", .{ context, arg });
+            return CliError.UserError;
+        }
+    }
+    return options;
+}
+
+fn requireBodyOption(context: []const u8, body: ?[]const u8) ![]const u8 {
+    if (body == null or std.mem.trim(u8, body.?, " \t\r\n").len == 0) {
+        try io.eprint("{s}: --body is required\n", .{context});
+        return CliError.UserError;
+    }
+    return body.?;
+}
+
+fn createCommentForParentCommand(
+    allocator: Allocator,
+    context: []const u8,
+    parent_kind: []const u8,
+    parent_label: []const u8,
+    parent_id: []const u8,
+    body: []const u8,
+    reply_ref: ?[]const u8,
+) !void {
+    if (reply_ref) |raw_ref| {
+        const reply_target = std.mem.trim(u8, raw_ref, " \t\r\n");
+        if (reply_target.len == 0) {
+            try io.eprint("{s}: --reply must not be empty\n", .{context});
+            return CliError.UserError;
+        }
+        const reply_parent_id = try resolveCommentIdForCommand(allocator, reply_target);
+        defer allocator.free(reply_parent_id);
+        var reply_parent = try commentParentForCommand(allocator, reply_parent_id);
+        defer reply_parent.deinit();
+        if (!std.mem.eql(u8, reply_parent.parent_kind, parent_kind) or !std.mem.eql(u8, reply_parent.parent_id, parent_id)) {
+            try io.eprint("{s}: reply target is not in this {s}\n", .{ context, parent_label });
+            return CliError.UserError;
+        }
+        try comment.createCommentReplyEvent(allocator, parent_kind, parent_id, reply_parent_id, reply_parent.add_hash, body);
+        return;
+    }
+
+    try comment.createCommentAddedEvent(allocator, parent_kind, parent_id, body);
+}
+
+const PullDiffCommentOptions = struct {
+    file: ?[]const u8 = null,
+    side: ?[]const u8 = null,
+    line: ?usize = null,
+    start_line: ?usize = null,
+    end_line: ?usize = null,
+    line_option_seen: bool = false,
+    start_line_option_seen: bool = false,
+    end_line_option_seen: bool = false,
+
+    fn hasAny(self: PullDiffCommentOptions) bool {
+        return self.file != null or
+            self.side != null or
+            self.line_option_seen or
+            self.start_line_option_seen or
+            self.end_line_option_seen;
+    }
+};
+
+fn parsePositiveLineOption(context: []const u8, option: []const u8, raw: []const u8) !usize {
+    const value = std.mem.trim(u8, raw, " \t\r\n");
+    const parsed = std.fmt.parseUnsigned(usize, value, 10) catch {
+        try io.eprint("{s}: {s} must be a positive line number\n", .{ context, option });
+        return CliError.UserError;
+    };
+    if (parsed == 0) {
+        try io.eprint("{s}: {s} must be a positive line number\n", .{ context, option });
+        return CliError.UserError;
+    }
+    return parsed;
+}
+
+fn formatPullDiffCommentBodyFromOptions(
+    allocator: Allocator,
+    context: []const u8,
+    body: []const u8,
+    options: PullDiffCommentOptions,
+) !?[]u8 {
+    if (!options.hasAny()) return null;
+    if (options.file == null or options.side == null) {
+        try io.eprint("{s}: diff comments require --file and --side\n", .{context});
+        return CliError.UserError;
+    }
+
+    const file = std.mem.trim(u8, options.file.?, " \t\r\n");
+    if (file.len == 0 or file.len > 4096 or containsLineBreakOrNul(file)) {
+        try io.eprint("{s}: --file must be a non-empty single-line path\n", .{context});
+        return CliError.UserError;
+    }
+
+    const side = std.mem.trim(u8, options.side.?, " \t\r\n");
+    if (!std.mem.eql(u8, side, "old") and !std.mem.eql(u8, side, "new")) {
+        try io.eprint("{s}: --side must be old or new\n", .{context});
+        return CliError.UserError;
+    }
+
+    var start_line: usize = 0;
+    var end_line: usize = 0;
+    if (options.line_option_seen) {
+        if (options.start_line_option_seen or options.end_line_option_seen) {
+            try io.eprint("{s}: --line cannot be combined with --start-line or --end-line\n", .{context});
+            return CliError.UserError;
+        }
+        start_line = options.line.?;
+        end_line = options.line.?;
+    } else {
+        if (!options.start_line_option_seen) {
+            try io.eprint("{s}: diff comments require --line or --start-line\n", .{context});
+            return CliError.UserError;
+        }
+        start_line = options.start_line.?;
+        end_line = if (options.end_line_option_seen) options.end_line.? else start_line;
+    }
+
+    if (end_line < start_line) {
+        try io.eprint("{s}: --end-line must be greater than or equal to --start-line\n", .{context});
+        return CliError.UserError;
+    }
+
+    if (start_line == end_line) {
+        return try std.fmt.allocPrint(allocator, "Review comment on `{s}` ({s} line {d}).\n\n{s}", .{ file, side, start_line, body });
+    }
+    return try std.fmt.allocPrint(allocator, "Review comment on `{s}` ({s} lines {d}-{d}).\n\n{s}", .{ file, side, start_line, end_line, body });
+}
+
+fn containsLineBreakOrNul(value: []const u8) bool {
+    return std.mem.indexOfAny(u8, value, "\r\n\x00") != null;
+}
+
 fn appendCollectionOptionValues(
     allocator: Allocator,
     list: *std.ArrayList([]const u8),
@@ -1359,27 +1656,63 @@ fn cmdPr(allocator: Allocator, args: []const []const u8, command_context: []cons
     }
 
     if (std.mem.eql(u8, args[0], "comment")) {
+        const comment_context = if (std.mem.eql(u8, command_context, "gt pull")) "gt pull comment" else "gt pr comment";
         if (args.len < 2) {
-            try io.eprint("{s} comment: PR is required\n", .{command_context});
+            try io.eprint("{s}: PR is required\n", .{comment_context});
             return CliError.UserError;
         }
         var body: ?[]const u8 = null;
+        var reply_ref: ?[]const u8 = null;
+        var diff_options = PullDiffCommentOptions{};
+        var line_option_seen = false;
+        var start_line_option_seen = false;
+        var end_line_option_seen = false;
         var i: usize = 2;
         while (i < args.len) : (i += 1) {
-            if (std.mem.eql(u8, args[i], "--body") or std.mem.eql(u8, args[i], "-b")) {
+            const arg = args[i];
+            if (std.mem.eql(u8, arg, "--body") or std.mem.eql(u8, arg, "-b")) {
                 body = try util.requireValue(args, &i, "--body");
+            } else if (std.mem.eql(u8, arg, "--reply")) {
+                reply_ref = try util.requireValue(args, &i, "--reply");
+            } else if (std.mem.eql(u8, arg, "--file")) {
+                diff_options.file = try util.requireValue(args, &i, "--file");
+            } else if (std.mem.eql(u8, arg, "--side")) {
+                diff_options.side = try util.requireValue(args, &i, "--side");
+            } else if (std.mem.eql(u8, arg, "--line")) {
+                diff_options.line = try parsePositiveLineOption(comment_context, "--line", try util.requireValue(args, &i, "--line"));
+                line_option_seen = true;
+            } else if (std.mem.eql(u8, arg, "--start-line")) {
+                diff_options.start_line = try parsePositiveLineOption(comment_context, "--start-line", try util.requireValue(args, &i, "--start-line"));
+                start_line_option_seen = true;
+            } else if (std.mem.eql(u8, arg, "--end-line")) {
+                diff_options.end_line = try parsePositiveLineOption(comment_context, "--end-line", try util.requireValue(args, &i, "--end-line"));
+                end_line_option_seen = true;
             } else {
-                try io.eprint("{s} comment: unknown option '{s}'\n", .{ command_context, args[i] });
+                try io.eprint("{s}: unknown option '{s}'\n", .{ comment_context, arg });
                 return CliError.UserError;
             }
         }
+        diff_options.line_option_seen = line_option_seen;
+        diff_options.start_line_option_seen = start_line_option_seen;
+        diff_options.end_line_option_seen = end_line_option_seen;
         if (body == null or std.mem.trim(u8, body.?, " \t\r\n").len == 0) {
-            try io.eprint("{s} comment: --body is required\n", .{command_context});
+            try io.eprint("{s}: --body is required\n", .{comment_context});
             return CliError.UserError;
         }
+        const comment_body = body.?;
         const pull_id = try resolvePullIdForCommand(allocator, args[1]);
         defer allocator.free(pull_id);
-        try comment.createCommentAddedEvent(allocator, "pull", pull_id, body.?);
+        if (reply_ref) |_| {
+            if (diff_options.hasAny()) {
+                try io.eprint("{s}: --reply cannot be combined with diff line options\n", .{comment_context});
+                return CliError.UserError;
+            }
+            try createCommentForParentCommand(allocator, comment_context, "pull", "pull request", pull_id, comment_body, reply_ref);
+        } else {
+            const diff_comment_body = try formatPullDiffCommentBodyFromOptions(allocator, comment_context, comment_body, diff_options);
+            defer if (diff_comment_body) |value| allocator.free(value);
+            try comment.createCommentAddedEvent(allocator, "pull", pull_id, diff_comment_body orelse comment_body);
+        }
         return;
     }
 
@@ -1843,6 +2176,7 @@ fn cmdActions(allocator: Allocator, args: []const []const u8, command_name: []co
         var target_oid: ?[]const u8 = null;
         var object_id: ?[]const u8 = null;
         var act_path: []const u8 = "act";
+        var agent_runner_path: ?[]const u8 = null;
         var dry_run = false;
         var extra_args: []const []const u8 = &.{};
         var i: usize = 1;
@@ -1861,6 +2195,8 @@ fn cmdActions(allocator: Allocator, args: []const []const u8, command_name: []co
                 object_id = try util.requireValue(args, &i, "--object-id");
             } else if (std.mem.eql(u8, arg, "--act")) {
                 act_path = try util.requireValue(args, &i, "--act");
+            } else if (std.mem.eql(u8, arg, "--agent-runner")) {
+                agent_runner_path = try util.requireValue(args, &i, "--agent-runner");
             } else if (std.mem.eql(u8, arg, "--dry-run")) {
                 dry_run = true;
             } else {
@@ -1874,6 +2210,7 @@ fn cmdActions(allocator: Allocator, args: []const []const u8, command_name: []co
         }
         try actions.scheduleEvent(allocator, event_type.?, target_ref, target_oid, object_id, .{
             .act_path = act_path,
+            .agent_runner_path = agent_runner_path,
             .dry_run = dry_run,
             .extra_args = extra_args,
         });
@@ -1883,6 +2220,7 @@ fn cmdActions(allocator: Allocator, args: []const []const u8, command_name: []co
     if (std.mem.eql(u8, args[0], "run-requested")) {
         var run_filter: ?[]const u8 = null;
         var act_path: []const u8 = "act";
+        var agent_runner_path: ?[]const u8 = null;
         var dry_run = false;
         var extra_args: []const []const u8 = &.{};
         var i: usize = 1;
@@ -1893,6 +2231,8 @@ fn cmdActions(allocator: Allocator, args: []const []const u8, command_name: []co
                 break;
             } else if (std.mem.eql(u8, arg, "--act")) {
                 act_path = try util.requireValue(args, &i, "--act");
+            } else if (std.mem.eql(u8, arg, "--agent-runner")) {
+                agent_runner_path = try util.requireValue(args, &i, "--agent-runner");
             } else if (std.mem.eql(u8, arg, "--dry-run")) {
                 dry_run = true;
             } else if (std.mem.startsWith(u8, arg, "-")) {
@@ -1907,6 +2247,7 @@ fn cmdActions(allocator: Allocator, args: []const []const u8, command_name: []co
         }
         try actions.runRequested(allocator, run_filter, .{
             .act_path = act_path,
+            .agent_runner_path = agent_runner_path,
             .dry_run = dry_run,
             .extra_args = extra_args,
         });
@@ -1923,6 +2264,8 @@ fn cmdActions(allocator: Allocator, args: []const []const u8, command_name: []co
                 break;
             } else if (std.mem.eql(u8, arg, "--act")) {
                 options.act_path = try util.requireValue(args, &i, "--act");
+            } else if (std.mem.eql(u8, arg, "--agent-runner")) {
+                options.agent_runner_path = try util.requireValue(args, &i, "--agent-runner");
             } else if (std.mem.eql(u8, arg, "--dry-run")) {
                 options.dry_run = true;
             } else if (std.mem.eql(u8, arg, "--once")) {

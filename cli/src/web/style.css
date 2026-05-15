@@ -131,8 +131,8 @@ code {
   grid-template-columns: minmax(0, 1fr) auto;
   grid-template-areas:
     "brand actions"
-    "nav nav";
-  align-items: center;
+    "nav actions";
+  align-items: stretch;
   gap: 0 16px;
   min-height: 96px;
   padding: 8px 16px 0;
@@ -212,9 +212,10 @@ code {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  min-height: 32px;
+  align-self: start;
+  min-height: 28px;
   margin-left: 0;
-  padding: 0 10px;
+  padding: 0 8px;
   color: var(--topbar-text);
   background: color-mix(in srgb, var(--topbar-text) 6%, transparent);
   border: 1px solid var(--topbar-border);
@@ -229,8 +230,8 @@ code {
 }
 .theme-toggle-track {
   position: relative;
-  width: 34px;
-  height: 18px;
+  width: 30px;
+  height: 16px;
   border-radius: 999px;
   background: var(--border-strong);
 }
@@ -238,25 +239,28 @@ code {
   position: absolute;
   top: 3px;
   left: 3px;
-  width: 12px;
-  height: 12px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
   background: var(--panel);
   transition: transform 120ms ease;
 }
 :root[data-theme="dark"] .theme-toggle-thumb {
-  transform: translateX(16px);
+  transform: translateX(14px);
 }
 .theme-toggle-label {
-  min-width: 34px;
+  min-width: 30px;
+  font-size: 13px;
   text-align: left;
 }
 .topbar-actions {
   grid-area: actions;
   display: inline-flex;
-  align-items: center;
+  align-items: stretch;
   gap: 10px;
+  align-self: stretch;
   margin-left: auto;
+  padding-bottom: 8px;
 }
 .user-menu {
   position: relative;
@@ -265,12 +269,13 @@ code {
 }
 .user-menu summary {
   display: grid;
-  grid-template-rows: 34px minmax(16px, auto);
+  grid-template-rows: 36px minmax(0, 1fr);
   place-items: center;
   align-items: center;
-  gap: 4px;
-  min-height: 68px;
-  max-width: 320px;
+  gap: 6px;
+  height: 100%;
+  min-height: 88px;
+  max-width: 210px;
   padding: 6px 12px 7px;
   color: var(--topbar-text);
   background: color-mix(in srgb, var(--topbar-text) 6%, transparent);
@@ -309,13 +314,13 @@ code {
   border-radius: 50%;
 }
 .user-menu-label {
-  display: flex;
-  align-items: baseline;
+  display: grid;
   justify-content: center;
-  gap: 5px;
+  gap: 2px;
   min-width: 0;
-  max-width: 220px;
-  line-height: 1.15;
+  max-width: 184px;
+  line-height: 1.12;
+  text-align: center;
 }
 .user-menu-label strong,
 .user-menu-label span {
@@ -331,12 +336,6 @@ code {
   color: var(--muted);
   font-size: 11px;
   font-weight: 700;
-}
-.user-menu-label span::before {
-  content: "/";
-  margin-right: 5px;
-  color: var(--muted);
-  opacity: 0.7;
 }
 .user-menu-popover {
   position: absolute;
@@ -3570,6 +3569,66 @@ main.page-code:has(.root-page-grid) {
   font-size: 12px;
   font-weight: 700;
 }
+.project-index-panel {
+  padding-bottom: 18px;
+}
+.project-index-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px;
+  padding: 0 18px 18px;
+}
+.project-index-card {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.project-index-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.project-index-card h2,
+.project-index-description {
+  min-width: 0;
+  margin: 0;
+}
+.project-index-card h2 {
+  font-size: 18px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+.project-index-description {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.project-index-stats,
+.project-index-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.project-index-stats {
+  color: var(--muted);
+  font-size: 13px;
+}
+.project-index-stats span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  background: var(--subtle);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
 .project-title-line {
   display: flex;
   align-items: center;
@@ -3641,6 +3700,32 @@ main.page-code:has(.root-page-grid) {
   border-radius: 3px;
   box-shadow: inset 5px 0 0 color-mix(in srgb, currentColor 45%, transparent);
 }
+.project-view-table-icon,
+.project-view-roadmap-icon {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  border: 2px solid currentColor;
+  border-radius: 3px;
+}
+.project-view-table-icon {
+  background:
+    linear-gradient(currentColor, currentColor) 0 50% / 100% 2px no-repeat,
+    linear-gradient(currentColor, currentColor) 50% 0 / 2px 100% no-repeat;
+}
+.project-view-roadmap-icon::before,
+.project-view-roadmap-icon::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  height: 3px;
+  background: currentColor;
+  border-radius: 999px;
+}
+.project-view-roadmap-icon::before { top: 4px; }
+.project-view-roadmap-icon::after { bottom: 4px; }
 .project-filter-bar {
   position: relative;
   padding: 10px 14px;
@@ -3683,6 +3768,180 @@ main.page-code:has(.root-page-grid) {
   min-width: 0;
   margin: 0;
   overflow-wrap: anywhere;
+}
+.project-table-view {
+  overflow-x: auto;
+  background: var(--panel);
+}
+.project-data-table {
+  width: 100%;
+  min-width: 980px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.project-data-table th,
+.project-data-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: middle;
+}
+.project-data-table thead th {
+  color: var(--muted);
+  background: var(--panel-strong);
+  font-size: 12px;
+  font-weight: 800;
+}
+.project-table-group-row th {
+  color: var(--text);
+  background: color-mix(in srgb, var(--subtle) 72%, var(--panel));
+}
+.project-table-group-row th {
+  display: table-cell;
+}
+.project-table-group-row th > span:last-child {
+  display: inline-grid;
+  place-items: center;
+  min-width: 22px;
+  height: 20px;
+  margin-left: 8px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--muted) 14%, transparent);
+  border-radius: 999px;
+  font-size: 12px;
+}
+.project-table-title-cell {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 8px;
+  align-items: center;
+  min-width: 260px;
+}
+.project-table-title-cell a {
+  min-width: 0;
+  color: var(--text);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.project-table-title-cell small {
+  grid-column: 2;
+  color: var(--muted);
+}
+.project-status-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  color: var(--text);
+  background: var(--subtle);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.project-status-chip.tone-progress { background: color-mix(in srgb, #bf8700 14%, var(--panel)); }
+.project-status-chip.tone-review { background: color-mix(in srgb, var(--blue) 12%, var(--panel)); }
+.project-status-chip.tone-done { background: color-mix(in srgb, #8250df 12%, var(--panel)); }
+.project-status-chip.tone-backlog { background: color-mix(in srgb, var(--muted) 12%, var(--panel)); }
+.project-table-avatar {
+  width: 24px;
+  height: 24px;
+  font-size: 11px;
+}
+.project-table-empty-row td {
+  color: var(--muted);
+}
+.project-roadmap-view {
+  display: grid;
+  gap: 0;
+  overflow-x: auto;
+  background: var(--panel);
+}
+.project-roadmap-scale {
+  display: grid;
+  grid-template-columns: 180px repeat(3, minmax(160px, 1fr));
+  gap: 0;
+  min-width: 760px;
+  color: var(--muted);
+  background: var(--panel-strong);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 800;
+}
+.project-roadmap-scale span {
+  padding: 10px 12px;
+  border-right: 1px solid var(--border);
+}
+.project-roadmap-lane {
+  display: grid;
+  grid-template-columns: 180px minmax(580px, 1fr);
+  min-width: 760px;
+  border-bottom: 1px solid var(--border);
+}
+.project-roadmap-lane header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  background: color-mix(in srgb, var(--subtle) 72%, var(--panel));
+  border-right: 1px solid var(--border);
+}
+.project-roadmap-lane h2 {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-roadmap-lane header > span:last-child {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+.project-roadmap-lane.tone-todo .kanban-status-dot { color: var(--green); }
+.project-roadmap-lane.tone-progress .kanban-status-dot { color: #bf8700; }
+.project-roadmap-lane.tone-review .kanban-status-dot { color: var(--blue); }
+.project-roadmap-lane.tone-done .kanban-status-dot { color: #8250df; }
+.project-roadmap-lane.tone-backlog .kanban-status-dot { color: #6e7781; }
+.project-roadmap-items {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  background:
+    linear-gradient(90deg, transparent 0, transparent calc(33.333% - 1px), var(--border) calc(33.333% - 1px), var(--border) 33.333%, transparent 33.333%, transparent calc(66.666% - 1px), var(--border) calc(66.666% - 1px), var(--border) 66.666%, transparent 66.666%);
+}
+.project-roadmap-item {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  align-items: center;
+  min-width: 0;
+  max-width: 680px;
+  padding: 8px 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 10%);
+}
+.project-roadmap-bar {
+  height: 8px;
+  background: var(--blue);
+  border-radius: 999px;
+}
+.project-roadmap-item.is-closed .project-roadmap-bar {
+  background: var(--green);
+}
+.project-roadmap-item a {
+  color: var(--text);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.project-roadmap-item small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
 }
 .kanban-board {
   display: grid;
@@ -4929,8 +5188,8 @@ main.page-code:has(.root-code-toolbar) .repo-actions {
 .root-commit-avatar {
   width: 24px;
   height: 24px;
-  background: linear-gradient(135deg, #54aeef, #a475f9 55%, #fb6a7a);
-  border-radius: 50%;
+  border-color: var(--border);
+  border-radius: 6px;
 }
 .root-commit-main {
   display: flex;
@@ -6870,18 +7129,10 @@ a.root-file-commit:hover {
   font-size: 13px;
 }
 .commit-avatar {
-  display: inline-grid;
-  place-items: center;
   width: 20px;
   height: 20px;
-  flex: 0 0 auto;
-  color: #ffffff;
-  background: linear-gradient(135deg, #54aeef, #a475f9 55%, #fb6a7a);
-  border: 1px solid color-mix(in srgb, var(--panel) 80%, transparent);
-  border-radius: 50%;
-  font-size: 10px;
-  font-weight: 800;
-  line-height: 1;
+  border-color: var(--border);
+  border-radius: 5px;
 }
 .commit-row-actions {
   display: flex;
@@ -7639,10 +7890,14 @@ textarea {
     padding: 12px;
   }
   .topbar-actions {
+    align-items: center;
+    align-self: center;
     margin-left: 0;
+    padding-bottom: 0;
     justify-self: end;
   }
   .user-menu summary {
+    min-height: 64px;
     max-width: min(42vw, 220px);
   }
   .theme-toggle {

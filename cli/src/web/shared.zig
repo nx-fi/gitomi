@@ -335,12 +335,12 @@ pub fn appendShellStart(
     try appendNavLink(buf, allocator, active, "commits", "/commits", "Commits", null);
     try appendNavLink(buf, allocator, active, "issues", "/issues", "Issues", stats.issues);
     try appendNavLink(buf, allocator, active, "pulls", "/pulls", "PRs", stats.pulls);
+    try appendNavLink(buf, allocator, active, "actions", "/actions", "Actions", null);
     try appendNavLink(buf, allocator, active, "projects", "/projects", "Projects", null);
     try appendNavLink(buf, allocator, active, "milestones", "/milestones", "Milestones", null);
-    try appendNavLink(buf, allocator, active, "access", "/access", "Access", null);
-    try appendNavLink(buf, allocator, active, "actions", "/actions", "Actions", null);
     try appendNavLink(buf, allocator, active, "events", "/events", "Events", null);
     try appendNavLink(buf, allocator, active, "refs", "/refs", "Refs", null);
+    try appendNavLink(buf, allocator, active, "access", "/access", "Access", null);
     try buf.appendSlice(allocator,
         \\  </nav>
         \\  <div class="topbar-actions">

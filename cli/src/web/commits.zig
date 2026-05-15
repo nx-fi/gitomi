@@ -299,11 +299,11 @@ fn appendCommitRow(buf: *std.ArrayList(u8), allocator: Allocator, commit: Commit
     try appendHtml(buf, allocator, commit.subject);
     try appendTemplate(buf, allocator,
         \\</a></div>
-        \\    <p class="commit-meta-line"><span class="commit-avatar" title="{author}" aria-label="{author}">
-    , .{ .author = commit.author });
-    try appendAuthorInitial(buf, allocator, commit.author);
+        \\    <p class="commit-meta-line">
+    , .{});
+    try shared.appendAvatar(buf, allocator, commit.author, "commit-avatar");
     try appendTemplate(buf, allocator,
-        \\</span><span>{author} committed {relative}</span></p>
+        \\<span>{author} committed {relative}</span></p>
         \\  </div>
         \\  <div class="commit-row-actions">
     , .{
@@ -429,16 +429,6 @@ fn branchScopeForFullRef(ref: []const u8) ?BranchScope {
     if (std.mem.startsWith(u8, ref, "refs/heads/")) return .local;
     if (std.mem.startsWith(u8, ref, "refs/remotes/")) return .remote;
     return null;
-}
-
-fn appendAuthorInitial(buf: *std.ArrayList(u8), allocator: Allocator, author: []const u8) !void {
-    for (author) |c| {
-        if (!std.ascii.isAlphanumeric(c)) continue;
-        var initial = [_]u8{std.ascii.toUpper(c)};
-        try appendHtml(buf, allocator, &initial);
-        return;
-    }
-    try buf.append(allocator, '?');
 }
 
 fn isVerifiedSignature(status: []const u8) bool {
