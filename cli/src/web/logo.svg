@@ -1,8 +1,8 @@
 <svg
   xmlns="http://www.w3.org/2000/svg"
-  width="510"
-  height="360"
-  viewBox="0 0 510 360"
+  width="408"
+  height="234"
+  viewBox="51 63 408 234"
   fill="none"
   role="img"
   aria-labelledby="gitomiIconTitle"
@@ -10,52 +10,55 @@
   <title id="gitomiIconTitle">Gitomi icon</title>
 
   <defs>
-    <mask id="gitomi-iris-mask" maskUnits="userSpaceOnUse">
-      <rect x="0" y="0" width="510" height="360" fill="black" />
-
-      <!-- Visible iris area -->
-      <circle cx="255" cy="180" r="82" fill="white" />
-
-      <!-- Git branch negative cutout -->
-      <g
-        fill="none"
-        stroke="black"
-        stroke-width="9"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-      >
-        <path d="M247 134 L247 226" />
-        <path d="M247 193 L300 158" />
-      </g>
-
-      <!-- Top hollow node -->
-      <circle cx="247" cy="134" r="20" fill="black" />
-      <circle cx="247" cy="134" r="10" fill="white" />
-
-      <!-- Bottom hollow node -->
-      <circle cx="247" cy="226" r="20" fill="black" />
-      <circle cx="247" cy="226" r="10" fill="white" />
-
-      <!-- Upper-right filled node -->
-      <circle cx="300" cy="158" r="20" fill="black" />
-    </mask>
+    <clipPath id="gitomi-iris-clip">
+      <circle cx="255" cy="180" r="92" />
+    </clipPath>
   </defs>
 
-  <!-- Eye outline -->
+  <!-- Filled eye with iris cutout -->
   <path
-    d="M70 180 C125 120 190 82 255 82 C320 82 385 120 440 180 C385 240 320 278 255 278 C190 278 125 240 70 180 Z"
-    stroke="#10B8AA"
-    stroke-width="22"
-    stroke-linecap="round"
-    stroke-linejoin="round"
+    fill="#10B8AA"
+    fill-rule="evenodd"
+    clip-rule="evenodd"
+    d="
+      M70 180
+      C125 120 190 82 255 82
+      C320 82 385 120 440 180
+      C385 240 320 278 255 278
+      C190 278 125 240 70 180
+      Z
+
+      M255 88
+      A92 92 0 1 0 255 272
+      A92 92 0 1 0 255 88
+      Z
+    "
   />
 
-  <!-- Iris -->
-  <circle
-    cx="255"
-    cy="180"
-    r="82"
-    fill="#10B8AA"
-    mask="url(#gitomi-iris-mask)"
-  />
+  <g clip-path="url(#gitomi-iris-clip)">
+    <!-- Straight lines -->
+    <g
+      stroke="#10B8AA"
+      stroke-width="12"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      fill="none"
+    >
+      <path d="M238 150 L238 210" />
+      <path d="M238 194 L300 158" />
+    </g>
+
+    <!-- Outline circles -->
+    <g
+      stroke="#10B8AA"
+      stroke-width="15"
+      fill="none"
+    >
+      <circle cx="238" cy="128" r="22" />
+      <circle cx="238" cy="232" r="22" />
+    </g>
+
+    <!-- Filled circle -->
+    <circle cx="300" cy="158" r="22" fill="#10B8AA" />
+  </g>
 </svg>
