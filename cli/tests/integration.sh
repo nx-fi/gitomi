@@ -41,6 +41,26 @@ assert_line_count() {
   [[ "$count" == "$expected" ]] || fail "expected $expected non-empty line(s), got $count"$'\n'"$text"
 }
 
+assert_line_order() {
+  local text="$1"
+  shift
+  local previous=0
+  local needle line
+  for needle in "$@"; do
+    line="$(printf '%s\n' "$text" | grep -nF "$needle" | head -n 1 | cut -d: -f1 || true)"
+    [[ -n "$line" ]] || fail "expected output to contain ordered item: $needle"$'\n'"output was:"$'\n'"$text"
+    (( line > previous )) || fail "expected '$needle' to appear after previous ordered item"$'\n'"output was:"$'\n'"$text"
+    previous="$line"
+  done
+}
+
+assert_equal() {
+  local left="$1"
+  local right="$2"
+  local message="$3"
+  [[ "$left" == "$right" ]] || fail "$message"$'\n'"left:"$'\n'"$left"$'\n'"right:"$'\n'"$right"
+}
+
 json_field() {
   local json="$1"
   local field="$2"
@@ -70,6 +90,15 @@ configure_signing() {
   git -C "$repo" config user.email "alice@example.com"
   git -C "$repo" config gpg.format ssh
   git -C "$repo" config user.signingkey "$KEY"
+  git -C "$repo" config gpg.ssh.allowedSignersFile "$ALLOWED_SIGNERS"
+}
+
+configure_bob_signing() {
+  local repo="$1"
+  git -C "$repo" config user.name "Bob"
+  git -C "$repo" config user.email "bob@example.com"
+  git -C "$repo" config gpg.format ssh
+  git -C "$repo" config user.signingkey "$BOB_KEY"
   git -C "$repo" config gpg.ssh.allowedSignersFile "$ALLOWED_SIGNERS"
 }
 
@@ -125,6 +154,44 @@ init_repo "$single"
   assert_line_count "$issue_show_json" 1
   assert_contains "$issue_show_json" '"id":"'"$issue_id"'"'
   assert_contains "$issue_show_json" '"body":"Body text"'
+  gt fsck >/dev/null
+)
+
+echo "integration: issue open requires gt init"
+no_init="$ROOT/no-init"
+init_repo "$no_init"
+(
+  cd "$no_init"
+  if gt issue open --title "No init issue" >no-init.out 2>&1; then
+    fail "expected issue open to fail before gt init"
+  fi
+  assert_contains "$(cat no-init.out)" "Gitomi is not initialized; run \`gt init\`"
+  refs="$(gt refs)"
+  assert_contains "$refs" "no Gitomi refs"
+)
+
+echo "integration: user A syncs an issue that user B can pull"
+user_sync="$ROOT/user-sync"
+mkdir -p "$user_sync"
+git -C "$user_sync" init --bare remote.git >/dev/null
+init_repo "$user_sync/a"
+init_repo "$user_sync/b"
+configure_bob_signing "$user_sync/b"
+git -C "$user_sync/a" remote add origin "$user_sync/remote.git"
+git -C "$user_sync/b" remote add origin "$user_sync/remote.git"
+(
+  cd "$user_sync/a"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  gt issue open --title "A synced issue" --body "A body" >/dev/null
+  gt sync --push-only >/dev/null
+)
+(
+  cd "$user_sync/b"
+  gt sync --pull-only >/dev/null
+  issues="$(gt issue list --json)"
+  assert_line_count "$issues" 1
+  assert_contains "$issues" '"title":"A synced issue"'
+  assert_contains "$issues" '"body":"A body"'
   gt fsck >/dev/null
 )
 
@@ -276,6 +343,8 @@ JSON
   assert_contains "$pulls" '"title":"Legacy PR"'
   assert_contains "$pulls" '"legacy_github_pull_number":7'
   events="$(gt events list --json)"
+  assert_contains "$events" '"event_type":"acl.delegation_granted"'
+  assert_contains "$events" '"actor_principal":"alice"'
   assert_contains "$events" '"actor_principal":"import-bot"'
   assert_contains "$events" '"event_type":"comment.added"'
   mkdir -p src
@@ -313,6 +382,12 @@ git -C "$github_sync/replica" remote add origin "$github_sync/remote.git"
   assert_contains "$issues" '"title":"Legacy bug"'
   pulls="$(gt pr list --json)"
   assert_contains "$pulls" '"title":"Legacy PR"'
+  events="$(gt events list --json)"
+  delegation_line="$(printf '%s\n' "$events" | grep 'acl.delegation_granted')"
+  assert_contains "$delegation_line" '"actor_principal":"alice"'
+  assert_contains "$delegation_line" '"domain_status":"accepted"'
+  import_line="$(printf '%s\n' "$events" | grep 'issue.opened' | grep 'import-bot')"
+  assert_contains "$import_line" '"domain_status":"accepted"'
   gt fsck >/dev/null
 )
 
@@ -625,7 +700,28 @@ init_repo "$comments"
   assert_contains "$comments_json" '"redacted":false'
   comment_id="$(json_field "$comments_json" id)"
   [[ -n "$comment_id" ]] || fail "expected comment id from comment list"
-  comment_ref="#${comment_id:0:7}"
+  comment_ref="comment:$(object_ref "$comment_id")"
+  gt issue react "$issue_ref" +1 >/dev/null
+  issue_show_json="$(gt issue show "$issue_ref" --json)"
+  assert_contains "$issue_show_json" '"reactions":[{'
+  assert_contains "$issue_show_json" '"count":1'
+  assert_contains "$issue_show_json" '"actors":["alice"]'
+  gt issue unreact "$issue_ref" +1 >/dev/null
+  issue_show_json="$(gt issue show "$issue_ref" --json)"
+  assert_contains "$issue_show_json" '"reactions":[]'
+  gt comment react "$comment_ref" heart >/dev/null
+  comments_json="$(gt comment list issue "$issue_ref" --json)"
+  assert_contains "$comments_json" '"reactions":[{'
+  assert_contains "$comments_json" '"actors":["alice"]'
+  gt comment unreact "$comment_ref" heart >/dev/null
+  comments_json="$(gt comment list issue "$issue_ref" --json)"
+  assert_contains "$comments_json" '"reactions":[]'
+  gt comment reply "$comment_ref" --body "Reply comment" >/dev/null
+  comments_json="$(gt comment list issue "$issue_ref" --json)"
+  assert_line_count "$comments_json" 2
+  assert_contains "$comments_json" '"body":"Reply comment"'
+  assert_contains "$comments_json" '"reply_parent_id":"'"$comment_id"'"'
+  assert_contains "$comments_json" '"reply_parent_hash":'
   sleep 1
   gt comment edit "$comment_ref" --body "Edited comment" >/dev/null
   comments_json="$(gt comment list issue "$issue_ref" --json)"
@@ -672,6 +768,20 @@ init_repo "$pulls_repo"
   pull_comments="$(gt comment list pr "$pull_ref" --json)"
   assert_line_count "$pull_comments" 1
   assert_contains "$pull_comments" '"body":"Pull comment"'
+  pull_comment_id="$(json_field "$pull_comments" id)"
+  [[ -n "$pull_comment_id" ]] || fail "expected pull comment id from comment list"
+  pull_comment_ref="comment:$(object_ref "$pull_comment_id")"
+  gt pr react "$pull_ref" eyes >/dev/null
+  pull_show_json="$(gt pr view "$pull_ref" --json)"
+  assert_contains "$pull_show_json" '"reactions":[{'
+  assert_contains "$pull_show_json" '"actors":["alice"]'
+  gt comment react "$pull_comment_ref" +1 >/dev/null
+  gt comment reply "$pull_comment_ref" --body "Pull reply" >/dev/null
+  pull_comments="$(gt comment list pr "$pull_ref" --json)"
+  assert_line_count "$pull_comments" 2
+  assert_contains "$pull_comments" '"body":"Pull reply"'
+  assert_contains "$pull_comments" '"reply_parent_id":"'"$pull_comment_id"'"'
+  assert_contains "$pull_comments" '"reactions":[{'
   sleep 1
   gt pr title "$pull_ref" --title "Updated pull" >/dev/null
   gt pr base "$pull_ref" --base trunk >/dev/null
@@ -753,8 +863,9 @@ init_repo "$invalid"
   cd "$invalid"
   gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
   empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
-  bad_body='{"$schema":"urn:gitomi:event:v1","repo_id":"018f0000-0000-7000-8000-000000000001","event_uuid":"018f0000-0000-7000-8000-000000000002","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000000003"},"idempotency_key":"018f0000-0000-7000-8000-000000000004","actor":{"principal":"alice","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:30:59Z","parent_hashes":{"log":"","causal":[],"related":[]},"legacy":{},"payload":{}}'
-  bad_commit="$(git commit-tree -S -m "bad issue" -m "$bad_body" "$empty_tree")"
+  genesis_head="$(git rev-parse refs/gitomi/genesis)"
+  bad_body='{"$schema":"urn:gitomi:event:v1","repo_id":"018f0000-0000-7000-8000-000000000001","event_uuid":"018f0000-0000-7000-8000-000000000002","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000000003"},"idempotency_key":"018f0000-0000-7000-8000-000000000004","actor":{"principal":"alice","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:30:59Z","parent_hashes":{"log":"","anchor":"'"$genesis_head"'","causal":[],"related":[]},"legacy":{},"payload":{}}'
+  bad_commit="$(git commit-tree -S -m "bad issue" -m "$bad_body" "$empty_tree" -p "$genesis_head")"
   git update-ref refs/gitomi/inbox/alice/laptop "$bad_commit"
   json="$(gt events list --json)"
   assert_file ".git/gitomi/index.sqlite"
@@ -774,9 +885,10 @@ init_repo "$domain_invalid"
   cd "$domain_invalid"
   gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
   empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
+  genesis_head="$(git rev-parse refs/gitomi/genesis)"
   missing_issue="018f0000-0000-7000-8000-000000000111"
-  bad_body='{"$schema":"urn:gitomi:event:v1","repo_id":"018f0000-0000-7000-8000-000000000001","event_uuid":"018f0000-0000-7000-8000-000000000112","event_type":"issue.title_set","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000000111"},"idempotency_key":"018f0000-0000-7000-8000-000000000113","actor":{"principal":"alice","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:30:59Z","parent_hashes":{"log":"","causal":[],"related":[]},"legacy":{},"payload":{"title":"No opener"}}'
-  bad_commit="$(git commit-tree -S -m "issue.title_set #$(object_ref "$missing_issue")" -m "$bad_body" "$empty_tree")"
+  bad_body='{"$schema":"urn:gitomi:event:v1","repo_id":"018f0000-0000-7000-8000-000000000001","event_uuid":"018f0000-0000-7000-8000-000000000112","event_type":"issue.title_set","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000000111"},"idempotency_key":"018f0000-0000-7000-8000-000000000113","actor":{"principal":"alice","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:30:59Z","parent_hashes":{"log":"","anchor":"'"$genesis_head"'","causal":[],"related":[]},"legacy":{},"payload":{"title":"No opener"}}'
+  bad_commit="$(git commit-tree -S -m "issue.title_set #$(object_ref "$missing_issue")" -m "$bad_body" "$empty_tree" -p "$genesis_head")"
   git update-ref refs/gitomi/inbox/alice/laptop "$bad_commit"
   events="$(gt events list --json)"
   assert_line_count "$events" 1
@@ -794,10 +906,11 @@ init_repo "$duplicate_open"
   cd "$duplicate_open"
   gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
   empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
+  genesis_head="$(git rev-parse refs/gitomi/genesis)"
   issue_id="018f0000-0000-7000-8000-000000000211"
-  body1='{"$schema":"urn:gitomi:event:v1","repo_id":"018f0000-0000-7000-8000-000000000001","event_uuid":"018f0000-0000-7000-8000-000000000212","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000000211"},"idempotency_key":"018f0000-0000-7000-8000-000000000213","actor":{"principal":"alice","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:30:59Z","parent_hashes":{"log":"","causal":[],"related":[]},"legacy":{},"payload":{"title":"First open"}}'
-  first_commit="$(git commit-tree -S -m "issue.opened #$(object_ref "$issue_id") First open" -m "$body1" "$empty_tree")"
-  body2='{"$schema":"urn:gitomi:event:v1","repo_id":"018f0000-0000-7000-8000-000000000001","event_uuid":"018f0000-0000-7000-8000-000000000214","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000000211"},"idempotency_key":"018f0000-0000-7000-8000-000000000215","actor":{"principal":"alice","device":"laptop"},"seq":2,"occurred_at":"2026-05-13T18:31:00Z","parent_hashes":{"log":"'"$first_commit"'","causal":[],"related":["'"$first_commit"'"]},"legacy":{},"payload":{"title":"Second open"}}'
+  body1='{"$schema":"urn:gitomi:event:v1","repo_id":"018f0000-0000-7000-8000-000000000001","event_uuid":"018f0000-0000-7000-8000-000000000212","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000000211"},"idempotency_key":"018f0000-0000-7000-8000-000000000213","actor":{"principal":"alice","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:30:59Z","parent_hashes":{"log":"","anchor":"'"$genesis_head"'","causal":[],"related":[]},"legacy":{},"payload":{"title":"First open"}}'
+  first_commit="$(git commit-tree -S -m "issue.opened #$(object_ref "$issue_id") First open" -m "$body1" "$empty_tree" -p "$genesis_head")"
+  body2='{"$schema":"urn:gitomi:event:v1","repo_id":"018f0000-0000-7000-8000-000000000001","event_uuid":"018f0000-0000-7000-8000-000000000214","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000000211"},"idempotency_key":"018f0000-0000-7000-8000-000000000215","actor":{"principal":"alice","device":"laptop"},"seq":2,"occurred_at":"2026-05-13T18:31:00Z","parent_hashes":{"log":"'"$first_commit"'","anchor":"","causal":[],"related":["'"$first_commit"'"]},"legacy":{},"payload":{"title":"Second open"}}'
   second_commit="$(git commit-tree -S -m "issue.opened #$(object_ref "$issue_id") Second open" -m "$body2" -p "$first_commit" "$empty_tree")"
   git update-ref refs/gitomi/inbox/alice/laptop "$second_commit"
   events="$(gt events list --json)"
@@ -865,12 +978,14 @@ init_repo "$collection_limits"
   gt fsck >/dev/null
 )
 
-echo "integration: RBAC projections and CLI preflight"
+echo "integration: RBAC projections and write accounting"
 rbac_repo="$ROOT/rbac"
 init_repo "$rbac_repo"
 (
   cd "$rbac_repo"
   gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  genesis_manifest="$(git show refs/gitomi/genesis:.gitomi/genesis.json)"
+  assert_contains "$genesis_manifest" '"access":{"mode":"closed"}'
   acl_json="$(gt acl list --json)"
   assert_contains "$acl_json" '"principal":"alice"'
   assert_contains "$acl_json" '"role":"owner"'
@@ -888,10 +1003,103 @@ init_repo "$rbac_repo"
   assert_contains "$acl_json" '"principal":"bob"'
   assert_contains "$acl_json" '"role":"reader"'
   write_gt_config "$REPO_ID" bob desktop 0
-  if gt issue open --title "Reader cannot open" >preflight.out 2>&1; then
-    fail "expected reader issue open to fail authorization"
-  fi
-  assert_contains "$(cat preflight.out)" "insufficient_role"
+  gt issue open --title "Reader cannot open" >/dev/null
+  events="$(gt events list --json)"
+  reader_line="$(printf '%s\n' "$events" | grep 'Reader cannot open')"
+  assert_contains "$reader_line" '"actor_principal":"bob"'
+  assert_contains "$reader_line" '"domain_status":"rejected"'
+  assert_contains "$reader_line" '"rejection_reason":"insufficient_role"'
+  issues="$(gt issue list --json)"
+  assert_not_contains "$issues" '"title":"Reader cannot open"'
+)
+
+echo "integration: open access accepts signed writers without explicit roles"
+open_rbac="$ROOT/open-rbac"
+init_repo "$open_rbac"
+(
+  cd "$open_rbac"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop --access open >/dev/null
+  genesis_manifest="$(git show refs/gitomi/genesis:.gitomi/genesis.json)"
+  assert_contains "$genesis_manifest" '"access":{"mode":"open"}'
+  write_gt_config "$REPO_ID" bob desktop 0
+  configure_bob_signing "$PWD"
+  gt issue open --title "Open access Bob issue" >/dev/null
+  events="$(gt events list --json)"
+  bob_line="$(printf '%s\n' "$events" | grep 'Open access Bob issue')"
+  assert_contains "$bob_line" '"actor_principal":"bob"'
+  assert_contains "$bob_line" '"domain_status":"accepted"'
+  issues="$(gt issue list --json)"
+  assert_contains "$issues" '"title":"Open access Bob issue"'
+  gt fsck >/dev/null
+)
+
+echo "integration: closed RBAC sync hides unauthorized events until a grant"
+closed_rbac="$ROOT/closed-rbac-sync"
+mkdir -p "$closed_rbac"
+git -C "$closed_rbac" init --bare remote.git >/dev/null
+init_repo "$closed_rbac/alice"
+init_repo "$closed_rbac/bob"
+configure_bob_signing "$closed_rbac/bob"
+git -C "$closed_rbac/alice" remote add origin "$closed_rbac/remote.git"
+git -C "$closed_rbac/bob" remote add origin "$closed_rbac/remote.git"
+(
+  cd "$closed_rbac/alice"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop --access closed >/dev/null
+  gt issue open --title "Alice visible issue" >/dev/null
+  alice_issue_id="$(json_field "$(gt issue list --json)" id)"
+  [[ -n "$alice_issue_id" ]] || fail "expected Alice issue id"
+  printf '%s\n' "$alice_issue_id" > "$closed_rbac/alice_issue_id"
+  gt sync --push-only >/dev/null
+)
+(
+  cd "$closed_rbac/bob"
+  gt sync --pull-only >/dev/null
+  write_gt_config "$REPO_ID" bob desktop 0
+  gt issue open --title "Bob hidden issue" >/dev/null
+  events="$(gt events list --json)"
+  bob_line="$(printf '%s\n' "$events" | grep 'Bob hidden issue')"
+  assert_contains "$bob_line" '"actor_principal":"bob"'
+  assert_contains "$bob_line" '"domain_status":"rejected"'
+  assert_contains "$bob_line" '"rejection_reason":"unauthorized_principal"'
+  gt sync --push-only >/dev/null
+)
+(
+  cd "$closed_rbac/alice"
+  gt sync --pull-only >/dev/null
+  events="$(gt events list --json)"
+  bob_line="$(printf '%s\n' "$events" | grep 'Bob hidden issue')"
+  assert_contains "$bob_line" '"domain_status":"rejected"'
+  assert_contains "$bob_line" '"rejection_reason":"unauthorized_principal"'
+  issues="$(gt issue list --json)"
+  assert_contains "$issues" '"title":"Alice visible issue"'
+  assert_not_contains "$issues" '"title":"Bob hidden issue"'
+  gt acl grant bob reporter >/dev/null
+  gt identity add-device bob desktop --public-key "$BOB_PUBLIC_KEY" --fingerprint "$BOB_FINGERPRINT" --scheme ssh >/dev/null
+  gt sync --push-only >/dev/null
+)
+(
+  cd "$closed_rbac/bob"
+  gt sync --pull-only >/dev/null
+  alice_issue_id="$(cat "$closed_rbac/alice_issue_id")"
+  alice_issue_ref="#$(object_ref "$alice_issue_id")"
+  issues="$(gt issue list --json)"
+  assert_contains "$issues" '"title":"Alice visible issue"'
+  gt comment add issue "$alice_issue_ref" --body "Bob visible comment" >/dev/null
+  gt sync --push-only >/dev/null
+)
+(
+  cd "$closed_rbac/alice"
+  gt sync --pull-only >/dev/null
+  alice_issue_id="$(cat "$closed_rbac/alice_issue_id")"
+  alice_issue_ref="#$(object_ref "$alice_issue_id")"
+  comments="$(gt comment list issue "$alice_issue_ref" --json)"
+  assert_contains "$comments" '"body":"Bob visible comment"'
+  events="$(gt events list --json)"
+  comment_line="$(printf '%s\n' "$events" | grep 'comment.added' | grep 'bob')"
+  assert_contains "$comment_line" '"domain_status":"accepted"'
+  issues="$(gt issue list --json)"
+  assert_not_contains "$issues" '"title":"Bob hidden issue"'
+  gt fsck >/dev/null
 )
 
 echo "integration: concurrent RBAC events resolve by hash and remove-wins"
@@ -914,13 +1122,13 @@ init_repo "$concurrent_rbac"
   gt acl grant bob reader >/dev/null
   anchor_base="$(git rev-parse refs/gitomi/inbox/alice/anchor)"
 
-  acl_grant_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000000501","event_type":"acl.role_granted","object":{"kind":"acl","id":"acl:bob"},"idempotency_key":"018f0000-0000-7000-8000-000000000502","actor":{"principal":"alice","device":"z"},"seq":2,"occurred_at":"2026-05-13T18:31:00Z","parent_hashes":{"log":"'"$z_base"'","causal":["'"$anchor_base"'"],"related":["'"$anchor_base"'"]},"legacy":{},"payload":{"principal":"bob","role":"reporter"}}'
+  acl_grant_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000000501","event_type":"acl.role_granted","object":{"kind":"acl","id":"acl:bob"},"idempotency_key":"018f0000-0000-7000-8000-000000000502","actor":{"principal":"alice","device":"z"},"seq":2,"occurred_at":"2026-05-13T18:31:00Z","parent_hashes":{"log":"'"$z_base"'","anchor":"","causal":["'"$anchor_base"'"],"related":["'"$anchor_base"'"]},"legacy":{},"payload":{"principal":"bob","role":"reporter"}}'
   acl_grant_commit="$(git commit-tree -S -m "acl.role_granted bob reporter" -m "$acl_grant_body" "$empty_tree" -p "$z_base" -p "$anchor_base")"
   acl_revoke_commit=""
   for n in $(seq 1 200); do
     event_uuid="$(printf '018f0000-0000-7000-8000-%012d' $((600 + n)))"
     idem="$(printf '018f0000-0000-7000-8000-%012d' $((800 + n)))"
-    acl_revoke_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"'"$event_uuid"'","event_type":"acl.role_revoked","object":{"kind":"acl","id":"acl:bob"},"idempotency_key":"'"$idem"'","actor":{"principal":"alice","device":"m"},"seq":2,"occurred_at":"2026-05-13T18:31:01Z","parent_hashes":{"log":"'"$m_base"'","causal":["'"$anchor_base"'"],"related":["'"$anchor_base"'"]},"legacy":{},"payload":{"principal":"bob","role":"reader"}}'
+    acl_revoke_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"'"$event_uuid"'","event_type":"acl.role_revoked","object":{"kind":"acl","id":"acl:bob"},"idempotency_key":"'"$idem"'","actor":{"principal":"alice","device":"m"},"seq":2,"occurred_at":"2026-05-13T18:31:01Z","parent_hashes":{"log":"'"$m_base"'","anchor":"","causal":["'"$anchor_base"'"],"related":["'"$anchor_base"'"]},"legacy":{},"payload":{"principal":"bob","role":"reader"}}'
     acl_revoke_commit="$(git commit-tree -S -m "acl.role_revoked bob reader $n" -m "$acl_revoke_body" "$empty_tree" -p "$m_base" -p "$anchor_base")"
     [[ "$acl_revoke_commit" > "$acl_grant_commit" ]] && break
   done
@@ -936,9 +1144,9 @@ init_repo "$concurrent_rbac"
   m_head="$(git rev-parse refs/gitomi/inbox/alice/m)"
   z_head="$(git rev-parse refs/gitomi/inbox/alice/z)"
 
-  phone_revoke_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000001001","event_type":"identity.device_revoked","object":{"kind":"identity","id":"identity:alice:phone"},"idempotency_key":"018f0000-0000-7000-8000-000000001002","actor":{"principal":"alice","device":"m"},"seq":3,"occurred_at":"2026-05-13T18:32:00Z","parent_hashes":{"log":"'"$m_head"'","causal":["'"$phone_base"'"],"related":["'"$phone_base"'"]},"legacy":{},"payload":{"principal":"alice","device":"phone"}}'
+  phone_revoke_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000001001","event_type":"identity.device_revoked","object":{"kind":"identity","id":"identity:alice:phone"},"idempotency_key":"018f0000-0000-7000-8000-000000001002","actor":{"principal":"alice","device":"m"},"seq":3,"occurred_at":"2026-05-13T18:32:00Z","parent_hashes":{"log":"'"$m_head"'","anchor":"","causal":["'"$phone_base"'"],"related":["'"$phone_base"'"]},"legacy":{},"payload":{"principal":"alice","device":"phone"}}'
   phone_revoke_commit="$(git commit-tree -S -m "identity.device_revoked alice/phone" -m "$phone_revoke_body" "$empty_tree" -p "$m_head" -p "$phone_base")"
-  phone_add_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000001003","event_type":"identity.device_added","object":{"kind":"identity","id":"identity:alice:phone"},"idempotency_key":"018f0000-0000-7000-8000-000000001004","actor":{"principal":"alice","device":"z"},"seq":3,"occurred_at":"2026-05-13T18:32:01Z","parent_hashes":{"log":"'"$z_head"'","causal":["'"$phone_base"'"],"related":["'"$phone_base"'"]},"legacy":{},"payload":{"principal":"alice","device":"phone","signing_key":{"scheme":"ssh","public_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIrotate","fingerprint":"phone-rotate"}}}'
+  phone_add_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000001003","event_type":"identity.device_added","object":{"kind":"identity","id":"identity:alice:phone"},"idempotency_key":"018f0000-0000-7000-8000-000000001004","actor":{"principal":"alice","device":"z"},"seq":3,"occurred_at":"2026-05-13T18:32:01Z","parent_hashes":{"log":"'"$z_head"'","anchor":"","causal":["'"$phone_base"'"],"related":["'"$phone_base"'"]},"legacy":{},"payload":{"principal":"alice","device":"phone","signing_key":{"scheme":"ssh","public_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIrotate","fingerprint":"phone-rotate"}}}'
   phone_add_commit="$(git commit-tree -S -m "identity.device_added alice/phone" -m "$phone_add_body" "$empty_tree" -p "$z_head" -p "$phone_base")"
   git update-ref refs/gitomi/inbox/alice/m "$phone_revoke_commit" "$m_head"
   git update-ref refs/gitomi/inbox/alice/z "$phone_add_commit" "$z_head"
@@ -955,29 +1163,31 @@ init_repo "$frontier_auth"
   cd "$frontier_auth"
   gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
   empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
+  genesis_head="$(git rev-parse refs/gitomi/genesis)"
 
-  anchor_a_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002001","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000002101"},"idempotency_key":"018f0000-0000-7000-8000-000000002201","actor":{"principal":"alice","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:33:00Z","parent_hashes":{"log":"","causal":[],"related":[]},"legacy":{},"payload":{"title":"Frontier anchor A"}}'
-  anchor_a_commit="$(git commit-tree -S -m "issue.opened frontier anchor A" -m "$anchor_a_body" "$empty_tree")"
-  grant_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002002","event_type":"acl.role_granted","object":{"kind":"acl","id":"acl:bob"},"idempotency_key":"018f0000-0000-7000-8000-000000002202","actor":{"principal":"alice","device":"laptop"},"seq":2,"occurred_at":"2026-05-13T18:33:01Z","parent_hashes":{"log":"'"$anchor_a_commit"'","causal":[],"related":[]},"legacy":{},"payload":{"principal":"bob","role":"reporter"}}'
+  anchor_a_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002001","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000002101"},"idempotency_key":"018f0000-0000-7000-8000-000000002201","actor":{"principal":"alice","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:33:00Z","parent_hashes":{"log":"","anchor":"'"$genesis_head"'","causal":[],"related":[]},"legacy":{},"payload":{"title":"Frontier anchor A"}}'
+  anchor_a_commit="$(git commit-tree -S -m "issue.opened frontier anchor A" -m "$anchor_a_body" "$empty_tree" -p "$genesis_head")"
+  grant_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002002","event_type":"acl.role_granted","object":{"kind":"acl","id":"acl:bob"},"idempotency_key":"018f0000-0000-7000-8000-000000002202","actor":{"principal":"alice","device":"laptop"},"seq":2,"occurred_at":"2026-05-13T18:33:01Z","parent_hashes":{"log":"'"$anchor_a_commit"'","anchor":"","causal":[],"related":[]},"legacy":{},"payload":{"principal":"bob","role":"reporter"}}'
   grant_commit="$(git commit-tree -S -m "acl.role_granted bob reporter frontier" -m "$grant_body" "$empty_tree" -p "$anchor_a_commit")"
-  identity_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002003","event_type":"identity.device_added","object":{"kind":"identity","id":"identity:bob:desktop"},"idempotency_key":"018f0000-0000-7000-8000-000000002203","actor":{"principal":"alice","device":"laptop"},"seq":3,"occurred_at":"2026-05-13T18:33:02Z","parent_hashes":{"log":"'"$grant_commit"'","causal":[],"related":[]},"legacy":{},"payload":{"principal":"bob","device":"desktop","signing_key":{"scheme":"ssh","public_key":"'"$BOB_PUBLIC_KEY"'","fingerprint":"'"$BOB_FINGERPRINT"'"}}}'
+  identity_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002003","event_type":"identity.device_added","object":{"kind":"identity","id":"identity:bob:desktop"},"idempotency_key":"018f0000-0000-7000-8000-000000002203","actor":{"principal":"alice","device":"laptop"},"seq":3,"occurred_at":"2026-05-13T18:33:02Z","parent_hashes":{"log":"'"$grant_commit"'","anchor":"","causal":[],"related":[]},"legacy":{},"payload":{"principal":"bob","device":"desktop","signing_key":{"scheme":"ssh","public_key":"'"$BOB_PUBLIC_KEY"'","fingerprint":"'"$BOB_FINGERPRINT"'"}}}'
   identity_commit="$(git commit-tree -S -m "identity.device_added bob/desktop frontier" -m "$identity_body" "$empty_tree" -p "$grant_commit")"
-  bob_issue_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002004","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000002102"},"idempotency_key":"018f0000-0000-7000-8000-000000002204","actor":{"principal":"bob","device":"desktop"},"seq":1,"occurred_at":"2026-05-13T18:33:03Z","parent_hashes":{"log":"'"$identity_commit"'","causal":[],"related":[]},"legacy":{},"payload":{"title":"Bob concurrent issue"}}'
+  bob_issue_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002004","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000002102"},"idempotency_key":"018f0000-0000-7000-8000-000000002204","actor":{"principal":"bob","device":"desktop"},"seq":1,"occurred_at":"2026-05-13T18:33:03Z","parent_hashes":{"log":"","anchor":"'"$genesis_head"'","causal":["'"$identity_commit"'"],"related":["'"$identity_commit"'"]},"legacy":{},"payload":{"title":"Bob concurrent issue"}}'
   git config user.name "Bob"
   git config user.email "bob@example.com"
   git config user.signingkey "$BOB_KEY"
-  bob_issue_commit="$(git commit-tree -S -m "issue.opened bob concurrent frontier" -m "$bob_issue_body" "$empty_tree" -p "$identity_commit")"
+  bob_issue_commit="$(git commit-tree -S -m "issue.opened bob concurrent frontier" -m "$bob_issue_body" "$empty_tree" -p "$genesis_head" -p "$identity_commit")"
   git config user.name "Alice"
   git config user.email "alice@example.com"
   git config user.signingkey "$KEY"
 
-  anchor_b_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002005","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000002103"},"idempotency_key":"018f0000-0000-7000-8000-000000002205","actor":{"principal":"alice","device":"laptop"},"seq":4,"occurred_at":"2026-05-13T18:33:04Z","parent_hashes":{"log":"","causal":[],"related":[]},"legacy":{},"payload":{"title":"Frontier anchor B"}}'
-  anchor_b_commit="$(git commit-tree -S -m "issue.opened frontier anchor B" -m "$anchor_b_body" "$empty_tree")"
-  revoke_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002006","event_type":"acl.role_revoked","object":{"kind":"acl","id":"acl:bob"},"idempotency_key":"018f0000-0000-7000-8000-000000002206","actor":{"principal":"alice","device":"laptop"},"seq":5,"occurred_at":"2026-05-13T18:33:05Z","parent_hashes":{"log":"'"$anchor_b_commit"'","causal":["'"$identity_commit"'"],"related":["'"$identity_commit"'"]},"legacy":{},"payload":{"principal":"bob","role":"reporter"}}'
+  anchor_b_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002005","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000002103"},"idempotency_key":"018f0000-0000-7000-8000-000000002205","actor":{"principal":"alice","device":"laptop"},"seq":4,"occurred_at":"2026-05-13T18:33:04Z","parent_hashes":{"log":"","anchor":"'"$genesis_head"'","causal":[],"related":[]},"legacy":{},"payload":{"title":"Frontier anchor B"}}'
+  anchor_b_commit="$(git commit-tree -S -m "issue.opened frontier anchor B" -m "$anchor_b_body" "$empty_tree" -p "$genesis_head")"
+  revoke_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002006","event_type":"acl.role_revoked","object":{"kind":"acl","id":"acl:bob"},"idempotency_key":"018f0000-0000-7000-8000-000000002206","actor":{"principal":"alice","device":"laptop"},"seq":5,"occurred_at":"2026-05-13T18:33:05Z","parent_hashes":{"log":"'"$anchor_b_commit"'","anchor":"","causal":["'"$identity_commit"'"],"related":["'"$identity_commit"'"]},"legacy":{},"payload":{"principal":"bob","role":"reporter"}}'
   revoke_commit="$(git commit-tree -S -m "acl.role_revoked bob reporter frontier" -m "$revoke_body" "$empty_tree" -p "$anchor_b_commit" -p "$identity_commit")"
 
-  git update-ref refs/gitomi/inbox/alice/a "$bob_issue_commit"
+  git update-ref refs/gitomi/inbox/alice/a "$identity_commit"
   git update-ref refs/gitomi/inbox/alice/b "$revoke_commit"
+  git update-ref refs/gitomi/inbox/bob/desktop "$bob_issue_commit"
   events="$(gt events list --json)"
   bob_line="$(printf '%s\n' "$events" | grep '"actor_principal":"bob"')"
   assert_contains "$bob_line" '"domain_status":"accepted"'
@@ -995,12 +1205,13 @@ init_repo "$signature_binding"
   cd "$signature_binding"
   gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
   empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
+  genesis_head="$(git rev-parse refs/gitomi/genesis)"
   git config user.name "Bob"
   git config user.email "bob@example.com"
   git config user.signingkey "$BOB_KEY"
   issue_id="018f0000-0000-7000-8000-000000002301"
-  bad_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002302","event_type":"issue.opened","object":{"kind":"issue","id":"'"$issue_id"'"},"idempotency_key":"018f0000-0000-7000-8000-000000002303","actor":{"principal":"alice","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:34:00Z","parent_hashes":{"log":"","causal":[],"related":[]},"legacy":{},"payload":{"title":"Wrong signer"}}'
-  bad_commit="$(git commit-tree -S -m "issue.opened #$(object_ref "$issue_id") Wrong signer" -m "$bad_body" "$empty_tree")"
+  bad_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002302","event_type":"issue.opened","object":{"kind":"issue","id":"'"$issue_id"'"},"idempotency_key":"018f0000-0000-7000-8000-000000002303","actor":{"principal":"alice","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:34:00Z","parent_hashes":{"log":"","anchor":"'"$genesis_head"'","causal":[],"related":[]},"legacy":{},"payload":{"title":"Wrong signer"}}'
+  bad_commit="$(git commit-tree -S -m "issue.opened #$(object_ref "$issue_id") Wrong signer" -m "$bad_body" "$empty_tree" -p "$genesis_head")"
   git update-ref refs/gitomi/inbox/alice/laptop "$bad_commit"
   events="$(gt events list --json)"
   assert_line_count "$events" 1
@@ -1017,9 +1228,10 @@ init_repo "$unauthorized"
   cd "$unauthorized"
   gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
   empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
+  genesis_head="$(git rev-parse refs/gitomi/genesis)"
   issue_id="018f0000-0000-7000-8000-000000000311"
-  bad_body='{"$schema":"urn:gitomi:event:v1","repo_id":"018f0000-0000-7000-8000-000000000001","event_uuid":"018f0000-0000-7000-8000-000000000312","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000000311"},"idempotency_key":"018f0000-0000-7000-8000-000000000313","actor":{"principal":"mallory","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:30:59Z","parent_hashes":{"log":"","causal":[],"related":[]},"legacy":{},"payload":{"title":"Unauthorized"}}'
-  bad_commit="$(git commit-tree -S -m "issue.opened #$(object_ref "$issue_id") Unauthorized" -m "$bad_body" "$empty_tree")"
+  bad_body='{"$schema":"urn:gitomi:event:v1","repo_id":"018f0000-0000-7000-8000-000000000001","event_uuid":"018f0000-0000-7000-8000-000000000312","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000000311"},"idempotency_key":"018f0000-0000-7000-8000-000000000313","actor":{"principal":"mallory","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:30:59Z","parent_hashes":{"log":"","anchor":"'"$genesis_head"'","causal":[],"related":[]},"legacy":{},"payload":{"title":"Unauthorized"}}'
+  bad_commit="$(git commit-tree -S -m "issue.opened #$(object_ref "$issue_id") Unauthorized" -m "$bad_body" "$empty_tree" -p "$genesis_head")"
   git update-ref refs/gitomi/inbox/mallory/laptop "$bad_commit"
   events="$(gt events list --json)"
   assert_line_count "$events" 1
@@ -1078,6 +1290,161 @@ assert_not_contains "$remote_refs" "refs/gitomi/staging"
   issues="$(gt issue list --json)"
   assert_line_count "$issues" 1
   assert_contains "$issues" '"title":"Synced issue"'
+  gt fsck >/dev/null
+)
+
+echo "integration: two users sync interleaved issue events and converge with LWW edits"
+interleaved="$ROOT/interleaved-users"
+mkdir -p "$interleaved"
+git -C "$interleaved" init --bare remote.git >/dev/null
+init_repo "$interleaved/a"
+init_repo "$interleaved/b"
+configure_bob_signing "$interleaved/b"
+git -C "$interleaved/a" remote add origin "$interleaved/remote.git"
+git -C "$interleaved/b" remote add origin "$interleaved/remote.git"
+(
+  cd "$interleaved/a"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  gt identity add-device bob desktop --public-key "$BOB_PUBLIC_KEY" --fingerprint "$BOB_FINGERPRINT" >/dev/null
+  gt acl grant bob maintainer >/dev/null
+  gt issue open --title "Shared interleaved issue" --body "Initial shared body" >/dev/null
+  shared_issue_id="$(json_field "$(gt issue list --json)" id)"
+  [[ -n "$shared_issue_id" ]] || fail "expected shared issue id"
+  printf '%s\n' "$shared_issue_id" > "$interleaved/shared_issue_id"
+  gt sync --push-only >/dev/null
+)
+(
+  cd "$interleaved/b"
+  gt sync >/dev/null
+  write_gt_config "$REPO_ID" bob desktop 0
+  issues="$(gt issue list --json)"
+  assert_contains "$issues" '"title":"Shared interleaved issue"'
+)
+(
+  cd "$interleaved/a"
+  gt sync >/dev/null
+)
+
+(
+  cd "$interleaved/a"
+  gt issue open --title "Alice interleaved 1" >/dev/null
+)
+sleep 1
+(
+  cd "$interleaved/b"
+  gt issue open --title "Bob interleaved 1" >/dev/null
+)
+sleep 1
+(
+  cd "$interleaved/a"
+  gt issue open --title "Alice interleaved 2" >/dev/null
+)
+sleep 1
+(
+  cd "$interleaved/b"
+  gt issue open --title "Bob interleaved 2" >/dev/null
+)
+
+(
+  cd "$interleaved/a"
+  gt sync >/dev/null
+)
+(
+  cd "$interleaved/b"
+  gt sync >/dev/null
+)
+(
+  cd "$interleaved/a"
+  gt sync >/dev/null
+)
+(
+  cd "$interleaved/a"
+  issues="$(gt issue list --json)"
+  assert_line_count "$issues" 5
+  assert_line_order "$issues" \
+    '"title":"Bob interleaved 2"' \
+    '"title":"Alice interleaved 2"' \
+    '"title":"Bob interleaved 1"' \
+    '"title":"Alice interleaved 1"' \
+    '"title":"Shared interleaved issue"'
+)
+(
+  cd "$interleaved/b"
+  issues="$(gt issue list --json)"
+  assert_line_count "$issues" 5
+  assert_line_order "$issues" \
+    '"title":"Bob interleaved 2"' \
+    '"title":"Alice interleaved 2"' \
+    '"title":"Bob interleaved 1"' \
+    '"title":"Alice interleaved 1"' \
+    '"title":"Shared interleaved issue"'
+)
+
+shared_issue_id="$(cat "$interleaved/shared_issue_id")"
+shared_issue_ref="#$(object_ref "$shared_issue_id")"
+(
+  cd "$interleaved/a"
+  gt comment add issue "$shared_issue_ref" --body "Alice local comment" >/dev/null
+)
+sleep 1
+(
+  cd "$interleaved/b"
+  gt comment add issue "$shared_issue_ref" --body "Bob local comment" >/dev/null
+)
+sleep 1
+(
+  cd "$interleaved/a"
+  gt issue body "$shared_issue_ref" --body "Alice local edit" >/dev/null
+  git rev-parse refs/gitomi/inbox/alice/laptop > "$interleaved/alice_edit_hash"
+)
+sleep 1
+(
+  cd "$interleaved/b"
+  gt issue body "$shared_issue_ref" --body "Bob local edit" >/dev/null
+  git rev-parse refs/gitomi/inbox/bob/desktop > "$interleaved/bob_edit_hash"
+)
+alice_edit_hash="$(cat "$interleaved/alice_edit_hash")"
+bob_edit_hash="$(cat "$interleaved/bob_edit_hash")"
+if [[ "$alice_edit_hash" > "$bob_edit_hash" ]]; then
+  expected_body="Alice local edit"
+else
+  expected_body="Bob local edit"
+fi
+
+(
+  cd "$interleaved/a"
+  gt sync >/dev/null
+)
+(
+  cd "$interleaved/b"
+  gt sync >/dev/null
+)
+(
+  cd "$interleaved/a"
+  gt sync >/dev/null
+)
+(
+  cd "$interleaved/a"
+  issue_show="$(gt issue show "$shared_issue_ref" --json)"
+  comments="$(gt comment list issue "$shared_issue_ref" --json)"
+  assert_contains "$issue_show" '"body":"'"$expected_body"'"'
+  assert_line_count "$comments" 2
+  assert_contains "$comments" '"body":"Alice local comment"'
+  assert_contains "$comments" '"body":"Bob local comment"'
+  printf '%s\n' "$issue_show" > "$interleaved/a_issue.json"
+  printf '%s\n' "$comments" > "$interleaved/a_comments.json"
+  gt fsck >/dev/null
+)
+(
+  cd "$interleaved/b"
+  issue_show="$(gt issue show "$shared_issue_ref" --json)"
+  comments="$(gt comment list issue "$shared_issue_ref" --json)"
+  assert_contains "$issue_show" '"body":"'"$expected_body"'"'
+  assert_line_count "$comments" 2
+  assert_contains "$comments" '"body":"Alice local comment"'
+  assert_contains "$comments" '"body":"Bob local comment"'
+  assert_equal "$(cat "$interleaved/a_issue.json")" "$issue_show" "expected user A and user B issue projections to match"
+  assert_equal "$(cat "$interleaved/a_comments.json")" "$comments" "expected user A and user B comment projections to match"
   gt fsck >/dev/null
 )
 
@@ -1267,12 +1634,14 @@ git -C "$div_root/desktop" remote add origin "$div_root/remote.git"
 (
   cd "$div_root/laptop"
   gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  gt identity add-device alice desktop >/dev/null
   gt issue open --title "Laptop issue" >/dev/null
   gt sync --push-only >/dev/null
 )
 (
   cd "$div_root/desktop"
-  gt init --repo-id "$REPO_ID" --principal alice --device desktop >/dev/null
+  gt sync --pull-only >/dev/null
+  write_gt_config "$REPO_ID" alice desktop 0
   gt issue open --title "Desktop issue" >/dev/null
   gt sync --push-only >/dev/null
 )
@@ -1283,7 +1652,7 @@ git -C "$div_root/desktop" remote add origin "$div_root/remote.git"
   assert_contains "$refs" "refs/gitomi/inbox/alice/laptop"
   assert_contains "$refs" "refs/gitomi/inbox/alice/desktop"
   json="$(gt events list --json)"
-  assert_line_count "$json" 2
+  assert_line_count "$json" 3
   assert_contains "$json" '"actor_device":"laptop"'
   assert_contains "$json" '"actor_device":"desktop"'
   gt fsck >/dev/null

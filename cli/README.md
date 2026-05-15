@@ -31,7 +31,7 @@ zig build install
 Implemented commands:
 
 ```text
-gt init [--principal ID] [--device ID] [--repo-id UUID] [--force]
+gt init [--principal ID] [--device ID] [--repo-id UUID] [--access open|closed] [--force]
 gt status
 gt fsck
 gt index rebuild|status
@@ -53,6 +53,7 @@ gt issue label ISSUE add|remove LABEL
 gt issue assignee ISSUE add|remove PRINCIPAL
 gt issue milestone ISSUE --milestone MILESTONE
 gt issue project ISSUE add|remove PROJECT --column COLUMN
+gt issue react|unreact ISSUE EMOJI
 gt project list [--json]
 gt project create --name NAME [--description TEXT] [--column COLUMN]
 gt project column PROJECT add|remove COLUMN
@@ -74,11 +75,14 @@ gt pr label PR add|remove LABEL
 gt pr assignee PR add|remove PRINCIPAL
 gt pr reviewer PR add|remove PRINCIPAL
 gt pr comment PR --body BODY
+gt pr react|unreact PR EMOJI
 gt pr merge PR [--merge-oid OID] [--target-oid OID]
 gt comment list issue|pr OBJECT [--json]
 gt comment add issue|pr OBJECT --body BODY
+gt comment reply COMMENT --body BODY
 gt comment edit COMMENT --body BODY
 gt comment redact COMMENT [--reason REASON]
+gt comment react|unreact COMMENT EMOJI
 gt actions workflows [--json] [--ref REF|--oid OID]
 gt actions request --workflow WORKFLOW [--ref REF|--oid OID] [--event EVENT]
 gt actions complete RUN --conclusion CONCLUSION [--workflow WORKFLOW] [--ref REF|--oid OID] [--event EVENT]
@@ -93,9 +97,14 @@ gt web [--host 127.0.0.1] [--port 12655]
 ```
 
 `gt init` writes a signed genesis manifest to `refs/gitomi/genesis`, including
-the repo id, owner, device, public signing key, and key fingerprint. Configure
-Git commit signing before using it. OpenPGP `user.signingkey` values are
-exported with `gpg`; SSH signing is also supported when `gpg.format=ssh`.
+the repo id, access mode, owner, device, public signing key, and key
+fingerprint. `--access closed` is the default RBAC mode: events from principals
+without effective grants remain in the signed inbox log but are not projected
+as visible issues, comments, or other domain objects. `--access open` accepts
+signed events from anyone who can sync and push Gitomi refs, leaving access
+control to the Git server. Configure Git commit signing before using it. OpenPGP
+`user.signingkey` values are exported with `gpg`; SSH signing is also supported
+when `gpg.format=ssh`.
 
 `gt issue open` writes a signed Git commit to the configured inbox ref under
 `refs/gitomi/inbox/<principal>/<device>`. Event identity is the Git commit hash;
@@ -185,9 +194,11 @@ or `--remote REMOTE`. All variants require an exact typed confirmation unless
 
 `gt github import` reads GitHub issues and pull requests from the GitHub API or
 a fixture JSON object with `issues`, `pulls`, and optional `comments` fields,
-then writes signed import events through an `import-bot/github` actor. With no
-API or fixture options, it shells out to local `gh api` and lets `gh` choose the
-repository and credentials from the current Git checkout. Imported
+then writes signed import events through a delegated `import-bot/github` actor.
+The current maintainer or owner emits an `acl.delegation_granted` event that
+binds the bot to the signing key used for the import. With no API or fixture
+options, it shells out to local `gh api` and lets `gh` choose the repository and
+credentials from the current Git checkout. Imported
 issue and pull numbers are preserved as `legacy.github_issue_number` and
 `legacy.github_pull_number`, are materialized in the local index, and can be
 used as `#123`, `gh#123`, or `github:123` references. A later import skips

@@ -184,6 +184,33 @@
     document.querySelectorAll("[data-copy-path]").forEach(initPathCopyButton);
   }
 
+  function initTextCopyButton(button) {
+    button.addEventListener("click", async function () {
+      const text = button.dataset.copyText || "";
+      const original = button.title || button.getAttribute("aria-label") || "Copy";
+      if (!text) return;
+      button.disabled = true;
+      try {
+        await copyText(text);
+        button.title = "Copied";
+        button.setAttribute("aria-label", "Copied");
+      } catch (_) {
+        button.title = "Copy failed";
+        button.setAttribute("aria-label", "Copy failed");
+      } finally {
+        window.setTimeout(function () {
+          button.disabled = false;
+          button.title = original;
+          button.setAttribute("aria-label", original);
+        }, 1200);
+      }
+    });
+  }
+
+  function initTextCopyButtons() {
+    document.querySelectorAll("[data-copy-text]").forEach(initTextCopyButton);
+  }
+
   let activeLine = null;
   let activeLineButton = null;
   let lineMenu = null;
@@ -522,6 +549,7 @@
   function initCodeControls() {
     initCopyButtons();
     initPathCopyButtons();
+    initTextCopyButtons();
     initCodeLineActionControls();
     initSymbolsToggles();
   }

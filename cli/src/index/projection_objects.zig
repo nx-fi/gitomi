@@ -14,6 +14,8 @@ const eventWins = ordering.eventWins;
 const max_projected_labels: usize = 256;
 const max_projected_participants: usize = 128;
 const max_projected_project_columns: usize = 128;
+const max_projected_reaction_emojis: usize = 64;
+const max_projected_reaction_actors: usize = 1024;
 
 fn creationEventWins(db: *SqliteDb, event_type: []const u8, object_id: []const u8, event_hash: []const u8) !bool {
     var stmt = try db.prepare("SELECT event_hash FROM events WHERE event_type = ? AND object_id = ? ORDER BY event_hash DESC LIMIT 1");
@@ -97,6 +99,13 @@ pub fn applyIssueProjection(allocator: Allocator, db: *SqliteDb, event_hash: []c
         const project = event_mod.jsonString(payload.get("project")) orelse return "invalid_event_envelope";
         const column = event_mod.jsonString(payload.get("column")) orelse return "invalid_event_envelope";
         try deleteIssueProject(allocator, db, envelope.object_id, project, column, event_hash);
+    } else if (std.mem.eql(u8, envelope.event_type, "issue.reaction_added")) {
+        const emoji = event_mod.jsonString(payload.get("emoji")) orelse return "invalid_event_envelope";
+        try insertReaction(db, "issue", envelope.object_id, emoji, envelope.actor_principal, event_hash, envelope.occurred_at);
+        if (try reactionLimitRejection(db, "issue", envelope.object_id)) |reason| return reason;
+    } else if (std.mem.eql(u8, envelope.event_type, "issue.reaction_removed")) {
+        const emoji = event_mod.jsonString(payload.get("emoji")) orelse return "invalid_event_envelope";
+        try deleteReaction(allocator, db, "issue", envelope.object_id, emoji, envelope.actor_principal, event_hash, payload);
     }
     return null;
 }
@@ -762,6 +771,13 @@ pub fn applyPullProjection(allocator: Allocator, db: *SqliteDb, event_hash: []co
         try deletePullCollectionValue(allocator, db, "SELECT add_hash FROM pull_reviewers WHERE pull_id = ? AND reviewer = ?", "DELETE FROM pull_reviewers WHERE pull_id = ? AND reviewer = ? AND add_hash = ?", envelope.object_id, reviewer, event_hash);
     } else if (std.mem.eql(u8, envelope.event_type, "pull.merged")) {
         try applyPullMerged(allocator, db, envelope.object_id, event_mod.jsonString(payload.get("merge_oid")) orelse "", event_mod.jsonString(payload.get("target_oid")) orelse "", event_hash, envelope);
+    } else if (std.mem.eql(u8, envelope.event_type, "pull.reaction_added")) {
+        const emoji = event_mod.jsonString(payload.get("emoji")) orelse return "invalid_event_envelope";
+        try insertReaction(db, "pull", envelope.object_id, emoji, envelope.actor_principal, event_hash, envelope.occurred_at);
+        if (try reactionLimitRejection(db, "pull", envelope.object_id)) |reason| return reason;
+    } else if (std.mem.eql(u8, envelope.event_type, "pull.reaction_removed")) {
+        const emoji = event_mod.jsonString(payload.get("emoji")) orelse return "invalid_event_envelope";
+        try deleteReaction(allocator, db, "pull", envelope.object_id, emoji, envelope.actor_principal, event_hash, payload);
     }
     return null;
 }
@@ -1048,7 +1064,8 @@ pub fn applyCommentProjection(allocator: Allocator, db: *SqliteDb, event_hash: [
         const reply_parent_id = try commentReplyParentId(allocator, db, event_mod.jsonString(payload.get("reply_parent_id")) orelse "", reply_parent_hash);
         defer allocator.free(reply_parent_id);
         if (reply_parent_hash.len != 0 and reply_parent_id.len == 0) return "parent_not_created";
-        if (reply_parent_id.len != 0 and !(try commentExists(db, reply_parent_id))) return "parent_not_created";
+        if (reply_parent_id.len != 0 and !(try commentInParent(db, reply_parent_id, parent_kind, parent_id))) return "parent_not_created";
+        if (reply_parent_id.len != 0 and reply_parent_hash.len != 0 and !(try commentCreationHashMatches(db, reply_parent_id, reply_parent_hash))) return "parent_not_created";
         try insertCommentAdded(db, event_hash, envelope, parent_kind, parent_id, comment_body, source_author, reply_parent_id, reply_parent_hash);
     } else if (std.mem.eql(u8, envelope.event_type, "comment.body_set")) {
         if (!(try commentExists(db, envelope.object_id))) return "object_not_created";
@@ -1057,6 +1074,15 @@ pub fn applyCommentProjection(allocator: Allocator, db: *SqliteDb, event_hash: [
     } else if (std.mem.eql(u8, envelope.event_type, "comment.redacted")) {
         if (!(try commentExists(db, envelope.object_id))) return "object_not_created";
         try redactComment(allocator, db, envelope.object_id, event_hash, envelope);
+    } else if (std.mem.eql(u8, envelope.event_type, "comment.reaction_added")) {
+        if (!(try commentExists(db, envelope.object_id))) return "object_not_created";
+        const emoji = event_mod.jsonString(payload.get("emoji")) orelse return "invalid_event_envelope";
+        try insertReaction(db, "comment", envelope.object_id, emoji, envelope.actor_principal, event_hash, envelope.occurred_at);
+        if (try reactionLimitRejection(db, "comment", envelope.object_id)) |reason| return reason;
+    } else if (std.mem.eql(u8, envelope.event_type, "comment.reaction_removed")) {
+        if (!(try commentExists(db, envelope.object_id))) return "object_not_created";
+        const emoji = event_mod.jsonString(payload.get("emoji")) orelse return "invalid_event_envelope";
+        try deleteReaction(allocator, db, "comment", envelope.object_id, emoji, envelope.actor_principal, event_hash, payload);
     }
     return null;
 }
@@ -1127,6 +1153,31 @@ fn commentExists(db: *SqliteDb, comment_id: []const u8) !bool {
     return try stmt.step();
 }
 
+fn commentInParent(db: *SqliteDb, comment_id: []const u8, parent_kind: []const u8, parent_id: []const u8) !bool {
+    var stmt = try db.prepare("SELECT 1 FROM comments WHERE id = ? AND parent_kind = ? AND parent_id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, comment_id);
+    try stmt.bindText(2, parent_kind);
+    try stmt.bindText(3, parent_id);
+    return try stmt.step();
+}
+
+fn commentCreationHashMatches(db: *SqliteDb, comment_id: []const u8, event_hash: []const u8) !bool {
+    var stmt = try db.prepare(
+        \\SELECT 1
+        \\FROM events
+        \\WHERE object_id = ?
+        \\  AND event_type = 'comment.added'
+        \\  AND event_hash = ?
+        \\  AND domain_status = 'accepted'
+        \\LIMIT 1
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, comment_id);
+    try stmt.bindText(2, event_hash);
+    return try stmt.step();
+}
+
 fn updateCommentBody(allocator: Allocator, db: *SqliteDb, comment_id: []const u8, body: []const u8, event_hash: []const u8, envelope: ValidatedEnvelope) !void {
     var select = try db.prepare("SELECT body_occurred_at, body_actor_principal, body_event_hash FROM comments WHERE id = ?");
     defer select.deinit();
@@ -1174,4 +1225,104 @@ fn redactComment(allocator: Allocator, db: *SqliteDb, comment_id: []const u8, ev
     try update.bindText(3, event_hash);
     try update.bindText(4, comment_id);
     try update.stepDone();
+}
+
+fn insertReaction(
+    db: *SqliteDb,
+    object_kind: []const u8,
+    object_id: []const u8,
+    emoji: []const u8,
+    actor: []const u8,
+    event_hash: []const u8,
+    created_at: []const u8,
+) !void {
+    if (std.mem.trim(u8, emoji, " \t\r\n").len == 0) return;
+    var stmt = try db.prepare(
+        \\INSERT OR IGNORE INTO reactions(object_kind, object_id, emoji, actor_principal, add_hash, created_at)
+        \\VALUES (?, ?, ?, ?, ?, ?)
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, object_kind);
+    try stmt.bindText(2, object_id);
+    try stmt.bindText(3, emoji);
+    try stmt.bindText(4, actor);
+    try stmt.bindText(5, event_hash);
+    try stmt.bindText(6, created_at);
+    try stmt.stepDone();
+}
+
+fn deleteReaction(
+    allocator: Allocator,
+    db: *SqliteDb,
+    object_kind: []const u8,
+    object_id: []const u8,
+    emoji: []const u8,
+    actor: []const u8,
+    remove_hash: []const u8,
+    payload: std.json.ObjectMap,
+) !void {
+    var explicit_hashes = std.StringHashMap(void).init(allocator);
+    defer explicit_hashes.deinit();
+    if (payload.get("add_hashes")) |value| {
+        if (value == .array) {
+            for (value.array.items) |item| {
+                if (item != .string) continue;
+                try explicit_hashes.put(item.string, {});
+            }
+        }
+    }
+
+    var select = try db.prepare(
+        \\SELECT add_hash
+        \\FROM reactions
+        \\WHERE object_kind = ?
+        \\  AND object_id = ?
+        \\  AND emoji = ?
+        \\  AND actor_principal = ?
+    );
+    defer select.deinit();
+    try select.bindText(1, object_kind);
+    try select.bindText(2, object_id);
+    try select.bindText(3, emoji);
+    try select.bindText(4, actor);
+    while (try select.step()) {
+        const add_hash = try select.columnTextDup(allocator, 0);
+        defer allocator.free(add_hash);
+        const explicit = explicit_hashes.contains(add_hash);
+        if (!explicit and !(try git.isAncestor(allocator, add_hash, remove_hash))) continue;
+        var delete = try db.prepare(
+            \\DELETE FROM reactions
+            \\WHERE object_kind = ?
+            \\  AND object_id = ?
+            \\  AND emoji = ?
+            \\  AND actor_principal = ?
+            \\  AND add_hash = ?
+        );
+        defer delete.deinit();
+        try delete.bindText(1, object_kind);
+        try delete.bindText(2, object_id);
+        try delete.bindText(3, emoji);
+        try delete.bindText(4, actor);
+        try delete.bindText(5, add_hash);
+        try delete.stepDone();
+    }
+}
+
+fn reactionLimitRejection(db: *SqliteDb, object_kind: []const u8, object_id: []const u8) !?[]const u8 {
+    if (try reactionCountExceeds(db, "SELECT COUNT(DISTINCT emoji) FROM reactions WHERE object_kind = ? AND object_id = ?", object_kind, object_id, max_projected_reaction_emojis)) {
+        return "collection_limit_exceeded";
+    }
+    if (try reactionCountExceeds(db, "SELECT COUNT(DISTINCT actor_principal) FROM reactions WHERE object_kind = ? AND object_id = ?", object_kind, object_id, max_projected_reaction_actors)) {
+        return "collection_limit_exceeded";
+    }
+    return null;
+}
+
+fn reactionCountExceeds(db: *SqliteDb, comptime sql_text: []const u8, object_kind: []const u8, object_id: []const u8, max_count: usize) !bool {
+    var stmt = try db.prepare(sql_text);
+    defer stmt.deinit();
+    try stmt.bindText(1, object_kind);
+    try stmt.bindText(2, object_id);
+    if (!(try stmt.step())) return false;
+    return stmt.columnInt64(0) > @as(i64, @intCast(max_count));
 }

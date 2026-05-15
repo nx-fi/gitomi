@@ -80,6 +80,12 @@ fingerprint as the repository's trust root. If a clone already has a local
 genesis ref, a different fetched genesis commit MUST NOT be admitted
 automatically.
 
+For OpenPGP genesis keys, an implementation MAY import the public key block from
+the staged manifest before verifying the staged genesis commit. This import is
+only a verifier bootstrap step: the genesis commit MUST still verify
+cryptographically, and the verified signer fingerprint MUST equal the manifest's
+`device.signing_key.fingerprint` before the genesis ref is admitted.
+
 The genesis ref is immutable after publication. Any later owner or device change
 MUST be expressed through inbox events, not by rewriting `refs/gitomi/genesis`.
 
@@ -205,24 +211,33 @@ payload aliases. These tokens are not Git refs and do not authorize access.
 | `#<object-ref>` | Issue in issue context, or issue/pull when the caller resolves both |
 | `issue:<object-ref>` | Issue |
 | `pr:<object-ref>` or `pull:<object-ref>` | Pull request |
+| `comment:<comment-ref>` | Comment |
+| `~<comment-ref>` | Comment shorthand |
 | `project:<uuid-prefix>` | Project by UUID prefix |
 | `@<project-slug>` | Project by slug |
 | `milestone:<uuid-prefix>` | Milestone by UUID prefix |
 | `^<milestone-slug>` | Milestone by slug |
 | `@<project-slug>/<column-slug>` | Kanban column on a project |
 
-Issue and pull object refs MUST be lowercase hexadecimal prefixes of
+Issue, pull, and comment object refs MUST be lowercase hexadecimal prefixes of
 `sha256(object.id)`, where `object.id` is the canonical UUID string from the
 accepted event payload. They MUST be at least 7 characters and MUST be extended
-when ambiguous. Project, milestone, and column slugs MUST be ref-safe segments
-(§3.1) generated with the sanitization algorithm in §3.3. If a slug would
-collide in the local projection, the writer MUST append a disambiguating
-suffix, normally `-<uuid-prefix>`.
+when ambiguous. Comment refs SHOULD be rendered in typed form as
+`comment:<comment-ref>` in general command output and MAY be rendered as
+`~<comment-ref>` in dense timeline UI. Implementations MAY accept a full
+comment UUID or UUID prefix in comment-specific command contexts as a recovery
+and compatibility fallback, but they SHOULD NOT render ambiguous bare `#...`
+comment references because `#...` is reserved for issues and pull requests.
+Project, milestone, and column slugs MUST be ref-safe segments (§3.1) generated
+with the sanitization algorithm in §3.3. If a slug would collide in the local
+projection, the writer MUST append a disambiguating suffix, normally
+`-<uuid-prefix>`.
 
 CLI and HTTP entry points SHOULD accept the typed long forms
 `issue:<object-ref>`, `pull:<object-ref>`, `project:<uuid-prefix>`, and
 `milestone:<uuid-prefix>` whenever the expected object kind is not otherwise
-obvious from command context.
+obvious from command context. Entry points that target comments SHOULD accept
+`comment:<comment-ref>` and `~<comment-ref>`.
 
 When a command context requires an existing milestone, implementations SHOULD
 also accept `^<milestone-slug>` and MAY accept an exact milestone title as a
@@ -316,25 +331,32 @@ MUST NOT exceed 1 MiB before Git object compression.
 
 ### 4.4. Parent Linkage and Parent Hashes
 
-Inbox commits use Git's multi-parent mechanism to encode sequential ordering and
-cross-device causal knowledge. Event envelopes also record the same parent
-hashes explicitly so reducers can reason about security and object-specific
-relationships without trusting user-generated UUIDs.
+Inbox commits use Git's multi-parent mechanism to encode sequential ordering,
+genesis anchoring, and cross-device causal knowledge. Event envelopes also
+record the same parent hashes explicitly so reducers can reason about security
+and object-specific relationships without trusting user-generated UUIDs.
 
 #### 4.4.1. First Parent (Chain Link)
 
-*   The first parent MUST be the immediately preceding commit on the same inbox ref.
-*   The root commit (first event on an inbox ref) MUST have no first parent (it is a parentless commit).
-*   This forms a strict linear chain when traversed with `--first-parent`.
+*   For every non-root inbox event, the first parent MUST be the immediately
+    preceding commit on the same inbox ref.
+*   For the root event on an inbox ref, the first parent MUST be the repository
+    genesis commit at `refs/gitomi/genesis`.
+*   This forms a strict linear chain when traversed with `--first-parent`, with
+    genesis as the terminal trust anchor for every inbox root.
 *   For every non-root inbox event, `parent_hashes.log` in the event envelope
-    MUST equal the first-parent commit OID.
+    MUST equal the first-parent event commit OID.
+*   For every root inbox event, `parent_hashes.log` MUST be the empty string and
+    `parent_hashes.anchor` MUST equal the genesis commit OID.
 
 #### 4.4.2. Additional Parents (Causal Knowledge)
 
 *   After the first parent, a commit SHOULD include additional parents referencing a bounded set of latest known heads of other inbox refs at the time the event was created.
 *   These additional parents encode the actor's causal knowledge: "when I created this event, I had observed these other inbox states."
 *   Additional parents MUST be commit OIDs that exist in the repository. Implementations MUST tolerate missing additional parents during validation (the remote commits may not have arrived yet).
-*   When no cross-device knowledge exists (e.g., the actor has never synced), the commit has only its first parent (or no parents for root commits).
+*   When no cross-device knowledge exists (e.g., the actor has never synced),
+    the commit has only its first parent. For a root event, that sole parent is
+    genesis.
 *   A v1 event commit MUST NOT contain more than 32 additional parents. Writers SHOULD omit heads already reachable from the first parent before applying this cap, then select remaining heads deterministically by inbox ref name. Omitted heads are treated as concurrent.
 *   `parent_hashes.causal` in the event envelope MUST contain the additional
     parent commit OIDs known to the writer. The JSON order MUST match the Git
@@ -349,7 +371,9 @@ writer used when creating the event. Related means one of:
 *   the latest observed event that affects the same scalar register, such as an
     issue title, pull state, comment body, merge state, ACL role for a
     principal, or identity device binding;
-*   an add event hash being observed by a collection remove; or
+*   an add event hash being observed by a collection remove;
+*   the `comment.added` event hash of the parent comment when creating a reply;
+    or
 *   a creation event for the object being modified.
 
 For v1, the log parent is the minimum related parent for every non-root event.
@@ -364,7 +388,8 @@ A v1 event envelope MUST NOT contain more than 256
 #### 4.4.4. Parent Order
 
 ```
-parent 1: previous commit on this inbox ref (chain link)
+root event parent 1: genesis commit (trust anchor)
+non-root parent 1: previous commit on this inbox ref (chain link)
 parent 2: latest known head of inbox ref A
 parent 3: latest known head of inbox ref B
 ...
@@ -377,8 +402,11 @@ The order of additional parents (2, 3, …) is not semantically significant but 
 To create a new inbox event commit, an implementation MUST:
 
 1.  Compute the empty tree OID.
-2.  Resolve the current head of the actor's inbox ref (if it exists) as the first parent.
-3.  Resolve the current heads of all other known inbox refs as additional parents.
+2.  Resolve the current head of the actor's inbox ref. If it exists, use it as
+    the first parent. If it does not exist, resolve `refs/gitomi/genesis` and
+    use genesis as the first parent.
+3.  Resolve the current heads of all other known inbox refs as additional
+    parents, omitting heads already reachable from the first parent.
 4.  Resolve related parent hashes for the event's object, field, collection
     member, ACL target, identity target, or merge/redaction target.
 5.  Format the subject line and JSON event body, including `parent_hashes`.
@@ -411,6 +439,7 @@ Every event body MUST be a single JSON object conforming to:
     },
     "parent_hashes": {
         "log": "<commit-oid or empty string>",
+        "anchor": "<genesis commit-oid for root event, otherwise empty string>",
         "causal": ["<commit-oid>"],
         "related": ["<commit-oid>"]
     },
@@ -435,6 +464,7 @@ Every event body MUST be a single JSON object conforming to:
 | `actor.principal`   | string  | The acting principal. MUST match the commit signature identity. |
 | `actor.device`      | string  | The device that created the event. MUST be ref-safe. |
 | `parent_hashes.log` | string  | First-parent event hash for this inbox log, or the empty string for a root event. |
+| `parent_hashes.anchor` | string | Genesis commit OID for a root event, or the empty string for a non-root event. |
 | `parent_hashes.causal` | array | Additional Git parent event hashes representing observed inbox heads. |
 | `parent_hashes.related` | array | Domain-related event hashes used by reducers and security checks. |
 | `seq`               | integer | Strictly increasing per `(principal, device)` log. The tuple `(principal, device, seq)` MUST be unique within a repository. Gaps are allowed. |
@@ -496,6 +526,7 @@ fsck, and index rebuild:
 | Issue, pull request, and comment body fields | 64 KiB |
 | Public signing key payload fields | 16 KiB |
 | Principal, device, label, assignee, reviewer, workflow, and conclusion strings | 256 bytes each |
+| Reaction emoji payload string | 256 bytes |
 | Project, milestone, and kanban column names or slugs | 256 bytes each |
 | Data Plane ref or object-id payload strings | 512 bytes each |
 | Collection delta arrays in one event | 128 entries |
@@ -503,6 +534,8 @@ fsck, and index rebuild:
 | Visible assignees or reviewers on one issue or pull request | 128 |
 | Visible project placements on one issue | 256 |
 | Visible kanban columns on one project | 128 |
+| Visible reaction emoji kinds on one issue, pull request, or comment | 64 |
+| Visible reaction actors on one issue, pull request, or comment | 1,024 |
 | Snapshot tree size | 64 MiB |
 | Retained snapshot refs per repository | 32 |
 
@@ -564,11 +597,12 @@ For each staging inbox ref, the implementation MUST:
 
 3.  **Validate new commits**: For each new commit in first-parent order from the local base to the staged head:
     *   Verify the tree is the empty tree.
-    *   Verify first-parent linkage (each commit's first parent is the preceding commit; root has no parent).
+    *   Verify first-parent linkage (each non-root commit's first parent is the
+        preceding inbox commit; each root commit's first parent is genesis).
     *   Verify the commit signature.
     *   Parse and validate the event envelope.
-    *   Verify `parent_hashes.log` and `parent_hashes.causal` against the Git
-        parent list.
+    *   Verify `parent_hashes.log`, `parent_hashes.anchor`, and
+        `parent_hashes.causal` against the Git parent list.
 
 4.  If all commits pass, atomically update the local inbox ref.
 
@@ -629,7 +663,12 @@ Once an inbox ref has been published (pushed to any remote or fetched by any oth
 
 Implementations SHOULD detect non-fast-forward updates to inbox refs during pull and reject them. During push, the remote's built-in fast-forward check provides enforcement.
 
-The `gt fsck` command MUST verify first-parent chain integrity for all inbox refs.
+The `gt fsck` command MUST verify first-parent chain integrity for all inbox
+refs, including the genesis first-parent anchor of every inbox root.
+
+There is no longest-chain rule in Gitomi v1. A diverged or rewritten inbox ref
+is not resolved by selecting the longer history; it is rejected or quarantined
+until an operator chooses a recovery path from trusted replicas.
 
 ## 8. Validation Pipeline
 
@@ -638,11 +677,15 @@ The `gt fsck` command MUST verify first-parent chain integrity for all inbox ref
 When validating an inbox commit (during sync admission, fsck, or index rebuild), the following checks MUST be performed in order:
 
 1.  **Empty tree**: The commit's tree OID MUST equal the empty tree.
-2.  **First parent**: The commit's first parent MUST be the previous commit on the same inbox ref (or absent for root).
+2.  **First parent**: The commit's first parent MUST be the previous commit on
+    the same inbox ref, or genesis for the root event on that ref.
 3.  **Signature**: The commit MUST have a valid Git signature verifiable against the configured signing backend.
 4.  **Envelope**: The commit body MUST parse as valid JSON conforming to the event envelope schema (§5).
 5.  **Repo ID**: The `repo_id` MUST match the repository's configured or observed `repo_id`.
-6.  **Parent hashes**: `parent_hashes.log` and `parent_hashes.causal` MUST match the commit's first and additional parents, and `parent_hashes.causal` MUST NOT exceed the v1 additional-parent cap.
+6.  **Parent hashes**: `parent_hashes.log`, `parent_hashes.anchor`, and
+    `parent_hashes.causal` MUST match the commit's first and additional
+    parents. `parent_hashes.causal` MUST NOT exceed the v1 additional-parent
+    cap.
 7.  **Resource limits**: The subject, JSON body, parent count, and
     `parent_hashes.related` count MUST satisfy the v1 limits.
 8.  **Sequence uniqueness**: The `(actor.principal, actor.device, seq)` tuple MUST not duplicate any previously accepted event. Within a single principal-device inbox history, each event's `seq` MUST be greater than the previous event's `seq`; gaps are allowed.

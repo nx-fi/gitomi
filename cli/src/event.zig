@@ -22,6 +22,7 @@ pub const max_related_parents = 256;
 
 pub const EventParents = struct {
     log: ?[]const u8 = null,
+    anchor: ?[]const u8 = null,
     causal: []const []const u8 = &.{},
     related: []const []const u8 = &.{},
 };
@@ -50,6 +51,12 @@ pub const CommentAddedMetadata = struct {
     source_author: ?[]const u8 = null,
     reply_parent_id: ?[]const u8 = null,
     reply_parent_hash: ?[]const u8 = null,
+};
+
+pub const DelegationSigningKey = struct {
+    scheme: []const u8,
+    public_key: []const u8,
+    fingerprint: []const u8,
 };
 
 pub const IssueUpdate = struct {
@@ -617,6 +624,31 @@ pub fn buildCommentRedactedJson(
     return try buf.toOwnedSlice(allocator);
 }
 
+pub fn buildReactionJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    object_kind: []const u8,
+    object_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    event_type: []const u8,
+    emoji: []const u8,
+    add_hashes: []const []const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, object_id, event_uuid, idem, occurred_at, parents, event_type, object_kind);
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "emoji", emoji, add_hashes.len != 0);
+    if (add_hashes.len != 0) try appendJsonFieldStringArray(&buf, allocator, "add_hashes", add_hashes, false);
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
 pub fn buildPullOpenedJson(
     allocator: Allocator,
     cfg: Config,
@@ -791,6 +823,45 @@ pub fn buildAclRoleJson(
     try buf.appendSlice(allocator, "\"payload\":{");
     try appendJsonFieldString(&buf, allocator, "principal", principal, true);
     try appendJsonFieldString(&buf, allocator, "role", role, false);
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildAclDelegationJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    principal: []const u8,
+    device: []const u8,
+    capability: []const u8,
+    scope: []const u8,
+    signing_key: DelegationSigningKey,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    grant: bool,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    const object_id = try std.fmt.allocPrint(allocator, "acl:{s}", .{principal});
+    defer allocator.free(object_id);
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, object_id, event_uuid, idem, occurred_at, parents, if (grant) "acl.delegation_granted" else "acl.delegation_revoked", "acl");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "principal", principal, true);
+    try appendJsonFieldString(&buf, allocator, "device", device, true);
+    try appendJsonFieldString(&buf, allocator, "capability", capability, true);
+    try appendJsonFieldString(&buf, allocator, "scope", scope, true);
+    if (grant) {
+        try buf.appendSlice(allocator, "\"signing_key\":{");
+        try appendJsonFieldString(&buf, allocator, "scheme", signing_key.scheme, true);
+        try appendJsonFieldString(&buf, allocator, "public_key", signing_key.public_key, true);
+        try appendJsonFieldString(&buf, allocator, "fingerprint", signing_key.fingerprint, false);
+        try buf.appendSlice(allocator, "}");
+    } else if (buf.items[buf.items.len - 1] == ',') {
+        buf.items.len -= 1;
+    }
     try buf.appendSlice(allocator, "}}");
     return try buf.toOwnedSlice(allocator);
 }
@@ -1000,6 +1071,7 @@ fn appendIssueProjectsField(
 fn appendParentHashes(buf: *std.ArrayList(u8), allocator: Allocator, parents: EventParents) !void {
     try buf.appendSlice(allocator, "\"parent_hashes\":{");
     try appendJsonFieldString(buf, allocator, "log", parents.log orelse "", true);
+    try appendJsonFieldString(buf, allocator, "anchor", parents.anchor orelse "", true);
     try appendJsonFieldStringArray(buf, allocator, "causal", parents.causal, true);
     try appendJsonFieldStringArray(buf, allocator, "related", parents.related, false);
     try buf.appendSlice(allocator, "},");
@@ -1155,6 +1227,10 @@ pub fn validateEnvelopeObject(allocator: Allocator, root: std.json.ObjectMap) !?
         .message => |message| return message,
     };
     _ = switch (try requiredEnvelopeString(allocator, parent_hashes, "log", "parent_hashes.log", true)) {
+        .value => |value| value,
+        .message => |message| return message,
+    };
+    _ = switch (try requiredEnvelopeString(allocator, parent_hashes, "anchor", "parent_hashes.anchor", true)) {
         .value => |value| value,
         .message => |message| return message,
     };
@@ -1315,6 +1391,17 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
     }
     if (std.mem.startsWith(u8, event_type, "action.") and !std.mem.eql(u8, object_kind, "action")) {
         return "action event object.kind must be action";
+    }
+
+    if (isReactionEvent(event_type)) {
+        const emoji = jsonString(payload.get("emoji")) orelse return "reaction payload.emoji must be a string";
+        if (!validReactionEmoji(emoji)) return "reaction payload.emoji must be a non-empty emoji string";
+        if (emoji.len > git.max_payload_atom_bytes) return "reaction payload.emoji exceeds v1 field size limit";
+        if (std.mem.endsWith(u8, event_type, ".reaction_removed")) {
+            if (!optionalStringArray(payload, "add_hashes")) return "reaction payload.add_hashes must be an array of strings";
+            if (!optionalStringArrayWithin(payload, "add_hashes", git.max_payload_collection_items, git.max_payload_ref_bytes)) return "reaction payload.add_hashes exceeds v1 collection limits";
+        }
+        return null;
     }
 
     if (std.mem.eql(u8, event_type, "issue.opened")) {
@@ -1497,6 +1584,27 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         return null;
     }
 
+    if (std.mem.eql(u8, event_type, "acl.delegation_granted") or std.mem.eql(u8, event_type, "acl.delegation_revoked")) {
+        if (!hasString(payload, "principal")) return "acl delegation event payload.principal must be a string";
+        if (!stringWithin(payload, "principal", git.max_payload_atom_bytes)) return "acl delegation event payload.principal exceeds v1 field size limit";
+        if (!hasString(payload, "device")) return "acl delegation event payload.device must be a string";
+        if (!stringWithin(payload, "device", git.max_payload_atom_bytes)) return "acl delegation event payload.device exceeds v1 field size limit";
+        if (!hasString(payload, "capability")) return "acl delegation event payload.capability must be a string";
+        if (!stringWithin(payload, "capability", git.max_payload_atom_bytes)) return "acl delegation event payload.capability exceeds v1 field size limit";
+        if (!hasString(payload, "scope")) return "acl delegation event payload.scope must be a string";
+        if (!stringWithin(payload, "scope", git.max_payload_ref_bytes)) return "acl delegation event payload.scope exceeds v1 field size limit";
+        if (std.mem.eql(u8, event_type, "acl.delegation_granted")) {
+            const signing_key = objectValue(payload, "signing_key") orelse return "acl.delegation_granted payload.signing_key must be an object";
+            if (!hasString(signing_key, "public_key")) return "acl.delegation_granted payload.signing_key.public_key must be a string";
+            if (!stringWithin(signing_key, "public_key", git.max_payload_key_bytes)) return "acl.delegation_granted payload.signing_key.public_key exceeds v1 key size limit";
+            if (!hasString(signing_key, "fingerprint")) return "acl.delegation_granted payload.signing_key.fingerprint must be a string";
+            if (!stringWithin(signing_key, "fingerprint", git.max_payload_atom_bytes)) return "acl.delegation_granted payload.signing_key.fingerprint exceeds v1 field size limit";
+            if (!optionalString(signing_key, "scheme")) return "acl.delegation_granted payload.signing_key.scheme must be a string";
+            if (!optionalStringWithin(signing_key, "scheme", git.max_payload_atom_bytes)) return "acl.delegation_granted payload.signing_key.scheme exceeds v1 field size limit";
+        }
+        return null;
+    }
+
     if (std.mem.eql(u8, event_type, "identity.device_added")) {
         if (!hasString(payload, "principal")) return "identity device event payload.principal must be a string";
         if (!stringWithin(payload, "principal", git.max_payload_atom_bytes)) return "identity device event payload.principal exceeds v1 field size limit";
@@ -1546,6 +1654,23 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
     }
 
     return null;
+}
+
+fn isReactionEvent(event_type: []const u8) bool {
+    return std.mem.eql(u8, event_type, "issue.reaction_added") or
+        std.mem.eql(u8, event_type, "issue.reaction_removed") or
+        std.mem.eql(u8, event_type, "pull.reaction_added") or
+        std.mem.eql(u8, event_type, "pull.reaction_removed") or
+        std.mem.eql(u8, event_type, "comment.reaction_added") or
+        std.mem.eql(u8, event_type, "comment.reaction_removed");
+}
+
+fn validReactionEmoji(value: []const u8) bool {
+    if (std.mem.trim(u8, value, " \t\r\n").len == 0) return false;
+    for (value) |c| {
+        if (c < 0x20) return false;
+    }
+    return true;
 }
 
 pub fn objectIdRequirementError(event_type: []const u8, object_kind: []const u8, object_id: []const u8, payload: std.json.ObjectMap) ?[]const u8 {
@@ -2004,6 +2129,7 @@ test "validated envelope rejects known event with missing required payload" {
         \\  },
         \\  "parent_hashes": {
         \\    "log": "",
+        \\    "anchor": "",
         \\    "causal": [],
         \\    "related": []
         \\  },
@@ -2035,6 +2161,7 @@ test "acl object id targets principal instead of uuid" {
         \\  },
         \\  "parent_hashes": {
         \\    "log": "",
+        \\    "anchor": "",
         \\    "causal": [],
         \\    "related": []
         \\  },
@@ -2071,6 +2198,7 @@ test "identity object id must match principal and device payload" {
         \\  },
         \\  "parent_hashes": {
         \\    "log": "",
+        \\    "anchor": "",
         \\    "causal": [],
         \\    "related": []
         \\  },
@@ -2105,6 +2233,7 @@ test "validated envelope rejects pull state_set merged" {
         \\  },
         \\  "parent_hashes": {
         \\    "log": "",
+        \\    "anchor": "",
         \\    "causal": [],
         \\    "related": []
         \\  },

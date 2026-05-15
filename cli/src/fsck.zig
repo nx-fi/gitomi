@@ -87,14 +87,16 @@ pub const State = struct {
     }
 };
 
-pub fn checkInboxRef(allocator: Allocator, fsck: *State, ref: []const u8, empty_tree: []const u8) !void {
+pub fn checkInboxRef(allocator: Allocator, fsck: *State, ref: []const u8, empty_tree: []const u8, genesis_oid: []const u8) !void {
     fsck.refs += 1;
     try checkInboxRefName(fsck, ref);
 
-    const commits = try gitChecked(allocator, &.{ "rev-list", "--first-parent", "--reverse", ref });
+    const range = try std.fmt.allocPrint(allocator, "{s}..{s}", .{ genesis_oid, ref });
+    defer allocator.free(range);
+    const commits = try gitChecked(allocator, &.{ "rev-list", "--first-parent", "--reverse", range });
     defer allocator.free(commits);
 
-    var expected_first_parent: ?[]const u8 = null;
+    var expected_first_parent: ?[]const u8 = genesis_oid;
     var it = std.mem.tokenizeScalar(u8, commits, '\n');
     while (it.next()) |commit_raw| {
         const commit = std.mem.trim(u8, commit_raw, " \t\r\n");
@@ -195,6 +197,10 @@ fn checkParentHashes(
         .string => |value| value,
         else => return,
     };
+    const anchor_hash = switch (parent_hashes.get("anchor") orelse return) {
+        .string => |value| value,
+        else => return,
+    };
     const causal = switch (parent_hashes.get("causal") orelse return) {
         .array => |array| array,
         else => return,
@@ -212,9 +218,18 @@ fn checkParentHashes(
     var it = std.mem.tokenizeScalar(u8, parents, ' ');
     while (it.next()) |parent| try parent_list.append(allocator, parent);
 
-    const expected_log = if (parent_list.items.len == 0) "" else parent_list.items[0];
-    if (!std.mem.eql(u8, log_hash, expected_log)) {
-        try fsck.fail("{s}: {s}: parent_hashes.log does not match first parent", .{ ref, commit });
+    const first_parent = if (parent_list.items.len == 0) null else parent_list.items[0];
+    if (log_hash.len == 0) {
+        if (first_parent == null or anchor_hash.len == 0 or !std.mem.eql(u8, anchor_hash, first_parent.?)) {
+            try fsck.fail("{s}: {s}: parent_hashes.anchor does not match root genesis parent", .{ ref, commit });
+        }
+    } else {
+        if (first_parent == null or !std.mem.eql(u8, log_hash, first_parent.?)) {
+            try fsck.fail("{s}: {s}: parent_hashes.log does not match first parent", .{ ref, commit });
+        }
+        if (anchor_hash.len != 0) {
+            try fsck.fail("{s}: {s}: non-root event has parent_hashes.anchor", .{ ref, commit });
+        }
     }
 
     const expected_causal_len = if (parent_list.items.len == 0) 0 else parent_list.items.len - 1;

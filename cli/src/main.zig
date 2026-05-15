@@ -12,6 +12,7 @@ test {
     _ = @import("event_writer.zig");
     _ = @import("index.zig");
     _ = @import("comment.zig");
+    _ = @import("reaction.zig");
     _ = @import("pull.zig");
     _ = @import("project.zig");
     _ = @import("milestone.zig");

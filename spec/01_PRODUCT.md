@@ -101,8 +101,11 @@ Every event commit in `refs/gitomi/inbox/*` MUST satisfy the following:
 *   **Signature**: MUST use native Git commit signing.
 *   **Subject line**: SHOULD be a short human-readable summary.
 *   **Body**: MUST contain exactly one UTF-8 JSON object.
-*   **First parent**: MUST be the previous commit on the same inbox ref, except for the root event on that ref.
-*   **Additional parents**: SHOULD encode a bounded set of latest Gitomi commits known to the writer when the event was created. These extra parents define cross-device causal knowledge.
+*   **First parent**: MUST be the previous commit on the same inbox ref, or the
+    genesis commit for the root event on that ref.
+*   **Additional parents**: SHOULD encode a bounded set of latest Gitomi
+    commits known to the writer when the event was created. These extra parents
+    define cross-device causal knowledge.
 *   **Event hash**: The event's authoritative identity is the signed commit OID.
 *   **Parent hashes**: The event envelope MUST record the first-parent and additional-parent event hashes.
 
@@ -129,6 +132,7 @@ Every event body MUST conform to the following envelope:
   },
   "parent_hashes": {
     "log": "string, previous commit OID or empty string",
+    "anchor": "string, genesis OID for inbox root or empty string",
     "causal": ["string, observed commit OID, bounded by v1 parent policy"],
     "related": ["string, domain-related commit OID"]
   },
@@ -162,15 +166,16 @@ than user-facing content objects:
     `object.id`.
 
 Gitomi v1 does not require a native repo-wide integer allocator. The canonical
-human reference form for issue and pull UUIDs is a unique SHA-256 prefix derived
-from the UUID:
+human reference form for issue, pull, and comment UUIDs is a unique SHA-256
+prefix derived from the UUID:
 
 *   `#<object-ref>` for issues in issue contexts
 *   `pr:<object-ref>` for pull requests outside an explicit pull context
+*   `comment:<comment-ref>` or `~<comment-ref>` for comments
 *   `project:<uuid-prefix>` or `@<slug>` for projects
 *   `milestone:<uuid-prefix>` or `^<slug>` for milestones
-*   issue and pull object refs are lowercase hex prefixes of `sha256(object.id)`
-*   minimum issue/pull object-ref length: 7 lowercase hex characters
+*   issue, pull, and comment refs are lowercase hex prefixes of `sha256(object.id)`
+*   minimum issue/pull/comment ref length: 7 lowercase hex characters
 *   implementations MUST extend the displayed prefix when 7 characters are ambiguous within the local projection
 
 Project and milestone slugs are display aliases, not Git ref names and not
@@ -198,11 +203,13 @@ preserve them without admitting malformed history.
 Compliant implementations MUST understand the following event families:
 
 *   `issue.opened`, `issue.updated`, `issue.title_set`, `issue.body_set`, `issue.state_set`, `issue.label_added`, `issue.label_removed`, `issue.assignee_added`, `issue.assignee_removed`, `issue.milestone_set`, `issue.project_added`, `issue.project_removed`
+*   `issue.reaction_added`, `issue.reaction_removed`
 *   `pull.opened`, `pull.updated`, `pull.title_set`, `pull.body_set`, `pull.state_set`, `pull.base_set`, `pull.head_set`, `pull.label_added`, `pull.label_removed`, `pull.assignee_added`, `pull.assignee_removed`, `pull.reviewer_added`, `pull.reviewer_removed`, `pull.merged`
+*   `pull.reaction_added`, `pull.reaction_removed`
 *   `project.created`, `project.updated`, `project.column_added`, `project.column_removed`
 *   `milestone.created`, `milestone.updated`, `milestone.state_set`
-*   `comment.added`, `comment.body_set`, `comment.redacted`
-*   `acl.role_granted`, `acl.role_revoked`
+*   `comment.added`, `comment.body_set`, `comment.redacted`, `comment.reaction_added`, `comment.reaction_removed`
+*   `acl.role_granted`, `acl.role_revoked`, `acl.delegation_granted`, `acl.delegation_revoked`
 *   `identity.device_added`, `identity.device_revoked`
 *   `action.run_requested`, `action.run_completed`
 
@@ -221,6 +228,7 @@ The following payload members are REQUIRED for interoperable v1 implementations:
 *   `issue.assignee_added` / `issue.assignee_removed`: `assignee`
 *   `issue.milestone_set`: `milestone`; OPTIONAL `milestone_ref`. An empty `milestone` clears the assignment.
 *   `issue.project_added` / `issue.project_removed`: `project`, `column`; OPTIONAL `project_ref`, `column_ref`
+*   `issue.reaction_added` / `issue.reaction_removed`: `emoji`; for removal, OPTIONAL `add_hashes`
 *   `pull.opened`: `title`, `base_ref`, `head_ref`; OPTIONAL `body`, `draft`
 *   `pull.updated`: OPTIONAL `title`, `body`, `state`, `base_ref`, `head_ref`, `labels_added`, `labels_removed`, `assignees_added`, `assignees_removed`, `reviewers_added`, `reviewers_removed`; at least one field MUST be present
 *   `pull.title_set`: `title`
@@ -232,16 +240,20 @@ The following payload members are REQUIRED for interoperable v1 implementations:
 *   `pull.assignee_added` / `pull.assignee_removed`: `assignee`
 *   `pull.reviewer_added` / `pull.reviewer_removed`: `reviewer`
 *   `pull.merged`: `merge_oid` or `target_oid`
+*   `pull.reaction_added` / `pull.reaction_removed`: `emoji`; for removal, OPTIONAL `add_hashes`
 *   `project.created`: `name`; OPTIONAL `description`, `slug`, `columns`
 *   `project.updated`: OPTIONAL `name`, `description`, `state`; at least one field MUST be present
 *   `project.column_added` / `project.column_removed`: `column`; OPTIONAL `column_ref`
 *   `milestone.created`: `title`; OPTIONAL `description`, `slug`, `due_at`, `state`
 *   `milestone.updated`: OPTIONAL `title`, `description`, `due_at`, `state`; at least one field MUST be present
 *   `milestone.state_set`: `state` (`open` or `closed`)
-*   `comment.added`: `parent_kind`, `parent_id`, `body`
+*   `comment.added`: `parent_kind`, `parent_id`, `body`; OPTIONAL `reply_parent_id`, `reply_parent_hash`
 *   `comment.body_set`: `body`
 *   `comment.redacted`: OPTIONAL `reason`
+*   `comment.reaction_added` / `comment.reaction_removed`: `emoji`; for removal, OPTIONAL `add_hashes`
 *   `acl.role_granted` / `acl.role_revoked`: `principal`, `role`
+*   `acl.delegation_granted`: `principal`, `device`, `capability`, `scope`, `signing_key.public_key`, `signing_key.fingerprint`
+*   `acl.delegation_revoked`: `principal`, `device`, `capability`, `scope`
 *   `identity.device_added`: `principal`, `device`, `signing_key.public_key`, `signing_key.fingerprint`
 *   `identity.device_revoked`: `principal`, `device`
 *   `action.run_requested`: `workflow`, `target_ref` or `target_oid`; OPTIONAL `event_name`, `gitomi_event_type`
@@ -330,6 +342,11 @@ The event payload identity and the commit signature MUST agree:
 `identity.device_added` MUST bind the device identifier to public signing key
 material and a key fingerprint so a clone can rebuild trust from refs alone.
 
+For delegated actors, the signing key MAY map through an accepted
+`acl.delegation_granted` event instead of an identity device record. In that
+case the event is authorized only for the delegated capability and scope, and
+the commit signer fingerprint MUST match the delegation's signing key.
+
 ### 5.3. ACL Model
 
 Authorization is event-sourced.
@@ -338,6 +355,8 @@ Compliant implementations MUST derive effective permissions by replaying:
 
 *   `acl.role_granted`
 *   `acl.role_revoked`
+*   `acl.delegation_granted`
+*   `acl.delegation_revoked`
 *   `identity.device_added`
 *   `identity.device_revoked`
 
@@ -421,6 +440,7 @@ The following issue collections MUST be modeled as Observed-Remove Sets:
 *   labels
 *   assignees
 *   project placements, keyed by `(project, column)`
+*   emoji reactions, keyed by `(emoji, actor.principal)`
 
 The add tag for an OR-Set member is the add event hash. A remove affects only
 add tags reachable from the remove event's causal frontier or explicitly listed
@@ -435,8 +455,10 @@ fields, to avoid one signed commit per small UI mutation.
 
 The visible issue projection MUST be bounded. A v1 implementation MUST NOT
 project more than 256 labels, more than 128 assignees, or more than 256 project
-placements on one issue. An event that would exceed those limits after
-reduction MUST be domain-rejected with reason `collection_limit_exceeded`.
+placements on one issue. A v1 implementation MUST NOT project more than 64
+distinct reaction emoji or 1024 visible reaction actors on one issue. An event
+that would exceed those limits after reduction MUST be domain-rejected with
+reason `collection_limit_exceeded`.
 
 Reducers MUST preserve all accepted events in the issue timeline, even when the visible projection only shows the latest scalar values.
 
@@ -468,6 +490,7 @@ The following pull-request collections MUST be modeled as Observed-Remove Sets:
 *   labels
 *   assignees
 *   reviewers
+*   emoji reactions, keyed by `(emoji, actor.principal)`
 
 For `pull.updated`, each scalar and collection member is reduced as if the
 corresponding single-field event had been emitted at the same event hash.
@@ -476,8 +499,10 @@ change multiple fields.
 
 The visible pull-request projection MUST be bounded. A v1 implementation MUST
 NOT project more than 256 labels, 128 assignees, or 128 reviewers on one pull
-request. An event that would exceed those limits after reduction MUST be
-domain-rejected with reason `collection_limit_exceeded`.
+request. A v1 implementation MUST NOT project more than 64 distinct reaction
+emoji or 1024 visible reaction actors on one pull request. An event that would
+exceed those limits after reduction MUST be domain-rejected with reason
+`collection_limit_exceeded`.
 
 `pull.merged` MUST record enough payload to identify the resulting merge outcome, typically a merge commit OID or a fast-forward target OID.
 `pull.state_set` MUST NOT set `state` to `merged`; the merged state is derived
@@ -496,6 +521,17 @@ Comments are append-only event histories attached to a stable comment UUID.
 *   `comment.body_set` updates the current rendered body using causal order,
     with event-hash order for concurrent body updates.
 *   `comment.redacted` marks the comment as semantically removed while preserving audit history.
+*   `comment.reaction_added` and `comment.reaction_removed` update visible
+    emoji reactions on the comment.
+
+`comment.added` MAY include `reply_parent_id`, `reply_parent_hash`, or both to
+represent a reply. When either field is present, the referenced parent MUST be
+an accepted `comment.added` event in the same top-level issue or pull request
+conversation. `reply_parent_hash` SHOULD be the event hash of the parent
+comment's accepted creation event and SHOULD be listed in
+`parent_hashes.related`. A reply whose parent comment is missing, rejected, or
+attached to a different issue or pull request MUST be domain-rejected with
+reason `parent_not_created`.
 
 `comment.body_set` and `comment.redacted` require an accepted `comment.added`
 event for the target comment. If no accepted creation event exists, the update
@@ -516,7 +552,30 @@ For a comment that has not been redacted, the current visible body MUST be
 derived from the latest accepted `comment.body_set` or the initial
 `comment.added` payload.
 
-### 6.5. Projects and Kanban Boards
+Comment reactions are Observed-Remove Sets keyed by `(emoji, actor.principal)`.
+The add tag is the `comment.reaction_added` event hash. A
+`comment.reaction_removed` event removes only add tags for the removing actor
+that are reachable from the remove event's causal frontier or explicitly listed
+in `payload.add_hashes`. A v1 implementation MUST NOT project more than 64
+distinct reaction emoji or 1024 visible reaction actors on one comment.
+
+### 6.5. Reactions
+
+Emoji reactions are lightweight acknowledgements attached directly to issues,
+pull requests, and comments. The reaction payload's `emoji` member is the
+canonical UTF-8 emoji presentation string. Writers SHOULD use a single Unicode
+emoji grapheme or an established emoji sequence and MUST NOT use control
+characters. Implementations MAY normalize known shortcodes such as `+1` or
+`heart` to emoji before writing the event, but the event payload MUST contain
+the canonical emoji string.
+
+Reactions are not scalar fields. Repeated accepted adds by the same actor for
+the same `(object, emoji)` are displayed as one visible reaction by that actor,
+but each accepted add remains auditable by event hash. Reaction removals affect
+only the removing actor's adds. They MUST NOT remove another principal's
+reaction.
+
+### 6.6. Projects and Kanban Boards
 
 A project is created by `project.created`.
 
@@ -558,7 +617,7 @@ A visible project projection MUST NOT expose more than 128 kanban columns. An
 event that would exceed this limit after reduction MUST be domain-rejected with
 reason `collection_limit_exceeded`.
 
-### 6.6. Milestones
+### 6.7. Milestones
 
 A milestone is created by `milestone.created`.
 
@@ -592,7 +651,7 @@ values clear those fields; `title` MUST NOT be empty. Convenience close/reopen
 surfaces SHOULD emit `milestone.state_set` with `state` set to `closed` or
 `open`.
 
-### 6.7. Derived References From Code Commits
+### 6.8. Derived References From Code Commits
 
 Implementations MUST parse Data Plane commit messages to derive links from code to Gitomi objects.
 
@@ -608,7 +667,7 @@ derive issue and pull relationships from accepted, non-redacted body/comment
 text that uses those directives. These relationships are presentation data and
 MUST NOT change object state or admission decisions.
 
-### 6.8. Cache Rebuild
+### 6.9. Cache Rebuild
 
 `.git/gitomi/index.sqlite` and `.git/gitomi/cursors.sqlite` are disposable caches.
 
@@ -815,7 +874,13 @@ When importing from GitHub:
 1.  each issue or pull request MUST receive a new UUIDv7;
 2.  the original GitHub number MUST be preserved in `legacy.github_issue_number` or `legacy.github_pull_number`;
 3.  historical labels, comments, and state transitions SHOULD be backfilled as Gitomi events; and
-4.  imported events SHOULD be signed by a clearly identified `import-bot` principal.
+4.  imported events SHOULD be authored by a clearly identified `import-bot` principal.
+
+The `import-bot` SHOULD be authorized through an `acl.delegation_granted` event
+emitted by the actor executing the import. The delegation MUST bind the bot
+principal/device, the `github.import` capability, and the signing key that will
+sign imported events. This preserves a stable bot event stream for later
+two-way sync while keeping the import auditable as a maintainer-approved action.
 
 Imported numeric identifiers are compatibility metadata, not the native identity model.
 

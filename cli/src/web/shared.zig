@@ -357,7 +357,7 @@ pub fn appendShellStart(
 
 fn appendUserMenu(buf: *std.ArrayList(u8), allocator: Allocator, cfg: Config) !void {
     try appendTemplate(buf, allocator,
-        \\<details class="user-menu">
+        \\<details class="user-menu" data-popover-menu>
         \\  <summary aria-label="User menu">
         \\    <span class="user-avatar" aria-hidden="true"></span>
         \\    <span class="user-menu-label"><strong>{principal}</strong><span>{device}</span></span>
@@ -404,6 +404,7 @@ pub fn appendShellEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
     try buf.appendSlice(allocator,
         \\</main>
         \\<script src="/theme.js"></script>
+        \\<script src="/ui.js"></script>
         \\<script src="/shortcuts.js"></script>
         \\<script src="/tree.js"></script>
         \\<script src="/code.js"></script>

@@ -12,6 +12,7 @@ const issue = @import("issue.zig");
 const milestone = @import("milestone.zig");
 const project = @import("project.zig");
 const pull_mod = @import("pull.zig");
+const reaction = @import("reaction.zig");
 const rbac = @import("rbac.zig");
 const repo_mod = @import("repo.zig");
 const reset = @import("reset.zig");
@@ -98,7 +99,7 @@ fn realMain() !void {
 fn printUsage() !void {
     try io.out(
         \\Usage:
-        \\  gt init [--principal ID] [--device ID] [--repo-id UUID] [--force]
+        \\  gt init [--principal ID] [--device ID] [--repo-id UUID] [--access open|closed] [--force]
         \\  gt status
         \\  gt fsck
         \\  gt index rebuild|status
@@ -120,6 +121,7 @@ fn printUsage() !void {
         \\  gt issue assignee ISSUE add|remove PRINCIPAL
         \\  gt issue milestone ISSUE --milestone MILESTONE
         \\  gt issue project ISSUE add|remove PROJECT --column COLUMN
+        \\  gt issue react|unreact ISSUE EMOJI
         \\  gt project list [--json]
         \\  gt project create --name NAME [--description TEXT] [--column COLUMN]
         \\  gt project column PROJECT add|remove COLUMN
@@ -141,11 +143,14 @@ fn printUsage() !void {
         \\  gt pr assignee PR add|remove PRINCIPAL
         \\  gt pr reviewer PR add|remove PRINCIPAL
         \\  gt pr comment PR --body BODY
+        \\  gt pr react|unreact PR EMOJI
         \\  gt pr merge PR [--merge-oid OID] [--target-oid OID]
         \\  gt comment list issue|pr OBJECT [--json]
         \\  gt comment add issue|pr OBJECT --body BODY
+        \\  gt comment reply COMMENT --body BODY
         \\  gt comment edit COMMENT --body BODY
         \\  gt comment redact COMMENT [--reason REASON]
+        \\  gt comment react|unreact COMMENT EMOJI
         \\  gt acl grant PRINCIPAL ROLE
         \\  gt acl revoke PRINCIPAL
         \\  gt acl list [--json]
@@ -173,6 +178,7 @@ fn cmdInit(allocator: Allocator, args: []const []const u8) !void {
     var repo_id_arg: ?[]const u8 = null;
     var principal_arg: ?[]const u8 = null;
     var device_arg: ?[]const u8 = null;
+    var access_mode: repo_mod.AccessMode = .closed;
     var force = false;
 
     var i: usize = 0;
@@ -184,6 +190,12 @@ fn cmdInit(allocator: Allocator, args: []const []const u8) !void {
             principal_arg = try util.requireValue(args, &i, "--principal");
         } else if (std.mem.eql(u8, arg, "--device")) {
             device_arg = try util.requireValue(args, &i, "--device");
+        } else if (std.mem.eql(u8, arg, "--access")) {
+            const raw = try util.requireValue(args, &i, "--access");
+            access_mode = repo_mod.parseAccessMode(raw) orelse {
+                try io.eprint("gt init: --access must be open or closed\n", .{});
+                return CliError.UserError;
+            };
         } else if (std.mem.eql(u8, arg, "--force")) {
             force = true;
         } else {
@@ -236,7 +248,7 @@ fn cmdInit(allocator: Allocator, args: []const []const u8) !void {
         try io.eprint("gt init: signing public key is required; configure Git signing with user.signingkey\n", .{});
         return CliError.MissingArgument;
     }
-    const genesis_manifest = try repo_mod.buildGenesisManifestJson(allocator, cfg, signing_key.public_key, signing_key.fingerprint, signing_key.scheme);
+    const genesis_manifest = try repo_mod.buildGenesisManifestJson(allocator, cfg, signing_key.public_key, signing_key.fingerprint, signing_key.scheme, access_mode);
     defer allocator.free(genesis_manifest);
 
     try repo_mod.writeConfig(repo.config_path, cfg);
@@ -247,6 +259,7 @@ fn cmdInit(allocator: Allocator, args: []const []const u8) !void {
     try io.out("  repo:      {s}\n", .{repo.root});
     try io.out("  config:    {s}\n", .{repo.config_path});
     try io.out("  repo_id:   {s}\n", .{cfg.repo_id});
+    try io.out("  access:    {s}\n", .{repo_mod.accessModeName(access_mode)});
     try io.out("  actor:     {s}/{s}\n", .{ cfg.principal, cfg.device });
     try io.out("  genesis:   {s}\n", .{genesis_oid});
     const ref = try repo_mod.inboxRef(allocator, cfg);
@@ -335,8 +348,13 @@ fn cmdFsck(allocator: Allocator, args: []const []const u8) !void {
     const genesis_oid = try git.resolveOptionalRef(allocator, repo_mod.genesis_ref);
     defer if (genesis_oid) |oid| allocator.free(oid);
     if (genesis_oid) |oid| {
-        sync.verifyCommitSignature(allocator, oid) catch try checker.fail("{s}: signature verification failed", .{repo_mod.genesis_ref});
-        repo_mod.validateGenesisManifest(allocator, oid) catch try checker.fail("{s}: invalid genesis manifest", .{repo_mod.genesis_ref});
+        if (repo_mod.loadGenesisManifest(allocator, oid)) |manifest_value| {
+            var manifest = manifest_value;
+            defer manifest.deinit();
+            sync.verifyGenesisCommitSignature(allocator, oid, manifest.fingerprint) catch try checker.fail("{s}: signature verification failed", .{repo_mod.genesis_ref});
+        } else |_| {
+            try checker.fail("{s}: invalid genesis manifest", .{repo_mod.genesis_ref});
+        }
     } else {
         try checker.fail("{s}: missing genesis ref", .{repo_mod.genesis_ref});
     }
@@ -351,7 +369,9 @@ fn cmdFsck(allocator: Allocator, args: []const []const u8) !void {
     defer allocator.free(empty_tree);
 
     for (refs) |ref| {
-        try fsck.checkInboxRef(allocator, &checker, ref, empty_tree);
+        if (genesis_oid) |oid| {
+            try fsck.checkInboxRef(allocator, &checker, ref, empty_tree, oid);
+        }
     }
 
     if (checker.errors == 0) {
@@ -755,6 +775,17 @@ fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
         return;
     }
 
+    if (std.mem.eql(u8, args[0], "react") or std.mem.eql(u8, args[0], "unreact")) {
+        if (args.len != 3) {
+            try io.eprint("gt issue {s}: expected ISSUE EMOJI\n", .{args[0]});
+            return CliError.UserError;
+        }
+        const issue_id = try resolveIssueIdForCommand(allocator, args[1]);
+        defer allocator.free(issue_id);
+        try reaction.createReactionEvent(allocator, "issue", issue_id, args[2], std.mem.eql(u8, args[0], "react"));
+        return;
+    }
+
     if (!std.mem.eql(u8, args[0], "open")) {
         try io.eprint("gt issue: expected subcommand 'list', 'show', 'open', or an issue update command\n", .{});
         return CliError.UserError;
@@ -1041,6 +1072,13 @@ fn resolveCommentIdForCommand(allocator: Allocator, raw_ref: []const u8) ![]u8 {
     defer repo.deinit();
     try index.ensureIndex(allocator, repo);
     return try index.resolveCommentId(allocator, repo, raw_ref);
+}
+
+fn commentParentForCommand(allocator: Allocator, comment_id: []const u8) !index.CommentParentInfo {
+    var repo = try repo_mod.discoverRepo(allocator);
+    defer repo.deinit();
+    try index.ensureIndex(allocator, repo);
+    return try index.commentParentInfo(allocator, repo, comment_id);
 }
 
 fn requireNonEmptyOption(context: []const u8, option: []const u8, value: []const u8) !void {
@@ -1338,6 +1376,17 @@ fn cmdPr(allocator: Allocator, args: []const []const u8, command_context: []cons
         return;
     }
 
+    if (std.mem.eql(u8, args[0], "react") or std.mem.eql(u8, args[0], "unreact")) {
+        if (args.len != 3) {
+            try io.eprint("{s} {s}: expected PR EMOJI\n", .{ command_context, args[0] });
+            return CliError.UserError;
+        }
+        const pull_id = try resolvePullIdForCommand(allocator, args[1]);
+        defer allocator.free(pull_id);
+        try reaction.createReactionEvent(allocator, "pull", pull_id, args[2], std.mem.eql(u8, args[0], "react"));
+        return;
+    }
+
     if (std.mem.eql(u8, args[0], "merge")) {
         if (args.len < 2) {
             try io.eprint("{s} merge: PR is required\n", .{command_context});
@@ -1417,7 +1466,7 @@ fn cmdPr(allocator: Allocator, args: []const []const u8, command_context: []cons
 
 fn cmdComment(allocator: Allocator, args: []const []const u8) !void {
     if (args.len == 0) {
-        try io.eprint("gt comment: expected subcommand 'list', 'add', 'edit', or 'redact'\n", .{});
+        try io.eprint("gt comment: expected subcommand 'list', 'add', 'reply', 'edit', 'redact', 'react', or 'unreact'\n", .{});
         return CliError.UserError;
     }
 
@@ -1478,6 +1527,33 @@ fn cmdComment(allocator: Allocator, args: []const []const u8) !void {
         return;
     }
 
+    if (std.mem.eql(u8, args[0], "reply")) {
+        if (args.len < 2) {
+            try io.eprint("gt comment reply: COMMENT is required\n", .{});
+            return CliError.UserError;
+        }
+        var body: ?[]const u8 = null;
+        var i: usize = 2;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--body") or std.mem.eql(u8, args[i], "-b")) {
+                body = try util.requireValue(args, &i, "--body");
+            } else {
+                try io.eprint("gt comment reply: unknown option '{s}'\n", .{args[i]});
+                return CliError.UserError;
+            }
+        }
+        if (body == null or std.mem.trim(u8, body.?, " \t\r\n").len == 0) {
+            try io.eprint("gt comment reply: --body is required\n", .{});
+            return CliError.UserError;
+        }
+        const reply_parent_id = try resolveCommentIdForCommand(allocator, args[1]);
+        defer allocator.free(reply_parent_id);
+        var reply_parent = try commentParentForCommand(allocator, reply_parent_id);
+        defer reply_parent.deinit();
+        try comment.createCommentReplyEvent(allocator, reply_parent.parent_kind, reply_parent.parent_id, reply_parent_id, reply_parent.add_hash, body.?);
+        return;
+    }
+
     if (std.mem.eql(u8, args[0], "edit")) {
         if (args.len < 2) {
             try io.eprint("gt comment edit: COMMENT is required\n", .{});
@@ -1524,7 +1600,18 @@ fn cmdComment(allocator: Allocator, args: []const []const u8) !void {
         return;
     }
 
-    try io.eprint("gt comment: expected subcommand 'list', 'add', 'edit', or 'redact'\n", .{});
+    if (std.mem.eql(u8, args[0], "react") or std.mem.eql(u8, args[0], "unreact")) {
+        if (args.len != 3) {
+            try io.eprint("gt comment {s}: expected COMMENT EMOJI\n", .{args[0]});
+            return CliError.UserError;
+        }
+        const comment_id = try resolveCommentIdForCommand(allocator, args[1]);
+        defer allocator.free(comment_id);
+        try reaction.createReactionEvent(allocator, "comment", comment_id, args[2], std.mem.eql(u8, args[0], "react"));
+        return;
+    }
+
+    try io.eprint("gt comment: expected subcommand 'list', 'add', 'reply', 'edit', 'redact', 'react', or 'unreact'\n", .{});
     return CliError.UserError;
 }
 
