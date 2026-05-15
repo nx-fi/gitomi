@@ -41,7 +41,11 @@ pub fn syncPull(allocator: Allocator, remote: []const u8) !void {
     defer allocator.free(fetched);
     if (fetched.len != 0) try out("{s}", .{fetched});
 
-    try admitStagedGenesisRef(allocator, staging_prefix);
+    const genesis_admission = try admitStagedGenesisRef(allocator, staging_prefix);
+    if (genesis_admission == .conflict) {
+        try eprint("gt sync: refusing to admit inbox refs from {s} because its genesis conflicts with the local trust root\n", .{remote});
+        return CliError.UserError;
+    }
     try admitStagedInboxRefs(allocator, staging_prefix);
 }
 
@@ -166,10 +170,17 @@ fn pushGenesisRef(allocator: Allocator, remote: []const u8) !void {
     try out("genesis ref not pushed to {s}; remote may already have a different trust root\n", .{remote});
 }
 
-pub fn admitStagedGenesisRef(allocator: Allocator, staging_prefix: []const u8) !void {
+const GenesisAdmission = enum {
+    absent,
+    created,
+    unchanged,
+    conflict,
+};
+
+pub fn admitStagedGenesisRef(allocator: Allocator, staging_prefix: []const u8) !GenesisAdmission {
     const staged_ref = try std.fmt.allocPrint(allocator, "{s}/genesis", .{staging_prefix});
     defer allocator.free(staged_ref);
-    const staged_oid = (try resolveOptionalRef(allocator, staged_ref)) orelse return;
+    const staged_oid = (try resolveOptionalRef(allocator, staged_ref)) orelse return .absent;
     defer allocator.free(staged_oid);
 
     const local_oid = try resolveOptionalRef(allocator, repo_mod.genesis_ref);
@@ -178,10 +189,11 @@ pub fn admitStagedGenesisRef(allocator: Allocator, staging_prefix: []const u8) !
     if (local_oid) |local| {
         if (std.mem.eql(u8, local, staged_oid)) {
             try out("unchanged {s}\n", .{repo_mod.genesis_ref});
+            return .unchanged;
         } else {
             try out("conflicting {s}; staged ref left at {s}\n", .{ repo_mod.genesis_ref, staged_ref });
+            return .conflict;
         }
-        return;
     }
 
     try verifyCommitSignature(allocator, staged_oid);
@@ -190,6 +202,7 @@ pub fn admitStagedGenesisRef(allocator: Allocator, staging_prefix: []const u8) !
     defer allocator.free(updated);
     try out("created {s}\n", .{repo_mod.genesis_ref});
     try autoInitConfigFromGenesis(allocator, staged_oid);
+    return .created;
 }
 
 fn autoInitConfigFromGenesis(allocator: Allocator, genesis_oid: []const u8) !void {
@@ -388,7 +401,9 @@ pub fn validateInboxRange(
 
     var count: usize = 0;
     var expected_first_parent = local_base;
-    var last_seq = try seqForCommit(allocator, local_base);
+    var actor_seqs = ActorSeqTracker.init(allocator);
+    defer actor_seqs.deinit();
+    try seedActorSeqsThroughCommit(allocator, &actor_seqs, local_base);
     var records = std.mem.splitScalar(u8, log, 0x1e);
     while (records.next()) |record_raw| {
         const record = parseInboxCommitRecord(record_raw) orelse {
@@ -402,13 +417,7 @@ pub fn validateInboxRange(
         }
         var envelope = try validateInboxRecord(allocator, record, expected_first_parent, empty_tree);
         defer envelope.deinit();
-        if (last_seq) |previous_seq| {
-            if (envelope.seq <= previous_seq) {
-                try eprint("gt sync: rejecting {s}: seq {d} is not strictly greater than previous sequence {d}\n", .{ record.commit, envelope.seq, previous_seq });
-                return CliError.UserError;
-            }
-        }
-        last_seq = envelope.seq;
+        try actor_seqs.remember(record.commit, ref, envelope.actor_principal, envelope.actor_device, envelope.seq);
         expected_first_parent = record.commit;
         count += 1;
     }
@@ -424,6 +433,69 @@ const InboxCommitRecord = struct {
     subject: []const u8,
     body: []const u8,
 };
+
+const ActorSeqTracker = struct {
+    allocator: Allocator,
+    last_seq: std.StringHashMap(i64),
+
+    fn init(allocator: Allocator) ActorSeqTracker {
+        return .{
+            .allocator = allocator,
+            .last_seq = std.StringHashMap(i64).init(allocator),
+        };
+    }
+
+    fn deinit(self: *ActorSeqTracker) void {
+        var keys = self.last_seq.keyIterator();
+        while (keys.next()) |key| self.allocator.free(key.*);
+        self.last_seq.deinit();
+    }
+
+    fn seed(self: *ActorSeqTracker, principal: []const u8, device: []const u8, seq: i64) !void {
+        const key = try actorSeqKey(self.allocator, principal, device);
+        errdefer self.allocator.free(key);
+        const entry = try self.last_seq.getOrPut(key);
+        if (entry.found_existing) {
+            self.allocator.free(key);
+            if (seq > entry.value_ptr.*) entry.value_ptr.* = seq;
+            return;
+        }
+        entry.key_ptr.* = key;
+        entry.value_ptr.* = seq;
+    }
+
+    fn remember(
+        self: *ActorSeqTracker,
+        commit: []const u8,
+        ref: []const u8,
+        principal: []const u8,
+        device: []const u8,
+        seq: i64,
+    ) !void {
+        const key = try actorSeqKey(self.allocator, principal, device);
+        errdefer self.allocator.free(key);
+        const entry = try self.last_seq.getOrPut(key);
+        if (entry.found_existing) {
+            self.allocator.free(key);
+            if (seq <= entry.value_ptr.*) {
+                try eprint("gt sync: rejecting {s} on {s}: actor {s}/{s} seq {d} is not strictly greater than previous sequence {d}\n", .{ commit, ref, principal, device, seq, entry.value_ptr.* });
+                return CliError.UserError;
+            }
+        } else {
+            entry.key_ptr.* = key;
+        }
+        entry.value_ptr.* = seq;
+    }
+};
+
+fn actorSeqKey(allocator: Allocator, principal: []const u8, device: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{d}:{s}\x1f{d}:{s}", .{
+        principal.len,
+        principal,
+        device.len,
+        device,
+    });
+}
 
 fn inboxCommitLog(allocator: Allocator, ref: []const u8, local_base: ?[]const u8) ![]u8 {
     if (local_base) |base| {
@@ -506,14 +578,19 @@ fn validateInboxRecord(
     return try parseValidatedEnvelope(allocator, record.body);
 }
 
-fn seqForCommit(allocator: Allocator, commit_opt: ?[]const u8) !?i64 {
-    const commit = commit_opt orelse return null;
-    const body_raw = try gitChecked(allocator, &.{ "show", "-s", "--format=%b", commit });
-    defer allocator.free(body_raw);
-    const body = std.mem.trim(u8, body_raw, " \t\r\n");
-    var envelope = parseValidatedEnvelope(allocator, body) catch return null;
-    defer envelope.deinit();
-    return envelope.seq;
+fn seedActorSeqsThroughCommit(allocator: Allocator, actor_seqs: *ActorSeqTracker, commit_opt: ?[]const u8) !void {
+    const commit = commit_opt orelse return;
+    const log = try gitChecked(allocator, &.{ "log", "--first-parent", "--reverse", "--format=%b%x1e", commit });
+    defer allocator.free(log);
+
+    var records = std.mem.splitScalar(u8, log, 0x1e);
+    while (records.next()) |record_raw| {
+        const body = std.mem.trim(u8, record_raw, " \t\r\n");
+        if (body.len == 0) continue;
+        var envelope = parseValidatedEnvelope(allocator, body) catch continue;
+        defer envelope.deinit();
+        try actor_seqs.seed(envelope.actor_principal, envelope.actor_device, envelope.seq);
+    }
 }
 
 pub fn validateFirstParent(allocator: Allocator, commit: []const u8, expected_first_parent: ?[]const u8) !void {

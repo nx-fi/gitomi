@@ -357,6 +357,69 @@ pub fn projectNameForId(allocator: Allocator, repo: Repo, project_id: []const u8
     return try stmt.columnTextDup(allocator, 0);
 }
 
+pub fn resolveMilestoneId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
+    const trimmed = std.mem.trim(u8, raw_ref, " \t\r\n");
+    const typed_uuid_ref = std.mem.startsWith(u8, trimmed, "milestone:");
+    const value = if (typed_uuid_ref)
+        trimmed["milestone:".len..]
+    else if (std.mem.startsWith(u8, trimmed, "^"))
+        trimmed[1..]
+    else
+        trimmed;
+    if (value.len == 0) {
+        try eprint("gt milestone: milestone reference must not be empty\n", .{});
+        return CliError.InvalidReference;
+    }
+
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
+    if (typed_uuid_ref and !isUuidPrefix(value)) {
+        try eprint("gt milestone: milestone:<uuid-prefix> requires a 7+ hex UUID prefix\n", .{});
+        return CliError.InvalidReference;
+    }
+
+    if (isUuidPrefix(value)) {
+        const pattern = try std.fmt.allocPrint(allocator, "{s}%", .{value});
+        defer allocator.free(pattern);
+        var stmt = try db.prepare("SELECT id FROM milestones WHERE id LIKE ? ORDER BY id LIMIT 2");
+        defer stmt.deinit();
+        try stmt.bindText(1, pattern);
+        if (try stmt.step()) {
+            const first = try stmt.columnTextDup(allocator, 0);
+            errdefer allocator.free(first);
+            if (try stmt.step()) {
+                const second = try stmt.columnTextDup(allocator, 0);
+                defer allocator.free(second);
+                try eprint("gt milestone: ambiguous milestone reference {s} matches {s} and {s}\n", .{ raw_ref, first, second });
+                return CliError.AmbiguousReference;
+            }
+            return first;
+        }
+        if (typed_uuid_ref) {
+            try eprint("gt milestone: no milestone matches {s}\n", .{raw_ref});
+            return CliError.NotFound;
+        }
+    }
+
+    var stmt = try db.prepare("SELECT id FROM milestones WHERE title = ? ORDER BY id LIMIT 2");
+    defer stmt.deinit();
+    try stmt.bindText(1, value);
+    if (!(try stmt.step())) {
+        try eprint("gt milestone: no milestone named {s}\n", .{value});
+        return CliError.NotFound;
+    }
+    const first = try stmt.columnTextDup(allocator, 0);
+    errdefer allocator.free(first);
+    if (try stmt.step()) {
+        const second = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(second);
+        try eprint("gt milestone: ambiguous milestone name {s} matches {s} and {s}\n", .{ value, first, second });
+        return CliError.AmbiguousReference;
+    }
+    return first;
+}
+
 fn isUuidPrefix(value: []const u8) bool {
     if (value.len < 7) return false;
     for (value) |c| {

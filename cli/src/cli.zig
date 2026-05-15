@@ -102,6 +102,7 @@ fn printUsage() !void {
         \\  gt status
         \\  gt fsck
         \\  gt index rebuild|status
+        \\  gt index snapshots prune [--dry-run] [--max-count N] [--max-bytes N] [--max-tree-bytes N]
         \\  gt refs
         \\  gt clear local [--yes]
         \\  gt clear remote [--remote REMOTE] [--yes]
@@ -125,6 +126,8 @@ fn printUsage() !void {
         \\  gt project add|remove PROJECT ISSUE --column COLUMN
         \\  gt milestone list [--json]
         \\  gt milestone create --title TITLE [--description TEXT] [--due DATE]
+        \\  gt milestone edit MILESTONE [--title TITLE] [--description TEXT] [--due DATE] [--state open|closed]
+        \\  gt milestone close|reopen MILESTONE
         \\  gt pr list [--json]
         \\  gt pr view PR [--json]
         \\  gt pr create --title TITLE --base BASE --head HEAD [--body BODY] [--draft]
@@ -409,8 +412,46 @@ fn cmdIndex(allocator: Allocator, args: []const []const u8) !void {
         return;
     }
 
-    try io.eprint("gt index: expected subcommand 'rebuild' or 'status'\n", .{});
+    if (std.mem.eql(u8, args[0], "snapshots")) {
+        try cmdIndexSnapshots(allocator, args[1..]);
+        return;
+    }
+
+    try io.eprint("gt index: expected subcommand 'rebuild', 'status', or 'snapshots'\n", .{});
     return CliError.UserError;
+}
+
+fn cmdIndexSnapshots(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len == 0 or !std.mem.eql(u8, args[0], "prune")) {
+        try io.eprint("gt index snapshots: expected subcommand 'prune'\n", .{});
+        return CliError.UserError;
+    }
+
+    var options = index.SnapshotPruneOptions{};
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--dry-run")) {
+            options.dry_run = true;
+        } else if (std.mem.eql(u8, arg, "--max-count")) {
+            const value = try index.parseSnapshotPruneNumber(try util.requireValue(args, &i, "--max-count"), "--max-count");
+            options.max_count = std.math.cast(usize, value) orelse {
+                try io.eprint("gt index snapshots prune: --max-count is too large\n", .{});
+                return CliError.UserError;
+            };
+        } else if (std.mem.eql(u8, arg, "--max-bytes")) {
+            options.max_total_bytes = try index.parseSnapshotPruneNumber(try util.requireValue(args, &i, "--max-bytes"), "--max-bytes");
+        } else if (std.mem.eql(u8, arg, "--max-tree-bytes")) {
+            options.max_tree_bytes = try index.parseSnapshotPruneNumber(try util.requireValue(args, &i, "--max-tree-bytes"), "--max-tree-bytes");
+        } else {
+            try io.eprint("gt index snapshots prune: unknown option '{s}'\n", .{arg});
+            return CliError.UserError;
+        }
+    }
+
+    var repo = try repo_mod.discoverRepo(allocator);
+    defer repo.deinit();
+    try index.pruneSnapshots(allocator, options);
 }
 
 fn cmdRefs(allocator: Allocator) !void {
@@ -856,7 +897,7 @@ fn cmdProject(allocator: Allocator, args: []const []const u8) !void {
 
 fn cmdMilestone(allocator: Allocator, args: []const []const u8) !void {
     if (args.len == 0) {
-        try io.eprint("gt milestone: expected subcommand 'list' or 'create'\n", .{});
+        try io.eprint("gt milestone: expected subcommand 'list', 'create', 'edit', 'close', or 'reopen'\n", .{});
         return CliError.UserError;
     }
 
@@ -903,7 +944,60 @@ fn cmdMilestone(allocator: Allocator, args: []const []const u8) !void {
         return;
     }
 
-    try io.eprint("gt milestone: expected subcommand 'list' or 'create'\n", .{});
+    if (std.mem.eql(u8, args[0], "edit")) {
+        if (args.len < 2) {
+            try io.eprint("gt milestone edit: MILESTONE is required\n", .{});
+            return CliError.UserError;
+        }
+
+        var update = event_mod.MilestoneUpdate{};
+        var i: usize = 2;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--title") or std.mem.eql(u8, args[i], "-t")) {
+                update.title = try util.requireValue(args, &i, "--title");
+            } else if (std.mem.eql(u8, args[i], "--description") or std.mem.eql(u8, args[i], "-d")) {
+                update.description = try util.requireValue(args, &i, "--description");
+            } else if (std.mem.eql(u8, args[i], "--due")) {
+                update.due_at = try util.requireValue(args, &i, "--due");
+            } else if (std.mem.eql(u8, args[i], "--state")) {
+                const state = try util.requireValue(args, &i, "--state");
+                if (!isIssueState(state)) {
+                    try io.eprint("gt milestone edit: --state must be open or closed\n", .{});
+                    return CliError.UserError;
+                }
+                update.state = state;
+            } else {
+                try io.eprint("gt milestone edit: unknown option '{s}'\n", .{args[i]});
+                return CliError.UserError;
+            }
+        }
+        if (!update.hasChanges()) {
+            try io.eprint("gt milestone edit: at least one update option is required\n", .{});
+            return CliError.UserError;
+        }
+        if (update.title) |title| {
+            try requireNonEmptyOption("gt milestone edit", "--title", title);
+        }
+
+        const milestone_id = try resolveMilestoneIdForCommand(allocator, args[1]);
+        defer allocator.free(milestone_id);
+        try milestone.createMilestoneUpdatedEvent(allocator, milestone_id, update);
+        return;
+    }
+
+    if (std.mem.eql(u8, args[0], "close") or std.mem.eql(u8, args[0], "reopen")) {
+        if (args.len != 2) {
+            try io.eprint("gt milestone {s}: expected MILESTONE\n", .{args[0]});
+            return CliError.UserError;
+        }
+        const milestone_id = try resolveMilestoneIdForCommand(allocator, args[1]);
+        defer allocator.free(milestone_id);
+        const state: []const u8 = if (std.mem.eql(u8, args[0], "close")) "closed" else "open";
+        try milestone.createMilestoneStringEvent(allocator, milestone_id, "milestone.state_set", "state", state);
+        return;
+    }
+
+    try io.eprint("gt milestone: expected subcommand 'list', 'create', 'edit', 'close', or 'reopen'\n", .{});
     return CliError.UserError;
 }
 
@@ -919,6 +1013,13 @@ fn resolveProjectIdForCommand(allocator: Allocator, raw_ref: []const u8) ![]u8 {
     defer repo.deinit();
     try index.ensureIndex(allocator, repo);
     return try index.resolveProjectId(allocator, repo, raw_ref);
+}
+
+fn resolveMilestoneIdForCommand(allocator: Allocator, raw_ref: []const u8) ![]u8 {
+    var repo = try repo_mod.discoverRepo(allocator);
+    defer repo.deinit();
+    try index.ensureIndex(allocator, repo);
+    return try index.resolveMilestoneId(allocator, repo, raw_ref);
 }
 
 fn projectNameForCommand(allocator: Allocator, project_id: []const u8) ![]u8 {
