@@ -132,6 +132,7 @@ pub const PullCounts = struct {
 
 pub const PullListOptions = struct {
     state: PullStateFilter = .all,
+    q: ?[]const u8 = null,
     limit: ?usize = null,
 };
 
@@ -292,6 +293,139 @@ pub fn issueStateFilterFromValue(value: []const u8) ?IssueStateFilter {
     return null;
 }
 
+pub const ParsedIssueSearchQuery = struct {
+    state: ?IssueStateFilter = null,
+    q: ?[]u8 = null,
+
+    pub fn deinit(self: *ParsedIssueSearchQuery, allocator: Allocator) void {
+        if (self.q) |value| allocator.free(value);
+    }
+};
+
+pub const ParsedPullSearchQuery = struct {
+    state: ?PullStateFilter = null,
+    q: ?[]u8 = null,
+
+    pub fn deinit(self: *ParsedPullSearchQuery, allocator: Allocator) void {
+        if (self.q) |value| allocator.free(value);
+    }
+};
+
+const SearchToken = struct {
+    value: []const u8,
+    quoted: bool = false,
+};
+
+pub fn parseIssueSearchQuery(allocator: Allocator, query: []const u8) !ParsedIssueSearchQuery {
+    var parsed: ParsedIssueSearchQuery = .{};
+    errdefer parsed.deinit(allocator);
+
+    var terms: std.ArrayList(u8) = .empty;
+    errdefer terms.deinit(allocator);
+
+    var cursor: usize = 0;
+    while (nextSearchToken(query, &cursor)) |token| {
+        if (!token.quoted) {
+            if (std.ascii.eqlIgnoreCase(token.value, "is:issue")) continue;
+            if (issueStateFilterFromSearchToken(token.value)) |state| {
+                parsed.state = state;
+                continue;
+            }
+        }
+        try appendSearchTerm(&terms, allocator, token.value);
+    }
+
+    if (terms.items.len != 0) parsed.q = try terms.toOwnedSlice(allocator);
+    return parsed;
+}
+
+pub fn parsePullSearchQuery(allocator: Allocator, query: []const u8) !ParsedPullSearchQuery {
+    var parsed: ParsedPullSearchQuery = .{};
+    errdefer parsed.deinit(allocator);
+
+    var terms: std.ArrayList(u8) = .empty;
+    errdefer terms.deinit(allocator);
+
+    var cursor: usize = 0;
+    while (nextSearchToken(query, &cursor)) |token| {
+        if (!token.quoted) {
+            if (std.ascii.eqlIgnoreCase(token.value, "is:pr") or
+                std.ascii.eqlIgnoreCase(token.value, "is:pull") or
+                std.ascii.eqlIgnoreCase(token.value, "is:pull-request"))
+            {
+                continue;
+            }
+            if (pullStateFilterFromSearchToken(token.value)) |state| {
+                parsed.state = state;
+                continue;
+            }
+        }
+        try appendSearchTerm(&terms, allocator, token.value);
+    }
+
+    if (terms.items.len != 0) parsed.q = try terms.toOwnedSlice(allocator);
+    return parsed;
+}
+
+fn nextSearchToken(query: []const u8, cursor: *usize) ?SearchToken {
+    while (cursor.* < query.len and std.ascii.isWhitespace(query[cursor.*])) : (cursor.* += 1) {}
+    if (cursor.* >= query.len) return null;
+
+    if (query[cursor.*] == '"') {
+        const start = cursor.* + 1;
+        cursor.* += 1;
+        while (cursor.* < query.len and query[cursor.*] != '"') : (cursor.* += 1) {}
+        const end = cursor.*;
+        if (cursor.* < query.len) cursor.* += 1;
+        return .{ .value = query[start..end], .quoted = true };
+    }
+
+    const start = cursor.*;
+    while (cursor.* < query.len and !std.ascii.isWhitespace(query[cursor.*])) : (cursor.* += 1) {}
+    return .{ .value = query[start..cursor.*] };
+}
+
+fn appendSearchTerm(terms: *std.ArrayList(u8), allocator: Allocator, value: []const u8) !void {
+    if (value.len == 0) return;
+    if (terms.items.len != 0) try terms.append(allocator, ' ');
+    try terms.appendSlice(allocator, value);
+}
+
+fn issueStateFilterFromSearchToken(token: []const u8) ?IssueStateFilter {
+    if (std.ascii.startsWithIgnoreCase(token, "state:")) {
+        return issueStateFilterFromValueIgnoreCase(token["state:".len..]);
+    }
+    if (std.ascii.startsWithIgnoreCase(token, "is:")) {
+        return issueStateFilterFromValueIgnoreCase(token["is:".len..]);
+    }
+    return null;
+}
+
+fn pullStateFilterFromSearchToken(token: []const u8) ?PullStateFilter {
+    if (std.ascii.startsWithIgnoreCase(token, "state:")) {
+        return pullStateFilterFromValueIgnoreCase(token["state:".len..]);
+    }
+    if (std.ascii.startsWithIgnoreCase(token, "is:")) {
+        return pullStateFilterFromValueIgnoreCase(token["is:".len..]);
+    }
+    return null;
+}
+
+fn issueStateFilterFromValueIgnoreCase(value: []const u8) ?IssueStateFilter {
+    if (std.ascii.eqlIgnoreCase(value, "open")) return .open;
+    if (std.ascii.eqlIgnoreCase(value, "closed")) return .closed;
+    if (std.ascii.eqlIgnoreCase(value, "all")) return .all;
+    return null;
+}
+
+fn pullStateFilterFromValueIgnoreCase(value: []const u8) ?PullStateFilter {
+    if (std.ascii.eqlIgnoreCase(value, "open")) return .open;
+    if (std.ascii.eqlIgnoreCase(value, "merged")) return .merged;
+    if (std.ascii.eqlIgnoreCase(value, "closed")) return .closed;
+    if (std.ascii.eqlIgnoreCase(value, "all")) return .all;
+    return null;
+}
+
 pub fn issueSortFromValue(value: []const u8) ?IssueSort {
     if (std.mem.eql(u8, value, "newest")) return .newest;
     if (std.mem.eql(u8, value, "oldest")) return .oldest;
@@ -306,6 +440,10 @@ pub fn hasRestrictiveIssueFilters(filters: IssueListOptions) bool {
         filters.project != null or
         filters.milestone != null or
         filters.assignee != null;
+}
+
+pub fn hasRestrictivePullFilters(filters: PullListOptions) bool {
+    return filters.q != null;
 }
 
 pub fn pullStateValue(filter: PullStateFilter) []const u8 {
@@ -527,8 +665,11 @@ pub fn loadPullCounts(db: *SqliteDb) !PullCounts {
     return counts;
 }
 
-pub fn pullListSql(options: PullListOptions) []const u8 {
-    const select =
+pub fn pullListSql(allocator: Allocator, options: PullListOptions) ![]u8 {
+    var sql: std.ArrayList(u8) = .empty;
+    errdefer sql.deinit(allocator);
+
+    try sql.appendSlice(allocator,
         \\SELECT p.id, p.title, p.state, COALESCE(NULLIF(pm.source_author, ''), p.author_principal), p.opened_at, p.state_occurred_at,
         \\       p.base_ref, p.head_ref, p.draft,
         \\       (SELECT COUNT(*) FROM comments c WHERE c.parent_kind = 'pull' AND c.parent_id = p.id),
@@ -537,30 +678,60 @@ pub fn pullListSql(options: PullListOptions) []const u8 {
         \\LEFT JOIN legacy_aliases a
         \\  ON a.provider = 'github' AND a.object_kind = 'pull' AND a.object_id = p.id
         \\LEFT JOIN pull_metadata pm ON pm.pull_id = p.id
-    ;
-    return switch (options.state) {
-        .open => select ++
-            \\ WHERE p.state = 'open'
-            \\ ORDER BY p.opened_at DESC, p.id DESC
-        ,
-        .merged => select ++
-            \\ WHERE p.state = 'merged'
-            \\ ORDER BY p.state_occurred_at DESC, p.opened_at DESC, p.id DESC
-        ,
-        .closed => select ++
-            \\ WHERE p.state = 'closed'
-            \\ ORDER BY p.state_occurred_at DESC, p.opened_at DESC, p.id DESC
-        ,
-        .all => select ++
-            \\ ORDER BY p.state_occurred_at DESC, p.opened_at DESC, p.id DESC
-        ,
-    };
+    );
+
+    var conditions: usize = 0;
+    if (options.state != .all) try appendPullListCondition(&sql, allocator, &conditions, "p.state = ?");
+    if (options.q != null) {
+        try appendPullListCondition(&sql, allocator, &conditions,
+            \\(p.title LIKE ? ESCAPE '\' OR p.body LIKE ? ESCAPE '\' OR COALESCE(NULLIF(pm.source_author, ''), p.author_principal) LIKE ? ESCAPE '\' OR p.base_ref LIKE ? ESCAPE '\' OR p.head_ref LIKE ? ESCAPE '\' OR EXISTS (SELECT 1 FROM comments c WHERE c.parent_kind = 'pull' AND c.parent_id = p.id AND c.body LIKE ? ESCAPE '\'))
+        );
+    }
+
+    try sql.appendSlice(allocator, switch (options.state) {
+        .open => "\nORDER BY p.opened_at DESC, p.id DESC",
+        .merged, .closed, .all => "\nORDER BY p.state_occurred_at DESC, p.opened_at DESC, p.id DESC",
+    });
+    return sql.toOwnedSlice(allocator);
 }
 
-pub fn preparePullListStmt(db: *SqliteDb, options: PullListOptions) !SqliteStmt {
-    var stmt = try db.prepare(pullListSql(options));
+fn appendPullListCondition(sql: *std.ArrayList(u8), allocator: Allocator, conditions: *usize, condition: []const u8) !void {
+    try sql.appendSlice(allocator, if (conditions.* == 0) "\nWHERE " else "\n  AND ");
+    try sql.appendSlice(allocator, condition);
+    conditions.* += 1;
+}
+
+pub fn preparePullListStmt(allocator: Allocator, db: *SqliteDb, options: PullListOptions) !SqliteStmt {
+    const sql = try pullListSql(allocator, options);
+    defer allocator.free(sql);
+    var stmt = try db.prepare(sql);
     errdefer stmt.deinit();
+    const search_pattern = if (options.q) |query| try sqliteLikePatternOwned(allocator, query) else null;
+    defer if (search_pattern) |pattern| allocator.free(pattern);
+    try bindPullListFilters(&stmt, options, search_pattern);
     return stmt;
+}
+
+pub fn bindPullListFilters(stmt: *SqliteStmt, filters: PullListOptions, search_pattern: ?[]const u8) !void {
+    var idx: c_int = 1;
+    if (filters.state != .all) {
+        try stmt.bindText(idx, pullStateValue(filters.state));
+        idx += 1;
+    }
+    if (search_pattern) |pattern| {
+        try stmt.bindText(idx, pattern);
+        idx += 1;
+        try stmt.bindText(idx, pattern);
+        idx += 1;
+        try stmt.bindText(idx, pattern);
+        idx += 1;
+        try stmt.bindText(idx, pattern);
+        idx += 1;
+        try stmt.bindText(idx, pattern);
+        idx += 1;
+        try stmt.bindText(idx, pattern);
+        idx += 1;
+    }
 }
 
 pub fn pullListRowFromStmt(allocator: Allocator, stmt: *SqliteStmt) !PullListRow {
@@ -778,7 +949,7 @@ pub fn appendPullListAgentJson(buf: *std.ArrayList(u8), allocator: Allocator, db
     try appendPullCountsJsonField(buf, allocator, counts, true);
     try appendJsonString(buf, allocator, "pull_requests");
     try buf.appendSlice(allocator, ":[");
-    var stmt = try preparePullListStmt(db, filters);
+    var stmt = try preparePullListStmt(allocator, db, filters);
     defer stmt.deinit();
     var first = true;
     var shown: usize = 0;
@@ -912,7 +1083,8 @@ fn appendPullFiltersJsonField(buf: *std.ArrayList(u8), allocator: Allocator, fil
     try appendJsonString(buf, allocator, "filters");
     try buf.append(allocator, ':');
     try buf.append(allocator, '{');
-    try appendJsonFieldString(buf, allocator, "state", pullStateValue(filters.state), filters.limit != null);
+    try appendJsonFieldString(buf, allocator, "state", pullStateValue(filters.state), true);
+    try appendOptionalStringJsonField(buf, allocator, "q", filters.q, filters.limit != null);
     if (filters.limit) |value| try appendJsonFieldInteger(buf, allocator, "limit", @intCast(value), false);
     try buf.append(allocator, '}');
     if (comma) try buf.append(allocator, ',');
@@ -1343,4 +1515,33 @@ test "formats single-line and range diff comments" {
     }, "Needs work");
     defer std.testing.allocator.free(range);
     try std.testing.expectEqualStrings("Review comment on `src/main.zig` (old lines 3-5).\n\nNeeds work", range);
+}
+
+test "work item search query filters state and keeps text terms" {
+    var issue_query = try parseIssueSearchQuery(std.testing.allocator, "is:issue state:open web new test");
+    defer issue_query.deinit(std.testing.allocator);
+    try std.testing.expectEqual(IssueStateFilter.open, issue_query.state.?);
+    try std.testing.expectEqualStrings("web new test", issue_query.q.?);
+
+    var quoted_issue_query = try parseIssueSearchQuery(std.testing.allocator, "is:closed \"manual filter\"");
+    defer quoted_issue_query.deinit(std.testing.allocator);
+    try std.testing.expectEqual(IssueStateFilter.closed, quoted_issue_query.state.?);
+    try std.testing.expectEqualStrings("manual filter", quoted_issue_query.q.?);
+
+    var pull_query = try parsePullSearchQuery(std.testing.allocator, "is:pr state:merged branch search");
+    defer pull_query.deinit(std.testing.allocator);
+    try std.testing.expectEqual(PullStateFilter.merged, pull_query.state.?);
+    try std.testing.expectEqualStrings("branch search", pull_query.q.?);
+}
+
+test "pull list SQL includes search filter" {
+    const sql = try pullListSql(std.testing.allocator, .{
+        .state = .open,
+        .q = "feature",
+    });
+    defer std.testing.allocator.free(sql);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "p.state = ?") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "p.title LIKE ?") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "p.base_ref LIKE ?") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "comments c") != null);
 }

@@ -1515,7 +1515,7 @@ fn appendRootDocsPreview(
     }
     try appendTemplate(buf, allocator,
         \\    </nav>
-        \\    <details class="markdown-toc-menu" data-markdown-toc-menu hidden>
+        \\    <details class="markdown-toc-menu" data-popover-menu data-markdown-toc-menu hidden>
         \\      <summary aria-label="Table of contents" title="Table of contents"><span class="button-icon icon-outline" aria-hidden="true"></span></summary>
         \\      <div class="markdown-toc-popover"><nav class="markdown-toc-list" data-markdown-toc-list></nav></div>
         \\    </details>

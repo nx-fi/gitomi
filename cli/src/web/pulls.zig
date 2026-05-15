@@ -41,6 +41,7 @@ const max_merge_blob_bytes = 2 * 1024 * 1024;
 const merge_context_radius = 15;
 
 const PullStateFilter = work_items.PullStateFilter;
+const PullFilters = work_items.PullListOptions;
 
 const PullDetailTab = enum {
     conversation,
@@ -185,14 +186,15 @@ pub fn renderPullsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]
 
     const requested_filter = try pullStateFilterFromTarget(allocator, target);
     const counts = try work_items.loadPullCounts(&db);
-    const filter = requested_filter orelse .open;
+    var filters = try pullFiltersFromTarget(allocator, target, requested_filter orelse .open);
+    defer pullFiltersDeinit(allocator, &filters);
 
     try appendShellStart(&buf, allocator, repo, "Pull Requests", "pulls");
-    try appendPullsToolbar(&buf, allocator, filter);
+    try appendPullsToolbar(&buf, allocator, filters);
     try buf.appendSlice(allocator, "<section class=\"panel pulls-panel\">");
-    try appendPullsListHeader(&buf, allocator, filter, counts);
+    try appendPullsListHeader(&buf, allocator, filters, counts);
 
-    var stmt = try work_items.preparePullListStmt(&db, .{ .state = filter });
+    var stmt = try work_items.preparePullListStmt(allocator, &db, filters);
     defer stmt.deinit();
 
     var shown: usize = 0;
@@ -205,7 +207,9 @@ pub fn renderPullsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]
     }
 
     if (shown == 0) {
-        switch (filter) {
+        if (work_items.hasRestrictivePullFilters(filters)) {
+            try appendEmptyState(&buf, allocator, "No matching pull requests.", "Change or clear filters to widen the pull request list.");
+        } else switch (filters.state) {
             .open => try appendEmptyState(&buf, allocator, "No open pull requests.", "Create a pull request from a branch with proposed changes."),
             .merged => try appendEmptyState(&buf, allocator, "No merged pull requests.", "Merged pull requests will appear here after a pull.merged event is accepted."),
             .closed => try appendEmptyState(&buf, allocator, "No closed pull requests.", "Closed pull requests are pull requests that were closed without being merged."),
@@ -229,6 +233,27 @@ fn pullStateFilterFromTarget(allocator: Allocator, target: []const u8) !?PullSta
     return null;
 }
 
+fn pullFiltersFromTarget(allocator: Allocator, target: []const u8, default_state: PullStateFilter) !PullFilters {
+    var filters = PullFilters{ .state = default_state };
+    errdefer pullFiltersDeinit(allocator, &filters);
+
+    if (try queryTextFilterOwned(allocator, target, "q")) |query| {
+        defer allocator.free(query);
+        var parsed = try work_items.parsePullSearchQuery(allocator, query);
+        defer parsed.deinit(allocator);
+        if (parsed.state) |state| filters.state = state;
+        if (parsed.q) |search| {
+            filters.q = search;
+            parsed.q = null;
+        }
+    }
+    return filters;
+}
+
+fn pullFiltersDeinit(allocator: Allocator, filters: *PullFilters) void {
+    if (filters.q) |query| allocator.free(query);
+}
+
 fn pullDetailTabFromTarget(allocator: Allocator, target: []const u8) !PullDetailTab {
     const tab_value = try queryValueOwned(allocator, target, "tab");
     defer if (tab_value) |value| allocator.free(value);
@@ -238,7 +263,9 @@ fn pullDetailTabFromTarget(allocator: Allocator, target: []const u8) !PullDetail
     return .conversation;
 }
 
-fn appendPullsToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filter: PullStateFilter) !void {
+fn appendPullsToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters) !void {
+    const query = try pullSearchInputValue(allocator, filters);
+    defer allocator.free(query);
     try appendTemplate(buf, allocator,
         \\<div class="pulls-toolbar issues-toolbar">
         \\  <form class="issues-search" action="/pulls" method="get">
@@ -253,20 +280,26 @@ fn appendPullsToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filter: Pul
         \\  </div>
         \\</div>
     , .{
-        .query = work_items.pullSearchQuery(filter),
-        .state = work_items.pullStateValue(filter),
+        .query = query,
+        .state = work_items.pullStateValue(filters.state),
     });
 }
 
-fn appendPullsListHeader(buf: *std.ArrayList(u8), allocator: Allocator, filter: PullStateFilter, counts: PullCounts) !void {
+fn pullSearchInputValue(allocator: Allocator, filters: PullFilters) ![]u8 {
+    const prefix = work_items.pullSearchQuery(filters.state);
+    if (filters.q) |query| return std.fmt.allocPrint(allocator, "{s} {s}", .{ prefix, query });
+    return std.fmt.allocPrint(allocator, "{s} ", .{prefix});
+}
+
+fn appendPullsListHeader(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters, counts: PullCounts) !void {
     try buf.appendSlice(allocator,
         \\<header class="pulls-list-head issues-list-head">
         \\  <div class="issues-select-all"><input type="checkbox" aria-label="Select all pull requests" disabled></div>
         \\  <nav class="issues-state-tabs" aria-label="Pull request state">
     );
-    try appendPullStateTab(buf, allocator, "Open", counts.open, .open, filter, "issue-open-icon");
-    try appendPullStateTab(buf, allocator, "Merged", counts.merged, .merged, filter, "pull-merged-icon");
-    try appendPullStateTab(buf, allocator, "Closed", counts.closed, .closed, filter, "pull-closed-icon");
+    try appendPullStateTab(buf, allocator, "Open", counts.open, .open, filters, "issue-open-icon");
+    try appendPullStateTab(buf, allocator, "Merged", counts.merged, .merged, filters, "pull-merged-icon");
+    try appendPullStateTab(buf, allocator, "Closed", counts.closed, .closed, filters, "pull-closed-icon");
     try buf.appendSlice(allocator,
         \\  </nav>
         \\  <div class="issues-filter-menus">
@@ -286,18 +319,31 @@ fn appendPullStateTab(
     label: []const u8,
     count: usize,
     tab_filter: PullStateFilter,
-    active_filter: PullStateFilter,
+    filters: PullFilters,
     icon_class: []const u8,
 ) !void {
     try appendTemplate(buf, allocator,
-        \\<a class="{classes}" href="/pulls?state={state}"><span class="issue-tab-icon {icon_class}" aria-hidden="true"></span><span>{label}</span><span class="issue-count-badge">{count}</span></a>
+        \\<a class="{classes}" href="
     , .{
-        .classes = shared.classes("issues-state-tab", &.{shared.class("active", tab_filter == active_filter)}),
-        .state = work_items.pullStateValue(tab_filter),
+        .classes = shared.classes("issues-state-tab", &.{shared.class("active", tab_filter == filters.state)}),
+    });
+    try appendPullsHref(buf, allocator, filters, tab_filter);
+    try appendTemplate(buf, allocator,
+        \\"><span class="issue-tab-icon {icon_class}" aria-hidden="true"></span><span>{label}</span><span class="issue-count-badge">{count}</span></a>
+    , .{
         .icon_class = icon_class,
         .label = label,
         .count = count,
     });
+}
+
+fn appendPullsHref(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters, state: PullStateFilter) !void {
+    try buf.appendSlice(allocator, "/pulls?state=");
+    try shared.appendUrlEncoded(buf, allocator, work_items.pullStateValue(state));
+    if (filters.q) |query| {
+        try buf.appendSlice(allocator, "&amp;q=");
+        try shared.appendUrlEncoded(buf, allocator, query);
+    }
 }
 
 fn appendPullListRow(
@@ -2641,6 +2687,19 @@ pub fn handlePullCommentPost(allocator: Allocator, repo: Repo, stream: std.net.S
     const location = try std.fmt.allocPrint(allocator, "/pulls/{s}", .{raw_ref});
     defer allocator.free(location);
     try sendRedirect(allocator, stream, location);
+}
+
+fn queryTextFilterOwned(allocator: Allocator, target: []const u8, name: []const u8) !?[]u8 {
+    const owned = try queryValueOwned(allocator, target, name) orelse return null;
+    const trimmed = std.mem.trim(u8, owned, " \t\r\n");
+    if (trimmed.len == 0) {
+        allocator.free(owned);
+        return null;
+    }
+    if (trimmed.ptr == owned.ptr and trimmed.len == owned.len) return owned;
+    const result = try allocator.dupe(u8, trimmed);
+    allocator.free(owned);
+    return result;
 }
 
 fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const u8) !?[]u8 {

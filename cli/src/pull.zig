@@ -276,7 +276,7 @@ pub fn cmdPr(allocator: Allocator, args: []const []const u8, command_context: []
         if (filtered) {
             var db = try work_items.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
             defer db.deinit();
-            var stmt = try work_items.preparePullListStmt(&db, filters);
+            var stmt = try work_items.preparePullListStmt(allocator, &db, filters);
             defer stmt.deinit();
             var shown: usize = 0;
             while (try stmt.step()) {

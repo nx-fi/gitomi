@@ -30,11 +30,38 @@ const ActionsFilters = struct {
     allocator: Allocator,
     workflow: ?[]u8 = null,
     query: ?[]u8 = null,
+    event: ?[]u8 = null,
+    status: ?[]u8 = null,
+    branch: ?[]u8 = null,
+    actor: ?[]u8 = null,
 
     fn deinit(self: *ActionsFilters) void {
         if (self.workflow) |value| self.allocator.free(value);
         if (self.query) |value| self.allocator.free(value);
+        if (self.event) |value| self.allocator.free(value);
+        if (self.status) |value| self.allocator.free(value);
+        if (self.branch) |value| self.allocator.free(value);
+        if (self.actor) |value| self.allocator.free(value);
     }
+};
+
+const ActionsFilterKind = enum {
+    workflow,
+    event,
+    status,
+    branch,
+    actor,
+};
+
+const ActionsHrefOverride = struct {
+    param_name: ?[]const u8 = null,
+    param_value: ?[]const u8 = null,
+};
+
+const ActionsFilterOption = struct {
+    value: []const u8,
+    label: []const u8,
+    count: usize,
 };
 
 const RunRow = struct {
@@ -155,11 +182,12 @@ fn appendActionsSidebar(
         \\  </div>
         \\  <nav class="actions-workflow-nav" aria-label="Workflows">
     );
-    try appendActionsSidebarLink(buf, allocator, "All workflows", null, filters.workflow == null, runs.len);
+    try appendActionsSidebarLink(buf, allocator, filters, "All workflows", null, filters.workflow == null, runs.len);
     for (workflows) |workflow| {
         try appendActionsSidebarLink(
             buf,
             allocator,
+            filters,
             workflow.name,
             workflow.path,
             if (filters.workflow) |selected| std.mem.eql(u8, selected, workflow.path) else false,
@@ -241,6 +269,7 @@ fn appendActionsStatus(buf: *std.ArrayList(u8), allocator: Allocator, stats: Act
 fn appendActionsSidebarLink(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
+    filters: ActionsFilters,
     label: []const u8,
     workflow: ?[]const u8,
     active: bool,
@@ -249,7 +278,10 @@ fn appendActionsSidebarLink(
     try appendTemplate(buf, allocator,
         \\<a{class_attr} href="
     , .{ .class_attr = classAttr("actions-workflow-link", &.{class("active", active)}) });
-    try appendActionsHref(buf, allocator, workflow, null);
+    try appendActionsHref(buf, allocator, filters, .{
+        .param_name = "workflow",
+        .param_value = workflow,
+    });
     try appendTemplate(buf, allocator,
         \\"><span>{label}</span><small>{count}</small></a>
     , .{
@@ -281,9 +313,7 @@ fn appendActionsMain(
         .title = selected_title,
         .subtitle = if (filters.workflow == null) "Showing runs from all workflows" else "Showing runs from the selected workflow",
     });
-    if (filters.workflow) |workflow| {
-        try appendTemplate(buf, allocator, "<input type=\"hidden\" name=\"workflow\" value=\"{workflow}\">", .{ .workflow = workflow });
-    }
+    try appendActionsFilterHiddenInputs(buf, allocator, filters);
     try appendTemplate(buf, allocator,
         \\    <span class="actions-filter-icon" aria-hidden="true"></span>
         \\    <input type="search" name="q" value="{query}" placeholder="Filter workflow runs" aria-label="Filter workflow runs">
@@ -299,18 +329,20 @@ fn appendActionsMain(
         \\<section class="actions-runs-panel">
         \\  <div class="actions-runs-head">
         \\    <strong>{count} workflow {run_label}</strong>
-        \\    <div class="actions-runs-filters" aria-hidden="true">
-        \\      <span>Workflow</span>
-        \\      <span>Event</span>
-        \\      <span>Status</span>
-        \\      <span>Branch</span>
-        \\      <span>Actor</span>
-        \\    </div>
-        \\  </div>
+        \\    <div class="actions-runs-filters">
     , .{
         .count = groupedUnsigned(@intCast(visible_count)),
         .run_label = if (visible_count == 1) "run" else "runs",
     });
+    try appendActionsFilterMenu(buf, allocator, workflows, runs, filters, .workflow);
+    try appendActionsFilterMenu(buf, allocator, workflows, runs, filters, .event);
+    try appendActionsFilterMenu(buf, allocator, workflows, runs, filters, .status);
+    try appendActionsFilterMenu(buf, allocator, workflows, runs, filters, .branch);
+    try appendActionsFilterMenu(buf, allocator, workflows, runs, filters, .actor);
+    try buf.appendSlice(allocator,
+        \\    </div>
+        \\  </div>
+    );
 
     var shown: usize = 0;
     for (runs) |row| {
@@ -319,13 +351,126 @@ fn appendActionsMain(
         shown += 1;
     }
     if (shown == 0) {
-        if (filters.workflow != null or filters.query != null) {
-            try appendEmptyState(buf, allocator, "No matching workflow runs.", "Change the workflow or search filter to widen the run list.");
+        if (hasRestrictiveActionsFilters(filters)) {
+            try appendEmptyState(buf, allocator, "No matching workflow runs.", "Change or clear filters to widen the run list.");
         } else {
             try appendEmptyState(buf, allocator, "No workflow runs yet.", "Request a workflow run or start the actions daemon to populate this list.");
         }
     }
     try buf.appendSlice(allocator, "</section>");
+}
+
+fn appendActionsFilterHiddenInputs(buf: *std.ArrayList(u8), allocator: Allocator, filters: ActionsFilters) !void {
+    try appendActionsHiddenInputIfPresent(buf, allocator, "workflow", filters.workflow);
+    try appendActionsHiddenInputIfPresent(buf, allocator, "event", filters.event);
+    try appendActionsHiddenInputIfPresent(buf, allocator, "status", filters.status);
+    try appendActionsHiddenInputIfPresent(buf, allocator, "branch", filters.branch);
+    try appendActionsHiddenInputIfPresent(buf, allocator, "actor", filters.actor);
+}
+
+fn appendActionsHiddenInputIfPresent(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8, value: ?[]const u8) !void {
+    if (value) |payload| {
+        try appendTemplate(buf, allocator,
+            \\    <input type="hidden" name="{name}" value="{value}">
+        , .{
+            .name = name,
+            .value = payload,
+        });
+    }
+}
+
+fn appendActionsFilterMenu(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    workflows: []const actions.Workflow,
+    runs: []const RunRow,
+    filters: ActionsFilters,
+    kind: ActionsFilterKind,
+) !void {
+    const active = actionsFilterValue(filters, kind);
+    try appendTemplate(buf, allocator,
+        \\<details{class_attr} data-popover-menu><summary>{label}
+    , .{
+        .class_attr = classAttr("actions-filter-menu", &.{class("active", active != null)}),
+        .label = actionsFilterLabel(kind),
+    });
+    if (active) |value| {
+        try appendTemplate(buf, allocator, ": {value}", .{
+            .value = actionsFilterDisplayLabel(workflows, kind, value),
+        });
+    }
+    try buf.appendSlice(allocator, "</summary><div class=\"actions-filter-popover\" role=\"menu\">");
+
+    try appendActionsFilterMenuLink(
+        buf,
+        allocator,
+        filters,
+        kind,
+        null,
+        actionsFilterAllLabel(kind),
+        countRunsMatchingFiltersExcept(runs, filters, kind),
+        active == null,
+    );
+
+    var options: std.ArrayList(ActionsFilterOption) = .empty;
+    defer options.deinit(allocator);
+    for (runs) |row| {
+        if (!runMatchesFiltersExcept(row, filters, kind)) continue;
+        const value = actionsRunFilterValue(row, kind);
+        if (value.len == 0) continue;
+        if (findActionsFilterOptionIndex(options.items, value)) |option_index| {
+            options.items[option_index].count += 1;
+            continue;
+        }
+        try options.append(allocator, .{
+            .value = value,
+            .label = actionsFilterDisplayLabel(workflows, kind, value),
+            .count = 1,
+        });
+    }
+    std.mem.sort(ActionsFilterOption, options.items, {}, actionsFilterOptionLessThan);
+
+    for (options.items) |option| {
+        try appendActionsFilterMenuLink(
+            buf,
+            allocator,
+            filters,
+            kind,
+            option.value,
+            option.label,
+            option.count,
+            active != null and std.mem.eql(u8, active.?, option.value),
+        );
+    }
+    if (options.items.len == 0) {
+        try buf.appendSlice(allocator, "<span class=\"actions-filter-empty\">No values</span>");
+    }
+    try buf.appendSlice(allocator, "</div></details>");
+}
+
+fn appendActionsFilterMenuLink(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    filters: ActionsFilters,
+    kind: ActionsFilterKind,
+    value: ?[]const u8,
+    label: []const u8,
+    count: usize,
+    selected: bool,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<a class="{classes}" role="menuitem" href="
+    , .{ .classes = shared.classes("actions-filter-option", &.{shared.class("selected", selected)}) });
+    try appendActionsHref(buf, allocator, filters, .{
+        .param_name = actionsFilterParamName(kind),
+        .param_value = value,
+    });
+    try appendTemplate(buf, allocator,
+        \\"><span>{label}</span><small>{count}</small></a>
+    , .{
+        .label = label,
+        .count = groupedUnsigned(@intCast(count)),
+    });
 }
 
 fn appendRunRow(buf: *std.ArrayList(u8), allocator: Allocator, workflows: []const actions.Workflow, row: RunRow) !void {
@@ -472,7 +617,7 @@ fn appendWorkflowOverview(
         \\  <div class="actions-workflow-grid">
     , .{ .count = groupedUnsigned(@intCast(workflows.len)) });
     for (workflows) |workflow| {
-        try appendWorkflowCard(buf, allocator, workflow, workflowRunCount(workflow.path, runs));
+        try appendWorkflowCard(buf, allocator, filters, workflow, workflowRunCount(workflow.path, runs));
     }
     try buf.appendSlice(allocator, "</div></section>");
 }
@@ -508,13 +653,16 @@ fn appendSelectedWorkflow(buf: *std.ArrayList(u8), allocator: Allocator, workflo
     try buf.appendSlice(allocator, "</section>");
 }
 
-fn appendWorkflowCard(buf: *std.ArrayList(u8), allocator: Allocator, workflow: actions.Workflow, run_count: usize) !void {
+fn appendWorkflowCard(buf: *std.ArrayList(u8), allocator: Allocator, filters: ActionsFilters, workflow: actions.Workflow, run_count: usize) !void {
     try appendTemplate(buf, allocator,
         \\<article class="actions-workflow-card">
         \\  <div class="actions-workflow-card-head">
         \\    <a href="
     , .{});
-    try appendActionsHref(buf, allocator, workflow.path, null);
+    try appendActionsHref(buf, allocator, filters, .{
+        .param_name = "workflow",
+        .param_value = workflow.path,
+    });
     try appendTemplate(buf, allocator,
         \\">{name}</a>
         \\    <span>{dialect}</span>
@@ -666,6 +814,18 @@ fn actionsFiltersFromTarget(allocator: Allocator, target: []const u8) !ActionsFi
     if (try queryTextValueOwned(allocator, target, "q")) |query| {
         filters.query = query;
     }
+    if (try queryTextValueOwned(allocator, target, "event")) |event| {
+        filters.event = event;
+    }
+    if (try queryTextValueOwned(allocator, target, "status")) |status| {
+        filters.status = status;
+    }
+    if (try queryTextValueOwned(allocator, target, "branch")) |branch| {
+        filters.branch = branch;
+    }
+    if (try queryTextValueOwned(allocator, target, "actor")) |actor| {
+        filters.actor = actor;
+    }
 
     return filters;
 }
@@ -698,18 +858,56 @@ fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const
     return null;
 }
 
-fn appendActionsHref(buf: *std.ArrayList(u8), allocator: Allocator, workflow: ?[]const u8, query: ?[]const u8) !void {
+fn appendActionsHref(buf: *std.ArrayList(u8), allocator: Allocator, filters: ActionsFilters, override: ActionsHrefOverride) !void {
     try buf.appendSlice(allocator, "/actions");
-    var has_query = false;
-    if (workflow) |value| {
-        try buf.appendSlice(allocator, "?workflow=");
-        try appendUrlEncoded(buf, allocator, value);
-        has_query = true;
+    var first = true;
+    if (actionsFilterHrefValue(filters, override, "workflow")) |value| try appendActionsHrefParam(buf, allocator, &first, "workflow", value);
+    if (actionsFilterHrefValue(filters, override, "q")) |value| try appendActionsHrefParam(buf, allocator, &first, "q", value);
+    if (actionsFilterHrefValue(filters, override, "event")) |value| try appendActionsHrefParam(buf, allocator, &first, "event", value);
+    if (actionsFilterHrefValue(filters, override, "status")) |value| try appendActionsHrefParam(buf, allocator, &first, "status", value);
+    if (actionsFilterHrefValue(filters, override, "branch")) |value| try appendActionsHrefParam(buf, allocator, &first, "branch", value);
+    if (actionsFilterHrefValue(filters, override, "actor")) |value| try appendActionsHrefParam(buf, allocator, &first, "actor", value);
+}
+
+fn actionsFilterHrefValue(filters: ActionsFilters, override: ActionsHrefOverride, name: []const u8) ?[]const u8 {
+    if (override.param_name) |param| {
+        if (std.mem.eql(u8, param, name)) return override.param_value;
     }
-    if (query) |value| {
-        try buf.appendSlice(allocator, if (has_query) "&amp;q=" else "?q=");
-        try appendUrlEncoded(buf, allocator, value);
-    }
+    if (std.mem.eql(u8, name, "workflow")) return filters.workflow;
+    if (std.mem.eql(u8, name, "q")) return filters.query;
+    if (std.mem.eql(u8, name, "event")) return filters.event;
+    if (std.mem.eql(u8, name, "status")) return filters.status;
+    if (std.mem.eql(u8, name, "branch")) return filters.branch;
+    if (std.mem.eql(u8, name, "actor")) return filters.actor;
+    return null;
+}
+
+fn appendActionsHrefParam(buf: *std.ArrayList(u8), allocator: Allocator, first: *bool, name: []const u8, value: []const u8) !void {
+    try buf.appendSlice(allocator, if (first.*) "?" else "&amp;");
+    first.* = false;
+    try appendUrlEncoded(buf, allocator, name);
+    try buf.append(allocator, '=');
+    try appendUrlEncoded(buf, allocator, value);
+}
+
+test "web actions filters parse and preserve href parameters" {
+    var filters = try actionsFiltersFromTarget(std.testing.allocator, "/actions?workflow=.github/workflows/ci.yml&q=deploy+main&event=push&status=success&branch=refs/heads/main&actor=alice");
+    defer filters.deinit();
+
+    try std.testing.expectEqualStrings(".github/workflows/ci.yml", filters.workflow.?);
+    try std.testing.expectEqualStrings("deploy main", filters.query.?);
+    try std.testing.expectEqualStrings("push", filters.event.?);
+    try std.testing.expectEqualStrings("success", filters.status.?);
+    try std.testing.expectEqualStrings("refs/heads/main", filters.branch.?);
+    try std.testing.expectEqualStrings("alice", filters.actor.?);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    try appendActionsHref(&buf, std.testing.allocator, filters, .{
+        .param_name = "status",
+        .param_value = null,
+    });
+    try std.testing.expectEqualStrings("/actions?workflow=.github/workflows/ci.yml&amp;q=deploy%20main&amp;event=push&amp;branch=refs/heads/main&amp;actor=alice", buf.items);
 }
 
 fn workflowRunCount(workflow: []const u8, runs: []const RunRow) usize {
@@ -747,6 +945,114 @@ fn actionsStats(workflow_count: usize, runs: []const RunRow, pending_count: usiz
     return stats;
 }
 
+fn hasRestrictiveActionsFilters(filters: ActionsFilters) bool {
+    return filters.workflow != null or
+        filters.query != null or
+        filters.event != null or
+        filters.status != null or
+        filters.branch != null or
+        filters.actor != null;
+}
+
+fn actionsFilterValue(filters: ActionsFilters, kind: ActionsFilterKind) ?[]const u8 {
+    return switch (kind) {
+        .workflow => filters.workflow,
+        .event => filters.event,
+        .status => filters.status,
+        .branch => filters.branch,
+        .actor => filters.actor,
+    };
+}
+
+fn actionsFilterLabel(kind: ActionsFilterKind) []const u8 {
+    return switch (kind) {
+        .workflow => "Workflow",
+        .event => "Event",
+        .status => "Status",
+        .branch => "Branch",
+        .actor => "Actor",
+    };
+}
+
+fn actionsFilterAllLabel(kind: ActionsFilterKind) []const u8 {
+    return switch (kind) {
+        .workflow => "Any workflow",
+        .event => "Any event",
+        .status => "Any status",
+        .branch => "Any branch",
+        .actor => "Anyone",
+    };
+}
+
+fn actionsFilterParamName(kind: ActionsFilterKind) []const u8 {
+    return switch (kind) {
+        .workflow => "workflow",
+        .event => "event",
+        .status => "status",
+        .branch => "branch",
+        .actor => "actor",
+    };
+}
+
+fn actionsFilterDisplayLabel(workflows: []const actions.Workflow, kind: ActionsFilterKind, value: []const u8) []const u8 {
+    return switch (kind) {
+        .workflow => workflowDisplayName(workflows, value),
+        .status => conclusionLabel(value),
+        else => value,
+    };
+}
+
+fn actionsRunFilterValue(row: RunRow, kind: ActionsFilterKind) []const u8 {
+    return switch (kind) {
+        .workflow => row.workflow,
+        .event => row.event_name,
+        .status => row.conclusion,
+        .branch => branchFilterValue(row),
+        .actor => row.actor_principal,
+    };
+}
+
+fn branchFilterValue(row: RunRow) []const u8 {
+    if (row.target_ref.len != 0) return row.target_ref;
+    return row.target_oid;
+}
+
+fn conclusionLabel(conclusion: []const u8) []const u8 {
+    if (std.mem.eql(u8, conclusion, "success")) return "Success";
+    if (std.mem.eql(u8, conclusion, "pending")) return "Pending";
+    if (std.mem.eql(u8, conclusion, "failure")) return "Failure";
+    if (std.mem.eql(u8, conclusion, "cancelled")) return "Cancelled";
+    if (std.mem.eql(u8, conclusion, "skipped")) return "Skipped";
+    if (std.mem.eql(u8, conclusion, "timed_out")) return "Timed out";
+    if (std.mem.eql(u8, conclusion, "action_required")) return "Action required";
+    return conclusion;
+}
+
+fn findActionsFilterOptionIndex(options: []const ActionsFilterOption, value: []const u8) ?usize {
+    for (options, 0..) |option, option_index| {
+        if (std.mem.eql(u8, option.value, value)) return option_index;
+    }
+    return null;
+}
+
+fn actionsFilterOptionLessThan(_: void, left: ActionsFilterOption, right: ActionsFilterOption) bool {
+    if (asciiLessThanIgnoreCase(left.label, right.label)) return true;
+    if (asciiEqlIgnoreCase(left.label, right.label)) return asciiLessThanIgnoreCase(left.value, right.value);
+    return false;
+}
+
+fn asciiLessThanIgnoreCase(a: []const u8, b: []const u8) bool {
+    const shared_len = @min(a.len, b.len);
+    var offset: usize = 0;
+    while (offset < shared_len) : (offset += 1) {
+        const left = std.ascii.toLower(a[offset]);
+        const right = std.ascii.toLower(b[offset]);
+        if (left < right) return true;
+        if (left > right) return false;
+    }
+    return a.len < b.len;
+}
+
 fn findWorkflow(workflows: []const actions.Workflow, workflow_path: []const u8) ?actions.Workflow {
     for (workflows) |workflow| {
         if (std.mem.eql(u8, workflow.path, workflow_path)) return workflow;
@@ -781,8 +1087,42 @@ fn filteredRunCount(runs: []const RunRow, filters: ActionsFilters) usize {
 }
 
 fn runMatchesFilters(row: RunRow, filters: ActionsFilters) bool {
-    if (filters.workflow) |workflow| {
-        if (!std.mem.eql(u8, row.workflow, workflow)) return false;
+    return runMatchesFiltersExcept(row, filters, null);
+}
+
+fn countRunsMatchingFiltersExcept(runs: []const RunRow, filters: ActionsFilters, except: ActionsFilterKind) usize {
+    var count: usize = 0;
+    for (runs) |row| {
+        if (runMatchesFiltersExcept(row, filters, except)) count += 1;
+    }
+    return count;
+}
+
+fn runMatchesFiltersExcept(row: RunRow, filters: ActionsFilters, except: ?ActionsFilterKind) bool {
+    if (filterApplies(except, .workflow)) {
+        if (filters.workflow) |workflow| {
+            if (!std.mem.eql(u8, row.workflow, workflow)) return false;
+        }
+    }
+    if (filterApplies(except, .event)) {
+        if (filters.event) |event| {
+            if (!std.mem.eql(u8, row.event_name, event)) return false;
+        }
+    }
+    if (filterApplies(except, .status)) {
+        if (filters.status) |status| {
+            if (!std.mem.eql(u8, row.conclusion, status)) return false;
+        }
+    }
+    if (filterApplies(except, .branch)) {
+        if (filters.branch) |branch| {
+            if (!std.mem.eql(u8, branchFilterValue(row), branch)) return false;
+        }
+    }
+    if (filterApplies(except, .actor)) {
+        if (filters.actor) |actor| {
+            if (!std.mem.eql(u8, row.actor_principal, actor)) return false;
+        }
     }
     if (filters.query) |query| {
         if (!containsIgnoreCase(row.workflow, query) and
@@ -797,6 +1137,11 @@ fn runMatchesFilters(row: RunRow, filters: ActionsFilters) bool {
             return false;
         }
     }
+    return true;
+}
+
+fn filterApplies(except: ?ActionsFilterKind, kind: ActionsFilterKind) bool {
+    if (except) |skip| return skip != kind;
     return true;
 }
 
