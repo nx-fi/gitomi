@@ -6969,7 +6969,7 @@ main.page-code:has(.root-code-toolbar) .repo-actions {
 }
 .markdown-body .markdown-codeblock pre {
   margin: 0;
-  padding-right: 78px;
+  padding-right: 48px;
 }
 .markdown-copy-button {
   position: absolute;
@@ -6978,14 +6978,13 @@ main.page-code:has(.root-code-toolbar) .repo-actions {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 58px;
-  min-height: 28px;
-  padding: 0 9px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
   color: var(--text);
   background: var(--button-secondary-bg);
   border: 1px solid var(--border-strong);
   border-radius: 6px;
-  font: 700 12px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   box-shadow: var(--shadow-subtle);
   cursor: pointer;
 }

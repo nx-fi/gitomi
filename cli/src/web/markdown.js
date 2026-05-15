@@ -19,7 +19,10 @@
   }
 
   function setButtonState(button, label) {
-    button.textContent = label;
+    const accessibleLabel = label === "Copy" ? "Copy code to clipboard" : label;
+    button.dataset.copyState = label;
+    button.title = accessibleLabel;
+    button.setAttribute("aria-label", accessibleLabel);
   }
 
   async function copyText(text) {
@@ -722,10 +725,13 @@
     const button = document.createElement("button");
     button.className = "markdown-copy-button";
     button.type = "button";
-    button.setAttribute("aria-label", "Copy code to clipboard");
+    const icon = document.createElement("span");
+    icon.className = "button-icon icon-copy";
+    icon.setAttribute("aria-hidden", "true");
+    button.appendChild(icon);
     setButtonState(button, "Copy");
     button.addEventListener("click", async function () {
-      const original = button.textContent || "Copy";
+      const original = button.dataset.copyState || "Copy";
       button.disabled = true;
       setButtonState(button, "Copying");
       try {
