@@ -20,15 +20,16 @@ const index_event_columns = index.index_event_columns;
 const sqlite = index.sqlite;
 
 pub fn renderEventsPage(allocator: Allocator, repo: Repo) ![]u8 {
-    if (try shared.renderIndexingPageIfStale(allocator, repo, "Events", "events", "/events")) |body| return body;
+    if (try shared.renderIndexingPageIfStale(allocator, repo, "Activity", "events", "/events")) |body| return body;
     try ensureIndex(allocator, repo);
 
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
-    try appendShellStart(&buf, allocator, repo, "Events", "events");
-    try buf.appendSlice(allocator, "<section class=\"panel\">");
-    try appendSectionHead(&buf, allocator, "Control plane", "Event Log", null);
+    try appendShellStart(&buf, allocator, repo, "Activity", "events");
+    try shared.appendSettingsLayoutStart(&buf, allocator, "events");
+    try buf.appendSlice(allocator, "<section class=\"panel settings-panel activity-panel\">");
+    try appendSectionHead(&buf, allocator, "Settings", "Activity", null);
     try buf.appendSlice(allocator,
         \\  <div class="table-wrap">
         \\    <table>
@@ -59,6 +60,7 @@ pub fn renderEventsPage(allocator: Allocator, repo: Repo) ![]u8 {
         \\  </div>
         \\</section>
     );
+    try shared.appendSettingsLayoutEnd(&buf, allocator);
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
 }

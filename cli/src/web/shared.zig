@@ -332,15 +332,11 @@ pub fn appendShellStart(
         \\  <nav>
     , .{ .repo_name = std.fs.path.basename(repo.root) });
     try appendNavLink(buf, allocator, active, "code", "/", "Code", null);
-    try appendNavLink(buf, allocator, active, "commits", "/commits", "Commits", null);
     try appendNavLink(buf, allocator, active, "issues", "/issues", "Issues", stats.issues);
     try appendNavLink(buf, allocator, active, "pulls", "/pulls", "PRs", stats.pulls);
-    try appendNavLink(buf, allocator, active, "actions", "/actions", "Actions", null);
+    try appendNavLink(buf, allocator, active, "actions", "/actions", "Workflows", null);
     try appendNavLink(buf, allocator, active, "projects", "/projects", "Projects", null);
-    try appendNavLink(buf, allocator, active, "milestones", "/milestones", "Milestones", null);
-    try appendNavLink(buf, allocator, active, "events", "/events", "Events", null);
-    try appendNavLink(buf, allocator, active, "refs", "/refs", "Refs", null);
-    try appendNavLink(buf, allocator, active, "access", "/access", "Access", null);
+    try appendSettingsNavLink(buf, allocator, active);
     try buf.appendSlice(allocator,
         \\  </nav>
         \\  <div class="topbar-actions">
@@ -536,6 +532,7 @@ pub fn appendShellEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
         \\<script src="/shortcuts.js"></script>
         \\<script src="/tree.js"></script>
         \\<script src="/code.js"></script>
+        \\<script src="/projects.js"></script>
         \\<script src="/vendor/marked/marked.umd.js"></script>
         \\<script src="/vendor/dompurify/purify.min.js"></script>
         \\<script src="/vendor/katex/katex.min.js"></script>
@@ -585,6 +582,57 @@ pub fn appendNavLink(
         }
     }
     try buf.appendSlice(allocator, "</a>");
+}
+
+fn appendSettingsNavLink(buf: *std.ArrayList(u8), allocator: Allocator, active: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<a{class_attr} href="/settings">Settings</a>
+    , .{ .class_attr = classAttr("", &.{class("active", isSettingsActive(active))}) });
+}
+
+fn isSettingsActive(active: []const u8) bool {
+    return std.mem.eql(u8, active, "events") or std.mem.eql(u8, active, "access");
+}
+
+pub fn appendSettingsLayoutStart(buf: *std.ArrayList(u8), allocator: Allocator, active: []const u8) !void {
+    try buf.appendSlice(allocator,
+        \\<div class="project-page-layout settings-page-layout">
+        \\  <aside class="project-page-sidebar settings-page-sidebar">
+        \\    <nav class="project-page-tabs settings-page-tabs" aria-label="Settings sections">
+    );
+    try appendSettingsTab(buf, allocator, active, "events", "/events", "icon-history", "Activity");
+    try appendSettingsTab(buf, allocator, active, "access", "/access", "icon-users", "Access");
+    try buf.appendSlice(allocator,
+        \\    </nav>
+        \\  </aside>
+        \\  <div class="settings-page-content">
+    );
+}
+
+pub fn appendSettingsLayoutEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try buf.appendSlice(allocator,
+        \\  </div>
+        \\</div>
+    );
+}
+
+fn appendSettingsTab(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    active: []const u8,
+    id: []const u8,
+    href: []const u8,
+    icon: []const u8,
+    label: []const u8,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<a class="{classes}" href="{href}"><span class="button-icon {icon}" aria-hidden="true"></span><span>{label}</span></a>
+    , .{
+        .classes = classes("project-page-tab", &.{class("active", std.mem.eql(u8, active, id))}),
+        .href = href,
+        .icon = icon,
+        .label = label,
+    });
 }
 
 pub fn renderNavStatsJson(allocator: Allocator, repo: Repo) ![]u8 {

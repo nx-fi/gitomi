@@ -72,6 +72,7 @@ const exact_routes = [_]Route{
     .{ .method = "GET", .path = "/shortcuts.js", .handler = handleShortcutsJs },
     .{ .method = "GET", .path = "/tree.js", .handler = handleTreeJs },
     .{ .method = "GET", .path = "/code.js", .handler = handleCodeJs },
+    .{ .method = "GET", .path = "/projects.js", .handler = handleProjectsJs },
     .{ .method = "GET", .path = "/markdown.js", .handler = handleMarkdownJs },
     .{ .method = "GET", .path = "/vendor/hljs/all-languages.js", .handler = handleHighlightAllJs },
     .{ .method = "GET", .path = "/highlight/zig.js", .handler = handleHighlightZigJs },
@@ -96,12 +97,14 @@ const exact_routes = [_]Route{
     .{ .method = "GET", .path = "/projects", .handler = handleProjectsPage },
     .{ .method = "GET", .path = "/new-project", .handler = handleNewProjectPage },
     .{ .method = "POST", .path = "/projects", .handler = handleProjectPost },
+    .{ .method = "POST", .path = "/projects/items", .handler = handleProjectItemPost },
     .{ .method = "GET", .path = "/milestones", .handler = handleMilestonesPage },
     .{ .method = "GET", .path = "/new-milestone", .handler = handleNewMilestonePage },
     .{ .method = "POST", .path = "/milestones", .handler = handleMilestonePost },
     .{ .method = "GET", .path = "/access", .handler = handleAccessPage },
     .{ .method = "POST", .path = "/access/roles", .handler = handleAccessRolePost },
     .{ .method = "POST", .path = "/access/devices", .handler = handleAccessDevicePost },
+    .{ .method = "GET", .path = "/settings", .handler = handleSettingsPage },
     .{ .method = "GET", .path = "/actions", .handler = handleActionsPage },
     .{ .method = "POST", .path = "/actions/request", .handler = handleActionsRequestPost },
     .{ .method = "POST", .path = "/actions/run-requested", .handler = handleRunRequestedPost },
@@ -435,6 +438,10 @@ fn handleCodeJs(ctx: WebContext) !void {
     try sendTextAsset(ctx, "application/javascript", code_js);
 }
 
+fn handleProjectsJs(ctx: WebContext) !void {
+    try sendTextAsset(ctx, "application/javascript", projects_js);
+}
+
 fn handleMarkdownJs(ctx: WebContext) !void {
     try sendTextAsset(ctx, "application/javascript", markdown_js);
 }
@@ -537,8 +544,12 @@ fn handleProjectPost(ctx: WebContext) !void {
     try projects_page.handleProjectPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
 }
 
+fn handleProjectItemPost(ctx: WebContext) !void {
+    try projects_page.handleProjectItemPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
+}
+
 fn handleMilestonesPage(ctx: WebContext) !void {
-    try sendOwnedHtml(ctx, try milestones_page.renderMilestonesPage(ctx.allocator, ctx.repo));
+    try shared.sendRedirect(ctx.allocator, ctx.stream, "/projects#milestones");
 }
 
 fn handleNewMilestonePage(ctx: WebContext) !void {
@@ -551,6 +562,10 @@ fn handleMilestonePost(ctx: WebContext) !void {
 
 fn handleAccessPage(ctx: WebContext) !void {
     try sendOwnedHtml(ctx, try access_page.renderAccessPage(ctx.allocator, ctx.repo));
+}
+
+fn handleSettingsPage(ctx: WebContext) !void {
+    try shared.sendRedirect(ctx.allocator, ctx.stream, "/events");
 }
 
 fn handleAccessRolePost(ctx: WebContext) !void {
@@ -570,7 +585,7 @@ fn handleActionsRequestPost(ctx: WebContext) !void {
 }
 
 fn handleRunRequestedPost(ctx: WebContext) !void {
-    try actions_page.handleRunRequestedPost(ctx.allocator, ctx.stream);
+    try actions_page.handleRunRequestedPost(ctx.allocator, ctx.stream, ctx.request.body);
 }
 
 fn handleEventsPage(ctx: WebContext) !void {
@@ -823,6 +838,7 @@ const ui_js = @embedFile("web/ui.js");
 const shortcuts_js = @embedFile("web/shortcuts.js");
 const tree_js = @embedFile("web/tree.js");
 const code_js = @embedFile("web/code.js");
+const projects_js = @embedFile("web/projects.js");
 const markdown_js = @embedFile("web/markdown.js");
 const marked_js = @embedFile("web/vendor/marked/marked.umd.js");
 const dompurify_js = @embedFile("web/vendor/dompurify/purify.min.js");

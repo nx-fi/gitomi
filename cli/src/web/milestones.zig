@@ -43,15 +43,23 @@ const MilestoneFormData = struct {
 };
 
 pub fn renderMilestonesPage(allocator: Allocator, repo: Repo) ![]u8 {
-    if (try shared.renderIndexingPageIfStale(allocator, repo, "Milestones", "milestones", "/milestones")) |body| return body;
+    if (try shared.renderIndexingPageIfStale(allocator, repo, "Milestones", "projects", "/projects#milestones")) |body| return body;
     try index.ensureIndex(allocator, repo);
 
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
-    try appendShellStart(&buf, allocator, repo, "Milestones", "milestones");
-    try buf.appendSlice(allocator, "<section class=\"panel milestones-panel\">");
-    try appendSectionHead(&buf, allocator, "Milestones", "Release Milestones", .{
+    try appendShellStart(&buf, allocator, repo, "Milestones", "projects");
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    try appendMilestonesPanel(&buf, allocator, &db);
+    try appendShellEnd(&buf, allocator);
+    return buf.toOwnedSlice(allocator);
+}
+
+pub fn appendMilestonesPanel(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb) !void {
+    try buf.appendSlice(allocator, "<section id=\"milestones\" class=\"panel milestones-panel project-page-panel\" role=\"tabpanel\" aria-labelledby=\"project-tab-milestones\" data-project-index-panel>");
+    try appendSectionHead(buf, allocator, "Projects", "Milestones", .{
         .label = "New milestone",
         .href = literalHref("/new-milestone"),
         .kind = "primary",
@@ -63,8 +71,6 @@ pub fn renderMilestonesPage(allocator: Allocator, repo: Repo) ![]u8 {
         \\      <tbody>
     );
 
-    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
-    defer db.deinit();
     var stmt = try db.prepare(
         \\SELECT m.id, m.title, m.description, m.due_at, m.state,
         \\       (SELECT COUNT(*)
@@ -99,11 +105,11 @@ pub fn renderMilestonesPage(allocator: Allocator, repo: Repo) ![]u8 {
         defer allocator.free(state);
         const issue_count = @as(usize, @intCast(stmt.columnInt64(5)));
         const closed_count = @as(usize, @intCast(stmt.columnInt64(6)));
-        try appendMilestoneRow(&buf, allocator, id, title, description, due_at, state, issue_count, closed_count);
+        try appendMilestoneRow(buf, allocator, id, title, description, due_at, state, issue_count, closed_count);
         shown += 1;
     }
     if (shown == 0) {
-        try appendEmptyCell(&buf, allocator, 5, "No milestones found.");
+        try appendEmptyCell(buf, allocator, 5, "No milestones found.");
     }
 
     try buf.appendSlice(allocator,
@@ -112,8 +118,6 @@ pub fn renderMilestonesPage(allocator: Allocator, repo: Repo) ![]u8 {
         \\  </div>
         \\</section>
     );
-    try appendShellEnd(&buf, allocator);
-    return buf.toOwnedSlice(allocator);
 }
 
 fn appendMilestoneRow(
@@ -186,15 +190,15 @@ fn renderMilestoneForm(
     errdefer buf.deinit(allocator);
 
     const editing = raw_ref != null;
-    try appendShellStart(&buf, allocator, repo, if (editing) "Edit Milestone" else "New Milestone", "milestones");
+    try appendShellStart(&buf, allocator, repo, if (editing) "Edit Milestone" else "New Milestone", "projects");
     try buf.appendSlice(allocator, "<section class=\"panel form-panel milestone-form-panel\">");
     try appendTemplate(&buf, allocator,
         \\<div class="project-create-head">
         \\  <div>
-        \\    <p class="eyebrow">Milestones</p>
+        \\    <p class="eyebrow">Projects</p>
         \\    <h1>{heading}</h1>
         \\  </div>
-        \\  <a class="button secondary" href="/milestones" aria-label="Close milestone form">Close</a>
+        \\  <a class="button secondary" href="/projects#milestones" aria-label="Close milestone form">Close</a>
         \\</div>
     , .{ .heading = if (editing) "Edit milestone" else "Create milestone" });
     if (error_message) |message| {
@@ -227,7 +231,7 @@ fn renderMilestoneForm(
     }
     try buf.appendSlice(allocator,
         \\  <div class="form-actions">
-        \\    <a class="button secondary" href="/milestones">Cancel</a>
+        \\    <a class="button secondary" href="/projects#milestones">Cancel</a>
         \\    <button class="button primary" type="submit">Save milestone</button>
         \\  </div>
         \\</form>
@@ -274,7 +278,7 @@ fn handleMilestoneCreatePost(allocator: Allocator, repo: Repo, stream: std.net.S
         return;
     };
 
-    try sendRedirect(allocator, stream, "/milestones");
+    try sendRedirect(allocator, stream, "/projects#milestones");
 }
 
 fn handleMilestoneUpdatePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
@@ -294,7 +298,7 @@ fn handleMilestoneUpdatePost(allocator: Allocator, repo: Repo, stream: std.net.S
             try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update milestone state\n");
             return;
         };
-        try sendRedirect(allocator, stream, "/milestones");
+        try sendRedirect(allocator, stream, "/projects#milestones");
         return;
     }
 
@@ -334,7 +338,7 @@ fn handleMilestoneUpdatePost(allocator: Allocator, repo: Repo, stream: std.net.S
         try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", body, null);
         return;
     };
-    try sendRedirect(allocator, stream, "/milestones");
+    try sendRedirect(allocator, stream, "/projects#milestones");
 }
 
 fn validMilestoneState(state: []const u8) bool {
@@ -366,7 +370,7 @@ fn loadMilestoneFormData(allocator: Allocator, repo: Repo, raw_ref: []const u8) 
 fn renderMilestoneNotFound(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
-    try appendShellStart(&buf, allocator, repo, "Milestone Not Found", "milestones");
+    try appendShellStart(&buf, allocator, repo, "Milestone Not Found", "projects");
     const detail = try std.fmt.allocPrint(allocator, "No milestone matches {s}.", .{raw_ref});
     defer allocator.free(detail);
     try shared.appendEmptyState(&buf, allocator, "Milestone not found.", detail);

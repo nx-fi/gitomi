@@ -50,6 +50,10 @@ const RunRow = struct {
     completed_at: []u8,
     conclusion: []u8,
     duration_seconds: ?i64,
+    diagnostics_ref: []u8,
+    diagnostics_oid: []u8,
+    attempt_id: []u8,
+    runner_id: []u8,
 
     fn deinit(self: *RunRow) void {
         self.allocator.free(self.run_id);
@@ -62,7 +66,20 @@ const RunRow = struct {
         self.allocator.free(self.requested_at);
         self.allocator.free(self.completed_at);
         self.allocator.free(self.conclusion);
+        self.allocator.free(self.diagnostics_ref);
+        self.allocator.free(self.diagnostics_oid);
+        self.allocator.free(self.attempt_id);
+        self.allocator.free(self.runner_id);
     }
+};
+
+const ActionsStats = struct {
+    workflows: usize,
+    runs: usize,
+    pending: usize,
+    successful: usize,
+    failed: usize,
+    other: usize,
 };
 
 pub fn renderActionsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]u8 {
@@ -70,7 +87,7 @@ pub fn renderActionsPage(allocator: Allocator, repo: Repo, target: []const u8) !
 }
 
 fn renderActionsPageWithMessage(allocator: Allocator, repo: Repo, target: []const u8, message: ?[]const u8) ![]u8 {
-    if (try shared.renderIndexingPageIfStale(allocator, repo, "Actions", "actions", "/actions")) |body| return body;
+    if (try shared.renderIndexingPageIfStale(allocator, repo, "Workflows", "actions", "/actions")) |body| return body;
     try ensureIndex(allocator, repo);
 
     var buf: std.ArrayList(u8) = .empty;
@@ -89,10 +106,11 @@ fn renderActionsPageWithMessage(allocator: Allocator, repo: Repo, target: []cons
     defer filters.deinit();
 
     const pending = actions.countPendingRequests(allocator, repo) catch 0;
+    const stats = actionsStats(workflows.len, runs.items, pending);
 
-    try appendShellStart(&buf, allocator, repo, "Actions", "actions");
+    try appendShellStart(&buf, allocator, repo, "Workflows", "actions");
     try buf.appendSlice(allocator, "<div class=\"actions-layout\">");
-    try appendActionsSidebar(&buf, allocator, workflows, runs.items, filters, pending);
+    try appendActionsSidebar(&buf, allocator, workflows, runs.items, filters, stats);
     try buf.appendSlice(allocator, "<section class=\"actions-main\">");
     if (message) |value| {
         try appendTemplate(&buf, allocator, "<div class=\"flash error\">{message}</div>", .{ .message = value });
@@ -101,7 +119,7 @@ fn renderActionsPageWithMessage(allocator: Allocator, repo: Repo, target: []cons
     } else if (std.mem.indexOf(u8, target, "run=1") != null) {
         try buf.appendSlice(allocator, "<div class=\"flash success\">Pending action runs processed.</div>");
     }
-    try appendActionsMain(&buf, allocator, workflows, runs.items, filters);
+    try appendActionsMain(&buf, allocator, workflows, runs.items, filters, stats);
     try buf.appendSlice(allocator, "</section></div>");
 
     try appendShellEnd(&buf, allocator);
@@ -127,12 +145,12 @@ fn appendActionsSidebar(
     workflows: []const actions.Workflow,
     runs: []const RunRow,
     filters: ActionsFilters,
-    pending: usize,
+    stats: ActionsStats,
 ) !void {
     try buf.appendSlice(allocator,
         \\<aside class="actions-sidebar">
         \\  <div class="actions-sidebar-head">
-        \\    <h1>Actions</h1>
+        \\    <h1>Workflows</h1>
         \\    <a class="button primary actions-new-workflow" href="/code?ref=HEAD&amp;path=.github/workflows">New workflow</a>
         \\  </div>
         \\  <nav class="actions-workflow-nav" aria-label="Workflows">
@@ -153,16 +171,24 @@ fn appendActionsSidebar(
     }
     try appendTemplate(buf, allocator,
         \\  </nav>
-        \\  <details class="actions-manual-run">
+    , .{});
+    try appendActionsStatus(buf, allocator, stats);
+    try buf.appendSlice(allocator, "  <details class=\"actions-manual-run\"");
+    if (filters.workflow != null) try buf.appendSlice(allocator, " open");
+    try appendTemplate(buf, allocator,
+        \\>
         \\    <summary>Request workflow</summary>
         \\    <form method="post" action="/actions/request">
         \\      <label>Workflow<select name="workflow" required>
     , .{});
     for (workflows) |workflow| {
-        try appendTemplate(buf, allocator, "<option value=\"{path}\">{name}</option>", .{
+        try appendTemplate(buf, allocator, "<option value=\"{path}\"", .{
             .path = workflow.path,
-            .name = workflow.name,
         });
+        if (filters.workflow) |selected| {
+            if (std.mem.eql(u8, selected, workflow.path)) try buf.appendSlice(allocator, " selected");
+        }
+        try appendTemplate(buf, allocator, ">{name}</option>", .{ .name = workflow.name });
     }
     if (workflows.len == 0) {
         try buf.appendSlice(allocator, "<option value=\"\" disabled selected>No workflows found</option>");
@@ -185,16 +211,31 @@ fn appendActionsSidebar(
         \\      <button class="button secondary" type="submit">Run pending ({pending})</button>
         \\    </form>
         \\  </details>
-        \\  <div class="actions-management">
-        \\    <h2>Management</h2>
-        \\    <span class="actions-management-link actions-icon-caches">Caches</span>
-        \\    <span class="actions-management-link actions-icon-attestations">Attestations</span>
-        \\    <span class="actions-management-link actions-icon-runners">Runners</span>
-        \\    <span class="actions-management-link actions-icon-metrics">Usage metrics</span>
-        \\    <span class="actions-management-link actions-icon-metrics">Performance metrics</span>
-        \\  </div>
         \\</aside>
-    , .{ .pending = pending });
+    , .{ .pending = stats.pending });
+}
+
+fn appendActionsStatus(buf: *std.ArrayList(u8), allocator: Allocator, stats: ActionsStats) !void {
+    try appendTemplate(buf, allocator,
+        \\  <div class="actions-status">
+        \\    <h2>Status</h2>
+        \\    <div class="actions-status-grid">
+        \\      <span><strong>{workflows}</strong><small>Workflows</small></span>
+        \\      <span><strong>{runs}</strong><small>Runs</small></span>
+        \\      <span><strong>{pending}</strong><small>Pending</small></span>
+        \\      <span><strong>{successful}</strong><small>Successful</small></span>
+        \\      <span><strong>{failed}</strong><small>Failed</small></span>
+        \\      <span><strong>{other}</strong><small>Other</small></span>
+        \\    </div>
+        \\  </div>
+    , .{
+        .workflows = groupedUnsigned(@intCast(stats.workflows)),
+        .runs = groupedUnsigned(@intCast(stats.runs)),
+        .pending = groupedUnsigned(@intCast(stats.pending)),
+        .successful = groupedUnsigned(@intCast(stats.successful)),
+        .failed = groupedUnsigned(@intCast(stats.failed)),
+        .other = groupedUnsigned(@intCast(stats.other)),
+    });
 }
 
 fn appendActionsSidebarLink(
@@ -223,6 +264,7 @@ fn appendActionsMain(
     workflows: []const actions.Workflow,
     runs: []const RunRow,
     filters: ActionsFilters,
+    stats: ActionsStats,
 ) !void {
     const visible_count = filteredRunCount(runs, filters);
     const selected_title = if (filters.workflow) |selected| workflowDisplayName(workflows, selected) else "All workflows";
@@ -247,6 +289,13 @@ fn appendActionsMain(
         \\    <input type="search" name="q" value="{query}" placeholder="Filter workflow runs" aria-label="Filter workflow runs">
         \\  </form>
         \\</div>
+    , .{
+        .query = query,
+    });
+
+    try appendWorkflowOverview(buf, allocator, workflows, runs, filters, stats);
+
+    try appendTemplate(buf, allocator,
         \\<section class="actions-runs-panel">
         \\  <div class="actions-runs-head">
         \\    <strong>{count} workflow {run_label}</strong>
@@ -259,7 +308,6 @@ fn appendActionsMain(
         \\    </div>
         \\  </div>
     , .{
-        .query = query,
         .count = groupedUnsigned(@intCast(visible_count)),
         .run_label = if (visible_count == 1) "run" else "runs",
     });
@@ -319,9 +367,293 @@ fn appendRunRow(buf: *std.ArrayList(u8), allocator: Allocator, workflows: []cons
     try appendTemplate(buf, allocator,
         \\    <small>{duration}</small>
         \\  </div>
-        \\  <button class="actions-run-menu" type="button" aria-label="Run menu" disabled></button>
-        \\</article>
+        \\  <details class="actions-run-menu-wrap" data-popover-menu>
+        \\    <summary class="actions-run-menu" aria-label="Run actions" title="Run actions"></summary>
+        \\    <div class="actions-run-popover" role="menu">
     , .{ .duration = duration });
+    try appendRunMenu(buf, allocator, row);
+    try buf.appendSlice(allocator, "</div></details></article>");
+}
+
+fn appendRunMenu(buf: *std.ArrayList(u8), allocator: Allocator, row: RunRow) !void {
+    if (row.workflow.len != 0) {
+        try appendRunMenuCodeLink(buf, allocator, "Workflow file", "HEAD", row.workflow);
+    } else {
+        try appendRunMenuDisabled(buf, allocator, "Workflow file");
+    }
+
+    if (row.target_oid.len != 0) {
+        try appendTemplate(buf, allocator, "<a role=\"menuitem\" href=\"/commit?sha=", .{});
+        try appendUrlEncoded(buf, allocator, row.target_oid);
+        try appendTemplate(buf, allocator, "\"><span class=\"actions-menu-icon actions-menu-icon-commit\" aria-hidden=\"true\"></span><span>Target commit</span></a>", .{});
+    } else {
+        try appendRunMenuDisabled(buf, allocator, "Target commit");
+    }
+
+    if (row.diagnostics_ref.len != 0) {
+        try appendRunMenuCodeLink(buf, allocator, "Diagnostics", row.diagnostics_ref, "run.json");
+    } else {
+        try appendRunMenuDisabled(buf, allocator, "Diagnostics");
+    }
+
+    try buf.appendSlice(allocator, "<div class=\"actions-run-popover-divider\" aria-hidden=\"true\"></div>");
+    try appendRunRequestForm(buf, allocator, row, "Rerun workflow", false);
+    try appendRunRequestForm(buf, allocator, row, "Run now", true);
+}
+
+fn appendRunMenuCodeLink(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, ref: []const u8, path: []const u8) !void {
+    try appendTemplate(buf, allocator, "<a role=\"menuitem\" href=\"/code?ref=", .{});
+    try appendUrlEncoded(buf, allocator, ref);
+    if (path.len != 0) {
+        try buf.appendSlice(allocator, "&amp;path=");
+        try appendUrlEncoded(buf, allocator, path);
+    }
+    try appendTemplate(buf, allocator, "\"><span class=\"actions-menu-icon actions-menu-icon-file\" aria-hidden=\"true\"></span><span>{label}</span></a>", .{ .label = label });
+}
+
+fn appendRunMenuDisabled(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<button type="button" role="menuitem" disabled><span class="actions-menu-icon actions-menu-icon-file" aria-hidden="true"></span><span>{label}</span></button>
+    , .{ .label = label });
+}
+
+fn appendRunRequestForm(buf: *std.ArrayList(u8), allocator: Allocator, row: RunRow, label: []const u8, pending_only: bool) !void {
+    const disabled = pending_only and !std.mem.eql(u8, row.conclusion, "pending");
+    if (pending_only) {
+        try appendTemplate(buf, allocator,
+            \\<form method="post" action="/actions/run-requested"><input type="hidden" name="run" value="{run_id}">
+        , .{ .run_id = row.run_id });
+    } else {
+        try appendTemplate(buf, allocator,
+            \\<form method="post" action="/actions/request"><input type="hidden" name="workflow" value="{workflow}"><input type="hidden" name="event" value="{event_name}">
+        , .{
+            .workflow = row.workflow,
+            .event_name = row.event_name,
+        });
+        if (row.target_ref.len != 0) {
+            try appendTemplate(buf, allocator, "<input type=\"hidden\" name=\"ref\" value=\"{target_ref}\">", .{ .target_ref = row.target_ref });
+        } else if (row.target_oid.len != 0) {
+            try appendTemplate(buf, allocator, "<input type=\"hidden\" name=\"oid\" value=\"{target_oid}\">", .{ .target_oid = row.target_oid });
+        }
+    }
+    try appendTemplate(buf, allocator,
+        \\<button type="submit" role="menuitem"
+    , .{});
+    if (disabled or row.workflow.len == 0) try buf.appendSlice(allocator, " disabled");
+    try appendTemplate(buf, allocator,
+        \\><span class="actions-menu-icon actions-menu-icon-run" aria-hidden="true"></span><span>{label}</span></button></form>
+    , .{ .label = label });
+}
+
+fn appendWorkflowOverview(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    workflows: []const actions.Workflow,
+    runs: []const RunRow,
+    filters: ActionsFilters,
+    stats: ActionsStats,
+) !void {
+    _ = stats;
+    if (workflows.len == 0) return;
+
+    if (filters.workflow) |selected| {
+        if (findWorkflow(workflows, selected)) |workflow| {
+            try appendSelectedWorkflow(buf, allocator, workflow, workflowRunCount(workflow.path, runs));
+            return;
+        }
+    }
+
+    try appendTemplate(buf, allocator,
+        \\<section class="actions-workflow-overview" aria-label="Workflow definitions">
+        \\  <div class="actions-section-head">
+        \\    <h2>Workflows</h2>
+        \\    <span>{count} discovered</span>
+        \\  </div>
+        \\  <div class="actions-workflow-grid">
+    , .{ .count = groupedUnsigned(@intCast(workflows.len)) });
+    for (workflows) |workflow| {
+        try appendWorkflowCard(buf, allocator, workflow, workflowRunCount(workflow.path, runs));
+    }
+    try buf.appendSlice(allocator, "</div></section>");
+}
+
+fn appendSelectedWorkflow(buf: *std.ArrayList(u8), allocator: Allocator, workflow: actions.Workflow, run_count: usize) !void {
+    try appendTemplate(buf, allocator,
+        \\<section class="actions-workflow-detail">
+        \\  <div class="actions-workflow-detail-head">
+        \\    <div>
+        \\      <span class="actions-kicker">{dialect}</span>
+        \\      <h2>{name}</h2>
+        \\      <code>{path}</code>
+        \\    </div>
+        \\    <a class="button secondary" href="/code?ref=HEAD&amp;path=
+    , .{
+        .dialect = workflowDialectLabel(workflow.dialect),
+        .name = workflow.name,
+        .path = workflow.path,
+    });
+    try appendUrlEncoded(buf, allocator, workflow.path);
+    try buf.appendSlice(allocator,
+        \\">View file</a>
+        \\  </div>
+        \\  <div class="actions-workflow-meta">
+    );
+    try appendWorkflowMetaItem(buf, allocator, "Runs", groupedUnsigned(@intCast(run_count)));
+    try appendWorkflowMetaItem(buf, allocator, "Triggers", groupedUnsigned(@intCast(workflow.triggers.len)));
+    try appendWorkflowMetaItem(buf, allocator, "Jobs", groupedUnsigned(@intCast(workflow.jobs.len)));
+    try appendWorkflowMetaItem(buf, allocator, "Source", workflowSourceLabel(workflow));
+    try buf.appendSlice(allocator, "</div>");
+    try appendWorkflowTriggerSection(buf, allocator, workflow);
+    try appendWorkflowJobs(buf, allocator, workflow);
+    try buf.appendSlice(allocator, "</section>");
+}
+
+fn appendWorkflowCard(buf: *std.ArrayList(u8), allocator: Allocator, workflow: actions.Workflow, run_count: usize) !void {
+    try appendTemplate(buf, allocator,
+        \\<article class="actions-workflow-card">
+        \\  <div class="actions-workflow-card-head">
+        \\    <a href="
+    , .{});
+    try appendActionsHref(buf, allocator, workflow.path, null);
+    try appendTemplate(buf, allocator,
+        \\">{name}</a>
+        \\    <span>{dialect}</span>
+        \\  </div>
+        \\  <code>{path}</code>
+        \\  <div class="actions-workflow-card-pills">
+    , .{
+        .name = workflow.name,
+        .dialect = workflowDialectLabel(workflow.dialect),
+        .path = workflow.path,
+    });
+    try appendTriggerPills(buf, allocator, workflow.triggers, 4);
+    try appendTemplate(buf, allocator,
+        \\  </div>
+        \\  <dl class="actions-workflow-card-stats">
+        \\    <div><dt>Runs</dt><dd>{runs}</dd></div>
+        \\    <div><dt>Jobs</dt><dd>{jobs}</dd></div>
+        \\    <div><dt>Source</dt><dd>{source}</dd></div>
+        \\  </dl>
+        \\</article>
+    , .{
+        .runs = groupedUnsigned(@intCast(run_count)),
+        .jobs = groupedUnsigned(@intCast(workflow.jobs.len)),
+        .source = workflowSourceLabel(workflow),
+    });
+}
+
+fn appendWorkflowMetaItem(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, value: anytype) !void {
+    try appendTemplate(buf, allocator,
+        \\<span><small>{label}</small><strong>{value}</strong></span>
+    , .{
+        .label = label,
+        .value = value,
+    });
+}
+
+fn appendWorkflowTriggerSection(buf: *std.ArrayList(u8), allocator: Allocator, workflow: actions.Workflow) !void {
+    try buf.appendSlice(allocator, "<div class=\"actions-workflow-section\"><h3>Triggers</h3>");
+    if (workflow.triggers.len == 0) {
+        try buf.appendSlice(allocator, "<p>No triggers declared.</p></div>");
+        return;
+    }
+    try buf.appendSlice(allocator, "<div class=\"actions-trigger-list\">");
+    for (workflow.trigger_defs) |trigger| {
+        try appendTriggerDetail(buf, allocator, trigger);
+    }
+    try buf.appendSlice(allocator, "</div></div>");
+}
+
+fn appendTriggerDetail(buf: *std.ArrayList(u8), allocator: Allocator, trigger: actions.WorkflowTrigger) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="actions-trigger-detail">
+        \\  <strong>{name}</strong>
+    , .{ .name = trigger.name });
+    if (trigger.branches.len == 0 and
+        trigger.branches_ignore.len == 0 and
+        trigger.paths.len == 0 and
+        trigger.paths_ignore.len == 0 and
+        trigger.types.len == 0 and
+        trigger.actors.len == 0 and
+        trigger.labels.len == 0)
+    {
+        try buf.appendSlice(allocator, "<span>No filters</span></div>");
+        return;
+    }
+    try buf.appendSlice(allocator, "<dl>");
+    try appendStringListTerm(buf, allocator, "Types", trigger.types);
+    try appendStringListTerm(buf, allocator, "Branches", trigger.branches);
+    try appendStringListTerm(buf, allocator, "Ignored branches", trigger.branches_ignore);
+    try appendStringListTerm(buf, allocator, "Paths", trigger.paths);
+    try appendStringListTerm(buf, allocator, "Ignored paths", trigger.paths_ignore);
+    try appendStringListTerm(buf, allocator, "Actors", trigger.actors);
+    try appendStringListTerm(buf, allocator, "Labels", trigger.labels);
+    try buf.appendSlice(allocator, "</dl></div>");
+}
+
+fn appendWorkflowJobs(buf: *std.ArrayList(u8), allocator: Allocator, workflow: actions.Workflow) !void {
+    try buf.appendSlice(allocator, "<div class=\"actions-workflow-section\"><h3>Jobs</h3>");
+    if (workflow.jobs.len == 0) {
+        try appendTemplate(buf, allocator, "<p>{message}</p></div>", .{
+            .message = if (workflow.dialect == .github_actions) "Job details are delegated to the GitHub Actions-compatible runner." else "No native jobs declared.",
+        });
+        return;
+    }
+    try buf.appendSlice(allocator, "<div class=\"actions-job-list\">");
+    for (workflow.jobs) |job| {
+        try appendWorkflowJob(buf, allocator, job);
+    }
+    try buf.appendSlice(allocator, "</div></div>");
+}
+
+fn appendWorkflowJob(buf: *std.ArrayList(u8), allocator: Allocator, job: actions.WorkflowJob) !void {
+    try appendTemplate(buf, allocator,
+        \\<article class="actions-job-row">
+        \\  <div>
+        \\    <strong>{id}</strong>
+        \\    <span>{backend}</span>
+        \\  </div>
+    , .{
+        .id = job.id,
+        .backend = effectiveJobBackendLabel(job),
+    });
+    if (job.uses) |uses| {
+        try appendTemplate(buf, allocator, "<code>{uses}</code>", .{ .uses = uses });
+    } else if (job.steps.len != 0) {
+        try appendTemplate(buf, allocator, "<small>{count} {step_label}</small>", .{
+            .count = groupedUnsigned(@intCast(job.steps.len)),
+            .step_label = if (job.steps.len == 1) "step" else "steps",
+        });
+    } else {
+        try buf.appendSlice(allocator, "<small>No steps</small>");
+    }
+    try buf.appendSlice(allocator, "</article>");
+}
+
+fn appendTriggerPills(buf: *std.ArrayList(u8), allocator: Allocator, values: []const []u8, limit: usize) !void {
+    if (values.len == 0) {
+        try buf.appendSlice(allocator, "<span class=\"actions-trigger-pill muted\">No triggers</span>");
+        return;
+    }
+    for (values, 0..) |value, idx| {
+        if (idx >= limit) break;
+        try appendTemplate(buf, allocator, "<span class=\"actions-trigger-pill\">{value}</span>", .{ .value = value });
+    }
+    if (values.len > limit) {
+        try appendTemplate(buf, allocator, "<span class=\"actions-trigger-pill muted\">+{count}</span>", .{
+            .count = groupedUnsigned(@intCast(values.len - limit)),
+        });
+    }
+}
+
+fn appendStringListTerm(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, values: []const []u8) !void {
+    if (values.len == 0) return;
+    try appendTemplate(buf, allocator, "<div><dt>{label}</dt><dd>", .{ .label = label });
+    for (values, 0..) |value, idx| {
+        if (idx != 0) try buf.appendSlice(allocator, ", ");
+        try appendTemplate(buf, allocator, "<code>{value}</code>", .{ .value = value });
+    }
+    try buf.appendSlice(allocator, "</dd></div>");
 }
 
 fn actionsFiltersFromTarget(allocator: Allocator, target: []const u8) !ActionsFilters {
@@ -386,6 +718,58 @@ fn workflowRunCount(workflow: []const u8, runs: []const RunRow) usize {
         if (std.mem.eql(u8, row.workflow, workflow)) count += 1;
     }
     return count;
+}
+
+fn actionsStats(workflow_count: usize, runs: []const RunRow, pending_count: usize) ActionsStats {
+    var stats = ActionsStats{
+        .workflows = workflow_count,
+        .runs = runs.len,
+        .pending = pending_count,
+        .successful = 0,
+        .failed = 0,
+        .other = 0,
+    };
+    for (runs) |row| {
+        if (std.mem.eql(u8, row.conclusion, "success")) {
+            stats.successful += 1;
+        } else if (std.mem.eql(u8, row.conclusion, "pending")) {
+            continue;
+        } else if (std.mem.eql(u8, row.conclusion, "failure") or
+            std.mem.eql(u8, row.conclusion, "cancelled") or
+            std.mem.eql(u8, row.conclusion, "timed_out") or
+            std.mem.eql(u8, row.conclusion, "action_required"))
+        {
+            stats.failed += 1;
+        } else {
+            stats.other += 1;
+        }
+    }
+    return stats;
+}
+
+fn findWorkflow(workflows: []const actions.Workflow, workflow_path: []const u8) ?actions.Workflow {
+    for (workflows) |workflow| {
+        if (std.mem.eql(u8, workflow.path, workflow_path)) return workflow;
+    }
+    return null;
+}
+
+fn workflowDialectLabel(dialect: actions.WorkflowDialect) []const u8 {
+    return switch (dialect) {
+        .github_actions => "github-actions",
+        .gitomi => "gitomi",
+    };
+}
+
+fn workflowSourceLabel(workflow: actions.Workflow) []const u8 {
+    if (std.mem.eql(u8, workflow.source.workflow_from, workflow.source.code_from)) return workflow.source.workflow_from;
+    return "split";
+}
+
+fn effectiveJobBackendLabel(job: actions.WorkflowJob) []const u8 {
+    if (job.backend.len == 0 and job.steps.len != 0) return "shell";
+    if (job.backend.len == 0) return "unspecified";
+    return job.backend;
 }
 
 fn filteredRunCount(runs: []const RunRow, filters: ActionsFilters) usize {
@@ -533,6 +917,14 @@ fn loadRunRows(allocator: Allocator, repo: Repo) !std.ArrayList(RunRow) {
         else
             try payloadStringOwned(allocator, completed_body, "conclusion", "unknown");
         errdefer allocator.free(conclusion);
+        const diagnostics_ref = try payloadStringOwned(allocator, completed_body, "diagnostics_ref", "");
+        errdefer allocator.free(diagnostics_ref);
+        const diagnostics_oid = try payloadStringOwned(allocator, completed_body, "diagnostics_oid", "");
+        errdefer allocator.free(diagnostics_oid);
+        const attempt_id = try payloadStringOwned(allocator, completed_body, "attempt_id", "");
+        errdefer allocator.free(attempt_id);
+        const runner_id = try payloadStringOwned(allocator, completed_body, "runner_id", "");
+        errdefer allocator.free(runner_id);
 
         try rows.append(allocator, .{
             .allocator = allocator,
@@ -547,6 +939,10 @@ fn loadRunRows(allocator: Allocator, repo: Repo) !std.ArrayList(RunRow) {
             .completed_at = completed_at,
             .conclusion = conclusion,
             .duration_seconds = duration_seconds,
+            .diagnostics_ref = diagnostics_ref,
+            .diagnostics_oid = diagnostics_oid,
+            .attempt_id = attempt_id,
+            .runner_id = runner_id,
         });
     }
 
@@ -575,10 +971,13 @@ pub fn handleActionsRequestPost(allocator: Allocator, repo: Repo, stream: std.ne
     defer allocator.free(event_owned);
     const ref_owned = (try issues_page.formValueOwned(allocator, form_body, "ref")) orelse try allocator.dupe(u8, "HEAD");
     defer allocator.free(ref_owned);
+    const oid_owned = (try issues_page.formValueOwned(allocator, form_body, "oid")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(oid_owned);
 
     const workflow = std.mem.trim(u8, workflow_owned, " \t\r\n");
     const event_name = std.mem.trim(u8, event_owned, " \t\r\n");
     const target_ref = std.mem.trim(u8, ref_owned, " \t\r\n");
+    const target_oid = std.mem.trim(u8, oid_owned, " \t\r\n");
     if (workflow.len == 0) {
         const body = try renderActionsPageWithMessage(allocator, repo, "/actions", "Workflow is required.");
         defer allocator.free(body);
@@ -589,8 +988,8 @@ pub fn handleActionsRequestPost(allocator: Allocator, repo: Repo, stream: std.ne
     var result = actions.requestWorkflow(
         allocator,
         workflow,
-        if (target_ref.len == 0) "HEAD" else target_ref,
-        null,
+        if (target_oid.len == 0) if (target_ref.len == 0) "HEAD" else target_ref else null,
+        if (target_oid.len == 0) null else target_oid,
         if (event_name.len == 0) "workflow_dispatch" else event_name,
         null,
     ) catch {
@@ -604,12 +1003,21 @@ pub fn handleActionsRequestPost(allocator: Allocator, repo: Repo, stream: std.ne
     try sendRedirect(allocator, stream, "/actions?requested=1");
 }
 
-pub fn handleRunRequestedPost(allocator: Allocator, stream: std.net.Stream) !void {
-    actions.runRequested(allocator, null, .{}) catch |err| {
+pub fn handleRunRequestedPost(allocator: Allocator, stream: std.net.Stream, form_body: []const u8) !void {
+    const run_owned = try issues_page.formValueOwned(allocator, form_body, "run");
+    defer if (run_owned) |value| allocator.free(value);
+    const run_filter: ?[]const u8 = if (run_owned) |value| blk: {
+        const trimmed = std.mem.trim(u8, value, " \t\r\n");
+        break :blk if (trimmed.len == 0) null else trimmed;
+    } else null;
+
+    actions.runRequested(allocator, run_filter, .{}) catch |err| {
         if (!errors.isUserError(err)) {
             try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Action runner failed\n");
             return;
         }
+        try sendPlainResponse(allocator, stream, 409, "Conflict", "No matching pending action run\n");
+        return;
     };
     try sendRedirect(allocator, stream, "/actions?run=1");
 }

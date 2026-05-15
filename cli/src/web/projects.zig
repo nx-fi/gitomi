@@ -1,10 +1,13 @@
 const std = @import("std");
+const event_mod = @import("../event.zig");
 const index = @import("../index.zig");
+const issue_mod = @import("../issue.zig");
 const project_mod = @import("../project.zig");
 const repo_mod = @import("../repo.zig");
 const shared = @import("shared.zig");
 const util = @import("../util.zig");
 const issues_page = @import("issues.zig");
+const milestones_page = @import("milestones.zig");
 
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
@@ -17,11 +20,14 @@ const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
 const appendStatePill = shared.appendStatePill;
 const appendTemplate = shared.appendTemplate;
+const createIssueOpenedWithMetadataEvent = issue_mod.createIssueOpenedWithMetadataEvent;
+const createIssueProjectEvent = issue_mod.createIssueProjectEvent;
 const createProjectCreatedEvent = project_mod.createProjectCreatedEvent;
 const formValueOwned = issues_page.formValueOwned;
 const issueHref = shared.issueHref;
 const literalHref = shared.literalHref;
 const sendRedirect = shared.sendRedirect;
+const sendPlainResponse = shared.sendPlainResponse;
 const sendResponse = shared.sendResponse;
 const splitCommaFields = util.splitCommaFields;
 const sqlite = index.sqlite;
@@ -138,7 +144,17 @@ fn renderProjectIndex(allocator: Allocator, repo: Repo, db: *SqliteDb) ![]u8 {
     errdefer buf.deinit(allocator);
 
     try appendShellStart(&buf, allocator, repo, "Projects", "projects");
-    try buf.appendSlice(allocator, "<section class=\"panel project-index-panel\">");
+    try buf.appendSlice(allocator,
+        \\<div class="project-page-layout" data-project-index-tabs>
+        \\  <aside class="project-page-sidebar">
+        \\    <nav class="project-page-tabs" aria-label="Projects sections" role="tablist">
+        \\      <a id="project-tab-projects" class="project-page-tab" href="#projects" role="tab" aria-controls="projects" aria-selected="true" data-project-index-tab="projects"><span class="button-icon icon-projects" aria-hidden="true"></span><span>Projects</span></a>
+        \\      <a id="project-tab-milestones" class="project-page-tab" href="#milestones" role="tab" aria-controls="milestones" aria-selected="false" data-project-index-tab="milestones"><span class="button-icon icon-milestones" aria-hidden="true"></span><span>Milestones</span></a>
+        \\    </nav>
+        \\  </aside>
+        \\  <div class="project-page-content">
+        \\    <section id="projects" class="panel project-index-panel project-page-panel" role="tabpanel" aria-labelledby="project-tab-projects" data-project-index-panel>
+    );
     try appendSectionHead(&buf, allocator, "Projects", "Issue Workspaces", Button{
         .label = "New project",
         .href = literalHref("/new-project"),
@@ -220,6 +236,12 @@ fn renderProjectIndex(allocator: Allocator, repo: Repo, db: *SqliteDb) ![]u8 {
         try appendEmptyState(&buf, allocator, "No projects yet.", "Create the first project from this browser UI or with gt project create.");
     }
     try buf.appendSlice(allocator, "</section>");
+
+    try milestones_page.appendMilestonesPanel(&buf, allocator, db);
+    try buf.appendSlice(allocator,
+        \\  </div>
+        \\</div>
+    );
 
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
@@ -343,6 +365,7 @@ fn appendProjectWorkspaceChromeStart(
     try shared.appendUrlEncoded(buf, allocator, project);
     try buf.appendSlice(allocator, "\">Open issues</a></div>");
     try appendProjectViewTabs(buf, allocator, project, active_view, issue_count);
+    try appendProjectItemActions(buf, allocator, db, project, active_view);
     try appendTemplate(buf, allocator,
         \\  <form class="project-filter-bar" method="get" action="/issues">
         \\    <span class="project-filter-icon" aria-hidden="true"></span>
@@ -405,6 +428,69 @@ fn appendProjectColumns(
         shown_column = true;
     }
     if (!shown_column) try appendColumnFn(buf, allocator, db, project, "");
+}
+
+fn appendProjectColumnOptions(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    project: []const u8,
+    selected: ?[]const u8,
+) !void {
+    var columns = try db.prepare(
+        \\SELECT column_name FROM (
+        \\  SELECT pc.column_name AS column_name
+        \\  FROM project_columns pc
+        \\  JOIN projects p ON p.id = pc.project_id
+        \\  WHERE p.name = ?
+        \\  UNION
+        \\  SELECT column_name
+        \\  FROM issue_projects
+        \\  WHERE project = ?
+        \\)
+        \\ORDER BY
+        \\  CASE lower(column_name)
+        \\    WHEN 'triage' THEN 5
+        \\    WHEN 'backlog' THEN 10
+        \\    WHEN 'todo' THEN 20
+        \\    WHEN 'to do' THEN 20
+        \\    WHEN 'ready' THEN 30
+        \\    WHEN 'in progress' THEN 40
+        \\    WHEN 'doing' THEN 40
+        \\    WHEN 'in review' THEN 50
+        \\    WHEN 'review' THEN 50
+        \\    WHEN 'done' THEN 60
+        \\    WHEN 'completed' THEN 60
+        \\    WHEN 'closed' THEN 60
+        \\    ELSE 70
+        \\  END,
+        \\  lower(column_name),
+        \\  column_name
+    );
+    defer columns.deinit();
+    try columns.bindText(1, project);
+    try columns.bindText(2, project);
+
+    var shown = false;
+    while (try columns.step()) {
+        const column = try columns.columnTextDup(allocator, 0);
+        defer allocator.free(column);
+        try appendTemplate(buf, allocator,
+            \\<option value="{value}"{selected}>{label}</option>
+        , .{
+            .value = column,
+            .selected = shared.trustedHtml(if (selected) |current| if (std.mem.eql(u8, current, column)) " selected" else "" else ""),
+            .label = if (column.len == 0) "No status" else column,
+        });
+        shown = true;
+    }
+    if (!shown) {
+        try appendTemplate(buf, allocator,
+            \\<option value=""{selected}>No status</option>
+        , .{
+            .selected = shared.trustedHtml(if (selected) |current| if (current.len == 0) " selected" else "" else ""),
+        });
+    }
 }
 
 fn appendProjectTable(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, project: []const u8) !void {
@@ -648,6 +734,66 @@ fn appendProjectViewTabs(
     , .{ .issue_count = issue_count });
 }
 
+fn appendProjectItemActions(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    project: []const u8,
+    active_view: ProjectView,
+) !void {
+    try buf.appendSlice(allocator,
+        \\<div class="project-item-actions">
+    );
+    try appendTemplate(buf, allocator,
+        \\  <details class="project-action-menu" data-popover-menu>
+        \\    <summary class="button primary" aria-expanded="false"><span class="project-add-icon" aria-hidden="true"></span>New issue</summary>
+        \\    <div class="project-action-popover">
+        \\      <form class="project-item-form" method="post" action="/projects/items">
+        \\        <input type="hidden" name="action" value="create-issue">
+        \\        <input type="hidden" name="project" value="{project}">
+        \\        <input type="hidden" name="view" value="{view}">
+        \\        <label>Title<input name="title" required></label>
+        \\        <label>Body<textarea name="body" rows="4"></textarea></label>
+        \\        <div class="grid two">
+        \\          <label>Status<select name="column">
+    , .{
+        .project = project,
+        .view = projectViewValue(active_view),
+    });
+    try appendProjectColumnOptions(buf, allocator, db, project, null);
+    try appendTemplate(buf, allocator,
+        \\          </select></label>
+        \\          <label>Labels<input name="labels" placeholder="bug, docs"></label>
+        \\        </div>
+        \\        <label>Assignees<input name="assignees" placeholder="alice, bob"></label>
+        \\        <div class="form-actions"><button class="button primary" type="submit">Create issue</button></div>
+        \\      </form>
+        \\    </div>
+        \\  </details>
+        \\  <details class="project-action-menu" data-popover-menu>
+        \\    <summary class="button secondary" aria-expanded="false"><span class="project-link-icon" aria-hidden="true"></span>Add existing</summary>
+        \\    <div class="project-action-popover project-action-popover-narrow">
+        \\      <form class="project-item-form" method="post" action="/projects/items">
+        \\        <input type="hidden" name="action" value="add-existing">
+        \\        <input type="hidden" name="project" value="{project}">
+        \\        <input type="hidden" name="view" value="{view}">
+        \\        <label>Issue<input name="issue" placeholder="#123 or issue:abcdef0" required></label>
+        \\        <label>Status<select name="column">
+    , .{
+        .project = project,
+        .view = projectViewValue(active_view),
+    });
+    try appendProjectColumnOptions(buf, allocator, db, project, null);
+    try buf.appendSlice(allocator,
+        \\        </select></label>
+        \\        <div class="form-actions"><button class="button primary" type="submit">Add issue</button></div>
+        \\      </form>
+        \\    </div>
+        \\  </details>
+        \\</div>
+    );
+}
+
 fn appendProjectViewTab(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -752,19 +898,43 @@ fn appendProjectColumn(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
     const tone = columnTone(column);
     const note = columnDescription(column);
     try appendTemplate(buf, allocator,
-        \\<section class="kanban-column tone-{tone}">
+        \\<section class="kanban-column tone-{tone}" data-project-column data-column="{column}">
         \\  <header>
         \\    <div class="kanban-column-title">
         \\      <span class="kanban-status-dot" aria-hidden="true"></span>
         \\      <h2>{title}</h2>
         \\      <span class="kanban-count">{count}</span>
         \\    </div>
-        \\    <div class="kanban-column-actions" aria-hidden="true"><span class="kanban-column-menu"></span><span class="kanban-column-add"></span></div>
+        \\    <div class="kanban-column-actions">
+        \\      <details class="kanban-column-add-menu" data-popover-menu>
+        \\        <summary aria-label="Add issue to {title}" title="Add issue"><span class="kanban-column-add" aria-hidden="true"></span></summary>
+        \\        <div class="kanban-column-popover">
+        \\          <form class="project-column-mini-form" method="post" action="/projects/items">
+        \\            <input type="hidden" name="action" value="create-issue">
+        \\            <input type="hidden" name="project" value="{project}">
+        \\            <input type="hidden" name="column" value="{column}">
+        \\            <input type="hidden" name="view" value="board">
+        \\            <input name="title" placeholder="New issue title" aria-label="New issue title" required>
+        \\            <button class="button primary" type="submit">Create</button>
+        \\          </form>
+        \\          <form class="project-column-mini-form" method="post" action="/projects/items">
+        \\            <input type="hidden" name="action" value="add-existing">
+        \\            <input type="hidden" name="project" value="{project}">
+        \\            <input type="hidden" name="column" value="{column}">
+        \\            <input type="hidden" name="view" value="board">
+        \\            <input name="issue" placeholder="#123 or issue:abcdef0" aria-label="Issue" required>
+        \\            <button class="button secondary" type="submit">Add</button>
+        \\          </form>
+        \\        </div>
+        \\      </details>
+        \\    </div>
         \\  </header>
         \\  <p class="kanban-column-note">{note}</p>
-        \\  <div class="kanban-cards">
+        \\  <div class="kanban-cards" data-project-dropzone>
     , .{
         .tone = tone,
+        .project = project,
+        .column = column,
         .title = title,
         .count = count,
         .note = note,
@@ -805,12 +975,17 @@ fn appendProjectColumn(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
         var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
         const issue_ref = util.shortObjectRef(&issue_ref_buf, id);
         try appendTemplate(buf, allocator,
-            \\<article class="kanban-card is-{state}">
+            \\<article class="kanban-card is-{state}" draggable="true" data-project-card data-project="{project}" data-issue-id="{id}" data-issue-ref="{issue_ref}" data-column="{column}">
             \\  <div class="kanban-card-head">
+            \\    <span class="kanban-card-drag-handle" aria-hidden="true"></span>
             \\    <span class="issue-state-icon {state}" title="{state}" aria-label="{state}"></span>
             \\    <span class="kanban-card-ref">
         , .{
             .state = state,
+            .project = project,
+            .id = id,
+            .issue_ref = issue_ref,
+            .column = column,
         });
         if (legacy_number > 0) {
             try appendTemplate(buf, allocator, "GitHub #{legacy_number}", .{ .legacy_number = legacy_number });
@@ -987,6 +1162,105 @@ pub fn handleProjectPost(allocator: Allocator, repo: Repo, stream: std.net.Strea
     };
 
     try sendRedirect(allocator, stream, "/projects");
+}
+
+pub fn handleProjectItemPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
+    const action_owned = try formTrimmedOwned(allocator, form_body, "action");
+    defer allocator.free(action_owned);
+    const project_owned = try formTrimmedOwned(allocator, form_body, "project");
+    defer allocator.free(project_owned);
+    const column_owned = try formTrimmedOwned(allocator, form_body, "column");
+    defer allocator.free(column_owned);
+    const view_owned = try formTrimmedOwned(allocator, form_body, "view");
+    defer allocator.free(view_owned);
+    const request_mode_owned = try formTrimmedOwned(allocator, form_body, "request_mode");
+    defer allocator.free(request_mode_owned);
+
+    const wants_async = std.mem.eql(u8, request_mode_owned, "async");
+    const view = projectViewFromValue(view_owned);
+    if (project_owned.len == 0) {
+        try sendProjectItemError(allocator, stream, wants_async, 422, "Unprocessable Entity", "Project is required\n");
+        return;
+    }
+
+    if (std.mem.eql(u8, action_owned, "create-issue")) {
+        const title_owned = try formTrimmedOwned(allocator, form_body, "title");
+        defer allocator.free(title_owned);
+        if (title_owned.len == 0) {
+            try sendProjectItemError(allocator, stream, wants_async, 422, "Unprocessable Entity", "Title is required\n");
+            return;
+        }
+        const body_owned = (try formValueOwned(allocator, form_body, "body")) orelse try allocator.dupe(u8, "");
+        defer allocator.free(body_owned);
+        const labels_owned = (try formValueOwned(allocator, form_body, "labels")) orelse try allocator.dupe(u8, "");
+        defer allocator.free(labels_owned);
+        const assignees_owned = (try formValueOwned(allocator, form_body, "assignees")) orelse try allocator.dupe(u8, "");
+        defer allocator.free(assignees_owned);
+        var labels = try splitCommaFields(allocator, labels_owned);
+        defer labels.deinit(allocator);
+        var assignees = try splitCommaFields(allocator, assignees_owned);
+        defer assignees.deinit(allocator);
+        const placements = [_]event_mod.IssueProjectPlacement{.{
+            .project = project_owned,
+            .column = column_owned,
+        }};
+        createIssueOpenedWithMetadataEvent(
+            allocator,
+            title_owned,
+            body_owned,
+            labels.items,
+            assignees.items,
+            .{ .projects = placements[0..] },
+        ) catch {
+            try sendProjectItemError(allocator, stream, wants_async, 500, "Internal Server Error", "Could not create issue\n");
+            return;
+        };
+    } else if (std.mem.eql(u8, action_owned, "add-existing") or std.mem.eql(u8, action_owned, "move")) {
+        const issue_ref_owned = try formTrimmedOwned(allocator, form_body, "issue");
+        defer allocator.free(issue_ref_owned);
+        if (issue_ref_owned.len == 0) {
+            try sendProjectItemError(allocator, stream, wants_async, 422, "Unprocessable Entity", "Issue is required\n");
+            return;
+        }
+        try index.ensureIndex(allocator, repo);
+        const issue_id = index.resolveIssueId(allocator, repo, issue_ref_owned) catch {
+            try sendProjectItemError(allocator, stream, wants_async, 404, "Not Found", "Issue not found\n");
+            return;
+        };
+        defer allocator.free(issue_id);
+        replaceIssueProjectPlacement(allocator, repo, issue_id, project_owned, column_owned) catch {
+            try sendProjectItemError(allocator, stream, wants_async, 500, "Internal Server Error", "Could not update issue project placement\n");
+            return;
+        };
+    } else if (std.mem.eql(u8, action_owned, "remove")) {
+        const issue_ref_owned = try formTrimmedOwned(allocator, form_body, "issue");
+        defer allocator.free(issue_ref_owned);
+        if (issue_ref_owned.len == 0) {
+            try sendProjectItemError(allocator, stream, wants_async, 422, "Unprocessable Entity", "Issue is required\n");
+            return;
+        }
+        try index.ensureIndex(allocator, repo);
+        const issue_id = index.resolveIssueId(allocator, repo, issue_ref_owned) catch {
+            try sendProjectItemError(allocator, stream, wants_async, 404, "Not Found", "Issue not found\n");
+            return;
+        };
+        defer allocator.free(issue_id);
+        removeIssueProjectPlacements(allocator, repo, issue_id, project_owned, null) catch {
+            try sendProjectItemError(allocator, stream, wants_async, 500, "Internal Server Error", "Could not remove issue from project\n");
+            return;
+        };
+    } else {
+        try sendProjectItemError(allocator, stream, wants_async, 422, "Unprocessable Entity", "Unknown project item action\n");
+        return;
+    }
+
+    if (wants_async) {
+        try sendResponse(allocator, stream, 204, "No Content", "text/plain", "", null);
+        return;
+    }
+    const location = try projectWorkspaceLocationOwned(allocator, project_owned, view);
+    defer allocator.free(location);
+    try sendRedirect(allocator, stream, location);
 }
 
 fn appendProjectTemplateSidebar(buf: *std.ArrayList(u8), allocator: Allocator, selected_id: []const u8) !void {
@@ -1187,10 +1461,21 @@ fn trimmedQueryValueOwned(allocator: Allocator, target: []const u8, wanted_key: 
     return result;
 }
 
+fn formTrimmedOwned(allocator: Allocator, form_body: []const u8, wanted_key: []const u8) ![]u8 {
+    const owned = (try formValueOwned(allocator, form_body, wanted_key)) orelse try allocator.dupe(u8, "");
+    defer allocator.free(owned);
+    const trimmed = std.mem.trim(u8, owned, " \t\r\n");
+    return try allocator.dupe(u8, trimmed);
+}
+
 fn projectViewFromTarget(allocator: Allocator, target: []const u8) !ProjectView {
     const view = try trimmedQueryValueOwned(allocator, target, "view");
     defer if (view) |value| allocator.free(value);
     const value = view orelse return .board;
+    return projectViewFromValue(value);
+}
+
+fn projectViewFromValue(value: []const u8) ProjectView {
     if (std.mem.eql(u8, value, "table")) return .table;
     if (std.mem.eql(u8, value, "roadmap")) return .roadmap;
     return .board;
@@ -1202,6 +1487,104 @@ fn projectViewValue(view: ProjectView) []const u8 {
         .board => "board",
         .roadmap => "roadmap",
     };
+}
+
+fn projectWorkspaceLocationOwned(allocator: Allocator, project: []const u8, view: ProjectView) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.appendSlice(allocator, "/projects?project=");
+    try shared.appendUrlEncoded(&buf, allocator, project);
+    try buf.appendSlice(allocator, "&view=");
+    try buf.appendSlice(allocator, projectViewValue(view));
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn sendProjectItemError(
+    allocator: Allocator,
+    stream: std.net.Stream,
+    wants_async: bool,
+    status: u16,
+    reason: []const u8,
+    message: []const u8,
+) !void {
+    _ = wants_async;
+    try sendPlainResponse(allocator, stream, status, reason, message);
+}
+
+fn replaceIssueProjectPlacement(
+    allocator: Allocator,
+    repo: Repo,
+    issue_id: []const u8,
+    project: []const u8,
+    column: []const u8,
+) !void {
+    var existing = try loadIssueProjectColumns(allocator, repo, issue_id, project, null);
+    defer freeColumnList(allocator, &existing);
+
+    var has_target = false;
+    for (existing.items) |old_column| {
+        if (std.mem.eql(u8, old_column, column)) {
+            has_target = true;
+            continue;
+        }
+        try createIssueProjectEvent(allocator, issue_id, project, old_column, null, null, false);
+    }
+    if (!has_target) {
+        try createIssueProjectEvent(allocator, issue_id, project, column, null, null, true);
+    }
+}
+
+fn removeIssueProjectPlacements(
+    allocator: Allocator,
+    repo: Repo,
+    issue_id: []const u8,
+    project: []const u8,
+    column_filter: ?[]const u8,
+) !void {
+    var existing = try loadIssueProjectColumns(allocator, repo, issue_id, project, column_filter);
+    defer freeColumnList(allocator, &existing);
+    for (existing.items) |old_column| {
+        try createIssueProjectEvent(allocator, issue_id, project, old_column, null, null, false);
+    }
+}
+
+fn loadIssueProjectColumns(
+    allocator: Allocator,
+    repo: Repo,
+    issue_id: []const u8,
+    project: []const u8,
+    column_filter: ?[]const u8,
+) !std.ArrayList([]u8) {
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    const sql_text: []const u8 = if (column_filter == null)
+        \\SELECT DISTINCT column_name
+        \\FROM issue_projects
+        \\WHERE issue_id = ? AND project = ?
+        \\ORDER BY column_name
+    else
+        \\SELECT DISTINCT column_name
+        \\FROM issue_projects
+        \\WHERE issue_id = ? AND project = ? AND column_name = ?
+        \\ORDER BY column_name
+    ;
+    var stmt = try db.prepare(sql_text);
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    try stmt.bindText(2, project);
+    if (column_filter) |column| try stmt.bindText(3, column);
+
+    var columns: std.ArrayList([]u8) = .empty;
+    errdefer freeColumnList(allocator, &columns);
+    while (try stmt.step()) {
+        try columns.append(allocator, try stmt.columnTextDup(allocator, 0));
+    }
+    return columns;
+}
+
+fn freeColumnList(allocator: Allocator, columns: *std.ArrayList([]u8)) void {
+    for (columns.items) |column| allocator.free(column);
+    columns.deinit(allocator);
 }
 
 fn projectExists(db: *SqliteDb, project: []const u8) !bool {

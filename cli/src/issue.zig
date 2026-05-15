@@ -17,7 +17,6 @@ const issue = @This();
 const out = io.out;
 const eprint = io.eprint;
 const EventWriter = event_writer_mod.EventWriter;
-const buildIssueOpenedJson = event_mod.buildIssueOpenedJson;
 const buildIssueProjectEventJson = event_mod.buildIssueProjectEventJson;
 const buildIssueProjectFieldClearedJson = event_mod.buildIssueProjectFieldClearedJson;
 const buildIssueProjectFieldSetJson = event_mod.buildIssueProjectFieldSetJson;
@@ -50,6 +49,17 @@ pub fn createIssueOpenedEvent(
     labels: []const []const u8,
     assignees: []const []const u8,
 ) !void {
+    try createIssueOpenedWithMetadataEvent(allocator, title, body, labels, assignees, .{});
+}
+
+pub fn createIssueOpenedWithMetadataEvent(
+    allocator: Allocator,
+    title: []const u8,
+    body: []const u8,
+    labels: []const []const u8,
+    assignees: []const []const u8,
+    metadata: event_mod.IssueOpenedMetadata,
+) !void {
     var writer = try EventWriter.init(allocator, "gt issue open");
     defer writer.deinit();
 
@@ -63,7 +73,7 @@ pub fn createIssueOpenedEvent(
     defer allocator.free(occurred_at);
     const event_parents = writer.eventParents();
 
-    const event_body = try buildIssueOpenedJson(
+    const event_body = try event_mod.buildIssueOpenedJsonWithLegacyAndMetadata(
         allocator,
         writer.cfg,
         writer.nextSeq(),
@@ -76,6 +86,8 @@ pub fn createIssueOpenedEvent(
         body,
         labels,
         assignees,
+        .{},
+        metadata,
     );
     defer allocator.free(event_body);
 
