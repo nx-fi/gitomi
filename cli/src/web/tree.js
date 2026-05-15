@@ -227,8 +227,8 @@
   }
 
   function initTreeSearchMenu(input, items) {
-    const label = input.closest(".tree-search-label") || input.parentElement;
-    const container = input.closest(".tree-search-wrap") || label;
+    const label = input.closest(".tree-search-label, .root-file-search") || input.parentElement;
+    const container = input.closest(".tree-search-wrap, .root-file-search-wrap") || label;
     if (!container) return;
 
     const menu = document.createElement("div");
@@ -369,27 +369,39 @@
 
   function initRootFileSearch(input) {
     const panel = input.closest(".root-page-main") || document;
-    const rows = Array.from(panel.querySelectorAll("[data-root-file-row]"));
-    const items = rows.map((row) => ({
-      row,
-      searchName: (row.dataset.rootFileName || "").toLowerCase(),
-      searchPath: (row.dataset.rootFilePath || "").toLowerCase(),
-    }));
-    const sync = () => {
-      const tokens = searchTokens(input.value);
-      items.forEach((item) => {
-        item.row.hidden = tokens.length !== 0 && !itemMatchesSearch(item, tokens);
+    const index = panel.querySelector("[data-root-file-search-index]");
+    const nodes = index ? Array.from(index.querySelectorAll("[data-root-file-search-item]")) : [];
+    const rows = nodes.length === 0 ? Array.from(panel.querySelectorAll("[data-root-file-row]")) : [];
+    const items = nodes.length !== 0
+      ? nodes.map((node) => {
+        const path = node.dataset.rootFilePath || "";
+        const slash = path.lastIndexOf("/");
+        const name = node.dataset.rootFileName || (slash === -1 ? path : path.slice(slash + 1));
+        return {
+          node,
+          path,
+          name,
+          searchPath: path.toLowerCase(),
+          searchName: name.toLowerCase(),
+          href: node.getAttribute("href") || "",
+          kind: node.dataset.rootFileKind || "blob",
+        };
+      })
+      : rows.map((row) => {
+        const path = row.dataset.rootFilePath || "";
+        const name = row.dataset.rootFileName || path;
+        const link = row.querySelector("a[href]");
+        return {
+          node: row,
+          path,
+          name,
+          searchPath: path.toLowerCase(),
+          searchName: name.toLowerCase(),
+          href: link ? link.getAttribute("href") : "",
+          kind: row.dataset.rootFileKind || "blob",
+        };
       });
-    };
-    input.addEventListener("input", sync);
-    input.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter") return;
-      const firstItem = items.find((item) => !item.row.hidden);
-      const first = firstItem ? firstItem.row : null;
-      const link = first ? first.querySelector("a[href]") : null;
-      if (link) link.click();
-    });
-    sync();
+    initTreeSearchMenu(input, items);
   }
 
   function initRootFileSearchShortcut(input) {

@@ -1,125 +1,130 @@
-# Markdown 全功能测试文件
+# Markdown Full Feature Test File
 
-这是一个包含所有常见 Markdown 语法的测试文件，用于验证渲染效果。
+This file covers common and extended Markdown syntax. Use it to validate renderer behavior, spacing, escaping, and mixed-content rendering.
 
 ---
 
-## 1. 标题 (Headings)
+## 1. Headings
 
 ```markdown
-# 一级标题
-## 二级标题
-### 三级标题
-#### 四级标题
-##### 五级标题
-###### 六级标题
+# Heading 1
+## Heading 2
+### Heading 3
+#### Heading 4
+##### Heading 5
+###### Heading 6
 ```
 
 ---
 
-## 2. 文本格式 (Text Formatting)
+## 2. Text Formatting
 
-**粗体文本** (Bold)
+**Bold text**
 
-*斜体文本* (Italic)
+*Italic text*
 
-***粗斜体文本*** (Bold + Italic)
+***Bold and italic text***
 
-~~删除线~~ (Strikethrough)
+~~Strikethrough text~~
 
-==高亮文本== (Highlight - 部分支持)
+==Highlighted text== (extension syntax; renderer support may vary)
 
-`行内代码` (Inline Code)
+`Inline code`
 
----
-
-## 3. 段落与换行
-
-这是第一段。
-
-这是第二段（空行分隔）。
-
-这是同一行内的硬换行（两个空格+回车）。
+Text with **bold**, *italic*, `code`, and [a link](https://example.com) in the same sentence.
 
 ---
 
-## 4. 列表 (Lists)
+## 3. Paragraphs and Line Breaks
 
-### 无序列表 (Unordered Lists)
+This is the first paragraph.
 
-- 项目 1
-- 项目 2
-  - 嵌套项目 2.1
-  - 嵌套项目 2.2
-- 项目 3
+This is the second paragraph, separated by an empty line.
 
-+ 使用加号
-- 使用减号
-* 使用星号
-
-### 有序列表 (Ordered Lists)
-
-1. 第一项
-2. 第二项
-3. 第三项
-   1. 嵌套有序列表
-   2. 继续嵌套
-4. 回到主列表
-
-### 任务列表 (Task Lists)
-
-- [ ] 未完成任务 1
-- [x] 已完成任务 2
-- [ ] 未完成任务 3
-  - [ ] 嵌套未完成
-  - [x] 嵌套已完成
-
-### 定义列表 (Definition Lists - 扩展语法)
-
-术语 1
-:   定义 1
-
-术语 2
-:   定义 2
-:   定义 2 的延续
+This sentence ends with a hard line break.\
+This sentence should start on the next line.
 
 ---
 
-## 5. 引用 (Blockquotes)
+## 4. Lists
 
-> 这是一段引用文本。
->
-> 可以有多行。
->
-> > 支持嵌套引用。
->
-> 引用中可以包含其他元素：
->
-> - 列表项
-> - **粗体**
-> > 嵌套引用
+### Unordered Lists
+
+- Item 1
+- Item 2
+  - Nested item 2.1
+  - Nested item 2.2
+- Item 3
+
++ Plus marker
+- Minus marker
+* Asterisk marker
+
+### Ordered Lists
+
+1. First item
+2. Second item
+3. Third item
+   1. Nested ordered item
+   2. Another nested item
+4. Back to the main list
+
+### Task Lists
+
+- [ ] Open task 1
+- [x] Completed task 2
+- [ ] Open task 3
+  - [ ] Nested open task
+  - [x] Nested completed task
+
+### Definition Lists (Extension Syntax)
+
+Term 1
+:   Definition 1
+
+Term 2
+:   Definition 2
+:   Continuation of definition 2
 
 ---
 
-## 6. 代码 (Code)
+## 5. Blockquotes
 
-### 行内代码 (Inline Code)
+> This is a quoted paragraph.
+>
+> It can span multiple lines.
+>
+> > Nested blockquotes are supported.
+>
+> Blockquotes can include other elements:
+>
+> - List item
+> - **Bold text**
+> > Another nested quote
 
-使用反引号：`code here`
+---
 
-### 代码块 (Code Blocks)
+## 6. Code
 
-#### 普通代码块
+### Inline Code
+
+Use backticks for inline code: `code here`
+
+Inline code can include escaped backticks like ``Use `backticks` inside code``.
+
+### Code Blocks
+
+#### Plain Code Block
 
 ```
-这是普通代码块
-没有语法高亮
+This is a plain code block.
+It has no syntax highlighting.
 ```
 
-#### 语言指定 (Syntax Highlighting)
+#### Language-Specific Code Blocks
 
 ```javascript
-// JavaScript 示例
+// JavaScript example
 function greet(name) {
     console.log(`Hello, ${name}!`);
     return true;
@@ -130,9 +135,9 @@ arr.map(x => x * 2);
 ```
 
 ```python
-# Python 示例
+# Python example
 def greet(name):
-    """打印问候语"""
+    """Print a greeting."""
     print(f"Hello, {name}!")
     return True
 
@@ -142,7 +147,7 @@ class Person:
 ```
 
 ```css
-/* CSS 示例 */
+/* CSS example */
 .container {
     display: flex;
     justify-content: center;
@@ -156,7 +161,7 @@ class Person:
 ```
 
 ```bash
-# Bash 示例
+# Bash example
 #!/bin/bash
 echo "Hello, World!"
 for file in *.txt; do
@@ -174,95 +179,122 @@ done
 }
 ```
 
-#### 缩进代码块
+#### Indented Code Block
 
-    这是缩进代码块
-    每行前面有4个空格
-
----
-
-## 7. 表格 (Tables)
-
-### 基本表格
-
-| 列 1 | 列 2 | 列 3 |
-|------|------|------|
-| 数据 1.1 | 数据 1.2 | 数据 1.3 |
-| 数据 2.1 | 数据 2.2 | 数据 2.3 |
-
-### 对齐方式
-
-| 左对齐 | 居中对齐 | 右对齐 |
-|:-------|:-------:|-------:|
-| Left   | Center  | Right  |
-| 数据   | 数据    | 数据   |
-
-### 复杂表格
-
-| 功能 | 语法 | 说明 |
-|------|------|------|
-| **粗体** | `**text**` | 粗体文本 |
-| *斜体* | `*text*` | 斜体文本 |
-| `代码` | `` `code` `` | 行内代码 |
-
-### 空单元格
-
-| 列 1 | 列 2 | 列 3 |
-|------|------|------|
-| 数据 |      | 数据 |
-|      | 数据 |      |
+    This is an indented code block.
+    Each line starts with four spaces.
 
 ---
 
-## 8. 链接 (Links)
+## 7. Tables
 
-### 行内链接
+### Basic Table
 
-[文本链接](https://example.com)
+| Column 1 | Column 2 | Column 3 |
+|----------|----------|----------|
+| Data 1.1 | Data 1.2 | Data 1.3 |
+| Data 2.1 | Data 2.2 | Data 2.3 |
 
-[带标题的链接](https://example.com "鼠标悬停显示")
+### Alignment
 
-### 相对路径链接
+| Left Aligned | Center Aligned | Right Aligned |
+|:-------------|:--------------:|--------------:|
+| Left         | Center         | Right         |
+| Data         | Data           | Data          |
 
-[链接到文档](./other-file.md)
+### Markdown Inside Tables
 
-### 引用式链接
+| Feature | Syntax | Description |
+|---------|--------|-------------|
+| **Bold** | `**text**` | Bold text inside a table cell |
+| *Italic* | `*text*` | Italic text inside a table cell |
+| `Code` | `` `code` `` | Inline code inside a table cell |
+| [Link](https://example.com) | `[Link](https://example.com)` | Inline link inside a table cell |
+| Escaped pipe | `alpha \| beta` | A literal pipe character inside code |
 
-[引用链接][reference-link]
+### Empty Cells
 
-[reference-link]: https://github.com "GitHub 主页"
+| Column 1 | Column 2 | Column 3 |
+|----------|----------|----------|
+| Data     |          | Data     |
+|          | Data     |          |
 
-### URL 直接链接
+### Complex Table: Images, LaTeX, HTML, and Mixed Content
+
+| Case | Example | Expected Rendering |
+|------|---------|--------------------|
+| Image | ![Avatar](https://avatars.githubusercontent.com/u/20858116?s=40&v=4 "Avatar in a table") | Image should scale inside the table cell |
+| Linked image | [![GitHub avatar](https://avatars.githubusercontent.com/u/9919?s=40&v=4)](https://github.com) | Image should be clickable |
+| Inline LaTeX | $E = mc^2$ | Inline math should render inside a table cell |
+| Fraction LaTeX | $\frac{\sqrt{x + 1}}{x - 1}$ | Fraction and square root should render inline |
+| Summation LaTeX | $\sum_{i=1}^{n} i = \frac{n(n+1)}{2}$ | Summation should fit without breaking the row |
+| HTML controls | <kbd>Ctrl</kbd> + <kbd>K</kbd> | Inline HTML should remain inside the cell |
+| Mixed inline content | **Status:** `ready` and [docs](https://commonmark.org/) | Bold, code, and links should combine correctly |
+| Escaped characters | \*literal asterisks\* and `a \| b` | Escaped Markdown and escaped pipes should stay readable |
+
+### Table With Dense Technical Content
+
+| Input | Formula | Notes |
+|-------|---------|-------|
+| `x = [1, 2, 3]` | $\bar{x} = \frac{1}{n}\sum x_i$ | Mean calculation with inline code and math |
+| `P(A \| B)` | $P(A \mid B) = \frac{P(B \mid A)P(A)}{P(B)}$ | Escaped pipe in code, conditional probability in LaTeX |
+| ![Small image](https://avatars.githubusercontent.com/u/20858116?s=24&v=4) | $\int_0^1 x^2 dx = \frac{1}{3}$ | Image and integral in the same row |
+
+---
+
+## 8. Links
+
+### Inline Links
+
+[Text link](https://example.com)
+
+[Link with title](https://example.com "Shown on hover")
+
+### Relative Links
+
+[Link to another document](./other-file.md)
+
+### Reference Links
+
+[Reference link][reference-link]
+
+[reference-link]: https://github.com "GitHub home page"
+
+### Bare URLs
 
 https://example.com
 
 <https://example.com>
 
-### 邮件链接
+### Email Links
 
 <user@example.com>
 
 ---
 
-## 9. 图片 (Images)
+## 9. Images
 
-### 行内图片
+### Inline Image
 
-![替代文本](https://avatars.githubusercontent.com/u/20858116?s=40&v=4)
+![Alt text](https://avatars.githubusercontent.com/u/20858116?s=40&v=4)
 
-### 带标题的图片
+### Image With Title
 
-![Logo](https://avatars.githubusercontent.com/u/20858116?s=40&v=4 "这是图片标题")
+![Logo](https://avatars.githubusercontent.com/u/20858116?s=40&v=4 "This is an image title")
 
-### 引用式图片
+### Reference Image
 
-![引用图片][image-ref]
+![Reference image][image-ref]
 
 [image-ref]: https://avatars.githubusercontent.com/u/20858116?s=40&v=4
 
+### Image Nested in a Link
+
+[![Linked logo](https://avatars.githubusercontent.com/u/20858116?s=40&v=4 "Linked image title")](https://github.com)
+
 ---
 
-## 10. 分隔线 (Horizontal Rules)
+## 10. Horizontal Rules
 
 ***
 
@@ -274,66 +306,72 @@ ___
 
 ---
 
-## 11. 转义字符 (Escaping)
+## 11. Escaping
 
-\*不是粗体\*
+\*Not bold\*
 
-\[不是链接\]
+\[Not a link\]
 
-\`不是代码\`
+\`Not code\`
+
+\# Not a heading
+
+Use a backslash before a pipe in table-sensitive text: `a \| b`.
 
 ---
 
-## 12. HTML 支持 (HTML in Markdown)
+## 12. HTML in Markdown
 
-### 行内 HTML
+### Inline HTML
 
-这是 <strong>HTML 粗体</strong> 和 <em>斜体</em>。
+This sentence contains <strong>HTML bold</strong> and <em>HTML italic</em>.
 
-### HTML 块
+### HTML Block
 
 <div style="color: red;">
-    这是红色文本（HTML div）
+    This is red text inside an HTML div.
 </div>
 
 <details>
-<summary>点击展开折叠内容</summary>
+<summary>Expand collapsible content</summary>
 
-这是隐藏的内容！
+This content is hidden until the details block is opened.
 
 </details>
 
 ---
 
-## 13. 数学公式 (Math Formulas)
+## 13. Math Formulas
 
-### 行内公式
+### Inline Math
 
-质能方程：$E = mc^2$
+Mass-energy equivalence: $E = mc^2$
 
-勾股定理：$a^2 + b^2 = c^2$
+Pythagorean theorem: $a^2 + b^2 = c^2$
 
-### 块级公式
+Bayes theorem: $P(A \mid B) = \frac{P(B \mid A)P(A)}{P(B)}$
 
-二次公式：
+### Block Math
+
+Quadratic formula:
 
 $$
 x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}
 $$
 
-求和公式：
+Summation formula:
 
 $$
 \sum_{i=1}^{n} i = \frac{n(n+1)}{2}
 $$
 
-积分：
+Integral:
 
 $$
 \int_{0}^{\infty} x^2 e^{-x} dx = 2
 $$
 
-矩阵：
+Matrix:
 
 $$
 \begin{pmatrix}
@@ -342,158 +380,177 @@ c & d
 \end{pmatrix}
 $$
 
-分数和根号：
+Fraction and square root:
 
 $$
 \frac{\sqrt{x+1}}{x-1}
 $$
 
+Piecewise function:
+
+$$
+f(x)=
+\begin{cases}
+x^2, & x \ge 0 \\
+-x, & x < 0
+\end{cases}
+$$
+
 ---
 
-## 14. 脚注 (Footnotes - 扩展语法)
+## 14. Footnotes (Extension Syntax)
 
-这是一个脚注引用[^1]。
+This sentence has a footnote reference.[^1]
 
-这是另一个脚注[^note]。
+This sentence has another footnote.[^note]
 
-[^1]: 这是第一个脚注的内容。
-[^note]: 这是命名脚注的内容，可以包含多行。
+[^1]: This is the first footnote.
+[^note]: This is a named footnote. It can include more descriptive text.
 
 ---
 
-## 15. 缩写 (Abbreviations - 扩展语法)
+## 15. Abbreviations (Extension Syntax)
 
 *[HTML]: Hyper Text Markup Language
 *[CSS]: Cascading Style Sheets
 
-HTML 和 CSS 是 Web 开发的基础。
+HTML and CSS are core Web technologies.
 
 ---
 
-## 16. 标记 (Mark - 扩展语法)
+## 16. Mark (Extension Syntax)
 
-==这段文本被高亮标记==
-
----
-
-## 17. 上标和下标 (Superscript & Subscript - 扩展语法)
-
-下标：H~2~O
-
-上标：X^2^
+==This text is highlighted with mark syntax.==
 
 ---
 
-## 18. Emoji 表情
+## 17. Superscript and Subscript (Extension Syntax)
+
+Subscript: H~2~O
+
+Superscript: X^2^
+
+---
+
+## 18. Emoji
 
 😀 😃 😄 😁 😆 😅 🤣 😂
 
+---
+
+## 19. Special Characters
+
+&copy; copyright symbol
+
+&reg; registered trademark
+
+&trade; trademark
+
+&amp; ampersand
+
+&lt; less than
+
+&gt; greater than
+
+&hearts; heart
+
+&diams; diamond
 
 ---
 
-## 19. 特殊字符
+## 20. Mermaid Flowcharts
 
-&copy; 版权符号
-&reg; 注册商标
-&trade; 商标
-&amp; 和号
-&lt; 小于
-&gt; 大于
-&hearts; ♥
-&diams; ♦
-
----
-
-## 20. Mermaid 流程图 (Mermaid Diagrams)
-
-### 基本流程图
+### Basic Flowchart
 
 ```mermaid
 flowchart TD
-    A[开始] --> B{是否条件满足?}
-    B -->|是| C[执行操作 A]
-    B -->|否| D[执行操作 B]
-    C --> E[处理结果]
+    A[Start] --> B{Condition met?}
+    B -->|Yes| C[Run operation A]
+    B -->|No| D[Run operation B]
+    C --> E[Process result]
     D --> E
-    E --> F((结束))
+    E --> F((End))
 ```
 
-### 横向流程图
+### Left-to-Right Flowchart
 
 ```mermaid
 flowchart LR
-    A[用户请求] --> B[身份验证]
-    B --> C{验证通过?}
-    C -->|是| D[处理业务逻辑]
-    C -->|否| E[返回 401]
-    D --> F[返回响应]
+    A[User request] --> B[Authenticate]
+    B --> C{Valid?}
+    C -->|Yes| D[Run business logic]
+    C -->|No| E[Return 401]
+    D --> F[Return response]
     E --> F
 ```
 
-### 带子流程的流程图
+### Flowchart With Subgraphs
 
 ```mermaid
 flowchart TB
-    subgraph 前端
-        A[用户点击] --> B[发送请求]
+    subgraph Frontend
+        A[User clicks] --> B[Send request]
     end
-    subgraph 后端
-        C[接收请求] --> D[验证参数]
-        D --> E[查询数据库]
-        E --> F[组装响应]
+    subgraph Backend
+        C[Receive request] --> D[Validate parameters]
+        D --> E[Query database]
+        E --> F[Build response]
     end
     B --> C
-    F --> G[前端渲染结果]
+    F --> G[Render result in frontend]
 ```
 
 ---
 
-## 21. Mermaid 时序图 (Sequence Diagrams)
+## 21. Mermaid Sequence Diagram
 
 ```mermaid
 sequenceDiagram
-    participant U as 用户
-    participant F as 前端
-    participant B as 后端
-    participant DB as 数据库
+    participant U as User
+    participant F as Frontend
+    participant B as Backend
+    participant DB as Database
 
-    U->>F: 点击登录
+    U->>F: Click login
     F->>B: POST /api/login
-    B->>DB: 查询用户
-    DB-->>B: 返回用户数据
-    B-->>F: 返回 Token
-    F-->>U: 登录成功
+    B->>DB: Query user
+    DB-->>B: Return user data
+    B-->>F: Return token
+    F-->>U: Login succeeded
 ```
 
 ---
 
-## 22. Mermaid 其他图表
+## 22. Other Mermaid Diagrams
 
-### 饼图
+### Pie Chart
 
 ```mermaid
-pie title 技术栈占比
+pie title Technology Share
     "TypeScript" : 40
     "Python" : 25
     "Rust" : 20
     "Go" : 15
 ```
 
-### 甘特图
+### Gantt Chart
 
 ```mermaid
 gantt
-    title 项目开发计划
+    title Project Development Plan
     dateFormat  YYYY-MM-DD
-    section 设计阶段   需求分析       :a1, 2026-01-01, 10d
-    系统设计       :a2, after a1, 15d
-    section 开发阶段   前端开发       :b1, after a2, 20d
-    后端开发       :b2, after a2, 25d
-    section 测试阶段   集成测试       :c1, after b2, 10d
-    上线发布       :milestone, after c1, 0d
+    section Design
+    Requirements analysis :a1, 2026-01-01, 10d
+    System design         :a2, after a1, 15d
+    section Development
+    Frontend development  :b1, after a2, 20d
+    Backend development   :b2, after a2, 25d
+    section Testing
+    Integration testing   :c1, after b2, 10d
+    Release               :milestone, after c1, 0d
 ```
 
-### 类图
+### Class Diagram
 
 ```mermaid
 classDiagram
@@ -514,37 +571,58 @@ classDiagram
 
 ---
 
-## 23. 混合示例
+## 23. Mixed Examples
 
-### 代码块中的列表
+### List Inside a Code Block
 
 ```markdown
-1. 项目 1
-2. 项目 2
-   - 子项目
+1. Item 1
+2. Item 2
+   - Child item
 ```
 
-### 引用中的代码
+### Code Inside a Blockquote
 
-> 使用 `console.log()` 来输出信息。
+> Use `console.log()` to print information.
 
-### 列表中的链接
+### Link List
 
-- [Markdown 官方规范](https://commonmark.org/)
+- [CommonMark specification](https://commonmark.org/)
 - [GitHub Flavored Markdown](https://github.github.com/gfm/)
 
-### 表格中的图片
+### Image Inside a Table
 
-| 图标 | 名称 | 说明 |
-|------|------|------|
-| ![Icon](https://avatars.githubusercontent.com/u/20858116?s=40&v=4) | Logo | 网站标志 |
+| Icon | Name | Description |
+|------|------|-------------|
+| ![Icon](https://avatars.githubusercontent.com/u/20858116?s=40&v=4) | Logo | Site logo |
+| [![Linked icon](https://avatars.githubusercontent.com/u/9919?s=40&v=4)](https://github.com) | Linked logo | Clickable image in a table |
+
+### LaTeX Inside a Table
+
+| Name | Inline Formula | Notes |
+|------|----------------|-------|
+| Energy | $E = mc^2$ | Simple inline math |
+| Normal distribution | $\frac{1}{\sigma\sqrt{2\pi}}e^{-\frac{1}{2}\left(\frac{x-\mu}{\sigma}\right)^2}$ | Long formula in a table cell |
+| Matrix determinant | $\det\begin{pmatrix}a & b \\ c & d\end{pmatrix}=ad-bc$ | Matrix-style LaTeX in a compact cell |
+
+### Nested Markdown Stress Case
+
+> #### Quoted heading
+>
+> | Step | Content |
+> |------|---------|
+> | 1 | **Bold text** with `inline code` |
+> | 2 | ![Icon](https://avatars.githubusercontent.com/u/20858116?s=24&v=4) and $a^2 + b^2 = c^2$ |
+>
+> - [x] Completed item inside a quote
+> - [ ] Open item inside a quote
 
 ---
 
-## 测试完成
+## Test Complete
 
-此文件涵盖了 Markdown 的常见语法和扩展语法，可用于测试渲染器的兼容性和功能完整性。
+This file covers common Markdown syntax, extension syntax, and mixed-content edge cases for renderer compatibility testing.
 
 ---
 
-*最后更新：2026-02-26*
+*Last updated: 2026-05-15*
