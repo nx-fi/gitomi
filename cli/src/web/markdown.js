@@ -805,6 +805,7 @@
       link.href = "#" + heading.id;
       link.textContent = heading.text;
       link.style.setProperty("--depth", String(heading.depth));
+      link.dataset.depth = String(Math.min(heading.depth, 5));
       container.appendChild(link);
     });
   }

@@ -158,6 +158,37 @@
       .slice(0, limit);
   }
 
+  function appendHighlightedText(parent, text, tokens) {
+    const lower = text.toLowerCase();
+    const ranges = [];
+
+    tokens.forEach((token) => {
+      if (!token) return;
+      let start = lower.indexOf(token);
+      while (start !== -1) {
+        ranges.push({ start, end: start + token.length });
+        start = lower.indexOf(token, start + token.length);
+      }
+    });
+
+    ranges.sort((a, b) => a.start - b.start || b.end - a.end);
+
+    let cursor = 0;
+    ranges.forEach((range) => {
+      if (range.start < cursor) return;
+      if (range.start > cursor) {
+        parent.appendChild(document.createTextNode(text.slice(cursor, range.start)));
+      }
+
+      const mark = document.createElement("mark");
+      mark.textContent = text.slice(range.start, range.end);
+      parent.appendChild(mark);
+      cursor = range.end;
+    });
+
+    if (cursor < text.length) parent.appendChild(document.createTextNode(text.slice(cursor)));
+  }
+
   function initTree(nav) {
     const nodes = Array.from(nav.querySelectorAll("[data-tree-path]"));
     const byPath = new Map();
@@ -304,12 +335,12 @@
 
         const name = document.createElement("span");
         name.className = "tree-search-result-name";
-        name.textContent = item.name;
+        appendHighlightedText(name, item.name, tokens);
         link.appendChild(name);
 
         const path = document.createElement("span");
         path.className = "tree-search-result-path";
-        path.textContent = item.path;
+        appendHighlightedText(path, item.path, tokens);
         link.appendChild(path);
 
         menu.appendChild(link);
