@@ -1060,7 +1060,7 @@ fn mergeFileConflictContent(
         incoming_path,
     }, null, max_merge_blob_bytes * 3);
     if (result.exitCode()) |code| {
-        if (code == 0 or code == 1) {
+        if (mergeFileProducedContent(code)) {
             const stdout = result.stdout;
             allocator.free(result.stderr);
             return stdout;
@@ -1068,6 +1068,11 @@ fn mergeFileConflictContent(
     }
     result.deinit();
     return null;
+}
+
+fn mergeFileProducedContent(exit_code: u8) bool {
+    // git merge-file returns the conflict count on successful text merges, capped at 127.
+    return exit_code <= 127;
 }
 
 fn containsNul(value: []const u8) bool {
@@ -3155,6 +3160,15 @@ test "merge editor counts conflict groups" {
         \\>>>>>>> theirs
     ));
     try std.testing.expectEqual(@as(usize, 0), countConflictGroups("const divider = \"=======\";\n"));
+}
+
+test "merge-file conflict counts are treated as generated content" {
+    try std.testing.expect(mergeFileProducedContent(0));
+    try std.testing.expect(mergeFileProducedContent(1));
+    try std.testing.expect(mergeFileProducedContent(2));
+    try std.testing.expect(mergeFileProducedContent(127));
+    try std.testing.expect(!mergeFileProducedContent(128));
+    try std.testing.expect(!mergeFileProducedContent(255));
 }
 
 test "merge editor path safety" {
