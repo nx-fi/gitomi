@@ -304,9 +304,17 @@ init_repo "$github_io"
       "created_at": "2026-01-03T00:00:00Z",
       "merged_at": "2026-01-04T00:00:00Z",
       "merge_commit_sha": "0123456789abcdef0123456789abcdef01234567",
+      "user": { "login": "ichewm" },
+      "labels": [{ "name": "docs" }],
+      "assignees": [{ "login": "bob" }],
+      "requested_reviewers": [{ "login": "Okenx" }],
       "base": { "ref": "main" },
       "head": { "ref": "feature" },
-      "draft": false
+      "draft": false,
+      "commits": 1,
+      "changed_files": 4,
+      "additions": 40,
+      "deletions": 4
     }
   ],
   "comments": {
@@ -341,6 +349,14 @@ JSON
   assert_contains "$comments" '"reply_parent_hash":'
   pulls="$(gt pr list --json)"
   assert_contains "$pulls" '"title":"Legacy PR"'
+  assert_contains "$pulls" '"source_author":"ichewm"'
+  assert_contains "$pulls" '"labels":["docs"]'
+  assert_contains "$pulls" '"assignees":["bob"]'
+  assert_contains "$pulls" '"reviewers":["Okenx"]'
+  assert_contains "$pulls" '"commit_count":1'
+  assert_contains "$pulls" '"changed_files":4'
+  assert_contains "$pulls" '"additions":40'
+  assert_contains "$pulls" '"deletions":4'
   assert_contains "$pulls" '"legacy_github_pull_number":7'
   events="$(gt events list --json)"
   assert_contains "$events" '"event_type":"acl.delegation_granted"'
@@ -355,6 +371,12 @@ JSON
   issue_show_json="$(gt issue show '#42' --json)"
   assert_contains "$issue_show_json" '"commit_references":["'"$code_commit"'"]'
   pull_show_json="$(gt pr view '#7' --json)"
+  assert_contains "$pull_show_json" '"source_author":"ichewm"'
+  assert_contains "$pull_show_json" '"reviewers":["Okenx"]'
+  assert_contains "$pull_show_json" '"commit_count":1'
+  assert_contains "$pull_show_json" '"changed_files":4'
+  assert_contains "$pull_show_json" '"additions":40'
+  assert_contains "$pull_show_json" '"deletions":4'
   assert_contains "$pull_show_json" '"commit_references":["'"$code_commit"'"]'
   replay="$(gt github export --repo acme/project --dry-run --reuse-legacy)"
   assert_contains "$replay" "PATCH /repos/acme/project/issues/42"
@@ -448,8 +470,8 @@ JSON
 [
   {
     "number": 44,
-    "title": "Current repo pull",
-    "body": "Imported pull through gh",
+    "title": "Current repo pull summary",
+    "body": "Summary payload should not be imported",
     "state": "open",
     "created_at": "2026-01-06T00:00:00Z",
     "base": { "ref": "main" },
@@ -457,6 +479,28 @@ JSON
     "draft": false
   }
 ]
+JSON
+    ;;
+  'repos/{owner}/{repo}/pulls/44')
+    cat <<'JSON'
+{
+  "number": 44,
+  "title": "Current repo pull",
+  "body": "Imported pull through gh",
+  "state": "open",
+  "created_at": "2026-01-06T00:00:00Z",
+  "user": { "login": "pull-author" },
+  "labels": [{ "name": "api" }],
+  "assignees": [{ "login": "api-assignee" }],
+  "requested_reviewers": [{ "login": "api-reviewer" }],
+  "base": { "ref": "main" },
+  "head": { "ref": "feature" },
+  "draft": false,
+  "commits": 2,
+  "changed_files": 3,
+  "additions": 12,
+  "deletions": 5
+}
 JSON
     ;;
   'repos/{owner}/{repo}/issues/44/comments?per_page=100')
@@ -488,11 +532,21 @@ SH
   gh_calls="$(cat "$GH_CALL_LOG")"
   assert_contains "$gh_calls" "api --method GET"
   assert_contains "$gh_calls" 'repos/{owner}/{repo}/issues?state=all&per_page=100&page=1'
+  assert_contains "$gh_calls" 'repos/{owner}/{repo}/pulls/44'
   issues="$(gt issue list --json)"
   assert_contains "$issues" '"title":"Current repo issue"'
   assert_contains "$issues" '"legacy_github_issue_number":43'
   pulls="$(gt pr list --json)"
   assert_contains "$pulls" '"title":"Current repo pull"'
+  assert_not_contains "$pulls" "Summary payload should not be imported"
+  assert_contains "$pulls" '"source_author":"pull-author"'
+  assert_contains "$pulls" '"labels":["api"]'
+  assert_contains "$pulls" '"assignees":["api-assignee"]'
+  assert_contains "$pulls" '"reviewers":["api-reviewer"]'
+  assert_contains "$pulls" '"commit_count":2'
+  assert_contains "$pulls" '"changed_files":3'
+  assert_contains "$pulls" '"additions":12'
+  assert_contains "$pulls" '"deletions":5'
   assert_contains "$pulls" '"legacy_github_pull_number":44'
   events="$(gt events list --json)"
   assert_contains "$events" '"event_type":"comment.added"'
@@ -501,6 +555,7 @@ SH
   gh_calls="$(cat "$GH_CALL_LOG")"
   assert_contains "$gh_calls" 'repos/{owner}/{repo}/issues?state=all&per_page=100&page=1'
   assert_contains "$gh_calls" 'repos/{owner}/{repo}/pulls?state=all&per_page=100&page=1'
+  assert_not_contains "$gh_calls" 'repos/{owner}/{repo}/pulls/44'
   assert_not_contains "$gh_calls" 'repos/{owner}/{repo}/issues/43/comments?per_page=100'
   assert_not_contains "$gh_calls" 'repos/{owner}/{repo}/issues/44/comments?per_page=100'
   gt fsck >/dev/null

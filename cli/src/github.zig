@@ -494,10 +494,11 @@ fn importFromApi(allocator: Allocator, client: GitHubClient, options: ImportOpti
         if (pulls.items.len == 0) break;
         for (pulls.items) |item| {
             if (item != .object) continue;
-            const pull_result = try importPullObject(allocator, item.object, options, stats);
+            const number = jsonInteger(item.object.get("number")) orelse continue;
+            const pull_result = try importApiPullObject(allocator, client, item.object, options, stats);
             defer if (pull_result) |result| allocator.free(result.id);
             if (pull_result) |result| {
-                if (result.is_new) try importApiComments(allocator, client, "pull", jsonInteger(item.object.get("number")) orelse continue, result.id, options, stats);
+                if (result.is_new) try importApiComments(allocator, client, "pull", number, result.id, options, stats);
             }
         }
         if (pulls.items.len < 100) break;
@@ -509,6 +510,41 @@ fn importFromApi(allocator: Allocator, client: GitHubClient, options: ImportOpti
             else => try eprint("gt github import: project import skipped: {s}\n", .{@errorName(err)}),
         };
     }
+}
+
+fn importApiPullObject(
+    allocator: Allocator,
+    client: GitHubClient,
+    summary: std.json.ObjectMap,
+    options: ImportOptions,
+    stats: *ImportStats,
+) !?ImportedObject {
+    const number = jsonInteger(summary.get("number")) orelse return null;
+
+    var repo = try repo_mod.discoverRepo(allocator);
+    defer repo.deinit();
+    if (try index.lookupLegacyGithubObjectId(allocator, repo, "pull", number)) |existing| {
+        try eprint("gt github import: pull #{d} already imported; skipping\n", .{number});
+        return .{ .id = existing, .is_new = false };
+    }
+
+    try eprint("gt github import: fetching pull #{d} details\n", .{number});
+    const suffix = try std.fmt.allocPrint(allocator, "/pulls/{d}", .{number});
+    defer allocator.free(suffix);
+    const path = try client.repoPath(allocator, suffix);
+    defer allocator.free(path);
+    const raw = try client.request("GET", path, null);
+    defer allocator.free(raw);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{});
+    defer parsed.deinit();
+    const pull = switch (parsed.value) {
+        .object => |object| object,
+        else => {
+            try eprint("gt github import: pull #{d} detail response must be a JSON object\n", .{number});
+            return CliError.InvalidArgument;
+        },
+    };
+    return try importPullObject(allocator, pull, options, stats);
 }
 
 fn importApiComments(

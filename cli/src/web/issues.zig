@@ -820,21 +820,7 @@ fn appendIssueAssignees(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqli
 }
 
 fn appendIssueAvatar(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8, extra_class: []const u8) !void {
-    try appendTemplate(buf, allocator,
-        \\<span class="issue-avatar {extra_class}" title="{name}" aria-label="{name}">
-    , .{
-        .extra_class = extra_class,
-        .name = name,
-    });
-    var initial_buf = [_]u8{'?'};
-    for (name) |c| {
-        if (std.ascii.isAlphanumeric(c)) {
-            initial_buf[0] = std.ascii.toUpper(c);
-            break;
-        }
-    }
-    try shared.appendHtml(buf, allocator, initial_buf[0..]);
-    try buf.appendSlice(allocator, "</span>");
+    try shared.appendAvatar(buf, allocator, name, extra_class);
 }
 
 fn issueSearchQuery(filter: IssueStateFilter) []const u8 {
