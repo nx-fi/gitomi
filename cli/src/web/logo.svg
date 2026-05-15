@@ -24,20 +24,20 @@
         stroke-linecap="round"
         stroke-linejoin="round"
       >
-        <path d="M255 134 L255 226" />
-        <path d="M255 193 L298 148" />
+        <path d="M247 134 L247 226" />
+        <path d="M247 193 L300 158" />
       </g>
 
       <!-- Top hollow node -->
-      <circle cx="255" cy="134" r="20" fill="black" />
-      <circle cx="255" cy="134" r="10" fill="white" />
+      <circle cx="247" cy="134" r="20" fill="black" />
+      <circle cx="247" cy="134" r="10" fill="white" />
 
       <!-- Bottom hollow node -->
-      <circle cx="255" cy="226" r="20" fill="black" />
-      <circle cx="255" cy="226" r="10" fill="white" />
+      <circle cx="247" cy="226" r="20" fill="black" />
+      <circle cx="247" cy="226" r="10" fill="white" />
 
       <!-- Upper-right filled node -->
-      <circle cx="298" cy="148" r="20" fill="black" />
+      <circle cx="300" cy="158" r="20" fill="black" />
     </mask>
   </defs>
 
@@ -58,4 +58,4 @@
     fill="#10B8AA"
     mask="url(#gitomi-iris-mask)"
   />
-</svg>
+</svg>tvt
