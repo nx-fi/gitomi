@@ -198,6 +198,40 @@ fn upsertIssueMilestone(db: *SqliteDb, issue_id: []const u8, milestone: []const 
     try stmt.stepDone();
 }
 
+fn upsertPullMetadata(
+    db: *SqliteDb,
+    pull_id: []const u8,
+    source_author: []const u8,
+    commit_count: i64,
+    changed_files: i64,
+    additions: i64,
+    deletions: i64,
+) !void {
+    var stmt = try db.prepare(
+        \\INSERT INTO pull_metadata(pull_id, source_author, commit_count, changed_files, additions, deletions)
+        \\VALUES (?, ?, ?, ?, ?, ?)
+        \\ON CONFLICT(pull_id) DO UPDATE SET
+        \\  source_author = excluded.source_author,
+        \\  commit_count = excluded.commit_count,
+        \\  changed_files = excluded.changed_files,
+        \\  additions = excluded.additions,
+        \\  deletions = excluded.deletions
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, pull_id);
+    try stmt.bindText(2, source_author);
+    try stmt.bindInt64(3, commit_count);
+    try stmt.bindInt64(4, changed_files);
+    try stmt.bindInt64(5, additions);
+    try stmt.bindInt64(6, deletions);
+    try stmt.stepDone();
+}
+
+fn metadataCount(payload: std.json.ObjectMap, key: []const u8) i64 {
+    const value = event_mod.jsonInteger(payload.get(key)) orelse return -1;
+    return if (value >= 0) value else -1;
+}
+
 fn insertLegacyAliasFromEnvelope(db: *SqliteDb, object_kind: []const u8, object_id: []const u8, legacy: std.json.ObjectMap) !void {
     const key = if (std.mem.eql(u8, object_kind, "issue"))
         "github_issue_number"
@@ -728,8 +762,20 @@ pub fn applyPullProjection(allocator: Allocator, db: *SqliteDb, event_hash: []co
         const body_value = event_mod.jsonString(payload.get("body")) orelse "";
         const draft = event_mod.jsonBool(payload.get("draft")) orelse false;
         try insertPullOpened(db, event_hash, envelope, title, body_value, base_ref, head_ref, draft);
+        try upsertPullMetadata(
+            db,
+            envelope.object_id,
+            event_mod.jsonString(payload.get("source_author")) orelse "",
+            metadataCount(payload, "commits"),
+            metadataCount(payload, "changed_files"),
+            metadataCount(payload, "additions"),
+            metadataCount(payload, "deletions"),
+        );
         try insertLegacyAliasFromEnvelope(db, "pull", envelope.object_id, legacy);
-        return null;
+        try insertPullPayloadStringArray(db, payload, "labels", insert_pull_label_sql, envelope.object_id, event_hash);
+        try insertPullPayloadStringArray(db, payload, "assignees", insert_pull_assignee_sql, envelope.object_id, event_hash);
+        try insertPullPayloadStringArray(db, payload, "reviewers", insert_pull_reviewer_sql, envelope.object_id, event_hash);
+        return try pullCollectionLimitRejection(db, envelope.object_id);
     }
 
     if (!(try pullExists(db, envelope.object_id))) return "object_not_created";

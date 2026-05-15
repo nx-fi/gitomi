@@ -1018,9 +1018,13 @@ pub fn listPullsFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
     defer db.deinit();
 
     var stmt = try db.prepare(
-        \\SELECT id, title, state, author_principal, opened_at, body, base_ref, head_ref, draft, merge_oid, target_oid
-        \\FROM pulls
-        \\ORDER BY opened_at DESC, id DESC
+        \\SELECT p.id, p.title, p.state, p.author_principal, p.opened_at, p.body, p.base_ref, p.head_ref,
+        \\       p.draft, p.merge_oid, p.target_oid,
+        \\       COALESCE(pm.source_author, ''), COALESCE(pm.commit_count, -1), COALESCE(pm.changed_files, -1),
+        \\       COALESCE(pm.additions, -1), COALESCE(pm.deletions, -1)
+        \\FROM pulls p
+        \\LEFT JOIN pull_metadata pm ON pm.pull_id = p.id
+        \\ORDER BY p.opened_at DESC, p.id DESC
     );
     defer stmt.deinit();
 
@@ -1046,6 +1050,12 @@ pub fn listPullsFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
         defer allocator.free(merge_oid);
         const target_oid = try stmt.columnTextDup(allocator, 10);
         defer allocator.free(target_oid);
+        const source_author = try stmt.columnTextDup(allocator, 11);
+        defer allocator.free(source_author);
+        const commit_count = stmt.columnInt64(12);
+        const changed_files = stmt.columnInt64(13);
+        const additions = stmt.columnInt64(14);
+        const deletions = stmt.columnInt64(15);
 
         if (json) {
             var line: std.ArrayList(u8) = .empty;
@@ -1061,7 +1071,12 @@ pub fn listPullsFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
             try appendJsonFieldString(&line, allocator, "merge_oid", merge_oid, true);
             try appendJsonFieldString(&line, allocator, "target_oid", target_oid, true);
             try appendJsonFieldString(&line, allocator, "author_principal", author, true);
+            if (source_author.len != 0) try appendJsonFieldString(&line, allocator, "source_author", source_author, true);
             try appendJsonFieldString(&line, allocator, "opened_at", opened_at, true);
+            if (commit_count >= 0) try appendJsonFieldInteger(&line, allocator, "commit_count", commit_count, true);
+            if (changed_files >= 0) try appendJsonFieldInteger(&line, allocator, "changed_files", changed_files, true);
+            if (additions >= 0) try appendJsonFieldInteger(&line, allocator, "additions", additions, true);
+            if (deletions >= 0) try appendJsonFieldInteger(&line, allocator, "deletions", deletions, true);
             if (try legacyGithubNumberForObjectInDb(&db, "pull", id)) |number| {
                 try appendJsonFieldInteger(&line, allocator, "legacy_github_pull_number", number, true);
             }
@@ -1090,9 +1105,13 @@ pub fn showPullFromIndex(allocator: Allocator, repo: Repo, pull_id: []const u8, 
     defer db.deinit();
 
     var stmt = try db.prepare(
-        \\SELECT id, title, state, author_principal, author_device, opened_at, body, base_ref, head_ref, draft, merge_oid, target_oid
-        \\FROM pulls
-        \\WHERE id = ?
+        \\SELECT p.id, p.title, p.state, p.author_principal, p.author_device, p.opened_at, p.body, p.base_ref,
+        \\       p.head_ref, p.draft, p.merge_oid, p.target_oid,
+        \\       COALESCE(pm.source_author, ''), COALESCE(pm.commit_count, -1), COALESCE(pm.changed_files, -1),
+        \\       COALESCE(pm.additions, -1), COALESCE(pm.deletions, -1)
+        \\FROM pulls p
+        \\LEFT JOIN pull_metadata pm ON pm.pull_id = p.id
+        \\WHERE p.id = ?
     );
     defer stmt.deinit();
     try stmt.bindText(1, pull_id);
@@ -1125,6 +1144,12 @@ pub fn showPullFromIndex(allocator: Allocator, repo: Repo, pull_id: []const u8, 
     defer allocator.free(merge_oid);
     const target_oid = try stmt.columnTextDup(allocator, 11);
     defer allocator.free(target_oid);
+    const source_author = try stmt.columnTextDup(allocator, 12);
+    defer allocator.free(source_author);
+    const commit_count = stmt.columnInt64(13);
+    const changed_files = stmt.columnInt64(14);
+    const additions = stmt.columnInt64(15);
+    const deletions = stmt.columnInt64(16);
 
     if (json) {
         var line: std.ArrayList(u8) = .empty;
@@ -1141,7 +1166,12 @@ pub fn showPullFromIndex(allocator: Allocator, repo: Repo, pull_id: []const u8, 
         try appendJsonFieldString(&line, allocator, "target_oid", target_oid, true);
         try appendJsonFieldString(&line, allocator, "author_principal", author_principal, true);
         try appendJsonFieldString(&line, allocator, "author_device", author_device, true);
+        if (source_author.len != 0) try appendJsonFieldString(&line, allocator, "source_author", source_author, true);
         try appendJsonFieldString(&line, allocator, "opened_at", opened_at, true);
+        if (commit_count >= 0) try appendJsonFieldInteger(&line, allocator, "commit_count", commit_count, true);
+        if (changed_files >= 0) try appendJsonFieldInteger(&line, allocator, "changed_files", changed_files, true);
+        if (additions >= 0) try appendJsonFieldInteger(&line, allocator, "additions", additions, true);
+        if (deletions >= 0) try appendJsonFieldInteger(&line, allocator, "deletions", deletions, true);
         if (try legacyGithubNumberForObjectInDb(&db, "pull", id)) |number| {
             try appendJsonFieldInteger(&line, allocator, "legacy_github_pull_number", number, true);
         }
@@ -1170,6 +1200,7 @@ pub fn showPullFromIndex(allocator: Allocator, repo: Repo, pull_id: []const u8, 
     try out("state:      {s}\n", .{state});
     try out("title:      {s}\n", .{title});
     try out("author:     {s}/{s}\n", .{ author_principal, author_device });
+    if (source_author.len != 0) try out("source:     {s}\n", .{source_author});
     try out("opened_at:  {s}\n", .{opened_at});
     if (try legacyGithubNumberForObjectInDb(&db, "pull", id)) |number| {
         try out("github:     #{d}\n", .{number});
@@ -1179,6 +1210,9 @@ pub fn showPullFromIndex(allocator: Allocator, repo: Repo, pull_id: []const u8, 
     try out("draft:      {s}\n", .{if (draft) "true" else "false"});
     try out("merge_oid:  {s}\n", .{if (merge_oid.len == 0) "(none)" else merge_oid});
     try out("target_oid: {s}\n", .{if (target_oid.len == 0) "(none)" else target_oid});
+    if (commit_count >= 0) try out("commit_count: {d}\n", .{commit_count});
+    if (changed_files >= 0) try out("changed_files: {d}\n", .{changed_files});
+    if (additions >= 0 or deletions >= 0) try out("diffstat:   +{d} -{d}\n", .{ if (additions >= 0) additions else 0, if (deletions >= 0) deletions else 0 });
     try out("labels:     {s}\n", .{labels});
     try out("assignees:  {s}\n", .{assignees});
     try out("reviewers:  {s}\n", .{reviewers});
