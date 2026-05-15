@@ -35,6 +35,7 @@ gt init [--principal ID] [--device ID] [--repo-id UUID] [--force]
 gt status
 gt fsck
 gt index rebuild|status
+gt index snapshots prune [--dry-run] [--max-count N] [--max-bytes N] [--max-tree-bytes N]
 gt refs
 gt clear local [--yes]
 gt clear remote [--remote REMOTE] [--yes]
@@ -58,6 +59,8 @@ gt project column PROJECT add|remove COLUMN
 gt project add|remove PROJECT ISSUE --column COLUMN
 gt milestone list [--json]
 gt milestone create --title TITLE [--description TEXT] [--due DATE]
+gt milestone edit MILESTONE [--title TITLE] [--description TEXT] [--due DATE] [--state open|closed]
+gt milestone close|reopen MILESTONE
 gt pr list [--json]
 gt pr view PR [--json]
 gt pr create --title TITLE --base BASE --head HEAD [--body BODY] [--draft]
@@ -107,8 +110,9 @@ into one signed `issue.updated` or `pull.updated` event.
 When no columns are supplied it creates `Todo`, `In Progress`, and `Done`.
 `gt project add` and `gt project remove` place issue cards on or off a board
 column by writing signed issue placement events. `gt milestone create` creates
-named milestones, and `gt issue milestone` assigns or clears an issue
-milestone.
+named milestones, `gt milestone edit` updates title, description, due date, or
+state, and `gt milestone close` / `gt milestone reopen` change milestone state.
+`gt issue milestone` assigns or clears an issue milestone.
 
 `gt pull` remains accepted as a compatibility alias for `gt pr`. `gt pr view`
 also accepts `show`, and `gt pr create` also accepts `open` and `new`.
@@ -118,6 +122,11 @@ then admits only compatible genesis refs and new or fast-forward inbox refs into
 the authoritative namespace after checking the event commit chain, empty-tree
 rule, native Git signature, parent hashes, and v1 JSON envelope. Diverged or
 chain-invalid staged inbox refs are moved under `refs/gitomi/quarantine/*`.
+To join an existing Gitomi repository, clone or add the remote and run
+`gt sync` without running `gt init` first; the remote genesis is promoted
+locally and a local config is created from it. A replica that has already
+created a different local genesis must clear or recreate its local Gitomi state
+before it can trust and project the remote issues.
 Default push publishes local genesis and all authoritative inbox refs under
 `refs/gitomi/inbox/*`, so a replica can relay the durable event logs it has
 accepted. Sync does not publish local cache or diagnostic namespaces such as
@@ -148,21 +157,31 @@ under `.git/gitomi/actions-scheduler.state`. On first start it begins from the
 current frontier; use `--replay` to intentionally schedule existing history.
 
 `gt index rebuild` writes a disposable SQLite event projection to
-`.git/gitomi/index.sqlite`, including the inbox ref heads used to decide
-freshness. Structurally valid but domain-rejected events remain visible with a
-rejection reason and do not affect issue, pull, or comment projections. `gt
-events list`, `gt status`, and the web UI rebuild the cache automatically when
-inbox heads change, then query it instead of running `git show` for every
-event.
+`.git/gitomi/index.sqlite`, including the inbox, branch, and tag heads used to
+decide freshness. Structurally valid but domain-rejected events remain visible
+with a rejection reason and do not affect issue, pull, or comment projections.
+`gt events list`, `gt status`, and the web UI rebuild the cache automatically
+when indexed refs change, then query it instead of running `git show` for every
+event. Rebuilds restore the newest valid snapshot first; Gitomi writes the first
+snapshot immediately, then writes another only after 64 new events or after the
+previous snapshot is at least 24 hours old and there is new event history to
+checkpoint. Branch and tag movement can reuse event snapshots while derived
+commit references are rebuilt for the current refs. Automatic retention keeps at
+most 32 snapshots, at most 64 MiB per snapshot, and at most 2 GiB total by
+default. `gt index snapshots prune` applies the same retention rules manually,
+with optional count, total-byte, and per-snapshot byte limits.
 
 `gt runs prune` deletes auxiliary refs under `refs/gitomi/runs/*` according to
 age, count, and byte limits. Run refs are not fetched or pushed by default sync;
 the signed `action.run_completed` inbox event is the durable workflow result.
 
-`gt clear local` and `gt reset local` delete all local refs under
-`refs/gitomi/*`. `gt clear remote` and `gt reset remote` delete all refs under
-`refs/gitomi/*` from a remote, using `origin` by default or `--remote REMOTE`.
-All variants require an exact typed confirmation unless `--yes` is supplied.
+`gt clear local` deletes all local refs under `refs/gitomi/*` while leaving
+`.git/gitomi/config.toml` and local caches in place. `gt reset local` deletes
+local `refs/gitomi/*` and the repo-local `.git/gitomi/` state directory, so the
+next `gt init` starts from scratch. `gt clear remote` and `gt reset remote`
+delete all refs under `refs/gitomi/*` from a remote, using `origin` by default
+or `--remote REMOTE`. All variants require an exact typed confirmation unless
+`--yes` is supplied.
 
 `gt github import` reads GitHub issues and pull requests from the GitHub API or
 a fixture JSON object with `issues`, `pulls`, and optional `comments` fields,

@@ -26,7 +26,10 @@ pub fn cmdClearOrReset(allocator: Allocator, args: []const []const u8, command_n
     defer repo.deinit();
 
     switch (options.scope) {
-        .local => try clearLocalRefs(allocator, command_name, options.yes),
+        .local => if (std.mem.eql(u8, command_name, "gt reset"))
+            try resetLocalState(allocator, repo, command_name, options.yes)
+        else
+            try clearLocalRefs(allocator, command_name, options.yes),
         .remote => try clearRemoteRefs(allocator, command_name, options.remote, options.yes),
     }
 }
@@ -104,6 +107,41 @@ fn clearLocalRefs(allocator: Allocator, command_name: []const u8, yes: bool) !vo
         refs.len,
         if (refs.len == 1) "" else "s",
     });
+}
+
+fn resetLocalState(allocator: Allocator, repo: repo_mod.Repo, command_name: []const u8, yes: bool) !void {
+    const refs = try git.listRefs(allocator, "refs/gitomi");
+    defer git.freeStringList(allocator, refs);
+
+    const has_state_dir = util.fileExists(repo.gitomi_dir);
+    if (refs.len == 0 and !has_state_dir) {
+        try io.out("no local Gitomi state\n", .{});
+        return;
+    }
+
+    try io.out("{s}: deleting local Gitomi state ({d} ref{s} and {s})\n", .{
+        command_name,
+        refs.len,
+        if (refs.len == 1) "" else "s",
+        repo.gitomi_dir,
+    });
+    if (!yes) try requireConfirmation(allocator, command_name, "delete local gitomi state");
+
+    for (refs) |ref| {
+        const deleted = try git.gitChecked(allocator, &.{ "update-ref", "-d", ref });
+        allocator.free(deleted);
+        try io.out("deleted {s}\n", .{ref});
+    }
+
+    if (has_state_dir) {
+        std.fs.deleteTreeAbsolute(repo.gitomi_dir) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
+        try io.out("deleted {s}\n", .{repo.gitomi_dir});
+    }
+
+    try io.out("{s}: deleted local Gitomi state\n", .{command_name});
 }
 
 fn clearRemoteRefs(allocator: Allocator, command_name: []const u8, remote: []const u8, yes: bool) !void {

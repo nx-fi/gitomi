@@ -44,7 +44,7 @@ const appendJsonFieldInteger = json_writer.appendJsonFieldInteger;
 const appendJsonFieldUnsigned = json_writer.appendJsonFieldUnsigned;
 const appendJsonString = json_writer.appendJsonString;
 
-const index_schema_version = "4";
+const index_schema_version = "1";
 pub const index_event_columns = index_query.index_event_columns;
 const snapshot_schema = "urn:gitomi:snapshot:v1";
 const snapshot_schema_version: u64 = 1;
@@ -54,16 +54,39 @@ const snapshot_index_path = "index.sqlite";
 pub const default_max_snapshot_tree_bytes: u64 = 64 * 1024 * 1024;
 pub const default_max_snapshot_count: usize = 32;
 pub const default_max_snapshot_total_bytes: u64 = default_max_snapshot_tree_bytes * default_max_snapshot_count;
+pub const default_snapshot_min_new_events: usize = 64;
+pub const default_snapshot_min_age_seconds: u64 = 24 * 60 * 60;
 
 pub const IndexStats = struct {
     refs: usize = 0,
     events: usize = 0,
+    new_events: usize = 0,
 };
 
 pub const SnapshotLimits = struct {
     max_tree_bytes: u64 = default_max_snapshot_tree_bytes,
     max_count: usize = default_max_snapshot_count,
     max_total_bytes: u64 = default_max_snapshot_total_bytes,
+};
+
+const SnapshotPolicy = struct {
+    min_new_events: usize = default_snapshot_min_new_events,
+    min_age_seconds: u64 = default_snapshot_min_age_seconds,
+};
+
+pub const SnapshotPruneOptions = struct {
+    dry_run: bool = false,
+    max_tree_bytes: u64 = default_max_snapshot_tree_bytes,
+    max_count: usize = default_max_snapshot_count,
+    max_total_bytes: u64 = default_max_snapshot_total_bytes,
+
+    fn limits(self: SnapshotPruneOptions) SnapshotLimits {
+        return .{
+            .max_tree_bytes = self.max_tree_bytes,
+            .max_count = self.max_count,
+            .max_total_bytes = self.max_total_bytes,
+        };
+    }
 };
 
 const IndexBuildLock = struct {
@@ -94,6 +117,7 @@ const SnapshotRef = struct {
     oid: []u8,
     timestamp: i64,
     bytes: u64 = 0,
+    prune: bool = false,
 
     fn deinit(self: *SnapshotRef) void {
         self.allocator.free(self.ref);
@@ -106,6 +130,7 @@ const LoadedSnapshot = struct {
     ref: []u8,
     oid: []u8,
     covered_refs_raw: []u8,
+    timestamp: i64,
     exact: bool,
 
     fn deinit(self: *LoadedSnapshot) void {
@@ -302,12 +327,8 @@ fn rebuildIndexUnlocked(allocator: Allocator, repo: Repo) !IndexStats {
     const refs_raw = try currentIndexRefsRaw(allocator);
     defer allocator.free(refs_raw);
 
-    var cfg_opt: ?repo_mod.Config = repo_mod.loadConfig(allocator, repo.config_path) catch |err| switch (err) {
-        CliError.ConfigNotFound, CliError.ConfigInvalid => null,
-        else => return err,
-    };
-    defer if (cfg_opt) |*cfg| cfg.deinit();
-    const expected_repo_id = if (cfg_opt) |cfg| cfg.repo_id else null;
+    const expected_repo_id = try expectedRepoIdForIndex(allocator, repo);
+    defer if (expected_repo_id) |repo_id| allocator.free(repo_id);
     var admission = IndexAdmission.init(allocator, expected_repo_id);
     defer admission.deinit();
 
@@ -320,18 +341,23 @@ fn rebuildIndexUnlocked(allocator: Allocator, repo: Repo) !IndexStats {
     var loaded_snapshot = try loadNewestValidSnapshot(allocator, repo, refs_raw, limits);
     defer if (loaded_snapshot) |*snapshot| snapshot.deinit();
 
-    const stats = if (loaded_snapshot) |snapshot|
-        rebuildIndexFromSnapshot(allocator, repo, refs_raw, snapshot.covered_refs_raw, &admission, empty_tree) catch |err| blk: {
+    var used_snapshot = false;
+    const stats = if (loaded_snapshot) |snapshot| blk: {
+        used_snapshot = true;
+        break :blk rebuildIndexFromSnapshot(allocator, repo, refs_raw, snapshot.covered_refs_raw, &admission, empty_tree) catch |err| fallback: {
             if (err == error.OutOfMemory) return err;
+            used_snapshot = false;
             admission.deinit();
             admission = IndexAdmission.init(allocator, expected_repo_id);
-            break :blk try rebuildIndexFromScratch(allocator, repo, refs_raw, &admission, empty_tree);
-        }
-    else
-        try rebuildIndexFromScratch(allocator, repo, refs_raw, &admission, empty_tree);
+            break :fallback try rebuildIndexFromScratch(allocator, repo, refs_raw, &admission, empty_tree);
+        };
+    } else try rebuildIndexFromScratch(allocator, repo, refs_raw, &admission, empty_tree);
 
-    const loaded_exact = if (loaded_snapshot) |snapshot| snapshot.exact else false;
-    if (!loaded_exact) {
+    const snapshot_ptr: ?*const LoadedSnapshot = if (used_snapshot) blk: {
+        if (loaded_snapshot) |*snapshot| break :blk snapshot;
+        break :blk null;
+    } else null;
+    if (shouldCreateSnapshot(snapshot_ptr, stats, SnapshotPolicy{}, std.time.timestamp())) {
         createIndexSnapshot(allocator, repo, refs_raw, limits) catch {};
         enforceSnapshotRetention(allocator, limits) catch {};
     }
@@ -339,6 +365,23 @@ fn rebuildIndexUnlocked(allocator: Allocator, repo: Repo) !IndexStats {
     try writeCursorsAfterRebuild(allocator, repo);
 
     return stats;
+}
+
+fn expectedRepoIdForIndex(allocator: Allocator, repo: Repo) !?[]u8 {
+    const genesis_oid = try git.resolveOptionalRef(allocator, repo_mod.genesis_ref);
+    defer if (genesis_oid) |oid| allocator.free(oid);
+    if (genesis_oid) |oid| {
+        var manifest = try repo_mod.loadGenesisManifest(allocator, oid);
+        defer manifest.deinit();
+        return try allocator.dupe(u8, manifest.repo_id);
+    }
+
+    var cfg = repo_mod.loadConfig(allocator, repo.config_path) catch |err| switch (err) {
+        CliError.ConfigNotFound, CliError.ConfigInvalid => return null,
+        else => return err,
+    };
+    defer cfg.deinit();
+    return try allocator.dupe(u8, cfg.repo_id);
 }
 
 pub fn ensureCursors(allocator: Allocator, repo: Repo) !void {
@@ -488,6 +531,7 @@ fn rebuildIndexFromScratch(
         stats.refs += 1;
         stats.events += try indexRefEvents(allocator, &event_stmt, admission, ref, null, empty_tree);
     }
+    stats.new_events = stats.events;
 
     try projectIndexedEvents(allocator, &db);
     try rebuildDerivedCommitReferences(allocator, &db, refs_raw);
@@ -552,7 +596,7 @@ fn rebuildIndexFromSnapshot(
         if (!std.mem.startsWith(u8, ref, "refs/gitomi/inbox/")) continue;
         stats.refs += 1;
         const base = findRefOid(covered_refs.items, ref);
-        stats.events += try indexRefEvents(allocator, &event_stmt, admission, ref, base, empty_tree);
+        stats.new_events += try indexRefEvents(allocator, &event_stmt, admission, ref, base, empty_tree);
     }
 
     try projectNewIndexedEvents(allocator, &db);
@@ -645,23 +689,110 @@ pub fn enforceSnapshotRetention(allocator: Allocator, limits: SnapshotLimits) !v
     var refs = try loadSnapshotRefs(allocator);
     defer freeSnapshotRefs(allocator, &refs);
 
+    try markSnapshotRetention(allocator, &refs, limits);
+    for (refs.items) |*ref| {
+        if (!ref.prune) continue;
+        const deleted = try gitChecked(allocator, &.{ "update-ref", "-d", ref.ref });
+        defer allocator.free(deleted);
+    }
+}
+
+pub fn pruneSnapshots(allocator: Allocator, options: SnapshotPruneOptions) !void {
+    var refs = try loadSnapshotRefs(allocator);
+    defer freeSnapshotRefs(allocator, &refs);
+
+    if (refs.items.len == 0) {
+        try out("no Gitomi index snapshot refs\n", .{});
+        return;
+    }
+
+    try markSnapshotRetention(allocator, &refs, options.limits());
+
+    var pruned: usize = 0;
+    for (refs.items) |*ref| {
+        if (!ref.prune) continue;
+        pruned += 1;
+        if (options.dry_run) {
+            try out("would prune {s} ({d} bytes)\n", .{ ref.ref, ref.bytes });
+        } else {
+            const deleted = try gitChecked(allocator, &.{ "update-ref", "-d", ref.ref });
+            defer allocator.free(deleted);
+            try out("pruned {s} ({d} bytes)\n", .{ ref.ref, ref.bytes });
+        }
+    }
+
+    try out("{s}: {d} pruned, {d} retained\n", .{
+        if (options.dry_run) "index snapshots prune dry-run" else "index snapshots prune",
+        pruned,
+        refs.items.len - pruned,
+    });
+}
+
+fn markSnapshotRetention(allocator: Allocator, refs: *std.ArrayList(SnapshotRef), limits: SnapshotLimits) !void {
     var retained_count: usize = 0;
     var retained_bytes: u64 = 0;
     for (refs.items) |*ref| {
         ref.bytes = snapshotTreeBytes(allocator, ref.oid) catch limits.max_tree_bytes +| 1;
-        var prune = false;
-        if (limits.max_tree_bytes != 0 and ref.bytes > limits.max_tree_bytes) prune = true;
-        if (!prune and limits.max_count != 0 and retained_count >= limits.max_count) prune = true;
-        if (!prune and limits.max_total_bytes != 0 and retained_bytes +| ref.bytes > limits.max_total_bytes) prune = true;
+        ref.prune = false;
+        if (limits.max_tree_bytes != 0 and ref.bytes > limits.max_tree_bytes) ref.prune = true;
+        if (!ref.prune and limits.max_count != 0 and retained_count >= limits.max_count) ref.prune = true;
+        if (!ref.prune and limits.max_total_bytes != 0 and retained_bytes +| ref.bytes > limits.max_total_bytes) ref.prune = true;
 
-        if (prune) {
-            const deleted = try gitChecked(allocator, &.{ "update-ref", "-d", ref.ref });
-            defer allocator.free(deleted);
-        } else {
+        if (!ref.prune) {
             retained_count += 1;
             retained_bytes += ref.bytes;
         }
     }
+}
+
+pub fn parseSnapshotPruneNumber(raw: []const u8, label: []const u8) !u64 {
+    return std.fmt.parseUnsigned(u64, raw, 10) catch {
+        try eprint("gt index snapshots prune: {s} must be a non-negative integer\n", .{label});
+        return CliError.UserError;
+    };
+}
+
+fn shouldCreateSnapshot(snapshot: ?*const LoadedSnapshot, stats: IndexStats, policy: SnapshotPolicy, now: i64) bool {
+    if (stats.events == 0) return false;
+
+    const loaded = snapshot orelse return true;
+    if (loaded.exact) return false;
+    if (stats.new_events == 0) return false;
+    if (policy.min_new_events == 0 or stats.new_events >= policy.min_new_events) return true;
+    if (policy.min_age_seconds == 0) return false;
+
+    const age_seconds: u64 = if (now > loaded.timestamp) @intCast(now - loaded.timestamp) else 0;
+    return age_seconds >= policy.min_age_seconds;
+}
+
+test "snapshot policy checkpoints first, threshold, and aged incremental rebuilds" {
+    const policy = SnapshotPolicy{ .min_new_events = 64, .min_age_seconds = 100 };
+
+    try std.testing.expect(!shouldCreateSnapshot(null, .{ .events = 0, .new_events = 0 }, policy, 1000));
+    try std.testing.expect(shouldCreateSnapshot(null, .{ .events = 1, .new_events = 1 }, policy, 1000));
+
+    const exact = LoadedSnapshot{
+        .allocator = std.testing.allocator,
+        .ref = "",
+        .oid = "",
+        .covered_refs_raw = "",
+        .timestamp = 900,
+        .exact = true,
+    };
+    try std.testing.expect(!shouldCreateSnapshot(&exact, .{ .events = 10, .new_events = 64 }, policy, 1000));
+
+    const stale = LoadedSnapshot{
+        .allocator = std.testing.allocator,
+        .ref = "",
+        .oid = "",
+        .covered_refs_raw = "",
+        .timestamp = 900,
+        .exact = false,
+    };
+    try std.testing.expect(!shouldCreateSnapshot(&stale, .{ .events = 10, .new_events = 0 }, policy, 1000));
+    try std.testing.expect(!shouldCreateSnapshot(&stale, .{ .events = 10, .new_events = 63 }, policy, 999));
+    try std.testing.expect(shouldCreateSnapshot(&stale, .{ .events = 10, .new_events = 64 }, policy, 999));
+    try std.testing.expect(shouldCreateSnapshot(&stale, .{ .events = 10, .new_events = 1 }, policy, 1000));
 }
 
 fn loadNewestValidSnapshot(
@@ -743,6 +874,7 @@ fn loadSnapshotCandidate(
         .ref = try allocator.dupe(u8, ref.ref),
         .oid = try allocator.dupe(u8, ref.oid),
         .covered_refs_raw = covered_refs_raw,
+        .timestamp = ref.timestamp,
         .exact = std.mem.eql(u8, covered_refs_raw, current_refs_raw),
     };
 }
@@ -792,13 +924,13 @@ fn snapshotCoverageValid(allocator: Allocator, covered_refs_raw: []const u8, cur
     defer freeRefHeads(allocator, &current_refs);
 
     for (covered_refs.items) |covered| {
+        if (isDataPlaneIndexRef(covered.ref)) continue;
+
         const current_oid = findRefOid(current_refs.items, covered.ref) orelse return false;
         if (std.mem.eql(u8, covered.ref, repo_mod.genesis_ref)) {
             if (!std.mem.eql(u8, current_oid, covered.oid)) return false;
         } else if (std.mem.startsWith(u8, covered.ref, "refs/gitomi/inbox/")) {
             if (!(try git.isAncestor(allocator, covered.oid, current_oid))) return false;
-        } else if (isDataPlaneIndexRef(covered.ref)) {
-            if (!std.mem.eql(u8, current_oid, covered.oid)) return false;
         } else {
             return false;
         }
@@ -1108,6 +1240,7 @@ pub const listCommentsFromIndex = index_query.listCommentsFromIndex;
 pub const listEventsFromIndex = index_query.listEventsFromIndex;
 pub const resolveProjectId = index_query.resolveProjectId;
 pub const projectNameForId = index_query.projectNameForId;
+pub const resolveMilestoneId = index_query.resolveMilestoneId;
 pub const sqliteLimitValue = index_query.sqliteLimitValue;
 
 pub fn requireAuthorizedWrite(allocator: Allocator, repo: Repo, event_body: []const u8) !void {

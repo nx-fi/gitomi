@@ -224,6 +224,11 @@ CLI and HTTP entry points SHOULD accept the typed long forms
 `milestone:<uuid-prefix>` whenever the expected object kind is not otherwise
 obvious from command context.
 
+When a command context requires an existing milestone, implementations SHOULD
+also accept `^<milestone-slug>` and MAY accept an exact milestone title as a
+display-name fallback. If either form matches more than one local milestone, the
+reference MUST be rejected as ambiguous.
+
 Accepted event payloads MUST carry display names (`project`, `column`, `name`,
 or `title`) even when they also carry slug or UUID aliases. Reducers MUST treat
 the UUID in `object.id` as authoritative for created project and milestone

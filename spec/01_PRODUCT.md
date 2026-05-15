@@ -586,6 +586,12 @@ resolves locally, implementations SHOULD use the referenced milestone for UI
 linking; absence of a created milestone MUST NOT make the issue assignment
 invalid.
 
+Interactive milestone update surfaces SHOULD emit `milestone.updated` when
+changing one or more milestone scalar fields. Empty `description` and `due_at`
+values clear those fields; `title` MUST NOT be empty. Convenience close/reopen
+surfaces SHOULD emit `milestone.state_set` with `state` set to `closed` or
+`open`.
+
 ### 6.7. Derived References From Code Commits
 
 Implementations MUST parse Data Plane commit messages to derive links from code to Gitomi objects.

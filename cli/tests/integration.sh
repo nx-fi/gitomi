@@ -173,18 +173,33 @@ init_repo "$projects_repo"
   assert_line_count "$milestones" 1
   assert_contains "$milestones" '"title":"v1.0"'
   assert_contains "$milestones" '"due_at":"2026-06-01"'
+  milestone_id="$(json_field "$milestones" id)"
+  [[ -n "$milestone_id" ]] || fail "expected milestone id from milestone list"
+  milestone_ref="milestone:${milestone_id:0:7}"
+  gt milestone edit "$milestone_ref" --title "v1.1" --description "Second release" --due "2026-07-01" >/dev/null
+  gt milestone close "^v1.1" >/dev/null
+  milestones="$(gt milestone list --json)"
+  assert_contains "$milestones" '"title":"v1.1"'
+  assert_contains "$milestones" '"description":"Second release"'
+  assert_contains "$milestones" '"due_at":"2026-07-01"'
+  assert_contains "$milestones" '"state":"closed"'
+  gt milestone reopen "$milestone_ref" >/dev/null
+  milestones="$(gt milestone list --json)"
+  assert_contains "$milestones" '"state":"open"'
   gt issue open --title "Ship kanban" >/dev/null
   issue_id="$(json_field "$(gt issue list --json)" id)"
   [[ -n "$issue_id" ]] || fail "expected issue id from issue list"
   issue_ref="#$(object_ref "$issue_id")"
   gt project add "Roadmap" "$issue_ref" --column "Backlog" >/dev/null
-  gt issue milestone "$issue_ref" --milestone "v1.0" >/dev/null
+  gt issue milestone "$issue_ref" --milestone "v1.1" >/dev/null
   issue_show="$(gt issue show "$issue_ref")"
-  assert_contains "$issue_show" "milestone: v1.0"
+  assert_contains "$issue_show" "milestone: v1.1"
   assert_contains "$issue_show" "projects:  Roadmap / Backlog"
   events="$(gt events list --json)"
   assert_contains "$events" '"event_type":"project.created"'
   assert_contains "$events" '"event_type":"milestone.created"'
+  assert_contains "$events" '"event_type":"milestone.updated"'
+  assert_contains "$events" '"event_type":"milestone.state_set"'
   assert_contains "$events" '"event_type":"issue.project_added"'
   assert_contains "$events" '"event_type":"issue.milestone_set"'
   gt fsck >/dev/null
@@ -277,6 +292,27 @@ JSON
   assert_contains "$replay" "PUT /repos/acme/project/pulls/7/merge"
   assert_contains "$replay" "POST /repos/acme/project/issues/42/comments"
   assert_contains "$replay" "POST /repos/acme/project/issues/7/comments"
+  gt fsck >/dev/null
+)
+
+echo "integration: sync admits github import bootstrap sequences"
+github_sync="$ROOT/github-sync"
+mkdir -p "$github_sync"
+git -C "$github_sync" init --bare remote.git >/dev/null
+init_repo "$github_sync/replica"
+git -C "$github_io" remote add import-sync "$github_sync/remote.git"
+git -C "$github_sync/replica" remote add origin "$github_sync/remote.git"
+(
+  cd "$github_io"
+  gt sync --remote import-sync --push-only >/dev/null
+)
+(
+  cd "$github_sync/replica"
+  gt sync --pull-only >/dev/null
+  issues="$(gt issue list --json)"
+  assert_contains "$issues" '"title":"Legacy bug"'
+  pulls="$(gt pr list --json)"
+  assert_contains "$pulls" '"title":"Legacy PR"'
   gt fsck >/dev/null
 )
 
@@ -498,7 +534,7 @@ SH
   gt fsck >/dev/null
 )
 
-echo "integration: index snapshots restore cache and enforce retention count"
+echo "integration: index snapshots restore cache, checkpoint by threshold, and prune"
 snapshots="$ROOT/snapshots"
 init_repo "$snapshots"
 (
@@ -516,7 +552,7 @@ init_repo "$snapshots"
   snapshot_ref="$(git for-each-ref --sort=-committerdate '--format=%(refname)' refs/gitomi/snapshots | head -n 1)"
   manifest="$(git show "$snapshot_ref:manifest.json")"
   assert_contains "$manifest" '"$schema":"urn:gitomi:snapshot:v1"'
-  assert_contains "$manifest" '"index_schema_version":"4"'
+  assert_contains "$manifest" '"index_schema_version":"1"'
   assert_contains "$manifest" '"covered_refs"'
 
   rm -f .git/gitomi/index.sqlite
@@ -531,7 +567,17 @@ init_repo "$snapshots"
     gt index rebuild >/dev/null
   done
   snapshot_refs="$(git for-each-ref '--format=%(refname)' refs/gitomi/snapshots)"
-  assert_line_count "$snapshot_refs" 32
+  assert_line_count "$snapshot_refs" 1
+
+  for n in $(seq 34 64); do
+    gt issue title "$issue_ref" --title "Snapshot title $n" >/dev/null
+    gt index rebuild >/dev/null
+  done
+  snapshot_refs="$(git for-each-ref '--format=%(refname)' refs/gitomi/snapshots)"
+  assert_line_count "$snapshot_refs" 2
+  gt index snapshots prune --max-count 1 --max-bytes 0 --max-tree-bytes 0 >/dev/null
+  snapshot_refs="$(git for-each-ref '--format=%(refname)' refs/gitomi/snapshots)"
+  assert_line_count "$snapshot_refs" 1
   gt fsck >/dev/null
 )
 
@@ -1021,7 +1067,6 @@ assert_contains "$remote_refs" "refs/gitomi/inbox/alice/laptop"
 assert_not_contains "$remote_refs" "refs/gitomi/staging"
 (
   cd "$sync_root/b"
-  gt init --repo-id "$REPO_ID" --principal bob --device desktop >/dev/null
   gt sync --pull-only >/dev/null
   refs="$(gt refs)"
   assert_contains "$refs" "refs/gitomi/staging/origin/inbox/alice/laptop"
@@ -1030,6 +1075,9 @@ assert_not_contains "$remote_refs" "refs/gitomi/staging"
   assert_file ".git/gitomi/index.sqlite"
   assert_line_count "$json" 1
   assert_contains "$json" '"actor_device":"laptop"'
+  issues="$(gt issue list --json)"
+  assert_line_count "$issues" 1
+  assert_contains "$issues" '"title":"Synced issue"'
   gt fsck >/dev/null
 )
 
@@ -1051,15 +1099,12 @@ git -C "$scope_root/replica" remote add backup "$scope_root/backup.git"
 )
 (
   cd "$scope_root/replica"
-  gt init --repo-id "$REPO_ID" --principal bob --device desktop >/dev/null
   gt sync --pull-only >/dev/null
-  gt issue open --title "Bob backup issue" >/dev/null
   gt sync --remote backup --push-only >/dev/null
 )
 backup_refs="$(git --git-dir="$scope_root/backup.git" for-each-ref '--format=%(refname)' refs/gitomi)"
 assert_contains "$backup_refs" "refs/gitomi/genesis"
 assert_contains "$backup_refs" "refs/gitomi/inbox/alice/laptop"
-assert_contains "$backup_refs" "refs/gitomi/inbox/bob/desktop"
 assert_not_contains "$backup_refs" "refs/gitomi/staging"
 assert_not_contains "$backup_refs" "refs/gitomi/quarantine"
 assert_not_contains "$backup_refs" "refs/gitomi/snapshots"
@@ -1081,6 +1126,29 @@ init_repo "$clear_local"
   printf 'delete local gitomi refs\n' | gt clear local >/dev/null
   refs="$(gt refs)"
   assert_contains "$refs" "no Gitomi refs"
+  assert_file ".git/gitomi/config.toml"
+)
+
+echo "integration: local reset removes refs and config"
+reset_local="$ROOT/reset-local"
+init_repo "$reset_local"
+(
+  cd "$reset_local"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  gt issue open --title "Local reset issue" >/dev/null
+  gt issue list --json >/dev/null
+  assert_file ".git/gitomi/config.toml"
+  assert_file ".git/gitomi/index.sqlite"
+  if printf 'no\n' | gt reset local >/dev/null 2>&1; then
+    fail "expected local reset to abort on mismatched confirmation"
+  fi
+  refs="$(gt refs)"
+  assert_contains "$refs" "refs/gitomi/genesis"
+  printf 'delete local gitomi state\n' | gt reset local >/dev/null
+  refs="$(gt refs)"
+  assert_contains "$refs" "no Gitomi refs"
+  [[ ! -e .git/gitomi/config.toml ]] || fail "expected config to be deleted"
+  [[ ! -e .git/gitomi/index.sqlite ]] || fail "expected index to be deleted"
 )
 
 echo "integration: remote reset requires confirmation"
@@ -1125,10 +1193,15 @@ git -C "$stale_root/replica" remote add origin "$stale_root/remote.git"
 (
   cd "$stale_root/replica"
   gt init --repo-id "$REPO_ID" --principal bob --device desktop >/dev/null
-  first_pull="$(gt sync --pull-only 2>&1)"
+  if first_pull="$(gt sync --pull-only 2>&1)"; then
+    fail "expected sync to reject conflicting genesis"
+  fi
   assert_contains "$first_pull" "conflicting refs/gitomi/genesis"
+  assert_contains "$first_pull" "refusing to admit inbox refs"
   staged_refs="$(git for-each-ref '--format=%(refname)' refs/gitomi/staging/origin)"
   assert_contains "$staged_refs" "refs/gitomi/staging/origin/genesis"
+  refs="$(git for-each-ref '--format=%(refname)' refs/gitomi/inbox)"
+  [[ -z "$refs" ]] || fail "expected conflicting pull not to admit inbox refs"$'\n'"$refs"
   gt clear remote --yes >/dev/null
   second_pull="$(gt sync --pull-only 2>&1)"
   assert_contains "$second_pull" "no remote Gitomi genesis ref at origin"
