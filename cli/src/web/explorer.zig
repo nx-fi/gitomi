@@ -11,7 +11,6 @@ const Href = shared.Href;
 const appendEmptyState = shared.appendEmptyState;
 const appendFmt = shared.appendFmt;
 const appendHref = shared.appendHref;
-const appendRepoHeaderShared = shared.appendRepoHeader;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
 const appendTemplate = shared.appendTemplate;
@@ -20,7 +19,6 @@ const codeHref = shared.codeHref;
 const codeHrefWithView = shared.codeHrefWithView;
 const commitHref = shared.commitHref;
 const commitsHref = shared.commitsHref;
-const literalHref = shared.literalHref;
 const rawHref = shared.rawHref;
 const runCommand = git.runCommand;
 
@@ -138,6 +136,11 @@ const BlameHeader = struct {
 };
 
 const SlocCounts = source_stats.Counts;
+
+const DeviconMapping = struct {
+    key: []const u8,
+    class: []const u8,
+};
 
 const RootEntryCounts = struct {
     files: usize = 0,
@@ -320,9 +323,11 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
                 error.OutOfMemory => return err,
                 else => null,
             };
+            const search_entries_opt = try loadTreeNavEntries(allocator, repo, ref);
+            defer if (search_entries_opt) |search_entries| freeTreeNavEntries(allocator, search_entries);
 
             try appendRootPageGridStart(&buf, allocator);
-            try appendRootCodeToolbar(&buf, allocator, ref, branches, branch_count, tag_count);
+            try appendRootCodeToolbar(&buf, allocator, ref, branches, branch_count, tag_count, search_entries_opt);
             try appendRootCodePanelStart(&buf, allocator);
             try appendRootCommitBar(&buf, allocator, ref, summary_opt, commit_count);
             try appendRootTreeListing(&buf, allocator, ref, entries);
@@ -549,8 +554,18 @@ fn renderMissingPathPage(allocator: Allocator, repo: Repo, ref: []const u8, path
 }
 
 fn appendRepoHeader(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8) !void {
-    try appendRepoHeaderShared(buf, allocator, repo, ref, &.{
-        .{ .label = "Commits", .href = literalHref("/commits") },
+    _ = ref;
+    const repo_name = std.fs.path.basename(repo.root);
+    const owner_name = if (std.fs.path.dirname(repo.root)) |parent| std.fs.path.basename(parent) else "local";
+    try appendTemplate(buf, allocator,
+        \\<section class="repo-head">
+        \\  <div>
+        \\    <h1><span class="repo-owner">{owner_name}</span><span class="repo-separator">/</span>{repo_name}</h1>
+        \\  </div>
+        \\</section>
+    , .{
+        .owner_name = owner_name,
+        .repo_name = repo_name,
     });
 }
 
@@ -674,6 +689,7 @@ fn appendMarkdownOutlineSidebar(buf: *std.ArrayList(u8), allocator: Allocator) !
         \\  <div class="markdown-outline-head"><h2>Outline</h2><button class="markdown-outline-close" type="button" data-markdown-outline-close aria-label="Hide outline">&times;</button></div>
         \\  <label class="markdown-outline-search" aria-label="Filter headings"><span class="button-icon icon-filter" aria-hidden="true"></span><input type="search" data-markdown-outline-filter placeholder="Filter headings" autocomplete="off" spellcheck="false"></label>
         \\  <nav class="markdown-outline-nav" data-markdown-outline-list></nav>
+        \\  <div class="markdown-outline-resizer" data-markdown-outline-resizer aria-hidden="true"></div>
         \\</aside>
     , .{});
 }
@@ -851,6 +867,7 @@ fn appendRootCodeToolbar(
     branches: []const BranchRef,
     branch_count: usize,
     tag_count: usize,
+    search_entries_opt: ?[]const TreeNavEntry,
 ) !void {
     try appendTemplate(buf, allocator,
         \\<div class="root-code-toolbar">
@@ -868,11 +885,23 @@ fn appendRootCodeToolbar(
         \\    <a class="root-ref-link" href="/refs"><span class="button-icon icon-tag" aria-hidden="true"></span><strong>{tag_count}</strong> {tag_label}</a>
         \\  </div>
         \\  <div class="root-code-toolbar-right">
-        \\    <label class="root-file-search" aria-label="Go to file">
-        \\      <span class="button-icon icon-search" aria-hidden="true"></span>
-        \\      <input type="search" data-root-file-search placeholder="Go to file" autocomplete="off" spellcheck="false">
-        \\      <kbd>T</kbd>
-        \\    </label>
+        \\    <div class="root-file-search-wrap">
+        \\      <label class="root-file-search" aria-label="Go to file">
+        \\        <span class="button-icon icon-search" aria-hidden="true"></span>
+        \\        <input type="search" data-root-file-search placeholder="Go to file" autocomplete="off" spellcheck="false">
+        \\        <kbd>T</kbd>
+        \\      </label>
+    , .{
+        .branch_count = shared.groupedUnsigned(@intCast(branch_count)),
+        .branch_label = if (branch_count == 1) "Branch" else "Branches",
+        .tag_count = shared.groupedUnsigned(@intCast(tag_count)),
+        .tag_label = if (tag_count == 1) "Tag" else "Tags",
+    });
+    if (search_entries_opt) |search_entries| {
+        try appendRootSearchIndex(buf, allocator, ref, search_entries);
+    }
+    try appendTemplate(buf, allocator,
+        \\    </div>
         \\    <details class="root-action-menu" data-popover-menu>
         \\      <summary class="button secondary root-menu-button">Add file<span class="root-caret" aria-hidden="true"></span></summary>
         \\      <div class="root-action-popover" role="menu">
@@ -889,12 +918,26 @@ fn appendRootCodeToolbar(
         \\    </details>
         \\  </div>
         \\</div>
-    , .{
-        .branch_count = shared.groupedUnsigned(@intCast(branch_count)),
-        .branch_label = if (branch_count == 1) "Branch" else "Branches",
-        .tag_count = shared.groupedUnsigned(@intCast(tag_count)),
-        .tag_label = if (tag_count == 1) "Tag" else "Tags",
-    });
+    , .{});
+}
+
+fn appendRootSearchIndex(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, entries: []const TreeNavEntry) !void {
+    try appendTemplate(buf, allocator,
+        \\      <div class="root-file-search-index" data-root-file-search-index hidden>
+    , .{});
+    for (entries) |entry| {
+        try appendTemplate(buf, allocator,
+            \\        <a data-root-file-search-item data-root-file-path="{path}" data-root-file-name="{name}" data-root-file-kind="{kind}" href="{href}"></a>
+        , .{
+            .path = entry.path,
+            .name = baseName(entry.path),
+            .kind = entry.kind,
+            .href = codeHref(ref, entry.path),
+        });
+    }
+    try appendTemplate(buf, allocator,
+        \\      </div>
+    , .{});
 }
 
 fn appendRootCodePanelStart(buf: *std.ArrayList(u8), allocator: Allocator) !void {
@@ -963,11 +1006,12 @@ fn appendRootTreeEntryRow(buf: *std.ArrayList(u8), allocator: Allocator, ref: []
     defer allocator.free(child_path);
 
     try appendTemplate(buf, allocator,
-        \\<div class="root-file-row" data-root-file-row data-root-file-path="{path}" data-root-file-name="{name}">
+        \\<div class="root-file-row" data-root-file-row data-root-file-path="{path}" data-root-file-name="{name}" data-root-file-kind="{kind}">
         \\  <a class="file-name root-file-name" href="{href}">
     , .{
         .path = child_path,
         .name = entry.name,
+        .kind = entry.kind,
         .href = codeHref(ref, child_path),
     });
     try appendFileIcon(buf, allocator, child_path, entry.kind);
@@ -2150,6 +2194,302 @@ fn treeEntryInitiallyVisible(path: []const u8, active_path: []const u8) bool {
     return parent.len == 0 or isAncestorOrSelfPath(parent, active_path);
 }
 
+const exact_file_devicons = [_]DeviconMapping{
+    .{ .key = ".babelrc", .class = "devicon-babel-plain" },
+    .{ .key = ".babelrc.cjs", .class = "devicon-babel-plain" },
+    .{ .key = ".babelrc.js", .class = "devicon-babel-plain" },
+    .{ .key = ".babelrc.json", .class = "devicon-babel-plain" },
+    .{ .key = ".babelrc.mjs", .class = "devicon-babel-plain" },
+    .{ .key = ".dockerignore", .class = "devicon-docker-plain" },
+    .{ .key = ".eslintignore", .class = "devicon-eslint-plain" },
+    .{ .key = ".eslintrc", .class = "devicon-eslint-plain" },
+    .{ .key = ".eslintrc.cjs", .class = "devicon-eslint-plain" },
+    .{ .key = ".eslintrc.js", .class = "devicon-eslint-plain" },
+    .{ .key = ".eslintrc.json", .class = "devicon-eslint-plain" },
+    .{ .key = ".eslintrc.mjs", .class = "devicon-eslint-plain" },
+    .{ .key = ".eslintrc.yaml", .class = "devicon-eslint-plain" },
+    .{ .key = ".eslintrc.yml", .class = "devicon-eslint-plain" },
+    .{ .key = ".firebaserc", .class = "devicon-firebase-plain" },
+    .{ .key = ".git-blame-ignore-revs", .class = "devicon-git-plain" },
+    .{ .key = ".gitattributes", .class = "devicon-git-plain" },
+    .{ .key = ".gitconfig", .class = "devicon-git-plain" },
+    .{ .key = ".gitignore", .class = "devicon-git-plain" },
+    .{ .key = ".gitkeep", .class = "devicon-git-plain" },
+    .{ .key = ".gitmodules", .class = "devicon-git-plain" },
+    .{ .key = ".mailmap", .class = "devicon-git-plain" },
+    .{ .key = ".node-version", .class = "devicon-nodejs-plain" },
+    .{ .key = ".npmignore", .class = "devicon-npm-plain" },
+    .{ .key = ".npmrc", .class = "devicon-npm-plain" },
+    .{ .key = ".nvmrc", .class = "devicon-nodejs-plain" },
+    .{ .key = ".pnpmfile.cjs", .class = "devicon-pnpm-plain" },
+    .{ .key = ".postcssrc", .class = "devicon-postcss-original" },
+    .{ .key = ".postcssrc.cjs", .class = "devicon-postcss-original" },
+    .{ .key = ".postcssrc.js", .class = "devicon-postcss-original" },
+    .{ .key = ".postcssrc.json", .class = "devicon-postcss-original" },
+    .{ .key = ".postcssrc.mjs", .class = "devicon-postcss-original" },
+    .{ .key = ".postcssrc.yaml", .class = "devicon-postcss-original" },
+    .{ .key = ".postcssrc.yml", .class = "devicon-postcss-original" },
+    .{ .key = ".python-version", .class = "devicon-python-plain" },
+    .{ .key = ".ruby-gemset", .class = "devicon-ruby-plain" },
+    .{ .key = ".ruby-version", .class = "devicon-ruby-plain" },
+    .{ .key = ".terraform.lock.hcl", .class = "devicon-terraform-plain" },
+    .{ .key = ".terraformrc", .class = "devicon-terraform-plain" },
+    .{ .key = ".travis.yml", .class = "devicon-travis-plain" },
+    .{ .key = ".yarnrc", .class = "devicon-yarn-original" },
+    .{ .key = ".yarnrc.yml", .class = "devicon-yarn-original" },
+    .{ .key = "angular.json", .class = "devicon-angular-plain" },
+    .{ .key = "ansible.cfg", .class = "devicon-ansible-plain" },
+    .{ .key = "artisan", .class = "devicon-laravel-original" },
+    .{ .key = "azure-pipelines.yaml", .class = "devicon-azuredevops-plain" },
+    .{ .key = "azure-pipelines.yml", .class = "devicon-azuredevops-plain" },
+    .{ .key = "biome.json", .class = "devicon-biome-original" },
+    .{ .key = "biome.jsonc", .class = "devicon-biome-original" },
+    .{ .key = "bitbucket-pipelines.yml", .class = "devicon-bitbucket-original" },
+    .{ .key = "build.gradle", .class = "devicon-gradle-original" },
+    .{ .key = "build.gradle.kts", .class = "devicon-gradle-original" },
+    .{ .key = "build.sbt", .class = "devicon-scala-plain" },
+    .{ .key = "bun.lock", .class = "devicon-bun-plain" },
+    .{ .key = "bun.lockb", .class = "devicon-bun-plain" },
+    .{ .key = "bunfig.toml", .class = "devicon-bun-plain" },
+    .{ .key = "cabal.project", .class = "devicon-haskell-plain" },
+    .{ .key = "cargo.lock", .class = "devicon-rust-original" },
+    .{ .key = "cargo.toml", .class = "devicon-rust-original" },
+    .{ .key = "chart.lock", .class = "devicon-helm-original" },
+    .{ .key = "chart.yaml", .class = "devicon-helm-original" },
+    .{ .key = "circle.yml", .class = "devicon-circleci-plain" },
+    .{ .key = "cloudbuild.yaml", .class = "devicon-googlecloud-plain" },
+    .{ .key = "cloudbuild.yml", .class = "devicon-googlecloud-plain" },
+    .{ .key = "cmakelists.txt", .class = "devicon-cmake-plain" },
+    .{ .key = "cmakepresets.json", .class = "devicon-cmake-plain" },
+    .{ .key = "cmakeuserpresets.json", .class = "devicon-cmake-plain" },
+    .{ .key = "codeowners", .class = "devicon-github-original" },
+    .{ .key = "compose.yaml", .class = "devicon-docker-plain" },
+    .{ .key = "compose.yml", .class = "devicon-docker-plain" },
+    .{ .key = "composer.json", .class = "devicon-composer-line" },
+    .{ .key = "composer.lock", .class = "devicon-composer-line" },
+    .{ .key = "constraints.txt", .class = "devicon-python-plain" },
+    .{ .key = "docker-compose.yaml", .class = "devicon-docker-plain" },
+    .{ .key = "docker-compose.yml", .class = "devicon-docker-plain" },
+    .{ .key = "docker-bake.hcl", .class = "devicon-docker-plain" },
+    .{ .key = "dockerfile", .class = "devicon-docker-plain" },
+    .{ .key = "deno.json", .class = "devicon-denojs-original" },
+    .{ .key = "deno.jsonc", .class = "devicon-denojs-original" },
+    .{ .key = "deno.lock", .class = "devicon-denojs-original" },
+    .{ .key = "dependabot.yaml", .class = "devicon-github-original" },
+    .{ .key = "dependabot.yml", .class = "devicon-github-original" },
+    .{ .key = "elm.json", .class = "devicon-elm-plain" },
+    .{ .key = "ember-cli-build.js", .class = "devicon-ember-plain" },
+    .{ .key = "environment.yaml", .class = "devicon-anaconda-original" },
+    .{ .key = "environment.yml", .class = "devicon-anaconda-original" },
+    .{ .key = "firebase.json", .class = "devicon-firebase-plain" },
+    .{ .key = "flake.lock", .class = "devicon-nixos-plain" },
+    .{ .key = "funding.yml", .class = "devicon-github-original" },
+    .{ .key = "gemfile", .class = "devicon-ruby-plain" },
+    .{ .key = "gemfile.lock", .class = "devicon-ruby-plain" },
+    .{ .key = "go.mod", .class = "devicon-go-plain" },
+    .{ .key = "go.sum", .class = "devicon-go-plain" },
+    .{ .key = "go.work", .class = "devicon-go-plain" },
+    .{ .key = "go.work.sum", .class = "devicon-go-plain" },
+    .{ .key = "gradle.properties", .class = "devicon-gradle-original" },
+    .{ .key = "gradlew", .class = "devicon-gradle-original" },
+    .{ .key = "gradlew.bat", .class = "devicon-gradle-original" },
+    .{ .key = "helmfile.yaml", .class = "devicon-helm-original" },
+    .{ .key = "helmfile.yml", .class = "devicon-helm-original" },
+    .{ .key = "httpd.conf", .class = "devicon-apache-plain" },
+    .{ .key = "jenkinsfile", .class = "devicon-jenkins-plain" },
+    .{ .key = "jsconfig.json", .class = "devicon-javascript-plain" },
+    .{ .key = "kustomization.yaml", .class = "devicon-kubernetes-plain" },
+    .{ .key = "kustomization.yml", .class = "devicon-kubernetes-plain" },
+    .{ .key = "manage.py", .class = "devicon-django-plain" },
+    .{ .key = "mix.exs", .class = "devicon-elixir-plain" },
+    .{ .key = "mix.lock", .class = "devicon-elixir-plain" },
+    .{ .key = "mvnw", .class = "devicon-maven-plain" },
+    .{ .key = "mvnw.cmd", .class = "devicon-maven-plain" },
+    .{ .key = "netlify.toml", .class = "devicon-netlify-plain" },
+    .{ .key = "nginx.conf", .class = "devicon-nginx-original" },
+    .{ .key = "npm-shrinkwrap.json", .class = "devicon-npm-plain" },
+    .{ .key = "package-lock.json", .class = "devicon-npm-plain" },
+    .{ .key = "package.json", .class = "devicon-npm-plain" },
+    .{ .key = "package.swift", .class = "devicon-swift-plain" },
+    .{ .key = "pipfile", .class = "devicon-python-plain" },
+    .{ .key = "pipfile.lock", .class = "devicon-python-plain" },
+    .{ .key = "pnpm-lock.yaml", .class = "devicon-pnpm-plain" },
+    .{ .key = "pnpm-workspace.yaml", .class = "devicon-pnpm-plain" },
+    .{ .key = "podfile", .class = "devicon-xcode-plain" },
+    .{ .key = "podfile.lock", .class = "devicon-xcode-plain" },
+    .{ .key = "poetry.lock", .class = "devicon-poetry-plain" },
+    .{ .key = "pom.xml", .class = "devicon-maven-plain" },
+    .{ .key = "procfile", .class = "devicon-heroku-original" },
+    .{ .key = "pubspec.lock", .class = "devicon-dart-plain" },
+    .{ .key = "pubspec.yaml", .class = "devicon-dart-plain" },
+    .{ .key = "pulumi.yaml", .class = "devicon-pulumi-plain" },
+    .{ .key = "pulumi.yml", .class = "devicon-pulumi-plain" },
+    .{ .key = "pyproject.toml", .class = "devicon-python-plain" },
+    .{ .key = "pytest.ini", .class = "devicon-pytest-plain" },
+    .{ .key = "rakefile", .class = "devicon-ruby-plain" },
+    .{ .key = "rebar.config", .class = "devicon-erlang-plain" },
+    .{ .key = "rebar.lock", .class = "devicon-erlang-plain" },
+    .{ .key = "requirements.txt", .class = "devicon-python-plain" },
+    .{ .key = "rust-toolchain", .class = "devicon-rust-original" },
+    .{ .key = "rust-toolchain.toml", .class = "devicon-rust-original" },
+    .{ .key = "rustfmt.toml", .class = "devicon-rust-original" },
+    .{ .key = "schema.prisma", .class = "devicon-prisma-original" },
+    .{ .key = "settings.gradle", .class = "devicon-gradle-original" },
+    .{ .key = "settings.gradle.kts", .class = "devicon-gradle-original" },
+    .{ .key = "setup.cfg", .class = "devicon-python-plain" },
+    .{ .key = "setup.py", .class = "devicon-python-plain" },
+    .{ .key = "stack.yaml", .class = "devicon-haskell-plain" },
+    .{ .key = "symfony.lock", .class = "devicon-symfony-original" },
+    .{ .key = "terraform.rc", .class = "devicon-terraform-plain" },
+    .{ .key = "tox.ini", .class = "devicon-python-plain" },
+    .{ .key = "tsconfig.base.json", .class = "devicon-typescript-plain" },
+    .{ .key = "tsconfig.json", .class = "devicon-typescript-plain" },
+    .{ .key = "uv.lock", .class = "devicon-python-plain" },
+    .{ .key = "vagrantfile", .class = "devicon-vagrant-plain" },
+    .{ .key = "vercel.json", .class = "devicon-vercel-original" },
+    .{ .key = "wrangler.toml", .class = "devicon-cloudflareworkers-plain" },
+    .{ .key = "yarn.lock", .class = "devicon-yarn-original" },
+};
+
+const base_prefix_devicons = [_]DeviconMapping{
+    .{ .key = ".babelrc.", .class = "devicon-babel-plain" },
+    .{ .key = ".eslintrc.", .class = "devicon-eslint-plain" },
+    .{ .key = ".postcssrc.", .class = "devicon-postcss-original" },
+    .{ .key = "astro.config.", .class = "devicon-astro-plain" },
+    .{ .key = "babel.config.", .class = "devicon-babel-plain" },
+    .{ .key = "cypress.config.", .class = "devicon-cypressio-plain" },
+    .{ .key = "dockerfile.", .class = "devicon-docker-plain" },
+    .{ .key = "eslint.config.", .class = "devicon-eslint-plain" },
+    .{ .key = "gatsby-browser.", .class = "devicon-gatsby-original" },
+    .{ .key = "gatsby-config.", .class = "devicon-gatsby-original" },
+    .{ .key = "gatsby-node.", .class = "devicon-gatsby-original" },
+    .{ .key = "gatsby-ssr.", .class = "devicon-gatsby-original" },
+    .{ .key = "jest.config.", .class = "devicon-jest-plain" },
+    .{ .key = "jest.setup.", .class = "devicon-jest-plain" },
+    .{ .key = "karma.conf.", .class = "devicon-karma-plain" },
+    .{ .key = "knexfile.", .class = "devicon-knexjs-original" },
+    .{ .key = "next.config.", .class = "devicon-nextjs-plain" },
+    .{ .key = "nuxt.config.", .class = "devicon-nuxt-original" },
+    .{ .key = "openapi.", .class = "devicon-openapi-plain" },
+    .{ .key = "playwright.config.", .class = "devicon-playwright-plain" },
+    .{ .key = "postcss.config.", .class = "devicon-postcss-original" },
+    .{ .key = "pulumi.", .class = "devicon-pulumi-plain" },
+    .{ .key = "remix.config.", .class = "devicon-remix-original" },
+    .{ .key = "rollup.config.", .class = "devicon-rollup-plain" },
+    .{ .key = "sequelize.config.", .class = "devicon-sequelize-plain" },
+    .{ .key = "svelte.config.", .class = "devicon-svelte-plain" },
+    .{ .key = "swagger.", .class = "devicon-swagger-plain" },
+    .{ .key = "tailwind.config.", .class = "devicon-tailwindcss-original" },
+    .{ .key = "vite.config.", .class = "devicon-vite-original" },
+    .{ .key = "vitest.config.", .class = "devicon-vitest-plain" },
+    .{ .key = "vue.config.", .class = "devicon-vuejs-plain" },
+    .{ .key = "webpack.config.", .class = "devicon-webpack-plain" },
+};
+
+const base_suffix_devicons = [_]DeviconMapping{
+    .{ .key = ".astro", .class = "devicon-astro-plain" },
+    .{ .key = ".bazel", .class = "devicon-bazel-plain" },
+    .{ .key = ".bzl", .class = "devicon-bazel-plain" },
+    .{ .key = ".cabal", .class = "devicon-haskell-plain" },
+    .{ .key = ".csproj", .class = "devicon-dot-net-plain" },
+    .{ .key = ".fsproj", .class = "devicon-dot-net-plain" },
+    .{ .key = ".gradle", .class = "devicon-gradle-original" },
+    .{ .key = ".gradle.kts", .class = "devicon-gradle-original" },
+    .{ .key = ".ipynb", .class = "devicon-jupyter-plain" },
+    .{ .key = ".nomad", .class = "devicon-nomad-original" },
+    .{ .key = ".nomad.hcl", .class = "devicon-nomad-original" },
+    .{ .key = ".pbxproj", .class = "devicon-xcode-plain" },
+    .{ .key = ".pkr.hcl", .class = "devicon-packer-plain" },
+    .{ .key = ".prisma", .class = "devicon-prisma-original" },
+    .{ .key = ".razor", .class = "devicon-blazor-original" },
+    .{ .key = ".rproj", .class = "devicon-rstudio-plain" },
+    .{ .key = ".sln", .class = "devicon-visualstudio-plain" },
+    .{ .key = ".tf", .class = "devicon-terraform-plain" },
+    .{ .key = ".tfstate", .class = "devicon-terraform-plain" },
+    .{ .key = ".tfvars", .class = "devicon-terraform-plain" },
+    .{ .key = ".vbproj", .class = "devicon-dot-net-plain" },
+    .{ .key = ".vue", .class = "devicon-vuejs-plain" },
+    .{ .key = ".xcconfig", .class = "devicon-xcode-plain" },
+    .{ .key = ".zig.zon", .class = "devicon-zig-original" },
+};
+
+const language_devicons = [_]DeviconMapping{
+    .{ .key = "apache", .class = "devicon-apache-plain" },
+    .{ .key = "arduino", .class = "devicon-arduino-plain" },
+    .{ .key = "awk", .class = "devicon-awk-plain-wordmark" },
+    .{ .key = "bash", .class = "devicon-bash-plain" },
+    .{ .key = "c", .class = "devicon-c-original" },
+    .{ .key = "ceylon", .class = "devicon-ceylon-plain" },
+    .{ .key = "clojure", .class = "devicon-clojure-plain" },
+    .{ .key = "cmake", .class = "devicon-cmake-plain" },
+    .{ .key = "coffeescript", .class = "devicon-coffeescript-original" },
+    .{ .key = "cpp", .class = "devicon-cplusplus-plain" },
+    .{ .key = "crystal", .class = "devicon-crystal-original" },
+    .{ .key = "csharp", .class = "devicon-csharp-plain" },
+    .{ .key = "css", .class = "devicon-css3-plain" },
+    .{ .key = "dart", .class = "devicon-dart-plain" },
+    .{ .key = "delphi", .class = "devicon-delphi-plain" },
+    .{ .key = "django", .class = "devicon-django-plain" },
+    .{ .key = "dockerfile", .class = "devicon-docker-plain" },
+    .{ .key = "dos", .class = "devicon-msdos-plain" },
+    .{ .key = "elixir", .class = "devicon-elixir-plain" },
+    .{ .key = "elm", .class = "devicon-elm-plain" },
+    .{ .key = "erlang", .class = "devicon-erlang-plain" },
+    .{ .key = "fortran", .class = "devicon-fortran-original" },
+    .{ .key = "fsharp", .class = "devicon-fsharp-plain" },
+    .{ .key = "gherkin", .class = "devicon-cucumber-plain" },
+    .{ .key = "go", .class = "devicon-go-plain" },
+    .{ .key = "gradle", .class = "devicon-gradle-original" },
+    .{ .key = "graphql", .class = "devicon-graphql-plain" },
+    .{ .key = "groovy", .class = "devicon-groovy-plain" },
+    .{ .key = "handlebars", .class = "devicon-handlebars-original" },
+    .{ .key = "haskell", .class = "devicon-haskell-plain" },
+    .{ .key = "haxe", .class = "devicon-haxe-plain" },
+    .{ .key = "html", .class = "devicon-html5-plain" },
+    .{ .key = "java", .class = "devicon-java-plain" },
+    .{ .key = "javascript", .class = "devicon-javascript-plain" },
+    .{ .key = "json", .class = "devicon-json-plain" },
+    .{ .key = "julia", .class = "devicon-julia-plain" },
+    .{ .key = "kotlin", .class = "devicon-kotlin-plain" },
+    .{ .key = "latex", .class = "devicon-latex-original" },
+    .{ .key = "less", .class = "devicon-less-plain-wordmark" },
+    .{ .key = "llvm", .class = "devicon-llvm-plain" },
+    .{ .key = "lua", .class = "devicon-lua-plain" },
+    .{ .key = "markdown", .class = "devicon-markdown-original" },
+    .{ .key = "matlab", .class = "devicon-matlab-plain" },
+    .{ .key = "nginx", .class = "devicon-nginx-original" },
+    .{ .key = "nim", .class = "devicon-nim-plain" },
+    .{ .key = "nix", .class = "devicon-nixos-plain" },
+    .{ .key = "objectivec", .class = "devicon-objectivec-plain" },
+    .{ .key = "ocaml", .class = "devicon-ocaml-plain" },
+    .{ .key = "perl", .class = "devicon-perl-plain" },
+    .{ .key = "pgsql", .class = "devicon-postgresql-plain" },
+    .{ .key = "php", .class = "devicon-php-plain" },
+    .{ .key = "powershell", .class = "devicon-powershell-plain" },
+    .{ .key = "processing", .class = "devicon-processing-plain" },
+    .{ .key = "prolog", .class = "devicon-prolog-plain" },
+    .{ .key = "python", .class = "devicon-python-plain" },
+    .{ .key = "r", .class = "devicon-r-plain" },
+    .{ .key = "ruby", .class = "devicon-ruby-plain" },
+    .{ .key = "rust", .class = "devicon-rust-original" },
+    .{ .key = "scala", .class = "devicon-scala-plain" },
+    .{ .key = "scss", .class = "devicon-sass-original" },
+    .{ .key = "shell", .class = "devicon-bash-plain" },
+    .{ .key = "solidity", .class = "devicon-solidity-plain" },
+    .{ .key = "stata", .class = "devicon-stata-original-wordmark" },
+    .{ .key = "stylus", .class = "devicon-stylus-original" },
+    .{ .key = "svelte", .class = "devicon-svelte-plain" },
+    .{ .key = "swift", .class = "devicon-swift-plain" },
+    .{ .key = "typescript", .class = "devicon-typescript-plain" },
+    .{ .key = "vala", .class = "devicon-vala-plain" },
+    .{ .key = "vbnet", .class = "devicon-visualbasic-plain" },
+    .{ .key = "vim", .class = "devicon-vim-plain" },
+    .{ .key = "wasm", .class = "devicon-wasm-original" },
+    .{ .key = "xml", .class = "devicon-xml-plain" },
+    .{ .key = "yaml", .class = "devicon-yaml-plain" },
+    .{ .key = "zig", .class = "devicon-zig-original" },
+};
+
 fn appendFileIcon(buf: *std.ArrayList(u8), allocator: Allocator, path: []const u8, kind: []const u8) !void {
     if (deviconClassForPath(path, kind)) |class| {
         try appendTemplate(buf, allocator,
@@ -2167,20 +2507,64 @@ fn deviconClassForPath(path: []const u8, kind: []const u8) ?[]const u8 {
     if (!std.mem.eql(u8, kind, "blob")) return null;
     if (mediaKindForPath(path) != null) return null;
 
+    const base = baseName(path);
+    if (deviconClassForExactBase(base)) |class| return class;
+    if (deviconClassForPathPattern(path, base)) |class| return class;
+    if (deviconClassForBasePrefix(base)) |class| return class;
+    if (deviconClassForBaseSuffix(base)) |class| return class;
+
     const language = languageForPath(path);
-    if (std.mem.eql(u8, language, "zig")) return "devicon-zig-original";
-    if (std.mem.eql(u8, language, "javascript")) return "devicon-javascript-plain";
-    if (std.mem.eql(u8, language, "typescript")) return "devicon-typescript-plain";
-    if (std.mem.eql(u8, language, "bash")) return "devicon-bash-plain";
-    if (std.mem.eql(u8, language, "yaml")) return "devicon-yaml-plain";
-    if (std.mem.eql(u8, language, "css")) return "devicon-css3-plain";
-    if (std.mem.eql(u8, language, "html")) return "devicon-html5-plain";
-    if (std.mem.eql(u8, language, "xml")) return "devicon-xml-plain";
-    if (std.mem.eql(u8, language, "solidity")) return "devicon-solidity-plain";
-    if (std.mem.eql(u8, language, "rust")) return "devicon-rust-plain";
-    if (std.mem.eql(u8, language, "python")) return "devicon-python-plain";
-    if (std.mem.eql(u8, language, "markdown")) return "devicon-markdown-original";
+    return deviconClassForLanguage(language);
+}
+
+fn deviconClassForExactBase(base: []const u8) ?[]const u8 {
+    return deviconClassFromMappings(base, &exact_file_devicons);
+}
+
+fn deviconClassForPathPattern(path: []const u8, base: []const u8) ?[]const u8 {
+    if (std.ascii.startsWithIgnoreCase(path, ".github/workflows/") and isYamlPath(path)) return "devicon-githubactions-plain";
+    if (std.ascii.startsWithIgnoreCase(path, ".github/")) return "devicon-github-original";
+    if (std.ascii.startsWithIgnoreCase(path, ".gitlab/")) return "devicon-gitlab-plain";
+    if (std.ascii.startsWithIgnoreCase(path, ".circleci/")) return "devicon-circleci-plain";
+    if (std.ascii.startsWithIgnoreCase(path, ".devcontainer/")) return "devicon-docker-plain";
+    if (std.ascii.startsWithIgnoreCase(path, ".vscode/")) return "devicon-vscode-plain";
+    if (std.ascii.startsWithIgnoreCase(path, ".mvn/")) return "devicon-maven-plain";
+    if (std.ascii.startsWithIgnoreCase(path, ".cargo/")) return "devicon-rust-original";
+    if (std.ascii.startsWithIgnoreCase(path, ".gradle/")) return "devicon-gradle-original";
+    if (std.ascii.startsWithIgnoreCase(path, ".yarn/")) return "devicon-yarn-original";
+    if (std.ascii.startsWithIgnoreCase(path, ".storybook/")) return "devicon-storybook-plain";
+    if (std.ascii.startsWithIgnoreCase(path, "charts/") and std.ascii.eqlIgnoreCase(base, "values.yaml")) return "devicon-helm-original";
+    if (std.ascii.startsWithIgnoreCase(path, "charts/") and std.ascii.eqlIgnoreCase(base, "values.yml")) return "devicon-helm-original";
     return null;
+}
+
+fn deviconClassForBasePrefix(base: []const u8) ?[]const u8 {
+    for (base_prefix_devicons) |mapping| {
+        if (std.ascii.startsWithIgnoreCase(base, mapping.key)) return mapping.class;
+    }
+    return null;
+}
+
+fn deviconClassForBaseSuffix(base: []const u8) ?[]const u8 {
+    for (base_suffix_devicons) |mapping| {
+        if (endsWithIgnoreCase(base, mapping.key)) return mapping.class;
+    }
+    return null;
+}
+
+fn deviconClassForLanguage(language: []const u8) ?[]const u8 {
+    return deviconClassFromMappings(language, &language_devicons);
+}
+
+fn deviconClassFromMappings(value: []const u8, mappings: []const DeviconMapping) ?[]const u8 {
+    for (mappings) |mapping| {
+        if (std.ascii.eqlIgnoreCase(value, mapping.key)) return mapping.class;
+    }
+    return null;
+}
+
+fn isYamlPath(path: []const u8) bool {
+    return endsWithIgnoreCase(path, ".yaml") or endsWithIgnoreCase(path, ".yml");
 }
 
 fn fileIconClass(path: []const u8, kind: []const u8) []const u8 {
@@ -2454,9 +2838,20 @@ test "web explorer maps file paths to highlight languages" {
 }
 
 test "web explorer maps supported file paths to devicon classes" {
+    try std.testing.expectEqualStrings("devicon-git-plain", deviconClassForPath(".gitignore", "blob").?);
+    try std.testing.expectEqualStrings("devicon-docker-plain", deviconClassForPath("Dockerfile", "blob").?);
+    try std.testing.expectEqualStrings("devicon-docker-plain", deviconClassForPath("docker/Dockerfile.web", "blob").?);
+    try std.testing.expectEqualStrings("devicon-nixos-plain", deviconClassForPath("flake.nix", "blob").?);
+    try std.testing.expectEqualStrings("devicon-nixos-plain", deviconClassForPath("flake.lock", "blob").?);
     try std.testing.expectEqualStrings("devicon-zig-original", deviconClassForPath("src/main.zig", "blob").?);
+    try std.testing.expectEqualStrings("devicon-zig-original", deviconClassForPath("build.zig.zon", "blob").?);
     try std.testing.expectEqualStrings("devicon-html5-plain", deviconClassForPath("index.html", "blob").?);
     try std.testing.expectEqualStrings("devicon-markdown-original", deviconClassForPath("README.md", "blob").?);
+    try std.testing.expectEqualStrings("devicon-npm-plain", deviconClassForPath("package.json", "blob").?);
+    try std.testing.expectEqualStrings("devicon-githubactions-plain", deviconClassForPath(".github/workflows/test.yml", "blob").?);
+    try std.testing.expectEqualStrings("devicon-terraform-plain", deviconClassForPath("main.tf", "blob").?);
+    try std.testing.expectEqualStrings("devicon-vuejs-plain", deviconClassForPath("src/App.vue", "blob").?);
+    try std.testing.expectEqualStrings("devicon-prisma-original", deviconClassForPath("schema.prisma", "blob").?);
     try std.testing.expectEqual(@as(?[]const u8, null), deviconClassForPath("assets/logo.svg", "blob"));
     try std.testing.expectEqual(@as(?[]const u8, null), deviconClassForPath("src", "tree"));
 }

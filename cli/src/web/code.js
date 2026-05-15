@@ -5,6 +5,7 @@
   const symbolsWidthKey = "gitomi.symbolsPanelWidth";
   const minSymbolsWidth = 180;
   const maxSymbolsWidth = 480;
+  let rightPanelOffsetResizeBound = false;
 
   function clamp(value, min, max) {
     return Math.min(max, Math.max(min, value));
@@ -60,6 +61,24 @@
     button.setAttribute("aria-label", visible ? "Hide symbols panel" : "Show symbols panel");
     button.title = visible ? "Hide symbols panel" : "Show symbols panel";
     if (persist) storeSymbolsVisible(visible);
+  }
+
+  function syncRightPanelOffset(layout) {
+    const pathbar = layout.querySelector(".code-pathbar");
+    const offset = pathbar ? Math.ceil(pathbar.getBoundingClientRect().height) : 0;
+    layout.style.setProperty("--right-panel-offset", `${offset}px`);
+  }
+
+  function syncRightPanelOffsets() {
+    document.querySelectorAll(".code-layout.has-symbols, .code-layout.has-markdown-outline").forEach(syncRightPanelOffset);
+  }
+
+  function initRightPanelOffsets() {
+    syncRightPanelOffsets();
+    if (rightPanelOffsetResizeBound) return;
+    rightPanelOffsetResizeBound = true;
+    window.addEventListener("resize", syncRightPanelOffsets);
+    window.addEventListener("load", syncRightPanelOffsets);
   }
 
   function initSymbolsToggle(button) {
@@ -547,6 +566,7 @@
   }
 
   function initCodeControls() {
+    initRightPanelOffsets();
     initCopyButtons();
     initPathCopyButtons();
     initTextCopyButtons();

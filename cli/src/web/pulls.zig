@@ -465,13 +465,14 @@ fn appendPullListRow(
     });
     try buf.append(allocator, ' ');
     try appendRelativeTime(buf, allocator, if (std.mem.eql(u8, state, "open")) opened_at else state_at);
-    try appendTemplate(buf, allocator,
-        \\</p><p class="pull-branch-line"><span>{head_ref}</span><span aria-hidden="true">-&gt;</span><span>{base_ref}</span></p></div>
+    try buf.appendSlice(allocator, "</p><p class=\"pull-branch-line\">");
+    try appendPullBranchLink(buf, allocator, head_ref);
+    try buf.appendSlice(allocator, "<span aria-hidden=\"true\">-&gt;</span>");
+    try appendPullBranchLink(buf, allocator, base_ref);
+    try buf.appendSlice(allocator,
+        \\</p></div>
         \\  <div class="issue-row-side">
-    , .{
-        .head_ref = head_ref,
-        .base_ref = base_ref,
-    });
+    );
     try appendPullRowCollection(buf, allocator, db, "SELECT DISTINCT reviewer FROM pull_reviewers WHERE pull_id = ? ORDER BY reviewer", id, "issue-row-assignees", false);
     if (comment_count > 0) {
         try appendTemplate(buf, allocator,
@@ -1105,12 +1106,10 @@ fn appendPullHeaderSummary(buf: *std.ArrayList(u8), allocator: Allocator, detail
             .actor = if (detail.state_actor_principal.len != 0) detail.state_actor_principal else detail.author_principal,
         });
         try appendPullCommitSummary(buf, allocator, counts.commits);
-        try appendTemplate(buf, allocator,
-            \\ into <code>{base_ref}</code> from <code>{head_ref}</code>
-        , .{
-            .base_ref = detail.base_ref,
-            .head_ref = detail.head_ref,
-        });
+        try buf.appendSlice(allocator, " into ");
+        try appendPullBranchLink(buf, allocator, detail.base_ref);
+        try buf.appendSlice(allocator, " from ");
+        try appendPullBranchLink(buf, allocator, detail.head_ref);
         try buf.append(allocator, ' ');
         try appendRelativeTime(buf, allocator, detail.state_occurred_at);
         try buf.appendSlice(allocator, "</span>");
@@ -1133,11 +1132,19 @@ fn appendPullHeaderSummary(buf: *std.ArrayList(u8), allocator: Allocator, detail
         .author = pullDisplayAuthor(detail),
     });
     try appendPullCommitSummary(buf, allocator, counts.commits);
+    try buf.appendSlice(allocator, " into ");
+    try appendPullBranchLink(buf, allocator, detail.base_ref);
+    try buf.appendSlice(allocator, " from ");
+    try appendPullBranchLink(buf, allocator, detail.head_ref);
+    try buf.appendSlice(allocator, "</span>");
+}
+
+fn appendPullBranchLink(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8) !void {
     try appendTemplate(buf, allocator,
-        \\ into <code>{base_ref}</code> from <code>{head_ref}</code></span>
+        \\<a class="pull-branch-link" href="{href}"><code>{ref}</code></a>
     , .{
-        .base_ref = detail.base_ref,
-        .head_ref = detail.head_ref,
+        .href = shared.codeHref(ref, ""),
+        .ref = ref,
     });
 }
 
@@ -1278,13 +1285,15 @@ fn appendPullFacts(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, db
     });
     try appendRelativeTime(buf, allocator, detail.opened_at);
     try appendTemplate(buf, allocator,
-        \\</dd></div><div><dt>Author</dt><dd>{author}/{device}</dd></div><div><dt>Base</dt><dd><code>{base_ref}</code></dd></div><div><dt>Head</dt><dd><code>{head_ref}</code></dd></div>
+        \\</dd></div><div><dt>Author</dt><dd>{author}/{device}</dd></div><div><dt>Base</dt><dd>
     , .{
         .author = detail.author_principal,
         .device = detail.author_device,
-        .base_ref = detail.base_ref,
-        .head_ref = detail.head_ref,
     });
+    try appendPullBranchLink(buf, allocator, detail.base_ref);
+    try buf.appendSlice(allocator, "</dd></div><div><dt>Head</dt><dd>");
+    try appendPullBranchLink(buf, allocator, detail.head_ref);
+    try buf.appendSlice(allocator, "</dd></div>");
     if (detail.legacy_number > 0) {
         try buf.appendSlice(allocator, "<div><dt>GitHub</dt><dd>");
         try appendLegacyPullLink(buf, allocator, detail.legacy_number);
@@ -1404,13 +1413,14 @@ fn appendPullSidebarEmptySection(buf: *std.ArrayList(u8), allocator: Allocator, 
 
 fn appendPullSidebarDevelopment(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, detail: PullDetail, pull_ref: []const u8) !void {
     try appendPullSidebarSectionStart(buf, allocator, "Development", "Link development");
-    try appendTemplate(buf, allocator,
+    try buf.appendSlice(allocator,
         \\<p class="issue-sidebar-empty">Successfully merging this pull request may close linked issues.</p>
-        \\<div class="pull-sidebar-branches"><span><strong>Base</strong><code>{base_ref}</code></span><span><strong>Head</strong><code>{head_ref}</code></span></div>
-    , .{
-        .base_ref = detail.base_ref,
-        .head_ref = detail.head_ref,
-    });
+        \\<div class="pull-sidebar-branches"><span><strong>Base</strong>
+    );
+    try appendPullBranchLink(buf, allocator, detail.base_ref);
+    try buf.appendSlice(allocator, "</span><span><strong>Head</strong>");
+    try appendPullBranchLink(buf, allocator, detail.head_ref);
+    try buf.appendSlice(allocator, "</span></div>");
     if (detail.merge_oid.len != 0) {
         try appendTemplate(buf, allocator,
             \\<a class="issue-sidebar-link-row" href="{href}"><span class="issue-sidebar-row-kind">merge</span><code>{short_oid}</code></a>

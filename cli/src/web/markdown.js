@@ -1,6 +1,14 @@
 (function () {
   "use strict";
 
+  const markdownOutlineWidthKey = "gitomi.markdownOutlinePanelWidth";
+  const minMarkdownOutlineWidth = 260;
+  const maxMarkdownOutlineWidth = 560;
+
+  function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+  }
+
   function escapeHtml(value) {
     return String(value)
       .replace(/&/g, "&amp;")
@@ -650,60 +658,6 @@
     });
   }
 
-  function renderLatex(value) {
-    let html = escapeHtml(String(value || "").trim());
-    html = html.replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, '<span class="math-frac"><span>$1</span><span>$2</span></span>');
-    html = html.replace(/\\sqrt\{([^{}]+)\}/g, '<span class="math-sqrt">$1</span>');
-    html = html.replace(/\^\{([^{}]+)\}/g, "<sup>$1</sup>");
-    html = html.replace(/_\{([^{}]+)\}/g, "<sub>$1</sub>");
-    html = html.replace(/\^([A-Za-z0-9+-]+)/g, "<sup>$1</sup>");
-    html = html.replace(/_([A-Za-z0-9+-]+)/g, "<sub>$1</sub>");
-    html = html.replace(/\\\\/g, "<br>");
-
-    const commands = {
-      alpha: "&alpha;",
-      beta: "&beta;",
-      gamma: "&gamma;",
-      delta: "&delta;",
-      epsilon: "&epsilon;",
-      theta: "&theta;",
-      lambda: "&lambda;",
-      mu: "&mu;",
-      pi: "&pi;",
-      rho: "&rho;",
-      sigma: "&sigma;",
-      tau: "&tau;",
-      phi: "&phi;",
-      omega: "&omega;",
-      Gamma: "&Gamma;",
-      Delta: "&Delta;",
-      Theta: "&Theta;",
-      Lambda: "&Lambda;",
-      Pi: "&Pi;",
-      Sigma: "&Sigma;",
-      Phi: "&Phi;",
-      Omega: "&Omega;",
-      sum: "&sum;",
-      prod: "&prod;",
-      int: "&int;",
-      infty: "&infin;",
-      le: "&le;",
-      ge: "&ge;",
-      neq: "&ne;",
-      times: "&times;",
-      cdot: "&middot;",
-      approx: "&asymp;",
-      to: "&rarr;",
-      leftarrow: "&larr;",
-      rightarrow: "&rarr;",
-    };
-
-    Object.keys(commands).forEach(function (name) {
-      html = html.replace(new RegExp("\\\\" + name + "\\b", "g"), commands[name]);
-    });
-    return html;
-  }
-
   function renderMath(root) {
     const scope = root || document;
     if (typeof window.renderMathInElement === "function") {
@@ -715,18 +669,13 @@
           { left: "$", right: "$", display: false },
         ],
         ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"],
+        ignoredClasses: ["mermaid", "mermaid-diagram"],
         throwOnError: false,
         trust: false,
         strict: "ignore",
       });
       return;
     }
-
-    scope.querySelectorAll("[data-latex-inline], [data-latex-display]").forEach(function (element) {
-      if (element.dataset.rendered === "yes") return;
-      element.innerHTML = renderLatex(element.textContent || "");
-      element.dataset.rendered = "yes";
-    });
   }
 
   function renderMermaidBlock(pre) {
@@ -868,6 +817,57 @@
     });
   }
 
+  function maxMarkdownOutlineWidthForLayout(layout) {
+    const layoutWidth = layout.getBoundingClientRect().width || window.innerWidth;
+    return Math.min(maxMarkdownOutlineWidth, Math.max(minMarkdownOutlineWidth, layoutWidth - 520));
+  }
+
+  function setMarkdownOutlineWidth(layout, width, persist) {
+    const next = clamp(width, minMarkdownOutlineWidth, maxMarkdownOutlineWidthForLayout(layout));
+    layout.style.setProperty("--markdown-outline-width", `${next}px`);
+    if (persist) {
+      try {
+        window.localStorage.setItem(markdownOutlineWidthKey, String(next));
+      } catch (_) {}
+    }
+  }
+
+  function initMarkdownOutlineResize(panel) {
+    const handle = panel.querySelector("[data-markdown-outline-resizer]");
+    const layout = panel.closest(".code-layout");
+    if (!handle || !layout || panel.dataset.markdownOutlineResizeReady === "yes") return;
+    panel.dataset.markdownOutlineResizeReady = "yes";
+
+    try {
+      const stored = Number(window.localStorage.getItem(markdownOutlineWidthKey));
+      if (Number.isFinite(stored) && stored > 0) {
+        setMarkdownOutlineWidth(layout, stored, false);
+      }
+    } catch (_) {}
+
+    handle.addEventListener("pointerdown", function (event) {
+      if (panel.hidden || layout.classList.contains("markdown-outline-collapsed")) return;
+      event.preventDefault();
+      handle.setPointerCapture(event.pointerId);
+      document.documentElement.classList.add("markdown-outline-resizing");
+
+      const onMove = function (moveEvent) {
+        const right = layout.getBoundingClientRect().right;
+        setMarkdownOutlineWidth(layout, right - moveEvent.clientX, true);
+      };
+      const onEnd = function () {
+        document.documentElement.classList.remove("markdown-outline-resizing");
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onEnd);
+        window.removeEventListener("pointercancel", onEnd);
+      };
+
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onEnd);
+      window.addEventListener("pointercancel", onEnd);
+    });
+  }
+
   function setMarkdownOutlineOpen(panel, open) {
     if (!panel) return;
     const layout = panel.closest(".code-layout");
@@ -902,6 +902,7 @@
     filterOutlineLinks(list, input ? input.value : "");
     if (button) button.hidden = false;
     setMarkdownOutlineOpen(panel, !panel.hidden);
+    initMarkdownOutlineResize(panel);
 
     if (panel.dataset.markdownOutlineReady === "yes") return;
     panel.dataset.markdownOutlineReady = "yes";
