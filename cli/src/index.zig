@@ -45,7 +45,7 @@ const appendJsonFieldUnsigned = json_writer.appendJsonFieldUnsigned;
 const appendJsonString = json_writer.appendJsonString;
 
 // This shall never be updated. Keep index compatibility checks additive under v1.
-const index_schema_version = "2";
+const index_schema_version = "1";
 pub const index_event_columns = index_query.index_event_columns;
 const snapshot_schema = "urn:gitomi:snapshot:v1";
 const snapshot_schema_version: u64 = 1;
@@ -302,6 +302,20 @@ fn isSchemaFresh(allocator: Allocator, db: *SqliteDb) !bool {
 fn requiredIndexTablesExist(db: *SqliteDb) bool {
     var pull_metadata = db.prepare("SELECT pull_id FROM pull_metadata LIMIT 0") catch return false;
     defer pull_metadata.deinit();
+    var projects_slug = db.prepare("SELECT slug FROM projects LIMIT 0") catch return false;
+    defer projects_slug.deinit();
+    var project_columns_ref = db.prepare("SELECT column_ref FROM project_columns LIMIT 0") catch return false;
+    defer project_columns_ref.deinit();
+    var project_memberships = db.prepare("SELECT project_id FROM project_memberships LIMIT 0") catch return false;
+    defer project_memberships.deinit();
+    var project_fields = db.prepare("SELECT id FROM project_fields LIMIT 0") catch return false;
+    defer project_fields.deinit();
+    var project_field_options = db.prepare("SELECT id FROM project_field_options LIMIT 0") catch return false;
+    defer project_field_options.deinit();
+    var project_field_values = db.prepare("SELECT project_id FROM project_field_values LIMIT 0") catch return false;
+    defer project_field_values.deinit();
+    var project_views = db.prepare("SELECT id FROM project_views LIMIT 0") catch return false;
+    defer project_views.deinit();
     return true;
 }
 
@@ -816,6 +830,119 @@ test "snapshot policy checkpoints first, threshold, and aged incremental rebuild
     try std.testing.expect(shouldCreateSnapshot(&stale, .{ .events = 10, .new_events = 1 }, policy, 1000));
 }
 
+test "index admission rejects repo, sequence, and idempotency conflicts" {
+    var admission = IndexAdmission.init(std.testing.allocator, "repo-a");
+    defer admission.deinit();
+
+    var first = try testEnvelope(std.testing.allocator, "repo-a", "alice", "laptop", 1, "idem-1");
+    defer first.deinit();
+    try std.testing.expect(try admission.accept(first));
+
+    var next = try testEnvelope(std.testing.allocator, "repo-a", "alice", "laptop", 2, "idem-2");
+    defer next.deinit();
+    try std.testing.expect(try admission.accept(next));
+
+    var stale_seq = try testEnvelope(std.testing.allocator, "repo-a", "alice", "laptop", 2, "idem-3");
+    defer stale_seq.deinit();
+    try std.testing.expect(!try admission.accept(stale_seq));
+
+    var duplicate_idem = try testEnvelope(std.testing.allocator, "repo-a", "bob", "desktop", 1, "idem-1");
+    defer duplicate_idem.deinit();
+    try std.testing.expect(!try admission.accept(duplicate_idem));
+
+    var wrong_repo = try testEnvelope(std.testing.allocator, "repo-b", "alice", "laptop", 3, "idem-4");
+    defer wrong_repo.deinit();
+    try std.testing.expect(!try admission.accept(wrong_repo));
+}
+
+test "index admission can be seeded from remembered snapshot events" {
+    var admission = IndexAdmission.init(std.testing.allocator, null);
+    defer admission.deinit();
+
+    var remembered = try testEnvelope(std.testing.allocator, "repo-a", "alice", "laptop", 5, "idem-5");
+    defer remembered.deinit();
+    try admission.remember(remembered);
+
+    var stale = try testEnvelope(std.testing.allocator, "repo-a", "alice", "laptop", 4, "idem-6");
+    defer stale.deinit();
+    try std.testing.expect(!try admission.accept(stale));
+
+    var wrong_repo = try testEnvelope(std.testing.allocator, "repo-b", "alice", "laptop", 6, "idem-7");
+    defer wrong_repo.deinit();
+    try std.testing.expectError(error.InvalidSnapshot, admission.remember(wrong_repo));
+}
+
+test "ref head parsing skips malformed rows and finds oids" {
+    const raw =
+        " refs/gitomi/genesis \tabc123\n" ++
+        "malformed\n" ++
+        "refs/gitomi/inbox/alice/laptop\tdef456\n" ++
+        "\n" ++
+        "\tblank-ref\n" ++
+        "refs/heads/main\t\n";
+    var refs = try parseRefsRaw(std.testing.allocator, raw);
+    defer freeRefHeads(std.testing.allocator, &refs);
+
+    try std.testing.expectEqual(@as(usize, 2), refs.items.len);
+    try std.testing.expectEqualStrings("abc123", findRefOid(refs.items, "refs/gitomi/genesis").?);
+    try std.testing.expectEqualStrings("def456", findRefOid(refs.items, "refs/gitomi/inbox/alice/laptop").?);
+    try std.testing.expect(findRefOid(refs.items, "refs/heads/main") == null);
+}
+
+test "snapshot manifest round trips covered refs and rejects invalid metadata" {
+    const refs_raw =
+        "refs/gitomi/genesis\tabc123\n" ++
+        "refs/gitomi/inbox/alice/laptop\tdef456\n" ++
+        "\n";
+    const manifest = try buildSnapshotManifest(std.testing.allocator, refs_raw);
+    defer std.testing.allocator.free(manifest);
+
+    const covered = try parseSnapshotManifest(std.testing.allocator, manifest);
+    defer std.testing.allocator.free(covered);
+    try std.testing.expectEqualStrings(refs_raw, covered);
+
+    try std.testing.expectError(
+        error.InvalidSnapshot,
+        parseSnapshotManifest(std.testing.allocator, "{\"$schema\":\"wrong\"}"),
+    );
+}
+
+test "first parent matcher handles root and merge histories" {
+    try std.testing.expect(firstParentMatches("", null));
+    try std.testing.expect(!firstParentMatches("parent-a", null));
+    try std.testing.expect(firstParentMatches("parent-a parent-b", "parent-a"));
+    try std.testing.expect(!firstParentMatches("parent-b parent-a", "parent-a"));
+}
+
+test "snapshot prune numbers require unsigned integers" {
+    try std.testing.expectEqual(@as(u64, 42), try parseSnapshotPruneNumber("42", "max-count"));
+    try std.testing.expectError(CliError.UserError, parseSnapshotPruneNumber("-1", "max-count"));
+    try std.testing.expectError(CliError.UserError, parseSnapshotPruneNumber("many", "max-count"));
+}
+
+fn testEnvelope(
+    allocator: Allocator,
+    repo_id: []const u8,
+    actor_principal: []const u8,
+    actor_device: []const u8,
+    seq: i64,
+    idempotency_key: []const u8,
+) !ValidatedEnvelope {
+    return .{
+        .allocator = allocator,
+        .repo_id = try allocator.dupe(u8, repo_id),
+        .event_uuid = try allocator.dupe(u8, "018f0000-0000-7000-8000-000000000000"),
+        .event_type = try allocator.dupe(u8, "issue.opened"),
+        .object_kind = try allocator.dupe(u8, "issue"),
+        .object_id = try allocator.dupe(u8, "018f0000-0000-7000-8000-000000000001"),
+        .idempotency_key = try allocator.dupe(u8, idempotency_key),
+        .actor_principal = try allocator.dupe(u8, actor_principal),
+        .actor_device = try allocator.dupe(u8, actor_device),
+        .seq = seq,
+        .occurred_at = try allocator.dupe(u8, "2026-05-15T12:00:00Z"),
+    };
+}
+
 fn loadNewestValidSnapshot(
     allocator: Allocator,
     repo: Repo,
@@ -1209,49 +1336,7 @@ fn firstParentMatches(parents: []const u8, expected_first_parent: ?[]const u8) b
 }
 
 fn eventParentHashesMatch(allocator: Allocator, parents: []const u8, body: []const u8) !bool {
-    var parent_list: std.ArrayList([]const u8) = .empty;
-    defer parent_list.deinit(allocator);
-    var parent_it = std.mem.tokenizeScalar(u8, parents, ' ');
-    while (parent_it.next()) |parent| try parent_list.append(allocator, parent);
-
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return false;
-    defer parsed.deinit();
-    const root = switch (parsed.value) {
-        .object => |object| object,
-        else => return false,
-    };
-    const parent_hashes = switch (root.get("parent_hashes") orelse return false) {
-        .object => |object| object,
-        else => return false,
-    };
-    const log_hash = switch (parent_hashes.get("log") orelse return false) {
-        .string => |value| value,
-        else => return false,
-    };
-    const anchor_hash = switch (parent_hashes.get("anchor") orelse return false) {
-        .string => |value| value,
-        else => return false,
-    };
-    const causal = switch (parent_hashes.get("causal") orelse return false) {
-        .array => |array| array,
-        else => return false,
-    };
-    if (causal.items.len > git.max_causal_parents) return false;
-
-    const first_parent = if (parent_list.items.len == 0) null else parent_list.items[0];
-    if (log_hash.len == 0) {
-        if (first_parent == null or anchor_hash.len == 0 or !std.mem.eql(u8, anchor_hash, first_parent.?)) return false;
-    } else {
-        if (first_parent == null or !std.mem.eql(u8, log_hash, first_parent.?)) return false;
-        if (anchor_hash.len != 0) return false;
-    }
-
-    const expected_causal_len = if (parent_list.items.len == 0) 0 else parent_list.items.len - 1;
-    if (causal.items.len != expected_causal_len) return false;
-    for (causal.items, 0..) |item, idx| {
-        if (item != .string or !std.mem.eql(u8, item.string, parent_list.items[idx + 1])) return false;
-    }
-    return true;
+    return (try event_mod.validateParentHashes(allocator, parents, body)) == null;
 }
 
 fn verifyCommitSignatureQuiet(allocator: Allocator, commit: []const u8) !bool {
@@ -1316,6 +1401,11 @@ pub const listCommentsFromIndex = index_query.listCommentsFromIndex;
 pub const listEventsFromIndex = index_query.listEventsFromIndex;
 pub const CommentParentInfo = index_query.CommentParentInfo;
 pub const resolveProjectId = index_query.resolveProjectId;
+pub const ProjectColumnRef = index_query.ProjectColumnRef;
+pub const resolveProjectColumnRef = index_query.resolveProjectColumnRef;
+pub const resolveProjectFieldId = index_query.resolveProjectFieldId;
+pub const resolveProjectFieldOptionId = index_query.resolveProjectFieldOptionId;
+pub const resolveProjectViewId = index_query.resolveProjectViewId;
 pub const projectNameForId = index_query.projectNameForId;
 pub const resolveMilestoneId = index_query.resolveMilestoneId;
 pub const sqliteLimitValue = index_query.sqliteLimitValue;

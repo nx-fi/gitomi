@@ -233,8 +233,30 @@ init_repo "$projects_repo"
   projects="$(gt project list --json)"
   assert_line_count "$projects" 1
   assert_contains "$projects" '"name":"Roadmap"'
+  assert_contains "$projects" '"slug":"roadmap"'
   assert_contains "$projects" '"description":"Release work"'
   assert_contains "$projects" '"columns":["Backlog","Done"]'
+  assert_contains "$projects" '"column_refs":[{"name":"Backlog","ref":"backlog"},{"name":"Done","ref":"done"}]'
+  gt project edit Roadmap --description "Release planning" >/dev/null
+  gt project column Roadmap add "In Review" >/dev/null
+  gt project field Roadmap create --key status --name "Status" --type single_select --position 1 --required true --default-json '"Backlog"' >/dev/null
+  gt project field-option Roadmap status add --name "Backlog" --color green --position 1 >/dev/null
+  gt project field-option Roadmap status add --name "In Review" --color yellow --position 2 >/dev/null
+  gt project view Roadmap create --name Board --layout board --position 1 --config-json '{"group_by":"status"}' >/dev/null
+  gt project view Roadmap create --name Timeline --layout roadmap --position 2 --config-json '{"date_field":"target"}' >/dev/null
+  projects="$(gt project list --json)"
+  assert_contains "$projects" '"description":"Release planning"'
+  assert_contains "$projects" '"columns":["Backlog","Done","In Review"]'
+  assert_contains "$projects" '"column_refs":[{"name":"Backlog","ref":"backlog"},{"name":"Done","ref":"done"},{"name":"In Review","ref":"in-review"}]'
+  assert_contains "$projects" '"key":"status"'
+  assert_contains "$projects" '"type":"single_select"'
+  assert_contains "$projects" '"default_value":"Backlog"'
+  assert_contains "$projects" '"options":[{"id":'
+  assert_contains "$projects" '"name":"Backlog","color":"green"'
+  assert_contains "$projects" '"name":"In Review","color":"yellow"'
+  assert_contains "$projects" '"layout":"board"'
+  assert_contains "$projects" '"config":{"group_by":"status"}'
+  assert_contains "$projects" '"layout":"roadmap"'
   gt milestone create --title "v1.0" --description "First release" --due "2026-06-01" >/dev/null
   milestones="$(gt milestone list --json)"
   assert_line_count "$milestones" 1
@@ -258,16 +280,25 @@ init_repo "$projects_repo"
   [[ -n "$issue_id" ]] || fail "expected issue id from issue list"
   issue_ref="#$(object_ref "$issue_id")"
   gt project add "Roadmap" "$issue_ref" --column "Backlog" >/dev/null
+  gt issue project-field "$issue_ref" set Roadmap status --value "In Review" >/dev/null
+  gt issue project-field "$issue_ref" clear Roadmap status >/dev/null
   gt issue milestone "$issue_ref" --milestone "v1.1" >/dev/null
   issue_show="$(gt issue show "$issue_ref")"
   assert_contains "$issue_show" "milestone: v1.1"
-  assert_contains "$issue_show" "projects:  Roadmap / Backlog"
+  assert_contains "$issue_show" "projects:  Roadmap"
   events="$(gt events list --json)"
   assert_contains "$events" '"event_type":"project.created"'
+  assert_contains "$events" '"event_type":"project.updated"'
+  assert_contains "$events" '"event_type":"project.column_added"'
+  assert_contains "$events" '"event_type":"project.field_created"'
+  assert_contains "$events" '"event_type":"project.field_option_added"'
+  assert_contains "$events" '"event_type":"project.view_created"'
   assert_contains "$events" '"event_type":"milestone.created"'
   assert_contains "$events" '"event_type":"milestone.updated"'
   assert_contains "$events" '"event_type":"milestone.state_set"'
   assert_contains "$events" '"event_type":"issue.project_added"'
+  assert_contains "$events" '"event_type":"issue.project_field_set"'
+  assert_contains "$events" '"event_type":"issue.project_field_cleared"'
   assert_contains "$events" '"event_type":"issue.milestone_set"'
   gt fsck >/dev/null
 )
@@ -679,20 +710,46 @@ on:
   push:
   schedule:
     - cron: "* * * * *"
+permissions:
+  contents: read
+source:
+  workflow_from: target
+  code_from: target
 jobs:
   test:
     backend: shell
+    permissions:
+      issues: write
     steps:
       - run: echo native-ok > native-output.txt
       - run: test -f native-output.txt
 YAML
-  git add .gitomi/workflows/native.yml
-  git commit -m "Add native workflow" >/dev/null
+  cat > .gitomi/workflows/agent.yml <<'YAML'
+name: Agent Review
+on: workflow_dispatch
+permissions:
+  issues: read
+jobs:
+  review:
+    backend: agent
+    uses: .gitomi/pipelines/code-review
+YAML
+  mkdir -p .gitomi/pipelines/code-review
+  cat > .gitomi/pipelines/code-review/pipeline.yml <<'YAML'
+name: Code Review
+tools:
+  - comments.write
+permissions:
+  issues: read
+YAML
+  git add .gitomi
+  git commit -m "Add native workflows" >/dev/null
 
   workflows="$(gt actions workflows --json)"
   assert_contains "$workflows" '"path":".gitomi/workflows/native.yml"'
   assert_contains "$workflows" '"dialect":"gitomi"'
   assert_contains "$workflows" '"triggers":["push","schedule","workflow.schedule"]'
+  assert_contains "$workflows" '"path":".gitomi/workflows/agent.yml"'
 
   gt actions run --event push >/dev/null
   events="$(gt events list --json)"
@@ -701,6 +758,16 @@ YAML
   assert_contains "$events" '"diagnostics_ref":"refs/gitomi/runs/alice-laptop/'
   completed_body="$(git log -1 --format=%B refs/gitomi/inbox/alice/laptop)"
   assert_contains "$completed_body" '"diagnostics_ref":"refs/gitomi/runs/alice-laptop/'
+  assert_contains "$completed_body" '"attempt_id":"'
+  assert_contains "$completed_body" '"runner_id":"alice-laptop"'
+  inbox_log="$(git log --format=%B refs/gitomi/inbox/alice/laptop)"
+  assert_contains "$inbox_log" '"workflow_name":"Native CI"'
+  assert_contains "$inbox_log" '"workflow_dialect":"gitomi"'
+  assert_contains "$inbox_log" '"backend_kind":"shell"'
+  assert_contains "$inbox_log" '"source_workflow_from":"target"'
+  assert_contains "$inbox_log" '"permission_grant":{"schema":"urn:gitomi:workflow-permission-grant:v1"'
+  assert_file ".git/gitomi/runner/id"
+  assert_contains "$(cat .git/gitomi/runner/id)" "alice-laptop"
 
   run_ref="$(git for-each-ref --format='%(refname)' refs/gitomi/runs | head -n 1)"
   [[ -n "$run_ref" ]] || fail "expected native workflow run ref"
@@ -709,6 +776,60 @@ YAML
   assert_contains "$run_json" '"workflow":".gitomi/workflows/native.yml"'
   assert_contains "$run_json" '"dialect":"gitomi"'
   assert_contains "$run_json" '"conclusion":"success"'
+  run_files="$(git ls-tree -r --name-only "$run_ref")"
+  assert_contains "$run_files" "/manifest.json"
+  assert_contains "$run_files" "/outputs/final.json"
+
+  fakebin="$PWD/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/agent-runner" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" > "${AGENT_ARGS_LOG:?}"
+event_path=""
+pipeline=""
+worktree=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --event)
+      shift
+      event_path="${1:-}"
+      ;;
+    --pipeline)
+      shift
+      pipeline="${1:-}"
+      ;;
+    --worktree)
+      shift
+      worktree="${1:-}"
+      ;;
+  esac
+  shift || true
+done
+[[ -f "$event_path" ]] || exit 2
+[[ -f "$worktree/$pipeline/pipeline.yml" ]] || exit 3
+SH
+  chmod +x "$fakebin/agent-runner"
+  AGENT_ARGS_LOG="$PWD/agent-args.log" gt actions run --event workflow.manual --agent-runner "$fakebin/agent-runner" >/dev/null
+  agent_args="$(cat agent-args.log)"
+  assert_contains "$agent_args" "--pipeline .gitomi/pipelines/code-review"
+  assert_contains "$agent_args" "--event "
+  inbox_log="$(git log --format=%B refs/gitomi/inbox/alice/laptop)"
+  assert_contains "$inbox_log" '"workflow_name":"Agent Review"'
+  assert_contains "$inbox_log" '"backend_kind":"agent"'
+  assert_contains "$inbox_log" '"pipeline":".gitomi/pipelines/code-review"'
+  agent_run_ref=""
+  for ref in $(git for-each-ref --format='%(refname)' refs/gitomi/runs); do
+    if git ls-tree -r --name-only "$ref" | grep -q 'pipelines/review-manifest.json'; then
+      agent_run_ref="$ref"
+      break
+    fi
+  done
+  [[ -n "$agent_run_ref" ]] || fail "expected agent workflow run ref with pipeline manifest"
+  pipeline_manifest="$(git show "$agent_run_ref:$(git ls-tree -r --name-only "$agent_run_ref" | grep 'pipelines/review-manifest.json' | head -n 1)")"
+  assert_contains "$pipeline_manifest" '"schema":"urn:gitomi:pipeline-manifest:v1"'
+  assert_contains "$pipeline_manifest" '"name":"Code Review"'
+  assert_contains "$pipeline_manifest" '"tools":["comments.write"]'
   gt fsck >/dev/null
 )
 

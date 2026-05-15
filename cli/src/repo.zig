@@ -876,39 +876,21 @@ pub fn loadGenesisManifest(allocator: Allocator, commit: []const u8) !GenesisMan
     const public_key = jsonString(signing_key.get("public_key")) orelse return invalidGenesis(commit, "signing_key.public_key must be a non-empty string");
     const fingerprint = jsonString(signing_key.get("fingerprint")) orelse return invalidGenesis(commit, "signing_key.fingerprint must be a non-empty string");
 
-    var repo_id_owned: ?[]u8 = try allocator.dupe(u8, repo_id);
-    errdefer if (repo_id_owned) |value| allocator.free(value);
-    var owner_principal_owned: ?[]u8 = try allocator.dupe(u8, owner_principal);
-    errdefer if (owner_principal_owned) |value| allocator.free(value);
-    var owner_role_owned: ?[]u8 = try allocator.dupe(u8, role);
-    errdefer if (owner_role_owned) |value| allocator.free(value);
-    var device_principal_owned: ?[]u8 = try allocator.dupe(u8, device_principal);
-    errdefer if (device_principal_owned) |value| allocator.free(value);
-    var device_id_owned: ?[]u8 = try allocator.dupe(u8, device_id);
-    errdefer if (device_id_owned) |value| allocator.free(value);
-    var public_key_owned: ?[]u8 = try allocator.dupe(u8, public_key);
-    errdefer if (public_key_owned) |value| allocator.free(value);
-    var fingerprint_owned: ?[]u8 = try allocator.dupe(u8, fingerprint);
-    errdefer if (fingerprint_owned) |value| allocator.free(value);
+    var owned = util.OwnedSliceList{ .allocator = allocator };
+    defer owned.deinit();
 
     const manifest = GenesisManifest{
         .allocator = allocator,
-        .repo_id = repo_id_owned.?,
+        .repo_id = try owned.dupe(repo_id),
         .access_mode = access_mode,
-        .owner_principal = owner_principal_owned.?,
-        .owner_role = owner_role_owned.?,
-        .device_principal = device_principal_owned.?,
-        .device_id = device_id_owned.?,
-        .public_key = public_key_owned.?,
-        .fingerprint = fingerprint_owned.?,
+        .owner_principal = try owned.dupe(owner_principal),
+        .owner_role = try owned.dupe(role),
+        .device_principal = try owned.dupe(device_principal),
+        .device_id = try owned.dupe(device_id),
+        .public_key = try owned.dupe(public_key),
+        .fingerprint = try owned.dupe(fingerprint),
     };
-    repo_id_owned = null;
-    owner_principal_owned = null;
-    owner_role_owned = null;
-    device_principal_owned = null;
-    device_id_owned = null;
-    public_key_owned = null;
-    fingerprint_owned = null;
+    owned.release();
     return manifest;
 }
 

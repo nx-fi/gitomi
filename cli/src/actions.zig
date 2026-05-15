@@ -15,6 +15,7 @@ const EventWriter = event_writer_mod.EventWriter;
 const appendJsonFieldString = json_writer.appendJsonFieldString;
 const appendJsonFieldStringArray = json_writer.appendJsonFieldStringArray;
 const appendJsonFieldUnsigned = json_writer.appendJsonFieldUnsigned;
+const appendJsonString = json_writer.appendJsonString;
 
 pub const Options = struct {
     act_path: []const u8 = "act",
@@ -49,7 +50,10 @@ pub const Workflow = struct {
     path: []u8,
     name: []u8,
     triggers: [][]u8,
+    trigger_defs: []WorkflowTrigger,
     dialect: WorkflowDialect,
+    source: WorkflowSourcePolicy,
+    permissions: []KeyValuePair,
     jobs: []WorkflowJob,
     schedules: [][]u8,
 
@@ -58,6 +62,10 @@ pub const Workflow = struct {
         self.allocator.free(self.name);
         for (self.triggers) |trigger| self.allocator.free(trigger);
         self.allocator.free(self.triggers);
+        for (self.trigger_defs) |*trigger| trigger.deinit();
+        self.allocator.free(self.trigger_defs);
+        self.source.deinit(self.allocator);
+        freeKeyValuePairs(self.allocator, self.permissions);
         for (self.jobs) |*job| job.deinit();
         self.allocator.free(self.jobs);
         for (self.schedules) |schedule| self.allocator.free(schedule);
@@ -77,12 +85,75 @@ pub const WorkflowDialect = enum {
     }
 };
 
+pub const WorkflowSourcePolicy = struct {
+    workflow_from: []u8,
+    code_from: []u8,
+
+    fn initDefaults(allocator: Allocator) !WorkflowSourcePolicy {
+        return .{
+            .workflow_from = try allocator.dupe(u8, "target"),
+            .code_from = try allocator.dupe(u8, "target"),
+        };
+    }
+
+    fn deinit(self: *WorkflowSourcePolicy, allocator: Allocator) void {
+        allocator.free(self.workflow_from);
+        allocator.free(self.code_from);
+    }
+
+    fn setWorkflowFrom(self: *WorkflowSourcePolicy, allocator: Allocator, value: []const u8) !void {
+        const owned = try allocator.dupe(u8, value);
+        allocator.free(self.workflow_from);
+        self.workflow_from = owned;
+    }
+
+    fn setCodeFrom(self: *WorkflowSourcePolicy, allocator: Allocator, value: []const u8) !void {
+        const owned = try allocator.dupe(u8, value);
+        allocator.free(self.code_from);
+        self.code_from = owned;
+    }
+};
+
+pub const WorkflowTrigger = struct {
+    allocator: Allocator,
+    name: []u8,
+    branches: [][]u8 = &.{},
+    branches_ignore: [][]u8 = &.{},
+    paths: [][]u8 = &.{},
+    paths_ignore: [][]u8 = &.{},
+    types: [][]u8 = &.{},
+    actors: [][]u8 = &.{},
+    labels: [][]u8 = &.{},
+
+    fn deinit(self: *WorkflowTrigger) void {
+        self.allocator.free(self.name);
+        git.freeStringList(self.allocator, self.branches);
+        git.freeStringList(self.allocator, self.branches_ignore);
+        git.freeStringList(self.allocator, self.paths);
+        git.freeStringList(self.allocator, self.paths_ignore);
+        git.freeStringList(self.allocator, self.types);
+        git.freeStringList(self.allocator, self.actors);
+        git.freeStringList(self.allocator, self.labels);
+    }
+};
+
+pub const KeyValuePair = struct {
+    key: []u8,
+    value: []u8,
+};
+
 pub const WorkflowJob = struct {
     allocator: Allocator,
     id: []u8,
     backend: []u8,
     uses: ?[]u8 = null,
     image: ?[]u8 = null,
+    needs: [][]u8 = &.{},
+    condition: ?[]u8 = null,
+    with: []KeyValuePair = &.{},
+    env: []KeyValuePair = &.{},
+    permissions: []KeyValuePair = &.{},
+    timeout_minutes: ?u64 = null,
     steps: []WorkflowStep = &.{},
 
     pub fn deinit(self: *WorkflowJob) void {
@@ -90,6 +161,11 @@ pub const WorkflowJob = struct {
         self.allocator.free(self.backend);
         if (self.uses) |value| self.allocator.free(value);
         if (self.image) |value| self.allocator.free(value);
+        git.freeStringList(self.allocator, self.needs);
+        if (self.condition) |value| self.allocator.free(value);
+        freeKeyValuePairs(self.allocator, self.with);
+        freeKeyValuePairs(self.allocator, self.env);
+        freeKeyValuePairs(self.allocator, self.permissions);
         for (self.steps) |*step| step.deinit();
         self.allocator.free(self.steps);
     }
@@ -114,6 +190,7 @@ pub const RunRequest = struct {
     target_oid: ?[]u8,
     event_name: []u8,
     gitomi_event_type: []u8,
+    schedule_slot: ?[]u8 = null,
 
     pub fn deinit(self: *RunRequest) void {
         self.allocator.free(self.run_id);
@@ -122,6 +199,7 @@ pub const RunRequest = struct {
         if (self.target_oid) |value| self.allocator.free(value);
         self.allocator.free(self.event_name);
         self.allocator.free(self.gitomi_event_type);
+        if (self.schedule_slot) |value| self.allocator.free(value);
     }
 };
 
@@ -175,11 +253,70 @@ const ExecuteResult = struct {
     conclusion: []const u8,
     diagnostics_ref: ?[]u8 = null,
     diagnostics_oid: ?[]u8 = null,
+    attempt_id: ?[]u8 = null,
+    runner_id: ?[]u8 = null,
 
     fn deinit(self: *ExecuteResult) void {
         if (self.diagnostics_ref) |value| self.allocator.free(value);
         if (self.diagnostics_oid) |value| self.allocator.free(value);
+        if (self.attempt_id) |value| self.allocator.free(value);
+        if (self.runner_id) |value| self.allocator.free(value);
     }
+};
+
+const EventContext = struct {
+    event_type: []const u8 = "",
+    event_name: []const u8 = "",
+    actor: ?[]const u8 = null,
+    branch: ?[]const u8 = null,
+    paths: ?[]const []u8 = null,
+    labels: ?[]const []u8 = null,
+};
+
+const RunMetadata = struct {
+    workflow_name: ?[]const u8 = null,
+    workflow_dialect: ?[]const u8 = null,
+    workflow_source_ref: ?[]const u8 = null,
+    workflow_source_oid: ?[]const u8 = null,
+    backend_kind: ?[]const u8 = null,
+    pipeline: ?[]const u8 = null,
+    schedule_slot: ?[]const u8 = null,
+    source_workflow_from: ?[]const u8 = null,
+    source_code_from: ?[]const u8 = null,
+    permission_grant_json: ?[]const u8 = null,
+};
+
+const RunClaim = struct {
+    allocator: Allocator,
+    path: []u8,
+    file: std.fs.File,
+
+    fn deinit(self: *RunClaim) void {
+        self.file.close();
+        std.fs.deleteFileAbsolute(self.path) catch {};
+        self.allocator.free(self.path);
+    }
+};
+
+const PipelineManifest = struct {
+    allocator: Allocator,
+    path: []u8,
+    name: []u8,
+    tools: [][]u8,
+    permissions: []KeyValuePair,
+
+    fn deinit(self: *PipelineManifest) void {
+        self.allocator.free(self.path);
+        self.allocator.free(self.name);
+        git.freeStringList(self.allocator, self.tools);
+        freeKeyValuePairs(self.allocator, self.permissions);
+    }
+};
+
+const JobState = enum {
+    pending,
+    skipped,
+    completed,
 };
 
 const DiagnosticFile = struct {
@@ -220,10 +357,12 @@ const DiagnosticRef = struct {
     allocator: Allocator,
     ref: []u8,
     oid: []u8,
+    runner_id: []u8,
 
     fn deinit(self: *DiagnosticRef) void {
         self.allocator.free(self.ref);
         self.allocator.free(self.oid);
+        self.allocator.free(self.runner_id);
     }
 };
 
@@ -382,6 +521,18 @@ pub fn scheduleEvent(
     object_id: ?[]const u8,
     options: Options,
 ) !void {
+    try scheduleEventWithContext(allocator, event_type, target_ref, target_oid, object_id, .{}, options);
+}
+
+fn scheduleEventWithContext(
+    allocator: Allocator,
+    event_type: []const u8,
+    target_ref: ?[]const u8,
+    target_oid: ?[]const u8,
+    object_id: ?[]const u8,
+    context_extra: EventContext,
+    options: Options,
+) !void {
     var repo = try repo_mod.discoverRepo(allocator);
     defer repo.deinit();
 
@@ -392,17 +543,26 @@ pub fn scheduleEvent(
     defer freeWorkflows(allocator, workflows);
 
     const event_name = githubEventName(event_type);
+    const branch = context_extra.branch orelse branchNameFromRef(target.target_ref);
+    const context = EventContext{
+        .event_type = event_type,
+        .event_name = event_name,
+        .actor = context_extra.actor,
+        .branch = branch,
+        .paths = context_extra.paths,
+        .labels = context_extra.labels,
+    };
     var matched: usize = 0;
     var failed = false;
     for (workflows) |workflow| {
-        if (!workflowMatches(workflow, event_type, event_name)) continue;
+        if (!workflowMatchesContext(workflow, context)) continue;
         matched += 1;
         if (options.dry_run) {
             try io.out("would run {s} for {s} at {s}\n", .{ workflow.path, event_type, target.target_oid });
             continue;
         }
 
-        if (try requestAndExecuteWorkflow(allocator, repo, workflow, target, event_name, event_type, object_id, options)) {
+        if (try requestAndExecuteWorkflow(allocator, repo, workflow, target, event_name, event_type, object_id, .{}, options)) {
             failed = true;
         }
     }
@@ -463,13 +623,14 @@ fn runRequestedWithRepo(allocator: Allocator, repo: repo_mod.Repo, run_filter: ?
             request.event_name,
             if (request.gitomi_event_type.len == 0) "action.run_requested" else request.gitomi_event_type,
             null,
+            request.schedule_slot,
             options,
         ) catch |err| blk: {
             if (!errors.isReported(err)) try io.eprint("gt actions: execution failed: {s}\n", .{@errorName(err)});
             break :blk ExecuteResult{ .allocator = allocator, .conclusion = "failure" };
         };
         defer execution.deinit();
-        var completed = try createRunCompletedEvent(
+        var completed = try createRunCompletedEventWithMetadata(
             allocator,
             request.run_id,
             execution.conclusion,
@@ -479,6 +640,10 @@ fn runRequestedWithRepo(allocator: Allocator, repo: repo_mod.Repo, run_filter: ?
             request.event_name,
             execution.diagnostics_ref,
             execution.diagnostics_oid,
+            .{
+                .attempt_id = execution.attempt_id,
+                .runner_id = execution.runner_id,
+            },
             false,
         );
         defer completed.deinit();
@@ -545,7 +710,25 @@ fn runDaemonTick(allocator: Allocator, repo: repo_mod.Repo, options: DaemonOptio
     if (try currentHeadOid(allocator)) |head| {
         defer allocator.free(head);
         if (options.replay or state.last_head_oid.len == 0 or !std.mem.eql(u8, state.last_head_oid, head)) {
-            try runScheduledEvent(allocator, "push", "HEAD", head, null, options);
+            const push_ref = (try currentBranchRef(allocator)) orelse try allocator.dupe(u8, "HEAD");
+            defer allocator.free(push_ref);
+            const changed_paths = if (!options.replay and state.last_head_oid.len != 0)
+                try changedPathsBetween(allocator, state.last_head_oid, head)
+            else
+                try allocator.alloc([]u8, 0);
+            defer git.freeStringList(allocator, changed_paths);
+            try runScheduledEventWithContext(
+                allocator,
+                "push",
+                push_ref,
+                head,
+                null,
+                .{
+                    .branch = branchNameFromRef(push_ref),
+                    .paths = changed_paths,
+                },
+                options,
+            );
             try state.setHead(head);
         }
     }
@@ -564,7 +747,7 @@ fn scheduleAcceptedEventsAfter(
 ) !void {
     _ = repo;
     var stmt = try db.prepare(
-        \\SELECT ordinal, event_type, object_id
+        \\SELECT ordinal, event_type, object_id, actor_principal, body
         \\FROM events
         \\WHERE valid_json != 0 AND domain_status = 'accepted' AND ordinal > ?
         \\ORDER BY ordinal
@@ -577,9 +760,29 @@ fn scheduleAcceptedEventsAfter(
         defer allocator.free(event_type);
         const object_id = try stmt.columnTextDup(allocator, 2);
         defer allocator.free(object_id);
+        const actor = try stmt.columnTextDup(allocator, 3);
+        defer allocator.free(actor);
+        const body = try stmt.columnTextDup(allocator, 4);
+        defer allocator.free(body);
 
         if (std.mem.startsWith(u8, event_type, "action.")) continue;
-        try runScheduledEvent(allocator, event_type, null, null, if (object_id.len == 0) null else object_id, options);
+        const labels = try labelsFromEventPayload(allocator, body);
+        defer git.freeStringList(allocator, labels);
+        const branch = try branchFromIndexedEvent(allocator, db, event_type, object_id, body);
+        defer if (branch) |value| allocator.free(value);
+        try runScheduledEventWithContext(
+            allocator,
+            event_type,
+            null,
+            null,
+            if (object_id.len == 0) null else object_id,
+            .{
+                .actor = actor,
+                .branch = branch,
+                .labels = labels,
+            },
+            options,
+        );
     }
 }
 
@@ -591,7 +794,19 @@ fn runScheduledEvent(
     object_id: ?[]const u8,
     options: DaemonOptions,
 ) !void {
-    scheduleEvent(allocator, event_type, target_ref, target_oid, object_id, daemonRunOptions(options)) catch |err| {
+    try runScheduledEventWithContext(allocator, event_type, target_ref, target_oid, object_id, .{}, options);
+}
+
+fn runScheduledEventWithContext(
+    allocator: Allocator,
+    event_type: []const u8,
+    target_ref: ?[]const u8,
+    target_oid: ?[]const u8,
+    object_id: ?[]const u8,
+    context: EventContext,
+    options: DaemonOptions,
+) !void {
+    scheduleEventWithContext(allocator, event_type, target_ref, target_oid, object_id, context, daemonRunOptions(options)) catch |err| {
         if (errors.isUserError(err)) return;
         return err;
     };
@@ -626,13 +841,27 @@ fn scheduleDueWorkflows(
     var minute = start_minute;
     while (minute <= current_minute) : (minute += 1) {
         for (workflows) |workflow| {
-            if (!workflowScheduleDue(workflow, minute * 60)) continue;
-            if (options.dry_run) {
-                try io.out("would run scheduled {s} for minute {d}\n", .{ workflow.path, minute });
-                continue;
-            }
-            if (try requestAndExecuteWorkflow(allocator, repo, workflow, target, "schedule", "workflow.schedule", null, daemonRunOptions(options))) {
-                failed = true;
+            for (workflow.schedules) |cron| {
+                if (!cronMatches(cron, minute * 60)) continue;
+                const slot = try scheduleSlotKey(allocator, workflow.path, cron, minute);
+                defer allocator.free(slot);
+                if (options.dry_run) {
+                    try io.out("would run scheduled {s} for minute {d}\n", .{ workflow.path, minute });
+                    continue;
+                }
+                if (try requestAndExecuteWorkflow(
+                    allocator,
+                    repo,
+                    workflow,
+                    target,
+                    "schedule",
+                    "workflow.schedule",
+                    null,
+                    .{ .schedule_slot = slot },
+                    daemonRunOptions(options),
+                )) {
+                    failed = true;
+                }
             }
         }
     }
@@ -657,15 +886,31 @@ fn requestAndExecuteWorkflow(
     event_name: []const u8,
     event_type: []const u8,
     object_id: ?[]const u8,
+    metadata_extra: RunMetadata,
     options: Options,
 ) !bool {
-    var request = try createRunRequestedEvent(
+    const permission_grant_json = try buildPermissionGrantJson(allocator, workflow);
+    defer allocator.free(permission_grant_json);
+    const metadata = RunMetadata{
+        .workflow_name = workflow.name,
+        .workflow_dialect = workflow.dialect.label(),
+        .workflow_source_ref = target.target_ref,
+        .workflow_source_oid = target.target_oid,
+        .backend_kind = workflowBackendSummary(workflow),
+        .pipeline = workflowPipelineSummary(workflow),
+        .schedule_slot = metadata_extra.schedule_slot,
+        .source_workflow_from = workflow.source.workflow_from,
+        .source_code_from = workflow.source.code_from,
+        .permission_grant_json = permission_grant_json,
+    };
+    var request = try createRunRequestedEventWithMetadata(
         allocator,
         workflow.path,
         target.target_ref,
         target.target_oid,
         event_name,
         event_type,
+        metadata,
         false,
     );
     defer request.deinit();
@@ -679,6 +924,7 @@ fn requestAndExecuteWorkflow(
         event_name,
         event_type,
         object_id,
+        metadata_extra.schedule_slot,
         options,
     ) catch |err| blk: {
         if (!errors.isReported(err)) try io.eprint("gt actions: execution failed: {s}\n", .{@errorName(err)});
@@ -686,7 +932,7 @@ fn requestAndExecuteWorkflow(
     };
     defer execution.deinit();
 
-    var completed = try createRunCompletedEvent(
+    var completed = try createRunCompletedEventWithMetadata(
         allocator,
         request.run_id,
         execution.conclusion,
@@ -696,6 +942,10 @@ fn requestAndExecuteWorkflow(
         event_name,
         execution.diagnostics_ref,
         execution.diagnostics_oid,
+        .{
+            .attempt_id = execution.attempt_id,
+            .runner_id = execution.runner_id,
+        },
         false,
     );
     defer completed.deinit();
@@ -725,6 +975,107 @@ fn currentHeadOid(allocator: Allocator) !?[]u8 {
     defer result.deinit();
     if (result.exitCode() != 0) return null;
     return try util.trimDup(allocator, result.stdout);
+}
+
+fn currentBranchRef(allocator: Allocator) !?[]u8 {
+    var argv = [_][]const u8{ "git", "symbolic-ref", "--quiet", "HEAD" };
+    var result = try git.runCommand(allocator, &argv, null, 512 * 1024);
+    defer result.deinit();
+    if (result.exitCode() != 0) return null;
+    return try util.trimDup(allocator, result.stdout);
+}
+
+fn changedPathsBetween(allocator: Allocator, before_oid: []const u8, after_oid: []const u8) ![][]u8 {
+    const range = try std.fmt.allocPrint(allocator, "{s}..{s}", .{ before_oid, after_oid });
+    defer allocator.free(range);
+    var argv = [_][]const u8{ "git", "diff", "--name-only", range };
+    var result = try git.runCommand(allocator, &argv, null, git.max_git_output);
+    defer result.deinit();
+    if (result.exitCode() != 0) return allocator.alloc([]u8, 0);
+
+    var paths: [][]u8 = &.{};
+    errdefer git.freeStringList(allocator, paths);
+    var lines = std.mem.tokenizeScalar(u8, result.stdout, '\n');
+    while (lines.next()) |line_raw| {
+        const path = std.mem.trim(u8, line_raw, " \t\r\n");
+        if (path.len != 0) try appendStringToSlice(allocator, &paths, path);
+    }
+    return paths;
+}
+
+fn branchNameFromRef(ref: ?[]const u8) ?[]const u8 {
+    const value = ref orelse return null;
+    if (std.mem.startsWith(u8, value, "refs/heads/")) return value["refs/heads/".len..];
+    if (std.mem.startsWith(u8, value, "heads/")) return value["heads/".len..];
+    if (std.mem.eql(u8, value, "HEAD")) return null;
+    return value;
+}
+
+fn labelsFromEventPayload(allocator: Allocator, body: []const u8) ![][]u8 {
+    var labels: [][]u8 = &.{};
+    errdefer git.freeStringList(allocator, labels);
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return labels;
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return labels,
+    };
+    const payload = switch (root.get("payload") orelse return labels) {
+        .object => |object| object,
+        else => return labels,
+    };
+    try appendPayloadLabels(allocator, &labels, payload, "label");
+    try appendPayloadLabels(allocator, &labels, payload, "labels");
+    try appendPayloadLabels(allocator, &labels, payload, "labels_added");
+    return labels;
+}
+
+fn appendPayloadLabels(allocator: Allocator, labels: *[][]u8, payload: std.json.ObjectMap, key: []const u8) !void {
+    const value = payload.get(key) orelse return;
+    switch (value) {
+        .string => |label| try appendStringToSlice(allocator, labels, label),
+        .array => |items| {
+            for (items.items) |item| {
+                switch (item) {
+                    .string => |label| try appendStringToSlice(allocator, labels, label),
+                    else => {},
+                }
+            }
+        },
+        else => {},
+    }
+}
+
+fn branchFromIndexedEvent(allocator: Allocator, db: *index.SqliteDb, event_type: []const u8, object_id: []const u8, body: []const u8) !?[]u8 {
+    if (!std.mem.startsWith(u8, event_type, "pull.")) return branchFromEventPayload(allocator, body);
+    if (object_id.len != 0) {
+        var stmt = try db.prepare("SELECT base_ref FROM pulls WHERE id = ?");
+        defer stmt.deinit();
+        try stmt.bindText(1, object_id);
+        if (try stmt.step()) return try stmt.columnTextDup(allocator, 0);
+    }
+    return branchFromEventPayload(allocator, body);
+}
+
+fn branchFromEventPayload(allocator: Allocator, body: []const u8) !?[]u8 {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return null;
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return null,
+    };
+    const payload = switch (root.get("payload") orelse return null) {
+        .object => |object| object,
+        else => return null,
+    };
+    if (event_mod.jsonString(payload.get("base_ref"))) |value| return try allocator.dupe(u8, value);
+    if (event_mod.jsonString(payload.get("ref"))) |value| return try allocator.dupe(u8, value);
+    return null;
+}
+
+fn scheduleSlotKey(allocator: Allocator, workflow_path: []const u8, cron: []const u8, minute: i64) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{d}:{s}:{s}", .{ minute, workflow_path, cron });
 }
 
 fn schedulerStatePath(allocator: Allocator, repo: repo_mod.Repo) ![]u8 {
@@ -787,6 +1138,28 @@ pub fn createRunRequestedEvent(
     gitomi_event_type: ?[]const u8,
     quiet: bool,
 ) !RequestResult {
+    return createRunRequestedEventWithMetadata(
+        allocator,
+        workflow,
+        target_ref,
+        target_oid,
+        event_name,
+        gitomi_event_type,
+        .{},
+        quiet,
+    );
+}
+
+fn createRunRequestedEventWithMetadata(
+    allocator: Allocator,
+    workflow: []const u8,
+    target_ref: ?[]const u8,
+    target_oid: ?[]const u8,
+    event_name: ?[]const u8,
+    gitomi_event_type: ?[]const u8,
+    metadata: RunMetadata,
+    quiet: bool,
+) !RequestResult {
     var writer = try EventWriter.init(allocator, "gt actions request");
     defer writer.deinit();
 
@@ -813,6 +1186,18 @@ pub fn createRunRequestedEvent(
         target_oid,
         event_name,
         gitomi_event_type,
+        .{
+            .workflow_name = metadata.workflow_name,
+            .workflow_dialect = metadata.workflow_dialect,
+            .workflow_source_ref = metadata.workflow_source_ref,
+            .workflow_source_oid = metadata.workflow_source_oid,
+            .backend_kind = metadata.backend_kind,
+            .pipeline = metadata.pipeline,
+            .schedule_slot = metadata.schedule_slot,
+            .source_workflow_from = metadata.source_workflow_from,
+            .source_code_from = metadata.source_code_from,
+            .permission_grant_json = metadata.permission_grant_json,
+        },
     );
     defer allocator.free(event_body);
 
@@ -844,6 +1229,34 @@ pub fn createRunCompletedEvent(
     diagnostics_oid: ?[]const u8,
     quiet: bool,
 ) !CompleteResult {
+    return createRunCompletedEventWithMetadata(
+        allocator,
+        run_id,
+        conclusion,
+        target_ref,
+        target_oid,
+        workflow,
+        event_name,
+        diagnostics_ref,
+        diagnostics_oid,
+        .{},
+        quiet,
+    );
+}
+
+fn createRunCompletedEventWithMetadata(
+    allocator: Allocator,
+    run_id: []const u8,
+    conclusion: []const u8,
+    target_ref: ?[]const u8,
+    target_oid: ?[]const u8,
+    workflow: ?[]const u8,
+    event_name: ?[]const u8,
+    diagnostics_ref: ?[]const u8,
+    diagnostics_oid: ?[]const u8,
+    metadata: event_mod.ActionRunCompletedMetadata,
+    quiet: bool,
+) !CompleteResult {
     var writer = try EventWriter.init(allocator, "gt actions complete");
     defer writer.deinit();
 
@@ -870,6 +1283,7 @@ pub fn createRunCompletedEvent(
         event_name,
         diagnostics_ref,
         diagnostics_oid,
+        metadata,
     );
     defer allocator.free(event_body);
 
@@ -897,9 +1311,15 @@ fn executeWorkflow(
     event_name: []const u8,
     gitomi_event_type: []const u8,
     object_id: ?[]const u8,
+    schedule_slot: ?[]const u8,
     options: Options,
 ) !ExecuteResult {
-    const event_path = try writeActEventPayload(allocator, repo, run_id, workflow, target, event_name, gitomi_event_type, object_id);
+    var claim = try acquireRunClaim(allocator, repo, run_id);
+    defer claim.deinit();
+
+    const permission_grant_json = try buildPermissionGrantJson(allocator, workflow);
+    defer allocator.free(permission_grant_json);
+    const event_path = try writeActEventPayload(allocator, repo, run_id, workflow, target, event_name, gitomi_event_type, object_id, schedule_slot, permission_grant_json);
     defer {
         std.fs.deleteFileAbsolute(event_path) catch {};
         allocator.free(event_path);
@@ -932,9 +1352,13 @@ fn executeWorkflow(
     };
 
     var result = ExecuteResult{ .allocator = allocator, .conclusion = conclusion };
-    if (writeRunDiagnostics(allocator, repo, run_id, workflow, target, conclusion, diagnostics)) |diag_ref| {
-        result.diagnostics_ref = diag_ref.ref;
-        result.diagnostics_oid = diag_ref.oid;
+    result.attempt_id = try allocator.dupe(u8, diagnostics.attempt_id);
+    if (writeRunDiagnostics(allocator, repo, run_id, workflow, target, conclusion, diagnostics)) |diag_ref_value| {
+        var diag_ref = diag_ref_value;
+        defer diag_ref.deinit();
+        result.diagnostics_ref = try allocator.dupe(u8, diag_ref.ref);
+        result.diagnostics_oid = try allocator.dupe(u8, diag_ref.oid);
+        result.runner_id = try allocator.dupe(u8, diag_ref.runner_id);
     } else |err| {
         if (!errors.isReported(err)) try io.eprint("gt actions: failed to write run diagnostics: {s}\n", .{@errorName(err)});
     }
@@ -999,13 +1423,71 @@ fn executeGitomiWorkflow(
         return "failure";
     }
 
+    const states = try allocator.alloc(JobState, workflow.jobs.len);
+    defer allocator.free(states);
+    @memset(states, .pending);
+
+    var completed_count: usize = 0;
     var action_required = false;
-    for (workflow.jobs) |job| {
-        const conclusion = try executeGitomiJob(allocator, run_id, workflow, job, event_path, worktree_path, options, diagnostics);
-        if (std.mem.eql(u8, conclusion, "failure")) return "failure";
-        if (std.mem.eql(u8, conclusion, "action_required")) action_required = true;
+    while (completed_count < workflow.jobs.len) {
+        var progressed = false;
+        for (workflow.jobs, 0..) |job, idx| {
+            if (states[idx] != .pending) continue;
+            const needs_satisfied = jobNeedsSatisfied(workflow, states, job) catch |err| switch (err) {
+                error.UnknownWorkflowJobNeed => {
+                    try io.eprint("gt actions: native job {s} references an unknown dependency\n", .{job.id});
+                    return "failure";
+                },
+                else => return err,
+            };
+            if (!needs_satisfied) continue;
+            if (!conditionAllowsJob(job.condition)) {
+                try io.out("gt actions: {s} skipped by if condition\n", .{job.id});
+                states[idx] = .skipped;
+                completed_count += 1;
+                progressed = true;
+                continue;
+            }
+            const conclusion = try executeGitomiJob(allocator, run_id, workflow, job, event_path, worktree_path, options, diagnostics);
+            if (std.mem.eql(u8, conclusion, "failure")) return "failure";
+            if (std.mem.eql(u8, conclusion, "action_required")) action_required = true;
+            states[idx] = .completed;
+            completed_count += 1;
+            progressed = true;
+        }
+        if (!progressed) {
+            try io.eprint("gt actions: native workflow {s} has unknown or cyclic job dependencies\n", .{workflow.path});
+            return "failure";
+        }
     }
     return if (action_required) "action_required" else "success";
+}
+
+fn jobNeedsSatisfied(workflow: Workflow, states: []const JobState, job: WorkflowJob) !bool {
+    for (job.needs) |need| {
+        const idx = findWorkflowJob(workflow, need) orelse return error.UnknownWorkflowJobNeed;
+        if (states[idx] == .pending) return false;
+    }
+    return true;
+}
+
+fn findWorkflowJob(workflow: Workflow, id: []const u8) ?usize {
+    for (workflow.jobs, 0..) |job, idx| {
+        if (std.mem.eql(u8, job.id, id)) return idx;
+    }
+    return null;
+}
+
+fn conditionAllowsJob(condition: ?[]const u8) bool {
+    const raw = condition orelse return true;
+    const value = std.mem.trim(u8, raw, " \t\r\n");
+    if (value.len == 0) return true;
+    if (std.mem.eql(u8, value, "true")) return true;
+    if (std.mem.eql(u8, value, "false")) return false;
+    if (std.mem.eql(u8, value, "always()")) return true;
+    if (std.mem.eql(u8, value, "success()")) return true;
+    if (std.mem.eql(u8, value, "cancelled()")) return false;
+    return true;
 }
 
 fn executeGitomiJob(
@@ -1110,6 +1592,25 @@ fn executeAgentJob(
         try io.eprint("gt actions: agent job {s} requires uses: .gitomi/pipelines/<name>\n", .{job.id});
         return "failure";
     };
+    var manifest = validateAgentPipelinePackage(allocator, worktree_path, pipeline) catch |err| switch (err) {
+        error.InvalidPipelinePath => {
+            try io.eprint("gt actions: agent job {s} uses invalid pipeline path '{s}'\n", .{ job.id, pipeline });
+            return "failure";
+        },
+        error.PipelineManifestMissing => {
+            try io.eprint("gt actions: agent job {s} pipeline {s} is missing pipeline.yml or pipeline.yaml\n", .{ job.id, pipeline });
+            return "failure";
+        },
+        else => return err,
+    };
+    defer manifest.deinit();
+    const manifest_json = try buildPipelineManifestDiagnosticJson(allocator, manifest);
+    defer allocator.free(manifest_json);
+    const safe_job = try sanitizePathSegment(allocator, job.id);
+    defer allocator.free(safe_job);
+    const manifest_diag_path = try std.fmt.allocPrint(allocator, "attempts/{s}/pipelines/{s}-manifest.json", .{ diagnostics.attempt_id, safe_job });
+    defer allocator.free(manifest_diag_path);
+    try diagnostics.addCopy(manifest_diag_path, manifest_json);
 
     var result = try runCommandInDir(allocator, &.{
         runner,
@@ -1132,6 +1633,112 @@ fn executeAgentJob(
     if (result.stderr.len != 0) try io.eprint("{s}", .{result.stderr});
     try addStepLogs(allocator, diagnostics, job.id, 1, result.stdout, result.stderr);
     return if (result.exitCode() == 0) "success" else "failure";
+}
+
+fn validateAgentPipelinePackage(allocator: Allocator, worktree_path: []const u8, pipeline: []const u8) !PipelineManifest {
+    if (!std.mem.startsWith(u8, pipeline, ".gitomi/pipelines/")) return error.InvalidPipelinePath;
+    if (std.fs.path.isAbsolute(pipeline)) return error.InvalidPipelinePath;
+    var components = std.mem.tokenizeScalar(u8, pipeline, '/');
+    while (components.next()) |component| {
+        if (std.mem.eql(u8, component, "..") or std.mem.eql(u8, component, ".")) return error.InvalidPipelinePath;
+    }
+
+    const manifest_yml = try std.fs.path.join(allocator, &.{ worktree_path, pipeline, "pipeline.yml" });
+    defer allocator.free(manifest_yml);
+    const manifest_yaml = try std.fs.path.join(allocator, &.{ worktree_path, pipeline, "pipeline.yaml" });
+    defer allocator.free(manifest_yaml);
+
+    var manifest_path: ?[]u8 = null;
+    const bytes = std.fs.cwd().readFileAlloc(allocator, manifest_yml, 256 * 1024) catch |err| switch (err) {
+        error.FileNotFound => blk: {
+            const alt = std.fs.cwd().readFileAlloc(allocator, manifest_yaml, 256 * 1024) catch |alt_err| switch (alt_err) {
+                error.FileNotFound => return error.PipelineManifestMissing,
+                else => return alt_err,
+            };
+            manifest_path = try allocator.dupe(u8, manifest_yaml);
+            break :blk alt;
+        },
+        else => return err,
+    };
+    defer allocator.free(bytes);
+    if (manifest_path == null) manifest_path = try allocator.dupe(u8, manifest_yml);
+    errdefer if (manifest_path) |value| allocator.free(value);
+
+    var name: ?[]u8 = null;
+    errdefer if (name) |value| allocator.free(value);
+    var tools: [][]u8 = &.{};
+    errdefer git.freeStringList(allocator, tools);
+    var permissions: []KeyValuePair = &.{};
+    errdefer freeKeyValuePairs(allocator, permissions);
+
+    var in_tools = false;
+    var in_permissions = false;
+    var child_indent: ?usize = null;
+    var lines = std.mem.splitScalar(u8, bytes, '\n');
+    while (lines.next()) |line_raw| {
+        const clean = std.mem.trim(u8, stripYamlComment(line_raw), " \t\r\n");
+        if (clean.len == 0) continue;
+        const indent = lineIndent(line_raw);
+        if (indent == 0) {
+            in_tools = false;
+            in_permissions = false;
+            child_indent = null;
+            if (parseYamlKeyValue(clean)) |kv| {
+                if (std.mem.eql(u8, kv.key, "name")) {
+                    if (name) |old| allocator.free(old);
+                    name = try allocator.dupe(u8, unquoteScalar(kv.value));
+                } else if (std.mem.eql(u8, kv.key, "tools")) {
+                    if (kv.value.len == 0) {
+                        in_tools = true;
+                    } else {
+                        try parseStringListIntoSlice(allocator, &tools, kv.value);
+                    }
+                } else if (std.mem.eql(u8, kv.key, "permissions")) {
+                    if (kv.value.len == 0) {
+                        in_permissions = true;
+                    } else if (kv.value[0] == '{') {
+                        try parseInlineMappingIntoSlice(allocator, &permissions, kv.value);
+                    } else {
+                        try appendKeyValueToSlice(allocator, &permissions, "*", unquoteScalar(kv.value));
+                    }
+                }
+            }
+            continue;
+        }
+        if (child_indent == null) child_indent = indent;
+        if (indent != child_indent.?) continue;
+        if (in_tools and std.mem.startsWith(u8, clean, "-")) {
+            const value = unquoteScalar(std.mem.trim(u8, clean[1..], " \t\r\n"));
+            if (value.len != 0) try appendStringToSlice(allocator, &tools, value);
+        } else if (in_permissions) {
+            if (parseYamlKeyValue(clean)) |kv| try appendKeyValueToSlice(allocator, &permissions, kv.key, unquoteScalar(kv.value));
+        }
+    }
+
+    const manifest_name = name orelse try allocator.dupe(u8, std.fs.path.basename(pipeline));
+    name = null;
+    return .{
+        .allocator = allocator,
+        .path = manifest_path.?,
+        .name = manifest_name,
+        .tools = tools,
+        .permissions = permissions,
+    };
+}
+
+fn buildPipelineManifestDiagnosticJson(allocator: Allocator, manifest: PipelineManifest) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.append(allocator, '{');
+    try appendJsonFieldString(&buf, allocator, "schema", "urn:gitomi:pipeline-manifest:v1", true);
+    try appendJsonFieldString(&buf, allocator, "path", manifest.path, true);
+    try appendJsonFieldString(&buf, allocator, "name", manifest.name, true);
+    try appendJsonFieldStringArray(&buf, allocator, "tools", manifest.tools, true);
+    try appendJsonString(&buf, allocator, "permissions");
+    try buf.append(allocator, ':');
+    try appendPermissionObject(&buf, allocator, manifest.permissions, false);
+    try buf.append(allocator, '}');
+    return try buf.toOwnedSlice(allocator);
 }
 
 fn addStepLogs(
@@ -1162,7 +1769,7 @@ fn writeRunDiagnostics(
     diagnostics: RunDiagnostics,
 ) !DiagnosticRef {
     const runner_id = try localRunnerId(allocator, repo);
-    defer allocator.free(runner_id);
+    errdefer allocator.free(runner_id);
 
     const run_ref = try std.fmt.allocPrint(allocator, "refs/gitomi/runs/{s}/{s}", .{ runner_id, run_id });
     errdefer allocator.free(run_ref);
@@ -1179,7 +1786,15 @@ fn writeRunDiagnostics(
 
     const manifest_path = try std.fmt.allocPrint(allocator, "attempts/{s}/manifest.json", .{diagnostics.attempt_id});
     defer allocator.free(manifest_path);
-    try writeDiagnosticBlobToIndex(allocator, repo, index_path, manifest_path, run_json);
+    const manifest_json = try buildAttemptManifestJson(allocator, run_id, workflow, target, conclusion, runner_id, diagnostics.attempt_id);
+    defer allocator.free(manifest_json);
+    try writeDiagnosticBlobToIndex(allocator, repo, index_path, manifest_path, manifest_json);
+
+    const output_path = try std.fmt.allocPrint(allocator, "attempts/{s}/outputs/final.json", .{diagnostics.attempt_id});
+    defer allocator.free(output_path);
+    const output_json = try buildFinalOutputJson(allocator, run_id, diagnostics.attempt_id, conclusion);
+    defer allocator.free(output_json);
+    try writeDiagnosticBlobToIndex(allocator, repo, index_path, output_path, output_json);
 
     for (diagnostics.files.items) |file| {
         try writeDiagnosticBlobToIndex(allocator, repo, index_path, file.path, file.bytes);
@@ -1204,6 +1819,7 @@ fn writeRunDiagnostics(
         .allocator = allocator,
         .ref = run_ref,
         .oid = commit_oid,
+        .runner_id = runner_id,
     };
 }
 
@@ -1247,15 +1863,204 @@ fn buildRunDiagnosticJson(
     try appendJsonFieldString(&buf, allocator, "dialect", workflow.dialect.label(), true);
     try appendJsonFieldString(&buf, allocator, "target_ref", target.target_ref orelse "", true);
     try appendJsonFieldString(&buf, allocator, "target_oid", target.target_oid, true);
+    try appendJsonString(&buf, allocator, "source");
+    try buf.appendSlice(allocator, ":{");
+    try appendJsonFieldString(&buf, allocator, "workflow_from", workflow.source.workflow_from, true);
+    try appendJsonFieldString(&buf, allocator, "code_from", workflow.source.code_from, false);
+    try buf.appendSlice(allocator, "},");
+    try appendJsonString(&buf, allocator, "jobs");
+    try buf.appendSlice(allocator, ":[");
+    for (workflow.jobs, 0..) |job, idx| {
+        if (idx != 0) try buf.append(allocator, ',');
+        try buf.append(allocator, '{');
+        try appendJsonFieldString(&buf, allocator, "id", job.id, true);
+        try appendJsonFieldString(&buf, allocator, "backend", effectiveJobBackend(job), true);
+        if (job.uses) |uses| try appendJsonFieldString(&buf, allocator, "uses", uses, true);
+        if (buf.items[buf.items.len - 1] == ',') buf.items.len -= 1;
+        try buf.append(allocator, '}');
+    }
+    try buf.appendSlice(allocator, "],");
     try appendJsonFieldString(&buf, allocator, "conclusion", conclusion, false);
     try buf.append(allocator, '}');
     return try buf.toOwnedSlice(allocator);
 }
 
+fn buildAttemptManifestJson(
+    allocator: Allocator,
+    run_id: []const u8,
+    workflow: Workflow,
+    target: ResolvedTarget,
+    conclusion: []const u8,
+    runner_id: []const u8,
+    attempt_id: []const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.append(allocator, '{');
+    try appendJsonFieldString(&buf, allocator, "schema", "urn:gitomi:workflow-attempt:v1", true);
+    try appendJsonFieldString(&buf, allocator, "run_id", run_id, true);
+    try appendJsonFieldString(&buf, allocator, "attempt_id", attempt_id, true);
+    try appendJsonFieldString(&buf, allocator, "runner_id", runner_id, true);
+    try appendJsonFieldString(&buf, allocator, "workflow", workflow.path, true);
+    try appendJsonFieldString(&buf, allocator, "target_oid", target.target_oid, true);
+    try appendJsonString(&buf, allocator, "jobs");
+    try buf.appendSlice(allocator, ":[");
+    for (workflow.jobs, 0..) |job, idx| {
+        if (idx != 0) try buf.append(allocator, ',');
+        try buf.append(allocator, '{');
+        try appendJsonFieldString(&buf, allocator, "id", job.id, true);
+        try appendJsonFieldString(&buf, allocator, "backend", effectiveJobBackend(job), true);
+        if (job.uses) |uses| try appendJsonFieldString(&buf, allocator, "uses", uses, true);
+        try appendJsonFieldStringArray(&buf, allocator, "needs", job.needs, false);
+        try buf.append(allocator, '}');
+    }
+    try buf.appendSlice(allocator, "],");
+    try appendJsonFieldString(&buf, allocator, "conclusion", conclusion, false);
+    try buf.append(allocator, '}');
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn buildFinalOutputJson(allocator: Allocator, run_id: []const u8, attempt_id: []const u8, conclusion: []const u8) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.append(allocator, '{');
+    try appendJsonFieldString(&buf, allocator, "schema", "urn:gitomi:workflow-output:v1", true);
+    try appendJsonFieldString(&buf, allocator, "run_id", run_id, true);
+    try appendJsonFieldString(&buf, allocator, "attempt_id", attempt_id, true);
+    try appendJsonFieldString(&buf, allocator, "conclusion", conclusion, true);
+    try buf.appendSlice(allocator, "\"outputs\":{}");
+    try buf.append(allocator, '}');
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn buildPermissionGrantJson(allocator: Allocator, workflow: Workflow) ![]u8 {
+    const untrusted_head = std.mem.eql(u8, workflow.source.workflow_from, "head");
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.append(allocator, '{');
+    try appendJsonFieldString(&buf, allocator, "schema", "urn:gitomi:workflow-permission-grant:v1", true);
+    try appendJsonFieldString(&buf, allocator, "source_trust", if (untrusted_head) "untrusted_head" else "trusted", true);
+    try appendJsonString(&buf, allocator, "workflow");
+    try buf.append(allocator, ':');
+    try appendPermissionObject(&buf, allocator, workflow.permissions, untrusted_head);
+    try buf.append(allocator, ',');
+    try appendJsonString(&buf, allocator, "jobs");
+    try buf.appendSlice(allocator, ":[");
+    for (workflow.jobs, 0..) |job, idx| {
+        if (idx != 0) try buf.append(allocator, ',');
+        try buf.append(allocator, '{');
+        try appendJsonFieldString(&buf, allocator, "id", job.id, true);
+        try appendJsonFieldString(&buf, allocator, "backend", effectiveJobBackend(job), true);
+        try appendJsonString(&buf, allocator, "permissions");
+        try buf.append(allocator, ':');
+        try appendPermissionObject(&buf, allocator, job.permissions, untrusted_head);
+        try buf.append(allocator, '}');
+    }
+    try buf.appendSlice(allocator, "]}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn appendPermissionObject(buf: *std.ArrayList(u8), allocator: Allocator, permissions: []const KeyValuePair, reduce_write: bool) !void {
+    try buf.append(allocator, '{');
+    for (permissions, 0..) |entry, idx| {
+        if (idx != 0) try buf.append(allocator, ',');
+        try appendJsonString(buf, allocator, entry.key);
+        try buf.append(allocator, ':');
+        try appendJsonString(buf, allocator, effectivePermissionValue(entry.value, reduce_write));
+    }
+    try buf.append(allocator, '}');
+}
+
+fn effectivePermissionValue(value: []const u8, reduce_write: bool) []const u8 {
+    if (!reduce_write) return value;
+    if (std.mem.eql(u8, value, "write-all")) return "read-all";
+    if (std.mem.indexOf(u8, value, "write") != null) return "read";
+    return value;
+}
+
+fn effectiveJobBackend(job: WorkflowJob) []const u8 {
+    if (job.backend.len == 0 and job.steps.len != 0) return "shell";
+    return job.backend;
+}
+
+fn workflowBackendSummary(workflow: Workflow) ?[]const u8 {
+    if (workflow.dialect == .github_actions) return "github-actions";
+    if (workflow.jobs.len == 0) return null;
+    const first = effectiveJobBackend(workflow.jobs[0]);
+    for (workflow.jobs[1..]) |job| {
+        if (!std.mem.eql(u8, first, effectiveJobBackend(job))) return "mixed";
+    }
+    return first;
+}
+
+fn workflowPipelineSummary(workflow: Workflow) ?[]const u8 {
+    for (workflow.jobs) |job| {
+        if (std.mem.eql(u8, effectiveJobBackend(job), "agent")) {
+            if (job.uses) |uses| return uses;
+        }
+    }
+    return null;
+}
+
 fn localRunnerId(allocator: Allocator, repo: repo_mod.Repo) ![]u8 {
-    var cfg = repo_mod.loadConfig(allocator, repo.config_path) catch return allocator.dupe(u8, "local");
+    const runner_dir = try std.fs.path.join(allocator, &.{ repo.gitomi_dir, "runner" });
+    defer allocator.free(runner_dir);
+    try std.fs.cwd().makePath(runner_dir);
+
+    const id_path = try std.fs.path.join(allocator, &.{ runner_dir, "id" });
+    defer allocator.free(id_path);
+    if (std.fs.cwd().readFileAlloc(allocator, id_path, 4 * 1024)) |bytes| {
+        defer allocator.free(bytes);
+        const trimmed = std.mem.trim(u8, bytes, " \t\r\n");
+        if (trimmed.len != 0) return try allocator.dupe(u8, trimmed);
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
+
+    var cfg = repo_mod.loadConfig(allocator, repo.config_path) catch {
+        const fallback = try allocator.dupe(u8, "local");
+        try writeRunnerId(id_path, fallback);
+        return fallback;
+    };
     defer cfg.deinit();
-    return std.fmt.allocPrint(allocator, "{s}-{s}", .{ cfg.principal, cfg.device });
+    const raw = try std.fmt.allocPrint(allocator, "{s}-{s}", .{ cfg.principal, cfg.device });
+    defer allocator.free(raw);
+    const runner_id = try sanitizePathSegment(allocator, raw);
+    try writeRunnerId(id_path, runner_id);
+    return runner_id;
+}
+
+fn writeRunnerId(id_path: []const u8, runner_id: []const u8) !void {
+    const file = try std.fs.createFileAbsolute(id_path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(runner_id);
+    try file.writeAll("\n");
+}
+
+fn acquireRunClaim(allocator: Allocator, repo: repo_mod.Repo, run_id: []const u8) !RunClaim {
+    const runner_dir = try std.fs.path.join(allocator, &.{ repo.gitomi_dir, "runner", "claims" });
+    defer allocator.free(runner_dir);
+    try std.fs.cwd().makePath(runner_dir);
+    const file_name = try std.fmt.allocPrint(allocator, "{s}.claim", .{run_id});
+    defer allocator.free(file_name);
+    const path = try std.fs.path.join(allocator, &.{ runner_dir, file_name });
+    errdefer allocator.free(path);
+
+    const file = std.fs.createFileAbsolute(path, .{
+        .read = true,
+        .truncate = false,
+        .exclusive = true,
+    }) catch |err| switch (err) {
+        error.PathAlreadyExists => {
+            try io.eprint("gt actions: run {s} is already claimed locally\n", .{run_id});
+            return CliError.UserError;
+        },
+        else => return err,
+    };
+    try file.writeAll(run_id);
+    try file.writeAll("\n");
+    return .{ .allocator = allocator, .path = path, .file = file };
 }
 
 fn runCheckedInDirSimple(
@@ -1304,6 +2109,8 @@ fn writeActEventPayload(
     event_name: []const u8,
     gitomi_event_type: []const u8,
     object_id: ?[]const u8,
+    schedule_slot: ?[]const u8,
+    permission_grant_json: []const u8,
 ) ![]u8 {
     const events_dir = try std.fs.path.join(allocator, &.{ repo.gitomi_dir, "action-events" });
     defer allocator.free(events_dir);
@@ -1342,6 +2149,11 @@ fn writeActEventPayload(
     try appendJsonFieldString(&payload, allocator, "run_id", run_id, true);
     try appendJsonFieldString(&payload, allocator, "event_type", gitomi_event_type, true);
     if (object_id) |value| try appendJsonFieldString(&payload, allocator, "object_id", value, true);
+    if (schedule_slot) |value| try appendJsonFieldString(&payload, allocator, "schedule_slot", value, true);
+    try appendJsonString(&payload, allocator, "permission_grant");
+    try payload.append(allocator, ':');
+    try payload.appendSlice(allocator, permission_grant_json);
+    try payload.append(allocator, ',');
     if (payload.items[payload.items.len - 1] == ',') payload.items.len -= 1;
     try payload.appendSlice(allocator, "}}");
 
@@ -1464,6 +2276,7 @@ fn parseRunRequest(allocator: Allocator, run_id: []const u8, body: []const u8) !
     const workflow = event_mod.jsonString(payload.get("workflow")) orelse return error.InvalidEventEnvelope;
     const event_name = event_mod.jsonString(payload.get("event_name")) orelse "workflow_dispatch";
     const gitomi_event_type = event_mod.jsonString(payload.get("gitomi_event_type")) orelse "";
+    const schedule_slot = event_mod.jsonString(payload.get("schedule_slot"));
 
     return .{
         .allocator = allocator,
@@ -1473,6 +2286,7 @@ fn parseRunRequest(allocator: Allocator, run_id: []const u8, body: []const u8) !
         .target_oid = if (event_mod.jsonString(payload.get("target_oid"))) |value| try allocator.dupe(u8, value) else null,
         .event_name = try allocator.dupe(u8, event_name),
         .gitomi_event_type = try allocator.dupe(u8, gitomi_event_type),
+        .schedule_slot = if (schedule_slot) |value| try allocator.dupe(u8, value) else null,
     };
 }
 
@@ -1513,10 +2327,25 @@ fn parseWorkflow(allocator: Allocator, path: []const u8, bytes: []const u8) !Wor
     const dialect = workflowDialect(path);
     var name: ?[]u8 = null;
     errdefer if (name) |value| allocator.free(value);
+    var source = try WorkflowSourcePolicy.initDefaults(allocator);
+    errdefer source.deinit(allocator);
+    var permissions: std.ArrayList(KeyValuePair) = .empty;
+    errdefer {
+        for (permissions.items) |*entry| {
+            allocator.free(entry.key);
+            allocator.free(entry.value);
+        }
+        permissions.deinit(allocator);
+    }
     var triggers: std.ArrayList([]u8) = .empty;
     errdefer {
         for (triggers.items) |trigger| allocator.free(trigger);
         triggers.deinit(allocator);
+    }
+    var trigger_defs = try parseWorkflowTriggersDetailed(allocator, bytes);
+    errdefer {
+        for (trigger_defs) |*trigger| trigger.deinit();
+        allocator.free(trigger_defs);
     }
     var schedules: std.ArrayList([]u8) = .empty;
     errdefer {
@@ -1530,13 +2359,18 @@ fn parseWorkflow(allocator: Allocator, path: []const u8, bytes: []const u8) !Wor
     }
 
     var in_on_block = false;
+    var in_permissions_block = false;
+    var in_source_block = false;
     var in_jobs_block = false;
     var in_schedule_block = false;
     var on_child_indent: ?usize = null;
+    var permissions_indent: ?usize = null;
+    var source_indent: ?usize = null;
     var schedule_indent: ?usize = null;
     var jobs_child_indent: ?usize = null;
     var current_job: ?usize = null;
     var job_field_indent: ?usize = null;
+    var job_nested_block: ?JobNestedBlock = null;
     var in_steps_block = false;
     var steps_indent: ?usize = null;
     var current_step: ?usize = null;
@@ -1548,13 +2382,18 @@ fn parseWorkflow(allocator: Allocator, path: []const u8, bytes: []const u8) !Wor
 
         if (indent == 0) {
             in_on_block = false;
+            in_permissions_block = false;
+            in_source_block = false;
             in_jobs_block = false;
             in_schedule_block = false;
             on_child_indent = null;
+            permissions_indent = null;
+            source_indent = null;
             schedule_indent = null;
             jobs_child_indent = null;
             current_job = null;
             job_field_indent = null;
+            job_nested_block = null;
             in_steps_block = false;
             steps_indent = null;
             current_step = null;
@@ -1568,11 +2407,42 @@ fn parseWorkflow(allocator: Allocator, path: []const u8, bytes: []const u8) !Wor
                     } else {
                         try addInlineTriggers(allocator, &triggers, kv.value);
                     }
+                } else if (std.mem.eql(u8, kv.key, "permissions")) {
+                    if (kv.value.len == 0) {
+                        in_permissions_block = true;
+                    } else {
+                        try appendKeyValue(allocator, &permissions, "*", unquoteScalar(kv.value));
+                    }
+                } else if (std.mem.eql(u8, kv.key, "source")) {
+                    if (kv.value.len == 0) in_source_block = true;
                 } else if (std.mem.eql(u8, kv.key, "jobs") and dialect == .gitomi) {
                     in_jobs_block = true;
                 }
             }
             continue;
+        }
+
+        if (in_permissions_block) {
+            if (permissions_indent == null) permissions_indent = indent;
+            if (indent == permissions_indent.?) {
+                if (parseYamlKeyValue(clean)) |kv| try appendKeyValue(allocator, &permissions, kv.key, unquoteScalar(kv.value));
+                continue;
+            }
+        }
+
+        if (in_source_block) {
+            if (source_indent == null) source_indent = indent;
+            if (indent == source_indent.?) {
+                if (parseYamlKeyValue(clean)) |kv| {
+                    const value = unquoteScalar(kv.value);
+                    if (std.mem.eql(u8, kv.key, "workflow_from")) {
+                        try source.setWorkflowFrom(allocator, value);
+                    } else if (std.mem.eql(u8, kv.key, "code_from")) {
+                        try source.setCodeFrom(allocator, value);
+                    }
+                }
+                continue;
+            }
         }
 
         if (in_on_block) {
@@ -1611,10 +2481,19 @@ fn parseWorkflow(allocator: Allocator, path: []const u8, bytes: []const u8) !Wor
                 in_steps_block = false;
                 steps_indent = null;
                 current_step = null;
+                job_nested_block = null;
                 try parseJobField(allocator, &jobs.items[current_job.?], clean);
                 if (parseYamlKeyValue(clean)) |kv| {
-                    if (std.mem.eql(u8, kv.key, "steps")) in_steps_block = true;
+                    if (std.mem.eql(u8, kv.key, "steps")) {
+                        in_steps_block = true;
+                    } else if (kv.value.len == 0) {
+                        job_nested_block = jobNestedBlockForKey(kv.key);
+                    }
                 }
+                continue;
+            }
+            if (job_nested_block) |block| {
+                try parseJobNestedLine(allocator, &jobs.items[current_job.?], block, clean);
                 continue;
             }
             if (in_steps_block) {
@@ -1630,27 +2509,147 @@ fn parseWorkflow(allocator: Allocator, path: []const u8, bytes: []const u8) !Wor
         _ = schedule;
         try addTrigger(allocator, &triggers, "workflow.schedule");
     }
+    try ensureTriggerDefsFromNames(allocator, &trigger_defs, triggers.items);
     return .{
         .allocator = allocator,
         .path = try allocator.dupe(u8, path),
         .name = display_name,
         .triggers = try triggers.toOwnedSlice(allocator),
+        .trigger_defs = trigger_defs,
         .dialect = dialect,
+        .source = source,
+        .permissions = try permissions.toOwnedSlice(allocator),
         .jobs = try jobs.toOwnedSlice(allocator),
         .schedules = try schedules.toOwnedSlice(allocator),
     };
 }
 
 fn workflowMatches(workflow: Workflow, event_type: []const u8, event_name: []const u8) bool {
-    const family = eventFamily(event_type);
+    return workflowMatchesContext(workflow, .{
+        .event_type = event_type,
+        .event_name = event_name,
+    });
+}
+
+fn workflowMatchesContext(workflow: Workflow, context: EventContext) bool {
+    const family = eventFamily(context.event_type);
+    if (workflow.trigger_defs.len != 0) {
+        for (workflow.trigger_defs) |trigger| {
+            if (!triggerNameMatches(trigger.name, context.event_type, context.event_name, family)) continue;
+            if (triggerFiltersMatch(trigger, context)) return true;
+        }
+        return false;
+    }
     for (workflow.triggers) |trigger| {
-        if (std.mem.eql(u8, trigger, event_type)) return true;
-        if (std.mem.eql(u8, trigger, event_name)) return true;
-        if (std.mem.eql(u8, trigger, family)) return true;
-        if (std.mem.eql(u8, trigger, "schedule") and std.mem.eql(u8, event_type, "workflow.schedule")) return true;
-        if (std.mem.eql(u8, trigger, "workflow_dispatch") and std.mem.eql(u8, event_type, "workflow.manual")) return true;
+        if (triggerNameMatches(trigger, context.event_type, context.event_name, family)) return true;
     }
     return false;
+}
+
+fn triggerNameMatches(trigger: []const u8, event_type: []const u8, event_name: []const u8, family: []const u8) bool {
+    if (std.mem.eql(u8, trigger, event_type)) return true;
+    if (std.mem.eql(u8, trigger, event_name)) return true;
+    if (std.mem.eql(u8, trigger, family)) return true;
+    if (std.mem.eql(u8, trigger, "schedule") and std.mem.eql(u8, event_type, "workflow.schedule")) return true;
+    if (std.mem.eql(u8, trigger, "workflow_dispatch") and std.mem.eql(u8, event_type, "workflow.manual")) return true;
+    if (std.mem.eql(u8, trigger, "pull_request") and std.mem.startsWith(u8, event_type, "pull.")) return true;
+    if (std.mem.eql(u8, trigger, "issues") and std.mem.startsWith(u8, event_type, "issue.")) return true;
+    return false;
+}
+
+fn triggerFiltersMatch(trigger: WorkflowTrigger, context: EventContext) bool {
+    if (trigger.types.len != 0) {
+        const action = githubActionValue(context.event_type);
+        if (!anyGlobMatches(trigger.types, action)) return false;
+    }
+
+    if (trigger.actors.len != 0) {
+        const actor = context.actor orelse return false;
+        if (!anyGlobMatches(trigger.actors, actor)) return false;
+    }
+
+    if (trigger.branches.len != 0) {
+        const branch = context.branch orelse return false;
+        if (!anyGlobMatches(trigger.branches, branch)) return false;
+    }
+    if (trigger.branches_ignore.len != 0) {
+        const branch = context.branch orelse return false;
+        if (anyGlobMatches(trigger.branches_ignore, branch)) return false;
+    }
+
+    if (trigger.paths.len != 0) {
+        const paths = context.paths orelse return false;
+        if (!anyPathMatches(trigger.paths, paths)) return false;
+    }
+    if (trigger.paths_ignore.len != 0) {
+        const paths = context.paths orelse return false;
+        if (paths.len != 0 and allPathsMatch(trigger.paths_ignore, paths)) return false;
+    }
+
+    if (trigger.labels.len != 0) {
+        const labels = context.labels orelse return false;
+        if (!anyLabelMatches(trigger.labels, labels)) return false;
+    }
+
+    return true;
+}
+
+fn anyGlobMatches(patterns: []const []u8, value: []const u8) bool {
+    for (patterns) |pattern| {
+        if (globMatches(pattern, value)) return true;
+    }
+    return false;
+}
+
+fn anyPathMatches(patterns: []const []u8, paths: []const []u8) bool {
+    for (paths) |path| {
+        if (anyGlobMatches(patterns, path)) return true;
+    }
+    return false;
+}
+
+fn allPathsMatch(patterns: []const []u8, paths: []const []u8) bool {
+    for (paths) |path| {
+        if (!anyGlobMatches(patterns, path)) return false;
+    }
+    return true;
+}
+
+fn anyLabelMatches(patterns: []const []u8, labels: []const []u8) bool {
+    for (labels) |label| {
+        if (anyGlobMatches(patterns, label)) return true;
+    }
+    return false;
+}
+
+fn globMatches(pattern: []const u8, value: []const u8) bool {
+    var p: usize = 0;
+    var v: usize = 0;
+    var star: ?usize = null;
+    var match_after_star: usize = 0;
+
+    while (v < value.len) {
+        if (p < pattern.len and (pattern[p] == '?' or pattern[p] == value[v])) {
+            p += 1;
+            v += 1;
+            continue;
+        }
+        if (p < pattern.len and pattern[p] == '*') {
+            while (p < pattern.len and pattern[p] == '*') p += 1;
+            star = p;
+            match_after_star = v;
+            continue;
+        }
+        if (star) |after_star| {
+            p = after_star;
+            match_after_star += 1;
+            v = match_after_star;
+            continue;
+        }
+        return false;
+    }
+    while (p < pattern.len and pattern[p] == '*') p += 1;
+    return p == pattern.len;
 }
 
 fn resolveWorkflowSelector(workflows: []Workflow, selector: []const u8) !Workflow {
@@ -1831,12 +2830,50 @@ const KeyValue = struct {
     value: []const u8,
 };
 
+const JobNestedBlock = enum {
+    env,
+    with,
+    permissions,
+    needs,
+};
+
 fn parseYamlKeyValue(line: []const u8) ?KeyValue {
     const colon = std.mem.indexOfScalar(u8, line, ':') orelse return null;
     const key = unquoteScalar(std.mem.trim(u8, line[0..colon], " \t\r\n"));
     const value = std.mem.trim(u8, line[colon + 1 ..], " \t\r\n");
     if (key.len == 0) return null;
     return .{ .key = key, .value = value };
+}
+
+fn jobNestedBlockForKey(key: []const u8) ?JobNestedBlock {
+    if (std.mem.eql(u8, key, "env")) return .env;
+    if (std.mem.eql(u8, key, "with")) return .with;
+    if (std.mem.eql(u8, key, "permissions")) return .permissions;
+    if (std.mem.eql(u8, key, "needs")) return .needs;
+    return null;
+}
+
+fn parseJobNestedLine(allocator: Allocator, job: *WorkflowJob, block: JobNestedBlock, line: []const u8) !void {
+    switch (block) {
+        .env => {
+            if (parseYamlKeyValue(line)) |kv| try appendKeyValueToSlice(allocator, &job.env, kv.key, unquoteScalar(kv.value));
+        },
+        .with => {
+            if (parseYamlKeyValue(line)) |kv| try appendKeyValueToSlice(allocator, &job.with, kv.key, unquoteScalar(kv.value));
+        },
+        .permissions => {
+            if (parseYamlKeyValue(line)) |kv| try appendKeyValueToSlice(allocator, &job.permissions, kv.key, unquoteScalar(kv.value));
+        },
+        .needs => {
+            if (std.mem.startsWith(u8, line, "-")) {
+                const value = unquoteScalar(std.mem.trim(u8, line[1..], " \t\r\n"));
+                if (value.len != 0) try appendStringToSlice(allocator, &job.needs, value);
+            } else if (parseYamlKeyValue(line)) |kv| {
+                const value = unquoteScalar(kv.value);
+                if (value.len != 0) try appendStringToSlice(allocator, &job.needs, value);
+            }
+        },
+    }
 }
 
 fn addTriggerBlockLine(allocator: Allocator, triggers: *std.ArrayList([]u8), line: []const u8) !void {
@@ -1900,6 +2937,26 @@ fn parseJobField(allocator: Allocator, job: *WorkflowJob, line: []const u8) !voi
     } else if (std.mem.eql(u8, kv.key, "image")) {
         if (job.image) |old| allocator.free(old);
         job.image = try allocator.dupe(u8, unquoteScalar(kv.value));
+    } else if (std.mem.eql(u8, kv.key, "if")) {
+        if (job.condition) |old| allocator.free(old);
+        job.condition = try allocator.dupe(u8, unquoteScalar(kv.value));
+    } else if (std.mem.eql(u8, kv.key, "timeout") or std.mem.eql(u8, kv.key, "timeout_minutes") or std.mem.eql(u8, kv.key, "timeout-minutes")) {
+        const value = unquoteScalar(kv.value);
+        if (value.len != 0) job.timeout_minutes = std.fmt.parseUnsigned(u64, value, 10) catch null;
+    } else if (std.mem.eql(u8, kv.key, "needs")) {
+        if (kv.value.len != 0) try parseStringListIntoSlice(allocator, &job.needs, kv.value);
+    } else if (std.mem.eql(u8, kv.key, "env")) {
+        if (kv.value.len != 0) try parseInlineMappingIntoSlice(allocator, &job.env, kv.value);
+    } else if (std.mem.eql(u8, kv.key, "with")) {
+        if (kv.value.len != 0) try parseInlineMappingIntoSlice(allocator, &job.with, kv.value);
+    } else if (std.mem.eql(u8, kv.key, "permissions")) {
+        if (kv.value.len != 0) {
+            if (kv.value[0] == '{') {
+                try parseInlineMappingIntoSlice(allocator, &job.permissions, kv.value);
+            } else {
+                try appendKeyValueToSlice(allocator, &job.permissions, "*", unquoteScalar(kv.value));
+            }
+        }
     }
 }
 
@@ -2033,6 +3090,282 @@ fn addTrigger(allocator: Allocator, triggers: *std.ArrayList([]u8), raw: []const
     try triggers.append(allocator, try allocator.dupe(u8, value));
 }
 
+fn parseWorkflowTriggersDetailed(allocator: Allocator, bytes: []const u8) ![]WorkflowTrigger {
+    var triggers: []WorkflowTrigger = &.{};
+    errdefer {
+        for (triggers) |*trigger| trigger.deinit();
+        allocator.free(triggers);
+    }
+
+    var in_on_block = false;
+    var on_child_indent: ?usize = null;
+    var current_trigger: ?usize = null;
+    var current_filter: ?[]const u8 = null;
+    var lines = std.mem.splitScalar(u8, bytes, '\n');
+    while (lines.next()) |line_raw| {
+        const clean = std.mem.trim(u8, stripYamlComment(line_raw), " \t\r\n");
+        if (clean.len == 0) continue;
+        const indent = lineIndent(line_raw);
+
+        if (indent == 0) {
+            in_on_block = false;
+            on_child_indent = null;
+            current_trigger = null;
+            current_filter = null;
+            if (parseYamlKeyValue(clean)) |kv| {
+                if (std.mem.eql(u8, kv.key, "on")) {
+                    if (kv.value.len == 0) {
+                        in_on_block = true;
+                    } else {
+                        try addInlineTriggerDefs(allocator, &triggers, kv.value);
+                    }
+                }
+            }
+            continue;
+        }
+
+        if (!in_on_block) continue;
+        if (on_child_indent == null) on_child_indent = indent;
+        if (indent == on_child_indent.?) {
+            current_filter = null;
+            const trigger_name = triggerNameFromBlockLine(clean) orelse continue;
+            current_trigger = try ensureTriggerDef(allocator, &triggers, trigger_name);
+            if (parseYamlKeyValue(clean)) |kv| {
+                if (kv.value.len != 0 and kv.value[0] == '{') {
+                    try parseTriggerInlineFilters(allocator, &triggers[current_trigger.?], kv.value);
+                }
+            }
+            continue;
+        }
+        if (current_trigger == null) continue;
+
+        if (parseYamlKeyValue(clean)) |kv| {
+            if (isTriggerFilterKey(kv.key)) {
+                current_filter = kv.key;
+                if (kv.value.len != 0) try addTriggerFilterValues(allocator, &triggers[current_trigger.?], kv.key, kv.value);
+            } else if (std.mem.eql(u8, kv.key, "cron")) {
+                current_filter = null;
+            }
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, clean, "-")) {
+            const rest = std.mem.trim(u8, clean[1..], " \t\r\n");
+            if (parseYamlKeyValue(rest)) |kv| {
+                if (isTriggerFilterKey(kv.key)) {
+                    current_filter = kv.key;
+                    if (kv.value.len != 0) try addTriggerFilterValues(allocator, &triggers[current_trigger.?], kv.key, kv.value);
+                } else if (std.mem.eql(u8, kv.key, "cron")) {
+                    current_filter = null;
+                }
+            } else if (current_filter) |filter| {
+                try addTriggerFilterValues(allocator, &triggers[current_trigger.?], filter, rest);
+            }
+        }
+    }
+
+    return triggers;
+}
+
+fn addInlineTriggerDefs(allocator: Allocator, triggers: *[]WorkflowTrigger, raw: []const u8) !void {
+    const value = std.mem.trim(u8, raw, " \t\r\n");
+    if (value.len == 0) return;
+    if (value[0] == '[' and value[value.len - 1] == ']') {
+        var parts = std.mem.splitScalar(u8, value[1 .. value.len - 1], ',');
+        while (parts.next()) |part| {
+            const trigger = unquoteScalar(std.mem.trim(u8, part, " \t\r\n"));
+            if (trigger.len != 0) _ = try ensureTriggerDef(allocator, triggers, trigger);
+        }
+        return;
+    }
+    if (value[0] == '{' and value[value.len - 1] == '}') {
+        try parseInlineTriggerMap(allocator, triggers, value[1 .. value.len - 1]);
+        return;
+    }
+    _ = try ensureTriggerDef(allocator, triggers, value);
+}
+
+fn parseInlineTriggerMap(allocator: Allocator, triggers: *[]WorkflowTrigger, inner: []const u8) !void {
+    const parts = try splitTopLevel(allocator, inner, ',');
+    defer git.freeStringList(allocator, parts);
+    for (parts) |part_raw| {
+        const part = std.mem.trim(u8, part_raw, " \t\r\n");
+        if (parseYamlKeyValue(part)) |kv| {
+            const idx = try ensureTriggerDef(allocator, triggers, kv.key);
+            if (kv.value.len != 0 and kv.value[0] == '{') try parseTriggerInlineFilters(allocator, &triggers.*[idx], kv.value);
+        }
+    }
+}
+
+fn parseTriggerInlineFilters(allocator: Allocator, trigger: *WorkflowTrigger, raw: []const u8) !void {
+    const value = std.mem.trim(u8, raw, " \t\r\n");
+    if (value.len < 2 or value[0] != '{' or value[value.len - 1] != '}') return;
+    const parts = try splitTopLevel(allocator, value[1 .. value.len - 1], ',');
+    defer git.freeStringList(allocator, parts);
+    for (parts) |part_raw| {
+        const part = std.mem.trim(u8, part_raw, " \t\r\n");
+        if (parseYamlKeyValue(part)) |kv| {
+            if (isTriggerFilterKey(kv.key)) try addTriggerFilterValues(allocator, trigger, kv.key, kv.value);
+        }
+    }
+}
+
+fn ensureTriggerDefsFromNames(allocator: Allocator, triggers: *[]WorkflowTrigger, names: []const []u8) !void {
+    for (names) |name| _ = try ensureTriggerDef(allocator, triggers, name);
+}
+
+fn ensureTriggerDef(allocator: Allocator, triggers: *[]WorkflowTrigger, raw_name: []const u8) !usize {
+    var name = unquoteScalar(std.mem.trim(u8, raw_name, " \t\r\n"));
+    if (name.len == 0) return triggers.*.len;
+    if (std.mem.indexOfAny(u8, name, " \t")) |space| name = name[0..space];
+    for (triggers.*, 0..) |trigger, idx| {
+        if (std.mem.eql(u8, trigger.name, name)) return idx;
+    }
+    const old = triggers.*;
+    const next = try allocator.alloc(WorkflowTrigger, old.len + 1);
+    for (old, 0..) |trigger, idx| next[idx] = trigger;
+    next[old.len] = .{
+        .allocator = allocator,
+        .name = try allocator.dupe(u8, name),
+    };
+    allocator.free(old);
+    triggers.* = next;
+    return old.len;
+}
+
+fn isTriggerFilterKey(key: []const u8) bool {
+    return std.mem.eql(u8, key, "branches") or
+        std.mem.eql(u8, key, "branches_ignore") or
+        std.mem.eql(u8, key, "branches-ignore") or
+        std.mem.eql(u8, key, "paths") or
+        std.mem.eql(u8, key, "paths_ignore") or
+        std.mem.eql(u8, key, "paths-ignore") or
+        std.mem.eql(u8, key, "types") or
+        std.mem.eql(u8, key, "actors") or
+        std.mem.eql(u8, key, "labels");
+}
+
+fn addTriggerFilterValues(allocator: Allocator, trigger: *WorkflowTrigger, key: []const u8, raw: []const u8) !void {
+    if (std.mem.eql(u8, key, "branches")) return parseStringListIntoSlice(allocator, &trigger.branches, raw);
+    if (std.mem.eql(u8, key, "branches_ignore") or std.mem.eql(u8, key, "branches-ignore")) return parseStringListIntoSlice(allocator, &trigger.branches_ignore, raw);
+    if (std.mem.eql(u8, key, "paths")) return parseStringListIntoSlice(allocator, &trigger.paths, raw);
+    if (std.mem.eql(u8, key, "paths_ignore") or std.mem.eql(u8, key, "paths-ignore")) return parseStringListIntoSlice(allocator, &trigger.paths_ignore, raw);
+    if (std.mem.eql(u8, key, "types")) return parseStringListIntoSlice(allocator, &trigger.types, raw);
+    if (std.mem.eql(u8, key, "actors")) return parseStringListIntoSlice(allocator, &trigger.actors, raw);
+    if (std.mem.eql(u8, key, "labels")) return parseStringListIntoSlice(allocator, &trigger.labels, raw);
+}
+
+fn parseStringListIntoSlice(allocator: Allocator, target: *[][]u8, raw: []const u8) !void {
+    const value = std.mem.trim(u8, raw, " \t\r\n");
+    if (value.len == 0) return;
+    if (value[0] == '[' and value[value.len - 1] == ']') {
+        const parts = try splitTopLevel(allocator, value[1 .. value.len - 1], ',');
+        defer git.freeStringList(allocator, parts);
+        for (parts) |part| {
+            const scalar = unquoteScalar(std.mem.trim(u8, part, " \t\r\n"));
+            if (scalar.len != 0) try appendStringToSlice(allocator, target, scalar);
+        }
+        return;
+    }
+    const scalar = unquoteScalar(value);
+    if (scalar.len != 0) try appendStringToSlice(allocator, target, scalar);
+}
+
+fn parseInlineMappingIntoSlice(allocator: Allocator, target: *[]KeyValuePair, raw: []const u8) !void {
+    const value = std.mem.trim(u8, raw, " \t\r\n");
+    if (value.len < 2 or value[0] != '{' or value[value.len - 1] != '}') return;
+    const parts = try splitTopLevel(allocator, value[1 .. value.len - 1], ',');
+    defer git.freeStringList(allocator, parts);
+    for (parts) |part_raw| {
+        const part = std.mem.trim(u8, part_raw, " \t\r\n");
+        if (parseYamlKeyValue(part)) |kv| try appendKeyValueToSlice(allocator, target, kv.key, unquoteScalar(kv.value));
+    }
+}
+
+fn appendStringToSlice(allocator: Allocator, target: *[][]u8, value: []const u8) !void {
+    for (target.*) |existing| {
+        if (std.mem.eql(u8, existing, value)) return;
+    }
+    const old = target.*;
+    const next = try allocator.alloc([]u8, old.len + 1);
+    for (old, 0..) |item, idx| next[idx] = item;
+    next[old.len] = try allocator.dupe(u8, value);
+    allocator.free(old);
+    target.* = next;
+}
+
+fn appendKeyValue(allocator: Allocator, list: *std.ArrayList(KeyValuePair), key: []const u8, value: []const u8) !void {
+    try list.append(allocator, .{
+        .key = try allocator.dupe(u8, key),
+        .value = try allocator.dupe(u8, value),
+    });
+}
+
+fn appendKeyValueToSlice(allocator: Allocator, target: *[]KeyValuePair, key: []const u8, value: []const u8) !void {
+    const old = target.*;
+    const next = try allocator.alloc(KeyValuePair, old.len + 1);
+    for (old, 0..) |entry, idx| next[idx] = entry;
+    next[old.len] = .{
+        .key = try allocator.dupe(u8, key),
+        .value = try allocator.dupe(u8, value),
+    };
+    allocator.free(old);
+    target.* = next;
+}
+
+fn splitTopLevel(allocator: Allocator, inner: []const u8, delimiter: u8) ![][]u8 {
+    var parts: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (parts.items) |part| allocator.free(part);
+        parts.deinit(allocator);
+    }
+    var start: usize = 0;
+    var depth: usize = 0;
+    var in_single = false;
+    var in_double = false;
+    var idx: usize = 0;
+    while (idx <= inner.len) : (idx += 1) {
+        const at_end = idx == inner.len;
+        if (!at_end) {
+            const c = inner[idx];
+            if (c == '\'' and !in_double) {
+                in_single = !in_single;
+                continue;
+            }
+            if (c == '"' and !in_single) {
+                in_double = !in_double;
+                continue;
+            }
+            if (!in_single and !in_double) {
+                if (c == '[' or c == '{') {
+                    depth += 1;
+                    continue;
+                }
+                if ((c == ']' or c == '}') and depth != 0) {
+                    depth -= 1;
+                    continue;
+                }
+                if (c == delimiter and depth == 0) {
+                    try parts.append(allocator, try allocator.dupe(u8, inner[start..idx]));
+                    start = idx + 1;
+                    continue;
+                }
+            }
+            continue;
+        }
+        try parts.append(allocator, try allocator.dupe(u8, inner[start..idx]));
+    }
+    return parts.toOwnedSlice(allocator);
+}
+
+fn freeKeyValuePairs(allocator: Allocator, values: []KeyValuePair) void {
+    for (values) |entry| {
+        allocator.free(entry.key);
+        allocator.free(entry.value);
+    }
+    allocator.free(values);
+}
+
 fn unquoteScalar(raw: []const u8) []const u8 {
     const value = std.mem.trim(u8, raw, " \t\r\n");
     if (value.len >= 2) {
@@ -2074,7 +3407,12 @@ test "workflow parser supports common on syntaxes" {
     var workflow = try parseWorkflow(std.testing.allocator, ".github/workflows/ci.yml", bytes);
     defer workflow.deinit();
     try std.testing.expectEqualStrings("CI", workflow.name);
-    try std.testing.expect(workflowMatches(workflow, "push", "push"));
+    try std.testing.expect(!workflowMatches(workflow, "push", "push"));
+    try std.testing.expect(workflowMatchesContext(workflow, .{
+        .event_type = "push",
+        .event_name = "push",
+        .branch = "main",
+    }));
     try std.testing.expect(workflowMatches(workflow, "pull.opened", "pull_request"));
     try std.testing.expect(workflowMatches(workflow, "issue.opened", "issues"));
 }
@@ -2097,8 +3435,65 @@ test "workflow parser supports inline trigger maps with filters" {
     ;
     var workflow = try parseWorkflow(std.testing.allocator, ".github/workflows/filtered.yml", bytes);
     defer workflow.deinit();
-    try std.testing.expect(workflowMatches(workflow, "push", "push"));
+    try std.testing.expect(!workflowMatches(workflow, "push", "push"));
+    try std.testing.expect(workflowMatchesContext(workflow, .{
+        .event_type = "push",
+        .event_name = "push",
+        .branch = "release",
+    }));
+    try std.testing.expect(!workflowMatchesContext(workflow, .{
+        .event_type = "push",
+        .event_name = "push",
+        .branch = "feature",
+    }));
     try std.testing.expect(workflowMatches(workflow, "pull.opened", "pull_request"));
+    try std.testing.expect(!workflowMatches(workflow, "pull.merged", "pull_request"));
+}
+
+test "workflow filters match paths actors labels and ignores" {
+    const bytes =
+        \\name: Filtered
+        \\on:
+        \\  push:
+        \\    branches: [main]
+        \\    paths: ["src/*"]
+        \\    paths-ignore: ["docs/*"]
+        \\  issue:
+        \\    actors: [alice]
+        \\    labels: [ci]
+    ;
+    var workflow = try parseWorkflow(std.testing.allocator, ".gitomi/workflows/filtered.yml", bytes);
+    defer workflow.deinit();
+    const src_paths = [_][]u8{try std.testing.allocator.dupe(u8, "src/main.zig")};
+    defer std.testing.allocator.free(src_paths[0]);
+    try std.testing.expect(workflowMatchesContext(workflow, .{
+        .event_type = "push",
+        .event_name = "push",
+        .branch = "main",
+        .paths = &src_paths,
+    }));
+    const docs_paths = [_][]u8{try std.testing.allocator.dupe(u8, "docs/spec.md")};
+    defer std.testing.allocator.free(docs_paths[0]);
+    try std.testing.expect(!workflowMatchesContext(workflow, .{
+        .event_type = "push",
+        .event_name = "push",
+        .branch = "main",
+        .paths = &docs_paths,
+    }));
+    const labels = [_][]u8{try std.testing.allocator.dupe(u8, "ci")};
+    defer std.testing.allocator.free(labels[0]);
+    try std.testing.expect(workflowMatchesContext(workflow, .{
+        .event_type = "issue.opened",
+        .event_name = "issues",
+        .actor = "alice",
+        .labels = &labels,
+    }));
+    try std.testing.expect(!workflowMatchesContext(workflow, .{
+        .event_type = "issue.opened",
+        .event_name = "issues",
+        .actor = "bob",
+        .labels = &labels,
+    }));
 }
 
 test "native workflow parser supports shell jobs and schedules" {
@@ -2132,6 +3527,85 @@ test "native workflow parser supports shell jobs and schedules" {
     try std.testing.expectEqualStrings("echo done", workflow.jobs[0].steps[1].run.?);
 }
 
+test "workflow parser initializes optional policy fields" {
+    const bytes =
+        \\name: Defaults
+        \\on: workflow_dispatch
+    ;
+    var workflow = try parseWorkflow(std.testing.allocator, ".gitomi/workflows/defaults.yml", bytes);
+    defer workflow.deinit();
+    try std.testing.expectEqual(@as(usize, 1), workflow.trigger_defs.len);
+    try std.testing.expectEqualStrings("workflow_dispatch", workflow.trigger_defs[0].name);
+    try std.testing.expectEqualStrings("target", workflow.source.workflow_from);
+    try std.testing.expectEqualStrings("target", workflow.source.code_from);
+    try std.testing.expectEqual(@as(usize, 0), workflow.permissions.len);
+}
+
+test "native workflow parser supports source permissions and job metadata" {
+    const bytes =
+        \\name: Agent Review
+        \\on: workflow_dispatch
+        \\permissions:
+        \\  contents: read
+        \\source:
+        \\  workflow_from: base
+        \\  code_from: head
+        \\jobs:
+        \\  prep:
+        \\    backend: shell
+        \\    if: "true"
+        \\    timeout_minutes: 10
+        \\    steps:
+        \\      - run: echo prep
+        \\  review:
+        \\    backend: agent
+        \\    uses: .gitomi/pipelines/code-review
+        \\    needs: [prep]
+        \\    with:
+        \\      mode: quick
+        \\    env:
+        \\      CI: "1"
+        \\    permissions:
+        \\      issues: write
+    ;
+    var workflow = try parseWorkflow(std.testing.allocator, ".gitomi/workflows/review.yml", bytes);
+    defer workflow.deinit();
+    try std.testing.expectEqualStrings("base", workflow.source.workflow_from);
+    try std.testing.expectEqualStrings("head", workflow.source.code_from);
+    try std.testing.expectEqual(@as(usize, 1), workflow.permissions.len);
+    try std.testing.expectEqualStrings("contents", workflow.permissions[0].key);
+    try std.testing.expectEqualStrings("read", workflow.permissions[0].value);
+    try std.testing.expectEqual(@as(usize, 2), workflow.jobs.len);
+    try std.testing.expectEqualStrings("true", workflow.jobs[0].condition.?);
+    try std.testing.expectEqual(@as(?u64, 10), workflow.jobs[0].timeout_minutes);
+    try std.testing.expectEqualStrings(".gitomi/pipelines/code-review", workflow.jobs[1].uses.?);
+    try std.testing.expectEqualStrings("prep", workflow.jobs[1].needs[0]);
+    try std.testing.expectEqualStrings("quick", workflow.jobs[1].with[0].value);
+    try std.testing.expectEqualStrings("1", workflow.jobs[1].env[0].value);
+    try std.testing.expectEqualStrings("write", workflow.jobs[1].permissions[0].value);
+}
+
+test "workflow runtime helpers are semantically checked" {
+    if (std.time.timestamp() == std.math.minInt(i64)) {
+        const repo: repo_mod.Repo = undefined;
+        const workflow: Workflow = undefined;
+        const target: ResolvedTarget = undefined;
+        var result = try executeWorkflow(
+            std.testing.allocator,
+            repo,
+            "018f0000-0000-7000-8000-000000000000",
+            workflow,
+            target,
+            "workflow_dispatch",
+            "workflow.manual",
+            null,
+            null,
+            .{},
+        );
+        result.deinit();
+    }
+}
+
 test "cron matcher supports wildcards ranges lists and steps" {
     // 2026-05-15 12:10:00 UTC is Friday.
     const ts: i64 = 1_778_847_000;
@@ -2144,4 +3618,67 @@ test "cron matcher supports wildcards ranges lists and steps" {
 test "github action value uses event suffix" {
     try std.testing.expectEqualStrings("opened", githubActionValue("issue.opened"));
     try std.testing.expectEqualStrings("push", githubActionValue("push"));
+}
+
+test "workflow selectors match exact paths names basenames and detect ambiguity" {
+    var workflows = [_]Workflow{
+        try parseWorkflow(std.testing.allocator, ".github/workflows/ci.yml",
+            \\name: CI
+            \\on: push
+        ),
+        try parseWorkflow(std.testing.allocator, ".gitomi/workflows/ci.yml",
+            \\name: Native CI
+            \\on: workflow_dispatch
+        ),
+    };
+    defer {
+        for (&workflows) |*workflow| workflow.deinit();
+    }
+
+    const by_path = try resolveWorkflowSelector(workflows[0..], ".github/workflows/ci.yml");
+    try std.testing.expectEqualStrings(".github/workflows/ci.yml", by_path.path);
+
+    const by_name = try resolveWorkflowSelector(workflows[0..], "Native CI");
+    try std.testing.expectEqualStrings(".gitomi/workflows/ci.yml", by_name.path);
+
+    try std.testing.expectError(CliError.UserError, resolveWorkflowSelector(workflows[0..], "ci"));
+    try std.testing.expectError(CliError.UserError, resolveWorkflowSelector(workflows[0..], "missing"));
+}
+
+test "workflow path helpers classify supported files and dialects" {
+    try std.testing.expect(isWorkflowPath(".github/workflows/ci.yml"));
+    try std.testing.expect(isWorkflowPath(".gitomi/workflows/review.yaml"));
+    try std.testing.expect(!isWorkflowPath(".github/workflows/ci.txt"));
+    try std.testing.expect(!isWorkflowPath("ci.yml"));
+
+    try std.testing.expectEqual(WorkflowDialect.github_actions, workflowDialect(".github/workflows/ci.yml"));
+    try std.testing.expectEqual(WorkflowDialect.gitomi, workflowDialect(".gitomi/workflows/review.yml"));
+    try std.testing.expectEqualStrings("github-actions", WorkflowDialect.github_actions.label());
+    try std.testing.expectEqualStrings("gitomi", WorkflowDialect.gitomi.label());
+}
+
+test "yaml helper parsing handles quotes comments and nested inline values" {
+    try std.testing.expectEqualStrings("key: \"#not a comment\" ", stripYamlComment("key: \"#not a comment\" # comment"));
+    try std.testing.expectEqualStrings("quoted", unquoteScalar(" 'quoted' "));
+
+    const parts = try splitTopLevel(
+        std.testing.allocator,
+        "push: { branches: [main, release] }, pull_request: { types: [opened, synchronize] }, label: 'a,b'",
+        ',',
+    );
+    defer git.freeStringList(std.testing.allocator, parts);
+    try std.testing.expectEqual(@as(usize, 3), parts.len);
+    try std.testing.expectEqualStrings("push: { branches: [main, release] }", std.mem.trim(u8, parts[0], " \t\r\n"));
+    try std.testing.expectEqualStrings("pull_request: { types: [opened, synchronize] }", std.mem.trim(u8, parts[1], " \t\r\n"));
+    try std.testing.expectEqualStrings("label: 'a,b'", std.mem.trim(u8, parts[2], " \t\r\n"));
+}
+
+test "cron matcher rejects malformed fields and sunday aliases correctly" {
+    // 2026-05-17 00:00:00 UTC is Sunday.
+    const sunday: i64 = 1_778_976_000;
+    try std.testing.expect(cronMatches("0 0 * * 0", sunday));
+    try std.testing.expect(cronMatches("0 0 * * 7", sunday));
+    try std.testing.expect(!cronMatches("0 0 * * 8", sunday));
+    try std.testing.expect(!cronMatches("0 0 * * */0", sunday));
+    try std.testing.expect(!cronMatches("0 0 * *", sunday));
 }

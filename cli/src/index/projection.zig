@@ -644,6 +644,11 @@ fn eventAuthorizationRejection(
     {
         return if (roleAtLeast(role, "maintainer")) null else "insufficient_role";
     }
+    if (std.mem.eql(u8, envelope.event_type, "issue.project_field_set") or
+        std.mem.eql(u8, envelope.event_type, "issue.project_field_cleared"))
+    {
+        return if (try canEditObject(allocator, db, role, envelope.actor_principal, "issue", envelope.object_id)) null else "insufficient_role";
+    }
     if (std.mem.eql(u8, envelope.event_type, "issue.reaction_added") or
         std.mem.eql(u8, envelope.event_type, "issue.reaction_removed"))
     {

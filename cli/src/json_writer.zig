@@ -23,9 +23,7 @@ pub fn appendJsonFieldUnsigned(
 ) !void {
     try appendJsonString(buf, allocator, key);
     try buf.append(allocator, ':');
-    const raw = try std.fmt.allocPrint(allocator, "{d}", .{value});
-    defer allocator.free(raw);
-    try buf.appendSlice(allocator, raw);
+    try buf.writer(allocator).print("{d}", .{value});
     if (comma) try buf.append(allocator, ',');
 }
 
@@ -90,9 +88,7 @@ pub fn appendJsonFieldInteger(
 ) !void {
     try appendJsonString(buf, allocator, key);
     try buf.append(allocator, ':');
-    const raw = try std.fmt.allocPrint(allocator, "{d}", .{value});
-    defer allocator.free(raw);
-    try buf.appendSlice(allocator, raw);
+    try buf.writer(allocator).print("{d}", .{value});
     if (comma) try buf.append(allocator, ',');
 }
 

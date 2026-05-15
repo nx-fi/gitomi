@@ -713,9 +713,9 @@ fn importIssueObject(
     defer allocator.free(occurred_at);
 
     const labels = try githubIssueLabels(allocator, issue);
-    defer freeStringList(allocator, labels);
+    defer git.freeStringList(allocator, labels);
     const assignees = try githubNamedArray(allocator, issue.get("assignees"), "login");
-    defer freeStringList(allocator, assignees);
+    defer git.freeStringList(allocator, assignees);
     const source_author = try githubSizedString(allocator, githubAuthorLogin(issue), "", git.max_payload_atom_bytes);
     defer allocator.free(source_author);
     const milestone = try githubSizedString(allocator, githubMilestoneTitle(issue), "", git.max_payload_atom_bytes);
@@ -761,11 +761,11 @@ fn importPullObject(allocator: Allocator, pull: std.json.ObjectMap, options: Imp
     const source_author = try githubSizedString(allocator, githubAuthorLogin(pull), "", git.max_payload_atom_bytes);
     defer allocator.free(source_author);
     const labels = try githubIssueLabels(allocator, pull);
-    defer freeStringList(allocator, labels);
+    defer git.freeStringList(allocator, labels);
     const assignees = try githubNamedArray(allocator, pull.get("assignees"), "login");
-    defer freeStringList(allocator, assignees);
+    defer git.freeStringList(allocator, assignees);
     const reviewers = try githubPullReviewers(allocator, pull);
-    defer freeStringList(allocator, reviewers);
+    defer git.freeStringList(allocator, reviewers);
 
     const pull_id = try util.newUuidV7(allocator);
     errdefer allocator.free(pull_id);
@@ -1064,7 +1064,7 @@ fn writeImportedIssueProjectAdded(
     defer allocator.free(event_uuid);
     const idem = try util.newUuidV7(allocator);
     defer allocator.free(idem);
-    const body = try event_mod.buildIssueProjectEventJson(allocator, writer.cfg, writer.nextSeq(), issue_id, event_uuid, idem, occurred_at, writer.eventParents(), "issue.project_added", project, column);
+    const body = try event_mod.buildIssueProjectEventJson(allocator, writer.cfg, writer.nextSeq(), issue_id, event_uuid, idem, occurred_at, writer.eventParents(), "issue.project_added", project, column, null, null);
     defer allocator.free(body);
     var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
     const issue_ref = util.shortObjectRef(&issue_ref_buf, issue_id);
@@ -1883,7 +1883,7 @@ fn firstJsonValue(a: ?std.json.Value, b: ?std.json.Value) ?std.json.Value {
 
 fn githubIssueLabels(allocator: Allocator, issue: std.json.ObjectMap) ![][]u8 {
     var list: std.ArrayList([]u8) = .empty;
-    errdefer freeStringList(allocator, list.items);
+    errdefer git.freeStringList(allocator, list.items);
     try appendGithubNamedArray(allocator, &list, issue.get("labels"), "name");
     try appendGithubNamedArray(allocator, &list, issue.get("tags"), "name");
     return list.toOwnedSlice(allocator);
@@ -1891,7 +1891,7 @@ fn githubIssueLabels(allocator: Allocator, issue: std.json.ObjectMap) ![][]u8 {
 
 fn githubPullReviewers(allocator: Allocator, pull: std.json.ObjectMap) ![][]u8 {
     var list: std.ArrayList([]u8) = .empty;
-    errdefer freeStringList(allocator, list.items);
+    errdefer git.freeStringList(allocator, list.items);
     try appendGithubNamedArray(allocator, &list, pull.get("requested_reviewers"), "login");
     try appendGithubNamedArray(allocator, &list, pull.get("reviewers"), "login");
     return list.toOwnedSlice(allocator);
@@ -1899,7 +1899,7 @@ fn githubPullReviewers(allocator: Allocator, pull: std.json.ObjectMap) ![][]u8 {
 
 fn githubNamedArray(allocator: Allocator, value: ?std.json.Value, key: []const u8) ![][]u8 {
     var list: std.ArrayList([]u8) = .empty;
-    errdefer freeStringList(allocator, list.items);
+    errdefer git.freeStringList(allocator, list.items);
     try appendGithubNamedArray(allocator, &list, value, key);
     return list.toOwnedSlice(allocator);
 }
@@ -1915,11 +1915,6 @@ fn appendGithubNamedArray(allocator: Allocator, list: *std.ArrayList([]u8), valu
             }
         }
     }
-}
-
-fn freeStringList(allocator: Allocator, values: [][]u8) void {
-    for (values) |value| allocator.free(value);
-    allocator.free(values);
 }
 
 fn githubAuthorLogin(object: std.json.ObjectMap) ?[]const u8 {
@@ -2093,4 +2088,142 @@ test "github import subject stays within event subject limit" {
     const subject = try githubSubject(std.testing.allocator, "issue.opened #1234567 GitHub #1 ", title);
     defer std.testing.allocator.free(subject);
     try std.testing.expect(subject.len <= git.max_event_subject_bytes);
+}
+
+test "github repo slugs and API paths are validated" {
+    const slug = try parseRepoSlug("owner/repo");
+    try std.testing.expectEqualStrings("owner", slug.owner);
+    try std.testing.expectEqualStrings("repo", slug.name);
+    try std.testing.expectEqualStrings("owner/repo", slug.slug);
+
+    try std.testing.expectError(CliError.InvalidArgument, parseRepoSlug("owner"));
+    try std.testing.expectError(CliError.InvalidArgument, parseRepoSlug("owner/"));
+    try std.testing.expectError(CliError.InvalidArgument, parseRepoSlug("/repo"));
+
+    const client = GitHubClient{
+        .allocator = std.testing.allocator,
+        .api_url = default_api_url,
+        .repo = slug,
+        .token = null,
+    };
+    const path = try client.repoPath(std.testing.allocator, "/issues");
+    defer std.testing.allocator.free(path);
+    try std.testing.expectEqualStrings("/repos/owner/repo/issues", path);
+}
+
+test "github import helpers extract labels authors milestones and counts" {
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{
+        \\  "labels": [{"name":"bug"}, "help wanted"],
+        \\  "tags": [{"name":"triage"}],
+        \\  "requested_reviewers": [{"login":"alice"}],
+        \\  "reviewers": ["bob"],
+        \\  "user": {"login": "carol"},
+        \\  "milestone": {"title": "v1"},
+        \\  "commits": 3,
+        \\  "deletions": -1
+        \\}
+    , .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+
+    const labels = try githubIssueLabels(std.testing.allocator, root);
+    defer git.freeStringList(std.testing.allocator, labels);
+    try std.testing.expectEqual(@as(usize, 3), labels.len);
+    try std.testing.expectEqualStrings("bug", labels[0]);
+    try std.testing.expectEqualStrings("help wanted", labels[1]);
+    try std.testing.expectEqualStrings("triage", labels[2]);
+
+    const reviewers = try githubPullReviewers(std.testing.allocator, root);
+    defer git.freeStringList(std.testing.allocator, reviewers);
+    try std.testing.expectEqual(@as(usize, 2), reviewers.len);
+    try std.testing.expectEqualStrings("alice", reviewers[0]);
+    try std.testing.expectEqualStrings("bob", reviewers[1]);
+
+    try std.testing.expectEqualStrings("carol", githubAuthorLogin(root).?);
+    try std.testing.expectEqualStrings("v1", githubMilestoneTitle(root).?);
+    try std.testing.expectEqual(@as(?u64, 3), githubOptionalUnsignedField(root, &.{"commits"}));
+    try std.testing.expect(githubOptionalUnsignedField(root, &.{"deletions"}) == null);
+}
+
+test "github export request body builders include supported fields" {
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{
+        \\  "title": "Fix bug",
+        \\  "body": "Details",
+        \\  "state": "closed",
+        \\  "labels": ["bug", "ci"],
+        \\  "assignees": ["alice"],
+        \\  "base_ref": "main",
+        \\  "head_ref": "feature",
+        \\  "draft": true
+        \\}
+    , .{});
+    defer parsed.deinit();
+    const payload = parsed.value.object;
+
+    const issue_body = try githubIssueCreateBody(std.testing.allocator, payload);
+    defer std.testing.allocator.free(issue_body);
+    try std.testing.expectEqualStrings("{\"title\":\"Fix bug\",\"body\":\"Details\",\"labels\":[\"bug\",\"ci\"],\"assignees\":[\"alice\"]}", issue_body);
+
+    const pull_body = try githubPullCreateBody(std.testing.allocator, payload);
+    defer std.testing.allocator.free(pull_body);
+    try std.testing.expectEqualStrings("{\"title\":\"Fix bug\",\"body\":\"Details\",\"base\":\"main\",\"head\":\"feature\",\"draft\":true}", pull_body);
+
+    const patch_body = (try githubIssuePatchBody(std.testing.allocator, payload)).?;
+    defer std.testing.allocator.free(patch_body);
+    try std.testing.expectEqualStrings("{\"title\":\"Fix bug\",\"body\":\"Details\",\"state\":\"closed\"}", patch_body);
+
+    const comment_body = try githubCommentBody(std.testing.allocator, "hello");
+    defer std.testing.allocator.free(comment_body);
+    try std.testing.expectEqualStrings("{\"body\":\"hello\"}", comment_body);
+
+    const labels_body = try singleArrayBody(std.testing.allocator, "labels", "needs/triage");
+    defer std.testing.allocator.free(labels_body);
+    try std.testing.expectEqualStrings("{\"labels\":[\"needs/triage\"]}", labels_body);
+
+    var empty = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, "{}", .{});
+    defer empty.deinit();
+    try std.testing.expect((try githubIssuePatchBody(std.testing.allocator, empty.value.object)) == null);
+}
+
+test "github fixture project placement combines object and root mappings" {
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{
+        \\  "issue": {
+        \\    "number": 42,
+        \\    "projects": ["Roadmap/Doing", {"project":"Backlog","column":"Todo"}]
+        \\  },
+        \\  "projects": {
+        \\    "issue:42": [{"name":"Global","status":"Done"}]
+        \\  }
+        \\}
+    , .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    const issue = root.get("issue").?.object;
+
+    const projects = try githubFixtureProjects(std.testing.allocator, root, "issue", 42, issue);
+    defer freeProjectPlacements(std.testing.allocator, projects);
+    try std.testing.expectEqual(@as(usize, 3), projects.len);
+    try std.testing.expectEqualStrings("Roadmap", projects[0].project);
+    try std.testing.expectEqualStrings("Doing", projects[0].column);
+    try std.testing.expectEqualStrings("Backlog", projects[1].project);
+    try std.testing.expectEqualStrings("Todo", projects[1].column);
+    try std.testing.expectEqualStrings("Global", projects[2].project);
+    try std.testing.expectEqualStrings("Done", projects[2].column);
+}
+
+test "github URL and response parsing helpers handle edge cases" {
+    const escaped = try urlPathEscape(std.testing.allocator, "bug needs/triage");
+    defer std.testing.allocator.free(escaped);
+    try std.testing.expectEqualStrings("bug%20needs%2Ftriage", escaped);
+
+    try std.testing.expectEqual(@as(?i64, 42), issueNumberFromContentUrl("https://api.github.com/repos/owner/repo/issues/42"));
+    try std.testing.expect(issueNumberFromContentUrl("https://api.github.com/repos/owner/repo/issues/not-a-number") == null);
+    try std.testing.expect(issueNumberFromContentUrl("https://api.github.com/repos/owner/repo/pulls/42") == null);
+
+    try std.testing.expectEqual(@as(?i64, 17), parseResponseNumber(std.testing.allocator, "{\"number\":17}", "number"));
+    try std.testing.expect(parseResponseNumber(std.testing.allocator, "[]", "number") == null);
+    try std.testing.expect(parseResponseNumber(std.testing.allocator, "not json", "number") == null);
 }

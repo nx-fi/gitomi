@@ -12,6 +12,7 @@ test {
     _ = @import("event_writer.zig");
     _ = @import("index.zig");
     _ = @import("comment.zig");
+    _ = @import("cmd_common.zig");
     _ = @import("reaction.zig");
     _ = @import("pull.zig");
     _ = @import("work_items.zig");
@@ -21,6 +22,7 @@ test {
     _ = @import("actions.zig");
     _ = @import("runs.zig");
     _ = @import("sync.zig");
+    _ = @import("fsck.zig");
     _ = @import("github.zig");
     _ = @import("web.zig");
 }

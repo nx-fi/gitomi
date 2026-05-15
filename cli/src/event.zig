@@ -19,7 +19,6 @@ const appendJsonFieldInteger = json_writer.appendJsonFieldInteger;
 const appendJsonString = json_writer.appendJsonString;
 
 pub const event_schema = "urn:gitomi:event:v1";
-pub const max_related_parents = 256;
 
 pub const EventParents = struct {
     log: ?[]const u8 = null,
@@ -35,6 +34,24 @@ pub const LegacyInfo = struct {
     pub fn isEmpty(self: LegacyInfo) bool {
         return self.github_issue_number == null and self.github_pull_number == null;
     }
+};
+
+pub const ActionRunRequestedMetadata = struct {
+    workflow_name: ?[]const u8 = null,
+    workflow_dialect: ?[]const u8 = null,
+    workflow_source_ref: ?[]const u8 = null,
+    workflow_source_oid: ?[]const u8 = null,
+    backend_kind: ?[]const u8 = null,
+    pipeline: ?[]const u8 = null,
+    schedule_slot: ?[]const u8 = null,
+    source_workflow_from: ?[]const u8 = null,
+    source_code_from: ?[]const u8 = null,
+    permission_grant_json: ?[]const u8 = null,
+};
+
+pub const ActionRunCompletedMetadata = struct {
+    attempt_id: ?[]const u8 = null,
+    runner_id: ?[]const u8 = null,
 };
 
 pub const IssueProjectPlacement = struct {
@@ -1362,6 +1379,7 @@ pub fn buildActionRunRequestedJson(
     target_oid: ?[]const u8,
     event_name: ?[]const u8,
     gitomi_event_type: ?[]const u8,
+    metadata: ActionRunRequestedMetadata,
 ) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -1373,6 +1391,21 @@ pub fn buildActionRunRequestedJson(
     if (target_oid) |value| try appendJsonFieldString(&buf, allocator, "target_oid", value, true);
     if (event_name) |value| try appendJsonFieldString(&buf, allocator, "event_name", value, true);
     if (gitomi_event_type) |value| try appendJsonFieldString(&buf, allocator, "gitomi_event_type", value, true);
+    if (metadata.workflow_name) |value| try appendJsonFieldString(&buf, allocator, "workflow_name", value, true);
+    if (metadata.workflow_dialect) |value| try appendJsonFieldString(&buf, allocator, "workflow_dialect", value, true);
+    if (metadata.workflow_source_ref) |value| try appendJsonFieldString(&buf, allocator, "workflow_source_ref", value, true);
+    if (metadata.workflow_source_oid) |value| try appendJsonFieldString(&buf, allocator, "workflow_source_oid", value, true);
+    if (metadata.backend_kind) |value| try appendJsonFieldString(&buf, allocator, "backend_kind", value, true);
+    if (metadata.pipeline) |value| try appendJsonFieldString(&buf, allocator, "pipeline", value, true);
+    if (metadata.schedule_slot) |value| try appendJsonFieldString(&buf, allocator, "schedule_slot", value, true);
+    if (metadata.source_workflow_from) |value| try appendJsonFieldString(&buf, allocator, "source_workflow_from", value, true);
+    if (metadata.source_code_from) |value| try appendJsonFieldString(&buf, allocator, "source_code_from", value, true);
+    if (metadata.permission_grant_json) |value| {
+        try appendJsonString(&buf, allocator, "permission_grant");
+        try buf.append(allocator, ':');
+        try buf.appendSlice(allocator, value);
+        try buf.append(allocator, ',');
+    }
     if (buf.items[buf.items.len - 1] == ',') {
         buf.items.len -= 1;
     }
@@ -1396,6 +1429,7 @@ pub fn buildActionRunCompletedJson(
     event_name: ?[]const u8,
     diagnostics_ref: ?[]const u8,
     diagnostics_oid: ?[]const u8,
+    metadata: ActionRunCompletedMetadata,
 ) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -1410,6 +1444,8 @@ pub fn buildActionRunCompletedJson(
     if (event_name) |value| try appendJsonFieldString(&buf, allocator, "event_name", value, true);
     if (diagnostics_ref) |value| try appendJsonFieldString(&buf, allocator, "diagnostics_ref", value, true);
     if (diagnostics_oid) |value| try appendJsonFieldString(&buf, allocator, "diagnostics_oid", value, true);
+    if (metadata.attempt_id) |value| try appendJsonFieldString(&buf, allocator, "attempt_id", value, true);
+    if (metadata.runner_id) |value| try appendJsonFieldString(&buf, allocator, "runner_id", value, true);
     if (buf.items[buf.items.len - 1] == ',') {
         buf.items.len -= 1;
     }
@@ -1576,48 +1612,108 @@ pub fn parseValidatedEnvelopeObject(allocator: Allocator, root: std.json.ObjectM
     const actor_principal = requiredString(actor, "principal").?;
     const actor_device = requiredString(actor, "device").?;
 
-    var repo_id_owned: ?[]u8 = try allocator.dupe(u8, repo_id);
-    errdefer if (repo_id_owned) |value| allocator.free(value);
-    var event_uuid_owned: ?[]u8 = try allocator.dupe(u8, event_uuid);
-    errdefer if (event_uuid_owned) |value| allocator.free(value);
-    var event_type_owned: ?[]u8 = try allocator.dupe(u8, event_type);
-    errdefer if (event_type_owned) |value| allocator.free(value);
-    var object_kind_owned: ?[]u8 = try allocator.dupe(u8, object_kind);
-    errdefer if (object_kind_owned) |value| allocator.free(value);
-    var object_id_owned: ?[]u8 = try allocator.dupe(u8, object_id);
-    errdefer if (object_id_owned) |value| allocator.free(value);
-    var idempotency_key_owned: ?[]u8 = try allocator.dupe(u8, idempotency_key);
-    errdefer if (idempotency_key_owned) |value| allocator.free(value);
-    var actor_principal_owned: ?[]u8 = try allocator.dupe(u8, actor_principal);
-    errdefer if (actor_principal_owned) |value| allocator.free(value);
-    var actor_device_owned: ?[]u8 = try allocator.dupe(u8, actor_device);
-    errdefer if (actor_device_owned) |value| allocator.free(value);
-    var occurred_at_owned: ?[]u8 = try allocator.dupe(u8, occurred_at);
-    errdefer if (occurred_at_owned) |value| allocator.free(value);
+    var owned = util.OwnedSliceList{ .allocator = allocator };
+    defer owned.deinit();
 
     const envelope = ValidatedEnvelope{
         .allocator = allocator,
-        .repo_id = repo_id_owned.?,
-        .event_uuid = event_uuid_owned.?,
-        .event_type = event_type_owned.?,
-        .object_kind = object_kind_owned.?,
-        .object_id = object_id_owned.?,
-        .idempotency_key = idempotency_key_owned.?,
-        .actor_principal = actor_principal_owned.?,
-        .actor_device = actor_device_owned.?,
+        .repo_id = try owned.dupe(repo_id),
+        .event_uuid = try owned.dupe(event_uuid),
+        .event_type = try owned.dupe(event_type),
+        .object_kind = try owned.dupe(object_kind),
+        .object_id = try owned.dupe(object_id),
+        .idempotency_key = try owned.dupe(idempotency_key),
+        .actor_principal = try owned.dupe(actor_principal),
+        .actor_device = try owned.dupe(actor_device),
         .seq = seq,
-        .occurred_at = occurred_at_owned.?,
+        .occurred_at = try owned.dupe(occurred_at),
     };
-    repo_id_owned = null;
-    event_uuid_owned = null;
-    event_type_owned = null;
-    object_kind_owned = null;
-    object_id_owned = null;
-    idempotency_key_owned = null;
-    actor_principal_owned = null;
-    actor_device_owned = null;
-    occurred_at_owned = null;
+    owned.release();
     return envelope;
+}
+
+pub const ParentHashValidationFailure = enum {
+    invalid_event_body,
+    invalid_parent_hashes,
+    root_anchor_mismatch,
+    log_mismatch_first_parent,
+    non_root_anchor,
+    causal_count_mismatch,
+    causal_parent_cap_exceeded,
+    related_parent_cap_exceeded,
+    causal_git_parent_mismatch,
+};
+
+pub fn parentHashValidationMessage(failure: ParentHashValidationFailure) []const u8 {
+    return switch (failure) {
+        .invalid_event_body => "event body is not valid JSON",
+        .invalid_parent_hashes => "parent_hashes must include string log/anchor fields and causal/related arrays",
+        .root_anchor_mismatch => "parent_hashes.anchor does not match root genesis parent",
+        .log_mismatch_first_parent => "parent_hashes.log does not match first parent",
+        .non_root_anchor => "non-root event has parent_hashes.anchor",
+        .causal_count_mismatch => "parent_hashes.causal does not match parent count",
+        .causal_parent_cap_exceeded => "parent_hashes.causal exceeds v1 causal parent cap",
+        .related_parent_cap_exceeded => "parent_hashes.related exceeds v1 related parent cap",
+        .causal_git_parent_mismatch => "parent_hashes.causal does not match Git parents",
+    };
+}
+
+pub fn validateParentHashes(allocator: Allocator, parents: []const u8, body: []const u8) !?ParentHashValidationFailure {
+    var parent_list: std.ArrayList([]const u8) = .empty;
+    defer parent_list.deinit(allocator);
+    var parent_it = std.mem.tokenizeScalar(u8, parents, ' ');
+    while (parent_it.next()) |parent| try parent_list.append(allocator, parent);
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return .invalid_event_body,
+    };
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return .invalid_event_body,
+    };
+    const parent_hashes = switch (root.get("parent_hashes") orelse return .invalid_parent_hashes) {
+        .object => |object| object,
+        else => return .invalid_parent_hashes,
+    };
+    const log_hash = switch (parent_hashes.get("log") orelse return .invalid_parent_hashes) {
+        .string => |value| value,
+        else => return .invalid_parent_hashes,
+    };
+    const anchor_hash = switch (parent_hashes.get("anchor") orelse return .invalid_parent_hashes) {
+        .string => |value| value,
+        else => return .invalid_parent_hashes,
+    };
+    const causal = switch (parent_hashes.get("causal") orelse return .invalid_parent_hashes) {
+        .array => |array| array,
+        else => return .invalid_parent_hashes,
+    };
+    const related = switch (parent_hashes.get("related") orelse return .invalid_parent_hashes) {
+        .array => |array| array,
+        else => return .invalid_parent_hashes,
+    };
+
+    const first_parent = if (parent_list.items.len == 0) null else parent_list.items[0];
+    if (log_hash.len == 0) {
+        if (first_parent == null or anchor_hash.len == 0 or !std.mem.eql(u8, anchor_hash, first_parent.?)) {
+            return .root_anchor_mismatch;
+        }
+    } else {
+        if (first_parent == null or !std.mem.eql(u8, log_hash, first_parent.?)) {
+            return .log_mismatch_first_parent;
+        }
+        if (anchor_hash.len != 0) return .non_root_anchor;
+    }
+
+    const expected_causal_len = if (parent_list.items.len == 0) 0 else parent_list.items.len - 1;
+    if (causal.items.len != expected_causal_len) return .causal_count_mismatch;
+    if (causal.items.len > git.max_causal_parents) return .causal_parent_cap_exceeded;
+    if (related.items.len > git.max_related_parents) return .related_parent_cap_exceeded;
+    for (causal.items, 0..) |item, idx| {
+        if (item != .string or !std.mem.eql(u8, item.string, parent_list.items[idx + 1])) return .causal_git_parent_mismatch;
+    }
+    return null;
 }
 
 pub fn validateEnvelopeObject(allocator: Allocator, root: std.json.ObjectMap) !?[]u8 {
@@ -1680,7 +1776,7 @@ pub fn validateEnvelopeObject(allocator: Allocator, root: std.json.ObjectMap) !?
     };
     if (try validateEnvelopeStringArray(allocator, parent_hashes, "causal", "parent_hashes.causal")) |message| return message;
     if (try validateEnvelopeStringArray(allocator, parent_hashes, "related", "parent_hashes.related")) |message| return message;
-    if (arrayLen(parent_hashes, "related") > max_related_parents) {
+    if (arrayLen(parent_hashes, "related") > git.max_related_parents) {
         return try validationMessage(allocator, "parent_hashes.related exceeds v1 related parent cap", .{});
     }
 
@@ -1905,6 +2001,28 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!stringWithin(payload, "project", git.max_payload_atom_bytes)) return "issue project event payload.project exceeds v1 field size limit";
         if (!hasString(payload, "column")) return "issue project event payload.column must be a string";
         if (!stringWithin(payload, "column", git.max_payload_atom_bytes)) return "issue project event payload.column exceeds v1 field size limit";
+        if (!optionalStringWithin(payload, "project_ref", git.max_payload_ref_bytes)) return "issue project event payload.project_ref exceeds v1 ref size limit";
+        if (!optionalStringWithin(payload, "column_ref", git.max_payload_atom_bytes)) return "issue project event payload.column_ref exceeds v1 field size limit";
+        return null;
+    }
+    if (std.mem.eql(u8, event_type, "issue.project_field_set")) {
+        if (!hasString(payload, "project_id") and !hasString(payload, "project_ref")) return "issue.project_field_set payload.project_id or payload.project_ref must be a string";
+        if (!optionalStringWithin(payload, "project_id", git.max_payload_ref_bytes)) return "issue.project_field_set payload.project_id exceeds v1 ref size limit";
+        if (!optionalStringWithin(payload, "project_ref", git.max_payload_ref_bytes)) return "issue.project_field_set payload.project_ref exceeds v1 ref size limit";
+        if (!hasString(payload, "field_id") and !hasString(payload, "field_key")) return "issue.project_field_set payload.field_id or payload.field_key must be a string";
+        if (!optionalStringWithin(payload, "field_id", git.max_payload_ref_bytes)) return "issue.project_field_set payload.field_id exceeds v1 ref size limit";
+        if (!optionalStringWithin(payload, "field_key", git.max_payload_atom_bytes)) return "issue.project_field_set payload.field_key exceeds v1 field size limit";
+        if (payload.get("value") == null) return "issue.project_field_set payload.value is required";
+        if (!jsonValueWithin(payload.get("value").?, git.max_payload_text_bytes)) return "issue.project_field_set payload.value exceeds v1 value size limit";
+        return null;
+    }
+    if (std.mem.eql(u8, event_type, "issue.project_field_cleared")) {
+        if (!hasString(payload, "project_id") and !hasString(payload, "project_ref")) return "issue.project_field_cleared payload.project_id or payload.project_ref must be a string";
+        if (!optionalStringWithin(payload, "project_id", git.max_payload_ref_bytes)) return "issue.project_field_cleared payload.project_id exceeds v1 ref size limit";
+        if (!optionalStringWithin(payload, "project_ref", git.max_payload_ref_bytes)) return "issue.project_field_cleared payload.project_ref exceeds v1 ref size limit";
+        if (!hasString(payload, "field_id") and !hasString(payload, "field_key")) return "issue.project_field_cleared payload.field_id or payload.field_key must be a string";
+        if (!optionalStringWithin(payload, "field_id", git.max_payload_ref_bytes)) return "issue.project_field_cleared payload.field_id exceeds v1 ref size limit";
+        if (!optionalStringWithin(payload, "field_key", git.max_payload_atom_bytes)) return "issue.project_field_cleared payload.field_key exceeds v1 field size limit";
         return null;
     }
 
@@ -1930,6 +2048,92 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!hasString(payload, "column")) return "project column event payload.column must be a string";
         if (!stringWithin(payload, "column", git.max_payload_atom_bytes)) return "project column event payload.column exceeds v1 field size limit";
         if (!optionalStringWithin(payload, "column_ref", git.max_payload_atom_bytes)) return "project column event payload.column_ref exceeds v1 field size limit";
+        return null;
+    }
+    if (std.mem.eql(u8, event_type, "project.field_created")) {
+        if (!hasUuidString(payload, "field_id")) return "project.field_created payload.field_id must be a UUID string";
+        if (!hasString(payload, "key")) return "project.field_created payload.key must be a string";
+        if (!stringWithin(payload, "key", git.max_payload_atom_bytes)) return "project.field_created payload.key exceeds v1 field size limit";
+        if (!hasString(payload, "name")) return "project.field_created payload.name must be a string";
+        if (!stringWithin(payload, "name", git.max_payload_atom_bytes)) return "project.field_created payload.name exceeds v1 field size limit";
+        const field_type = jsonString(payload.get("type")) orelse return "project.field_created payload.type must be a string";
+        if (!validProjectFieldType(field_type)) return "project.field_created payload.type is not recognized";
+        if (!optionalNonNegativeInteger(payload, "position")) return "project.field_created payload.position must be a non-negative integer";
+        if (!optionalBool(payload, "required")) return "project.field_created payload.required must be a boolean";
+        if (payload.get("default_value")) |value| if (!jsonValueWithin(value, git.max_payload_text_bytes)) return "project.field_created payload.default_value exceeds v1 value size limit";
+        if (!optionalState(payload, "state", &.{ "active", "removed" })) return "project.field_created payload.state must be active or removed";
+        return null;
+    }
+    if (std.mem.eql(u8, event_type, "project.field_updated")) {
+        if (!hasUuidString(payload, "field_id")) return "project.field_updated payload.field_id must be a UUID string";
+        if (!optionalStringWithin(payload, "key", git.max_payload_atom_bytes)) return "project.field_updated payload.key exceeds v1 field size limit";
+        if (!optionalStringWithin(payload, "name", git.max_payload_atom_bytes)) return "project.field_updated payload.name exceeds v1 field size limit";
+        if (payload.get("type")) |value| {
+            const field_type = jsonString(value) orelse return "project.field_updated payload.type must be a string";
+            if (!validProjectFieldType(field_type)) return "project.field_updated payload.type is not recognized";
+        }
+        if (!optionalNonNegativeInteger(payload, "position")) return "project.field_updated payload.position must be a non-negative integer";
+        if (!optionalBool(payload, "required")) return "project.field_updated payload.required must be a boolean";
+        if (payload.get("default_value")) |value| if (!jsonValueWithin(value, git.max_payload_text_bytes)) return "project.field_updated payload.default_value exceeds v1 value size limit";
+        if (!optionalState(payload, "state", &.{ "active", "removed" })) return "project.field_updated payload.state must be active or removed";
+        if (!hasAnyKey(payload, &.{ "key", "name", "type", "position", "required", "default_value", "state" })) return "project.field_updated payload must contain at least one update field";
+        return null;
+    }
+    if (std.mem.eql(u8, event_type, "project.field_removed")) {
+        if (!hasUuidString(payload, "field_id")) return "project.field_removed payload.field_id must be a UUID string";
+        return null;
+    }
+    if (std.mem.eql(u8, event_type, "project.field_option_added")) {
+        if (!hasUuidString(payload, "field_id")) return "project.field_option_added payload.field_id must be a UUID string";
+        if (!hasUuidString(payload, "option_id")) return "project.field_option_added payload.option_id must be a UUID string";
+        if (!hasString(payload, "name")) return "project.field_option_added payload.name must be a string";
+        if (!stringWithin(payload, "name", git.max_payload_atom_bytes)) return "project.field_option_added payload.name exceeds v1 field size limit";
+        if (!optionalStringWithin(payload, "color", git.max_payload_atom_bytes)) return "project.field_option_added payload.color exceeds v1 field size limit";
+        if (!optionalNonNegativeInteger(payload, "position")) return "project.field_option_added payload.position must be a non-negative integer";
+        if (!optionalState(payload, "state", &.{ "active", "removed" })) return "project.field_option_added payload.state must be active or removed";
+        return null;
+    }
+    if (std.mem.eql(u8, event_type, "project.field_option_updated")) {
+        if (!hasUuidString(payload, "field_id")) return "project.field_option_updated payload.field_id must be a UUID string";
+        if (!hasUuidString(payload, "option_id")) return "project.field_option_updated payload.option_id must be a UUID string";
+        if (!optionalStringWithin(payload, "name", git.max_payload_atom_bytes)) return "project.field_option_updated payload.name exceeds v1 field size limit";
+        if (!optionalStringWithin(payload, "color", git.max_payload_atom_bytes)) return "project.field_option_updated payload.color exceeds v1 field size limit";
+        if (!optionalNonNegativeInteger(payload, "position")) return "project.field_option_updated payload.position must be a non-negative integer";
+        if (!optionalState(payload, "state", &.{ "active", "removed" })) return "project.field_option_updated payload.state must be active or removed";
+        if (!hasAnyKey(payload, &.{ "name", "color", "position", "state" })) return "project.field_option_updated payload must contain at least one update field";
+        return null;
+    }
+    if (std.mem.eql(u8, event_type, "project.field_option_removed")) {
+        if (!hasUuidString(payload, "field_id")) return "project.field_option_removed payload.field_id must be a UUID string";
+        if (!hasUuidString(payload, "option_id")) return "project.field_option_removed payload.option_id must be a UUID string";
+        return null;
+    }
+    if (std.mem.eql(u8, event_type, "project.view_created")) {
+        if (!hasUuidString(payload, "view_id")) return "project.view_created payload.view_id must be a UUID string";
+        if (!hasString(payload, "name")) return "project.view_created payload.name must be a string";
+        if (!stringWithin(payload, "name", git.max_payload_atom_bytes)) return "project.view_created payload.name exceeds v1 field size limit";
+        const layout = jsonString(payload.get("layout")) orelse return "project.view_created payload.layout must be a string";
+        if (!validProjectViewLayout(layout)) return "project.view_created payload.layout is not recognized";
+        if (!optionalNonNegativeInteger(payload, "position")) return "project.view_created payload.position must be a non-negative integer";
+        if (payload.get("config")) |value| if (!jsonValueWithin(value, git.max_payload_text_bytes)) return "project.view_created payload.config exceeds v1 value size limit";
+        if (!optionalState(payload, "state", &.{ "active", "removed" })) return "project.view_created payload.state must be active or removed";
+        return null;
+    }
+    if (std.mem.eql(u8, event_type, "project.view_updated")) {
+        if (!hasUuidString(payload, "view_id")) return "project.view_updated payload.view_id must be a UUID string";
+        if (!optionalStringWithin(payload, "name", git.max_payload_atom_bytes)) return "project.view_updated payload.name exceeds v1 field size limit";
+        if (payload.get("layout")) |value| {
+            const layout = jsonString(value) orelse return "project.view_updated payload.layout must be a string";
+            if (!validProjectViewLayout(layout)) return "project.view_updated payload.layout is not recognized";
+        }
+        if (!optionalNonNegativeInteger(payload, "position")) return "project.view_updated payload.position must be a non-negative integer";
+        if (payload.get("config")) |value| if (!jsonValueWithin(value, git.max_payload_text_bytes)) return "project.view_updated payload.config exceeds v1 value size limit";
+        if (!optionalState(payload, "state", &.{ "active", "removed" })) return "project.view_updated payload.state must be active or removed";
+        if (!hasAnyKey(payload, &.{ "name", "layout", "position", "config", "state" })) return "project.view_updated payload must contain at least one update field";
+        return null;
+    }
+    if (std.mem.eql(u8, event_type, "project.view_removed")) {
+        if (!hasUuidString(payload, "view_id")) return "project.view_removed payload.view_id must be a UUID string";
         return null;
     }
 
@@ -2140,6 +2344,56 @@ fn validReactionEmoji(value: []const u8) bool {
         if (c < 0x20) return false;
     }
     return true;
+}
+
+fn hasUuidString(payload: std.json.ObjectMap, key: []const u8) bool {
+    const value = jsonString(payload.get(key)) orelse return false;
+    return looksLikeUuid(value);
+}
+
+fn validProjectFieldType(value: []const u8) bool {
+    return std.mem.eql(u8, value, "text") or
+        std.mem.eql(u8, value, "number") or
+        std.mem.eql(u8, value, "date") or
+        std.mem.eql(u8, value, "boolean") or
+        std.mem.eql(u8, value, "single_select") or
+        std.mem.eql(u8, value, "multi_select") or
+        std.mem.eql(u8, value, "user") or
+        std.mem.eql(u8, value, "issue_ref");
+}
+
+fn validProjectViewLayout(value: []const u8) bool {
+    return std.mem.eql(u8, value, "table") or
+        std.mem.eql(u8, value, "board") or
+        std.mem.eql(u8, value, "roadmap");
+}
+
+fn jsonValueWithin(value: std.json.Value, max_bytes: usize) bool {
+    return jsonValueApproxLen(value) <= max_bytes;
+}
+
+fn jsonValueApproxLen(value: std.json.Value) usize {
+    return switch (value) {
+        .null => 4,
+        .bool => 5,
+        .integer => 32,
+        .float => 32,
+        .number_string => |number| number.len,
+        .string => |string| string.len + 2,
+        .array => |array| blk: {
+            var total: usize = 2;
+            for (array.items) |item| total += jsonValueApproxLen(item) + 1;
+            break :blk total;
+        },
+        .object => |object| blk: {
+            var total: usize = 2;
+            var it = object.iterator();
+            while (it.next()) |entry| {
+                total += entry.key_ptr.*.len + 3 + jsonValueApproxLen(entry.value_ptr.*);
+            }
+            break :blk total;
+        },
+    };
 }
 
 pub fn objectIdRequirementError(event_type: []const u8, object_kind: []const u8, object_id: []const u8, payload: std.json.ObjectMap) ?[]const u8 {
