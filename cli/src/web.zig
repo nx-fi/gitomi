@@ -49,6 +49,73 @@ pub const ByteRange = struct {
     end: ?usize,
 };
 
+const WebContext = struct {
+    allocator: Allocator,
+    repo: Repo,
+    stream: std.net.Stream,
+    request: HttpRequest,
+};
+
+const RouteHandler = *const fn (WebContext) anyerror!void;
+
+const Route = struct {
+    method: []const u8,
+    path: []const u8,
+    handler: RouteHandler,
+};
+
+const exact_routes = [_]Route{
+    .{ .method = "GET", .path = "/style.css", .handler = handleStyleCss },
+    .{ .method = "GET", .path = "/logo.svg", .handler = handleLogoSvg },
+    .{ .method = "GET", .path = "/theme.js", .handler = handleThemeJs },
+    .{ .method = "GET", .path = "/ui.js", .handler = handleUiJs },
+    .{ .method = "GET", .path = "/shortcuts.js", .handler = handleShortcutsJs },
+    .{ .method = "GET", .path = "/tree.js", .handler = handleTreeJs },
+    .{ .method = "GET", .path = "/code.js", .handler = handleCodeJs },
+    .{ .method = "GET", .path = "/markdown.js", .handler = handleMarkdownJs },
+    .{ .method = "GET", .path = "/vendor/hljs/all-languages.js", .handler = handleHighlightAllJs },
+    .{ .method = "GET", .path = "/highlight/zig.js", .handler = handleHighlightZigJs },
+    .{ .method = "GET", .path = "/highlight/solidity.js", .handler = handleHighlightSolidityJs },
+    .{ .method = "GET", .path = "/highlight/tla.js", .handler = handleHighlightTlaJs },
+    .{ .method = "GET", .path = "/highlight/init.js", .handler = handleHighlightInitJs },
+    .{ .method = "GET", .path = "/diff.js", .handler = handleDiffJs },
+    .{ .method = "GET", .path = "/merge.js", .handler = handleMergeJs },
+    .{ .method = "GET", .path = "/raw", .handler = handleRaw },
+    .{ .method = "GET", .path = "/index/rebuild", .handler = handleIndexRebuild },
+    .{ .method = "GET", .path = "/nav/stats", .handler = handleNavStats },
+    .{ .method = "GET", .path = "/", .handler = handleCodePage },
+    .{ .method = "GET", .path = "/code", .handler = handleCodePage },
+    .{ .method = "POST", .path = "/code/sync", .handler = handleCodeSyncPost },
+    .{ .method = "GET", .path = "/blame", .handler = handleBlamePage },
+    .{ .method = "GET", .path = "/commits", .handler = handleCommitsPage },
+    .{ .method = "GET", .path = "/commit", .handler = handleCommitPage },
+    .{ .method = "GET", .path = "/overview", .handler = handleOverviewPage },
+    .{ .method = "GET", .path = "/issues", .handler = handleIssuesPage },
+    .{ .method = "GET", .path = "/pulls", .handler = handlePullsPage },
+    .{ .method = "GET", .path = "/prs", .handler = handlePullsPage },
+    .{ .method = "GET", .path = "/projects", .handler = handleProjectsPage },
+    .{ .method = "GET", .path = "/new-project", .handler = handleNewProjectPage },
+    .{ .method = "POST", .path = "/projects", .handler = handleProjectPost },
+    .{ .method = "GET", .path = "/milestones", .handler = handleMilestonesPage },
+    .{ .method = "GET", .path = "/new-milestone", .handler = handleNewMilestonePage },
+    .{ .method = "POST", .path = "/milestones", .handler = handleMilestonePost },
+    .{ .method = "GET", .path = "/access", .handler = handleAccessPage },
+    .{ .method = "POST", .path = "/access/roles", .handler = handleAccessRolePost },
+    .{ .method = "POST", .path = "/access/devices", .handler = handleAccessDevicePost },
+    .{ .method = "GET", .path = "/actions", .handler = handleActionsPage },
+    .{ .method = "POST", .path = "/actions/request", .handler = handleActionsRequestPost },
+    .{ .method = "POST", .path = "/actions/run-requested", .handler = handleRunRequestedPost },
+    .{ .method = "GET", .path = "/events", .handler = handleEventsPage },
+    .{ .method = "GET", .path = "/refs", .handler = handleRefsPage },
+    .{ .method = "POST", .path = "/refs/sync", .handler = handleRefsSyncPost },
+    .{ .method = "GET", .path = "/new-issue", .handler = handleNewIssuePage },
+    .{ .method = "POST", .path = "/issues", .handler = handleIssuePost },
+    .{ .method = "GET", .path = "/new-pull", .handler = handleNewPullPage },
+    .{ .method = "GET", .path = "/new-pr", .handler = handleNewPullPage },
+    .{ .method = "POST", .path = "/pulls", .handler = handlePullPost },
+    .{ .method = "GET", .path = "/favicon.ico", .handler = handleFavicon },
+};
+
 pub fn serve(allocator: Allocator, repo: Repo, options: Options) !void {
     const bind_host: []const u8 = if (std.mem.eql(u8, options.host, "localhost")) default_host else options.host;
     var server = try listenWeb(bind_host, options);
@@ -148,274 +215,394 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         return;
     };
 
-    if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/style.css")) {
-        try shared.sendResponse(allocator, stream, 200, "OK", "text/css", web_css, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/logo.svg")) {
-        try shared.sendResponse(allocator, stream, 200, "OK", "image/svg+xml", logo_svg, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/theme.js")) {
-        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", theme_js, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/ui.js")) {
-        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", ui_js, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/shortcuts.js")) {
-        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", shortcuts_js, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/tree.js")) {
-        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", tree_js, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/code.js")) {
-        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", code_js, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/markdown.js")) {
-        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", markdown_js, null);
-    } else if (try sendVendorAsset(allocator, stream, request.method, request.path)) {
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/vendor/hljs/all-languages.js")) {
-        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", highlight_js, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/highlight/zig.js")) {
-        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", highlight_zig_js, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/highlight/solidity.js")) {
-        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", solidity_js, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/highlight/tla.js")) {
-        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", tla_js, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/highlight/init.js")) {
-        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", highlight_init_js, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/diff.js")) {
-        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", diff_js, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/merge.js")) {
-        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", merge_js, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/raw")) {
-        const raw_blob_opt = explorer.loadRawBlob(allocator, repo, request.target) catch |err| switch (err) {
-            error.BlobTooLarge => {
-                try shared.sendPlainResponse(allocator, stream, 413, "Payload Too Large", "Blob too large\n");
-                return;
-            },
-            else => return err,
+    const ctx = WebContext{
+        .allocator = allocator,
+        .repo = repo,
+        .stream = stream,
+        .request = request,
+    };
+
+    if (try dispatchExactRoute(ctx)) return;
+    if (try sendVendorAsset(allocator, stream, request.method, request.path)) return;
+
+    if (std.mem.eql(u8, request.method, "POST") and std.mem.startsWith(u8, request.path, "/issues/") and std.mem.endsWith(u8, request.path, "/edit")) {
+        const issue_ref = pathRefWithSuffix(request.path, "/issues/", "/edit") orelse {
+            try sendPlainNotFound(ctx);
+            return;
         };
-        if (raw_blob_opt) |raw_blob| {
-            var blob = raw_blob;
-            defer blob.deinit(allocator);
-            try sendRawBlobResponse(allocator, stream, blob, request.range);
-        } else {
-            try shared.sendPlainResponse(allocator, stream, 404, "Not Found", "Blob not found\n");
-        }
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/index/rebuild")) {
-        try index.ensureIndex(allocator, repo);
-        try shared.sendResponse(allocator, stream, 204, "No Content", "text/plain", "", null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/nav/stats")) {
-        const body = try shared.renderNavStatsJson(allocator, repo);
-        defer allocator.free(body);
-        try shared.sendResponse(allocator, stream, 200, "OK", "application/json", body, "Cache-Control: no-store\r\n");
-    } else if (std.mem.eql(u8, request.method, "GET") and (std.mem.eql(u8, request.path, "/") or std.mem.eql(u8, request.path, "/code"))) {
-        const body = try explorer.renderCodePage(allocator, repo, request.target);
-        defer allocator.free(body);
-        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
-    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.eql(u8, request.path, "/code/sync")) {
-        try explorer.handleCodeSyncPost(allocator, repo, stream, request.body);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/blame")) {
-        const body = try explorer.renderBlamePage(allocator, repo, request.target);
-        defer allocator.free(body);
-        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/commits")) {
-        const body = try commits_page.renderCommitsPage(allocator, repo, request.target);
-        defer allocator.free(body);
-        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/commit")) {
-        const body = try commits_page.renderCommitPage(allocator, repo, request.target);
-        defer allocator.free(body);
-        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/overview")) {
-        const body = try overview_page.renderHomePage(allocator, repo);
-        defer allocator.free(body);
-        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/issues")) {
-        const body = try issues_page.renderIssuesPage(allocator, repo, request.target);
-        defer allocator.free(body);
-        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
-    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.startsWith(u8, request.path, "/issues/") and std.mem.endsWith(u8, request.path, "/edit")) {
-        const issue_ref_start = "/issues/".len;
-        const issue_ref_end = request.path.len - "/edit".len;
-        if (issue_ref_start >= issue_ref_end or request.path[issue_ref_end - 1] == '/') {
-            try shared.sendPlainResponse(allocator, stream, 404, "Not Found", "Not found\n");
-            return;
-        }
-        const issue_ref = request.path[issue_ref_start..issue_ref_end];
         try issues_page.handleIssueEditPost(allocator, repo, stream, issue_ref, request.body);
-    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.startsWith(u8, request.path, "/issues/") and std.mem.endsWith(u8, request.path, "/checklist")) {
-        const issue_ref_start = "/issues/".len;
-        const issue_ref_end = request.path.len - "/checklist".len;
-        if (issue_ref_start >= issue_ref_end or request.path[issue_ref_end - 1] == '/') {
-            try shared.sendPlainResponse(allocator, stream, 404, "Not Found", "Not found\n");
+        return;
+    }
+
+    if (std.mem.eql(u8, request.method, "POST") and std.mem.startsWith(u8, request.path, "/issues/") and std.mem.endsWith(u8, request.path, "/checklist")) {
+        const issue_ref = pathRefWithSuffix(request.path, "/issues/", "/checklist") orelse {
+            try sendPlainNotFound(ctx);
             return;
-        }
-        const issue_ref = request.path[issue_ref_start..issue_ref_end];
+        };
         try issues_page.handleIssueChecklistPost(allocator, repo, stream, issue_ref, request.body);
-    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.startsWith(u8, request.path, "/issues/") and std.mem.endsWith(u8, request.path, "/comments")) {
-        const issue_ref_start = "/issues/".len;
-        const issue_ref_end = request.path.len - "/comments".len;
-        if (issue_ref_start >= issue_ref_end or request.path[issue_ref_end - 1] == '/') {
-            try shared.sendPlainResponse(allocator, stream, 404, "Not Found", "Not found\n");
+        return;
+    }
+
+    if (std.mem.eql(u8, request.method, "POST") and std.mem.startsWith(u8, request.path, "/issues/") and std.mem.endsWith(u8, request.path, "/comments")) {
+        const issue_ref = pathRefWithSuffix(request.path, "/issues/", "/comments") orelse {
+            try sendPlainNotFound(ctx);
             return;
-        }
-        const issue_ref = request.path[issue_ref_start..issue_ref_end];
+        };
         try issues_page.handleIssueCommentPost(allocator, repo, stream, issue_ref, request.body);
-    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.startsWith(u8, request.path, "/issues/") and std.mem.endsWith(u8, request.path, "/sidebar")) {
-        const issue_ref_start = "/issues/".len;
-        const issue_ref_end = request.path.len - "/sidebar".len;
-        if (issue_ref_start >= issue_ref_end or request.path[issue_ref_end - 1] == '/') {
-            try shared.sendPlainResponse(allocator, stream, 404, "Not Found", "Not found\n");
+        return;
+    }
+
+    if (std.mem.eql(u8, request.method, "POST") and std.mem.startsWith(u8, request.path, "/issues/") and std.mem.endsWith(u8, request.path, "/sidebar")) {
+        const issue_ref = pathRefWithSuffix(request.path, "/issues/", "/sidebar") orelse {
+            try sendPlainNotFound(ctx);
             return;
-        }
-        const issue_ref = request.path[issue_ref_start..issue_ref_end];
+        };
         try issues_page.handleIssueSidebarPost(allocator, repo, stream, issue_ref, request.body);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.startsWith(u8, request.path, "/issues/") and std.mem.endsWith(u8, request.path, "/edit")) {
-        const issue_ref_start = "/issues/".len;
-        const issue_ref_end = request.path.len - "/edit".len;
-        if (issue_ref_start >= issue_ref_end or request.path[issue_ref_end - 1] == '/') {
-            try shared.sendPlainResponse(allocator, stream, 404, "Not Found", "Not found\n");
+        return;
+    }
+
+    if (std.mem.eql(u8, request.method, "GET") and std.mem.startsWith(u8, request.path, "/issues/") and std.mem.endsWith(u8, request.path, "/edit")) {
+        const issue_ref = pathRefWithSuffix(request.path, "/issues/", "/edit") orelse {
+            try sendPlainNotFound(ctx);
             return;
-        }
-        const issue_ref = request.path[issue_ref_start..issue_ref_end];
-        const body = try issues_page.renderIssueEditPage(allocator, repo, issue_ref, request.target);
-        defer allocator.free(body);
-        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.startsWith(u8, request.path, "/issues/")) {
+        };
+        try sendOwnedHtml(ctx, try issues_page.renderIssueEditPage(allocator, repo, issue_ref, request.target));
+        return;
+    }
+
+    if (std.mem.eql(u8, request.method, "GET") and std.mem.startsWith(u8, request.path, "/issues/")) {
         const issue_ref = request.path["/issues/".len..];
-        const body = try issues_page.renderIssueDetailPage(allocator, repo, issue_ref);
-        defer allocator.free(body);
-        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and (std.mem.eql(u8, request.path, "/pulls") or std.mem.eql(u8, request.path, "/prs"))) {
-        const body = try pulls_page.renderPullsPage(allocator, repo, request.target);
-        defer allocator.free(body);
-        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and ((std.mem.startsWith(u8, request.path, "/pulls/") or std.mem.startsWith(u8, request.path, "/prs/")) and std.mem.endsWith(u8, request.path, "/conflicts"))) {
-        const prefix = if (std.mem.startsWith(u8, request.path, "/pulls/")) "/pulls/" else "/prs/";
-        const pull_ref_start = prefix.len;
-        const pull_ref_end = request.path.len - "/conflicts".len;
-        if (pull_ref_start >= pull_ref_end or request.path[pull_ref_end - 1] == '/') {
-            try shared.sendPlainResponse(allocator, stream, 404, "Not Found", "Not found\n");
+        try sendOwnedHtml(ctx, try issues_page.renderIssueDetailPage(allocator, repo, issue_ref));
+        return;
+    }
+
+    if (std.mem.eql(u8, request.method, "GET") and pullPathHasSuffix(request.path, "/conflicts")) {
+        const pull_ref = pullRefWithSuffix(request.path, "/conflicts") orelse {
+            try sendPlainNotFound(ctx);
             return;
-        }
-        const pull_ref = request.path[pull_ref_start..pull_ref_end];
-        const body = try pulls_page.renderPullMergeEditorPage(allocator, repo, pull_ref, request.target, null);
-        defer allocator.free(body);
-        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
-    } else if (std.mem.eql(u8, request.method, "POST") and ((std.mem.startsWith(u8, request.path, "/pulls/") or std.mem.startsWith(u8, request.path, "/prs/")) and std.mem.endsWith(u8, request.path, "/conflicts"))) {
-        const prefix = if (std.mem.startsWith(u8, request.path, "/pulls/")) "/pulls/" else "/prs/";
-        const pull_ref_start = prefix.len;
-        const pull_ref_end = request.path.len - "/conflicts".len;
-        if (pull_ref_start >= pull_ref_end or request.path[pull_ref_end - 1] == '/') {
-            try shared.sendPlainResponse(allocator, stream, 404, "Not Found", "Not found\n");
+        };
+        try sendOwnedHtml(ctx, try pulls_page.renderPullMergeEditorPage(allocator, repo, pull_ref, request.target, null));
+        return;
+    }
+
+    if (std.mem.eql(u8, request.method, "POST") and pullPathHasSuffix(request.path, "/conflicts")) {
+        const pull_ref = pullRefWithSuffix(request.path, "/conflicts") orelse {
+            try sendPlainNotFound(ctx);
             return;
-        }
-        const pull_ref = request.path[pull_ref_start..pull_ref_end];
+        };
         try pulls_page.handlePullConflictPost(allocator, repo, stream, pull_ref, request.body);
-    } else if (std.mem.eql(u8, request.method, "POST") and ((std.mem.startsWith(u8, request.path, "/pulls/") or std.mem.startsWith(u8, request.path, "/prs/")) and std.mem.endsWith(u8, request.path, "/checklist"))) {
-        const prefix = if (std.mem.startsWith(u8, request.path, "/pulls/")) "/pulls/" else "/prs/";
-        const pull_ref_start = prefix.len;
-        const pull_ref_end = request.path.len - "/checklist".len;
-        if (pull_ref_start >= pull_ref_end or request.path[pull_ref_end - 1] == '/') {
-            try shared.sendPlainResponse(allocator, stream, 404, "Not Found", "Not found\n");
+        return;
+    }
+
+    if (std.mem.eql(u8, request.method, "POST") and pullPathHasSuffix(request.path, "/checklist")) {
+        const pull_ref = pullRefWithSuffix(request.path, "/checklist") orelse {
+            try sendPlainNotFound(ctx);
             return;
-        }
-        const pull_ref = request.path[pull_ref_start..pull_ref_end];
+        };
         try pulls_page.handlePullChecklistPost(allocator, repo, stream, pull_ref, request.body);
-    } else if (std.mem.eql(u8, request.method, "POST") and ((std.mem.startsWith(u8, request.path, "/pulls/") or std.mem.startsWith(u8, request.path, "/prs/")) and std.mem.endsWith(u8, request.path, "/comments"))) {
-        const prefix = if (std.mem.startsWith(u8, request.path, "/pulls/")) "/pulls/" else "/prs/";
-        const pull_ref_start = prefix.len;
-        const pull_ref_end = request.path.len - "/comments".len;
-        if (pull_ref_start >= pull_ref_end or request.path[pull_ref_end - 1] == '/') {
-            try shared.sendPlainResponse(allocator, stream, 404, "Not Found", "Not found\n");
+        return;
+    }
+
+    if (std.mem.eql(u8, request.method, "POST") and pullPathHasSuffix(request.path, "/comments")) {
+        const pull_ref = pullRefWithSuffix(request.path, "/comments") orelse {
+            try sendPlainNotFound(ctx);
             return;
-        }
-        const pull_ref = request.path[pull_ref_start..pull_ref_end];
+        };
         try pulls_page.handlePullCommentPost(allocator, repo, stream, pull_ref, request.body);
-    } else if (std.mem.eql(u8, request.method, "GET") and (std.mem.startsWith(u8, request.path, "/pulls/") or std.mem.startsWith(u8, request.path, "/prs/"))) {
-        const pull_ref = if (std.mem.startsWith(u8, request.path, "/pulls/"))
-            request.path["/pulls/".len..]
-        else
-            request.path["/prs/".len..];
-        const body = try pulls_page.renderPullDetailPage(allocator, repo, pull_ref, request.target);
-        defer allocator.free(body);
-        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/projects")) {
-        const body = try projects_page.renderProjectsPage(allocator, repo, request.target);
-        defer allocator.free(body);
-        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/new-project")) {
-        const body = try projects_page.renderProjectFormFromTarget(allocator, repo, request.target);
-        defer allocator.free(body);
-        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
-    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.eql(u8, request.path, "/projects")) {
-        try projects_page.handleProjectPost(allocator, repo, stream, request.body);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/milestones")) {
-        const body = try milestones_page.renderMilestonesPage(allocator, repo);
-        defer allocator.free(body);
-        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/new-milestone")) {
-        const body = try milestones_page.renderNewMilestoneForm(allocator, repo);
-        defer allocator.free(body);
-        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
-    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.eql(u8, request.path, "/milestones")) {
-        try milestones_page.handleMilestonePost(allocator, repo, stream, null, request.body);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.startsWith(u8, request.path, "/milestones/") and std.mem.endsWith(u8, request.path, "/edit")) {
-        const milestone_ref_start = "/milestones/".len;
-        const milestone_ref_end = request.path.len - "/edit".len;
-        if (milestone_ref_start >= milestone_ref_end or request.path[milestone_ref_end - 1] == '/') {
-            try shared.sendPlainResponse(allocator, stream, 404, "Not Found", "Not found\n");
+        return;
+    }
+
+    if (std.mem.eql(u8, request.method, "GET")) {
+        if (pullRefFromPath(request.path)) |pull_ref| {
+            try sendOwnedHtml(ctx, try pulls_page.renderPullDetailPage(allocator, repo, pull_ref, request.target));
             return;
         }
-        const milestone_ref = request.path[milestone_ref_start..milestone_ref_end];
-        const body = try milestones_page.renderMilestoneFormFromRef(allocator, repo, milestone_ref);
-        defer allocator.free(body);
-        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
-    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.startsWith(u8, request.path, "/milestones/")) {
+    }
+
+    if (std.mem.eql(u8, request.method, "GET") and std.mem.startsWith(u8, request.path, "/milestones/") and std.mem.endsWith(u8, request.path, "/edit")) {
+        const milestone_ref = pathRefWithSuffix(request.path, "/milestones/", "/edit") orelse {
+            try sendPlainNotFound(ctx);
+            return;
+        };
+        try sendOwnedHtml(ctx, try milestones_page.renderMilestoneFormFromRef(allocator, repo, milestone_ref));
+        return;
+    }
+
+    if (std.mem.eql(u8, request.method, "POST") and std.mem.startsWith(u8, request.path, "/milestones/")) {
         const milestone_ref = request.path["/milestones/".len..];
         if (milestone_ref.len == 0 or std.mem.indexOfScalar(u8, milestone_ref, '/') != null) {
-            try shared.sendPlainResponse(allocator, stream, 404, "Not Found", "Not found\n");
+            try sendPlainNotFound(ctx);
             return;
         }
         try milestones_page.handleMilestonePost(allocator, repo, stream, milestone_ref, request.body);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/access")) {
-        const body = try access_page.renderAccessPage(allocator, repo);
-        defer allocator.free(body);
-        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
-    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.eql(u8, request.path, "/access/roles")) {
-        try access_page.handleAccessRolePost(allocator, repo, stream, request.body);
-    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.eql(u8, request.path, "/access/devices")) {
-        try access_page.handleAccessDevicePost(allocator, repo, stream, request.body);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/actions")) {
-        const body = try actions_page.renderActionsPage(allocator, repo, request.target);
-        defer allocator.free(body);
-        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
-    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.eql(u8, request.path, "/actions/request")) {
-        try actions_page.handleActionsRequestPost(allocator, repo, stream, request.body);
-    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.eql(u8, request.path, "/actions/run-requested")) {
-        try actions_page.handleRunRequestedPost(allocator, stream);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/events")) {
-        const body = try events_page.renderEventsPage(allocator, repo);
-        defer allocator.free(body);
-        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/refs")) {
-        const body = try refs_page.renderRefsPage(allocator, repo, request.target);
-        defer allocator.free(body);
-        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
-    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.eql(u8, request.path, "/refs/sync")) {
-        try refs_page.handleRefsSyncPost(allocator, repo, stream);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/new-issue")) {
-        const body = try issues_page.renderIssueFormFromTarget(allocator, repo, request.target);
-        defer allocator.free(body);
-        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
-    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.eql(u8, request.path, "/issues")) {
-        try issues_page.handleIssuePost(allocator, repo, stream, request.body);
-    } else if (std.mem.eql(u8, request.method, "GET") and (std.mem.eql(u8, request.path, "/new-pull") or std.mem.eql(u8, request.path, "/new-pr"))) {
-        const body = try pulls_page.renderPullForm(allocator, repo, null, "", "", "", "", false);
-        defer allocator.free(body);
-        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
-    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.eql(u8, request.path, "/pulls")) {
-        try pulls_page.handlePullPost(allocator, repo, stream, request.body);
-    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/favicon.ico")) {
-        try shared.sendResponse(allocator, stream, 204, "No Content", "text/plain", "", null);
-    } else {
-        const body = try renderNotFoundPage(allocator, repo);
-        defer allocator.free(body);
-        try shared.sendResponse(allocator, stream, 404, "Not Found", "text/html", body, null);
+        return;
     }
+
+    try sendNotFound(ctx);
+}
+
+fn dispatchExactRoute(ctx: WebContext) !bool {
+    for (exact_routes) |route| {
+        if (std.mem.eql(u8, ctx.request.method, route.method) and std.mem.eql(u8, ctx.request.path, route.path)) {
+            try route.handler(ctx);
+            return true;
+        }
+    }
+    return false;
+}
+
+fn sendTextAsset(ctx: WebContext, content_type: []const u8, body: []const u8) !void {
+    try shared.sendResponse(ctx.allocator, ctx.stream, 200, "OK", content_type, body, null);
+}
+
+fn sendOwnedHtml(ctx: WebContext, body: []u8) !void {
+    try sendOwnedResponse(ctx, 200, "OK", "text/html", body, null);
+}
+
+fn sendOwnedResponse(
+    ctx: WebContext,
+    status: u16,
+    reason: []const u8,
+    content_type: []const u8,
+    body: []u8,
+    extra: ?[]const u8,
+) !void {
+    defer ctx.allocator.free(body);
+    try shared.sendResponse(ctx.allocator, ctx.stream, status, reason, content_type, body, extra);
+}
+
+fn sendPlainNotFound(ctx: WebContext) !void {
+    try shared.sendPlainResponse(ctx.allocator, ctx.stream, 404, "Not Found", "Not found\n");
+}
+
+fn sendNotFound(ctx: WebContext) !void {
+    try sendOwnedResponse(ctx, 404, "Not Found", "text/html", try renderNotFoundPage(ctx.allocator, ctx.repo), null);
+}
+
+fn pathRefWithSuffix(path: []const u8, prefix: []const u8, suffix: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, path, prefix) or !std.mem.endsWith(u8, path, suffix)) return null;
+    const ref_start = prefix.len;
+    const ref_end = path.len - suffix.len;
+    if (ref_start >= ref_end or path[ref_end - 1] == '/') return null;
+    return path[ref_start..ref_end];
+}
+
+fn pullPathHasSuffix(path: []const u8, suffix: []const u8) bool {
+    return pullPrefix(path) != null and std.mem.endsWith(u8, path, suffix);
+}
+
+fn pullRefWithSuffix(path: []const u8, suffix: []const u8) ?[]const u8 {
+    const prefix = pullPrefix(path) orelse return null;
+    return pathRefWithSuffix(path, prefix, suffix);
+}
+
+fn pullRefFromPath(path: []const u8) ?[]const u8 {
+    const prefix = pullPrefix(path) orelse return null;
+    return path[prefix.len..];
+}
+
+fn pullPrefix(path: []const u8) ?[]const u8 {
+    if (std.mem.startsWith(u8, path, "/pulls/")) return "/pulls/";
+    if (std.mem.startsWith(u8, path, "/prs/")) return "/prs/";
+    return null;
+}
+
+fn handleStyleCss(ctx: WebContext) !void {
+    try sendTextAsset(ctx, "text/css", web_css);
+}
+
+fn handleLogoSvg(ctx: WebContext) !void {
+    try sendTextAsset(ctx, "image/svg+xml", logo_svg);
+}
+
+fn handleThemeJs(ctx: WebContext) !void {
+    try sendTextAsset(ctx, "application/javascript", theme_js);
+}
+
+fn handleUiJs(ctx: WebContext) !void {
+    try sendTextAsset(ctx, "application/javascript", ui_js);
+}
+
+fn handleShortcutsJs(ctx: WebContext) !void {
+    try sendTextAsset(ctx, "application/javascript", shortcuts_js);
+}
+
+fn handleTreeJs(ctx: WebContext) !void {
+    try sendTextAsset(ctx, "application/javascript", tree_js);
+}
+
+fn handleCodeJs(ctx: WebContext) !void {
+    try sendTextAsset(ctx, "application/javascript", code_js);
+}
+
+fn handleMarkdownJs(ctx: WebContext) !void {
+    try sendTextAsset(ctx, "application/javascript", markdown_js);
+}
+
+fn handleHighlightAllJs(ctx: WebContext) !void {
+    try sendTextAsset(ctx, "application/javascript", highlight_js);
+}
+
+fn handleHighlightZigJs(ctx: WebContext) !void {
+    try sendTextAsset(ctx, "application/javascript", highlight_zig_js);
+}
+
+fn handleHighlightSolidityJs(ctx: WebContext) !void {
+    try sendTextAsset(ctx, "application/javascript", solidity_js);
+}
+
+fn handleHighlightTlaJs(ctx: WebContext) !void {
+    try sendTextAsset(ctx, "application/javascript", tla_js);
+}
+
+fn handleHighlightInitJs(ctx: WebContext) !void {
+    try sendTextAsset(ctx, "application/javascript", highlight_init_js);
+}
+
+fn handleDiffJs(ctx: WebContext) !void {
+    try sendTextAsset(ctx, "application/javascript", diff_js);
+}
+
+fn handleMergeJs(ctx: WebContext) !void {
+    try sendTextAsset(ctx, "application/javascript", merge_js);
+}
+
+fn handleRaw(ctx: WebContext) !void {
+    const raw_blob_opt = explorer.loadRawBlob(ctx.allocator, ctx.repo, ctx.request.target) catch |err| switch (err) {
+        error.BlobTooLarge => {
+            try shared.sendPlainResponse(ctx.allocator, ctx.stream, 413, "Payload Too Large", "Blob too large\n");
+            return;
+        },
+        else => return err,
+    };
+    if (raw_blob_opt) |raw_blob| {
+        var blob = raw_blob;
+        defer blob.deinit(ctx.allocator);
+        try sendRawBlobResponse(ctx.allocator, ctx.stream, blob, ctx.request.range);
+    } else {
+        try shared.sendPlainResponse(ctx.allocator, ctx.stream, 404, "Not Found", "Blob not found\n");
+    }
+}
+
+fn handleIndexRebuild(ctx: WebContext) !void {
+    try index.ensureIndex(ctx.allocator, ctx.repo);
+    try shared.sendResponse(ctx.allocator, ctx.stream, 204, "No Content", "text/plain", "", null);
+}
+
+fn handleNavStats(ctx: WebContext) !void {
+    try sendOwnedResponse(ctx, 200, "OK", "application/json", try shared.renderNavStatsJson(ctx.allocator, ctx.repo), "Cache-Control: no-store\r\n");
+}
+
+fn handleCodePage(ctx: WebContext) !void {
+    try sendOwnedHtml(ctx, try explorer.renderCodePage(ctx.allocator, ctx.repo, ctx.request.target));
+}
+
+fn handleCodeSyncPost(ctx: WebContext) !void {
+    try explorer.handleCodeSyncPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
+}
+
+fn handleBlamePage(ctx: WebContext) !void {
+    try sendOwnedHtml(ctx, try explorer.renderBlamePage(ctx.allocator, ctx.repo, ctx.request.target));
+}
+
+fn handleCommitsPage(ctx: WebContext) !void {
+    try sendOwnedHtml(ctx, try commits_page.renderCommitsPage(ctx.allocator, ctx.repo, ctx.request.target));
+}
+
+fn handleCommitPage(ctx: WebContext) !void {
+    try sendOwnedHtml(ctx, try commits_page.renderCommitPage(ctx.allocator, ctx.repo, ctx.request.target));
+}
+
+fn handleOverviewPage(ctx: WebContext) !void {
+    try sendOwnedHtml(ctx, try overview_page.renderHomePage(ctx.allocator, ctx.repo));
+}
+
+fn handleIssuesPage(ctx: WebContext) !void {
+    try sendOwnedHtml(ctx, try issues_page.renderIssuesPage(ctx.allocator, ctx.repo, ctx.request.target));
+}
+
+fn handlePullsPage(ctx: WebContext) !void {
+    try sendOwnedHtml(ctx, try pulls_page.renderPullsPage(ctx.allocator, ctx.repo, ctx.request.target));
+}
+
+fn handleProjectsPage(ctx: WebContext) !void {
+    try sendOwnedHtml(ctx, try projects_page.renderProjectsPage(ctx.allocator, ctx.repo, ctx.request.target));
+}
+
+fn handleNewProjectPage(ctx: WebContext) !void {
+    try sendOwnedHtml(ctx, try projects_page.renderProjectFormFromTarget(ctx.allocator, ctx.repo, ctx.request.target));
+}
+
+fn handleProjectPost(ctx: WebContext) !void {
+    try projects_page.handleProjectPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
+}
+
+fn handleMilestonesPage(ctx: WebContext) !void {
+    try sendOwnedHtml(ctx, try milestones_page.renderMilestonesPage(ctx.allocator, ctx.repo));
+}
+
+fn handleNewMilestonePage(ctx: WebContext) !void {
+    try sendOwnedHtml(ctx, try milestones_page.renderNewMilestoneForm(ctx.allocator, ctx.repo));
+}
+
+fn handleMilestonePost(ctx: WebContext) !void {
+    try milestones_page.handleMilestonePost(ctx.allocator, ctx.repo, ctx.stream, null, ctx.request.body);
+}
+
+fn handleAccessPage(ctx: WebContext) !void {
+    try sendOwnedHtml(ctx, try access_page.renderAccessPage(ctx.allocator, ctx.repo));
+}
+
+fn handleAccessRolePost(ctx: WebContext) !void {
+    try access_page.handleAccessRolePost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
+}
+
+fn handleAccessDevicePost(ctx: WebContext) !void {
+    try access_page.handleAccessDevicePost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
+}
+
+fn handleActionsPage(ctx: WebContext) !void {
+    try sendOwnedHtml(ctx, try actions_page.renderActionsPage(ctx.allocator, ctx.repo, ctx.request.target));
+}
+
+fn handleActionsRequestPost(ctx: WebContext) !void {
+    try actions_page.handleActionsRequestPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
+}
+
+fn handleRunRequestedPost(ctx: WebContext) !void {
+    try actions_page.handleRunRequestedPost(ctx.allocator, ctx.stream);
+}
+
+fn handleEventsPage(ctx: WebContext) !void {
+    try sendOwnedHtml(ctx, try events_page.renderEventsPage(ctx.allocator, ctx.repo));
+}
+
+fn handleRefsPage(ctx: WebContext) !void {
+    try sendOwnedHtml(ctx, try refs_page.renderRefsPage(ctx.allocator, ctx.repo, ctx.request.target));
+}
+
+fn handleRefsSyncPost(ctx: WebContext) !void {
+    try refs_page.handleRefsSyncPost(ctx.allocator, ctx.repo, ctx.stream);
+}
+
+fn handleNewIssuePage(ctx: WebContext) !void {
+    try sendOwnedHtml(ctx, try issues_page.renderIssueFormFromTarget(ctx.allocator, ctx.repo, ctx.request.target));
+}
+
+fn handleIssuePost(ctx: WebContext) !void {
+    try issues_page.handleIssuePost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
+}
+
+fn handleNewPullPage(ctx: WebContext) !void {
+    try sendOwnedHtml(ctx, try pulls_page.renderPullForm(ctx.allocator, ctx.repo, null, "", "", "", "", false));
+}
+
+fn handlePullPost(ctx: WebContext) !void {
+    try pulls_page.handlePullPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
+}
+
+fn handleFavicon(ctx: WebContext) !void {
+    try shared.sendResponse(ctx.allocator, ctx.stream, 204, "No Content", "text/plain", "", null);
 }
 
 pub fn readHttpRequest(allocator: Allocator, stream: std.net.Stream) ![]u8 {

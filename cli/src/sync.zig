@@ -13,7 +13,6 @@ const out = io.out;
 const eprint = io.eprint;
 const gitChecked = git.gitChecked;
 const listRefs = git.listRefs;
-const freeStringList = git.freeStringList;
 const emptyTreeOid = git.emptyTreeOid;
 const resolveOptionalRef = git.resolveOptionalRef;
 const isAncestor = git.isAncestor;
@@ -52,7 +51,7 @@ pub fn syncPull(allocator: Allocator, remote: []const u8) !void {
 
 fn clearStagedRemoteRefs(allocator: Allocator, staging_prefix: []const u8) !void {
     const refs = try listRefs(allocator, staging_prefix);
-    defer freeStringList(allocator, refs);
+    defer git.freeStringList(allocator, refs);
 
     for (refs) |ref| {
         const deleted = try gitChecked(allocator, &.{ "update-ref", "-d", ref });
@@ -258,7 +257,7 @@ pub fn admitStagedInboxRefs(allocator: Allocator, staging_prefix: []const u8) !v
     defer allocator.free(staged_inbox_prefix);
 
     const refs = try listRefs(allocator, staged_inbox_prefix);
-    defer freeStringList(allocator, refs);
+    defer git.freeStringList(allocator, refs);
 
     if (refs.len == 0) {
         try out("no staged Gitomi inbox refs to admit\n", .{});
@@ -278,7 +277,7 @@ pub fn admitStagedInboxRefs(allocator: Allocator, staging_prefix: []const u8) !v
     }
 
     const local_refs = try listRefs(allocator, "refs/gitomi/inbox");
-    defer freeStringList(allocator, local_refs);
+    defer git.freeStringList(allocator, local_refs);
     if (local_refs.len > git.max_default_inbox_refs) {
         try eprint("gt sync: refusing to admit inbox refs; local repository already has {d}, v1 default limit is {d}\n", .{ local_refs.len, git.max_default_inbox_refs });
         return CliError.UserError;
@@ -499,14 +498,17 @@ const ActorSeqTracker = struct {
         seq: i64,
     ) !void {
         const key = try actorSeqKey(self.allocator, principal, device);
-        errdefer self.allocator.free(key);
-        const entry = try self.last_seq.getOrPut(key);
-        if (entry.found_existing) {
+        const entry = self.last_seq.getOrPut(key) catch |err| {
             self.allocator.free(key);
+            return err;
+        };
+        if (entry.found_existing) {
             if (seq <= entry.value_ptr.*) {
+                self.allocator.free(key);
                 try eprint("gt sync: rejecting {s} on {s}: actor {s}/{s} seq {d} is not strictly greater than previous sequence {d}\n", .{ commit, ref, principal, device, seq, entry.value_ptr.* });
                 return CliError.UserError;
             }
+            self.allocator.free(key);
         } else {
             entry.key_ptr.* = key;
         }
@@ -672,77 +674,9 @@ pub fn verifyGenesisCommitSignature(allocator: Allocator, commit: []const u8, ex
 }
 
 fn validateEnvelopeParentHashes(allocator: Allocator, commit: []const u8, parents: []const u8, body: []const u8) !void {
-    var parent_list: std.ArrayList([]const u8) = .empty;
-    defer parent_list.deinit(allocator);
-    var parent_it = std.mem.tokenizeScalar(u8, parents, ' ');
-    while (parent_it.next()) |parent| try parent_list.append(allocator, parent);
-
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return CliError.UserError;
-    defer parsed.deinit();
-    const root = switch (parsed.value) {
-        .object => |object| object,
-        else => return CliError.UserError,
-    };
-    const parent_hashes_value = root.get("parent_hashes") orelse return CliError.UserError;
-    const parent_hashes = switch (parent_hashes_value) {
-        .object => |object| object,
-        else => return CliError.UserError,
-    };
-    const log_value = parent_hashes.get("log") orelse return CliError.UserError;
-    const log_hash = switch (log_value) {
-        .string => |value| value,
-        else => return CliError.UserError,
-    };
-    const anchor_value = parent_hashes.get("anchor") orelse return CliError.UserError;
-    const anchor_hash = switch (anchor_value) {
-        .string => |value| value,
-        else => return CliError.UserError,
-    };
-    const first_parent = if (parent_list.items.len == 0) null else parent_list.items[0];
-    if (log_hash.len == 0) {
-        if (first_parent == null or anchor_hash.len == 0 or !std.mem.eql(u8, anchor_hash, first_parent.?)) {
-            try eprint("gt sync: rejecting {s}: parent_hashes.anchor does not match root genesis parent\n", .{commit});
-            return CliError.UserError;
-        }
-    } else {
-        if (first_parent == null or !std.mem.eql(u8, log_hash, first_parent.?)) {
-            try eprint("gt sync: rejecting {s}: parent_hashes.log does not match first parent\n", .{commit});
-            return CliError.UserError;
-        }
-        if (anchor_hash.len != 0) {
-            try eprint("gt sync: rejecting {s}: non-root event has parent_hashes.anchor\n", .{commit});
-            return CliError.UserError;
-        }
-    }
-
-    const causal_value = parent_hashes.get("causal") orelse return CliError.UserError;
-    const causal = switch (causal_value) {
-        .array => |array| array,
-        else => return CliError.UserError,
-    };
-    const related_value = parent_hashes.get("related") orelse return CliError.UserError;
-    const related = switch (related_value) {
-        .array => |array| array,
-        else => return CliError.UserError,
-    };
-    const expected_causal_len = if (parent_list.items.len == 0) 0 else parent_list.items.len - 1;
-    if (causal.items.len != expected_causal_len) {
-        try eprint("gt sync: rejecting {s}: parent_hashes.causal does not match parent count\n", .{commit});
+    if (try event_mod.validateParentHashes(allocator, parents, body)) |failure| {
+        try eprint("gt sync: rejecting {s}: {s}\n", .{ commit, event_mod.parentHashValidationMessage(failure) });
         return CliError.UserError;
-    }
-    if (causal.items.len > git.max_causal_parents) {
-        try eprint("gt sync: rejecting {s}: parent_hashes.causal exceeds v1 causal parent cap\n", .{commit});
-        return CliError.UserError;
-    }
-    if (related.items.len > git.max_related_parents) {
-        try eprint("gt sync: rejecting {s}: parent_hashes.related exceeds v1 related parent cap\n", .{commit});
-        return CliError.UserError;
-    }
-    for (causal.items, 0..) |item, idx| {
-        if (item != .string or !std.mem.eql(u8, item.string, parent_list.items[idx + 1])) {
-            try eprint("gt sync: rejecting {s}: parent_hashes.causal does not match Git parents\n", .{commit});
-            return CliError.UserError;
-        }
     }
 }
 
@@ -759,4 +693,77 @@ test "staged refs map back to authoritative inbox refs" {
 test "missing remote genesis fetch errors are optional" {
     try std.testing.expect(isMissingRemoteGenesis("fatal: couldn't find remote ref refs/gitomi/genesis"));
     try std.testing.expect(!isMissingRemoteGenesis("fatal: authentication failed"));
+}
+
+test "staging remote segment sanitizes names and falls back when empty" {
+    const segment = try stagingRemoteSegment(std.testing.allocator, "HTTPS://GitHub.com/Owner/Repo.git");
+    defer std.testing.allocator.free(segment);
+    try std.testing.expectEqualStrings("https-github.com-owner-repo.git", segment);
+
+    const fallback = try stagingRemoteSegment(std.testing.allocator, "...");
+    defer std.testing.allocator.free(fallback);
+    try std.testing.expectEqualStrings("remote", fallback);
+}
+
+test "staged ref mapping rejects outside and non-inbox refs" {
+    try std.testing.expectError(
+        CliError.UserError,
+        localRefFromStaged(
+            std.testing.allocator,
+            "refs/gitomi/staging/origin",
+            "refs/gitomi/staging/other/inbox/alice/laptop",
+        ),
+    );
+    try std.testing.expectError(
+        CliError.UserError,
+        localRefFromStaged(
+            std.testing.allocator,
+            "refs/gitomi/staging/origin",
+            "refs/gitomi/staging/origin/genesis",
+        ),
+    );
+}
+
+test "inbox commit records parse git log fields" {
+    const record = parseInboxCommitRecord(" commit \x00 tree \x00 parent1 parent2 \x00 subject \x00 body\n") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("commit", record.commit);
+    try std.testing.expectEqualStrings("tree", record.tree);
+    try std.testing.expectEqualStrings("parent1 parent2", record.parents);
+    try std.testing.expectEqualStrings("subject", record.subject);
+    try std.testing.expectEqualStrings("body", record.body);
+
+    try std.testing.expect(parseInboxCommitRecord("commit\x00tree\x00parents") == null);
+}
+
+test "first parent validation accepts expected history shapes" {
+    try validateFirstParentList("root", "", null);
+    try validateFirstParentList("child", "parent-a parent-b", "parent-a");
+
+    try std.testing.expectError(CliError.UserError, validateFirstParentList("bad-root", "parent-a", null));
+    try std.testing.expectError(CliError.UserError, validateFirstParentList("bad-child", "parent-b parent-a", "parent-a"));
+}
+
+test "actor sequence tracker enforces strict per-actor monotonic order" {
+    var tracker = ActorSeqTracker.init(std.testing.allocator);
+    defer tracker.deinit();
+
+    try tracker.remember("commit-1", "refs/gitomi/inbox/ab/c", "ab", "c", 1);
+    try tracker.remember("commit-2", "refs/gitomi/inbox/a/bc", "a", "bc", 1);
+    try tracker.remember("commit-3", "refs/gitomi/inbox/ab/c", "ab", "c", 2);
+
+    try std.testing.expectError(
+        CliError.UserError,
+        tracker.remember("commit-4", "refs/gitomi/inbox/ab/c", "ab", "c", 2),
+    );
+    try std.testing.expectError(
+        CliError.UserError,
+        tracker.remember("commit-5", "refs/gitomi/inbox/ab/c", "ab", "c", 0),
+    );
+
+    try tracker.seed("ab", "c", 10);
+    try std.testing.expectError(
+        CliError.UserError,
+        tracker.remember("commit-6", "refs/gitomi/inbox/ab/c", "ab", "c", 10),
+    );
+    try tracker.remember("commit-7", "refs/gitomi/inbox/ab/c", "ab", "c", 11);
 }

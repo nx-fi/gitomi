@@ -6,18 +6,26 @@ pub fn build(b: *std.Build) void {
     const sqlite_dep = b.dependency("sqlite", .{});
     const tree_sitter_dep = b.dependency("tree_sitter", .{});
     const tree_sitter_zig_dep = b.dependency("tree_sitter_zig", .{});
+    const package_version = packageVersion(b);
+    const executable_version = std.SemanticVersion.parse(package_version) catch |err| {
+        std.debug.panic("invalid build.zig.zon version '{s}': {s}", .{ package_version, @errorName(err) });
+    };
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", package_version);
 
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
+    mod.addOptions("build_options", build_options);
     addSqlite(mod, sqlite_dep);
     addTreeSitter(mod, tree_sitter_dep, tree_sitter_zig_dep);
 
     const exe = b.addExecutable(.{
         .name = "gt",
         .root_module = mod,
+        .version = executable_version,
     });
     exe.linkLibC();
     b.installArtifact(exe);
@@ -34,11 +42,14 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    test_mod.addOptions("build_options", build_options);
     addSqlite(test_mod, sqlite_dep);
     addTreeSitter(test_mod, tree_sitter_dep, tree_sitter_zig_dep);
     const tests = b.addTest(.{ .root_module = test_mod });
     tests.linkLibC();
     const run_tests = b.addRunArtifact(tests);
+    const unit_test_step = b.step("unit-test", "Run unit tests");
+    unit_test_step.dependOn(&run_tests.step);
 
     const integration = b.addSystemCommand(&.{"bash"});
     integration.addFileArg(b.path("tests/integration.sh"));
@@ -83,4 +94,17 @@ fn addTreeSitter(
     module.addIncludePath(tree_sitter_dep.path("lib/src"));
     module.addIncludePath(tree_sitter_dep.path("lib/src/wasm"));
     module.addIncludePath(tree_sitter_zig_dep.path("src"));
+}
+
+const PackageManifest = struct {
+    version: []const u8,
+};
+
+fn packageVersion(b: *std.Build) []const u8 {
+    const manifest = std.zon.parse.fromSlice(PackageManifest, b.allocator, @embedFile("build.zig.zon"), null, .{
+        .ignore_unknown_fields = true,
+    }) catch |err| {
+        std.debug.panic("failed to parse build.zig.zon version: {s}", .{@errorName(err)});
+    };
+    return manifest.version;
 }

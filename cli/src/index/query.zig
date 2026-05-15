@@ -425,37 +425,209 @@ pub fn resolveProjectId(allocator: Allocator, repo: Repo, raw_ref: []const u8) !
     defer db.deinit();
 
     if (isUuidPrefix(value)) {
+        if (try resolveProjectIdByColumn(allocator, &db, "id", value, raw_ref)) |id| return id;
+    }
+    if (try resolveProjectIdByColumn(allocator, &db, "slug", value, raw_ref)) |id| return id;
+    if (try resolveProjectIdByColumn(allocator, &db, "name", value, raw_ref)) |id| return id;
+
+    try eprint("gt project: no project matches {s}\n", .{value});
+    return CliError.NotFound;
+}
+
+fn resolveProjectIdByColumn(
+    allocator: Allocator,
+    db: *SqliteDb,
+    comptime column: []const u8,
+    value: []const u8,
+    raw_ref: []const u8,
+) !?[]u8 {
+    const sql = if (std.mem.eql(u8, column, "id"))
+        "SELECT id FROM projects WHERE id LIKE ? ORDER BY id LIMIT 2"
+    else
+        "SELECT id FROM projects WHERE " ++ column ++ " = ? ORDER BY id LIMIT 2";
+    var stmt = try db.prepare(sql);
+    defer stmt.deinit();
+    if (std.mem.eql(u8, column, "id")) {
         const pattern = try std.fmt.allocPrint(allocator, "{s}%", .{value});
         defer allocator.free(pattern);
-        var stmt = try db.prepare("SELECT id FROM projects WHERE id LIKE ? ORDER BY id LIMIT 2");
-        defer stmt.deinit();
         try stmt.bindText(1, pattern);
-        if (try stmt.step()) {
-            const first = try stmt.columnTextDup(allocator, 0);
-            errdefer allocator.free(first);
-            if (try stmt.step()) {
-                const second = try stmt.columnTextDup(allocator, 0);
-                defer allocator.free(second);
-                try eprint("gt project: ambiguous project reference {s} matches {s} and {s}\n", .{ raw_ref, first, second });
-                return CliError.AmbiguousReference;
-            }
-            return first;
-        }
+    } else {
+        try stmt.bindText(1, value);
     }
-
-    var stmt = try db.prepare("SELECT id FROM projects WHERE name = ? ORDER BY id LIMIT 2");
-    defer stmt.deinit();
-    try stmt.bindText(1, value);
-    if (!(try stmt.step())) {
-        try eprint("gt project: no project named {s}\n", .{value});
-        return CliError.NotFound;
-    }
+    if (!(try stmt.step())) return null;
     const first = try stmt.columnTextDup(allocator, 0);
     errdefer allocator.free(first);
     if (try stmt.step()) {
         const second = try stmt.columnTextDup(allocator, 0);
         defer allocator.free(second);
-        try eprint("gt project: ambiguous project name {s} matches {s} and {s}\n", .{ value, first, second });
+        try eprint("gt project: ambiguous project reference {s} matches {s} and {s}\n", .{ raw_ref, first, second });
+        return CliError.AmbiguousReference;
+    }
+    return first;
+}
+
+pub const ProjectColumnRef = struct {
+    column: []u8,
+    column_ref: []u8,
+
+    pub fn deinit(self: *ProjectColumnRef, allocator: Allocator) void {
+        allocator.free(self.column);
+        allocator.free(self.column_ref);
+    }
+};
+
+pub fn resolveProjectColumnRef(allocator: Allocator, repo: Repo, project_id: []const u8, raw_ref: []const u8) !ProjectColumnRef {
+    const value = std.mem.trim(u8, raw_ref, " \t\r\n");
+    if (value.len == 0) {
+        try eprint("gt project: project column reference must not be empty\n", .{});
+        return CliError.InvalidReference;
+    }
+
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    if (try resolveProjectColumnByColumn(allocator, &db, project_id, "column_ref", value)) |resolved| return resolved;
+    if (try resolveProjectColumnByColumn(allocator, &db, project_id, "column_name", value)) |resolved| return resolved;
+    try eprint("gt project: no column matches {s}\n", .{value});
+    return CliError.NotFound;
+}
+
+fn resolveProjectColumnByColumn(
+    allocator: Allocator,
+    db: *SqliteDb,
+    project_id: []const u8,
+    comptime column: []const u8,
+    value: []const u8,
+) !?ProjectColumnRef {
+    var stmt = try db.prepare("SELECT column_name, column_ref FROM project_columns WHERE project_id = ? AND " ++ column ++ " = ? ORDER BY add_hash DESC LIMIT 1");
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    try stmt.bindText(2, value);
+    if (!(try stmt.step())) return null;
+    const column_name = try stmt.columnTextDup(allocator, 0);
+    errdefer allocator.free(column_name);
+    return .{
+        .column = column_name,
+        .column_ref = try stmt.columnTextDup(allocator, 1),
+    };
+}
+
+pub fn resolveProjectFieldId(allocator: Allocator, repo: Repo, project_id: []const u8, raw_ref: []const u8) ![]u8 {
+    const value = projectChildRefValue(raw_ref, "field:");
+    if (value.len == 0) {
+        try eprint("gt project field: field reference must not be empty\n", .{});
+        return CliError.InvalidReference;
+    }
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    if (isUuidPrefix(value)) {
+        if (try resolveProjectChildId(allocator, &db, "project_fields", "id", project_id, value, raw_ref)) |id| return id;
+    }
+    if (try resolveProjectChildId(allocator, &db, "project_fields", "key", project_id, value, raw_ref)) |id| return id;
+    if (try resolveProjectChildId(allocator, &db, "project_fields", "name", project_id, value, raw_ref)) |id| return id;
+    try eprint("gt project field: no field matches {s}\n", .{value});
+    return CliError.NotFound;
+}
+
+pub fn resolveProjectFieldOptionId(allocator: Allocator, repo: Repo, project_id: []const u8, field_id: []const u8, raw_ref: []const u8) ![]u8 {
+    const value = projectChildRefValue(raw_ref, "option:");
+    if (value.len == 0) {
+        try eprint("gt project field-option: option reference must not be empty\n", .{});
+        return CliError.InvalidReference;
+    }
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    if (isUuidPrefix(value)) {
+        if (try resolveProjectFieldOptionByColumn(allocator, &db, project_id, field_id, "id", value, raw_ref)) |id| return id;
+    }
+    if (try resolveProjectFieldOptionByColumn(allocator, &db, project_id, field_id, "name", value, raw_ref)) |id| return id;
+    try eprint("gt project field-option: no option matches {s}\n", .{value});
+    return CliError.NotFound;
+}
+
+pub fn resolveProjectViewId(allocator: Allocator, repo: Repo, project_id: []const u8, raw_ref: []const u8) ![]u8 {
+    const value = projectChildRefValue(raw_ref, "view:");
+    if (value.len == 0) {
+        try eprint("gt project view: view reference must not be empty\n", .{});
+        return CliError.InvalidReference;
+    }
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    if (isUuidPrefix(value)) {
+        if (try resolveProjectChildId(allocator, &db, "project_views", "id", project_id, value, raw_ref)) |id| return id;
+    }
+    if (try resolveProjectChildId(allocator, &db, "project_views", "name", project_id, value, raw_ref)) |id| return id;
+    try eprint("gt project view: no view matches {s}\n", .{value});
+    return CliError.NotFound;
+}
+
+fn projectChildRefValue(raw_ref: []const u8, prefix: []const u8) []const u8 {
+    const trimmed = std.mem.trim(u8, raw_ref, " \t\r\n");
+    if (std.mem.startsWith(u8, trimmed, prefix)) return trimmed[prefix.len..];
+    if (std.mem.startsWith(u8, trimmed, "@")) return trimmed[1..];
+    return trimmed;
+}
+
+fn resolveProjectChildId(
+    allocator: Allocator,
+    db: *SqliteDb,
+    comptime table: []const u8,
+    comptime column: []const u8,
+    project_id: []const u8,
+    value: []const u8,
+    raw_ref: []const u8,
+) !?[]u8 {
+    const sql = if (std.mem.eql(u8, column, "id"))
+        "SELECT id FROM " ++ table ++ " WHERE project_id = ? AND id LIKE ? AND state != 'removed' ORDER BY id LIMIT 2"
+    else
+        "SELECT id FROM " ++ table ++ " WHERE project_id = ? AND " ++ column ++ " = ? AND state != 'removed' ORDER BY id LIMIT 2";
+    var stmt = try db.prepare(sql);
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    if (std.mem.eql(u8, column, "id")) {
+        const pattern = try std.fmt.allocPrint(allocator, "{s}%", .{value});
+        defer allocator.free(pattern);
+        try stmt.bindText(2, pattern);
+    } else {
+        try stmt.bindText(2, value);
+    }
+    return try uniqueIdFromStmt(allocator, &stmt, raw_ref);
+}
+
+fn resolveProjectFieldOptionByColumn(
+    allocator: Allocator,
+    db: *SqliteDb,
+    project_id: []const u8,
+    field_id: []const u8,
+    comptime column: []const u8,
+    value: []const u8,
+    raw_ref: []const u8,
+) !?[]u8 {
+    const sql = if (std.mem.eql(u8, column, "id"))
+        "SELECT id FROM project_field_options WHERE project_id = ? AND field_id = ? AND id LIKE ? AND state != 'removed' ORDER BY id LIMIT 2"
+    else
+        "SELECT id FROM project_field_options WHERE project_id = ? AND field_id = ? AND " ++ column ++ " = ? AND state != 'removed' ORDER BY id LIMIT 2";
+    var stmt = try db.prepare(sql);
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    try stmt.bindText(2, field_id);
+    if (std.mem.eql(u8, column, "id")) {
+        const pattern = try std.fmt.allocPrint(allocator, "{s}%", .{value});
+        defer allocator.free(pattern);
+        try stmt.bindText(3, pattern);
+    } else {
+        try stmt.bindText(3, value);
+    }
+    return try uniqueIdFromStmt(allocator, &stmt, raw_ref);
+}
+
+fn uniqueIdFromStmt(allocator: Allocator, stmt: *sqlite_db.SqliteStmt, raw_ref: []const u8) !?[]u8 {
+    if (!(try stmt.step())) return null;
+    const first = try stmt.columnTextDup(allocator, 0);
+    errdefer allocator.free(first);
+    if (try stmt.step()) {
+        const second = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(second);
+        try eprint("gt project: ambiguous reference {s} matches {s} and {s}\n", .{ raw_ref, first, second });
         return CliError.AmbiguousReference;
     }
     return first;
@@ -924,7 +1096,7 @@ pub fn listProjectsFromIndex(allocator: Allocator, repo: Repo, json: bool) !void
     defer db.deinit();
 
     var stmt = try db.prepare(
-        \\SELECT id, name, description, state, author_principal, created_at
+        \\SELECT id, name, slug, description, state, author_principal, created_at
         \\FROM projects
         \\ORDER BY created_at DESC, id DESC
     );
@@ -935,13 +1107,15 @@ pub fn listProjectsFromIndex(allocator: Allocator, repo: Repo, json: bool) !void
         defer allocator.free(id);
         const name = try stmt.columnTextDup(allocator, 1);
         defer allocator.free(name);
-        const description = try stmt.columnTextDup(allocator, 2);
+        const slug = try stmt.columnTextDup(allocator, 2);
+        defer allocator.free(slug);
+        const description = try stmt.columnTextDup(allocator, 3);
         defer allocator.free(description);
-        const state = try stmt.columnTextDup(allocator, 3);
+        const state = try stmt.columnTextDup(allocator, 4);
         defer allocator.free(state);
-        const author = try stmt.columnTextDup(allocator, 4);
+        const author = try stmt.columnTextDup(allocator, 5);
         defer allocator.free(author);
-        const created_at = try stmt.columnTextDup(allocator, 5);
+        const created_at = try stmt.columnTextDup(allocator, 6);
         defer allocator.free(created_at);
 
         if (json) {
@@ -951,10 +1125,14 @@ pub fn listProjectsFromIndex(allocator: Allocator, repo: Repo, json: bool) !void
             try appendJsonFieldString(&line, allocator, "id", id, true);
             try appendJsonFieldString(&line, allocator, "state", state, true);
             try appendJsonFieldString(&line, allocator, "name", name, true);
+            try appendJsonFieldString(&line, allocator, "slug", slug, true);
             try appendJsonFieldString(&line, allocator, "description", description, true);
             try appendJsonFieldString(&line, allocator, "author_principal", author, true);
             try appendJsonFieldString(&line, allocator, "created_at", created_at, true);
-            try appendProjectColumnsJsonField(&line, allocator, &db, id, false);
+            try appendProjectColumnsJsonField(&line, allocator, &db, id, true);
+            try appendProjectColumnRefsJsonField(&line, allocator, &db, id, true);
+            try appendProjectFieldsJsonField(&line, allocator, &db, id, true);
+            try appendProjectViewsJsonField(&line, allocator, &db, id, false);
             try line.append(allocator, '}');
             try out("{s}\n", .{line.items});
         } else {
@@ -1323,12 +1501,30 @@ fn appendIssueProjectsJsonField(
     try buf.appendSlice(allocator, ":[");
     var stmt = try db.prepare(
         \\SELECT DISTINCT project, column_name
-        \\FROM issue_projects
-        \\WHERE issue_id = ?
+        \\FROM (
+        \\  SELECT project, column_name
+        \\  FROM issue_projects
+        \\  WHERE issue_id = ?
+        \\  UNION
+        \\  SELECT p.name AS project,
+        \\         COALESCE(CASE WHEN pfv.value_json IS NULL THEN '' ELSE json_extract(pfv.value_json, '$') END, '') AS column_name
+        \\  FROM project_memberships pm
+        \\  JOIN projects p ON p.id = pm.project_id
+        \\  LEFT JOIN project_fields pf
+        \\    ON pf.project_id = pm.project_id
+        \\   AND pf.key = 'status'
+        \\   AND pf.state != 'removed'
+        \\  LEFT JOIN project_field_values pfv
+        \\    ON pfv.project_id = pm.project_id
+        \\   AND pfv.issue_id = pm.issue_id
+        \\   AND pfv.field_id = pf.id
+        \\  WHERE pm.issue_id = ?
+        \\)
         \\ORDER BY project, column_name
     );
     defer stmt.deinit();
     try stmt.bindText(1, issue_id);
+    try stmt.bindText(2, issue_id);
 
     var first = true;
     while (try stmt.step()) {
@@ -1476,6 +1672,191 @@ fn appendProjectColumnsJsonField(
     if (comma) try buf.append(allocator, ',');
 }
 
+fn appendProjectFieldsJsonField(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    project_id: []const u8,
+    comma: bool,
+) !void {
+    try appendJsonString(buf, allocator, "fields");
+    try buf.appendSlice(allocator, ":[");
+    var stmt = try db.prepare(
+        \\SELECT id, key, name, field_type, position, required, default_value_json, state
+        \\FROM project_fields
+        \\WHERE project_id = ?
+        \\ORDER BY position, key, id
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+
+    var first = true;
+    while (try stmt.step()) {
+        const id = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(id);
+        const key = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(key);
+        const name = try stmt.columnTextDup(allocator, 2);
+        defer allocator.free(name);
+        const field_type = try stmt.columnTextDup(allocator, 3);
+        defer allocator.free(field_type);
+        const default_value_json = try stmt.columnTextDup(allocator, 6);
+        defer allocator.free(default_value_json);
+        const state = try stmt.columnTextDup(allocator, 7);
+        defer allocator.free(state);
+        if (!first) try buf.append(allocator, ',');
+        first = false;
+        try buf.append(allocator, '{');
+        try appendJsonFieldString(buf, allocator, "id", id, true);
+        try appendJsonFieldString(buf, allocator, "key", key, true);
+        try appendJsonFieldString(buf, allocator, "name", name, true);
+        try appendJsonFieldString(buf, allocator, "type", field_type, true);
+        try appendJsonFieldInteger(buf, allocator, "position", stmt.columnInt64(4), true);
+        try appendJsonFieldBool(buf, allocator, "required", stmt.columnInt64(5) != 0, true);
+        try appendJsonFieldRaw(buf, allocator, "default_value", default_value_json, true);
+        try appendJsonFieldString(buf, allocator, "state", state, true);
+        try appendProjectFieldOptionsJsonField(buf, allocator, db, id, false);
+        try buf.append(allocator, '}');
+    }
+    try buf.append(allocator, ']');
+    if (comma) try buf.append(allocator, ',');
+}
+
+fn appendProjectFieldOptionsJsonField(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    field_id: []const u8,
+    comma: bool,
+) !void {
+    try appendJsonString(buf, allocator, "options");
+    try buf.appendSlice(allocator, ":[");
+    var stmt = try db.prepare(
+        \\SELECT id, name, color, position, state
+        \\FROM project_field_options
+        \\WHERE field_id = ?
+        \\ORDER BY position, name, id
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, field_id);
+
+    var first = true;
+    while (try stmt.step()) {
+        const id = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(id);
+        const name = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(name);
+        const color = try stmt.columnTextDup(allocator, 2);
+        defer allocator.free(color);
+        const state = try stmt.columnTextDup(allocator, 4);
+        defer allocator.free(state);
+        if (!first) try buf.append(allocator, ',');
+        first = false;
+        try buf.append(allocator, '{');
+        try appendJsonFieldString(buf, allocator, "id", id, true);
+        try appendJsonFieldString(buf, allocator, "name", name, true);
+        try appendJsonFieldString(buf, allocator, "color", color, true);
+        try appendJsonFieldInteger(buf, allocator, "position", stmt.columnInt64(3), true);
+        try appendJsonFieldString(buf, allocator, "state", state, false);
+        try buf.append(allocator, '}');
+    }
+    try buf.append(allocator, ']');
+    if (comma) try buf.append(allocator, ',');
+}
+
+fn appendProjectColumnRefsJsonField(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    project_id: []const u8,
+    comma: bool,
+) !void {
+    try appendJsonString(buf, allocator, "column_refs");
+    try buf.appendSlice(allocator, ":[");
+    var stmt = try db.prepare(
+        \\SELECT column_name, column_ref
+        \\FROM project_columns
+        \\WHERE project_id = ?
+        \\ORDER BY column_name, column_ref
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+
+    var first = true;
+    while (try stmt.step()) {
+        const column = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(column);
+        const column_ref = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(column_ref);
+        if (!first) try buf.append(allocator, ',');
+        first = false;
+        try buf.append(allocator, '{');
+        try appendJsonFieldString(buf, allocator, "name", column, true);
+        try appendJsonFieldString(buf, allocator, "ref", column_ref, false);
+        try buf.append(allocator, '}');
+    }
+    try buf.append(allocator, ']');
+    if (comma) try buf.append(allocator, ',');
+}
+
+fn appendProjectViewsJsonField(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    project_id: []const u8,
+    comma: bool,
+) !void {
+    try appendJsonString(buf, allocator, "views");
+    try buf.appendSlice(allocator, ":[");
+    var stmt = try db.prepare(
+        \\SELECT id, name, layout, position, config_json, state
+        \\FROM project_views
+        \\WHERE project_id = ?
+        \\ORDER BY position, name, id
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+
+    var first = true;
+    while (try stmt.step()) {
+        const id = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(id);
+        const name = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(name);
+        const layout = try stmt.columnTextDup(allocator, 2);
+        defer allocator.free(layout);
+        const config_json = try stmt.columnTextDup(allocator, 4);
+        defer allocator.free(config_json);
+        const state = try stmt.columnTextDup(allocator, 5);
+        defer allocator.free(state);
+        if (!first) try buf.append(allocator, ',');
+        first = false;
+        try buf.append(allocator, '{');
+        try appendJsonFieldString(buf, allocator, "id", id, true);
+        try appendJsonFieldString(buf, allocator, "name", name, true);
+        try appendJsonFieldString(buf, allocator, "layout", layout, true);
+        try appendJsonFieldInteger(buf, allocator, "position", stmt.columnInt64(3), true);
+        try appendJsonFieldRaw(buf, allocator, "config", config_json, true);
+        try appendJsonFieldString(buf, allocator, "state", state, false);
+        try buf.append(allocator, '}');
+    }
+    try buf.append(allocator, ']');
+    if (comma) try buf.append(allocator, ',');
+}
+
+fn appendJsonFieldRaw(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    key: []const u8,
+    raw_json: []const u8,
+    comma: bool,
+) !void {
+    try appendJsonString(buf, allocator, key);
+    try buf.append(allocator, ':');
+    try buf.appendSlice(allocator, raw_json);
+    if (comma) try buf.append(allocator, ',');
+}
+
 fn appendCommitReferencesJsonField(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -1515,12 +1896,30 @@ fn issueProjectsText(allocator: Allocator, db: *SqliteDb, issue_id: []const u8) 
 
     var stmt = try db.prepare(
         \\SELECT DISTINCT project, column_name
-        \\FROM issue_projects
-        \\WHERE issue_id = ?
+        \\FROM (
+        \\  SELECT project, column_name
+        \\  FROM issue_projects
+        \\  WHERE issue_id = ?
+        \\  UNION
+        \\  SELECT p.name AS project,
+        \\         COALESCE(CASE WHEN pfv.value_json IS NULL THEN '' ELSE json_extract(pfv.value_json, '$') END, '') AS column_name
+        \\  FROM project_memberships pm
+        \\  JOIN projects p ON p.id = pm.project_id
+        \\  LEFT JOIN project_fields pf
+        \\    ON pf.project_id = pm.project_id
+        \\   AND pf.key = 'status'
+        \\   AND pf.state != 'removed'
+        \\  LEFT JOIN project_field_values pfv
+        \\    ON pfv.project_id = pm.project_id
+        \\   AND pfv.issue_id = pm.issue_id
+        \\   AND pfv.field_id = pf.id
+        \\  WHERE pm.issue_id = ?
+        \\)
         \\ORDER BY project, column_name
     );
     defer stmt.deinit();
     try stmt.bindText(1, issue_id);
+    try stmt.bindText(2, issue_id);
 
     var first = true;
     while (try stmt.step()) {

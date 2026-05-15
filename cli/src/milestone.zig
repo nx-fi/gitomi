@@ -1,13 +1,22 @@
 const std = @import("std");
+const cmd_common = @import("cmd_common.zig");
+const errors = @import("errors.zig");
 const event_mod = @import("event.zig");
 const event_writer_mod = @import("event_writer.zig");
+const index = @import("index.zig");
 const io = @import("io.zig");
+const repo_mod = @import("repo.zig");
 const util = @import("util.zig");
 
 const Allocator = std.mem.Allocator;
+const CliError = errors.CliError;
 const EventWriter = event_writer_mod.EventWriter;
+const milestone = @This();
 const out = io.out;
+const isIssueState = cmd_common.isIssueState;
 const newUuidV7 = util.newUuidV7;
+const requireNonEmptyOption = cmd_common.requireNonEmptyOption;
+const resolveMilestoneIdForCommand = cmd_common.resolveMilestoneIdForCommand;
 const rfc3339Now = util.rfc3339Now;
 
 pub fn createMilestoneCreatedEvent(
@@ -137,4 +146,110 @@ pub fn createMilestoneStringEvent(
     try out("{s} ^{s}\n", .{ event_type, short_id });
     try out("  commit: {s}\n", .{commit_oid});
     try out("  ref:    {s}\n", .{writer.inbox_ref});
+}
+
+pub fn cmdMilestone(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len == 0) {
+        try io.eprint("gt milestone: expected subcommand 'list', 'create', 'edit', 'close', or 'reopen'\n", .{});
+        return CliError.UserError;
+    }
+
+    if (std.mem.eql(u8, args[0], "list")) {
+        var json = false;
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--json")) {
+                json = true;
+            } else {
+                try io.eprint("gt milestone list: unknown option '{s}'\n", .{args[i]});
+                return CliError.UserError;
+            }
+        }
+        var repo = try repo_mod.discoverRepo(allocator);
+        defer repo.deinit();
+        try index.ensureIndex(allocator, repo);
+        try index.listMilestonesFromIndex(allocator, repo, json);
+        return;
+    }
+
+    if (std.mem.eql(u8, args[0], "create")) {
+        var title: ?[]const u8 = null;
+        var description: []const u8 = "";
+        var due_at: []const u8 = "";
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--title") or std.mem.eql(u8, args[i], "-t")) {
+                title = try util.requireValue(args, &i, "--title");
+            } else if (std.mem.eql(u8, args[i], "--description") or std.mem.eql(u8, args[i], "-d")) {
+                description = try util.requireValue(args, &i, "--description");
+            } else if (std.mem.eql(u8, args[i], "--due")) {
+                due_at = try util.requireValue(args, &i, "--due");
+            } else {
+                try io.eprint("gt milestone create: unknown option '{s}'\n", .{args[i]});
+                return CliError.UserError;
+            }
+        }
+        if (title == null or std.mem.trim(u8, title.?, " \t\r\n").len == 0) {
+            try io.eprint("gt milestone create: --title is required\n", .{});
+            return CliError.UserError;
+        }
+        try milestone.createMilestoneCreatedEvent(allocator, title.?, description, due_at);
+        return;
+    }
+
+    if (std.mem.eql(u8, args[0], "edit")) {
+        if (args.len < 2) {
+            try io.eprint("gt milestone edit: MILESTONE is required\n", .{});
+            return CliError.UserError;
+        }
+
+        var update = event_mod.MilestoneUpdate{};
+        var i: usize = 2;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--title") or std.mem.eql(u8, args[i], "-t")) {
+                update.title = try util.requireValue(args, &i, "--title");
+            } else if (std.mem.eql(u8, args[i], "--description") or std.mem.eql(u8, args[i], "-d")) {
+                update.description = try util.requireValue(args, &i, "--description");
+            } else if (std.mem.eql(u8, args[i], "--due")) {
+                update.due_at = try util.requireValue(args, &i, "--due");
+            } else if (std.mem.eql(u8, args[i], "--state")) {
+                const state = try util.requireValue(args, &i, "--state");
+                if (!isIssueState(state)) {
+                    try io.eprint("gt milestone edit: --state must be open or closed\n", .{});
+                    return CliError.UserError;
+                }
+                update.state = state;
+            } else {
+                try io.eprint("gt milestone edit: unknown option '{s}'\n", .{args[i]});
+                return CliError.UserError;
+            }
+        }
+        if (!update.hasChanges()) {
+            try io.eprint("gt milestone edit: at least one update option is required\n", .{});
+            return CliError.UserError;
+        }
+        if (update.title) |title| {
+            try requireNonEmptyOption("gt milestone edit", "--title", title);
+        }
+
+        const milestone_id = try resolveMilestoneIdForCommand(allocator, args[1]);
+        defer allocator.free(milestone_id);
+        try milestone.createMilestoneUpdatedEvent(allocator, milestone_id, update);
+        return;
+    }
+
+    if (std.mem.eql(u8, args[0], "close") or std.mem.eql(u8, args[0], "reopen")) {
+        if (args.len != 2) {
+            try io.eprint("gt milestone {s}: expected MILESTONE\n", .{args[0]});
+            return CliError.UserError;
+        }
+        const milestone_id = try resolveMilestoneIdForCommand(allocator, args[1]);
+        defer allocator.free(milestone_id);
+        const state: []const u8 = if (std.mem.eql(u8, args[0], "close")) "closed" else "open";
+        try milestone.createMilestoneStringEvent(allocator, milestone_id, "milestone.state_set", "state", state);
+        return;
+    }
+
+    try io.eprint("gt milestone: expected subcommand 'list', 'create', 'edit', 'close', or 'reopen'\n", .{});
+    return CliError.UserError;
 }

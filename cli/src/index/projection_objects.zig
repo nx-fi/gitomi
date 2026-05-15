@@ -520,7 +520,7 @@ pub fn applyProjectProjection(allocator: Allocator, db: *SqliteDb, event_hash: [
         const field_id = event_mod.jsonString(payload.get("field_id")) orelse return "invalid_event_envelope";
         try updateProjectFieldState(allocator, db, envelope.object_id, field_id, "removed", event_hash, envelope);
     } else if (std.mem.eql(u8, envelope.event_type, "project.field_option_added")) {
-        if (try applyProjectFieldOptionAdded(allocator, db, payload, envelope.object_id, event_hash, envelope)) |reason| return reason;
+        if (try applyProjectFieldOptionAdded(db, payload, envelope.object_id, event_hash, envelope)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "project.field_option_updated")) {
         if (try applyProjectFieldOptionUpdated(allocator, db, payload, envelope.object_id, event_hash, envelope)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "project.field_option_removed")) {
@@ -926,7 +926,6 @@ fn loadProjectField(allocator: Allocator, db: *SqliteDb, project_id: []const u8,
 }
 
 fn applyProjectFieldOptionAdded(
-    allocator: Allocator,
     db: *SqliteDb,
     payload: std.json.ObjectMap,
     project_id: []const u8,
@@ -1471,8 +1470,40 @@ fn jsonValueOrDefaultOwned(allocator: Allocator, value: ?std.json.Value, default
 fn jsonValueOwned(allocator: Allocator, value: std.json.Value) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
-    try std.json.stringify(value, .{}, buf.writer(allocator));
+    try appendJsonValue(&buf, allocator, value);
     return try buf.toOwnedSlice(allocator);
+}
+
+fn appendJsonValue(buf: *std.ArrayList(u8), allocator: Allocator, value: std.json.Value) !void {
+    switch (value) {
+        .null => try buf.appendSlice(allocator, "null"),
+        .bool => |boolean| try buf.appendSlice(allocator, if (boolean) "true" else "false"),
+        .integer => |integer| try std.fmt.format(buf.writer(allocator), "{d}", .{integer}),
+        .float => |number| try std.fmt.format(buf.writer(allocator), "{d}", .{number}),
+        .number_string => |number| try buf.appendSlice(allocator, number),
+        .string => |string| try json_writer.appendJsonString(buf, allocator, string),
+        .array => |array| {
+            try buf.append(allocator, '[');
+            for (array.items, 0..) |item, idx| {
+                if (idx != 0) try buf.append(allocator, ',');
+                try appendJsonValue(buf, allocator, item);
+            }
+            try buf.append(allocator, ']');
+        },
+        .object => |object| {
+            try buf.append(allocator, '{');
+            var first = true;
+            var it = object.iterator();
+            while (it.next()) |entry| {
+                if (!first) try buf.append(allocator, ',');
+                first = false;
+                try json_writer.appendJsonString(buf, allocator, entry.key_ptr.*);
+                try buf.append(allocator, ':');
+                try appendJsonValue(buf, allocator, entry.value_ptr.*);
+            }
+            try buf.append(allocator, '}');
+        },
+    }
 }
 
 fn jsonStringValueOwned(allocator: Allocator, value: []const u8) ![]u8 {

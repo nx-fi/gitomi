@@ -198,7 +198,7 @@ pub fn prepareEventParents(allocator: Allocator, inbox_ref: []const u8, root_anc
     };
 }
 
-fn containsString(values: []const []const u8, needle: []const u8) bool {
+pub fn containsString(values: []const []const u8, needle: []const u8) bool {
     for (values) |value| {
         if (std.mem.eql(u8, value, needle)) return true;
     }

@@ -190,7 +190,7 @@ pub const Stats = struct {
 
 pub fn loadRepositoryStats(allocator: Allocator, repo: Repo) !?Stats {
     const paths = try collectRepositoryPaths(allocator, repo) orelse return null;
-    defer freeStringList(allocator, paths);
+    defer git.freeStringList(allocator, paths);
 
     var rows: std.ArrayList(LanguageRow) = .empty;
     errdefer rows.deinit(allocator);
@@ -439,11 +439,6 @@ fn hasExtension(path: []const u8, ext: []const u8) bool {
 
 fn isReadmeName(base: []const u8) bool {
     return std.ascii.eqlIgnoreCase(base, "README");
-}
-
-fn freeStringList(allocator: Allocator, values: [][]u8) void {
-    for (values) |value| allocator.free(value);
-    allocator.free(values);
 }
 
 test "source stats maps hljs aliases to canonical languages" {

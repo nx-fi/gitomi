@@ -189,74 +189,14 @@ fn checkParentHashes(
     commit: []const u8,
     body: []const u8,
 ) !void {
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return;
-    defer parsed.deinit();
-    const root = switch (parsed.value) {
-        .object => |object| object,
-        else => return,
-    };
-    const parent_hashes_value = root.get("parent_hashes") orelse return;
-    const parent_hashes = switch (parent_hashes_value) {
-        .object => |object| object,
-        else => return,
-    };
-    const log_hash = switch (parent_hashes.get("log") orelse return) {
-        .string => |value| value,
-        else => return,
-    };
-    const anchor_hash = switch (parent_hashes.get("anchor") orelse return) {
-        .string => |value| value,
-        else => return,
-    };
-    const causal = switch (parent_hashes.get("causal") orelse return) {
-        .array => |array| array,
-        else => return,
-    };
-    const related = switch (parent_hashes.get("related") orelse return) {
-        .array => |array| array,
-        else => return,
-    };
-
     const parents_raw = try gitChecked(allocator, &.{ "show", "-s", "--format=%P", commit });
     defer allocator.free(parents_raw);
     const parents = std.mem.trim(u8, parents_raw, " \t\r\n");
-    var parent_list: std.ArrayList([]const u8) = .empty;
-    defer parent_list.deinit(allocator);
-    var it = std.mem.tokenizeScalar(u8, parents, ' ');
-    while (it.next()) |parent| try parent_list.append(allocator, parent);
 
-    const first_parent = if (parent_list.items.len == 0) null else parent_list.items[0];
-    if (log_hash.len == 0) {
-        if (first_parent == null or anchor_hash.len == 0 or !std.mem.eql(u8, anchor_hash, first_parent.?)) {
-            try fsck.fail("{s}: {s}: parent_hashes.anchor does not match root genesis parent", .{ ref, commit });
-        }
-    } else {
-        if (first_parent == null or !std.mem.eql(u8, log_hash, first_parent.?)) {
-            try fsck.fail("{s}: {s}: parent_hashes.log does not match first parent", .{ ref, commit });
-        }
-        if (anchor_hash.len != 0) {
-            try fsck.fail("{s}: {s}: non-root event has parent_hashes.anchor", .{ ref, commit });
-        }
-    }
-
-    const expected_causal_len = if (parent_list.items.len == 0) 0 else parent_list.items.len - 1;
-    if (causal.items.len != expected_causal_len) {
-        try fsck.fail("{s}: {s}: parent_hashes.causal does not match parent count", .{ ref, commit });
-        return;
-    }
-    if (causal.items.len > git.max_causal_parents) {
-        try fsck.fail("{s}: {s}: parent_hashes.causal exceeds v1 causal parent cap", .{ ref, commit });
-        return;
-    }
-    if (related.items.len > git.max_related_parents) {
-        try fsck.fail("{s}: {s}: parent_hashes.related exceeds v1 related parent cap", .{ ref, commit });
-        return;
-    }
-    for (causal.items, 0..) |item, idx| {
-        if (item != .string or !std.mem.eql(u8, item.string, parent_list.items[idx + 1])) {
-            try fsck.fail("{s}: {s}: parent_hashes.causal does not match Git parents", .{ ref, commit });
-            return;
-        }
+    const failure = (try event_mod.validateParentHashes(allocator, parents, body)) orelse return;
+    switch (failure) {
+        .invalid_event_body, .invalid_parent_hashes => return,
+        else => try fsck.fail("{s}: {s}: {s}", .{ ref, commit, event_mod.parentHashValidationMessage(failure) }),
     }
 }
 
@@ -327,4 +267,69 @@ fn parseEnvelope(
         try fsck.fail("{s}: {s}: invalid event envelope", .{ ref, commit });
         return null;
     };
+}
+
+test "fsck inbox ref name validates structure and ref-safe segments" {
+    var state = State.init(std.testing.allocator, null);
+    defer state.deinit();
+
+    try checkInboxRefName(&state, "refs/gitomi/inbox/alice/laptop");
+    try std.testing.expectEqual(@as(usize, 0), state.errors);
+
+    try checkInboxRefName(&state, "refs/heads/main");
+    try std.testing.expectEqual(@as(usize, 1), state.errors);
+
+    try checkInboxRefName(&state, "refs/gitomi/inbox/alice");
+    try std.testing.expectEqual(@as(usize, 2), state.errors);
+
+    try checkInboxRefName(&state, "refs/gitomi/inbox/alice/laptop/extra");
+    try std.testing.expectEqual(@as(usize, 4), state.errors);
+
+    try checkInboxRefName(&state, "refs/gitomi/inbox/al ice/laptop");
+    try std.testing.expectEqual(@as(usize, 5), state.errors);
+}
+
+test "fsck repo id checks configured and observed repository identity" {
+    var configured = State.init(std.testing.allocator, "repo-a");
+    defer configured.deinit();
+    try configured.checkRepoId("commit-1", "repo-a");
+    try std.testing.expectEqual(@as(usize, 0), configured.errors);
+    try configured.checkRepoId("commit-2", "repo-b");
+    try std.testing.expectEqual(@as(usize, 1), configured.errors);
+
+    var observed = State.init(std.testing.allocator, null);
+    defer observed.deinit();
+    try observed.checkRepoId("commit-3", "repo-a");
+    try std.testing.expectEqualStrings("repo-a", observed.observed_repo_id.?);
+    try observed.checkRepoId("commit-4", "repo-a");
+    try std.testing.expectEqual(@as(usize, 0), observed.errors);
+    try observed.checkRepoId("commit-5", "repo-b");
+    try std.testing.expectEqual(@as(usize, 1), observed.errors);
+}
+
+test "fsck actor sequence checks duplicates and monotonicity per actor" {
+    var state = State.init(std.testing.allocator, null);
+    defer state.deinit();
+
+    try state.checkActorSeq("commit-1", "ab", "c", 1);
+    try state.checkActorSeq("commit-2", "a", "bc", 1);
+    try state.checkActorSeq("commit-3", "ab", "c", 2);
+    try std.testing.expectEqual(@as(usize, 0), state.errors);
+
+    try state.checkActorSeq("commit-4", "ab", "c", 2);
+    try std.testing.expectEqual(@as(usize, 1), state.errors);
+
+    try state.checkActorSeq("commit-5", "ab", "c", 0);
+    try std.testing.expectEqual(@as(usize, 2), state.errors);
+}
+
+test "fsck envelope parsing reports malformed bodies without crashing" {
+    var state = State.init(std.testing.allocator, null);
+    defer state.deinit();
+
+    try std.testing.expect((try parseEnvelope(std.testing.allocator, &state, "refs/gitomi/inbox/alice/laptop", "commit-1", "not json")) == null);
+    try std.testing.expectEqual(@as(usize, 1), state.errors);
+
+    try std.testing.expect((try parseEnvelope(std.testing.allocator, &state, "refs/gitomi/inbox/alice/laptop", "commit-2", "[]")) == null);
+    try std.testing.expectEqual(@as(usize, 2), state.errors);
 }

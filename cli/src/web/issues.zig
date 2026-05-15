@@ -2719,7 +2719,7 @@ pub fn handleIssueSidebarPost(allocator: Allocator, repo: Repo, stream: std.net.
             break :blk try allocator.dupe(u8, std.mem.trim(u8, column_owned, " \t\r\n"));
         };
         defer allocator.free(column_value);
-        createIssueProjectEvent(allocator, issue_id, project_value, column_value, add) catch {
+        createIssueProjectEvent(allocator, issue_id, project_value, column_value, null, null, add) catch {
             try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update issue project placement\n");
             return;
         };

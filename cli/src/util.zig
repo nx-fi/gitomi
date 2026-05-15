@@ -9,6 +9,29 @@ const eprint = io.eprint;
 pub const short_object_ref_len: usize = 7;
 pub const max_object_ref_len: usize = 64;
 
+pub const OwnedSliceList = struct {
+    allocator: Allocator,
+    items: std.ArrayList([]u8) = .empty,
+
+    pub fn dupe(self: *OwnedSliceList, value: []const u8) ![]u8 {
+        const owned = try self.allocator.dupe(u8, value);
+        errdefer self.allocator.free(owned);
+        try self.items.append(self.allocator, owned);
+        return owned;
+    }
+
+    pub fn release(self: *OwnedSliceList) void {
+        self.items.clearRetainingCapacity();
+    }
+
+    pub fn deinit(self: *OwnedSliceList) void {
+        for (self.items.items) |value| {
+            self.allocator.free(value);
+        }
+        self.items.deinit(self.allocator);
+    }
+};
+
 pub fn splitCommaFields(allocator: Allocator, raw: []const u8) !std.ArrayList([]const u8) {
     var list: std.ArrayList([]const u8) = .empty;
     errdefer list.deinit(allocator);
@@ -91,13 +114,10 @@ pub fn newUuidV7(allocator: Allocator) ![]u8 {
     var bytes: [16]u8 = undefined;
     std.crypto.random.bytes(&bytes);
 
-    const ts = @as(u64, @intCast(std.time.milliTimestamp()));
-    bytes[0] = @as(u8, @intCast((ts >> 40) & 0xff));
-    bytes[1] = @as(u8, @intCast((ts >> 32) & 0xff));
-    bytes[2] = @as(u8, @intCast((ts >> 24) & 0xff));
-    bytes[3] = @as(u8, @intCast((ts >> 16) & 0xff));
-    bytes[4] = @as(u8, @intCast((ts >> 8) & 0xff));
-    bytes[5] = @as(u8, @intCast(ts & 0xff));
+    const ts: u64 = @intCast(std.time.milliTimestamp());
+    inline for (.{ 40, 32, 24, 16, 8, 0 }, 0..) |shift, idx| {
+        bytes[idx] = @truncate(ts >> shift);
+    }
     bytes[6] = (bytes[6] & 0x0f) | 0x70;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
 
