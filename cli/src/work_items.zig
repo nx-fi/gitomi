@@ -371,7 +371,7 @@ pub fn issueListSql(allocator: Allocator, filters: IssueListOptions) ![]u8 {
     var conditions: usize = 0;
     if (filters.state != .all) try appendIssueListCondition(&sql, allocator, &conditions, "i.state = ?");
     if (filters.q != null) {
-        try appendIssueListCondition(&sql, allocator,
+        try appendIssueListCondition(&sql, allocator, &conditions,
             \\(i.title LIKE ? ESCAPE '\' OR i.body LIKE ? ESCAPE '\' OR COALESCE(NULLIF(m.source_author, ''), i.author_principal) LIKE ? ESCAPE '\' OR EXISTS (SELECT 1 FROM comments c WHERE c.parent_kind = 'issue' AND c.parent_id = i.id AND c.body LIKE ? ESCAPE '\'))
         );
     }

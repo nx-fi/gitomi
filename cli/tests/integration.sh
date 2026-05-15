@@ -666,6 +666,50 @@ SH
   gt fsck >/dev/null
 )
 
+echo "integration: native gitomi workflow runs shell backend and stores diagnostics ref"
+native_actions_repo="$ROOT/native-actions"
+init_repo "$native_actions_repo"
+(
+  cd "$native_actions_repo"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  mkdir -p .gitomi/workflows
+  cat > .gitomi/workflows/native.yml <<'YAML'
+name: Native CI
+on:
+  push:
+  schedule:
+    - cron: "* * * * *"
+jobs:
+  test:
+    backend: shell
+    steps:
+      - run: echo native-ok > native-output.txt
+      - run: test -f native-output.txt
+YAML
+  git add .gitomi/workflows/native.yml
+  git commit -m "Add native workflow" >/dev/null
+
+  workflows="$(gt actions workflows --json)"
+  assert_contains "$workflows" '"path":".gitomi/workflows/native.yml"'
+  assert_contains "$workflows" '"dialect":"gitomi"'
+  assert_contains "$workflows" '"triggers":["push","schedule","workflow.schedule"]'
+
+  gt actions run --event push >/dev/null
+  events="$(gt events list --json)"
+  assert_contains "$events" '"event_type":"action.run_requested"'
+  assert_contains "$events" '"event_type":"action.run_completed"'
+  assert_contains "$events" '"diagnostics_ref":"refs/gitomi/runs/alice-laptop/'
+
+  run_ref="$(git for-each-ref --format='%(refname)' refs/gitomi/runs | head -n 1)"
+  [[ -n "$run_ref" ]] || fail "expected native workflow run ref"
+  run_json="$(git show "$run_ref:run.json")"
+  assert_contains "$run_json" '"schema":"urn:gitomi:workflow-run:v1"'
+  assert_contains "$run_json" '"workflow":".gitomi/workflows/native.yml"'
+  assert_contains "$run_json" '"dialect":"gitomi"'
+  assert_contains "$run_json" '"conclusion":"success"'
+  gt fsck >/dev/null
+)
+
 echo "integration: index snapshots restore cache, checkpoint by threshold, and prune"
 snapshots="$ROOT/snapshots"
 init_repo "$snapshots"

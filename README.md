@@ -85,8 +85,9 @@ before `gt init`. The remote genesis ref becomes the local trust anchor.
 
 ## Workflows
 
-Gitomi reads GitHub Actions-compatible workflow files from
-`.github/workflows/*.yml` and `.github/workflows/*.yaml`.
+Gitomi reads native workflow files from `.gitomi/workflows/*.yml` and
+`.gitomi/workflows/*.yaml`, and can also run GitHub Actions-compatible workflow
+files from `.github/workflows/*.yml` and `.github/workflows/*.yaml`.
 
 ```sh
 gt actions workflows
@@ -134,8 +135,8 @@ cache and can be rebuilt from Git refs.
 - Git
 - Zig, for building the `gt` CLI
 - Git commit signing configured for the actor device
-- Optional: [`nektos/act`](https://github.com/nektos/act) for local workflow
-  execution
+- Optional: [`nektos/act`](https://github.com/nektos/act) for local execution
+  of GitHub Actions-compatible workflows
 - Optional: GitHub CLI credentials for GitHub import/export without a fixture
 
 ## CLI Reference

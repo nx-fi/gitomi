@@ -609,7 +609,7 @@ fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
         defer repo.deinit();
         try index.ensureIndex(allocator, repo);
         if (agent_view) {
-            var db = try work_items.SqliteDb.open(allocator, repo.index_path, work_items.sqlite_db.sqlite.SQLITE_OPEN_READONLY, false);
+            var db = try work_items.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
             defer db.deinit();
             var buf: std.ArrayList(u8) = .empty;
             defer buf.deinit(allocator);
@@ -618,34 +618,22 @@ fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
             return;
         }
         if (filtered) {
-            var db = try work_items.SqliteDb.open(allocator, repo.index_path, work_items.sqlite_db.sqlite.SQLITE_OPEN_READONLY, false);
+            var db = try work_items.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
             defer db.deinit();
+            if (json) {
+                var buf: std.ArrayList(u8) = .empty;
+                defer buf.deinit(allocator);
+                try work_items.appendIssueListAgentJson(&buf, allocator, &db, filters);
+                try io.out("{s}\n", .{buf.items});
+                return;
+            }
             var stmt = try work_items.prepareIssueListStmt(allocator, &db, filters);
             defer stmt.deinit();
             while (try stmt.step()) {
                 var row = try work_items.issueListRowFromStmt(allocator, &stmt);
                 defer row.deinit(allocator);
-                if (json) {
-                    var buf: std.ArrayList(u8) = .empty;
-                    defer buf.deinit(allocator);
-                    try work_items.appendIssueListAgentJson(&buf, allocator, &db, .{
-                        .allocator = allocator,
-                        .state = filters.state,
-                        .q = filters.q,
-                        .author = filters.author,
-                        .label = filters.label,
-                        .project = filters.project,
-                        .milestone = filters.milestone,
-                        .assignee = filters.assignee,
-                        .sort = filters.sort,
-                        .limit = filters.limit,
-                    });
-                    try io.out("{s}\n", .{buf.items});
-                    return;
-                } else {
-                    var ref_buf: [util.short_object_ref_len]u8 = undefined;
-                    try io.out("#{s} {s} {s}\n", .{ util.shortObjectRef(&ref_buf, row.id), row.state, row.title });
-                }
+                var ref_buf: [util.short_object_ref_len]u8 = undefined;
+                try io.out("#{s} {s} {s}\n", .{ util.shortObjectRef(&ref_buf, row.id), row.state, row.title });
             }
             return;
         }
@@ -689,7 +677,7 @@ fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
         const issue_id = try index.resolveIssueId(allocator, repo, args[1]);
         defer allocator.free(issue_id);
         if (agent_view) {
-            var db = try work_items.SqliteDb.open(allocator, repo.index_path, work_items.sqlite_db.sqlite.SQLITE_OPEN_READONLY, false);
+            var db = try work_items.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
             defer db.deinit();
             const detail = (try work_items.loadIssueDetail(allocator, &db, issue_id)) orelse {
                 try io.eprint("gt issue: no issue matches {s}\n", .{issue_id});
@@ -1272,6 +1260,24 @@ fn requireBodyOption(context: []const u8, body: ?[]const u8) ![]const u8 {
     return body.?;
 }
 
+fn dupeNonEmptyOption(allocator: Allocator, context: []const u8, option: []const u8, value: []const u8) ![]u8 {
+    try requireNonEmptyOption(context, option, value);
+    return try allocator.dupe(u8, std.mem.trim(u8, value, " \t\r\n"));
+}
+
+fn parsePositiveIntegerOption(context: []const u8, option: []const u8, raw: []const u8) !usize {
+    const value = std.mem.trim(u8, raw, " \t\r\n");
+    const parsed = std.fmt.parseUnsigned(usize, value, 10) catch {
+        try io.eprint("{s}: {s} must be a positive integer\n", .{ context, option });
+        return CliError.UserError;
+    };
+    if (parsed == 0) {
+        try io.eprint("{s}: {s} must be a positive integer\n", .{ context, option });
+        return CliError.UserError;
+    }
+    return parsed;
+}
+
 fn createCommentForParentCommand(
     allocator: Allocator,
     context: []const u8,
@@ -1347,7 +1353,7 @@ fn formatPullDiffCommentBodyFromOptions(
     }
 
     const file = std.mem.trim(u8, options.file.?, " \t\r\n");
-    if (file.len == 0 or file.len > 4096 or containsLineBreakOrNul(file)) {
+    if (!work_items.validateDiffCommentPath(file)) {
         try io.eprint("{s}: --file must be a non-empty single-line path\n", .{context});
         return CliError.UserError;
     }
@@ -1381,14 +1387,12 @@ fn formatPullDiffCommentBodyFromOptions(
         return CliError.UserError;
     }
 
-    if (start_line == end_line) {
-        return try std.fmt.allocPrint(allocator, "Review comment on `{s}` ({s} line {d}).\n\n{s}", .{ file, side, start_line, body });
-    }
-    return try std.fmt.allocPrint(allocator, "Review comment on `{s}` ({s} lines {d}-{d}).\n\n{s}", .{ file, side, start_line, end_line, body });
-}
-
-fn containsLineBreakOrNul(value: []const u8) bool {
-    return std.mem.indexOfAny(u8, value, "\r\n\x00") != null;
+    return try work_items.formatDiffCommentBody(allocator, .{
+        .file = file,
+        .side = if (std.mem.eql(u8, side, "old")) .old else .new,
+        .start_line = start_line,
+        .end_line = end_line,
+    }, body);
 }
 
 fn appendCollectionOptionValues(
@@ -1435,11 +1439,36 @@ fn cmdPr(allocator: Allocator, args: []const []const u8, command_context: []cons
 
     if (std.mem.eql(u8, args[0], "list")) {
         var json = false;
+        var agent_view = false;
+        var filters = work_items.PullListOptions{};
+        var filtered = false;
         var i: usize = 1;
         while (i < args.len) : (i += 1) {
             const arg = args[i];
             if (std.mem.eql(u8, arg, "--json")) {
                 json = true;
+            } else if (std.mem.eql(u8, arg, "--view")) {
+                const value = try util.requireValue(args, &i, "--view");
+                if (std.mem.eql(u8, value, "agent") or std.mem.eql(u8, value, "full")) {
+                    agent_view = true;
+                } else if (std.mem.eql(u8, value, "summary")) {
+                    agent_view = false;
+                } else {
+                    try io.eprint("{s} list: --view must be summary or agent\n", .{command_context});
+                    return CliError.UserError;
+                }
+            } else if (std.mem.eql(u8, arg, "--agent")) {
+                agent_view = true;
+            } else if (std.mem.eql(u8, arg, "--state")) {
+                const value = try util.requireValue(args, &i, "--state");
+                filters.state = work_items.pullStateFilterFromValue(value) orelse {
+                    try io.eprint("{s} list: --state must be open, merged, closed, or all\n", .{command_context});
+                    return CliError.UserError;
+                };
+                filtered = true;
+            } else if (std.mem.eql(u8, arg, "--limit")) {
+                filters.limit = try parsePositiveIntegerOption(if (std.mem.eql(u8, command_context, "gt pull")) "gt pull list" else "gt pr list", "--limit", try util.requireValue(args, &i, "--limit"));
+                filtered = true;
             } else {
                 try io.eprint("{s} list: unknown option '{s}'\n", .{ command_context, arg });
                 return CliError.UserError;
@@ -1449,6 +1478,39 @@ fn cmdPr(allocator: Allocator, args: []const []const u8, command_context: []cons
         var repo = try repo_mod.discoverRepo(allocator);
         defer repo.deinit();
         try index.ensureIndex(allocator, repo);
+        if (agent_view or (filtered and json)) {
+            var db = try work_items.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
+            defer db.deinit();
+            var buf: std.ArrayList(u8) = .empty;
+            defer buf.deinit(allocator);
+            try work_items.appendPullListAgentJson(&buf, allocator, &db, filters);
+            try io.out("{s}\n", .{buf.items});
+            return;
+        }
+        if (filtered) {
+            var db = try work_items.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
+            defer db.deinit();
+            var stmt = try work_items.preparePullListStmt(&db, filters);
+            defer stmt.deinit();
+            var shown: usize = 0;
+            while (try stmt.step()) {
+                if (filters.limit) |limit| {
+                    if (shown >= limit) break;
+                }
+                var row = try work_items.pullListRowFromStmt(allocator, &stmt);
+                defer row.deinit(allocator);
+                var ref_buf: [util.short_object_ref_len]u8 = undefined;
+                try io.out("#{s} {s} {s}->{s} {s}\n", .{
+                    util.shortObjectRef(&ref_buf, row.id),
+                    row.state,
+                    row.head_ref,
+                    row.base_ref,
+                    row.title,
+                });
+                shown += 1;
+            }
+            return;
+        }
         try index.listPullsFromIndex(allocator, repo, json);
         return;
     }
@@ -1459,11 +1521,27 @@ fn cmdPr(allocator: Allocator, args: []const []const u8, command_context: []cons
             return CliError.UserError;
         }
         var json = false;
+        var agent_view = false;
+        var include_diff = false;
         var i: usize = 2;
         while (i < args.len) : (i += 1) {
             const arg = args[i];
             if (std.mem.eql(u8, arg, "--json")) {
                 json = true;
+            } else if (std.mem.eql(u8, arg, "--view")) {
+                const value = try util.requireValue(args, &i, "--view");
+                if (std.mem.eql(u8, value, "agent") or std.mem.eql(u8, value, "full")) {
+                    agent_view = true;
+                } else if (std.mem.eql(u8, value, "summary")) {
+                    agent_view = false;
+                } else {
+                    try io.eprint("{s} {s}: --view must be summary or agent\n", .{ command_context, args[0] });
+                    return CliError.UserError;
+                }
+            } else if (std.mem.eql(u8, arg, "--agent")) {
+                agent_view = true;
+            } else if (std.mem.eql(u8, arg, "--include-diff")) {
+                include_diff = true;
             } else {
                 try io.eprint("{s} {s}: unknown option '{s}'\n", .{ command_context, args[0], arg });
                 return CliError.UserError;
@@ -1475,6 +1553,20 @@ fn cmdPr(allocator: Allocator, args: []const []const u8, command_context: []cons
         try index.ensureIndex(allocator, repo);
         const pull_id = try index.resolvePullId(allocator, repo, args[1]);
         defer allocator.free(pull_id);
+        if (agent_view or include_diff) {
+            var db = try work_items.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
+            defer db.deinit();
+            const detail = (try work_items.loadPullDetail(allocator, &db, pull_id)) orelse {
+                try io.eprint("gt pr: no PR matches {s}\n", .{pull_id});
+                return CliError.NotFound;
+            };
+            defer detail.deinit(allocator);
+            var buf: std.ArrayList(u8) = .empty;
+            defer buf.deinit(allocator);
+            try work_items.appendPullAgentJson(&buf, allocator, &db, repo, detail, include_diff);
+            try io.out("{s}\n", .{buf.items});
+            return;
+        }
         try index.showPullFromIndex(allocator, repo, pull_id, json);
         return;
     }

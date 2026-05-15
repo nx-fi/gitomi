@@ -89,9 +89,9 @@ gt comment react|unreact COMMENT EMOJI
 gt actions workflows [--json] [--ref REF|--oid OID]
 gt actions request --workflow WORKFLOW [--ref REF|--oid OID] [--event EVENT]
 gt actions complete RUN --conclusion CONCLUSION [--workflow WORKFLOW] [--ref REF|--oid OID] [--event EVENT]
-gt actions run --event EVENT [--ref REF|--oid OID] [--object-id ID] [--dry-run] [--act PATH] [-- ACT_ARGS...]
-gt actions run-requested [RUN] [--dry-run] [--act PATH] [-- ACT_ARGS...]
-gt actions daemon [--once] [--replay] [--interval-ms N] [--dry-run] [--act PATH] [-- ACT_ARGS...]
+gt actions run --event EVENT [--ref REF|--oid OID] [--object-id ID] [--dry-run] [--act PATH] [--agent-runner PATH] [-- ACT_ARGS...]
+gt actions run-requested [RUN] [--dry-run] [--act PATH] [--agent-runner PATH] [-- ACT_ARGS...]
+gt actions daemon [--once] [--replay] [--interval-ms N] [--dry-run] [--act PATH] [--agent-runner PATH] [-- ACT_ARGS...]
 gt runs prune [--dry-run] [--max-age-days N] [--max-count N] [--max-bytes N]
 gt sync [--remote REMOTE] [--pull-only|--push-only]
 gt github import [--repo OWNER/REPO] [--token TOKEN] [--from-file PATH] [--no-comments] [--no-projects]
@@ -156,22 +156,26 @@ commits, native Git signatures, signing-key bindings to actor identities, v1
 event envelopes, matching repo IDs, unique and strictly increasing `(principal,
 device, seq)` tuples, and first-parent inbox-chain shape.
 
-`gt actions workflows` reads GitHub Actions-compatible workflow definitions from
-`.github/workflows/*.yml` and `.github/workflows/*.yaml` in the selected commit.
-`gt actions run` schedules matching workflows for a Gitomi or data-plane event,
-emits a signed `action.run_requested` event, creates a detached worktree at the
-target commit, runs `nektos/act` as
-`act <event> -W <workflow> -e <payload>`, then emits a signed
-`action.run_completed` event. `gt actions request` and `gt actions complete`
-expose the same event emission manually, and `gt actions run-requested`
-executes accepted pending run requests from the local event projection. Extra
-act flags can be passed after `--`; `--act PATH` selects a non-default act
-binary.
+`gt actions workflows` reads native workflow definitions from
+`.gitomi/workflows/*.yml` and `.gitomi/workflows/*.yaml`, plus
+GitHub Actions-compatible workflow definitions from `.github/workflows/*.yml`
+and `.github/workflows/*.yaml`, in the selected commit. `gt actions run`
+schedules matching workflows for a Gitomi or data-plane event, emits a signed
+`action.run_requested` event, creates a detached worktree at the target commit,
+executes native shell/container/agent jobs or runs GitHub-compatible workflows
+through `nektos/act` as `act <event> -W <workflow> -e <payload>`, then emits a
+signed `action.run_completed` event. `gt actions request` and
+`gt actions complete` expose the same event emission manually, and
+`gt actions run-requested` executes accepted pending run requests from the local
+event projection. Extra act flags can be passed after `--`; `--act PATH`
+selects a non-default act binary, and `--agent-runner PATH` selects the external
+agent backend command for native `backend: agent` jobs.
 
 `gt actions daemon` is the scheduler service. It polls the local repository,
-executes accepted pending run requests, schedules new accepted Gitomi events
-and `HEAD` changes against matching workflow triggers, and stores local cursors
-under `.git/gitomi/actions-scheduler.state`. On first start it begins from the
+executes accepted pending run requests, schedules new accepted Gitomi events,
+cron-style native `schedule` triggers, and `HEAD` changes against matching
+workflow triggers, and stores local cursors under
+`.git/gitomi/actions-scheduler.state`. On first start it begins from the
 current frontier; use `--replay` to intentionally schedule existing history.
 
 `gt index rebuild` writes a disposable SQLite event projection to
