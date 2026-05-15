@@ -760,6 +760,14 @@ init_repo "$comments"
   comments_json="$(gt comment list issue "$issue_ref" --json)"
   assert_contains "$comments_json" '"redacted":true'
   assert_contains "$comments_json" '"body":""'
+  sleep 1
+  gt comment edit "$comment_ref" --body "Restored comment" >/dev/null
+  comments_json="$(gt comment list issue "$issue_ref" --json)"
+  assert_contains "$comments_json" '"redacted":true'
+  assert_contains "$comments_json" '"body":""'
+  latest_body_event="$(gt events list --json | grep '"event_type":"comment.body_set"' | tail -n 1)"
+  assert_contains "$latest_body_event" '"domain_status":"rejected"'
+  assert_contains "$latest_body_event" '"rejection_reason":"object_redacted"'
   gt fsck >/dev/null
 )
 
@@ -878,11 +886,17 @@ init_repo "$derived_refs"
   git add src/app.txt
   git commit -m "Connect #$(object_ref "$issue_id") and #$(object_ref "$pull_id")" >/dev/null
   code_commit="$(git rev-parse HEAD)"
+  printf 'typed referenced\n' > src/typed.txt
+  git add src/typed.txt
+  git commit -m "Connect issue:$(object_ref "$issue_id") and pr:$(object_ref "$pull_id")" >/dev/null
+  typed_commit="$(git rev-parse HEAD)"
 
   issue_show_json="$(gt issue show "#$(object_ref "$issue_id")" --json)"
-  assert_contains "$issue_show_json" '"commit_references":["'"$code_commit"'"]'
+  assert_contains "$issue_show_json" "$code_commit"
+  assert_contains "$issue_show_json" "$typed_commit"
   pull_show_json="$(gt pr view "#$(object_ref "$pull_id")" --json)"
-  assert_contains "$pull_show_json" '"commit_references":["'"$code_commit"'"]'
+  assert_contains "$pull_show_json" "$code_commit"
+  assert_contains "$pull_show_json" "$typed_commit"
   gt fsck >/dev/null
 )
 

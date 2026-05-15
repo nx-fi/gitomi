@@ -15,6 +15,7 @@ const appendRepoHeaderShared = shared.appendRepoHeader;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
 const appendTemplate = shared.appendTemplate;
+const codeHref = shared.codeHref;
 const commitHref = shared.commitHref;
 const literalHref = shared.literalHref;
 const runCommand = git.runCommand;
@@ -289,15 +290,16 @@ fn appendCommitTimeline(buf: *std.ArrayList(u8), allocator: Allocator, commits: 
 }
 
 fn appendCommitRow(buf: *std.ArrayList(u8), allocator: Allocator, commit: CommitListEntry) !void {
-    const href = commitHref(commit.full_hash);
+    const commit_href = commitHref(commit.full_hash);
+    const code_href = codeHref(commit.full_hash, "");
     try appendTemplate(buf, allocator,
         \\<article class="commit-row commit-list-row">
         \\  <div class="commit-main">
-        \\    <div class="commit-title-line"><span class="commit-title">
-    , .{});
-    try appendIssueLinkedText(buf, allocator, commit.subject);
+        \\    <div class="commit-title-line"><a class="commit-title" href="{commit_href}">
+    , .{ .commit_href = commit_href });
+    try appendHtml(buf, allocator, commit.subject);
     try appendTemplate(buf, allocator,
-        \\</span></div>
+        \\</a></div>
         \\    <p class="commit-meta-line"><span class="commit-avatar" title="{author}" aria-label="{author}">
     , .{ .author = commit.author });
     try appendAuthorInitial(buf, allocator, commit.author);
@@ -313,13 +315,14 @@ fn appendCommitRow(buf: *std.ArrayList(u8), allocator: Allocator, commit: Commit
         try buf.appendSlice(allocator, "<span class=\"commit-verified\">Verified</span>");
     }
     try appendTemplate(buf, allocator,
-        \\    <a class="commit-sha" href="{href}">{short_hash}</a>
+        \\    <a class="commit-sha" href="{commit_href}">{short_hash}</a>
         \\    <button class="commit-icon-action" type="button" data-copy-text="{full_hash}" aria-label="Copy commit hash" title="Copy commit hash"><span class="button-icon icon-copy" aria-hidden="true"></span></button>
-        \\    <a class="commit-icon-action" href="{href}" aria-label="View commit" title="View commit"><span class="button-icon icon-code" aria-hidden="true"></span></a>
+        \\    <a class="commit-icon-action" href="{code_href}" aria-label="Browse code at commit" title="Browse code at commit"><span class="button-icon icon-code" aria-hidden="true"></span></a>
         \\  </div>
         \\</article>
     , .{
-        .href = href,
+        .commit_href = commit_href,
+        .code_href = code_href,
         .short_hash = commit.short_hash,
         .full_hash = commit.full_hash,
     });
@@ -823,4 +826,27 @@ test "web commits renders diff line classes" {
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "id=\"diff-file-0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-diff-row data-diff-kind=\"del\" data-diff-old=\"1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-diff-expand href=\"/commit?sha=abc123&amp;context=12#diff-file-0\"") != null);
+}
+
+test "web commits row links subject to commit and code icon to tree" {
+    const allocator = std.testing.allocator;
+    var commit = CommitListEntry{
+        .full_hash = try allocator.dupe(u8, "abc123def456"),
+        .short_hash = try allocator.dupe(u8, "abc123d"),
+        .subject = try allocator.dupe(u8, "Fix #42 <escape>"),
+        .author = try allocator.dupe(u8, "Ada"),
+        .email = try allocator.dupe(u8, "ada@example.test"),
+        .relative = try allocator.dupe(u8, "2 minutes ago"),
+        .date = try allocator.dupe(u8, "2026-05-15"),
+        .signature_status = try allocator.dupe(u8, "G"),
+    };
+    defer commit.deinit(allocator);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try appendCommitRow(&buf, allocator, commit);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<a class=\"commit-title\" href=\"/commit?sha=abc123def456\">Fix #42 &lt;escape&gt;</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<a class=\"commit-icon-action\" href=\"/code?ref=abc123def456\" aria-label=\"Browse code at commit\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues/42\"") == null);
 }

@@ -6,7 +6,10 @@ const events_page = @import("web/events.zig");
 const explorer = @import("web/explorer.zig");
 const index = @import("index.zig");
 const io = @import("io.zig");
+const access_page = @import("web/access.zig");
 const issues_page = @import("web/issues.zig");
+const markdown_render = @import("web/markdown_render.zig");
+const milestones_page = @import("web/milestones.zig");
 const overview_page = @import("web/overview.zig");
 const projects_page = @import("web/projects.zig");
 const pulls_page = @import("web/pulls.zig");
@@ -162,6 +165,11 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", code_js, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/markdown.js")) {
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", markdown_js, null);
+    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.eql(u8, request.path, "/markdown/preview")) {
+        var body: std.ArrayList(u8) = .empty;
+        defer body.deinit(allocator);
+        try markdown_render.appendMarkdown(&body, allocator, request.body);
+        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body.items, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/vendor/hljs/all-languages.js")) {
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", highlight_js, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/highlight/zig.js")) {
@@ -271,6 +279,42 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
     } else if (std.mem.eql(u8, request.method, "POST") and std.mem.eql(u8, request.path, "/projects")) {
         try projects_page.handleProjectPost(allocator, repo, stream, request.body);
+    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/milestones")) {
+        const body = try milestones_page.renderMilestonesPage(allocator, repo);
+        defer allocator.free(body);
+        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
+    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/new-milestone")) {
+        const body = try milestones_page.renderNewMilestoneForm(allocator, repo);
+        defer allocator.free(body);
+        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
+    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.eql(u8, request.path, "/milestones")) {
+        try milestones_page.handleMilestonePost(allocator, repo, stream, null, request.body);
+    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.startsWith(u8, request.path, "/milestones/") and std.mem.endsWith(u8, request.path, "/edit")) {
+        const milestone_ref_start = "/milestones/".len;
+        const milestone_ref_end = request.path.len - "/edit".len;
+        if (milestone_ref_start >= milestone_ref_end or request.path[milestone_ref_end - 1] == '/') {
+            try shared.sendPlainResponse(allocator, stream, 404, "Not Found", "Not found\n");
+            return;
+        }
+        const milestone_ref = request.path[milestone_ref_start..milestone_ref_end];
+        const body = try milestones_page.renderMilestoneFormFromRef(allocator, repo, milestone_ref);
+        defer allocator.free(body);
+        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
+    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.startsWith(u8, request.path, "/milestones/")) {
+        const milestone_ref = request.path["/milestones/".len..];
+        if (milestone_ref.len == 0 or std.mem.indexOfScalar(u8, milestone_ref, '/') != null) {
+            try shared.sendPlainResponse(allocator, stream, 404, "Not Found", "Not found\n");
+            return;
+        }
+        try milestones_page.handleMilestonePost(allocator, repo, stream, milestone_ref, request.body);
+    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/access")) {
+        const body = try access_page.renderAccessPage(allocator, repo);
+        defer allocator.free(body);
+        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
+    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.eql(u8, request.path, "/access/roles")) {
+        try access_page.handleAccessRolePost(allocator, repo, stream, request.body);
+    } else if (std.mem.eql(u8, request.method, "POST") and std.mem.eql(u8, request.path, "/access/devices")) {
+        try access_page.handleAccessDevicePost(allocator, repo, stream, request.body);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/actions")) {
         const body = try actions_page.renderActionsPage(allocator, repo, request.target);
         defer allocator.free(body);
