@@ -29,6 +29,7 @@ const sendResponse = shared.sendResponse;
 const max_blob_display_bytes = 512 * 1024;
 const max_blame_display_bytes = 16 * 1024 * 1024;
 const max_raw_blob_bytes = git.max_git_output;
+const unstaged_ref = "working tree";
 
 pub const RawBlob = struct {
     content_type: []const u8,
@@ -82,6 +83,7 @@ const BranchRef = struct {
 };
 
 const BranchScope = enum {
+    unstaged,
     local,
     remote,
 };
@@ -227,16 +229,14 @@ pub fn renderCodePage(allocator: Allocator, repo: Repo, target: []const u8) ![]u
         return renderTreePage(allocator, repo, ref, path, sync_flash);
     }
 
-    const spec = try objectSpec(allocator, ref, path);
-    defer allocator.free(spec);
-    const kind_owned = try objectType(allocator, repo, spec);
+    const kind_owned = try browseObjectType(allocator, repo, ref, path);
     defer if (kind_owned) |kind| allocator.free(kind);
     const kind = kind_owned orelse return renderMissingPathPage(allocator, repo, ref, path);
 
     if (std.mem.eql(u8, kind, "blob")) {
         const view = try targetViewOwned(allocator, target);
         defer allocator.free(view);
-        return renderBlobPage(allocator, repo, ref, path, spec, view);
+        return renderBlobPage(allocator, repo, ref, path, view);
     }
     if (std.mem.eql(u8, kind, "tree")) {
         return renderTreePage(allocator, repo, ref, path, null);
@@ -346,9 +346,7 @@ pub fn renderBlamePage(allocator: Allocator, repo: Repo, target: []const u8) ![]
 
     if (path.len == 0) return renderMissingPathPage(allocator, repo, ref, path);
 
-    const spec = try objectSpec(allocator, ref, path);
-    defer allocator.free(spec);
-    const kind_owned = try objectType(allocator, repo, spec);
+    const kind_owned = try browseObjectType(allocator, repo, ref, path);
     defer if (kind_owned) |kind| allocator.free(kind);
     const kind = kind_owned orelse return renderMissingPathPage(allocator, repo, ref, path);
     if (!std.mem.eql(u8, kind, "blob")) return renderMissingPathPage(allocator, repo, ref, path);
@@ -401,17 +399,15 @@ pub fn loadRawBlob(allocator: Allocator, repo: Repo, target: []const u8) !?RawBl
     };
     if (path.len == 0) return null;
 
-    const spec = try objectSpec(allocator, ref, path);
-    defer allocator.free(spec);
-    const kind_owned = try objectType(allocator, repo, spec);
+    const kind_owned = try browseObjectType(allocator, repo, ref, path);
     defer if (kind_owned) |kind| allocator.free(kind);
     const kind = kind_owned orelse return null;
     if (!std.mem.eql(u8, kind, "blob")) return null;
 
-    const size = try blobSize(allocator, repo, spec);
+    const size = try browseBlobSize(allocator, repo, ref, path);
     if (size != null and size.? > max_raw_blob_bytes) return error.BlobTooLarge;
 
-    const body = try gitMaybe(allocator, repo, &.{ "show", spec }, max_raw_blob_bytes) orelse return null;
+    const body = try loadBlobBytes(allocator, repo, ref, path, max_raw_blob_bytes) orelse return null;
     const content_type = if (mediaKindForPath(path) != null)
         contentTypeForPath(path)
     else if (containsNul(body))
@@ -442,7 +438,7 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
         if (is_root) {
             const branches = try loadBranchRefs(allocator, repo);
             defer freeBranchRefs(allocator, branches);
-            const branch_count = branches.len;
+            const branch_count = countRealBranches(branches);
             const tag_count = loadRefCount(allocator, repo, "refs/tags") catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => 0,
@@ -486,17 +482,17 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     return buf.toOwnedSlice(allocator);
 }
 
-fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8, spec: []const u8, view: []const u8) ![]u8 {
+fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8, view: []const u8) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
     try appendShellStart(&buf, allocator, repo, "Code", "code");
     try appendRepoHeader(&buf, allocator, repo, ref);
-    const size = try blobSize(allocator, repo, spec);
+    const size = try browseBlobSize(allocator, repo, ref, path);
     const media_kind = mediaKindForPath(path);
     const can_preview_media = media_kind != null and (size == null or size.? <= max_raw_blob_bytes);
     const content = if (!can_preview_media and size != null and size.? <= max_blob_display_bytes)
-        try gitMaybe(allocator, repo, &.{ "show", spec }, max_blob_display_bytes + 1)
+        try loadBlobBytes(allocator, repo, ref, path, max_blob_display_bytes + 1)
     else
         null;
     defer if (content) |bytes| allocator.free(bytes);
@@ -1374,9 +1370,7 @@ fn appendReadmePreview(
     const readme = findReadme(entries) orelse return;
     const readme_path = try childPath(allocator, path, readme);
     defer allocator.free(readme_path);
-    const spec = try objectSpec(allocator, ref, readme_path);
-    defer allocator.free(spec);
-    const content = try gitMaybe(allocator, repo, &.{ "show", spec }, max_blob_display_bytes + 1) orelse return;
+    const content = try loadBlobBytes(allocator, repo, ref, readme_path, max_blob_display_bytes + 1) orelse return;
     defer allocator.free(content);
     if (containsNul(content)) return;
 
@@ -1447,9 +1441,7 @@ fn appendRootDocsPreview(
 
 fn loadRootLicenseDoc(allocator: Allocator, repo: Repo, ref: []const u8, entries: []const TreeEntry) !?RootMarkdownDoc {
     const license = findLicense(entries) orelse return null;
-    const spec = try objectSpec(allocator, ref, license);
-    defer allocator.free(spec);
-    const content = try gitMaybe(allocator, repo, &.{ "show", spec }, max_blob_display_bytes + 1) orelse return null;
+    const content = try loadBlobBytes(allocator, repo, ref, license, max_blob_display_bytes + 1) orelse return null;
     errdefer allocator.free(content);
     if (containsNul(content)) {
         allocator.free(content);
@@ -1819,9 +1811,7 @@ fn rootEntryCounts(entries: []const TreeEntry) RootEntryCounts {
 
 fn loadReadmeSummaryOwned(allocator: Allocator, repo: Repo, ref: []const u8, entries: []const TreeEntry) !?[]u8 {
     const readme = findReadme(entries) orelse return null;
-    const spec = try objectSpec(allocator, ref, readme);
-    defer allocator.free(spec);
-    const content = try gitMaybe(allocator, repo, &.{ "show", spec }, 64 * 1024) orelse return null;
+    const content = try loadBlobBytes(allocator, repo, ref, readme, 64 * 1024) orelse return null;
     defer allocator.free(content);
     if (containsNul(content)) return null;
     return try markdownSummaryOwned(allocator, content);
@@ -1920,6 +1910,8 @@ fn physicalLineCount(content: []const u8) usize {
 }
 
 fn loadTreeEntries(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?[]TreeEntry {
+    if (isUnstagedRef(ref)) return loadWorktreeEntries(allocator, repo, path);
+
     const spec = try objectSpec(allocator, ref, path);
     defer allocator.free(spec);
     const raw = try gitMaybe(allocator, repo, &.{ "ls-tree", "-z", "-l", spec }, git.max_git_output) orelse return null;
@@ -1962,6 +1954,8 @@ fn loadTreeEntries(allocator: Allocator, repo: Repo, ref: []const u8, path: []co
 }
 
 fn loadTreeEntryCommits(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8, entries: []TreeEntry) !void {
+    if (isUnstagedRef(ref)) return;
+
     var index_by_name = std.StringHashMap(usize).init(allocator);
     defer index_by_name.deinit();
     for (entries, 0..) |entry, i| {
@@ -2051,6 +2045,8 @@ fn directChildName(parent: []const u8, changed_path: []const u8) ?[]const u8 {
 }
 
 fn loadBlameLines(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?[]BlameLine {
+    if (isUnstagedRef(ref)) return null;
+
     const raw = try gitMaybe(allocator, repo, &.{
         "blame",
         "--line-porcelain",
@@ -2234,6 +2230,8 @@ fn parseTimezoneOffset(value: []const u8) i64 {
 }
 
 fn loadCommitSummary(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?CommitSummary {
+    if (isUnstagedRef(ref)) return null;
+
     const format = "--format=%H%x09%h%x09%an%x09%s%x09%cr";
     const raw = if (path.len == 0)
         try gitMaybe(allocator, repo, &.{ "log", "-1", format, ref }, 1024 * 1024)
@@ -2266,6 +2264,8 @@ fn loadCommitSummary(allocator: Allocator, repo: Repo, ref: []const u8, path: []
 }
 
 fn loadCommitCount(allocator: Allocator, repo: Repo, ref: []const u8) !?usize {
+    if (isUnstagedRef(ref)) return null;
+
     const raw = try gitMaybe(allocator, repo, &.{ "rev-list", "--count", ref }, 1024) orelse return null;
     defer allocator.free(raw);
     const text = std.mem.trim(u8, raw, " \t\r\n");
@@ -2286,6 +2286,8 @@ fn loadRefCount(allocator: Allocator, repo: Repo, namespace: []const u8) !usize 
 }
 
 fn loadTreeNavEntries(allocator: Allocator, repo: Repo, ref: []const u8) !?[]TreeNavEntry {
+    if (isUnstagedRef(ref)) return loadWorktreeNavEntries(allocator, repo);
+
     const raw = try gitMaybe(allocator, repo, &.{ "ls-tree", "-z", "-r", "-t", ref }, git.max_git_output) orelse return null;
     defer allocator.free(raw);
 
@@ -2312,6 +2314,152 @@ fn loadTreeNavEntries(allocator: Allocator, repo: Repo, ref: []const u8) !?[]Tre
     std.mem.sort(TreeNavEntry, entries.items, {}, treeNavEntryLessThan);
 
     return try entries.toOwnedSlice(allocator);
+}
+
+fn loadWorktreeEntries(allocator: Allocator, repo: Repo, path: []const u8) !?[]TreeEntry {
+    const raw = try listWorktreePaths(allocator, repo) orelse return null;
+    defer allocator.free(raw);
+
+    var entries: std.ArrayList(TreeEntry) = .empty;
+    errdefer {
+        for (entries.items) |entry| entry.deinit(allocator);
+        entries.deinit(allocator);
+    }
+
+    var records = std.mem.splitScalar(u8, raw, 0);
+    while (records.next()) |record| {
+        if (record.len == 0) continue;
+        const child_name = directChildName(path, record) orelse continue;
+        if (treeEntryIndexByName(entries.items, child_name) != null) continue;
+
+        const child_path = try childPath(allocator, path, child_name);
+        defer allocator.free(child_path);
+        const direct = std.mem.eql(u8, child_path, record);
+        const kind = if (direct) worktreePathKind(repo, child_path) catch null else .tree;
+        const entry_kind = kind orelse continue;
+        const is_tree = entry_kind == .tree;
+        const size = if (is_tree) null else worktreeBlobSize(repo, child_path) catch null;
+
+        try entries.append(allocator, try worktreeTreeEntryOwned(allocator, child_name, is_tree, size));
+    }
+
+    std.mem.sort(TreeEntry, entries.items, {}, treeEntryLessThan);
+    return try entries.toOwnedSlice(allocator);
+}
+
+fn loadWorktreeNavEntries(allocator: Allocator, repo: Repo) !?[]TreeNavEntry {
+    const raw = try listWorktreePaths(allocator, repo) orelse return null;
+    defer allocator.free(raw);
+
+    var seen = std.StringHashMap(void).init(allocator);
+    defer seen.deinit();
+    var entries: std.ArrayList(TreeNavEntry) = .empty;
+    errdefer {
+        for (entries.items) |entry| entry.deinit(allocator);
+        entries.deinit(allocator);
+    }
+
+    var records = std.mem.splitScalar(u8, raw, 0);
+    while (records.next()) |record| {
+        if (record.len == 0) continue;
+        if (worktreePathKind(repo, record) catch null == null) continue;
+
+        var cursor: usize = 0;
+        while (cursor < record.len) {
+            const slash = std.mem.indexOfScalarPos(u8, record, cursor, '/');
+            const end = slash orelse record.len;
+            const entry_path = record[0..end];
+            if (!seen.contains(entry_path)) {
+                const is_tree = slash != null;
+                const owned_path = try allocator.dupe(u8, entry_path);
+                errdefer allocator.free(owned_path);
+                try seen.put(owned_path, {});
+                try entries.append(allocator, .{
+                    .kind = try allocator.dupe(u8, if (is_tree) "tree" else "blob"),
+                    .path = owned_path,
+                });
+            }
+            if (slash == null) break;
+            cursor = end + 1;
+        }
+    }
+
+    std.mem.sort(TreeNavEntry, entries.items, {}, treeNavEntryLessThan);
+    return try entries.toOwnedSlice(allocator);
+}
+
+fn listWorktreePaths(allocator: Allocator, repo: Repo) !?[]u8 {
+    return gitMaybe(allocator, repo, &.{ "ls-files", "-z", "-c", "-o", "--exclude-standard" }, git.max_git_output);
+}
+
+const WorktreePathKind = enum {
+    blob,
+    tree,
+};
+
+fn worktreePathKind(repo: Repo, path: []const u8) !?WorktreePathKind {
+    if (path.len == 0) return .tree;
+    const absolute_path = try absoluteWorktreePath(std.heap.page_allocator, repo, path);
+    defer std.heap.page_allocator.free(absolute_path);
+    const stat = std.fs.cwd().statFile(absolute_path) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return null,
+        else => return err,
+    };
+    return switch (stat.kind) {
+        .directory => .tree,
+        .file, .sym_link => .blob,
+        else => null,
+    };
+}
+
+fn worktreeObjectType(allocator: Allocator, repo: Repo, path: []const u8) !?[]u8 {
+    const kind = try worktreePathKind(repo, path) orelse return null;
+    return try allocator.dupe(u8, switch (kind) {
+        .blob => "blob",
+        .tree => "tree",
+    });
+}
+
+fn worktreeBlobSize(repo: Repo, path: []const u8) !?usize {
+    const absolute_path = try absoluteWorktreePath(std.heap.page_allocator, repo, path);
+    defer std.heap.page_allocator.free(absolute_path);
+    const stat = std.fs.cwd().statFile(absolute_path) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return null,
+        else => return err,
+    };
+    if (stat.kind != .file and stat.kind != .sym_link) return null;
+    return stat.size;
+}
+
+fn readWorktreeFile(allocator: Allocator, repo: Repo, path: []const u8, max_bytes: usize) !?[]u8 {
+    const absolute_path = try absoluteWorktreePath(allocator, repo, path);
+    defer allocator.free(absolute_path);
+    return std.fs.cwd().readFileAlloc(allocator, absolute_path, max_bytes) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir, error.IsDir => return null,
+        else => return err,
+    };
+}
+
+fn absoluteWorktreePath(allocator: Allocator, repo: Repo, path: []const u8) ![]u8 {
+    if (path.len == 0) return allocator.dupe(u8, repo.root);
+    return std.fs.path.join(allocator, &.{ repo.root, path });
+}
+
+fn worktreeTreeEntryOwned(allocator: Allocator, name: []const u8, is_tree: bool, size: ?usize) !TreeEntry {
+    return .{
+        .mode = try allocator.dupe(u8, if (is_tree) "040000" else "100644"),
+        .kind = try allocator.dupe(u8, if (is_tree) "tree" else "blob"),
+        .oid = try allocator.dupe(u8, ""),
+        .size = if (size) |bytes| try std.fmt.allocPrint(allocator, "{d}", .{bytes}) else try allocator.dupe(u8, "-"),
+        .name = try allocator.dupe(u8, name),
+    };
+}
+
+fn treeEntryIndexByName(entries: []const TreeEntry, name: []const u8) ?usize {
+    for (entries, 0..) |entry, i| {
+        if (std.mem.eql(u8, entry.name, name)) return i;
+    }
+    return null;
 }
 
 fn loadBranchRefs(allocator: Allocator, repo: Repo) ![]BranchRef {
@@ -2346,6 +2494,10 @@ fn loadBranchRefs(allocator: Allocator, repo: Repo) ![]BranchRef {
             return std.ascii.lessThanIgnoreCase(a.name, b.name);
         }
     }.lessThan);
+    try branches.insert(allocator, 0, .{
+        .name = try allocator.dupe(u8, unstaged_ref),
+        .scope = .unstaged,
+    });
     return branches.toOwnedSlice(allocator);
 }
 
@@ -2357,9 +2509,18 @@ fn branchScopeForFullRef(ref: []const u8) ?BranchScope {
 
 fn branchScopeLabel(scope: BranchScope) []const u8 {
     return switch (scope) {
+        .unstaged => "working tree",
         .local => "local",
         .remote => "remote",
     };
+}
+
+fn countRealBranches(branches: []const BranchRef) usize {
+    var count: usize = 0;
+    for (branches) |branch| {
+        if (branch.scope != .unstaged) count += 1;
+    }
+    return count;
 }
 
 fn treeEntryLessThan(_: void, a: TreeEntry, b: TreeEntry) bool {
@@ -2441,12 +2602,33 @@ fn objectType(allocator: Allocator, repo: Repo, spec: []const u8) !?[]u8 {
     return try trimOwned(allocator, raw);
 }
 
+fn browseObjectType(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?[]u8 {
+    if (isUnstagedRef(ref)) return worktreeObjectType(allocator, repo, path);
+    const spec = try objectSpec(allocator, ref, path);
+    defer allocator.free(spec);
+    return objectType(allocator, repo, spec);
+}
+
 fn blobSize(allocator: Allocator, repo: Repo, spec: []const u8) !?usize {
     const raw = try gitMaybe(allocator, repo, &.{ "cat-file", "-s", spec }, 1024) orelse return null;
     defer allocator.free(raw);
     const text = std.mem.trim(u8, raw, " \t\r\n");
     if (text.len == 0) return null;
     return std.fmt.parseUnsigned(usize, text, 10) catch null;
+}
+
+fn browseBlobSize(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?usize {
+    if (isUnstagedRef(ref)) return worktreeBlobSize(repo, path);
+    const spec = try objectSpec(allocator, ref, path);
+    defer allocator.free(spec);
+    return blobSize(allocator, repo, spec);
+}
+
+fn loadBlobBytes(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8, max_bytes: usize) !?[]u8 {
+    if (isUnstagedRef(ref)) return readWorktreeFile(allocator, repo, path, max_bytes);
+    const spec = try objectSpec(allocator, ref, path);
+    defer allocator.free(spec);
+    return gitMaybe(allocator, repo, &.{ "show", spec }, max_bytes);
 }
 
 fn defaultRef(allocator: Allocator, repo: Repo) ![]u8 {
@@ -2470,11 +2652,16 @@ fn targetRefOwned(allocator: Allocator, repo: Repo, target: []const u8) ![]u8 {
 }
 
 fn resolveBrowsableRefOwned(allocator: Allocator, repo: Repo, ref: []const u8) ![]u8 {
+    if (isUnstagedRef(ref)) return allocator.dupe(u8, unstaged_ref);
     if (try refResolvesToObject(allocator, repo, ref)) return allocator.dupe(u8, ref);
     if (isBranchShorthand(ref)) {
         if (try remoteTrackingBranchShortNameOwned(allocator, repo, ref)) |remote_ref| return remote_ref;
     }
     return allocator.dupe(u8, ref);
+}
+
+fn isUnstagedRef(ref: []const u8) bool {
+    return std.mem.eql(u8, ref, unstaged_ref);
 }
 
 fn refResolvesToObject(allocator: Allocator, repo: Repo, ref: []const u8) !bool {
