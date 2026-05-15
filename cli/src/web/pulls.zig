@@ -1077,8 +1077,6 @@ fn appendPullPageHeader(buf: *std.ArrayList(u8), allocator: Allocator, detail: P
         , .{ .pull_ref = pull_ref });
     }
     try buf.appendSlice(allocator,
-        \\      <a class="button secondary" href="/pulls">Back to PRs</a>
-        \\      <a class="button primary" href="/new-pull">New pull request</a>
         \\      <button class="issue-copy-button" type="button" disabled aria-label="Copy pull request link"><span class="button-icon icon-copy" aria-hidden="true"></span></button>
         \\    </div>
         \\  </div>
