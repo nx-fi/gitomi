@@ -264,12 +264,14 @@ code {
   min-width: 0;
 }
 .user-menu summary {
-  display: inline-flex;
+  display: grid;
+  grid-template-rows: 34px minmax(16px, auto);
+  place-items: center;
   align-items: center;
-  gap: 9px;
-  min-height: 32px;
+  gap: 4px;
+  min-height: 68px;
   max-width: 320px;
-  padding: 0 10px;
+  padding: 6px 12px 7px;
   color: var(--topbar-text);
   background: color-mix(in srgb, var(--topbar-text) 6%, transparent);
   border: 1px solid var(--topbar-border);
@@ -288,28 +290,32 @@ code {
   position: relative;
   display: inline-grid;
   place-items: center;
-  width: 18px;
-  height: 18px;
+  width: 32px;
+  height: 32px;
   flex: 0 0 auto;
   overflow: hidden;
-  border-radius: 4px;
+  border-radius: 7px;
   background: var(--panel-strong);
 }
 .user-avatar::after {
   content: "";
   position: absolute;
-  right: 1px;
-  bottom: 1px;
-  width: 6px;
-  height: 6px;
+  right: 2px;
+  bottom: 2px;
+  width: 8px;
+  height: 8px;
   background: var(--green);
   border: 2px solid var(--panel);
   border-radius: 50%;
 }
 .user-menu-label {
-  display: grid;
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 5px;
   min-width: 0;
-  line-height: 1.1;
+  max-width: 220px;
+  line-height: 1.15;
 }
 .user-menu-label strong,
 .user-menu-label span {
@@ -325,6 +331,12 @@ code {
   color: var(--muted);
   font-size: 11px;
   font-weight: 700;
+}
+.user-menu-label span::before {
+  content: "/";
+  margin-right: 5px;
+  color: var(--muted);
+  opacity: 0.7;
 }
 .user-menu-popover {
   position: absolute;
@@ -1799,6 +1811,32 @@ main.page-code:has(.root-page-grid) {
   background: var(--panel);
   font: 12px/1.45 var(--mono);
 }
+.merge-fold {
+  position: sticky;
+  left: 0;
+  display: grid;
+  grid-template-columns: 64px minmax(max-content, 1fr);
+  min-height: 30px;
+  min-width: max-content;
+  background: var(--panel-strong);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.merge-fold button {
+  justify-self: start;
+  min-height: 28px;
+  margin: 0;
+  padding: 0 12px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  font: 600 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  cursor: pointer;
+}
+.merge-fold button:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
 .merge-line {
   display: grid;
   grid-template-columns: 64px minmax(max-content, 1fr);
@@ -1828,6 +1866,51 @@ main.page-code:has(.root-page-grid) {
 .merge-line code[contenteditable="true"]:focus {
   background: color-mix(in srgb, var(--blue) 9%, transparent);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--blue) 52%, transparent);
+}
+.merge-context-edited {
+  background: color-mix(in srgb, var(--blue) 9%, var(--panel));
+  box-shadow: inset 3px 0 0 var(--blue);
+}
+.merge-context-edited .merge-line-number {
+  color: var(--blue);
+  background: color-mix(in srgb, var(--blue) 8%, var(--panel-strong));
+}
+.merge-inserted {
+  background: color-mix(in srgb, var(--green-bg) 42%, var(--panel));
+}
+.merge-inserted .merge-line-number {
+  color: var(--green);
+  font-weight: 700;
+}
+.merge-line-deleted {
+  color: var(--red);
+  background: color-mix(in srgb, var(--red-bg) 72%, var(--panel));
+}
+.merge-line-deleted .merge-line-number {
+  color: var(--red);
+  background: color-mix(in srgb, var(--red-bg) 82%, var(--panel-strong));
+}
+.merge-line-deleted code {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.merge-deleted-label {
+  color: var(--red);
+  font-weight: 700;
+}
+.merge-line-deleted button {
+  min-height: 24px;
+  padding: 0 8px;
+  color: var(--red);
+  background: var(--panel);
+  border: 1px solid color-mix(in srgb, var(--red) 42%, var(--border));
+  border-radius: 6px;
+  font: 600 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  cursor: pointer;
+}
+.merge-line-deleted button:hover {
+  border-color: var(--red);
 }
 .merge-current {
   background: var(--red-bg);
@@ -4869,9 +4952,15 @@ main.page-code:has(.root-code-toolbar) .repo-actions {
   white-space: nowrap;
 }
 .root-commit-message:hover,
-.root-file-commit:hover {
+a.root-file-commit:hover {
   color: var(--blue);
   text-decoration: none;
+}
+.worktree-change .change-word.staged {
+  color: var(--green);
+}
+.worktree-change .change-word.unstaged {
+  color: var(--warning-border);
 }
 .root-commit-meta,
 .root-commit-count {
@@ -4903,10 +4992,12 @@ main.page-code:has(.root-code-toolbar) .repo-actions {
 }
 .root-file-row {
   display: grid;
-  grid-template-columns: minmax(180px, 0.72fr) minmax(180px, 1fr) auto;
+  grid-template-columns: minmax(180px, 360px) minmax(0, 1fr) auto;
   gap: 14px;
   align-items: center;
-  min-height: 42px;
+  justify-items: start;
+  box-sizing: border-box;
+  height: 42px;
   padding: 7px 16px;
   border-top: 1px solid var(--border);
 }
@@ -4920,7 +5011,12 @@ main.page-code:has(.root-code-toolbar) .repo-actions {
   display: none;
 }
 .root-file-name {
+  min-width: 0;
+  overflow: hidden;
   color: var(--text);
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .root-file-name:hover {
   color: var(--blue);
@@ -4931,10 +5027,17 @@ main.page-code:has(.root-code-toolbar) .repo-actions {
   opacity: 0.7;
 }
 .root-file-time {
+  justify-self: end;
   color: var(--muted);
   font-size: 13px;
   font-weight: 500;
+  line-height: 20px;
   white-space: nowrap;
+}
+@media (min-width: 1200px) {
+  .root-file-row {
+    grid-template-columns: minmax(180px, 392px) minmax(0, 1fr) auto;
+  }
 }
 .root-sidebar {
   position: sticky;
@@ -5581,7 +5684,7 @@ main.page-code:has(.root-code-toolbar) .repo-actions {
   display: grid;
   grid-template-columns: 20px minmax(0, 1fr);
   align-items: center;
-  min-height: 30px;
+  height: 30px;
   padding-left: calc(var(--depth, 0) * 14px);
 }
 .tree-node[hidden],
@@ -5627,13 +5730,15 @@ main.page-code:has(.root-code-toolbar) .repo-actions {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 30px;
+  box-sizing: border-box;
+  height: 30px;
   min-width: 0;
   padding: 4px 8px;
   color: var(--text);
   border-radius: 6px;
   font-size: 13px;
   font-weight: 400;
+  line-height: 20px;
 }
 .tree-link:hover {
   background: var(--subtle);
@@ -5835,6 +5940,9 @@ main.page-code:has(.root-code-toolbar) .repo-actions {
 .icon-tag {
   --button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Cpath d='M20 10 14 4H5a1 1 0 0 0-1 1v9l6 6a2 2 0 0 0 3 0l7-7a2 2 0 0 0 0-3Z'/%3E%3Cpath d='M8 8h.01'/%3E%3C/g%3E%3C/svg%3E");
 }
+.icon-worktree {
+  --button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Crect x='3' y='4' width='7' height='6' rx='1'/%3E%3Crect x='14' y='4' width='7' height='6' rx='1'/%3E%3Crect x='8.5' y='14' width='7' height='6' rx='1'/%3E%3Cpath d='M6.5 10v2a2 2 0 0 0 2 2H12M17.5 10v2a2 2 0 0 1-2 2H12'/%3E%3C/g%3E%3C/svg%3E");
+}
 .icon-search {
   --button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.3-4.3'/%3E%3C/g%3E%3C/svg%3E");
 }
@@ -5927,7 +6035,8 @@ main.page-code:has(.root-code-toolbar) .repo-actions {
   grid-template-columns: minmax(0, 1fr) minmax(180px, 0.8fr) 120px 104px;
   gap: 12px;
   align-items: center;
-  min-height: 40px;
+  box-sizing: border-box;
+  height: 40px;
   padding: 6px 16px;
   border-top: 1px solid var(--border);
 }
@@ -5949,15 +6058,21 @@ main.page-code:has(.root-code-toolbar) .repo-actions {
   align-items: center;
   gap: 10px;
   min-width: 0;
+  overflow: hidden;
   font-weight: 500;
+  line-height: 20px;
   overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .file-commit {
+  justify-self: start;
   min-width: 0;
   overflow: hidden;
   color: var(--muted);
   font-size: 13px;
   font-weight: 400;
+  line-height: 20px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

@@ -345,14 +345,16 @@ pub fn appendShellStart(
         \\  </nav>
         \\  <div class="topbar-actions">
     );
-    if (cfg_opt) |cfg| {
-        try appendUserMenu(buf, allocator, cfg);
-    }
     try appendTemplate(buf, allocator,
         \\  <button class="theme-toggle" type="button" data-theme-toggle aria-pressed="false" aria-label="Toggle dark mode" title="Toggle dark mode">
         \\    <span class="theme-toggle-track" aria-hidden="true"><span class="theme-toggle-thumb"></span></span>
         \\    <span class="theme-toggle-label" data-theme-label>Light</span>
         \\  </button>
+    , .{});
+    if (cfg_opt) |cfg| {
+        try appendUserMenu(buf, allocator, cfg);
+    }
+    try appendTemplate(buf, allocator,
         \\  </div>
         \\</header>
         \\<main class="page page-{active}">
@@ -562,12 +564,19 @@ pub fn appendNavLink(
     count: ?usize,
 ) !void {
     try appendTemplate(buf, allocator,
-        \\<a{class_attr} href="{href}">{label}
+        \\<a{class_attr} href="{href}"
     , .{
         .class_attr = classAttr("", &.{class("active", std.mem.eql(u8, active, id))}),
         .href = href,
-        .label = label,
     });
+    if (count != null) {
+        try appendTemplate(buf, allocator,
+            \\ data-nav-count="{id}"
+        , .{ .id = id });
+    }
+    try appendTemplate(buf, allocator,
+        \\>{label}
+    , .{ .label = label });
     if (count) |value| {
         if (value > 0) {
             try appendTemplate(buf, allocator,
@@ -576,6 +585,16 @@ pub fn appendNavLink(
         }
     }
     try buf.appendSlice(allocator, "</a>");
+}
+
+pub fn renderNavStatsJson(allocator: Allocator, repo: Repo) ![]u8 {
+    try index.ensureIndex(allocator, repo);
+    const stats = try loadWebStats(allocator, repo);
+    return std.fmt.allocPrint(
+        allocator,
+        "{{\"issues\":{d},\"pulls\":{d}}}",
+        .{ stats.issues, stats.pulls },
+    );
 }
 
 pub fn appendEmptyState(buf: *std.ArrayList(u8), allocator: Allocator, title: []const u8, detail: []const u8) !void {

@@ -37,6 +37,7 @@ const sqlite = index.sqlite;
 
 const max_pull_diff_bytes = 8 * 1024 * 1024;
 const max_merge_blob_bytes = 2 * 1024 * 1024;
+const merge_context_radius = 15;
 
 const PullStateFilter = enum {
     open,
@@ -176,6 +177,16 @@ const MergeConflictFile = struct {
     fn editable(self: MergeConflictFile) bool {
         return self.content != null;
     }
+};
+
+const MergeRenderLine = struct {
+    line_number: usize,
+    text: []const u8,
+    group_id: usize = 0,
+    kind: []const u8 = "line",
+    side: []const u8 = "",
+    editable: bool = true,
+    visible: bool = false,
 };
 
 const FormField = struct {
@@ -855,6 +866,9 @@ fn appendMergeEditorFile(buf: *std.ArrayList(u8), allocator: Allocator, file: Me
 }
 
 fn appendMergeConflictContent(buf: *std.ArrayList(u8), allocator: Allocator, language: []const u8, content: []const u8) !void {
+    var render_lines: std.ArrayList(MergeRenderLine) = .empty;
+    defer render_lines.deinit(allocator);
+
     var line_number: usize = 1;
     var group_id: usize = 0;
     var side: []const u8 = "";
@@ -864,22 +878,76 @@ fn appendMergeConflictContent(buf: *std.ArrayList(u8), allocator: Allocator, lan
         if (std.mem.startsWith(u8, line, "<<<<<<<")) {
             group_id += 1;
             side = "current";
-            try appendMergeConflictActions(buf, allocator, group_id);
-            try appendMergeLine(buf, allocator, language, line_number, line, group_id, "marker", "current", false);
+            try render_lines.append(allocator, .{ .line_number = line_number, .text = line, .group_id = group_id, .kind = "marker", .side = "current", .editable = false });
         } else if (std.mem.startsWith(u8, line, "|||||||")) {
             side = "base";
-            try appendMergeLine(buf, allocator, language, line_number, line, group_id, "marker", "base", false);
+            try render_lines.append(allocator, .{ .line_number = line_number, .text = line, .group_id = group_id, .kind = "marker", .side = "base", .editable = false });
         } else if (std.mem.startsWith(u8, line, "=======")) {
             side = "incoming";
-            try appendMergeLine(buf, allocator, language, line_number, line, group_id, "marker", "incoming", false);
+            try render_lines.append(allocator, .{ .line_number = line_number, .text = line, .group_id = group_id, .kind = "marker", .side = "incoming", .editable = false });
         } else if (std.mem.startsWith(u8, line, ">>>>>>>")) {
-            try appendMergeLine(buf, allocator, language, line_number, line, group_id, "marker", "incoming", false);
+            try render_lines.append(allocator, .{ .line_number = line_number, .text = line, .group_id = group_id, .kind = "marker", .side = "incoming", .editable = false });
             side = "";
         } else {
-            try appendMergeLine(buf, allocator, language, line_number, line, group_id, "line", side, true);
+            try render_lines.append(allocator, .{ .line_number = line_number, .text = line, .group_id = group_id, .kind = "line", .side = side, .editable = true });
         }
         line_number += 1;
     }
+
+    markMergeLineVisibility(render_lines.items);
+    try appendMergeRenderLines(buf, allocator, language, render_lines.items);
+}
+
+fn markMergeLineVisibility(lines: []MergeRenderLine) void {
+    var has_conflicts = false;
+    for (lines, 0..) |line, index_value| {
+        if (line.group_id == 0) continue;
+        has_conflicts = true;
+        const start = index_value -| merge_context_radius;
+        const end = @min(lines.len, index_value + merge_context_radius + 1);
+        for (lines[start..end]) |*visible_line| visible_line.visible = true;
+    }
+    if (!has_conflicts) {
+        for (lines) |*line| line.visible = true;
+    }
+}
+
+fn appendMergeRenderLines(buf: *std.ArrayList(u8), allocator: Allocator, language: []const u8, lines: []const MergeRenderLine) !void {
+    var index_value: usize = 0;
+    var fold_id: usize = 0;
+    while (index_value < lines.len) {
+        const line = lines[index_value];
+        if (!line.visible) {
+            const start = index_value;
+            while (index_value < lines.len and !lines[index_value].visible) : (index_value += 1) {}
+            fold_id += 1;
+            try appendMergeFoldControl(buf, allocator, fold_id, index_value - start);
+            for (lines[start..index_value]) |hidden_line| {
+                try appendMergeRenderLine(buf, allocator, language, hidden_line, fold_id);
+            }
+            continue;
+        }
+
+        try appendMergeRenderLine(buf, allocator, language, line, 0);
+        index_value += 1;
+    }
+}
+
+fn appendMergeRenderLine(buf: *std.ArrayList(u8), allocator: Allocator, language: []const u8, line: MergeRenderLine, fold_id: usize) !void {
+    if (line.group_id != 0 and std.mem.eql(u8, line.kind, "marker") and std.mem.eql(u8, line.side, "current")) {
+        try appendMergeConflictActions(buf, allocator, line.group_id);
+    }
+    try appendMergeLine(buf, allocator, language, line, fold_id);
+}
+
+fn appendMergeFoldControl(buf: *std.ArrayList(u8), allocator: Allocator, fold_id: usize, count: usize) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="merge-fold" data-merge-fold="{fold_id}"><span class="merge-line-number"></span><button type="button" data-merge-fold-toggle data-merge-fold-target="{fold_id}" data-merge-fold-count="{count}" aria-expanded="false">Show {count} unchanged {label}</button></div>
+    , .{
+        .fold_id = fold_id,
+        .count = count,
+        .label = if (count == 1) "line" else "lines",
+    });
 }
 
 fn appendMergeConflictActions(buf: *std.ArrayList(u8), allocator: Allocator, group_id: usize) !void {
@@ -899,32 +967,32 @@ fn appendMergeLine(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
     language: []const u8,
-    line_number: usize,
-    line: []const u8,
-    group_id: usize,
-    kind: []const u8,
-    side: []const u8,
-    editable: bool,
+    line: MergeRenderLine,
+    fold_id: usize,
 ) !void {
     try appendTemplate(buf, allocator,
         \\<div class="{classes}" data-merge-line
     , .{ .classes = shared.classes("merge-line", &.{
-        shared.class("merge-marker", std.mem.eql(u8, kind, "marker")),
-        shared.class("merge-current", std.mem.eql(u8, side, "current")),
-        shared.class("merge-incoming", std.mem.eql(u8, side, "incoming")),
-        shared.class("merge-base", std.mem.eql(u8, side, "base")),
+        shared.class("merge-marker", std.mem.eql(u8, line.kind, "marker")),
+        shared.class("merge-current", std.mem.eql(u8, line.side, "current")),
+        shared.class("merge-incoming", std.mem.eql(u8, line.side, "incoming")),
+        shared.class("merge-base", std.mem.eql(u8, line.side, "base")),
+        shared.class("merge-context", line.group_id == 0 and std.mem.eql(u8, line.kind, "line")),
+        shared.class("merge-line-folded", !line.visible),
     }) });
-    if (group_id != 0) try appendTemplate(buf, allocator, " data-conflict-group=\"{group_id}\"", .{ .group_id = group_id });
-    if (side.len != 0 and !std.mem.eql(u8, kind, "marker")) try appendTemplate(buf, allocator, " data-conflict-side=\"{side}\"", .{ .side = side });
+    if (!line.visible) try appendTemplate(buf, allocator, " hidden data-merge-fold-id=\"{fold_id}\"", .{ .fold_id = fold_id });
+    if (line.group_id != 0) try appendTemplate(buf, allocator, " data-conflict-group=\"{group_id}\"", .{ .group_id = line.group_id });
+    if (line.side.len != 0 and !std.mem.eql(u8, line.kind, "marker")) try appendTemplate(buf, allocator, " data-conflict-side=\"{side}\"", .{ .side = line.side });
     try appendTemplate(buf, allocator,
         \\><span class="merge-line-number">{line_number}</span><code
-    , .{ .line_number = line_number });
-    if (!std.mem.eql(u8, kind, "marker")) try appendTemplate(buf, allocator, " class=\"language-{language}\"", .{ .language = language });
+    , .{ .line_number = line.line_number });
+    if (!std.mem.eql(u8, line.kind, "marker")) try appendTemplate(buf, allocator, " class=\"language-{language}\"", .{ .language = language });
     try buf.appendSlice(allocator, " data-merge-line-text");
-    if (editable and !std.mem.eql(u8, kind, "marker")) {
-        try buf.appendSlice(allocator, " contenteditable=\"true\" spellcheck=\"false\"");
+    if (!std.mem.eql(u8, line.kind, "marker")) try appendTemplate(buf, allocator, " data-original-text=\"{original}\"", .{ .original = line.text });
+    if (line.editable and !std.mem.eql(u8, line.kind, "marker")) {
+        try buf.appendSlice(allocator, " contenteditable=\"true\" spellcheck=\"false\" role=\"textbox\" aria-label=\"Editable merge line\"");
     }
-    try appendTemplate(buf, allocator, ">{line}</code></div>", .{ .line = line });
+    try appendTemplate(buf, allocator, ">{line}</code></div>", .{ .line = line.text });
 }
 
 fn loadMergeConflictFiles(allocator: Allocator, repo: Repo, detail: PullDetail, conflict_paths: []const []const u8) ![]MergeConflictFile {
@@ -3160,6 +3228,48 @@ test "merge editor counts conflict groups" {
         \\>>>>>>> theirs
     ));
     try std.testing.expectEqual(@as(usize, 0), countConflictGroups("const divider = \"=======\";\n"));
+}
+
+test "merge editor visibility keeps radius around conflicts" {
+    var lines: [40]MergeRenderLine = undefined;
+    for (&lines, 0..) |*line, index_value| {
+        line.* = .{ .line_number = index_value + 1, .text = "" };
+    }
+    lines[20].group_id = 1;
+
+    markMergeLineVisibility(&lines);
+
+    try std.testing.expect(!lines[4].visible);
+    try std.testing.expect(lines[5].visible);
+    try std.testing.expect(lines[20].visible);
+    try std.testing.expect(lines[35].visible);
+    try std.testing.expect(!lines[36].visible);
+}
+
+test "merge editor renders distant context folded" {
+    var content: std.ArrayList(u8) = .empty;
+    defer content.deinit(std.testing.allocator);
+    for (0..20) |index_value| {
+        try std.fmt.format(content.writer(std.testing.allocator), "before {d}\n", .{index_value});
+    }
+    try content.appendSlice(std.testing.allocator,
+        \\<<<<<<< ours
+        \\current
+        \\=======
+        \\incoming
+        \\>>>>>>> theirs
+        \\
+    );
+    for (0..20) |index_value| {
+        try std.fmt.format(content.writer(std.testing.allocator), "after {d}\n", .{index_value});
+    }
+
+    var html: std.ArrayList(u8) = .empty;
+    defer html.deinit(std.testing.allocator);
+    try appendMergeConflictContent(&html, std.testing.allocator, "zig", content.items);
+
+    try std.testing.expect(std.mem.indexOf(u8, html.items, "data-merge-fold-toggle") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html.items, "hidden data-merge-fold-id") != null);
 }
 
 test "merge-file conflict counts are treated as generated content" {

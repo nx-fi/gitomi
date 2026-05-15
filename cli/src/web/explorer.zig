@@ -30,6 +30,7 @@ const max_blob_display_bytes = 512 * 1024;
 const max_blame_display_bytes = 16 * 1024 * 1024;
 const max_raw_blob_bytes = git.max_git_output;
 const unstaged_ref = "working tree";
+const worktree_ref_prefix = "worktree:";
 
 pub const RawBlob = struct {
     content_type: []const u8,
@@ -82,6 +83,18 @@ const BranchRef = struct {
     }
 };
 
+const WorktreeRef = struct {
+    path: []u8,
+    value: []u8,
+    label: []u8,
+
+    fn deinit(self: WorktreeRef, allocator: Allocator) void {
+        allocator.free(self.path);
+        allocator.free(self.value);
+        allocator.free(self.label);
+    }
+};
+
 const BranchScope = enum {
     unstaged,
     local,
@@ -92,12 +105,21 @@ const TreeEntryCommit = struct {
     full_hash: []u8,
     subject: []u8,
     relative: []u8,
+    synthetic: bool = false,
+    change_state: ChangeState = .none,
 
     fn deinit(self: TreeEntryCommit, allocator: Allocator) void {
         allocator.free(self.full_hash);
         allocator.free(self.subject);
         allocator.free(self.relative);
     }
+};
+
+const ChangeState = enum {
+    none,
+    staged,
+    unstaged,
+    staged_and_unstaged,
 };
 
 const CommitSummary = struct {
@@ -438,11 +460,14 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
         if (is_root) {
             const branches = try loadBranchRefs(allocator, repo);
             defer freeBranchRefs(allocator, branches);
+            const worktrees = try loadWorktreeRefs(allocator, repo);
+            defer freeWorktreeRefs(allocator, worktrees);
             const branch_count = countRealBranches(branches);
             const tag_count = loadRefCount(allocator, repo, "refs/tags") catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => 0,
             };
+            const worktree_count = worktrees.len;
             const commit_count = loadCommitCount(allocator, repo, ref) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => null,
@@ -451,7 +476,7 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
             defer if (search_entries_opt) |search_entries| freeTreeNavEntries(allocator, search_entries);
 
             try appendRootPageGridStart(&buf, allocator);
-            try appendRootCodeToolbar(&buf, allocator, ref, branches, branch_count, tag_count, search_entries_opt);
+            try appendRootCodeToolbar(&buf, allocator, ref, branches, worktrees, branch_count, tag_count, worktree_count, search_entries_opt);
             if (sync_flash) |flash| try appendCodeSyncFlash(&buf, allocator, flash);
             try appendRootCodePanelStart(&buf, allocator);
             try appendRootCommitBar(&buf, allocator, ref, summary_opt, commit_count);
@@ -837,6 +862,8 @@ fn appendTreeSidebar(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, 
     defer if (entries_opt) |entries| freeTreeNavEntries(allocator, entries);
     const branches = try loadBranchRefs(allocator, repo);
     defer freeBranchRefs(allocator, branches);
+    const worktrees = try loadWorktreeRefs(allocator, repo);
+    defer freeWorktreeRefs(allocator, worktrees);
 
     try appendTemplate(buf, allocator,
         \\<aside class="panel tree-sidebar" data-tree-sidebar>
@@ -844,7 +871,7 @@ fn appendTreeSidebar(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, 
         \\  <div class="tree-sidebar-controls">
         \\    <label class="tree-branch-label"><span>Branch</span><select class="tree-branch-select" data-branch-switcher data-active-path="{active_path}">
     , .{ .active_path = active_path });
-    try appendBranchOptions(buf, allocator, branches, ref);
+    try appendBranchOptions(buf, allocator, branches, worktrees, ref);
     try appendTemplate(buf, allocator,
         \\    </select></label>
         \\    <div class="tree-search-wrap"><label class="tree-search-label"><span>File search</span><input class="tree-search-input" type="search" data-tree-search placeholder="Go to file" autocomplete="off" spellcheck="false"></label></div>
@@ -870,18 +897,43 @@ fn appendTreeSidebar(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, 
     , .{});
 }
 
-fn appendBranchOptions(buf: *std.ArrayList(u8), allocator: Allocator, branches: []const BranchRef, selected_ref: []const u8) !void {
+fn appendBranchOptions(buf: *std.ArrayList(u8), allocator: Allocator, branches: []const BranchRef, worktrees: []const WorktreeRef, selected_ref: []const u8) !void {
     var found_selected = false;
     for (branches) |branch| {
         const selected = std.mem.eql(u8, branch.name, selected_ref);
         found_selected = found_selected or selected;
+        if (branch.scope == .unstaged) {
+            try appendTemplate(buf, allocator,
+                \\<option value="{name}"{selected_attr}>{name}</option>
+            , .{
+                .name = branch.name,
+                .selected_attr = shared.trustedHtml(if (selected) " selected" else ""),
+            });
+        } else {
+            try appendTemplate(buf, allocator,
+                \\<option value="{name}"{selected_attr}>{name} ({scope})</option>
+            , .{
+                .name = branch.name,
+                .scope = branchScopeLabel(branch.scope),
+                .selected_attr = shared.trustedHtml(if (selected) " selected" else ""),
+            });
+        }
+    }
+    if (worktrees.len != 0) {
         try appendTemplate(buf, allocator,
-            \\<option value="{name}"{selected_attr}>{name} ({scope})</option>
-        , .{
-            .name = branch.name,
-            .scope = branchScopeLabel(branch.scope),
-            .selected_attr = shared.trustedHtml(if (selected) " selected" else ""),
-        });
+            \\<option disabled>-------- Worktrees --------</option>
+        , .{});
+        for (worktrees) |worktree| {
+            const selected = std.mem.eql(u8, worktree.value, selected_ref);
+            found_selected = found_selected or selected;
+            try appendTemplate(buf, allocator,
+                \\<option value="{value}"{selected_attr}>{label}</option>
+            , .{
+                .value = worktree.value,
+                .label = worktree.label,
+                .selected_attr = shared.trustedHtml(if (selected) " selected" else ""),
+            });
+        }
     }
     if (!found_selected) {
         try appendTemplate(buf, allocator,
@@ -990,8 +1042,10 @@ fn appendRootCodeToolbar(
     allocator: Allocator,
     ref: []const u8,
     branches: []const BranchRef,
+    worktrees: []const WorktreeRef,
     branch_count: usize,
     tag_count: usize,
+    worktree_count: usize,
     search_entries_opt: ?[]const TreeNavEntry,
 ) !void {
     try appendTemplate(buf, allocator,
@@ -1001,13 +1055,14 @@ fn appendRootCodeToolbar(
         \\      <span class="button-icon icon-branch" aria-hidden="true"></span>
         \\      <select class="root-branch-select" data-branch-switcher data-active-path="">
     , .{});
-    try appendBranchOptions(buf, allocator, branches, ref);
+    try appendBranchOptions(buf, allocator, branches, worktrees, ref);
     try appendTemplate(buf, allocator,
         \\      </select>
         \\      <span class="root-caret" aria-hidden="true"></span>
         \\    </label>
         \\    <a class="root-ref-link" href="/refs"><span class="button-icon icon-branch" aria-hidden="true"></span><strong>{branch_count}</strong> {branch_label}</a>
         \\    <a class="root-ref-link" href="/refs"><span class="button-icon icon-tag" aria-hidden="true"></span><strong>{tag_count}</strong> {tag_label}</a>
+        \\    <span class="root-ref-link"><span class="button-icon icon-worktree" aria-hidden="true"></span><strong>{worktree_count}</strong> {worktree_label}</span>
         \\  </div>
         \\  <div class="root-code-toolbar-right">
         \\    <div class="root-file-search-wrap">
@@ -1021,19 +1076,14 @@ fn appendRootCodeToolbar(
         .branch_label = if (branch_count == 1) "Branch" else "Branches",
         .tag_count = shared.groupedUnsigned(@intCast(tag_count)),
         .tag_label = if (tag_count == 1) "Tag" else "Tags",
+        .worktree_count = shared.groupedUnsigned(@intCast(worktree_count)),
+        .worktree_label = if (worktree_count == 1) "Worktree" else "Worktrees",
     });
     if (search_entries_opt) |search_entries| {
         try appendRootSearchIndex(buf, allocator, ref, search_entries);
     }
     try appendTemplate(buf, allocator,
         \\    </div>
-        \\    <details class="root-action-menu" data-popover-menu>
-        \\      <summary class="button secondary root-menu-button">Add file<span class="root-caret" aria-hidden="true"></span></summary>
-        \\      <div class="root-action-popover" role="menu">
-        \\        <button type="button" role="menuitem">Create new file</button>
-        \\        <button type="button" role="menuitem">Upload files</button>
-        \\      </div>
-        \\    </details>
         \\    <details class="root-action-menu root-sync-menu" data-popover-menu>
         \\      <summary class="button primary root-menu-button" title="Sync Gitomi refs with origin"><span class="button-icon icon-sync" aria-hidden="true"></span>Sync<span class="root-caret" aria-hidden="true"></span></summary>
         \\      <form class="root-action-popover root-sync-popover" method="post" action="/code/sync" role="menu">
@@ -1159,13 +1209,27 @@ fn appendRootTreeEntryRow(buf: *std.ArrayList(u8), allocator: Allocator, ref: []
     , .{ .name = entry.name });
 
     if (entry.last_commit) |commit| {
-        try appendTemplate(buf, allocator,
-            \\<a class="root-file-commit" href="{href}" title="{subject}">{subject}</a><span class="root-file-time">{relative}</span>
-        , .{
-            .href = commitHref(commit.full_hash),
-            .subject = commit.subject,
-            .relative = commit.relative,
-        });
+        if (commit.synthetic) {
+            const change_class = changeStateClass(commit.change_state);
+            try appendTemplate(buf, allocator,
+                \\<span class="root-file-commit worktree-change {change_class}" title="{subject}">
+            , .{
+                .change_class = change_class,
+                .subject = commit.subject,
+            });
+            try appendWorktreeChangeLabel(buf, allocator, commit.change_state);
+            try appendTemplate(buf, allocator,
+                \\</span><span class="root-file-time">{relative}</span>
+            , .{ .relative = commit.relative });
+        } else {
+            try appendTemplate(buf, allocator,
+                \\<a class="root-file-commit" href="{href}" title="{subject}">{subject}</a><span class="root-file-time">{relative}</span>
+            , .{
+                .href = commitHref(commit.full_hash),
+                .subject = commit.subject,
+                .relative = commit.relative,
+            });
+        }
     } else {
         try appendTemplate(buf, allocator,
             \\<span class="root-file-commit empty">No commit</span><span class="root-file-time"></span>
@@ -1208,14 +1272,35 @@ fn appendTreeEntryRow(buf: *std.ArrayList(u8), allocator: Allocator, ref: []cons
 
 fn appendTreeEntryCommit(buf: *std.ArrayList(u8), allocator: Allocator, commit_opt: ?TreeEntryCommit) !void {
     if (commit_opt) |commit| {
-        try appendTemplate(buf, allocator,
-            \\<span class="file-commit" title="{subject}"><a href="{href}">{subject}</a></span>
-        , .{
-            .href = commitHref(commit.full_hash),
-            .subject = commit.subject,
-        });
+        if (commit.synthetic) {
+            const change_class = changeStateClass(commit.change_state);
+            try appendTemplate(buf, allocator,
+                \\<span class="file-commit worktree-change {change_class}" title="{subject}">
+            , .{
+                .change_class = change_class,
+                .subject = commit.subject,
+            });
+            try appendWorktreeChangeLabel(buf, allocator, commit.change_state);
+            try appendTemplate(buf, allocator, "</span>", .{});
+        } else {
+            try appendTemplate(buf, allocator,
+                \\<span class="file-commit" title="{subject}"><a href="{href}">{subject}</a></span>
+            , .{
+                .href = commitHref(commit.full_hash),
+                .subject = commit.subject,
+            });
+        }
     } else {
         try appendTemplate(buf, allocator, "<span class=\"file-commit empty\">No commit</span>", .{});
+    }
+}
+
+fn appendWorktreeChangeLabel(buf: *std.ArrayList(u8), allocator: Allocator, state: ChangeState) !void {
+    switch (state) {
+        .none => {},
+        .staged => try appendTemplate(buf, allocator, "has <span class=\"change-word staged\">staged</span> changes", .{}),
+        .unstaged => try appendTemplate(buf, allocator, "has <span class=\"change-word unstaged\">unstaged</span> changes", .{}),
+        .staged_and_unstaged => try appendTemplate(buf, allocator, "has <span class=\"change-word staged\">staged</span> and <span class=\"change-word unstaged\">unstaged</span> changes", .{}),
     }
 }
 
@@ -1662,6 +1747,88 @@ fn loadWorktreeCount(allocator: Allocator, repo: Repo) !usize {
     return count;
 }
 
+fn loadWorktreeRefs(allocator: Allocator, repo: Repo) ![]WorktreeRef {
+    const raw = try gitMaybe(allocator, repo, &.{ "worktree", "list", "--porcelain" }, git.max_git_output) orelse {
+        return allocator.alloc(WorktreeRef, 0);
+    };
+    defer allocator.free(raw);
+
+    var worktrees: std.ArrayList(WorktreeRef) = .empty;
+    errdefer {
+        for (worktrees.items) |worktree| worktree.deinit(allocator);
+        worktrees.deinit(allocator);
+    }
+
+    var path: ?[]const u8 = null;
+    var branch: ?[]const u8 = null;
+    var detached = false;
+    var bare = false;
+
+    var lines = std.mem.splitScalar(u8, raw, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trimRight(u8, raw_line, "\r");
+        if (line.len == 0) {
+            try appendParsedWorktreeRef(allocator, &worktrees, path, branch, detached, bare);
+            path = null;
+            branch = null;
+            detached = false;
+            bare = false;
+            continue;
+        }
+        if (std.mem.startsWith(u8, line, "worktree ")) {
+            path = line["worktree ".len..];
+        } else if (std.mem.startsWith(u8, line, "branch ")) {
+            branch = worktreeBranchLabel(line["branch ".len..]);
+        } else if (std.mem.eql(u8, line, "detached")) {
+            detached = true;
+        } else if (std.mem.eql(u8, line, "bare")) {
+            bare = true;
+        }
+    }
+    try appendParsedWorktreeRef(allocator, &worktrees, path, branch, detached, bare);
+
+    std.mem.sort(WorktreeRef, worktrees.items, {}, struct {
+        fn lessThan(_: void, a: WorktreeRef, b: WorktreeRef) bool {
+            return std.ascii.lessThanIgnoreCase(a.path, b.path);
+        }
+    }.lessThan);
+
+    return worktrees.toOwnedSlice(allocator);
+}
+
+fn appendParsedWorktreeRef(
+    allocator: Allocator,
+    worktrees: *std.ArrayList(WorktreeRef),
+    path_opt: ?[]const u8,
+    branch_opt: ?[]const u8,
+    detached: bool,
+    bare: bool,
+) !void {
+    if (bare) return;
+    const path = path_opt orelse return;
+    if (path.len == 0) return;
+
+    const path_owned = try allocator.dupe(u8, path);
+    errdefer allocator.free(path_owned);
+    const value = try std.fmt.allocPrint(allocator, "{s}{s}", .{ worktree_ref_prefix, path });
+    errdefer allocator.free(value);
+    const label_ref = branch_opt orelse if (detached) "detached" else "worktree";
+    const label = try std.fmt.allocPrint(allocator, "{s} ({s})", .{ path, label_ref });
+    errdefer allocator.free(label);
+
+    try worktrees.append(allocator, .{
+        .path = path_owned,
+        .value = value,
+        .label = label,
+    });
+}
+
+fn worktreeBranchLabel(ref: []const u8) []const u8 {
+    const heads_prefix = "refs/heads/";
+    if (std.mem.startsWith(u8, ref, heads_prefix)) return ref[heads_prefix.len..];
+    return ref;
+}
+
 fn loadStashCount(allocator: Allocator, repo: Repo) !usize {
     const raw = try gitMaybe(allocator, repo, &.{ "stash", "list" }, git.max_git_output) orelse return 0;
     defer allocator.free(raw);
@@ -1910,7 +2077,7 @@ fn physicalLineCount(content: []const u8) usize {
 }
 
 fn loadTreeEntries(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?[]TreeEntry {
-    if (isUnstagedRef(ref)) return loadWorktreeEntries(allocator, repo, path);
+    if (isFilesystemRef(ref)) return loadWorktreeEntries(allocator, repo, ref, path);
 
     const spec = try objectSpec(allocator, ref, path);
     defer allocator.free(spec);
@@ -1954,7 +2121,7 @@ fn loadTreeEntries(allocator: Allocator, repo: Repo, ref: []const u8, path: []co
 }
 
 fn loadTreeEntryCommits(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8, entries: []TreeEntry) !void {
-    if (isUnstagedRef(ref)) return;
+    if (isFilesystemRef(ref)) return;
 
     var index_by_name = std.StringHashMap(usize).init(allocator);
     defer index_by_name.deinit();
@@ -1995,6 +2162,118 @@ fn loadTreeEntryCommits(allocator: Allocator, repo: Repo, ref: []const u8, path:
     }
 }
 
+fn loadFilesystemTreeEntryCommits(allocator: Allocator, root: []const u8, path: []const u8, entries: []TreeEntry) !void {
+    var index_by_name = std.StringHashMap(usize).init(allocator);
+    defer index_by_name.deinit();
+    for (entries, 0..) |entry, i| {
+        try index_by_name.put(entry.name, i);
+    }
+
+    try markChangedFilesystemChildren(allocator, root, path, entries, &index_by_name);
+
+    const format = "--format=%x1e%H%x09%s%x09%cr";
+    const raw = if (path.len == 0)
+        try gitMaybeAt(allocator, root, &.{ "log", format, "--name-only", "-z", "HEAD", "--" }, git.max_git_output)
+    else blk: {
+        const pathspec = try std.fmt.allocPrint(allocator, ":(top){s}", .{path});
+        defer allocator.free(pathspec);
+        break :blk try gitMaybeAt(allocator, root, &.{ "log", format, "--name-only", "-z", "HEAD", "--", pathspec }, git.max_git_output);
+    };
+    const text = raw orelse return;
+    defer allocator.free(text);
+
+    var commit: ?LogCommit = null;
+    var filled: usize = 0;
+    for (entries) |entry| {
+        if (entry.last_commit != null) filled += 1;
+    }
+
+    var records = std.mem.splitScalar(u8, text, 0);
+    while (records.next()) |record| {
+        if (record.len == 0) continue;
+        if (parseLogCommitHeader(record)) |parsed| {
+            commit = parsed;
+            continue;
+        }
+
+        const changed_path = normalizeLogPathRecord(record);
+        if (changed_path.len == 0) continue;
+        const parsed_commit = commit orelse continue;
+        const child_name = directChildName(path, changed_path) orelse continue;
+        const entry_index = index_by_name.get(child_name) orelse continue;
+        if (entries[entry_index].last_commit != null) continue;
+        entries[entry_index].last_commit = try treeEntryCommitOwned(allocator, parsed_commit);
+        filled += 1;
+        if (filled == entries.len) break;
+    }
+}
+
+fn markChangedFilesystemChildren(
+    allocator: Allocator,
+    root: []const u8,
+    path: []const u8,
+    entries: []TreeEntry,
+    index_by_name: *const std.StringHashMap(usize),
+) !void {
+    const raw = if (path.len == 0)
+        try gitMaybeAt(allocator, root, &.{ "status", "--porcelain=v1", "-z" }, git.max_git_output)
+    else blk: {
+        const pathspec = try std.fmt.allocPrint(allocator, ":(top){s}", .{path});
+        defer allocator.free(pathspec);
+        break :blk try gitMaybeAt(allocator, root, &.{ "status", "--porcelain=v1", "-z", "--", pathspec }, git.max_git_output);
+    };
+    const text = raw orelse return;
+    defer allocator.free(text);
+
+    var records = std.mem.splitScalar(u8, text, 0);
+    while (records.next()) |record| {
+        if (record.len < 4 or record[2] != ' ') continue;
+        const state = changeStateFromStatus(record[0], record[1]);
+        if (state == .none) continue;
+        const changed_path = record[3..];
+        const child_name = directChildName(path, changed_path) orelse continue;
+        const entry_index = index_by_name.get(child_name) orelse continue;
+        const existing_state = if (entries[entry_index].last_commit) |commit| commit.change_state else .none;
+        const merged_state = mergeChangeStates(existing_state, state);
+        if (entries[entry_index].last_commit) |commit| commit.deinit(allocator);
+        entries[entry_index].last_commit = try syntheticTreeEntryCommitOwned(allocator, merged_state);
+    }
+}
+
+fn changeStateFromStatus(index_status: u8, worktree_status: u8) ChangeState {
+    const staged = index_status != ' ' and index_status != '?';
+    const unstaged = worktree_status != ' ';
+    if (staged and unstaged) return .staged_and_unstaged;
+    if (staged) return .staged;
+    if (unstaged) return .unstaged;
+    return .none;
+}
+
+fn mergeChangeStates(a: ChangeState, b: ChangeState) ChangeState {
+    if (a == .staged_and_unstaged or b == .staged_and_unstaged) return .staged_and_unstaged;
+    if ((a == .staged and b == .unstaged) or (a == .unstaged and b == .staged)) return .staged_and_unstaged;
+    if (a != .none) return a;
+    return b;
+}
+
+fn changeStateSubject(state: ChangeState) []const u8 {
+    return switch (state) {
+        .none => "",
+        .staged => "has staged changes",
+        .unstaged => "has unstaged changes",
+        .staged_and_unstaged => "has staged and unstaged changes",
+    };
+}
+
+fn changeStateClass(state: ChangeState) []const u8 {
+    return switch (state) {
+        .none => "",
+        .staged => "staged",
+        .unstaged => "unstaged",
+        .staged_and_unstaged => "staged-and-unstaged",
+    };
+}
+
 fn treeEntryCommitOwned(allocator: Allocator, commit: LogCommit) !TreeEntryCommit {
     const full_hash = try allocator.dupe(u8, commit.full_hash);
     errdefer allocator.free(full_hash);
@@ -2005,6 +2284,22 @@ fn treeEntryCommitOwned(allocator: Allocator, commit: LogCommit) !TreeEntryCommi
         .full_hash = full_hash,
         .subject = subject,
         .relative = relative,
+    };
+}
+
+fn syntheticTreeEntryCommitOwned(allocator: Allocator, state: ChangeState) !TreeEntryCommit {
+    const full_hash = try allocator.dupe(u8, "");
+    errdefer allocator.free(full_hash);
+    const subject = changeStateSubject(state);
+    const subject_owned = try allocator.dupe(u8, subject);
+    errdefer allocator.free(subject_owned);
+    const relative = try allocator.dupe(u8, "");
+    return .{
+        .full_hash = full_hash,
+        .subject = subject_owned,
+        .relative = relative,
+        .synthetic = true,
+        .change_state = state,
     };
 }
 
@@ -2045,7 +2340,7 @@ fn directChildName(parent: []const u8, changed_path: []const u8) ?[]const u8 {
 }
 
 fn loadBlameLines(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?[]BlameLine {
-    if (isUnstagedRef(ref)) return null;
+    if (isFilesystemRef(ref)) return null;
 
     const raw = try gitMaybe(allocator, repo, &.{
         "blame",
@@ -2230,7 +2525,7 @@ fn parseTimezoneOffset(value: []const u8) i64 {
 }
 
 fn loadCommitSummary(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?CommitSummary {
-    if (isUnstagedRef(ref)) return null;
+    if (isFilesystemRef(ref)) return null;
 
     const format = "--format=%H%x09%h%x09%an%x09%s%x09%cr";
     const raw = if (path.len == 0)
@@ -2264,7 +2559,7 @@ fn loadCommitSummary(allocator: Allocator, repo: Repo, ref: []const u8, path: []
 }
 
 fn loadCommitCount(allocator: Allocator, repo: Repo, ref: []const u8) !?usize {
-    if (isUnstagedRef(ref)) return null;
+    if (isFilesystemRef(ref)) return null;
 
     const raw = try gitMaybe(allocator, repo, &.{ "rev-list", "--count", ref }, 1024) orelse return null;
     defer allocator.free(raw);
@@ -2286,7 +2581,7 @@ fn loadRefCount(allocator: Allocator, repo: Repo, namespace: []const u8) !usize 
 }
 
 fn loadTreeNavEntries(allocator: Allocator, repo: Repo, ref: []const u8) !?[]TreeNavEntry {
-    if (isUnstagedRef(ref)) return loadWorktreeNavEntries(allocator, repo);
+    if (isFilesystemRef(ref)) return loadWorktreeNavEntries(allocator, repo, ref);
 
     const raw = try gitMaybe(allocator, repo, &.{ "ls-tree", "-z", "-r", "-t", ref }, git.max_git_output) orelse return null;
     defer allocator.free(raw);
@@ -2316,8 +2611,10 @@ fn loadTreeNavEntries(allocator: Allocator, repo: Repo, ref: []const u8) !?[]Tre
     return try entries.toOwnedSlice(allocator);
 }
 
-fn loadWorktreeEntries(allocator: Allocator, repo: Repo, path: []const u8) !?[]TreeEntry {
-    const raw = try listWorktreePaths(allocator, repo) orelse return null;
+fn loadWorktreeEntries(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?[]TreeEntry {
+    const root = try worktreeRootOwned(allocator, repo, ref) orelse return null;
+    defer allocator.free(root);
+    const raw = try listWorktreePaths(allocator, root) orelse return null;
     defer allocator.free(raw);
 
     var entries: std.ArrayList(TreeEntry) = .empty;
@@ -2335,20 +2632,28 @@ fn loadWorktreeEntries(allocator: Allocator, repo: Repo, path: []const u8) !?[]T
         const child_path = try childPath(allocator, path, child_name);
         defer allocator.free(child_path);
         const direct = std.mem.eql(u8, child_path, record);
-        const kind = if (direct) worktreePathKind(repo, child_path) catch null else .tree;
+        const kind = if (direct) worktreePathKind(root, child_path) catch null else .tree;
         const entry_kind = kind orelse continue;
         const is_tree = entry_kind == .tree;
-        const size = if (is_tree) null else worktreeBlobSize(repo, child_path) catch null;
+        const size = if (is_tree) null else worktreeBlobSize(root, child_path) catch null;
 
         try entries.append(allocator, try worktreeTreeEntryOwned(allocator, child_name, is_tree, size));
     }
 
     std.mem.sort(TreeEntry, entries.items, {}, treeEntryLessThan);
+    if (entries.items.len != 0) {
+        loadFilesystemTreeEntryCommits(allocator, root, path, entries.items) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => {},
+        };
+    }
     return try entries.toOwnedSlice(allocator);
 }
 
-fn loadWorktreeNavEntries(allocator: Allocator, repo: Repo) !?[]TreeNavEntry {
-    const raw = try listWorktreePaths(allocator, repo) orelse return null;
+fn loadWorktreeNavEntries(allocator: Allocator, repo: Repo, ref: []const u8) !?[]TreeNavEntry {
+    const root = try worktreeRootOwned(allocator, repo, ref) orelse return null;
+    defer allocator.free(root);
+    const raw = try listWorktreePaths(allocator, root) orelse return null;
     defer allocator.free(raw);
 
     var seen = std.StringHashMap(void).init(allocator);
@@ -2362,7 +2667,7 @@ fn loadWorktreeNavEntries(allocator: Allocator, repo: Repo) !?[]TreeNavEntry {
     var records = std.mem.splitScalar(u8, raw, 0);
     while (records.next()) |record| {
         if (record.len == 0) continue;
-        if (worktreePathKind(repo, record) catch null == null) continue;
+        if (worktreePathKind(root, record) catch null == null) continue;
 
         var cursor: usize = 0;
         while (cursor < record.len) {
@@ -2388,8 +2693,8 @@ fn loadWorktreeNavEntries(allocator: Allocator, repo: Repo) !?[]TreeNavEntry {
     return try entries.toOwnedSlice(allocator);
 }
 
-fn listWorktreePaths(allocator: Allocator, repo: Repo) !?[]u8 {
-    return gitMaybe(allocator, repo, &.{ "ls-files", "-z", "-c", "-o", "--exclude-standard" }, git.max_git_output);
+fn listWorktreePaths(allocator: Allocator, root: []const u8) !?[]u8 {
+    return gitMaybeAt(allocator, root, &.{ "ls-files", "-z", "-c", "-o", "--exclude-standard" }, git.max_git_output);
 }
 
 const WorktreePathKind = enum {
@@ -2397,9 +2702,9 @@ const WorktreePathKind = enum {
     tree,
 };
 
-fn worktreePathKind(repo: Repo, path: []const u8) !?WorktreePathKind {
+fn worktreePathKind(root: []const u8, path: []const u8) !?WorktreePathKind {
     if (path.len == 0) return .tree;
-    const absolute_path = try absoluteWorktreePath(std.heap.page_allocator, repo, path);
+    const absolute_path = try absoluteWorktreePath(std.heap.page_allocator, root, path);
     defer std.heap.page_allocator.free(absolute_path);
     const stat = std.fs.cwd().statFile(absolute_path) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return null,
@@ -2412,16 +2717,16 @@ fn worktreePathKind(repo: Repo, path: []const u8) !?WorktreePathKind {
     };
 }
 
-fn worktreeObjectType(allocator: Allocator, repo: Repo, path: []const u8) !?[]u8 {
-    const kind = try worktreePathKind(repo, path) orelse return null;
+fn worktreeObjectType(allocator: Allocator, root: []const u8, path: []const u8) !?[]u8 {
+    const kind = try worktreePathKind(root, path) orelse return null;
     return try allocator.dupe(u8, switch (kind) {
         .blob => "blob",
         .tree => "tree",
     });
 }
 
-fn worktreeBlobSize(repo: Repo, path: []const u8) !?usize {
-    const absolute_path = try absoluteWorktreePath(std.heap.page_allocator, repo, path);
+fn worktreeBlobSize(root: []const u8, path: []const u8) !?usize {
+    const absolute_path = try absoluteWorktreePath(std.heap.page_allocator, root, path);
     defer std.heap.page_allocator.free(absolute_path);
     const stat = std.fs.cwd().statFile(absolute_path) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return null,
@@ -2431,8 +2736,8 @@ fn worktreeBlobSize(repo: Repo, path: []const u8) !?usize {
     return stat.size;
 }
 
-fn readWorktreeFile(allocator: Allocator, repo: Repo, path: []const u8, max_bytes: usize) !?[]u8 {
-    const absolute_path = try absoluteWorktreePath(allocator, repo, path);
+fn readWorktreeFile(allocator: Allocator, root: []const u8, path: []const u8, max_bytes: usize) !?[]u8 {
+    const absolute_path = try absoluteWorktreePath(allocator, root, path);
     defer allocator.free(absolute_path);
     return std.fs.cwd().readFileAlloc(allocator, absolute_path, max_bytes) catch |err| switch (err) {
         error.FileNotFound, error.NotDir, error.IsDir => return null,
@@ -2440,9 +2745,9 @@ fn readWorktreeFile(allocator: Allocator, repo: Repo, path: []const u8, max_byte
     };
 }
 
-fn absoluteWorktreePath(allocator: Allocator, repo: Repo, path: []const u8) ![]u8 {
-    if (path.len == 0) return allocator.dupe(u8, repo.root);
-    return std.fs.path.join(allocator, &.{ repo.root, path });
+fn absoluteWorktreePath(allocator: Allocator, root: []const u8, path: []const u8) ![]u8 {
+    if (path.len == 0) return allocator.dupe(u8, root);
+    return std.fs.path.join(allocator, &.{ root, path });
 }
 
 fn worktreeTreeEntryOwned(allocator: Allocator, name: []const u8, is_tree: bool, size: ?usize) !TreeEntry {
@@ -2603,7 +2908,11 @@ fn objectType(allocator: Allocator, repo: Repo, spec: []const u8) !?[]u8 {
 }
 
 fn browseObjectType(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?[]u8 {
-    if (isUnstagedRef(ref)) return worktreeObjectType(allocator, repo, path);
+    if (isFilesystemRef(ref)) {
+        const root = try worktreeRootOwned(allocator, repo, ref) orelse return null;
+        defer allocator.free(root);
+        return worktreeObjectType(allocator, root, path);
+    }
     const spec = try objectSpec(allocator, ref, path);
     defer allocator.free(spec);
     return objectType(allocator, repo, spec);
@@ -2618,14 +2927,22 @@ fn blobSize(allocator: Allocator, repo: Repo, spec: []const u8) !?usize {
 }
 
 fn browseBlobSize(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?usize {
-    if (isUnstagedRef(ref)) return worktreeBlobSize(repo, path);
+    if (isFilesystemRef(ref)) {
+        const root = try worktreeRootOwned(allocator, repo, ref) orelse return null;
+        defer allocator.free(root);
+        return worktreeBlobSize(root, path);
+    }
     const spec = try objectSpec(allocator, ref, path);
     defer allocator.free(spec);
     return blobSize(allocator, repo, spec);
 }
 
 fn loadBlobBytes(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8, max_bytes: usize) !?[]u8 {
-    if (isUnstagedRef(ref)) return readWorktreeFile(allocator, repo, path, max_bytes);
+    if (isFilesystemRef(ref)) {
+        const root = try worktreeRootOwned(allocator, repo, ref) orelse return null;
+        defer allocator.free(root);
+        return readWorktreeFile(allocator, root, path, max_bytes);
+    }
     const spec = try objectSpec(allocator, ref, path);
     defer allocator.free(spec);
     return gitMaybe(allocator, repo, &.{ "show", spec }, max_bytes);
@@ -2653,6 +2970,13 @@ fn targetRefOwned(allocator: Allocator, repo: Repo, target: []const u8) ![]u8 {
 
 fn resolveBrowsableRefOwned(allocator: Allocator, repo: Repo, ref: []const u8) ![]u8 {
     if (isUnstagedRef(ref)) return allocator.dupe(u8, unstaged_ref);
+    if (isWorktreeRef(ref)) {
+        if (try worktreePathFromRefOwned(allocator, repo, ref)) |path| {
+            defer allocator.free(path);
+            return std.fmt.allocPrint(allocator, "{s}{s}", .{ worktree_ref_prefix, path });
+        }
+        return allocator.dupe(u8, ref);
+    }
     if (try refResolvesToObject(allocator, repo, ref)) return allocator.dupe(u8, ref);
     if (isBranchShorthand(ref)) {
         if (try remoteTrackingBranchShortNameOwned(allocator, repo, ref)) |remote_ref| return remote_ref;
@@ -2662,6 +2986,31 @@ fn resolveBrowsableRefOwned(allocator: Allocator, repo: Repo, ref: []const u8) !
 
 fn isUnstagedRef(ref: []const u8) bool {
     return std.mem.eql(u8, ref, unstaged_ref);
+}
+
+fn isWorktreeRef(ref: []const u8) bool {
+    return std.mem.startsWith(u8, ref, worktree_ref_prefix);
+}
+
+fn isFilesystemRef(ref: []const u8) bool {
+    return isUnstagedRef(ref) or isWorktreeRef(ref);
+}
+
+fn worktreeRootOwned(allocator: Allocator, repo: Repo, ref: []const u8) !?[]u8 {
+    if (isUnstagedRef(ref)) return try allocator.dupe(u8, repo.root);
+    if (!isWorktreeRef(ref)) return null;
+    return worktreePathFromRefOwned(allocator, repo, ref);
+}
+
+fn worktreePathFromRefOwned(allocator: Allocator, repo: Repo, ref: []const u8) !?[]u8 {
+    if (!isWorktreeRef(ref)) return null;
+    const wanted = ref[worktree_ref_prefix.len..];
+    const worktrees = try loadWorktreeRefs(allocator, repo);
+    defer freeWorktreeRefs(allocator, worktrees);
+    for (worktrees) |worktree| {
+        if (std.mem.eql(u8, worktree.path, wanted)) return try allocator.dupe(u8, worktree.path);
+    }
+    return null;
 }
 
 fn refResolvesToObject(allocator: Allocator, repo: Repo, ref: []const u8) !bool {
@@ -3389,17 +3738,26 @@ fn freeBranchRefs(allocator: Allocator, branches: []BranchRef) void {
     allocator.free(branches);
 }
 
+fn freeWorktreeRefs(allocator: Allocator, worktrees: []WorktreeRef) void {
+    for (worktrees) |worktree| worktree.deinit(allocator);
+    allocator.free(worktrees);
+}
+
 fn freeBlameLines(allocator: Allocator, lines: []BlameLine) void {
     for (lines) |line| line.deinit(allocator);
     allocator.free(lines);
 }
 
 fn gitMaybe(allocator: Allocator, repo: Repo, git_args: []const []const u8, max_output_bytes: usize) !?[]u8 {
+    return gitMaybeAt(allocator, repo.root, git_args, max_output_bytes);
+}
+
+fn gitMaybeAt(allocator: Allocator, root: []const u8, git_args: []const []const u8, max_output_bytes: usize) !?[]u8 {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
     try argv.append(allocator, "git");
     try argv.append(allocator, "-C");
-    try argv.append(allocator, repo.root);
+    try argv.append(allocator, root);
     for (git_args) |arg| try argv.append(allocator, arg);
 
     var result = try runCommand(allocator, argv.items, null, max_output_bytes);
@@ -3523,19 +3881,24 @@ test "web explorer parses git log commit headers" {
 }
 
 test "web explorer labels branch dropdown options by scope" {
+    const worktree_name = try std.testing.allocator.dupe(u8, "working tree");
+    defer std.testing.allocator.free(worktree_name);
     const local_name = try std.testing.allocator.dupe(u8, "main");
     defer std.testing.allocator.free(local_name);
     const remote_name = try std.testing.allocator.dupe(u8, "origin/main");
     defer std.testing.allocator.free(remote_name);
     const branches = [_]BranchRef{
+        .{ .name = worktree_name, .scope = .unstaged },
         .{ .name = local_name, .scope = .local },
         .{ .name = remote_name, .scope = .remote },
     };
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
-    try appendBranchOptions(&buf, std.testing.allocator, &branches, "main");
+    try appendBranchOptions(&buf, std.testing.allocator, &branches, &.{}, "main");
 
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, ">working tree</option>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, ">working tree (working tree)</option>") == null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, ">main (local)</option>") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, ">origin/main (remote)</option>") != null);
 }
