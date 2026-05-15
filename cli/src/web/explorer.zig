@@ -311,10 +311,7 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
         if (is_root) {
             const branches = try loadBranchRefs(allocator, repo);
             defer freeBranchRefs(allocator, branches);
-            const branch_count = loadRefCount(allocator, repo, "refs/heads") catch |err| switch (err) {
-                error.OutOfMemory => return err,
-                else => 0,
-            };
+            const branch_count = branches.len;
             const tag_count = loadRefCount(allocator, repo, "refs/tags") catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => 0,
@@ -2130,9 +2127,85 @@ fn targetRefOwned(allocator: Allocator, repo: Repo, target: []const u8) ![]u8 {
     defer if (query_ref) |value| allocator.free(value);
     if (query_ref) |value| {
         const trimmed = std.mem.trim(u8, value, " \t\r\n");
-        if (trimmed.len != 0) return allocator.dupe(u8, trimmed);
+        if (trimmed.len != 0) return resolveBrowsableRefOwned(allocator, repo, trimmed);
     }
     return defaultRef(allocator, repo);
+}
+
+fn resolveBrowsableRefOwned(allocator: Allocator, repo: Repo, ref: []const u8) ![]u8 {
+    if (try refResolvesToObject(allocator, repo, ref)) return allocator.dupe(u8, ref);
+    if (isBranchShorthand(ref)) {
+        if (try remoteTrackingBranchShortNameOwned(allocator, repo, ref)) |remote_ref| return remote_ref;
+    }
+    return allocator.dupe(u8, ref);
+}
+
+fn refResolvesToObject(allocator: Allocator, repo: Repo, ref: []const u8) !bool {
+    const object_ref = try std.fmt.allocPrint(allocator, "{s}^{{object}}", .{ref});
+    defer allocator.free(object_ref);
+    const raw = try gitMaybe(allocator, repo, &.{ "rev-parse", "--verify", "--quiet", "--end-of-options", object_ref }, 1024 * 1024) orelse return false;
+    allocator.free(raw);
+    return true;
+}
+
+fn remoteTrackingBranchShortNameOwned(allocator: Allocator, repo: Repo, branch_name: []const u8) !?[]u8 {
+    const raw = try gitMaybe(allocator, repo, &.{ "for-each-ref", "--format=%(refname)%09%(refname:short)", "refs/remotes" }, git.max_git_output) orelse return null;
+    defer allocator.free(raw);
+
+    var candidate: ?[]u8 = null;
+    errdefer if (candidate) |value| allocator.free(value);
+    var ambiguous = false;
+
+    var lines = std.mem.splitScalar(u8, raw, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        if (trimmed.len == 0) continue;
+        var cols = std.mem.splitScalar(u8, trimmed, '\t');
+        const full_ref = cols.next() orelse continue;
+        const short_name = cols.next() orelse continue;
+        if (std.mem.endsWith(u8, full_ref, "/HEAD")) continue;
+        const remote_branch = remoteTrackingBranchName(full_ref) orelse continue;
+        if (!std.mem.eql(u8, remote_branch, branch_name)) continue;
+
+        if (std.mem.startsWith(u8, full_ref, "refs/remotes/origin/")) {
+            if (candidate) |value| allocator.free(value);
+            return try allocator.dupe(u8, short_name);
+        }
+
+        if (candidate == null) {
+            candidate = try allocator.dupe(u8, short_name);
+        } else {
+            ambiguous = true;
+        }
+    }
+
+    if (ambiguous) {
+        if (candidate) |value| allocator.free(value);
+        return null;
+    }
+    return candidate;
+}
+
+fn remoteTrackingBranchName(full_ref: []const u8) ?[]const u8 {
+    const prefix = "refs/remotes/";
+    if (!std.mem.startsWith(u8, full_ref, prefix)) return null;
+    const rest = full_ref[prefix.len..];
+    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
+    if (slash + 1 >= rest.len) return null;
+    return rest[slash + 1 ..];
+}
+
+fn isBranchShorthand(ref: []const u8) bool {
+    if (ref.len == 0) return false;
+    if (std.mem.startsWith(u8, ref, "refs/")) return false;
+    if (std.mem.startsWith(u8, ref, "origin/")) return false;
+    if (std.mem.startsWith(u8, ref, "-")) return false;
+    if (std.mem.endsWith(u8, ref, ".lock")) return false;
+    if (std.mem.indexOf(u8, ref, "..") != null) return false;
+    if (std.mem.indexOf(u8, ref, "//") != null) return false;
+    if (std.mem.indexOf(u8, ref, "@{") != null) return false;
+    if (std.mem.indexOfAny(u8, ref, " \t\r\n\x00:^~?*[\\") != null) return false;
+    return true;
 }
 
 fn targetPathQueryOwned(allocator: Allocator, target: []const u8) !PathQuery {
@@ -2927,6 +3000,22 @@ test "web explorer labels branch dropdown options by scope" {
 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, ">main (local)</option>") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, ">origin/main (remote)</option>") != null);
+}
+
+test "web explorer parses remote-tracking branch names" {
+    try std.testing.expectEqualStrings("main", remoteTrackingBranchName("refs/remotes/origin/main").?);
+    try std.testing.expectEqualStrings("fix/sync-bootstrap-flow", remoteTrackingBranchName("refs/remotes/origin/fix/sync-bootstrap-flow").?);
+    try std.testing.expect(remoteTrackingBranchName("refs/heads/main") == null);
+    try std.testing.expect(remoteTrackingBranchName("refs/remotes/origin") == null);
+}
+
+test "web explorer only falls back to remote tracking for branch shorthands" {
+    try std.testing.expect(isBranchShorthand("fix/sync-bootstrap-flow"));
+    try std.testing.expect(isBranchShorthand("dev/hewm/markdown"));
+    try std.testing.expect(!isBranchShorthand("origin/fix/sync-bootstrap-flow"));
+    try std.testing.expect(!isBranchShorthand("refs/heads/fix/sync-bootstrap-flow"));
+    try std.testing.expect(!isBranchShorthand("fix/sync-bootstrap-flow^{commit}"));
+    try std.testing.expect(!isBranchShorthand("fix/../sync-bootstrap-flow"));
 }
 
 test "web explorer maps changed paths to direct children" {

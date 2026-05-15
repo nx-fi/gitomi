@@ -23,8 +23,6 @@
   --topbar-link: #59636e;
   --topbar-active: #0969da;
   --nav-active-border: #fd8c73;
-  --brand-mark-bg: #1f883d;
-  --brand-mark-text: #ffffff;
   --button-secondary-bg: #f6f8fa;
   --code-bg: #eff1f5;
   --soft-row: #edf1f4;
@@ -80,8 +78,6 @@
   --topbar-link: #9198a1;
   --topbar-active: #4493f8;
   --nav-active-border: #fd8c73;
-  --brand-mark-bg: #238636;
-  --brand-mark-text: #f0f6fc;
   --button-secondary-bg: #212830;
   --code-bg: #0d1117;
   --soft-row: #212830;
@@ -159,21 +155,8 @@ code {
 .brand-logo {
   display: block;
   flex: 0 0 auto;
-  width: 32px;
+  width: 47px;
   height: 32px;
-  border-radius: 6px;
-}
-.brand-mark {
-  display: inline-grid;
-  place-items: center;
-  width: 32px;
-  height: 32px;
-  border: 1px solid rgba(31, 35, 40, 0.08);
-  border-radius: 7px;
-  background: var(--brand-mark-bg);
-  color: var(--brand-mark-text);
-  font: 700 13px/1 var(--mono);
-  box-shadow: var(--shadow-subtle);
 }
 .topbar nav {
   grid-area: nav;
