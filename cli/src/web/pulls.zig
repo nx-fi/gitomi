@@ -35,6 +35,7 @@ const sendResponse = shared.sendResponse;
 const sqlite = index.sqlite;
 
 const max_pull_diff_bytes = 8 * 1024 * 1024;
+const max_merge_blob_bytes = 2 * 1024 * 1024;
 
 const PullStateFilter = enum {
     open,
@@ -129,6 +130,56 @@ const PullTabCounts = struct {
     files: ?usize = null,
     additions: ?usize = null,
     deletions: ?usize = null,
+};
+
+const PullMergeStatusKind = enum {
+    unavailable,
+    clean,
+    conflicts,
+};
+
+const PullMergeStatus = struct {
+    kind: PullMergeStatusKind = .unavailable,
+    conflict_files: ?[][]u8 = null,
+
+    fn deinit(self: PullMergeStatus, allocator: Allocator) void {
+        if (self.conflict_files) |files| freeConflictFiles(allocator, files);
+    }
+
+    fn hasConflicts(self: PullMergeStatus) bool {
+        return self.kind == .conflicts;
+    }
+};
+
+const MergeConflictFile = struct {
+    path: []u8,
+    content: ?[]u8 = null,
+    message: ?[]u8 = null,
+
+    fn deinit(self: MergeConflictFile, allocator: Allocator) void {
+        allocator.free(self.path);
+        if (self.content) |value| allocator.free(value);
+        if (self.message) |value| allocator.free(value);
+    }
+
+    fn editable(self: MergeConflictFile) bool {
+        return self.content != null;
+    }
+};
+
+const FormField = struct {
+    name: []u8,
+    value: []u8,
+
+    fn deinit(self: FormField, allocator: Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.value);
+    }
+};
+
+const ResolvedConflictFile = struct {
+    path: []const u8,
+    content: []const u8,
 };
 
 const PullCommit = struct {
@@ -460,13 +511,15 @@ pub fn renderPullDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u
     var pull_ref_buf: [util.short_object_ref_len]u8 = undefined;
     const pull_ref = util.shortObjectRef(&pull_ref_buf, detail.id);
     const tab_counts = try loadPullTabCounts(allocator, repo, &db, detail);
+    const merge_status = try loadPullMergeStatus(allocator, repo, detail);
+    defer merge_status.deinit(allocator);
 
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
     try appendShellStart(&buf, allocator, repo, detail.title, "pulls");
     try buf.appendSlice(allocator, "<section class=\"pull-detail issue-page\">");
-    try appendPullPageHeader(&buf, allocator, detail, pull_ref, tab_counts);
+    try appendPullPageHeader(&buf, allocator, detail, pull_ref, tab_counts, merge_status);
     try appendPullTabs(&buf, allocator, pull_ref, tab, tab_counts);
     try appendTemplate(&buf, allocator,
         \\<div class="issue-conversation-layout pull-conversation-layout">
@@ -475,7 +528,7 @@ pub fn renderPullDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u
     const current_actor = try shared.currentPrincipalOwned(allocator, repo);
     defer if (current_actor) |actor| allocator.free(actor);
     switch (tab) {
-        .conversation => try appendPullConversation(&buf, allocator, &db, detail, raw_ref, current_actor),
+        .conversation => try appendPullConversation(&buf, allocator, &db, detail, raw_ref, current_actor, merge_status),
         .commits => try appendPullCommits(&buf, allocator, repo, detail),
         .files => try appendPullFiles(&buf, allocator, repo, detail),
     }
@@ -537,6 +590,396 @@ fn renderPullNotFound(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]
     return buf.toOwnedSlice(allocator);
 }
 
+pub fn renderPullMergeEditorPage(allocator: Allocator, repo: Repo, raw_ref: []const u8, target: []const u8, error_message: ?[]const u8) ![]u8 {
+    if (try shared.renderIndexingPageIfStale(allocator, repo, "Resolve Conflicts", "pulls", target)) |body| return body;
+    try index.ensureIndex(allocator, repo);
+    const pull_id = index.resolvePullId(allocator, repo, raw_ref) catch {
+        return renderPullNotFound(allocator, repo, raw_ref);
+    };
+    defer allocator.free(pull_id);
+
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
+    const detail = (try loadPullDetail(allocator, &db, pull_id)) orelse return renderPullNotFound(allocator, repo, raw_ref);
+    defer detail.deinit(allocator);
+
+    const merge_status = try loadPullMergeStatus(allocator, repo, detail);
+    defer merge_status.deinit(allocator);
+
+    var pull_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const pull_ref = util.shortObjectRef(&pull_ref_buf, detail.id);
+
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendShellStart(&buf, allocator, repo, "Resolve Conflicts", "pulls");
+    if (!merge_status.hasConflicts()) {
+        try appendMergeEditorEmptyState(&buf, allocator, raw_ref, "No merge conflicts detected.", "This pull request is not currently reporting file conflicts in the local repository.");
+        try appendShellEnd(&buf, allocator);
+        return buf.toOwnedSlice(allocator);
+    }
+
+    const conflict_files = merge_status.conflict_files orelse &[_][]u8{};
+    var files = try loadMergeConflictFiles(allocator, repo, detail, conflict_files);
+    defer freeMergeConflictFiles(allocator, files);
+
+    try appendMergeEditor(&buf, allocator, detail, raw_ref, pull_ref, files, error_message);
+    try appendShellEnd(&buf, allocator);
+    return buf.toOwnedSlice(allocator);
+}
+
+fn appendMergeEditorEmptyState(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8, title: []const u8, detail: []const u8) !void {
+    try buf.appendSlice(allocator, "<section class=\"panel merge-editor-empty\">");
+    try appendEmptyState(buf, allocator, title, detail);
+    try buf.appendSlice(allocator, "<div class=\"form-actions\"><a class=\"button secondary\" href=\"/pulls/");
+    try shared.appendUrlEncoded(buf, allocator, raw_ref);
+    try buf.appendSlice(allocator, "\">Back to pull request</a></div></section>");
+}
+
+fn appendMergeEditor(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    detail: PullDetail,
+    raw_ref: []const u8,
+    pull_ref: []const u8,
+    files: []const MergeConflictFile,
+    error_message: ?[]const u8,
+) !void {
+    const editable = mergeEditorEditable(files);
+    try appendTemplate(buf, allocator,
+        \\<form class="merge-editor" data-merge-editor data-merge-unsupported="{unsupported}" method="post" action="/pulls/
+    , .{ .unsupported = !editable });
+    try shared.appendUrlEncoded(buf, allocator, raw_ref);
+    try appendTemplate(buf, allocator,
+        \\/conflicts">
+        \\  <header class="merge-editor-head">
+        \\    <div class="merge-editor-title">
+        \\      <a class="merge-editor-back" href="/pulls/{pull_ref}" aria-label="Back to pull request"></a>
+        \\      <div>
+        \\        <h1>Resolving conflicts between <code>{head_ref}</code> and <code>{base_ref}</code></h1>
+        \\        <p>Committing changes to <code>{head_ref}</code></p>
+        \\      </div>
+        \\    </div>
+        \\    <div class="merge-editor-actions">
+        \\      <span class="merge-editor-count">{file_count} {file_word}</span>
+        \\      <button class="button secondary merge-editor-step" type="button" data-merge-prev>Prev</button>
+        \\      <button class="button secondary merge-editor-step" type="button" data-merge-next>Next</button>
+        \\      <button class="button primary" type="submit" data-merge-submit disabled>Commit resolution</button>
+        \\    </div>
+        \\  </header>
+    , .{
+        .pull_ref = pull_ref,
+        .head_ref = detail.head_ref,
+        .base_ref = detail.base_ref,
+        .file_count = files.len,
+        .file_word = if (files.len == 1) "conflicting file" else "conflicting files",
+    });
+
+    if (error_message) |message| {
+        try appendTemplate(buf, allocator, "<div class=\"flash error merge-editor-flash\">{message}</div>", .{ .message = message });
+    }
+
+    if (!editable) {
+        try buf.appendSlice(allocator, "<div class=\"flash warning merge-editor-flash\">At least one conflict cannot be edited in the web resolver. Resolve unsupported conflicts from the command line.</div>");
+    }
+
+    try appendTemplate(buf, allocator,
+        \\  <input type="hidden" name="file_count" value="{file_count}">
+        \\  <div class="merge-editor-layout">
+        \\    <aside class="merge-editor-sidebar">
+        \\      <strong>{file_count} {file_word}</strong>
+        \\      <nav aria-label="Conflicting files">
+    , .{
+        .file_count = files.len,
+        .file_word = if (files.len == 1) "file" else "files",
+    });
+    for (files, 0..) |file, index_value| {
+        try appendTemplate(buf, allocator,
+            \\<a class="{classes}" href="#merge-file-{index}" data-merge-file-link data-file-index="{index}"><span class="pull-conflict-file-icon" aria-hidden="true"></span><span>{path}</span></a>
+        , .{
+            .classes = shared.classes("merge-editor-file-link", &.{shared.class("is-unsupported", !file.editable())}),
+            .index = index_value,
+            .path = file.path,
+        });
+    }
+    try buf.appendSlice(allocator,
+        \\      </nav>
+        \\    </aside>
+        \\    <div class="merge-editor-files">
+    );
+    for (files, 0..) |file, index_value| {
+        try appendMergeEditorFile(buf, allocator, file, index_value);
+    }
+    try buf.appendSlice(allocator, "</div></div></form>");
+}
+
+fn mergeEditorEditable(files: []const MergeConflictFile) bool {
+    if (files.len == 0) return false;
+    for (files) |file| {
+        if (!file.editable()) return false;
+    }
+    return true;
+}
+
+fn appendMergeEditorFile(buf: *std.ArrayList(u8), allocator: Allocator, file: MergeConflictFile, index_value: usize) !void {
+    try appendTemplate(buf, allocator,
+        \\<section class="{classes}" id="merge-file-{index}" data-merge-file data-file-index="{index}">
+        \\  <header class="merge-file-head">
+        \\    <div><span class="pull-conflict-file-icon" aria-hidden="true"></span><strong>{path}</strong></div>
+        \\    <span class="merge-file-status" data-merge-file-status>{status}</span>
+        \\  </header>
+        \\  <input type="hidden" name="path_{index}" value="{path}">
+    , .{
+        .classes = shared.classes("panel merge-file-editor", &.{shared.class("is-unsupported", !file.editable())}),
+        .index = index_value,
+        .path = file.path,
+        .status = if (file.editable()) "Unresolved" else "Unsupported",
+    });
+
+    if (file.content) |content| {
+        try appendTemplate(buf, allocator,
+            \\  <textarea class="merge-content-field" name="content_{index}" data-merge-content>{content}</textarea>
+            \\  <div class="merge-code" data-merge-code>
+        , .{
+            .index = index_value,
+            .content = content,
+        });
+        try appendMergeConflictContent(buf, allocator, content);
+        try buf.appendSlice(allocator, "</div>");
+    } else {
+        try appendTemplate(buf, allocator,
+            \\<div class="merge-unsupported-message"><strong>This conflict is not editable in the web resolver.</strong><p>{message}</p></div>
+        , .{ .message = file.message orelse "The file could not be loaded as a text conflict." });
+    }
+    try buf.appendSlice(allocator, "</section>");
+}
+
+fn appendMergeConflictContent(buf: *std.ArrayList(u8), allocator: Allocator, content: []const u8) !void {
+    var line_number: usize = 1;
+    var group_id: usize = 0;
+    var side: []const u8 = "";
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trimRight(u8, raw_line, "\r");
+        if (std.mem.startsWith(u8, line, "<<<<<<<")) {
+            group_id += 1;
+            side = "current";
+            try appendMergeConflictActions(buf, allocator, group_id);
+            try appendMergeLine(buf, allocator, line_number, line, group_id, "marker", "current", false);
+        } else if (std.mem.startsWith(u8, line, "|||||||")) {
+            side = "base";
+            try appendMergeLine(buf, allocator, line_number, line, group_id, "marker", "base", false);
+        } else if (std.mem.startsWith(u8, line, "=======")) {
+            side = "incoming";
+            try appendMergeLine(buf, allocator, line_number, line, group_id, "marker", "incoming", false);
+        } else if (std.mem.startsWith(u8, line, ">>>>>>>")) {
+            try appendMergeLine(buf, allocator, line_number, line, group_id, "marker", "incoming", false);
+            side = "";
+        } else {
+            try appendMergeLine(buf, allocator, line_number, line, group_id, "line", side, true);
+        }
+        line_number += 1;
+    }
+}
+
+fn appendMergeConflictActions(buf: *std.ArrayList(u8), allocator: Allocator, group_id: usize) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="merge-conflict-actions" data-conflict-group="{group_id}">
+        \\  <button type="button" data-merge-action="current">Accept current change</button>
+        \\  <button type="button" data-merge-action="incoming">Accept incoming change</button>
+        \\  <button type="button" data-merge-action="both">Accept both changes</button>
+        \\</div>
+    , .{ .group_id = group_id });
+}
+
+fn appendMergeLine(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    line_number: usize,
+    line: []const u8,
+    group_id: usize,
+    kind: []const u8,
+    side: []const u8,
+    editable: bool,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="{classes}" data-merge-line
+    , .{ .classes = shared.classes("merge-line", &.{
+        shared.class("merge-marker", std.mem.eql(u8, kind, "marker")),
+        shared.class("merge-current", std.mem.eql(u8, side, "current")),
+        shared.class("merge-incoming", std.mem.eql(u8, side, "incoming")),
+        shared.class("merge-base", std.mem.eql(u8, side, "base")),
+    }) });
+    if (group_id != 0) try appendTemplate(buf, allocator, " data-conflict-group=\"{group_id}\"", .{ .group_id = group_id });
+    if (side.len != 0 and !std.mem.eql(u8, kind, "marker")) try appendTemplate(buf, allocator, " data-conflict-side=\"{side}\"", .{ .side = side });
+    try appendTemplate(buf, allocator,
+        \\><span class="merge-line-number">{line_number}</span><code data-merge-line-text
+    , .{ .line_number = line_number });
+    if (editable and !std.mem.eql(u8, kind, "marker")) {
+        try buf.appendSlice(allocator, " contenteditable=\"true\" spellcheck=\"false\"");
+    }
+    try appendTemplate(buf, allocator, ">{line}</code></div>", .{ .line = line });
+}
+
+fn loadMergeConflictFiles(allocator: Allocator, repo: Repo, detail: PullDetail, conflict_paths: []const []const u8) ![]MergeConflictFile {
+    var files: std.ArrayList(MergeConflictFile) = .empty;
+    errdefer {
+        for (files.items) |file| file.deinit(allocator);
+        files.deinit(allocator);
+    }
+
+    const merge_base = try loadMergeBase(allocator, repo, detail.base_ref, detail.head_ref);
+    defer if (merge_base) |value| allocator.free(value);
+
+    for (conflict_paths) |path| {
+        try files.append(allocator, try loadMergeConflictFile(allocator, repo, detail, merge_base, path));
+    }
+    return try files.toOwnedSlice(allocator);
+}
+
+fn loadMergeConflictFile(allocator: Allocator, repo: Repo, detail: PullDetail, merge_base: ?[]const u8, path: []const u8) !MergeConflictFile {
+    const owned_path = try allocator.dupe(u8, path);
+    errdefer allocator.free(owned_path);
+
+    if (!isSafeMergePath(path)) {
+        return .{
+            .path = owned_path,
+            .message = try allocator.dupe(u8, "The path is not a safe repository-relative file path."),
+        };
+    }
+
+    const base_oid = merge_base orelse {
+        return .{
+            .path = owned_path,
+            .message = try allocator.dupe(u8, "The local repository could not find a merge base for this pull request."),
+        };
+    };
+
+    const current = try loadBlobAtRef(allocator, repo, detail.head_ref, path);
+    defer if (current) |value| allocator.free(value);
+    const ancestor = try loadBlobAtRef(allocator, repo, base_oid, path);
+    defer if (ancestor) |value| allocator.free(value);
+    const incoming = try loadBlobAtRef(allocator, repo, detail.base_ref, path);
+    defer if (incoming) |value| allocator.free(value);
+
+    if (current == null or ancestor == null or incoming == null) {
+        return .{
+            .path = owned_path,
+            .message = try allocator.dupe(u8, "Deleted-file conflicts are not editable in the web resolver yet."),
+        };
+    }
+
+    if (containsNul(current.?) or containsNul(ancestor.?) or containsNul(incoming.?)) {
+        return .{
+            .path = owned_path,
+            .message = try allocator.dupe(u8, "Binary conflicts are not editable in the web resolver."),
+        };
+    }
+
+    const content = (try mergeFileConflictContent(allocator, detail, current.?, ancestor.?, incoming.?)) orelse {
+        return .{
+            .path = owned_path,
+            .message = try allocator.dupe(u8, "Git could not generate a text conflict for this file."),
+        };
+    };
+
+    return .{
+        .path = owned_path,
+        .content = content,
+    };
+}
+
+fn freeMergeConflictFiles(allocator: Allocator, files: []MergeConflictFile) void {
+    for (files) |file| file.deinit(allocator);
+    allocator.free(files);
+}
+
+fn loadBlobAtRef(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?[]u8 {
+    const object = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ ref, path });
+    defer allocator.free(object);
+    return gitMaybe(allocator, repo, &.{ "show", object }, max_merge_blob_bytes);
+}
+
+fn mergeFileConflictContent(
+    allocator: Allocator,
+    detail: PullDetail,
+    current: []const u8,
+    ancestor: []const u8,
+    incoming: []const u8,
+) !?[]u8 {
+    const tmp_dir = try tempPath(allocator, "gitomi-merge-file");
+    defer allocator.free(tmp_dir);
+    try std.fs.cwd().makePath(tmp_dir);
+    defer std.fs.deleteTreeAbsolute(tmp_dir) catch {};
+
+    const current_path = try std.fs.path.join(allocator, &.{ tmp_dir, "current" });
+    defer allocator.free(current_path);
+    const ancestor_path = try std.fs.path.join(allocator, &.{ tmp_dir, "ancestor" });
+    defer allocator.free(ancestor_path);
+    const incoming_path = try std.fs.path.join(allocator, &.{ tmp_dir, "incoming" });
+    defer allocator.free(incoming_path);
+
+    try writeFileBytes(current_path, current);
+    try writeFileBytes(ancestor_path, ancestor);
+    try writeFileBytes(incoming_path, incoming);
+
+    const current_label = try std.fmt.allocPrint(allocator, "{s} (Current change)", .{detail.head_ref});
+    defer allocator.free(current_label);
+    const incoming_label = try std.fmt.allocPrint(allocator, "{s} (Incoming change)", .{detail.base_ref});
+    defer allocator.free(incoming_label);
+
+    var result = try runCommand(allocator, &.{
+        "git",
+        "merge-file",
+        "-p",
+        "-L",
+        current_label,
+        "-L",
+        "merge base",
+        "-L",
+        incoming_label,
+        current_path,
+        ancestor_path,
+        incoming_path,
+    }, null, max_merge_blob_bytes * 3);
+    if (result.exitCode()) |code| {
+        if (code == 0 or code == 1) {
+            const stdout = result.stdout;
+            allocator.free(result.stderr);
+            return stdout;
+        }
+    }
+    result.deinit();
+    return null;
+}
+
+fn containsNul(value: []const u8) bool {
+    return std.mem.indexOfScalar(u8, value, 0) != null;
+}
+
+fn isSafeMergePath(path: []const u8) bool {
+    if (path.len == 0 or path[0] == '/' or std.mem.indexOfScalar(u8, path, 0) != null) return false;
+    var parts = std.mem.splitScalar(u8, path, '/');
+    while (parts.next()) |part| {
+        if (part.len == 0 or std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..") or std.mem.eql(u8, part, ".git")) return false;
+    }
+    return true;
+}
+
+fn tempPath(allocator: Allocator, prefix: []const u8) ![]u8 {
+    const id = try util.newUuidV7(allocator);
+    defer allocator.free(id);
+    return std.fmt.allocPrint(allocator, "/tmp/{s}-{s}", .{ prefix, id });
+}
+
+fn writeFileBytes(path: []const u8, bytes: []const u8) !void {
+    if (std.fs.path.dirname(path)) |dir| try std.fs.cwd().makePath(dir);
+    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(bytes);
+}
+
 fn loadPullTabCounts(allocator: Allocator, repo: Repo, db: *SqliteDb, detail: PullDetail) !PullTabCounts {
     var counts: PullTabCounts = .{};
     var comments = try db.prepare("SELECT COUNT(*) FROM comments WHERE parent_kind = 'pull' AND parent_id = ?");
@@ -581,7 +1024,7 @@ fn loadPullGitTabCounts(allocator: Allocator, repo: Repo, base_ref: []const u8, 
     return counts;
 }
 
-fn appendPullPageHeader(buf: *std.ArrayList(u8), allocator: Allocator, detail: PullDetail, pull_ref: []const u8, counts: PullTabCounts) !void {
+fn appendPullPageHeader(buf: *std.ArrayList(u8), allocator: Allocator, detail: PullDetail, pull_ref: []const u8, counts: PullTabCounts, merge_status: PullMergeStatus) !void {
     try appendTemplate(buf, allocator,
         \\<header class="issue-page-head pull-page-head">
         \\  <div class="issue-title-line">
@@ -591,13 +1034,20 @@ fn appendPullPageHeader(buf: *std.ArrayList(u8), allocator: Allocator, detail: P
     try appendTemplate(buf, allocator,
         \\</span></h1>
         \\    <div class="issue-page-actions">
+    , .{});
+    if (merge_status.hasConflicts()) {
+        try appendTemplate(buf, allocator,
+            \\      <a class="button secondary pull-conflicts-button" href="/pulls/{pull_ref}/conflicts"><span class="button-icon icon-conflict" aria-hidden="true"></span><span>Resolve conflicts</span></a>
+        , .{ .pull_ref = pull_ref });
+    }
+    try buf.appendSlice(allocator,
         \\      <a class="button secondary" href="/pulls">Back to PRs</a>
         \\      <a class="button primary" href="/new-pull">New pull request</a>
         \\      <button class="issue-copy-button" type="button" disabled aria-label="Copy pull request link"><span class="button-icon icon-copy" aria-hidden="true"></span></button>
         \\    </div>
         \\  </div>
         \\  <div class="issue-status-line pull-status-line">
-    , .{});
+    );
     try appendPullStateBadge(buf, allocator, detail.state, detail.draft);
     try appendPullHeaderSummary(buf, allocator, detail, counts);
     try buf.appendSlice(allocator, "</div></header>");
@@ -986,6 +1436,7 @@ fn appendPullConversation(
     detail: PullDetail,
     raw_ref: []const u8,
     current_actor: ?[]const u8,
+    merge_status: PullMergeStatus,
 ) !void {
     try appendTemplate(buf, allocator,
         \\<div class="issue-conversation pull-conversation">
@@ -1017,6 +1468,7 @@ fn appendPullConversation(
     try appendPullReactionBar(buf, allocator, db, "pull", detail.id, raw_ref, "", current_actor);
     try buf.appendSlice(allocator, "</article></div>");
     try appendPullComments(buf, allocator, db, raw_ref, detail.id, current_actor);
+    try appendPullMergeabilityTimeline(buf, allocator, raw_ref, merge_status);
     try appendPullResolutionTimeline(buf, allocator, detail);
     try appendPullCommentForm(buf, allocator, raw_ref, current_actor);
     try buf.appendSlice(allocator, "</div>");
@@ -1102,26 +1554,33 @@ fn appendPullComments(
 
 fn appendPullResolutionTimeline(buf: *std.ArrayList(u8), allocator: Allocator, detail: PullDetail) !void {
     if (!std.mem.eql(u8, detail.state, "merged") and !std.mem.eql(u8, detail.state, "closed")) return;
+    const merged = std.mem.eql(u8, detail.state, "merged");
+    const merge_display_oid = if (detail.merge_oid.len != 0) detail.merge_oid else detail.target_oid;
 
     try appendTemplate(buf, allocator,
         \\<div class="issue-timeline-item pull-event-item">
         \\  <div class="issue-timeline-avatar"><span class="pull-timeline-icon is-{state}" aria-hidden="true"></span></div>
-        \\  <div class="pull-event-text"><strong>{actor}</strong> {verb} this pull request
+        \\  <div class="pull-event-text"><span><strong>{actor}</strong> {verb}
     , .{
         .state = detail.state,
         .actor = if (detail.state_actor_principal.len != 0) detail.state_actor_principal else detail.author_principal,
-        .verb = if (std.mem.eql(u8, detail.state, "merged")) "merged" else "closed",
+        .verb = if (merged and merge_display_oid.len != 0) "merged commit" else if (merged) "merged this pull request" else "closed this pull request",
     });
-    if (std.mem.eql(u8, detail.state, "merged") and detail.merge_oid.len != 0) {
+    if (merged and merge_display_oid.len != 0) {
         try appendTemplate(buf, allocator,
-            \\ with commit <a href="{href}"><code>{short_oid}</code></a>
+            \\ <a href="{href}"><code>{short_oid}</code></a> into <code>{base_ref}</code>
         , .{
-            .href = commitHref(detail.merge_oid),
-            .short_oid = detail.merge_oid[0..@min(detail.merge_oid.len, 12)],
+            .href = commitHref(merge_display_oid),
+            .short_oid = merge_display_oid[0..@min(merge_display_oid.len, 12)],
+            .base_ref = detail.base_ref,
         });
     }
     try buf.append(allocator, ' ');
     try appendRelativeTime(buf, allocator, detail.state_occurred_at);
+    try buf.appendSlice(allocator, "</span>");
+    if (merged) {
+        try buf.appendSlice(allocator, "<button class=\"button secondary pull-revert-button\" type=\"button\" disabled>Revert</button>");
+    }
     try buf.appendSlice(allocator, "</div></div>");
 
     try appendTemplate(buf, allocator,
@@ -1134,9 +1593,45 @@ fn appendPullResolutionTimeline(buf: *std.ArrayList(u8), allocator: Allocator, d
         \\</div>
     , .{
         .state = detail.state,
-        .title = if (std.mem.eql(u8, detail.state, "merged")) "Pull request successfully merged and closed" else "Pull request closed",
-        .body = if (std.mem.eql(u8, detail.state, "merged")) "The branch has been merged into the base ref." else "This pull request was closed without being merged.",
+        .title = if (merged) "Pull request successfully merged and closed" else "Pull request closed",
+        .body = if (merged) "You're all set - the branch has been merged." else "This pull request was closed without being merged.",
     });
+}
+
+fn appendPullMergeabilityTimeline(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8, merge_status: PullMergeStatus) !void {
+    if (!merge_status.hasConflicts()) return;
+    try buf.appendSlice(allocator,
+        \\<div class="issue-timeline-item pull-mergeability-item" id="pull-mergeability">
+        \\  <div class="issue-timeline-avatar"><span class="pull-mergeability-icon is-conflicts" aria-hidden="true"></span></div>
+        \\  <div class="pull-mergeability-box is-conflicts">
+        \\    <div class="pull-mergeability-head">
+        \\      <div>
+        \\        <h2>This branch has conflicts that must be resolved</h2>
+        \\        <p>Resolve these files in the web editor, then commit the resolution back to the pull request branch.</p>
+        \\      </div>
+        \\      <a class="button secondary pull-mergeability-action" href="/pulls/
+    );
+    try shared.appendUrlEncoded(buf, allocator, raw_ref);
+    try buf.appendSlice(allocator,
+        \\/conflicts">Resolve conflicts</a>
+        \\    </div>
+    );
+    if (merge_status.conflict_files) |conflict_files| {
+        if (conflict_files.len == 0) {
+            try buf.appendSlice(allocator, "<p class=\"pull-mergeability-empty\">Git reported merge conflicts, but did not return file names.</p>");
+        } else {
+            try buf.appendSlice(allocator, "<ul class=\"pull-conflict-file-list\">");
+            for (conflict_files) |file| {
+                try appendTemplate(buf, allocator,
+                    \\<li><span class="pull-conflict-file-icon" aria-hidden="true"></span><code>{file}</code></li>
+                , .{ .file = file });
+            }
+            try buf.appendSlice(allocator, "</ul>");
+        }
+    } else {
+        try buf.appendSlice(allocator, "<p class=\"pull-mergeability-empty\">Git reported merge conflicts, but did not return file names.</p>");
+    }
+    try buf.appendSlice(allocator, "</div></div>");
 }
 
 fn appendPullReactionBar(
@@ -1422,6 +1917,70 @@ fn loadMergeBase(allocator: Allocator, repo: Repo, base_ref: []const u8, head_re
     return try allocator.dupe(u8, trimmed);
 }
 
+fn loadPullMergeStatus(allocator: Allocator, repo: Repo, detail: PullDetail) !PullMergeStatus {
+    if (!std.mem.eql(u8, detail.state, "open")) return .{ .kind = .unavailable };
+
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.appendSlice(allocator, &.{
+        "git",
+        "-C",
+        repo.root,
+        "merge-tree",
+        "--write-tree",
+        "--name-only",
+        "--no-messages",
+        "-z",
+        detail.base_ref,
+        detail.head_ref,
+    });
+
+    var result = try runCommand(allocator, argv.items, null, max_pull_diff_bytes);
+    defer result.deinit();
+    if (result.exitCode() == 0) return .{ .kind = .clean };
+    if (result.exitCode() != 1) return .{ .kind = .unavailable };
+
+    const conflict_files = try parseMergeTreeConflictFiles(allocator, result.stdout);
+    errdefer freeConflictFiles(allocator, conflict_files);
+    return .{
+        .kind = .conflicts,
+        .conflict_files = conflict_files,
+    };
+}
+
+fn parseMergeTreeConflictFiles(allocator: Allocator, raw: []const u8) ![][]u8 {
+    var files: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (files.items) |file| allocator.free(file);
+        files.deinit(allocator);
+    }
+
+    var parts = std.mem.splitScalar(u8, raw, 0);
+    _ = parts.next();
+    while (parts.next()) |raw_path| {
+        const path = std.mem.trim(u8, raw_path, " \t\r\n");
+        if (path.len == 0 or conflictFileAlreadyListed(files.items, path)) continue;
+        const owned = try allocator.dupe(u8, path);
+        files.append(allocator, owned) catch |err| {
+            allocator.free(owned);
+            return err;
+        };
+    }
+    return try files.toOwnedSlice(allocator);
+}
+
+fn conflictFileAlreadyListed(files: []const []const u8, path: []const u8) bool {
+    for (files) |file| {
+        if (std.mem.eql(u8, file, path)) return true;
+    }
+    return false;
+}
+
+fn freeConflictFiles(allocator: Allocator, files: [][]u8) void {
+    for (files) |file| allocator.free(file);
+    allocator.free(files);
+}
+
 fn appendPullDiff(buf: *std.ArrayList(u8), allocator: Allocator, diff: []const u8) !void {
     if (std.mem.trim(u8, diff, " \t\r\n").len == 0) {
         try appendEmptyState(buf, allocator, "No file changes.", "The head ref currently has no patch ahead of the merge base.");
@@ -1585,19 +2144,7 @@ fn appendLabel(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8)
 }
 
 fn appendAvatar(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8, extra_class: []const u8) !void {
-    try appendTemplate(buf, allocator, "<span class=\"issue-avatar {extra_class}\" title=\"{name}\" aria-label=\"{name}\">", .{
-        .extra_class = extra_class,
-        .name = name,
-    });
-    var initial_buf = [_]u8{'?'};
-    for (name) |c| {
-        if (std.ascii.isAlphanumeric(c)) {
-            initial_buf[0] = std.ascii.toUpper(c);
-            break;
-        }
-    }
-    try shared.appendHtml(buf, allocator, initial_buf[0..]);
-    try buf.appendSlice(allocator, "</span>");
+    try shared.appendAvatar(buf, allocator, name, extra_class);
 }
 
 fn appendLegacyPullLink(buf: *std.ArrayList(u8), allocator: Allocator, legacy_number: i64) !void {
@@ -1743,6 +2290,93 @@ pub fn handlePullPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, 
     };
 
     try sendRedirect(allocator, stream, "/pulls");
+}
+
+pub fn handlePullConflictPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
+    try index.ensureIndex(allocator, repo);
+    const pull_id = index.resolvePullId(allocator, repo, raw_ref) catch {
+        try sendPlainResponse(allocator, stream, 404, "Not Found", "Pull request not found\n");
+        return;
+    };
+    defer allocator.free(pull_id);
+
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    const detail = (try loadPullDetail(allocator, &db, pull_id)) orelse {
+        try sendPlainResponse(allocator, stream, 404, "Not Found", "Pull request not found\n");
+        return;
+    };
+    defer detail.deinit(allocator);
+
+    const merge_status = try loadPullMergeStatus(allocator, repo, detail);
+    defer merge_status.deinit(allocator);
+    if (!merge_status.hasConflicts()) {
+        try sendMergeEditorError(allocator, repo, stream, raw_ref, 409, "Conflict", "This pull request no longer reports merge conflicts.");
+        return;
+    }
+
+    const conflict_files = merge_status.conflict_files orelse {
+        try sendMergeEditorError(allocator, repo, stream, raw_ref, 409, "Conflict", "Git did not return the conflicting file list.");
+        return;
+    };
+
+    const fields = try parseFormFieldsOwned(allocator, form_body);
+    defer freeFormFields(allocator, fields);
+
+    var resolved: std.ArrayList(ResolvedConflictFile) = .empty;
+    defer resolved.deinit(allocator);
+    for (conflict_files, 0..) |path, index_value| {
+        const path_name = try std.fmt.allocPrint(allocator, "path_{d}", .{index_value});
+        defer allocator.free(path_name);
+        const content_name = try std.fmt.allocPrint(allocator, "content_{d}", .{index_value});
+        defer allocator.free(content_name);
+
+        const submitted_path = findFormField(fields, path_name) orelse {
+            try sendMergeEditorError(allocator, repo, stream, raw_ref, 422, "Unprocessable Entity", "A conflict file path was missing from the submitted resolution.");
+            return;
+        };
+        if (!std.mem.eql(u8, submitted_path, path)) {
+            try sendMergeEditorError(allocator, repo, stream, raw_ref, 422, "Unprocessable Entity", "The submitted conflict file list did not match the current merge conflicts.");
+            return;
+        }
+
+        const content = findFormField(fields, content_name) orelse {
+            try sendMergeEditorError(allocator, repo, stream, raw_ref, 422, "Unprocessable Entity", "Every conflicting file must be editable before the web resolver can commit.");
+            return;
+        };
+        if (contentHasConflictMarkers(content)) {
+            try sendMergeEditorError(allocator, repo, stream, raw_ref, 422, "Unprocessable Entity", "Resolve every conflict marker before committing the resolution.");
+            return;
+        }
+        try resolved.append(allocator, .{ .path = path, .content = content });
+    }
+
+    const merge_commit = commitPullConflictResolution(allocator, repo, detail, raw_ref, resolved.items) catch |err| {
+        const message = mergeCommitErrorMessage(err) orelse return err;
+        try sendMergeEditorError(allocator, repo, stream, raw_ref, 422, "Unprocessable Entity", message);
+        return;
+    };
+    defer allocator.free(merge_commit);
+
+    const location = try std.fmt.allocPrint(allocator, "/pulls/{s}", .{raw_ref});
+    defer allocator.free(location);
+    try sendRedirect(allocator, stream, location);
+}
+
+fn sendMergeEditorError(
+    allocator: Allocator,
+    repo: Repo,
+    stream: std.net.Stream,
+    raw_ref: []const u8,
+    status: u16,
+    reason: []const u8,
+    message: []const u8,
+) !void {
+    const target = try std.fmt.allocPrint(allocator, "/pulls/{s}/conflicts", .{raw_ref});
+    defer allocator.free(target);
+    const body = try renderPullMergeEditorPage(allocator, repo, raw_ref, target, message);
+    defer allocator.free(body);
+    try sendResponse(allocator, stream, status, reason, "text/html", body, null);
 }
 
 pub fn handlePullCommentPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
@@ -1894,4 +2528,24 @@ fn gitMaybe(allocator: Allocator, repo: Repo, git_args: []const []const u8, max_
 fn freePullCommits(allocator: Allocator, commits: []PullCommit) void {
     for (commits) |commit| commit.deinit(allocator);
     allocator.free(commits);
+}
+
+test "parse merge-tree conflict file names" {
+    const raw = "b8424e5199eed14e5e0c4fa9a3668f146ef44ae9\x00cli/src/github.zig\x00cli/src/sync.zig\x00";
+    const files = try parseMergeTreeConflictFiles(std.testing.allocator, raw);
+    defer freeConflictFiles(std.testing.allocator, files);
+
+    try std.testing.expectEqual(@as(usize, 2), files.len);
+    try std.testing.expectEqualStrings("cli/src/github.zig", files[0]);
+    try std.testing.expectEqualStrings("cli/src/sync.zig", files[1]);
+}
+
+test "parse merge-tree conflict file names skips duplicates and empty records" {
+    const raw = "tree\x00a.zig\x00\x00a.zig\x00b.zig\x00";
+    const files = try parseMergeTreeConflictFiles(std.testing.allocator, raw);
+    defer freeConflictFiles(std.testing.allocator, files);
+
+    try std.testing.expectEqual(@as(usize, 2), files.len);
+    try std.testing.expectEqualStrings("a.zig", files[0]);
+    try std.testing.expectEqualStrings("b.zig", files[1]);
 }

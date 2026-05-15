@@ -370,7 +370,9 @@ fn appendUserMenu(buf: *std.ArrayList(u8), allocator: Allocator, cfg: Config) !v
     try appendTemplate(buf, allocator,
         \\<details class="user-menu" data-popover-menu>
         \\  <summary aria-label="User menu">
-        \\    <span class="user-avatar" aria-hidden="true"></span>
+    , .{});
+    try appendUserAvatar(buf, allocator, cfg.principal);
+    try appendTemplate(buf, allocator,
         \\    <span class="user-menu-label"><strong>{principal}</strong><span>{device}</span></span>
         \\  </summary>
         \\  <div class="user-menu-popover" role="menu">
@@ -390,6 +392,253 @@ fn appendUserMenu(buf: *std.ArrayList(u8), allocator: Allocator, cfg: Config) !v
         .device = cfg.device,
         .repo_id = cfg.repo_id,
     });
+}
+
+pub fn appendAvatar(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8, extra_class: []const u8) !void {
+    try appendAvatarContainer(buf, allocator, "issue-avatar", extra_class, name);
+}
+
+fn appendUserAvatar(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8) !void {
+    try appendAvatarContainer(buf, allocator, "user-avatar", "", name);
+}
+
+fn appendAvatarContainer(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    base_class: []const u8,
+    extra_class: []const u8,
+    name: []const u8,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<span class="{base_class} nouns-avatar {extra_class}" title="{name}" aria-label="{name}">
+    , .{
+        .base_class = base_class,
+        .extra_class = extra_class,
+        .name = name,
+    });
+    try appendNounsAvatarSvg(buf, allocator, nounsAvatarSeed(name));
+    try buf.appendSlice(allocator, "</span>");
+}
+
+const NounsAvatarSeed = struct {
+    background: []const u8,
+    body: []const u8,
+    body_shadow: []const u8,
+    head: []const u8,
+    head_shadow: []const u8,
+    accent: []const u8,
+    glasses: []const u8,
+    lens: []const u8,
+    body_kind: u8,
+    head_kind: u8,
+    accessory_kind: u8,
+};
+
+const nouns_avatar_backgrounds = [_][]const u8{
+    "#d5d7e1",
+    "#e8d7ff",
+    "#c8edf0",
+    "#f7dfb1",
+    "#f3c9d7",
+    "#cde7be",
+    "#f4e8c1",
+    "#bfd2ff",
+};
+
+const nouns_avatar_bodies = [_][]const u8{
+    "#d13c5f",
+    "#2380c3",
+    "#29a37a",
+    "#f2a900",
+    "#6f56d9",
+    "#ef6b2e",
+    "#2c8f99",
+    "#d94ca7",
+};
+
+const nouns_avatar_body_shadows = [_][]const u8{
+    "#8f2440",
+    "#155179",
+    "#17634c",
+    "#9b6b00",
+    "#44328e",
+    "#9b421d",
+    "#195c63",
+    "#8f2d70",
+};
+
+const nouns_avatar_heads = [_][]const u8{
+    "#f9f871",
+    "#7bdff2",
+    "#ff8fab",
+    "#b8f2a5",
+    "#f6bd60",
+    "#cdb4db",
+    "#90dbf4",
+    "#ffafcc",
+};
+
+const nouns_avatar_head_shadows = [_][]const u8{
+    "#c8be32",
+    "#2e9db3",
+    "#cf5878",
+    "#73b862",
+    "#c37a18",
+    "#9871ad",
+    "#4fa9c3",
+    "#d46f97",
+};
+
+const nouns_avatar_accents = [_][]const u8{
+    "#111111",
+    "#ffffff",
+    "#e5484d",
+    "#2f6fed",
+    "#28a745",
+    "#f2cc60",
+    "#9b5de5",
+    "#00bbf9",
+};
+
+const nouns_avatar_glasses = [_][]const u8{
+    "#111111",
+    "#e5484d",
+    "#2f6fed",
+    "#1f883d",
+    "#f78166",
+    "#8250df",
+};
+
+const nouns_avatar_lenses = [_][]const u8{
+    "#f6f8fa",
+    "#fffbdd",
+    "#ddf4ff",
+    "#dafbe1",
+    "#fbefff",
+};
+
+fn nounsAvatarSeed(name: []const u8) NounsAvatarSeed {
+    const hash = fnv1a64(name);
+    const body_index: usize = @intCast((hash >> 8) % nouns_avatar_bodies.len);
+    const head_index: usize = @intCast((hash >> 16) % nouns_avatar_heads.len);
+    return .{
+        .background = nouns_avatar_backgrounds[@intCast(hash % nouns_avatar_backgrounds.len)],
+        .body = nouns_avatar_bodies[body_index],
+        .body_shadow = nouns_avatar_body_shadows[body_index],
+        .head = nouns_avatar_heads[head_index],
+        .head_shadow = nouns_avatar_head_shadows[head_index],
+        .accent = nouns_avatar_accents[@intCast((hash >> 24) % nouns_avatar_accents.len)],
+        .glasses = nouns_avatar_glasses[@intCast((hash >> 32) % nouns_avatar_glasses.len)],
+        .lens = nouns_avatar_lenses[@intCast((hash >> 40) % nouns_avatar_lenses.len)],
+        .body_kind = @intCast((hash >> 48) % 4),
+        .head_kind = @intCast((hash >> 52) % 4),
+        .accessory_kind = @intCast((hash >> 56) % 5),
+    };
+}
+
+fn fnv1a64(value: []const u8) u64 {
+    var hash: u64 = 14695981039346656037;
+    for (value) |byte| {
+        hash ^= byte;
+        hash *%= 1099511628211;
+    }
+    return hash;
+}
+
+fn appendNounsAvatarSvg(buf: *std.ArrayList(u8), allocator: Allocator, seed: NounsAvatarSeed) !void {
+    try appendTemplate(buf, allocator,
+        \\<svg class="nouns-avatar-svg" viewBox="0 0 32 32" width="32" height="32" aria-hidden="true" focusable="false" shape-rendering="crispEdges" xmlns="http://www.w3.org/2000/svg">
+        \\<rect width="32" height="32" fill="{background}"/>
+    , .{ .background = seed.background });
+    try appendNounsAvatarBody(buf, allocator, seed);
+    try appendNounsAvatarHead(buf, allocator, seed);
+    try appendNounsAvatarAccessory(buf, allocator, seed);
+    try appendTemplate(buf, allocator,
+        \\<rect x="7" y="12" width="8" height="6" fill="{glasses}"/>
+        \\<rect x="17" y="12" width="8" height="6" fill="{glasses}"/>
+        \\<rect x="15" y="14" width="2" height="2" fill="{glasses}"/>
+        \\<rect x="9" y="14" width="4" height="2" fill="{lens}"/>
+        \\<rect x="19" y="14" width="4" height="2" fill="{lens}"/>
+        \\<rect x="13" y="20" width="6" height="2" fill="#111111" opacity="0.65"/>
+        \\</svg>
+    , .{
+        .glasses = seed.glasses,
+        .lens = seed.lens,
+    });
+}
+
+fn appendNounsAvatarBody(buf: *std.ArrayList(u8), allocator: Allocator, seed: NounsAvatarSeed) !void {
+    try appendTemplate(buf, allocator,
+        \\<rect x="8" y="22" width="16" height="10" fill="{body}"/>
+        \\<rect x="6" y="25" width="20" height="7" fill="{body}"/>
+        \\<rect x="6" y="29" width="20" height="3" fill="{body_shadow}" opacity="0.45"/>
+    , .{
+        .body = seed.body,
+        .body_shadow = seed.body_shadow,
+    });
+    switch (seed.body_kind) {
+        0 => try appendTemplate(buf, allocator,
+            \\<rect x="12" y="23" width="8" height="3" fill="{accent}" opacity="0.8"/>
+        , .{ .accent = seed.accent }),
+        1 => try appendTemplate(buf, allocator,
+            \\<rect x="8" y="25" width="16" height="2" fill="{accent}" opacity="0.72"/>
+            \\<rect x="8" y="30" width="16" height="2" fill="{accent}" opacity="0.72"/>
+        , .{ .accent = seed.accent }),
+        2 => try appendTemplate(buf, allocator,
+            \\<rect x="15" y="22" width="2" height="10" fill="{accent}" opacity="0.82"/>
+            \\<rect x="11" y="25" width="10" height="2" fill="{accent}" opacity="0.82"/>
+        , .{ .accent = seed.accent }),
+        else => try appendTemplate(buf, allocator,
+            \\<rect x="9" y="23" width="5" height="5" fill="{body_shadow}" opacity="0.7"/>
+            \\<rect x="18" y="23" width="5" height="5" fill="{body_shadow}" opacity="0.7"/>
+        , .{ .body_shadow = seed.body_shadow }),
+    }
+}
+
+fn appendNounsAvatarHead(buf: *std.ArrayList(u8), allocator: Allocator, seed: NounsAvatarSeed) !void {
+    switch (seed.head_kind) {
+        0 => try appendTemplate(buf, allocator,
+            \\<rect x="9" y="7" width="14" height="14" fill="{head}"/>
+            \\<rect x="21" y="10" width="3" height="7" fill="{head_shadow}" opacity="0.5"/>
+        , .{ .head = seed.head, .head_shadow = seed.head_shadow }),
+        1 => try appendTemplate(buf, allocator,
+            \\<rect x="8" y="10" width="16" height="10" fill="{head}"/>
+            \\<rect x="10" y="7" width="12" height="4" fill="{head}"/>
+            \\<rect x="22" y="11" width="3" height="7" fill="{head_shadow}" opacity="0.45"/>
+        , .{ .head = seed.head, .head_shadow = seed.head_shadow }),
+        2 => try appendTemplate(buf, allocator,
+            \\<rect x="10" y="6" width="12" height="15" fill="{head}"/>
+            \\<rect x="8" y="10" width="16" height="8" fill="{head}"/>
+            \\<rect x="20" y="8" width="3" height="11" fill="{head_shadow}" opacity="0.48"/>
+        , .{ .head = seed.head, .head_shadow = seed.head_shadow }),
+        else => try appendTemplate(buf, allocator,
+            \\<rect x="8" y="8" width="16" height="12" fill="{head}"/>
+            \\<rect x="10" y="5" width="10" height="4" fill="{head}"/>
+            \\<rect x="6" y="12" width="4" height="5" fill="{head}"/>
+            \\<rect x="21" y="9" width="3" height="10" fill="{head_shadow}" opacity="0.48"/>
+        , .{ .head = seed.head, .head_shadow = seed.head_shadow }),
+    }
+}
+
+fn appendNounsAvatarAccessory(buf: *std.ArrayList(u8), allocator: Allocator, seed: NounsAvatarSeed) !void {
+    switch (seed.accessory_kind) {
+        0 => {},
+        1 => try appendTemplate(buf, allocator,
+            \\<rect x="10" y="5" width="12" height="2" fill="{accent}"/>
+        , .{ .accent = seed.accent }),
+        2 => try appendTemplate(buf, allocator,
+            \\<rect x="11" y="4" width="10" height="3" fill="{accent}"/>
+            \\<rect x="9" y="7" width="14" height="2" fill="{accent}"/>
+        , .{ .accent = seed.accent }),
+        3 => try appendTemplate(buf, allocator,
+            \\<rect x="13" y="3" width="6" height="4" fill="{accent}"/>
+            \\<rect x="11" y="6" width="10" height="2" fill="{accent}"/>
+        , .{ .accent = seed.accent }),
+        else => try appendTemplate(buf, allocator,
+            \\<rect x="8" y="7" width="16" height="2" fill="{accent}"/>
+            \\<rect x="20" y="5" width="4" height="2" fill="{accent}"/>
+        , .{ .accent = seed.accent }),
+    }
 }
 
 fn appendShortcutConfigScript(buf: *std.ArrayList(u8), allocator: Allocator, cfg_opt: ?Config) !void {
@@ -426,6 +675,7 @@ pub fn appendShellEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
         \\<script src="/highlight/tla.js"></script>
         \\<script src="/highlight/init.js"></script>
         \\<script src="/diff.js"></script>
+        \\<script src="/merge.js"></script>
         \\</body>
         \\</html>
     );
@@ -989,6 +1239,17 @@ test "web template supports typed href classes and formatters" {
     });
 
     try std.testing.expectEqualStrings("<a class=\"button active\" href=\"/code?ref=feature/test&amp;path=src/a%20b.zig&amp;view=preview\">12,345 83.3%</a>", buf.items);
+}
+
+test "web avatar renders offline nouns-style svg" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendAvatar(&buf, std.testing.allocator, "A&B <user>", "extra");
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "nouns-avatar-svg") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "title=\"A&amp;B &lt;user&gt;\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<rect x=\"7\" y=\"12\" width=\"8\" height=\"6\"") != null);
 }
 
 test "web issue linked text autolinks legacy and hash references" {

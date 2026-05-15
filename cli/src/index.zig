@@ -44,7 +44,8 @@ const appendJsonFieldInteger = json_writer.appendJsonFieldInteger;
 const appendJsonFieldUnsigned = json_writer.appendJsonFieldUnsigned;
 const appendJsonString = json_writer.appendJsonString;
 
-const index_schema_version = "2";
+// This shall never be updated. Keep index compatibility checks additive under v1.
+const index_schema_version = "1";
 pub const index_event_columns = index_query.index_event_columns;
 const snapshot_schema = "urn:gitomi:snapshot:v1";
 const snapshot_schema_version: u64 = 1;
@@ -294,7 +295,14 @@ fn isSchemaFresh(allocator: Allocator, db: *SqliteDb) !bool {
     if (!(stmt.step() catch return false)) return false;
     const value = stmt.columnTextDup(allocator, 0) catch return false;
     defer allocator.free(value);
-    return std.mem.eql(u8, value, index_schema_version);
+    if (!std.mem.eql(u8, value, index_schema_version)) return false;
+    return requiredIndexTablesExist(db);
+}
+
+fn requiredIndexTablesExist(db: *SqliteDb) bool {
+    var pull_metadata = db.prepare("SELECT pull_id FROM pull_metadata LIMIT 0") catch return false;
+    defer pull_metadata.deinit();
+    return true;
 }
 
 pub fn rebuildIndex(allocator: Allocator, repo: Repo) !IndexStats {

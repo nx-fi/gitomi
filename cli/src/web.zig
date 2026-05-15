@@ -23,7 +23,7 @@ const Repo = repo_mod.Repo;
 const out = io.out;
 const eprint = io.eprint;
 
-const max_http_request = 64 * 1024;
+const max_http_request = 10 * 1024 * 1024;
 const default_worker_count = 8;
 const default_port_attempt_limit = 128;
 pub const default_host = "127.0.0.1";
@@ -182,6 +182,8 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", highlight_init_js, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/diff.js")) {
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", diff_js, null);
+    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/merge.js")) {
+        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", merge_js, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/raw")) {
         const raw_blob_opt = explorer.loadRawBlob(allocator, repo, request.target) catch |err| switch (err) {
             error.BlobTooLarge => {
@@ -251,6 +253,28 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         const body = try pulls_page.renderPullsPage(allocator, repo, request.target);
         defer allocator.free(body);
         try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
+    } else if (std.mem.eql(u8, request.method, "GET") and ((std.mem.startsWith(u8, request.path, "/pulls/") or std.mem.startsWith(u8, request.path, "/prs/")) and std.mem.endsWith(u8, request.path, "/conflicts"))) {
+        const prefix = if (std.mem.startsWith(u8, request.path, "/pulls/")) "/pulls/" else "/prs/";
+        const pull_ref_start = prefix.len;
+        const pull_ref_end = request.path.len - "/conflicts".len;
+        if (pull_ref_start >= pull_ref_end or request.path[pull_ref_end - 1] == '/') {
+            try shared.sendPlainResponse(allocator, stream, 404, "Not Found", "Not found\n");
+            return;
+        }
+        const pull_ref = request.path[pull_ref_start..pull_ref_end];
+        const body = try pulls_page.renderPullMergeEditorPage(allocator, repo, pull_ref, request.target, null);
+        defer allocator.free(body);
+        try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
+    } else if (std.mem.eql(u8, request.method, "POST") and ((std.mem.startsWith(u8, request.path, "/pulls/") or std.mem.startsWith(u8, request.path, "/prs/")) and std.mem.endsWith(u8, request.path, "/conflicts"))) {
+        const prefix = if (std.mem.startsWith(u8, request.path, "/pulls/")) "/pulls/" else "/prs/";
+        const pull_ref_start = prefix.len;
+        const pull_ref_end = request.path.len - "/conflicts".len;
+        if (pull_ref_start >= pull_ref_end or request.path[pull_ref_end - 1] == '/') {
+            try shared.sendPlainResponse(allocator, stream, 404, "Not Found", "Not found\n");
+            return;
+        }
+        const pull_ref = request.path[pull_ref_start..pull_ref_end];
+        try pulls_page.handlePullConflictPost(allocator, repo, stream, pull_ref, request.body);
     } else if (std.mem.eql(u8, request.method, "POST") and ((std.mem.startsWith(u8, request.path, "/pulls/") or std.mem.startsWith(u8, request.path, "/prs/")) and std.mem.endsWith(u8, request.path, "/comments"))) {
         const prefix = if (std.mem.startsWith(u8, request.path, "/pulls/")) "/pulls/" else "/prs/";
         const pull_ref_start = prefix.len;
@@ -539,6 +563,7 @@ const solidity_js = @embedFile("web/highlight/solidity.js");
 const tla_js = @embedFile("web/highlight/tla.js");
 const highlight_init_js = @embedFile("web/highlight/init.js");
 const diff_js = @embedFile("web/diff.js");
+const merge_js = @embedFile("web/merge.js");
 
 test "web request parser separates method path and body" {
     const raw =
