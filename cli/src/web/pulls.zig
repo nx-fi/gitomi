@@ -177,6 +177,18 @@ const FormField = struct {
     }
 };
 
+const DiffCommentSide = enum {
+    old,
+    new,
+};
+
+const DiffCommentContext = struct {
+    file: []const u8,
+    side: DiffCommentSide,
+    start_line: usize,
+    end_line: usize,
+};
+
 const ResolvedConflictFile = struct {
     path: []const u8,
     content: []const u8,
@@ -530,7 +542,7 @@ pub fn renderPullDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u
     switch (tab) {
         .conversation => try appendPullConversation(&buf, allocator, &db, detail, raw_ref, current_actor, merge_status),
         .commits => try appendPullCommits(&buf, allocator, repo, detail),
-        .files => try appendPullFiles(&buf, allocator, repo, detail),
+        .files => try appendPullFiles(&buf, allocator, repo, detail, raw_ref),
     }
     try buf.appendSlice(allocator, "</div><aside class=\"issue-meta-sidebar pull-sidebar\">");
     try appendPullSidebar(&buf, allocator, repo, &db, detail, pull_ref);
@@ -621,7 +633,7 @@ pub fn renderPullMergeEditorPage(allocator: Allocator, repo: Repo, raw_ref: []co
     }
 
     const conflict_files = merge_status.conflict_files orelse &[_][]u8{};
-    var files = try loadMergeConflictFiles(allocator, repo, detail, conflict_files);
+    const files = try loadMergeConflictFiles(allocator, repo, detail, conflict_files);
     defer freeMergeConflictFiles(allocator, files);
 
     try appendMergeEditor(&buf, allocator, detail, raw_ref, pull_ref, files, error_message);
@@ -1801,7 +1813,9 @@ fn appendPullCommentForm(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref:
     try buf.appendSlice(allocator,
         \\/comments">
         \\  <input type="hidden" name="reply_parent_ref" value="" data-reply-parent-ref>
-        \\  <textarea name="body" rows="5" placeholder="Leave a comment" required></textarea>
+    );
+    try shared.appendMarkdownEditor(buf, allocator, .{});
+    try buf.appendSlice(allocator,
         \\  <div class="issue-comment-form-actions">
         \\    <button class="button primary" type="submit">Comment</button>
         \\  </div>
@@ -1842,7 +1856,7 @@ fn appendPullCommits(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, 
     try buf.appendSlice(allocator, "</div></section>");
 }
 
-fn appendPullFiles(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, detail: PullDetail) !void {
+fn appendPullFiles(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, detail: PullDetail, raw_ref: []const u8) !void {
     const diff_opt = try loadPullDiff(allocator, repo, detail.base_ref, detail.head_ref, 3);
     const diff = diff_opt orelse {
         if (detail.changed_files != null or detail.additions != null or detail.deletions != null) {
@@ -1855,7 +1869,9 @@ fn appendPullFiles(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, de
         return;
     };
     defer allocator.free(diff);
-    try buf.appendSlice(allocator, "<section class=\"diff-section pull-diff-section\">");
+    try buf.appendSlice(allocator, "<section class=\"diff-section pull-diff-section\" data-diff-review-action=\"/pulls/");
+    try shared.appendUrlEncoded(buf, allocator, raw_ref);
+    try buf.appendSlice(allocator, "/comments\">");
     try appendPullDiff(buf, allocator, diff);
     try buf.appendSlice(allocator, "</section>");
 }
@@ -1920,6 +1936,10 @@ fn loadMergeBase(allocator: Allocator, repo: Repo, base_ref: []const u8, head_re
 fn loadPullMergeStatus(allocator: Allocator, repo: Repo, detail: PullDetail) !PullMergeStatus {
     if (!std.mem.eql(u8, detail.state, "open")) return .{ .kind = .unavailable };
 
+    const merge_base = try loadMergeBase(allocator, repo, detail.base_ref, detail.head_ref);
+    defer if (merge_base) |value| allocator.free(value);
+    if (merge_base == null) return .{ .kind = .unavailable };
+
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
     try argv.appendSlice(allocator, &.{
@@ -1942,6 +1962,10 @@ fn loadPullMergeStatus(allocator: Allocator, repo: Repo, detail: PullDetail) !Pu
 
     const conflict_files = try parseMergeTreeConflictFiles(allocator, result.stdout);
     errdefer freeConflictFiles(allocator, conflict_files);
+    if (conflict_files.len == 0) {
+        freeConflictFiles(allocator, conflict_files);
+        return .{ .kind = .unavailable };
+    }
     return .{
         .kind = .conflicts,
         .conflict_files = conflict_files,
@@ -2380,9 +2404,10 @@ fn sendMergeEditorError(
 }
 
 pub fn handlePullCommentPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
-    const action_owned = try issues_page.formValueOwned(allocator, form_body, "action");
-    defer if (action_owned) |value| allocator.free(value);
-    if (action_owned) |raw_action| {
+    const fields = try parseFormFieldsOwned(allocator, form_body);
+    defer freeFormFields(allocator, fields);
+
+    if (findFormField(fields, "action")) |raw_action| {
         const action = std.mem.trim(u8, raw_action, " \t\r\n");
         if (std.mem.eql(u8, action, "add-reaction") or std.mem.eql(u8, action, "remove-reaction")) {
             try index.ensureIndex(allocator, repo);
@@ -2392,20 +2417,17 @@ pub fn handlePullCommentPost(allocator: Allocator, repo: Repo, stream: std.net.S
             };
             defer allocator.free(pull_id);
 
-            const emoji_owned = (try issues_page.formValueOwned(allocator, form_body, "emoji")) orelse {
+            const raw_emoji = findFormField(fields, "emoji") orelse {
                 try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Emoji is required\n");
                 return;
             };
-            defer allocator.free(emoji_owned);
-            const emoji = std.mem.trim(u8, emoji_owned, " \t\r\n");
+            const emoji = std.mem.trim(u8, raw_emoji, " \t\r\n");
             if (emoji.len == 0) {
                 try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Emoji is required\n");
                 return;
             }
 
-            const target_kind_owned = (try issues_page.formValueOwned(allocator, form_body, "target_kind")) orelse try allocator.dupe(u8, "pull");
-            defer allocator.free(target_kind_owned);
-            const target_kind = std.mem.trim(u8, target_kind_owned, " \t\r\n");
+            const target_kind = std.mem.trim(u8, findFormField(fields, "target_kind") orelse "pull", " \t\r\n");
             const add = std.mem.eql(u8, action, "add-reaction");
             if (std.mem.eql(u8, target_kind, "pull")) {
                 createReactionEvent(allocator, "pull", pull_id, emoji, add) catch {
@@ -2413,12 +2435,11 @@ pub fn handlePullCommentPost(allocator: Allocator, repo: Repo, stream: std.net.S
                     return;
                 };
             } else if (std.mem.eql(u8, target_kind, "comment")) {
-                const target_ref_owned = (try issues_page.formValueOwned(allocator, form_body, "target_ref")) orelse {
+                const target_ref = findFormField(fields, "target_ref") orelse {
                     try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Comment target is required\n");
                     return;
                 };
-                defer allocator.free(target_ref_owned);
-                const comment_id = index.resolveCommentId(allocator, repo, target_ref_owned) catch {
+                const comment_id = index.resolveCommentId(allocator, repo, target_ref) catch {
                     try sendPlainResponse(allocator, stream, 404, "Not Found", "Comment not found\n");
                     return;
                 };
@@ -2445,9 +2466,8 @@ pub fn handlePullCommentPost(allocator: Allocator, repo: Repo, stream: std.net.S
         }
     }
 
-    const body_owned = (try issues_page.formValueOwned(allocator, form_body, "body")) orelse try allocator.dupe(u8, "");
-    defer allocator.free(body_owned);
-    const body = std.mem.trim(u8, body_owned, " \t\r\n");
+    const body_value = findFormField(fields, "body") orelse "";
+    const body = std.mem.trim(u8, body_value, " \t\r\n");
     if (body.len == 0) {
         try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Comment is required\n");
         return;
@@ -2460,9 +2480,7 @@ pub fn handlePullCommentPost(allocator: Allocator, repo: Repo, stream: std.net.S
     };
     defer allocator.free(pull_id);
 
-    const reply_ref_owned = try issues_page.formValueOwned(allocator, form_body, "reply_parent_ref");
-    defer if (reply_ref_owned) |value| allocator.free(value);
-    const reply_ref = if (reply_ref_owned) |value| std.mem.trim(u8, value, " \t\r\n") else "";
+    const reply_ref = std.mem.trim(u8, findFormField(fields, "reply_parent_ref") orelse "", " \t\r\n");
     if (reply_ref.len != 0) {
         const reply_parent_id = index.resolveCommentId(allocator, repo, reply_ref) catch {
             try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Reply target was not found\n");
@@ -2475,12 +2493,20 @@ pub fn handlePullCommentPost(allocator: Allocator, repo: Repo, stream: std.net.S
             try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Reply target is not in this pull request\n");
             return;
         }
-        createCommentReplyEvent(allocator, "pull", pull_id, reply_parent_id, parent.add_hash, body_owned) catch {
+        createCommentReplyEvent(allocator, "pull", pull_id, reply_parent_id, parent.add_hash, body_value) catch {
             try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not add the reply\n");
             return;
         };
     } else {
-        createCommentAddedEvent(allocator, "pull", pull_id, body_owned) catch {
+        const diff_context = parseDiffCommentContext(fields) catch {
+            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Diff comment target is invalid\n");
+            return;
+        };
+        const comment_body_owned = if (diff_context) |context| try formatDiffCommentBody(allocator, context, body_value) else null;
+        defer if (comment_body_owned) |value| allocator.free(value);
+        const comment_body = comment_body_owned orelse body_value;
+
+        createCommentAddedEvent(allocator, "pull", pull_id, comment_body) catch {
             try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not add the comment\n");
             return;
         };
@@ -2504,6 +2530,227 @@ fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const
         return try issues_page.percentDecodeForm(allocator, raw_value);
     }
     return null;
+}
+
+fn parseFormFieldsOwned(allocator: Allocator, body: []const u8) ![]FormField {
+    var fields: std.ArrayList(FormField) = .empty;
+    errdefer {
+        for (fields.items) |field| field.deinit(allocator);
+        fields.deinit(allocator);
+    }
+
+    var pairs = std.mem.splitScalar(u8, body, '&');
+    while (pairs.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
+        const raw_key = pair[0..eq];
+        const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
+        const key = try issues_page.percentDecodeForm(allocator, raw_key);
+        errdefer allocator.free(key);
+        const value = try issues_page.percentDecodeForm(allocator, raw_value);
+        errdefer allocator.free(value);
+        try fields.append(allocator, .{ .name = key, .value = value });
+    }
+    return try fields.toOwnedSlice(allocator);
+}
+
+fn freeFormFields(allocator: Allocator, fields: []FormField) void {
+    for (fields) |field| field.deinit(allocator);
+    allocator.free(fields);
+}
+
+fn findFormField(fields: []const FormField, name: []const u8) ?[]const u8 {
+    for (fields) |field| {
+        if (std.mem.eql(u8, field.name, name)) return field.value;
+    }
+    return null;
+}
+
+fn parseDiffCommentContext(fields: []const FormField) !?DiffCommentContext {
+    const raw_file = findFormField(fields, "diff_file");
+    const raw_side = findFormField(fields, "diff_side");
+    const raw_start = findFormField(fields, "diff_start");
+    const raw_end = findFormField(fields, "diff_end");
+
+    if (raw_file == null and raw_side == null and raw_start == null and raw_end == null) return null;
+    if (raw_file == null or raw_side == null or raw_start == null or raw_end == null) return error.InvalidDiffCommentContext;
+
+    const file = std.mem.trim(u8, raw_file.?, " \t\r\n");
+    if (file.len == 0 or file.len > 4096 or containsLineBreakOrNul(file)) return error.InvalidDiffCommentContext;
+
+    const side_name = std.mem.trim(u8, raw_side.?, " \t\r\n");
+    const side: DiffCommentSide = if (std.mem.eql(u8, side_name, "old"))
+        .old
+    else if (std.mem.eql(u8, side_name, "new"))
+        .new
+    else
+        return error.InvalidDiffCommentContext;
+
+    const start_line = parseDiffCommentLine(raw_start.?) orelse return error.InvalidDiffCommentContext;
+    const end_line = parseDiffCommentLine(raw_end.?) orelse return error.InvalidDiffCommentContext;
+    if (end_line < start_line) return error.InvalidDiffCommentContext;
+
+    return .{
+        .file = file,
+        .side = side,
+        .start_line = start_line,
+        .end_line = end_line,
+    };
+}
+
+fn parseDiffCommentLine(value: []const u8) ?usize {
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    const parsed = std.fmt.parseUnsigned(usize, trimmed, 10) catch return null;
+    return if (parsed == 0) null else parsed;
+}
+
+fn containsLineBreakOrNul(value: []const u8) bool {
+    return std.mem.indexOfAny(u8, value, "\r\n\x00") != null;
+}
+
+fn formatDiffCommentBody(allocator: Allocator, context: DiffCommentContext, body: []const u8) ![]u8 {
+    const side_label = switch (context.side) {
+        .old => "old",
+        .new => "new",
+    };
+    if (context.start_line == context.end_line) {
+        return std.fmt.allocPrint(
+            allocator,
+            "Review comment on `{s}` ({s} line {d}).\n\n{s}",
+            .{ context.file, side_label, context.start_line, body },
+        );
+    }
+    return std.fmt.allocPrint(
+        allocator,
+        "Review comment on `{s}` ({s} lines {d}-{d}).\n\n{s}",
+        .{ context.file, side_label, context.start_line, context.end_line, body },
+    );
+}
+
+fn contentHasConflictMarkers(content: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trimRight(u8, line, "\r");
+        if (std.mem.startsWith(u8, trimmed, "<<<<<<<")) return true;
+        if (std.mem.startsWith(u8, trimmed, "|||||||")) return true;
+        if (std.mem.eql(u8, trimmed, "=======")) return true;
+        if (std.mem.startsWith(u8, trimmed, ">>>>>>>")) return true;
+    }
+    return false;
+}
+
+fn commitPullConflictResolution(
+    allocator: Allocator,
+    repo: Repo,
+    detail: PullDetail,
+    raw_ref: []const u8,
+    resolved_files: []const ResolvedConflictFile,
+) ![]u8 {
+    if (resolved_files.len == 0) return error.NoConflictResolutions;
+    const update_ref = try localHeadUpdateRef(allocator, repo, detail.head_ref);
+    defer allocator.free(update_ref);
+
+    const old_head_raw = try gitCheckedAt(allocator, repo.root, &.{ "rev-parse", "--verify", update_ref }, 1024 * 1024);
+    defer allocator.free(old_head_raw);
+    const old_head = try allocator.dupe(u8, std.mem.trim(u8, old_head_raw, " \t\r\n"));
+    defer allocator.free(old_head);
+    if (old_head.len == 0) return error.NoLocalHeadBranch;
+
+    const tmp_worktree = try tempPath(allocator, "gitomi-merge-worktree");
+    defer allocator.free(tmp_worktree);
+    var worktree_created = false;
+    defer {
+        if (worktree_created) {
+            var remove_result = gitRunAt(allocator, repo.root, &.{ "worktree", "remove", "--force", tmp_worktree }, 1024 * 1024) catch null;
+            if (remove_result) |*result| result.deinit();
+        }
+        std.fs.deleteTreeAbsolute(tmp_worktree) catch {};
+    }
+
+    const worktree_add_raw = try gitCheckedAt(allocator, repo.root, &.{ "worktree", "add", "--detach", tmp_worktree, old_head }, git.max_git_output);
+    allocator.free(worktree_add_raw);
+    worktree_created = true;
+
+    var merge_result = try gitRunAt(allocator, tmp_worktree, &.{ "merge", "--no-ff", "--no-commit", detail.base_ref }, git.max_git_output);
+    defer merge_result.deinit();
+    if (merge_result.exitCode()) |code| {
+        if (code != 0 and code != 1) return error.MergePreparationFailed;
+    } else {
+        return error.MergePreparationFailed;
+    }
+
+    for (resolved_files) |file| {
+        if (!isSafeMergePath(file.path)) return error.UnsafeConflictPath;
+        const absolute_path = try std.fs.path.join(allocator, &.{ tmp_worktree, file.path });
+        defer allocator.free(absolute_path);
+        try writeFileBytes(absolute_path, file.content);
+        const add_raw = try gitCheckedAt(allocator, tmp_worktree, &.{ "add", "--", file.path }, git.max_git_output);
+        allocator.free(add_raw);
+    }
+
+    const unmerged_raw = try gitCheckedAt(allocator, tmp_worktree, &.{ "diff", "--name-only", "--diff-filter=U" }, git.max_git_output);
+    defer allocator.free(unmerged_raw);
+    if (std.mem.trim(u8, unmerged_raw, " \t\r\n").len != 0) return error.UnresolvedConflicts;
+
+    const message = try std.fmt.allocPrint(allocator, "Resolve merge conflicts for PR {s}", .{raw_ref});
+    defer allocator.free(message);
+    const commit_output = try gitCheckedAt(allocator, tmp_worktree, &.{ "commit", "-m", message }, git.max_git_output);
+    allocator.free(commit_output);
+
+    const commit_raw = try gitCheckedAt(allocator, tmp_worktree, &.{ "rev-parse", "HEAD" }, 1024 * 1024);
+    defer allocator.free(commit_raw);
+    const commit_oid = try allocator.dupe(u8, std.mem.trim(u8, commit_raw, " \t\r\n"));
+    errdefer allocator.free(commit_oid);
+    if (commit_oid.len == 0) return error.MergeCommitFailed;
+
+    const update_output = try gitCheckedAt(allocator, repo.root, &.{ "update-ref", update_ref, commit_oid, old_head }, git.max_git_output);
+    allocator.free(update_output);
+    return commit_oid;
+}
+
+fn localHeadUpdateRef(allocator: Allocator, repo: Repo, head_ref: []const u8) ![]u8 {
+    const symbolic_raw = gitCheckedAt(allocator, repo.root, &.{ "rev-parse", "--symbolic-full-name", "--verify", head_ref }, 1024 * 1024) catch |err| switch (err) {
+        error.GitFailed => return error.NoLocalHeadBranch,
+        else => return err,
+    };
+    defer allocator.free(symbolic_raw);
+    const symbolic = std.mem.trim(u8, symbolic_raw, " \t\r\n");
+    if (!std.mem.startsWith(u8, symbolic, "refs/heads/")) return error.NoLocalHeadBranch;
+    return allocator.dupe(u8, symbolic);
+}
+
+fn mergeCommitErrorMessage(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.NoLocalHeadBranch => "The pull request head must be a local branch before the web resolver can update it.",
+        error.NoConflictResolutions => "No conflict resolutions were submitted.",
+        error.UnsafeConflictPath => "A conflicting path is not safe to write from the web resolver.",
+        error.MergePreparationFailed => "Git could not prepare a merge worktree for this pull request.",
+        error.UnresolvedConflicts => "Git still reports unresolved conflicts after applying the submitted files.",
+        error.MergeCommitFailed => "Git could not create the merge-resolution commit.",
+        error.GitFailed => "Git could not commit the resolution. Check the repository state and signing configuration.",
+        else => null,
+    };
+}
+
+fn gitRunAt(allocator: Allocator, root: []const u8, git_args: []const []const u8, max_output_bytes: usize) !git.RunOutput {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.append(allocator, "git");
+    try argv.append(allocator, "-C");
+    try argv.append(allocator, root);
+    for (git_args) |arg| try argv.append(allocator, arg);
+    return runCommand(allocator, argv.items, null, max_output_bytes);
+}
+
+fn gitCheckedAt(allocator: Allocator, root: []const u8, git_args: []const []const u8, max_output_bytes: usize) ![]u8 {
+    var result = try gitRunAt(allocator, root, git_args, max_output_bytes);
+    if (result.exitCode() == 0) {
+        const stdout = result.stdout;
+        allocator.free(result.stderr);
+        return stdout;
+    }
+    result.deinit();
+    return error.GitFailed;
 }
 
 fn gitMaybe(allocator: Allocator, repo: Repo, git_args: []const []const u8, max_output_bytes: usize) !?[]u8 {
@@ -2548,4 +2795,49 @@ test "parse merge-tree conflict file names skips duplicates and empty records" {
     try std.testing.expectEqual(@as(usize, 2), files.len);
     try std.testing.expectEqualStrings("a.zig", files[0]);
     try std.testing.expectEqualStrings("b.zig", files[1]);
+}
+
+test "parse merge-tree conflict file names returns empty for git errors without paths" {
+    const files = try parseMergeTreeConflictFiles(std.testing.allocator, "");
+    defer freeConflictFiles(std.testing.allocator, files);
+
+    try std.testing.expectEqual(@as(usize, 0), files.len);
+}
+
+test "parse diff comment context from form fields" {
+    const fields = try parseFormFieldsOwned(std.testing.allocator, "diff_file=cli%2Fsrc%2Fpulls.zig&diff_side=new&diff_start=139&diff_end=151");
+    defer freeFormFields(std.testing.allocator, fields);
+
+    const context = (try parseDiffCommentContext(fields)).?;
+    try std.testing.expectEqualStrings("cli/src/pulls.zig", context.file);
+    try std.testing.expectEqual(DiffCommentSide.new, context.side);
+    try std.testing.expectEqual(@as(usize, 139), context.start_line);
+    try std.testing.expectEqual(@as(usize, 151), context.end_line);
+}
+
+test "format diff comment body includes file and line range" {
+    const body = try formatDiffCommentBody(std.testing.allocator, .{
+        .file = "cli/src/pulls.zig",
+        .side = .new,
+        .start_line = 139,
+        .end_line = 151,
+    }, "Looks good.");
+    defer std.testing.allocator.free(body);
+
+    try std.testing.expectEqualStrings(
+        "Review comment on `cli/src/pulls.zig` (new lines 139-151).\n\nLooks good.",
+        body,
+    );
+}
+
+test "content conflict marker detection" {
+    try std.testing.expect(contentHasConflictMarkers("a\n<<<<<<< head\nb\n=======\nc\n>>>>>>> main\n"));
+    try std.testing.expect(!contentHasConflictMarkers("const divider = \"=======\";\n"));
+}
+
+test "merge editor path safety" {
+    try std.testing.expect(isSafeMergePath("src/main.zig"));
+    try std.testing.expect(!isSafeMergePath("../main.zig"));
+    try std.testing.expect(!isSafeMergePath("/tmp/main.zig"));
+    try std.testing.expect(!isSafeMergePath("src/.git/config"));
 }

@@ -1487,6 +1487,273 @@ main.page-code:has(.root-page-grid) {
   border-left: 1.6px solid currentColor;
   border-bottom: 1.6px solid currentColor;
 }
+.merge-editor {
+  display: grid;
+  min-height: calc(100vh - var(--sticky-top));
+  margin: -24px;
+  background: var(--bg);
+}
+.merge-editor-head {
+  position: sticky;
+  top: var(--sticky-top);
+  z-index: 7;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 16px 20px;
+  background: var(--panel-strong);
+  border-bottom: 1px solid var(--border);
+}
+.merge-editor-title {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+.merge-editor-title h1 {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.25;
+}
+.merge-editor-title p {
+  margin: 4px 0 0;
+  color: var(--muted);
+}
+.merge-editor-title code {
+  color: var(--text);
+  background: color-mix(in srgb, var(--blue) 8%, var(--panel));
+}
+.merge-editor-back {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  color: var(--muted);
+  border: 1px solid transparent;
+  border-radius: 6px;
+}
+.merge-editor-back::before {
+  content: "";
+  width: 18px;
+  height: 18px;
+  background: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m15 18-6-6 6-6'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m15 18-6-6 6-6'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+.merge-editor-back:hover {
+  color: var(--text);
+  background: var(--panel);
+  border-color: var(--border);
+  text-decoration: none;
+}
+.merge-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.merge-editor-count {
+  margin-right: 6px;
+  color: var(--red);
+  font-weight: 700;
+}
+.merge-editor-step {
+  min-width: 48px;
+}
+.merge-editor-layout {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  min-height: 0;
+}
+.merge-editor-sidebar {
+  position: sticky;
+  top: calc(var(--sticky-top) + 73px);
+  align-self: start;
+  height: calc(100vh - var(--sticky-top) - 73px);
+  overflow: auto;
+  background: var(--subtle);
+  border-right: 1px solid var(--border);
+}
+.merge-editor-sidebar > strong {
+  display: block;
+  padding: 16px 18px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+.merge-editor-sidebar nav {
+  display: grid;
+}
+.merge-editor-file-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 14px 18px;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+}
+.merge-editor-file-link span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.merge-editor-file-link:hover {
+  background: var(--panel-strong);
+  text-decoration: none;
+}
+.merge-editor-file-link.is-resolved {
+  color: var(--muted);
+}
+.merge-editor-file-link.is-resolved .pull-conflict-file-icon {
+  color: var(--green);
+}
+.merge-editor-file-link.is-unsupported {
+  color: var(--muted);
+}
+.merge-editor-files {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  min-width: 0;
+  padding: 16px;
+}
+.merge-editor-flash {
+  margin: 16px 16px 0;
+}
+.merge-file-editor {
+  overflow: hidden;
+  scroll-margin-top: calc(var(--sticky-top) + 90px);
+}
+.merge-file-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 14px;
+  background: var(--panel-strong);
+  border-bottom: 1px solid var(--border);
+}
+.merge-file-head > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.merge-file-head strong {
+  min-width: 0;
+  font: 600 13px/1.4 var(--mono);
+  overflow-wrap: anywhere;
+}
+.merge-file-status {
+  flex: 0 0 auto;
+  color: var(--red);
+  font-size: 12px;
+  font-weight: 700;
+}
+.merge-file-editor.is-resolved .merge-file-status {
+  color: var(--green);
+}
+.merge-content-field {
+  display: none;
+}
+.merge-code {
+  overflow-x: auto;
+  background: var(--panel);
+  font: 12px/1.45 var(--mono);
+}
+.merge-line {
+  display: grid;
+  grid-template-columns: 64px minmax(max-content, 1fr);
+  min-height: 20px;
+  white-space: pre;
+}
+.merge-line-number {
+  padding: 0 10px;
+  color: var(--muted);
+  background: var(--panel-strong);
+  border-right: 1px solid var(--border);
+  text-align: right;
+  user-select: none;
+}
+.merge-line code {
+  display: block;
+  min-width: max-content;
+  padding: 0 12px;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  font: inherit;
+  outline: 0;
+  white-space: pre;
+}
+.merge-line code[contenteditable="true"]:focus {
+  background: color-mix(in srgb, var(--blue) 9%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--blue) 52%, transparent);
+}
+.merge-current {
+  background: var(--red-bg);
+}
+.merge-incoming {
+  background: var(--green-bg);
+}
+.merge-base {
+  color: var(--muted);
+  background: var(--warning-bg);
+}
+.merge-marker {
+  color: var(--muted);
+  font-weight: 700;
+}
+.merge-marker .merge-line-number,
+.merge-base .merge-line-number {
+  background: color-mix(in srgb, var(--warning-bg) 70%, var(--panel-strong));
+}
+.merge-current .merge-line-number {
+  background: color-mix(in srgb, var(--red-bg) 82%, var(--panel-strong));
+}
+.merge-incoming .merge-line-number {
+  background: color-mix(in srgb, var(--green-bg) 82%, var(--panel-strong));
+}
+.merge-resolved {
+  background: color-mix(in srgb, var(--green-bg) 36%, var(--panel));
+}
+.merge-conflict-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: max-content;
+  padding: 8px 12px 8px 76px;
+  color: var(--muted);
+  background: var(--panel-strong);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  font: 600 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+.merge-conflict-actions button {
+  padding: 0;
+  color: var(--blue);
+  background: transparent;
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+}
+.merge-conflict-actions button:hover {
+  text-decoration: underline;
+}
+.merge-unsupported-message {
+  padding: 18px;
+}
+.merge-unsupported-message p {
+  margin: 4px 0 0;
+  color: var(--muted);
+}
+.merge-editor-empty {
+  max-width: 760px;
+  margin: 40px auto;
+}
 .pull-sidebar-gear {
   display: inline-grid;
   place-items: center;
@@ -6157,6 +6424,7 @@ main.page-code:has(.root-code-toolbar) .repo-actions {
   font: 12px/1.45 var(--mono);
 }
 .diff-row {
+  position: relative;
   display: grid;
   grid-template-columns: 56px 56px minmax(max-content, 1fr);
   min-height: 19px;
@@ -6169,6 +6437,9 @@ main.page-code:has(.root-code-toolbar) .repo-actions {
   border-right: 1px solid var(--border);
   text-align: right;
   user-select: none;
+}
+[data-diff-review-action] .diff-row:not(.hunk):not(.meta):not(.diff-expand) .diff-num {
+  cursor: crosshair;
 }
 .diff-code {
   display: block;
@@ -6204,6 +6475,81 @@ main.page-code:has(.root-code-toolbar) .repo-actions {
 }
 .diff-row.del .diff-num {
   background: color-mix(in srgb, var(--red-bg) 82%, var(--panel-strong));
+}
+.diff-row.is-range-selected {
+  background: color-mix(in srgb, var(--blue) 14%, var(--panel));
+}
+.diff-row.is-range-selected .diff-code {
+  background: color-mix(in srgb, var(--blue) 10%, transparent);
+}
+.diff-row.is-range-side-old .diff-num.old,
+.diff-row.is-range-side-new .diff-num.new {
+  color: var(--text);
+  background: color-mix(in srgb, var(--blue) 18%, var(--panel-strong));
+}
+.diff-row.is-range-boundary .diff-num.is-range-selected {
+  box-shadow: inset 0 0 0 1px var(--blue);
+}
+.diff-range-button {
+  position: fixed;
+  z-index: 60;
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: #ffffff;
+  background: var(--blue);
+  border: 1px solid color-mix(in srgb, var(--blue) 72%, #000000);
+  border-radius: 6px;
+  box-shadow: var(--shadow);
+  font: 800 18px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  cursor: pointer;
+}
+.diff-range-button:hover,
+.diff-range-button:focus-visible {
+  background: color-mix(in srgb, var(--blue) 86%, #ffffff);
+}
+.diff-review-row {
+  min-height: 0;
+  white-space: normal;
+  background: color-mix(in srgb, var(--blue) 8%, var(--panel));
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.diff-review-row .diff-num {
+  min-height: 100%;
+  background: color-mix(in srgb, var(--blue) 12%, var(--panel-strong));
+}
+.diff-review-form {
+  display: grid;
+  gap: 8px;
+  width: 620px;
+  max-width: calc(100vw - 150px);
+  margin: 8px;
+  padding: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  box-shadow: var(--shadow);
+}
+.diff-review-context {
+  margin: 0;
+  color: var(--muted);
+  font: 700 12px/1.4 var(--mono);
+  overflow-wrap: anywhere;
+}
+.diff-review-form textarea {
+  width: 100%;
+  min-height: 96px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  resize: vertical;
+}
+.diff-review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
 }
 .diff-expand {
   min-height: 26px;
@@ -6903,6 +7249,46 @@ textarea {
   .pull-revert-button,
   .pull-mergeability-action {
     align-self: flex-start;
+  }
+  .merge-editor {
+    margin: -12px;
+  }
+  .merge-editor-head {
+    position: static;
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .merge-editor-title {
+    align-items: flex-start;
+  }
+  .merge-editor-title h1 {
+    font-size: 19px;
+  }
+  .merge-editor-actions {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+  .merge-editor-count {
+    flex-basis: 100%;
+  }
+  .merge-editor-layout {
+    grid-template-columns: 1fr;
+  }
+  .merge-editor-sidebar {
+    position: static;
+    height: auto;
+    max-height: 220px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .merge-editor-files {
+    padding: 12px;
+  }
+  .merge-conflict-actions {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
+    padding-left: 12px;
   }
   .issue-conversation-layout {
     grid-template-columns: 1fr;
