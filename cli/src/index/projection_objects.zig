@@ -2,8 +2,10 @@ const std = @import("std");
 
 const event_mod = @import("../event.zig");
 const git = @import("../git.zig");
+const json_writer = @import("../json_writer.zig");
 const ordering = @import("projection_ordering.zig");
 const sqlite_db = @import("sqlite_db.zig");
+const util = @import("../util.zig");
 
 const Allocator = std.mem.Allocator;
 const SqliteDb = sqlite_db.SqliteDb;
@@ -14,6 +16,9 @@ const eventWins = ordering.eventWins;
 const max_projected_labels: usize = 256;
 const max_projected_participants: usize = 128;
 const max_projected_project_columns: usize = 128;
+const max_projected_project_fields: usize = 128;
+const max_projected_project_field_options: usize = 512;
+const max_projected_project_views: usize = 64;
 const max_projected_reaction_emojis: usize = 64;
 const max_projected_reaction_actors: usize = 1024;
 
@@ -94,11 +99,25 @@ pub fn applyIssueProjection(allocator: Allocator, db: *SqliteDb, event_hash: []c
         const project = event_mod.jsonString(payload.get("project")) orelse return "invalid_event_envelope";
         const column = event_mod.jsonString(payload.get("column")) orelse return "invalid_event_envelope";
         try insertIssueProject(db, envelope.object_id, project, column, event_hash);
+        if (try projectIdFromPayloadOrName(allocator, db, payload, project)) |project_id| {
+            defer allocator.free(project_id);
+            try insertProjectMembership(db, project_id, envelope.object_id, event_hash, envelope);
+            try setStatusFieldValueIfPresent(allocator, db, project_id, envelope.object_id, column, event_hash, envelope);
+        }
         if (try issueCollectionLimitRejection(db, envelope.object_id)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "issue.project_removed")) {
         const project = event_mod.jsonString(payload.get("project")) orelse return "invalid_event_envelope";
         const column = event_mod.jsonString(payload.get("column")) orelse return "invalid_event_envelope";
         try deleteIssueProject(allocator, db, envelope.object_id, project, column, event_hash);
+        if (try projectIdFromPayloadOrName(allocator, db, payload, project)) |project_id| {
+            defer allocator.free(project_id);
+            try deleteProjectMembership(allocator, db, project_id, envelope.object_id, event_hash);
+            try clearStatusFieldValueIfPresent(allocator, db, project_id, envelope.object_id, event_hash);
+        }
+    } else if (std.mem.eql(u8, envelope.event_type, "issue.project_field_set")) {
+        if (try applyIssueProjectFieldSet(allocator, db, envelope.object_id, payload, event_hash, envelope)) |reason| return reason;
+    } else if (std.mem.eql(u8, envelope.event_type, "issue.project_field_cleared")) {
+        if (try applyIssueProjectFieldClear(allocator, db, envelope.object_id, payload, event_hash)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "issue.reaction_added")) {
         const emoji = event_mod.jsonString(payload.get("emoji")) orelse return "invalid_event_envelope";
         try insertReaction(db, "issue", envelope.object_id, emoji, envelope.actor_principal, event_hash, envelope.occurred_at);
@@ -463,10 +482,12 @@ pub fn applyProjectProjection(allocator: Allocator, db: *SqliteDb, event_hash: [
     if (std.mem.eql(u8, envelope.event_type, "project.created")) {
         if (!(try creationEventWins(db, "project.created", envelope.object_id, event_hash))) return "duplicate_object_id";
         const name = event_mod.jsonString(payload.get("name")) orelse return "invalid_event_envelope";
+        const slug = try projectSlugForCreate(allocator, db, payload, envelope.object_id, name);
+        defer allocator.free(slug);
         const description = event_mod.jsonString(payload.get("description")) orelse "";
         const state = event_mod.jsonString(payload.get("state")) orelse "open";
-        try insertProjectCreated(db, event_hash, envelope, name, description, state);
-        try insertPayloadProjectColumns(db, payload, envelope.object_id, event_hash);
+        try insertProjectCreated(db, event_hash, envelope, name, slug, description, state);
+        try insertPayloadProjectColumns(allocator, db, payload, envelope.object_id, event_hash);
         return try projectColumnLimitRejection(db, envelope.object_id);
     }
 
@@ -484,11 +505,35 @@ pub fn applyProjectProjection(allocator: Allocator, db: *SqliteDb, event_hash: [
         }
     } else if (std.mem.eql(u8, envelope.event_type, "project.column_added")) {
         const column = event_mod.jsonString(payload.get("column")) orelse return "invalid_event_envelope";
-        try insertProjectColumn(db, envelope.object_id, column, event_hash);
+        const column_ref = try projectColumnRefForAdd(allocator, db, payload, envelope.object_id, column);
+        defer allocator.free(column_ref);
+        try insertProjectColumn(db, envelope.object_id, column, column_ref, event_hash);
         if (try projectColumnLimitRejection(db, envelope.object_id)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "project.column_removed")) {
         const column = event_mod.jsonString(payload.get("column")) orelse return "invalid_event_envelope";
         try deleteProjectColumn(allocator, db, envelope.object_id, column, event_hash);
+    } else if (std.mem.eql(u8, envelope.event_type, "project.field_created")) {
+        if (try applyProjectFieldCreated(allocator, db, payload, envelope.object_id, event_hash, envelope)) |reason| return reason;
+    } else if (std.mem.eql(u8, envelope.event_type, "project.field_updated")) {
+        if (try applyProjectFieldUpdated(allocator, db, payload, envelope.object_id, event_hash, envelope)) |reason| return reason;
+    } else if (std.mem.eql(u8, envelope.event_type, "project.field_removed")) {
+        const field_id = event_mod.jsonString(payload.get("field_id")) orelse return "invalid_event_envelope";
+        try updateProjectFieldState(allocator, db, envelope.object_id, field_id, "removed", event_hash, envelope);
+    } else if (std.mem.eql(u8, envelope.event_type, "project.field_option_added")) {
+        if (try applyProjectFieldOptionAdded(allocator, db, payload, envelope.object_id, event_hash, envelope)) |reason| return reason;
+    } else if (std.mem.eql(u8, envelope.event_type, "project.field_option_updated")) {
+        if (try applyProjectFieldOptionUpdated(allocator, db, payload, envelope.object_id, event_hash, envelope)) |reason| return reason;
+    } else if (std.mem.eql(u8, envelope.event_type, "project.field_option_removed")) {
+        const field_id = event_mod.jsonString(payload.get("field_id")) orelse return "invalid_event_envelope";
+        const option_id = event_mod.jsonString(payload.get("option_id")) orelse return "invalid_event_envelope";
+        try updateProjectFieldOptionState(allocator, db, envelope.object_id, field_id, option_id, "removed", event_hash, envelope);
+    } else if (std.mem.eql(u8, envelope.event_type, "project.view_created")) {
+        if (try applyProjectViewCreated(allocator, db, payload, envelope.object_id, event_hash, envelope)) |reason| return reason;
+    } else if (std.mem.eql(u8, envelope.event_type, "project.view_updated")) {
+        if (try applyProjectViewUpdated(allocator, db, payload, envelope.object_id, event_hash, envelope)) |reason| return reason;
+    } else if (std.mem.eql(u8, envelope.event_type, "project.view_removed")) {
+        const view_id = event_mod.jsonString(payload.get("view_id")) orelse return "invalid_event_envelope";
+        try updateProjectViewState(allocator, db, envelope.object_id, view_id, "removed", event_hash, envelope);
     }
     return null;
 }
@@ -539,33 +584,34 @@ pub fn applyMilestoneProjection(allocator: Allocator, db: *SqliteDb, event_hash:
     return null;
 }
 
-fn insertProjectCreated(db: *SqliteDb, event_hash: []const u8, envelope: ValidatedEnvelope, name: []const u8, description: []const u8, state: []const u8) !void {
+fn insertProjectCreated(db: *SqliteDb, event_hash: []const u8, envelope: ValidatedEnvelope, name: []const u8, slug: []const u8, description: []const u8, state: []const u8) !void {
     var stmt = try db.prepare(
         \\INSERT OR IGNORE INTO projects(
         \\  id,
-        \\  name, name_occurred_at, name_actor_principal, name_event_hash,
+        \\  name, slug, name_occurred_at, name_actor_principal, name_event_hash,
         \\  description, description_occurred_at, description_actor_principal, description_event_hash,
         \\  state, state_occurred_at, state_actor_principal, state_event_hash,
         \\  created_at, author_principal, author_device
-        \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     );
     defer stmt.deinit();
     try stmt.bindText(1, envelope.object_id);
     try stmt.bindText(2, name);
-    try stmt.bindText(3, envelope.occurred_at);
-    try stmt.bindText(4, envelope.actor_principal);
-    try stmt.bindText(5, event_hash);
-    try stmt.bindText(6, description);
-    try stmt.bindText(7, envelope.occurred_at);
-    try stmt.bindText(8, envelope.actor_principal);
-    try stmt.bindText(9, event_hash);
-    try stmt.bindText(10, state);
-    try stmt.bindText(11, envelope.occurred_at);
-    try stmt.bindText(12, envelope.actor_principal);
-    try stmt.bindText(13, event_hash);
-    try stmt.bindText(14, envelope.occurred_at);
-    try stmt.bindText(15, envelope.actor_principal);
-    try stmt.bindText(16, envelope.actor_device);
+    try stmt.bindText(3, slug);
+    try stmt.bindText(4, envelope.occurred_at);
+    try stmt.bindText(5, envelope.actor_principal);
+    try stmt.bindText(6, event_hash);
+    try stmt.bindText(7, description);
+    try stmt.bindText(8, envelope.occurred_at);
+    try stmt.bindText(9, envelope.actor_principal);
+    try stmt.bindText(10, event_hash);
+    try stmt.bindText(11, state);
+    try stmt.bindText(12, envelope.occurred_at);
+    try stmt.bindText(13, envelope.actor_principal);
+    try stmt.bindText(14, event_hash);
+    try stmt.bindText(15, envelope.occurred_at);
+    try stmt.bindText(16, envelope.actor_principal);
+    try stmt.bindText(17, envelope.actor_device);
     try stmt.stepDone();
 }
 
@@ -611,7 +657,7 @@ fn updateProjectScalar(
     try update.stepDone();
 }
 
-fn insertPayloadProjectColumns(db: *SqliteDb, payload: std.json.ObjectMap, project_id: []const u8, event_hash: []const u8) !void {
+fn insertPayloadProjectColumns(allocator: Allocator, db: *SqliteDb, payload: std.json.ObjectMap, project_id: []const u8, event_hash: []const u8) !void {
     const value = payload.get("columns") orelse return;
     const array = switch (value) {
         .array => |items| items,
@@ -619,17 +665,20 @@ fn insertPayloadProjectColumns(db: *SqliteDb, payload: std.json.ObjectMap, proje
     };
     for (array.items) |item| {
         if (item != .string) continue;
-        try insertProjectColumn(db, project_id, item.string, event_hash);
+        const column_ref = try projectColumnRefForName(allocator, db, project_id, item.string);
+        defer allocator.free(column_ref);
+        try insertProjectColumn(db, project_id, item.string, column_ref, event_hash);
     }
 }
 
-fn insertProjectColumn(db: *SqliteDb, project_id: []const u8, column: []const u8, event_hash: []const u8) !void {
+fn insertProjectColumn(db: *SqliteDb, project_id: []const u8, column: []const u8, column_ref: []const u8, event_hash: []const u8) !void {
     if (std.mem.trim(u8, column, " \t\r\n").len == 0) return;
-    var stmt = try db.prepare("INSERT OR IGNORE INTO project_columns(project_id, column_name, add_hash) VALUES (?, ?, ?)");
+    var stmt = try db.prepare("INSERT OR IGNORE INTO project_columns(project_id, column_name, column_ref, add_hash) VALUES (?, ?, ?, ?)");
     defer stmt.deinit();
     try stmt.bindText(1, project_id);
     try stmt.bindText(2, column);
-    try stmt.bindText(3, event_hash);
+    try stmt.bindText(3, column_ref);
+    try stmt.bindText(4, event_hash);
     try stmt.stepDone();
 }
 
@@ -656,6 +705,806 @@ fn projectColumnLimitRejection(db: *SqliteDb, project_id: []const u8) !?[]const 
         return "collection_limit_exceeded";
     }
     return null;
+}
+
+fn projectFieldLimitRejection(db: *SqliteDb, project_id: []const u8) !?[]const u8 {
+    if (try collectionCountExceeds(db, "SELECT COUNT(*) FROM project_fields WHERE project_id = ? AND state != 'removed'", project_id, max_projected_project_fields)) {
+        return "collection_limit_exceeded";
+    }
+    return null;
+}
+
+fn projectFieldOptionLimitRejection(db: *SqliteDb, field_id: []const u8) !?[]const u8 {
+    if (try collectionCountExceeds(db, "SELECT COUNT(*) FROM project_field_options WHERE field_id = ? AND state != 'removed'", field_id, max_projected_project_field_options)) {
+        return "collection_limit_exceeded";
+    }
+    return null;
+}
+
+fn projectViewLimitRejection(db: *SqliteDb, project_id: []const u8) !?[]const u8 {
+    if (try collectionCountExceeds(db, "SELECT COUNT(*) FROM project_views WHERE project_id = ? AND state != 'removed'", project_id, max_projected_project_views)) {
+        return "collection_limit_exceeded";
+    }
+    return null;
+}
+
+fn projectSlugForCreate(allocator: Allocator, db: *SqliteDb, payload: std.json.ObjectMap, project_id: []const u8, name: []const u8) ![]u8 {
+    const raw_slug = event_mod.jsonString(payload.get("slug")) orelse name;
+    const sanitized = try util.sanitizeRefSegment(allocator, raw_slug);
+    defer allocator.free(sanitized);
+    const slug = if (sanitized.len == 0)
+        try std.fmt.allocPrint(allocator, "project-{s}", .{project_id[0..@min(project_id.len, 7)]})
+    else
+        try allocator.dupe(u8, sanitized);
+    defer allocator.free(slug);
+
+    if (!(try projectSlugExistsForOther(db, slug, project_id))) return try allocator.dupe(u8, slug);
+    return try std.fmt.allocPrint(allocator, "{s}-{s}", .{ slug, project_id[0..@min(project_id.len, 7)] });
+}
+
+fn projectSlugExistsForOther(db: *SqliteDb, slug: []const u8, project_id: []const u8) !bool {
+    var stmt = try db.prepare("SELECT 1 FROM projects WHERE slug = ? AND id != ? LIMIT 1");
+    defer stmt.deinit();
+    try stmt.bindText(1, slug);
+    try stmt.bindText(2, project_id);
+    return try stmt.step();
+}
+
+fn projectColumnRefForAdd(allocator: Allocator, db: *SqliteDb, payload: std.json.ObjectMap, project_id: []const u8, column: []const u8) ![]u8 {
+    if (event_mod.jsonString(payload.get("column_ref"))) |column_ref| {
+        const sanitized = try util.sanitizeRefSegment(allocator, column_ref);
+        if (sanitized.len != 0) return sanitized;
+        allocator.free(sanitized);
+    }
+    return try projectColumnRefForName(allocator, db, project_id, column);
+}
+
+fn projectColumnRefForName(allocator: Allocator, db: *SqliteDb, project_id: []const u8, column: []const u8) ![]u8 {
+    const sanitized = try util.sanitizeRefSegment(allocator, column);
+    defer allocator.free(sanitized);
+    const base = if (sanitized.len == 0) try allocator.dupe(u8, "column") else try allocator.dupe(u8, sanitized);
+    defer allocator.free(base);
+
+    if (!(try projectColumnRefExists(db, project_id, base))) return try allocator.dupe(u8, base);
+    var suffix: usize = 2;
+    while (suffix < 1000) : (suffix += 1) {
+        const candidate = try std.fmt.allocPrint(allocator, "{s}-{d}", .{ base, suffix });
+        errdefer allocator.free(candidate);
+        if (!(try projectColumnRefExists(db, project_id, candidate))) return candidate;
+        allocator.free(candidate);
+    }
+    return try std.fmt.allocPrint(allocator, "{s}-{d}", .{ base, suffix });
+}
+
+fn projectColumnRefExists(db: *SqliteDb, project_id: []const u8, column_ref: []const u8) !bool {
+    var stmt = try db.prepare("SELECT 1 FROM project_columns WHERE project_id = ? AND column_ref = ? LIMIT 1");
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    try stmt.bindText(2, column_ref);
+    return try stmt.step();
+}
+
+fn applyProjectFieldCreated(
+    allocator: Allocator,
+    db: *SqliteDb,
+    payload: std.json.ObjectMap,
+    project_id: []const u8,
+    event_hash: []const u8,
+    envelope: ValidatedEnvelope,
+) !?[]const u8 {
+    const field_id = event_mod.jsonString(payload.get("field_id")) orelse return "invalid_event_envelope";
+    const key = event_mod.jsonString(payload.get("key")) orelse return "invalid_event_envelope";
+    const name = event_mod.jsonString(payload.get("name")) orelse return "invalid_event_envelope";
+    const field_type = event_mod.jsonString(payload.get("type")) orelse return "invalid_event_envelope";
+    const position = jsonInteger(payload.get("position")) orelse 0;
+    const required = jsonBool(payload.get("required")) orelse false;
+    const default_value_json = try jsonValueOrDefaultOwned(allocator, payload.get("default_value"), "null");
+    defer allocator.free(default_value_json);
+    const state = event_mod.jsonString(payload.get("state")) orelse "active";
+
+    var stmt = try db.prepare(
+        \\INSERT OR IGNORE INTO project_fields(
+        \\  id, project_id, key, name, field_type, position, required, default_value_json,
+        \\  state, created_at, actor_principal, event_hash
+        \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, field_id);
+    try stmt.bindText(2, project_id);
+    try stmt.bindText(3, key);
+    try stmt.bindText(4, name);
+    try stmt.bindText(5, field_type);
+    try stmt.bindInt64(6, position);
+    try stmt.bindInt64(7, if (required) 1 else 0);
+    try stmt.bindText(8, default_value_json);
+    try stmt.bindText(9, state);
+    try stmt.bindText(10, envelope.occurred_at);
+    try stmt.bindText(11, envelope.actor_principal);
+    try stmt.bindText(12, event_hash);
+    try stmt.stepDone();
+    return try projectFieldLimitRejection(db, project_id);
+}
+
+fn applyProjectFieldUpdated(
+    allocator: Allocator,
+    db: *SqliteDb,
+    payload: std.json.ObjectMap,
+    project_id: []const u8,
+    event_hash: []const u8,
+    envelope: ValidatedEnvelope,
+) !?[]const u8 {
+    const field_id = event_mod.jsonString(payload.get("field_id")) orelse return "invalid_event_envelope";
+    var current = try loadProjectField(allocator, db, project_id, field_id) orelse return "object_not_created";
+    defer current.deinit(allocator);
+    if (!(try eventWins(allocator, event_hash, current.event_hash))) return null;
+
+    const key = event_mod.jsonString(payload.get("key")) orelse current.key;
+    const name = event_mod.jsonString(payload.get("name")) orelse current.name;
+    const field_type = event_mod.jsonString(payload.get("type")) orelse current.field_type;
+    const position = jsonInteger(payload.get("position")) orelse current.position;
+    const required = jsonBool(payload.get("required")) orelse current.required;
+    const default_value_json = try jsonValueOrDefaultOwned(allocator, payload.get("default_value"), current.default_value_json);
+    defer allocator.free(default_value_json);
+    const state = event_mod.jsonString(payload.get("state")) orelse current.state;
+
+    var stmt = try db.prepare(
+        \\UPDATE project_fields
+        \\SET key = ?, name = ?, field_type = ?, position = ?, required = ?, default_value_json = ?,
+        \\    state = ?, actor_principal = ?, event_hash = ?
+        \\WHERE id = ? AND project_id = ?
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, key);
+    try stmt.bindText(2, name);
+    try stmt.bindText(3, field_type);
+    try stmt.bindInt64(4, position);
+    try stmt.bindInt64(5, if (required) 1 else 0);
+    try stmt.bindText(6, default_value_json);
+    try stmt.bindText(7, state);
+    try stmt.bindText(8, envelope.actor_principal);
+    try stmt.bindText(9, event_hash);
+    try stmt.bindText(10, field_id);
+    try stmt.bindText(11, project_id);
+    try stmt.stepDone();
+    return try projectFieldLimitRejection(db, project_id);
+}
+
+fn updateProjectFieldState(allocator: Allocator, db: *SqliteDb, project_id: []const u8, field_id: []const u8, state: []const u8, event_hash: []const u8, envelope: ValidatedEnvelope) !void {
+    var current = try loadProjectField(allocator, db, project_id, field_id) orelse return;
+    defer current.deinit(allocator);
+    if (!(try eventWins(allocator, event_hash, current.event_hash))) return;
+    var stmt = try db.prepare("UPDATE project_fields SET state = ?, actor_principal = ?, event_hash = ? WHERE id = ? AND project_id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, state);
+    try stmt.bindText(2, envelope.actor_principal);
+    try stmt.bindText(3, event_hash);
+    try stmt.bindText(4, field_id);
+    try stmt.bindText(5, project_id);
+    try stmt.stepDone();
+}
+
+const ProjectFieldRow = struct {
+    key: []u8,
+    name: []u8,
+    field_type: []u8,
+    position: i64,
+    required: bool,
+    default_value_json: []u8,
+    state: []u8,
+    event_hash: []u8,
+
+    fn deinit(self: *ProjectFieldRow, allocator: Allocator) void {
+        allocator.free(self.key);
+        allocator.free(self.name);
+        allocator.free(self.field_type);
+        allocator.free(self.default_value_json);
+        allocator.free(self.state);
+        allocator.free(self.event_hash);
+    }
+};
+
+fn loadProjectField(allocator: Allocator, db: *SqliteDb, project_id: []const u8, field_id: []const u8) !?ProjectFieldRow {
+    var stmt = try db.prepare(
+        \\SELECT key, name, field_type, position, required, default_value_json, state, event_hash
+        \\FROM project_fields
+        \\WHERE project_id = ? AND id = ?
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    try stmt.bindText(2, field_id);
+    if (!(try stmt.step())) return null;
+    return .{
+        .key = try stmt.columnTextDup(allocator, 0),
+        .name = try stmt.columnTextDup(allocator, 1),
+        .field_type = try stmt.columnTextDup(allocator, 2),
+        .position = stmt.columnInt64(3),
+        .required = stmt.columnInt64(4) != 0,
+        .default_value_json = try stmt.columnTextDup(allocator, 5),
+        .state = try stmt.columnTextDup(allocator, 6),
+        .event_hash = try stmt.columnTextDup(allocator, 7),
+    };
+}
+
+fn applyProjectFieldOptionAdded(
+    allocator: Allocator,
+    db: *SqliteDb,
+    payload: std.json.ObjectMap,
+    project_id: []const u8,
+    event_hash: []const u8,
+    envelope: ValidatedEnvelope,
+) !?[]const u8 {
+    const field_id = event_mod.jsonString(payload.get("field_id")) orelse return "invalid_event_envelope";
+    if (!(try projectFieldExists(db, project_id, field_id))) return "object_not_created";
+    const option_id = event_mod.jsonString(payload.get("option_id")) orelse return "invalid_event_envelope";
+    const name = event_mod.jsonString(payload.get("name")) orelse return "invalid_event_envelope";
+    const color = event_mod.jsonString(payload.get("color")) orelse "";
+    const position = jsonInteger(payload.get("position")) orelse 0;
+    const state = event_mod.jsonString(payload.get("state")) orelse "active";
+
+    var stmt = try db.prepare(
+        \\INSERT OR IGNORE INTO project_field_options(
+        \\  id, project_id, field_id, name, color, position, state, created_at, actor_principal, event_hash
+        \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, option_id);
+    try stmt.bindText(2, project_id);
+    try stmt.bindText(3, field_id);
+    try stmt.bindText(4, name);
+    try stmt.bindText(5, color);
+    try stmt.bindInt64(6, position);
+    try stmt.bindText(7, state);
+    try stmt.bindText(8, envelope.occurred_at);
+    try stmt.bindText(9, envelope.actor_principal);
+    try stmt.bindText(10, event_hash);
+    try stmt.stepDone();
+    return try projectFieldOptionLimitRejection(db, field_id);
+}
+
+fn applyProjectFieldOptionUpdated(
+    allocator: Allocator,
+    db: *SqliteDb,
+    payload: std.json.ObjectMap,
+    project_id: []const u8,
+    event_hash: []const u8,
+    envelope: ValidatedEnvelope,
+) !?[]const u8 {
+    const field_id = event_mod.jsonString(payload.get("field_id")) orelse return "invalid_event_envelope";
+    const option_id = event_mod.jsonString(payload.get("option_id")) orelse return "invalid_event_envelope";
+    var current = try loadProjectFieldOption(allocator, db, project_id, field_id, option_id) orelse return "object_not_created";
+    defer current.deinit(allocator);
+    if (!(try eventWins(allocator, event_hash, current.event_hash))) return null;
+    const name = event_mod.jsonString(payload.get("name")) orelse current.name;
+    const color = event_mod.jsonString(payload.get("color")) orelse current.color;
+    const position = jsonInteger(payload.get("position")) orelse current.position;
+    const state = event_mod.jsonString(payload.get("state")) orelse current.state;
+
+    var stmt = try db.prepare(
+        \\UPDATE project_field_options
+        \\SET name = ?, color = ?, position = ?, state = ?, actor_principal = ?, event_hash = ?
+        \\WHERE project_id = ? AND field_id = ? AND id = ?
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, name);
+    try stmt.bindText(2, color);
+    try stmt.bindInt64(3, position);
+    try stmt.bindText(4, state);
+    try stmt.bindText(5, envelope.actor_principal);
+    try stmt.bindText(6, event_hash);
+    try stmt.bindText(7, project_id);
+    try stmt.bindText(8, field_id);
+    try stmt.bindText(9, option_id);
+    try stmt.stepDone();
+    return try projectFieldOptionLimitRejection(db, field_id);
+}
+
+fn updateProjectFieldOptionState(allocator: Allocator, db: *SqliteDb, project_id: []const u8, field_id: []const u8, option_id: []const u8, state: []const u8, event_hash: []const u8, envelope: ValidatedEnvelope) !void {
+    var current = try loadProjectFieldOption(allocator, db, project_id, field_id, option_id) orelse return;
+    defer current.deinit(allocator);
+    if (!(try eventWins(allocator, event_hash, current.event_hash))) return;
+    var stmt = try db.prepare("UPDATE project_field_options SET state = ?, actor_principal = ?, event_hash = ? WHERE project_id = ? AND field_id = ? AND id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, state);
+    try stmt.bindText(2, envelope.actor_principal);
+    try stmt.bindText(3, event_hash);
+    try stmt.bindText(4, project_id);
+    try stmt.bindText(5, field_id);
+    try stmt.bindText(6, option_id);
+    try stmt.stepDone();
+}
+
+const ProjectFieldOptionRow = struct {
+    name: []u8,
+    color: []u8,
+    position: i64,
+    state: []u8,
+    event_hash: []u8,
+
+    fn deinit(self: *ProjectFieldOptionRow, allocator: Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.color);
+        allocator.free(self.state);
+        allocator.free(self.event_hash);
+    }
+};
+
+fn loadProjectFieldOption(allocator: Allocator, db: *SqliteDb, project_id: []const u8, field_id: []const u8, option_id: []const u8) !?ProjectFieldOptionRow {
+    var stmt = try db.prepare(
+        \\SELECT name, color, position, state, event_hash
+        \\FROM project_field_options
+        \\WHERE project_id = ? AND field_id = ? AND id = ?
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    try stmt.bindText(2, field_id);
+    try stmt.bindText(3, option_id);
+    if (!(try stmt.step())) return null;
+    return .{
+        .name = try stmt.columnTextDup(allocator, 0),
+        .color = try stmt.columnTextDup(allocator, 1),
+        .position = stmt.columnInt64(2),
+        .state = try stmt.columnTextDup(allocator, 3),
+        .event_hash = try stmt.columnTextDup(allocator, 4),
+    };
+}
+
+fn applyProjectViewCreated(
+    allocator: Allocator,
+    db: *SqliteDb,
+    payload: std.json.ObjectMap,
+    project_id: []const u8,
+    event_hash: []const u8,
+    envelope: ValidatedEnvelope,
+) !?[]const u8 {
+    const view_id = event_mod.jsonString(payload.get("view_id")) orelse return "invalid_event_envelope";
+    const name = event_mod.jsonString(payload.get("name")) orelse return "invalid_event_envelope";
+    const layout = event_mod.jsonString(payload.get("layout")) orelse return "invalid_event_envelope";
+    const position = jsonInteger(payload.get("position")) orelse 0;
+    const config_json = try jsonValueOrDefaultOwned(allocator, payload.get("config"), "{}");
+    defer allocator.free(config_json);
+    const state = event_mod.jsonString(payload.get("state")) orelse "active";
+
+    var stmt = try db.prepare(
+        \\INSERT OR IGNORE INTO project_views(
+        \\  id, project_id, name, layout, position, config_json, state, created_at, actor_principal, event_hash
+        \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, view_id);
+    try stmt.bindText(2, project_id);
+    try stmt.bindText(3, name);
+    try stmt.bindText(4, layout);
+    try stmt.bindInt64(5, position);
+    try stmt.bindText(6, config_json);
+    try stmt.bindText(7, state);
+    try stmt.bindText(8, envelope.occurred_at);
+    try stmt.bindText(9, envelope.actor_principal);
+    try stmt.bindText(10, event_hash);
+    try stmt.stepDone();
+    return try projectViewLimitRejection(db, project_id);
+}
+
+fn applyProjectViewUpdated(
+    allocator: Allocator,
+    db: *SqliteDb,
+    payload: std.json.ObjectMap,
+    project_id: []const u8,
+    event_hash: []const u8,
+    envelope: ValidatedEnvelope,
+) !?[]const u8 {
+    const view_id = event_mod.jsonString(payload.get("view_id")) orelse return "invalid_event_envelope";
+    var current = try loadProjectView(allocator, db, project_id, view_id) orelse return "object_not_created";
+    defer current.deinit(allocator);
+    if (!(try eventWins(allocator, event_hash, current.event_hash))) return null;
+    const name = event_mod.jsonString(payload.get("name")) orelse current.name;
+    const layout = event_mod.jsonString(payload.get("layout")) orelse current.layout;
+    const position = jsonInteger(payload.get("position")) orelse current.position;
+    const config_json = try jsonValueOrDefaultOwned(allocator, payload.get("config"), current.config_json);
+    defer allocator.free(config_json);
+    const state = event_mod.jsonString(payload.get("state")) orelse current.state;
+
+    var stmt = try db.prepare(
+        \\UPDATE project_views
+        \\SET name = ?, layout = ?, position = ?, config_json = ?, state = ?, actor_principal = ?, event_hash = ?
+        \\WHERE project_id = ? AND id = ?
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, name);
+    try stmt.bindText(2, layout);
+    try stmt.bindInt64(3, position);
+    try stmt.bindText(4, config_json);
+    try stmt.bindText(5, state);
+    try stmt.bindText(6, envelope.actor_principal);
+    try stmt.bindText(7, event_hash);
+    try stmt.bindText(8, project_id);
+    try stmt.bindText(9, view_id);
+    try stmt.stepDone();
+    return try projectViewLimitRejection(db, project_id);
+}
+
+fn updateProjectViewState(allocator: Allocator, db: *SqliteDb, project_id: []const u8, view_id: []const u8, state: []const u8, event_hash: []const u8, envelope: ValidatedEnvelope) !void {
+    var current = try loadProjectView(allocator, db, project_id, view_id) orelse return;
+    defer current.deinit(allocator);
+    if (!(try eventWins(allocator, event_hash, current.event_hash))) return;
+    var stmt = try db.prepare("UPDATE project_views SET state = ?, actor_principal = ?, event_hash = ? WHERE project_id = ? AND id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, state);
+    try stmt.bindText(2, envelope.actor_principal);
+    try stmt.bindText(3, event_hash);
+    try stmt.bindText(4, project_id);
+    try stmt.bindText(5, view_id);
+    try stmt.stepDone();
+}
+
+const ProjectViewRow = struct {
+    name: []u8,
+    layout: []u8,
+    position: i64,
+    config_json: []u8,
+    state: []u8,
+    event_hash: []u8,
+
+    fn deinit(self: *ProjectViewRow, allocator: Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.layout);
+        allocator.free(self.config_json);
+        allocator.free(self.state);
+        allocator.free(self.event_hash);
+    }
+};
+
+fn loadProjectView(allocator: Allocator, db: *SqliteDb, project_id: []const u8, view_id: []const u8) !?ProjectViewRow {
+    var stmt = try db.prepare(
+        \\SELECT name, layout, position, config_json, state, event_hash
+        \\FROM project_views
+        \\WHERE project_id = ? AND id = ?
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    try stmt.bindText(2, view_id);
+    if (!(try stmt.step())) return null;
+    return .{
+        .name = try stmt.columnTextDup(allocator, 0),
+        .layout = try stmt.columnTextDup(allocator, 1),
+        .position = stmt.columnInt64(2),
+        .config_json = try stmt.columnTextDup(allocator, 3),
+        .state = try stmt.columnTextDup(allocator, 4),
+        .event_hash = try stmt.columnTextDup(allocator, 5),
+    };
+}
+
+fn applyIssueProjectFieldSet(
+    allocator: Allocator,
+    db: *SqliteDb,
+    issue_id: []const u8,
+    payload: std.json.ObjectMap,
+    event_hash: []const u8,
+    envelope: ValidatedEnvelope,
+) !?[]const u8 {
+    const project_id = (try projectIdFromPayload(allocator, db, payload)) orelse return "object_not_created";
+    defer allocator.free(project_id);
+    if (!(try projectMembershipExists(db, project_id, issue_id))) return "object_not_created";
+    const field_id = (try projectFieldIdFromPayload(allocator, db, project_id, payload)) orelse return "object_not_created";
+    defer allocator.free(field_id);
+    const value = payload.get("value") orelse return "invalid_event_envelope";
+    const value_json = try jsonValueOwned(allocator, value);
+    defer allocator.free(value_json);
+    if (!(try projectFieldValueWins(allocator, db, project_id, issue_id, field_id, event_hash))) return null;
+
+    var stmt = try db.prepare(
+        \\INSERT INTO project_field_values(project_id, issue_id, field_id, value_json, occurred_at, actor_principal, event_hash)
+        \\VALUES (?, ?, ?, ?, ?, ?, ?)
+        \\ON CONFLICT(project_id, issue_id, field_id) DO UPDATE SET
+        \\  value_json = excluded.value_json,
+        \\  occurred_at = excluded.occurred_at,
+        \\  actor_principal = excluded.actor_principal,
+        \\  event_hash = excluded.event_hash
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    try stmt.bindText(2, issue_id);
+    try stmt.bindText(3, field_id);
+    try stmt.bindText(4, value_json);
+    try stmt.bindText(5, envelope.occurred_at);
+    try stmt.bindText(6, envelope.actor_principal);
+    try stmt.bindText(7, event_hash);
+    try stmt.stepDone();
+
+    if (try projectFieldKeyIs(db, field_id, "status")) {
+        if (value == .string) try replaceLegacyIssueProjectStatus(allocator, db, project_id, issue_id, value.string, event_hash);
+    }
+    return null;
+}
+
+fn applyIssueProjectFieldClear(
+    allocator: Allocator,
+    db: *SqliteDb,
+    issue_id: []const u8,
+    payload: std.json.ObjectMap,
+    event_hash: []const u8,
+) !?[]const u8 {
+    const project_id = (try projectIdFromPayload(allocator, db, payload)) orelse return "object_not_created";
+    defer allocator.free(project_id);
+    const field_id = (try projectFieldIdFromPayload(allocator, db, project_id, payload)) orelse return "object_not_created";
+    defer allocator.free(field_id);
+    if (!(try projectFieldValueWins(allocator, db, project_id, issue_id, field_id, event_hash))) return null;
+    var stmt = try db.prepare("DELETE FROM project_field_values WHERE project_id = ? AND issue_id = ? AND field_id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    try stmt.bindText(2, issue_id);
+    try stmt.bindText(3, field_id);
+    try stmt.stepDone();
+    if (try projectFieldKeyIs(db, field_id, "status")) {
+        try deleteLegacyIssueProjectStatus(allocator, db, project_id, issue_id);
+    }
+    return null;
+}
+
+fn insertProjectMembership(db: *SqliteDb, project_id: []const u8, issue_id: []const u8, event_hash: []const u8, envelope: ValidatedEnvelope) !void {
+    var stmt = try db.prepare("INSERT OR IGNORE INTO project_memberships(project_id, issue_id, add_hash, created_at, actor_principal) VALUES (?, ?, ?, ?, ?)");
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    try stmt.bindText(2, issue_id);
+    try stmt.bindText(3, event_hash);
+    try stmt.bindText(4, envelope.occurred_at);
+    try stmt.bindText(5, envelope.actor_principal);
+    try stmt.stepDone();
+}
+
+fn deleteProjectMembership(allocator: Allocator, db: *SqliteDb, project_id: []const u8, issue_id: []const u8, remove_hash: []const u8) !void {
+    var select = try db.prepare("SELECT add_hash FROM project_memberships WHERE project_id = ? AND issue_id = ?");
+    defer select.deinit();
+    try select.bindText(1, project_id);
+    try select.bindText(2, issue_id);
+    while (try select.step()) {
+        const add_hash = try select.columnTextDup(allocator, 0);
+        defer allocator.free(add_hash);
+        if (!(try git.isAncestor(allocator, add_hash, remove_hash))) continue;
+        var delete = try db.prepare("DELETE FROM project_memberships WHERE project_id = ? AND issue_id = ? AND add_hash = ?");
+        defer delete.deinit();
+        try delete.bindText(1, project_id);
+        try delete.bindText(2, issue_id);
+        try delete.bindText(3, add_hash);
+        try delete.stepDone();
+    }
+}
+
+fn projectMembershipExists(db: *SqliteDb, project_id: []const u8, issue_id: []const u8) !bool {
+    var stmt = try db.prepare("SELECT 1 FROM project_memberships WHERE project_id = ? AND issue_id = ? LIMIT 1");
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    try stmt.bindText(2, issue_id);
+    return try stmt.step();
+}
+
+fn projectFieldExists(db: *SqliteDb, project_id: []const u8, field_id: []const u8) !bool {
+    var stmt = try db.prepare("SELECT 1 FROM project_fields WHERE project_id = ? AND id = ? LIMIT 1");
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    try stmt.bindText(2, field_id);
+    return try stmt.step();
+}
+
+fn projectIdFromPayload(allocator: Allocator, db: *SqliteDb, payload: std.json.ObjectMap) !?[]u8 {
+    if (event_mod.jsonString(payload.get("project_id"))) |project_id| {
+        if (try projectExists(db, project_id)) return try allocator.dupe(u8, project_id);
+        return null;
+    }
+    if (event_mod.jsonString(payload.get("project_ref"))) |project_ref| {
+        return try resolveProjectIdInDb(allocator, db, project_ref);
+    }
+    return null;
+}
+
+fn projectIdFromPayloadOrName(allocator: Allocator, db: *SqliteDb, payload: std.json.ObjectMap, project_name: []const u8) !?[]u8 {
+    if (try projectIdFromPayload(allocator, db, payload)) |project_id| return project_id;
+    return try resolveProjectIdInDb(allocator, db, project_name);
+}
+
+fn resolveProjectIdInDb(allocator: Allocator, db: *SqliteDb, raw_ref: []const u8) !?[]u8 {
+    const trimmed = std.mem.trim(u8, raw_ref, " \t\r\n");
+    const without_prefix = if (std.mem.startsWith(u8, trimmed, "project:"))
+        trimmed["project:".len..]
+    else if (std.mem.startsWith(u8, trimmed, "@"))
+        trimmed[1..]
+    else
+        trimmed;
+    const slash = std.mem.indexOfScalar(u8, without_prefix, '/') orelse without_prefix.len;
+    const value = without_prefix[0..slash];
+    if (value.len == 0) return null;
+
+    if (util.looksLikeUuid(value)) {
+        if (try projectExists(db, value)) return try allocator.dupe(u8, value);
+    }
+    if (isUuidPrefix(value)) {
+        if (try resolveUniqueProjectByColumn(allocator, db, "id", value)) |id| return id;
+    }
+    if (try resolveUniqueProjectByColumn(allocator, db, "slug", value)) |id| return id;
+    if (try resolveUniqueProjectByColumn(allocator, db, "name", value)) |id| return id;
+    return null;
+}
+
+fn resolveUniqueProjectByColumn(allocator: Allocator, db: *SqliteDb, comptime column: []const u8, value: []const u8) !?[]u8 {
+    const sql = if (std.mem.eql(u8, column, "id"))
+        "SELECT id FROM projects WHERE id LIKE ? ORDER BY id LIMIT 2"
+    else
+        "SELECT id FROM projects WHERE " ++ column ++ " = ? ORDER BY id LIMIT 2";
+    var stmt = try db.prepare(sql);
+    defer stmt.deinit();
+    if (std.mem.eql(u8, column, "id")) {
+        const pattern = try std.fmt.allocPrint(allocator, "{s}%", .{value});
+        defer allocator.free(pattern);
+        try stmt.bindText(1, pattern);
+    } else {
+        try stmt.bindText(1, value);
+    }
+    if (!(try stmt.step())) return null;
+    const first = try stmt.columnTextDup(allocator, 0);
+    errdefer allocator.free(first);
+    if (try stmt.step()) {
+        allocator.free(first);
+        return null;
+    }
+    return first;
+}
+
+fn projectFieldIdFromPayload(allocator: Allocator, db: *SqliteDb, project_id: []const u8, payload: std.json.ObjectMap) !?[]u8 {
+    if (event_mod.jsonString(payload.get("field_id"))) |field_id| {
+        if (try projectFieldExists(db, project_id, field_id)) return try allocator.dupe(u8, field_id);
+        return null;
+    }
+    if (event_mod.jsonString(payload.get("field_key"))) |field_key| {
+        var stmt = try db.prepare("SELECT id FROM project_fields WHERE project_id = ? AND key = ? AND state != 'removed' ORDER BY id LIMIT 2");
+        defer stmt.deinit();
+        try stmt.bindText(1, project_id);
+        try stmt.bindText(2, field_key);
+        if (!(try stmt.step())) return null;
+        const first = try stmt.columnTextDup(allocator, 0);
+        errdefer allocator.free(first);
+        if (try stmt.step()) return null;
+        return first;
+    }
+    return null;
+}
+
+fn setStatusFieldValueIfPresent(allocator: Allocator, db: *SqliteDb, project_id: []const u8, issue_id: []const u8, value: []const u8, event_hash: []const u8, envelope: ValidatedEnvelope) !void {
+    const field_id = (try projectFieldIdByKey(allocator, db, project_id, "status")) orelse return;
+    defer allocator.free(field_id);
+    if (!(try projectFieldValueWins(allocator, db, project_id, issue_id, field_id, event_hash))) return;
+    const value_json = try jsonStringValueOwned(allocator, value);
+    defer allocator.free(value_json);
+    var stmt = try db.prepare(
+        \\INSERT INTO project_field_values(project_id, issue_id, field_id, value_json, occurred_at, actor_principal, event_hash)
+        \\VALUES (?, ?, ?, ?, ?, ?, ?)
+        \\ON CONFLICT(project_id, issue_id, field_id) DO UPDATE SET
+        \\  value_json = excluded.value_json,
+        \\  occurred_at = excluded.occurred_at,
+        \\  actor_principal = excluded.actor_principal,
+        \\  event_hash = excluded.event_hash
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    try stmt.bindText(2, issue_id);
+    try stmt.bindText(3, field_id);
+    try stmt.bindText(4, value_json);
+    try stmt.bindText(5, envelope.occurred_at);
+    try stmt.bindText(6, envelope.actor_principal);
+    try stmt.bindText(7, event_hash);
+    try stmt.stepDone();
+}
+
+fn clearStatusFieldValueIfPresent(allocator: Allocator, db: *SqliteDb, project_id: []const u8, issue_id: []const u8, event_hash: []const u8) !void {
+    const field_id = (try projectFieldIdByKey(allocator, db, project_id, "status")) orelse return;
+    defer allocator.free(field_id);
+    if (!(try projectFieldValueWins(allocator, db, project_id, issue_id, field_id, event_hash))) return;
+    var stmt = try db.prepare("DELETE FROM project_field_values WHERE project_id = ? AND issue_id = ? AND field_id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    try stmt.bindText(2, issue_id);
+    try stmt.bindText(3, field_id);
+    try stmt.stepDone();
+}
+
+fn projectFieldIdByKey(allocator: Allocator, db: *SqliteDb, project_id: []const u8, key: []const u8) !?[]u8 {
+    var stmt = try db.prepare("SELECT id FROM project_fields WHERE project_id = ? AND key = ? AND state != 'removed' ORDER BY id LIMIT 1");
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    try stmt.bindText(2, key);
+    if (!(try stmt.step())) return null;
+    return try stmt.columnTextDup(allocator, 0);
+}
+
+fn projectFieldValueWins(allocator: Allocator, db: *SqliteDb, project_id: []const u8, issue_id: []const u8, field_id: []const u8, event_hash: []const u8) !bool {
+    var stmt = try db.prepare("SELECT event_hash FROM project_field_values WHERE project_id = ? AND issue_id = ? AND field_id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    try stmt.bindText(2, issue_id);
+    try stmt.bindText(3, field_id);
+    if (!(try stmt.step())) return true;
+    const old_event_hash = try stmt.columnTextDup(allocator, 0);
+    defer allocator.free(old_event_hash);
+    return try eventWins(allocator, event_hash, old_event_hash);
+}
+
+fn projectFieldKeyIs(db: *SqliteDb, field_id: []const u8, expected: []const u8) !bool {
+    var stmt = try db.prepare("SELECT 1 FROM project_fields WHERE id = ? AND key = ? LIMIT 1");
+    defer stmt.deinit();
+    try stmt.bindText(1, field_id);
+    try stmt.bindText(2, expected);
+    return try stmt.step();
+}
+
+fn replaceLegacyIssueProjectStatus(allocator: Allocator, db: *SqliteDb, project_id: []const u8, issue_id: []const u8, column: []const u8, event_hash: []const u8) !void {
+    const project_name = (try projectNameById(allocator, db, project_id)) orelse return;
+    defer allocator.free(project_name);
+    try deleteLegacyIssueProjectStatusByName(db, project_name, issue_id);
+    try insertIssueProject(db, issue_id, project_name, column, event_hash);
+}
+
+fn deleteLegacyIssueProjectStatus(allocator: Allocator, db: *SqliteDb, project_id: []const u8, issue_id: []const u8) !void {
+    const project_name = (try projectNameById(allocator, db, project_id)) orelse return;
+    defer allocator.free(project_name);
+    try deleteLegacyIssueProjectStatusByName(db, project_name, issue_id);
+}
+
+fn deleteLegacyIssueProjectStatusByName(db: *SqliteDb, project_name: []const u8, issue_id: []const u8) !void {
+    var stmt = try db.prepare("DELETE FROM issue_projects WHERE project = ? AND issue_id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, project_name);
+    try stmt.bindText(2, issue_id);
+    try stmt.stepDone();
+}
+
+fn projectNameById(allocator: Allocator, db: *SqliteDb, project_id: []const u8) !?[]u8 {
+    var stmt = try db.prepare("SELECT name FROM projects WHERE id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    if (!(try stmt.step())) return null;
+    return try stmt.columnTextDup(allocator, 0);
+}
+
+fn jsonValueOrDefaultOwned(allocator: Allocator, value: ?std.json.Value, default_json: []const u8) ![]u8 {
+    if (value) |actual| return try jsonValueOwned(allocator, actual);
+    return try allocator.dupe(u8, default_json);
+}
+
+fn jsonValueOwned(allocator: Allocator, value: std.json.Value) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try std.json.stringify(value, .{}, buf.writer(allocator));
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn jsonStringValueOwned(allocator: Allocator, value: []const u8) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try json_writer.appendJsonString(&buf, allocator, value);
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn jsonInteger(value: ?std.json.Value) ?i64 {
+    const actual = value orelse return null;
+    return switch (actual) {
+        .integer => |integer| integer,
+        else => null,
+    };
+}
+
+fn jsonBool(value: ?std.json.Value) ?bool {
+    const actual = value orelse return null;
+    return switch (actual) {
+        .bool => |boolean| boolean,
+        else => null,
+    };
+}
+
+fn isUuidPrefix(value: []const u8) bool {
+    if (value.len < 1 or value.len > 36) return false;
+    for (value) |c| {
+        const ok = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F') or c == '-';
+        if (!ok) return false;
+    }
+    return true;
 }
 
 fn insertMilestoneCreated(db: *SqliteDb, event_hash: []const u8, envelope: ValidatedEnvelope, title: []const u8, description: []const u8, due_at: []const u8, state: []const u8) !void {

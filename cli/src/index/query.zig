@@ -10,7 +10,7 @@ const repo_mod = @import("../repo.zig");
 const sqlite_db = @import("sqlite_db.zig");
 const util = @import("../util.zig");
 
-pub const index_event_columns = "ref, \"commit\", event_hash, tree, subject, empty_tree, valid_json, event_type, object_kind, object_id, actor_principal, actor_device, seq, occurred_at, domain_status, rejection_reason";
+pub const index_event_columns = "ref, \"commit\", event_hash, tree, subject, empty_tree, valid_json, event_type, object_kind, object_id, actor_principal, actor_device, seq, occurred_at, domain_status, rejection_reason, body";
 
 const Allocator = std.mem.Allocator;
 const CliError = errors.CliError;

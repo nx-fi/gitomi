@@ -15,6 +15,7 @@ const appendJsonFieldString = json_writer.appendJsonFieldString;
 const appendJsonFieldUnsigned = json_writer.appendJsonFieldUnsigned;
 const appendJsonFieldStringArray = json_writer.appendJsonFieldStringArray;
 const appendJsonFieldBool = json_writer.appendJsonFieldBool;
+const appendJsonFieldInteger = json_writer.appendJsonFieldInteger;
 const appendJsonString = json_writer.appendJsonString;
 
 pub const event_schema = "urn:gitomi:event:v1";
@@ -101,6 +102,49 @@ pub const ProjectUpdate = struct {
 
     pub fn hasChanges(self: ProjectUpdate) bool {
         return self.name != null or self.description != null or self.state != null;
+    }
+};
+
+pub const ProjectFieldUpdate = struct {
+    key: ?[]const u8 = null,
+    name: ?[]const u8 = null,
+    field_type: ?[]const u8 = null,
+    position: ?i64 = null,
+    required: ?bool = null,
+    default_value_json: ?[]const u8 = null,
+    state: ?[]const u8 = null,
+
+    pub fn hasChanges(self: ProjectFieldUpdate) bool {
+        return self.key != null or
+            self.name != null or
+            self.field_type != null or
+            self.position != null or
+            self.required != null or
+            self.default_value_json != null or
+            self.state != null;
+    }
+};
+
+pub const ProjectFieldOptionUpdate = struct {
+    name: ?[]const u8 = null,
+    color: ?[]const u8 = null,
+    position: ?i64 = null,
+    state: ?[]const u8 = null,
+
+    pub fn hasChanges(self: ProjectFieldOptionUpdate) bool {
+        return self.name != null or self.color != null or self.position != null or self.state != null;
+    }
+};
+
+pub const ProjectViewUpdate = struct {
+    name: ?[]const u8 = null,
+    layout: ?[]const u8 = null,
+    position: ?i64 = null,
+    config_json: ?[]const u8 = null,
+    state: ?[]const u8 = null,
+
+    pub fn hasChanges(self: ProjectViewUpdate) bool {
+        return self.name != null or self.layout != null or self.position != null or self.config_json != null or self.state != null;
     }
 };
 
@@ -313,6 +357,8 @@ pub fn buildIssueProjectEventJson(
     event_type: []const u8,
     project: []const u8,
     column: []const u8,
+    project_ref: ?[]const u8,
+    column_ref: ?[]const u8,
 ) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -320,7 +366,66 @@ pub fn buildIssueProjectEventJson(
     try appendEnvelopePrefix(&buf, allocator, cfg, seq, issue_id, event_uuid, idem, occurred_at, parents, event_type, "issue");
     try buf.appendSlice(allocator, "\"payload\":{");
     try appendJsonFieldString(&buf, allocator, "project", project, true);
-    try appendJsonFieldString(&buf, allocator, "column", column, false);
+    try appendJsonFieldString(&buf, allocator, "column", column, project_ref != null or column_ref != null);
+    if (project_ref) |value| try appendJsonFieldString(&buf, allocator, "project_ref", value, column_ref != null);
+    if (column_ref) |value| try appendJsonFieldString(&buf, allocator, "column_ref", value, false);
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildIssueProjectFieldSetJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    issue_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    project_id: []const u8,
+    project_ref: ?[]const u8,
+    field_id: ?[]const u8,
+    field_key: ?[]const u8,
+    value_json: []const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, issue_id, event_uuid, idem, occurred_at, parents, "issue.project_field_set", "issue");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "project_id", project_id, true);
+    if (project_ref) |value| try appendJsonFieldString(&buf, allocator, "project_ref", value, true);
+    if (field_id) |value| try appendJsonFieldString(&buf, allocator, "field_id", value, true);
+    if (field_key) |value| try appendJsonFieldString(&buf, allocator, "field_key", value, true);
+    try appendJsonFieldRaw(&buf, allocator, "value", value_json, false);
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildIssueProjectFieldClearedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    issue_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    project_id: []const u8,
+    project_ref: ?[]const u8,
+    field_id: ?[]const u8,
+    field_key: ?[]const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, issue_id, event_uuid, idem, occurred_at, parents, "issue.project_field_cleared", "issue");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "project_id", project_id, true);
+    if (project_ref) |value| try appendJsonFieldString(&buf, allocator, "project_ref", value, true);
+    if (field_id) |value| try appendJsonFieldString(&buf, allocator, "field_id", value, field_key != null);
+    if (field_key) |value| try appendJsonFieldString(&buf, allocator, "field_key", value, false);
+    if (buf.items[buf.items.len - 1] == ',') buf.items.len -= 1;
     try buf.appendSlice(allocator, "}}");
     return try buf.toOwnedSlice(allocator);
 }
@@ -392,6 +497,7 @@ pub fn buildProjectCreatedJson(
     parents: EventParents,
     name: []const u8,
     description: []const u8,
+    slug: ?[]const u8,
     columns: []const []const u8,
 ) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
@@ -400,6 +506,7 @@ pub fn buildProjectCreatedJson(
     try appendEnvelopePrefix(&buf, allocator, cfg, seq, project_id, event_uuid, idem, occurred_at, parents, "project.created", "project");
     try buf.appendSlice(allocator, "\"payload\":{");
     try appendJsonFieldString(&buf, allocator, "name", name, true);
+    if (slug) |value| if (value.len != 0) try appendJsonFieldString(&buf, allocator, "slug", value, true);
     if (description.len != 0) try appendJsonFieldString(&buf, allocator, "description", description, true);
     if (columns.len != 0) try appendJsonFieldStringArray(&buf, allocator, "columns", columns, true);
     if (buf.items[buf.items.len - 1] == ',') {
@@ -446,13 +553,270 @@ pub fn buildProjectColumnEventJson(
     parents: EventParents,
     event_type: []const u8,
     column: []const u8,
+    column_ref: ?[]const u8,
 ) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
     try appendEnvelopePrefix(&buf, allocator, cfg, seq, project_id, event_uuid, idem, occurred_at, parents, event_type, "project");
     try buf.appendSlice(allocator, "\"payload\":{");
-    try appendJsonFieldString(&buf, allocator, "column", column, false);
+    try appendJsonFieldString(&buf, allocator, "column", column, column_ref != null);
+    if (column_ref) |value| try appendJsonFieldString(&buf, allocator, "column_ref", value, false);
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildProjectFieldCreatedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    project_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    field_id: []const u8,
+    key: []const u8,
+    name: []const u8,
+    field_type: []const u8,
+    position: ?i64,
+    required: ?bool,
+    default_value_json: ?[]const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, project_id, event_uuid, idem, occurred_at, parents, "project.field_created", "project");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "field_id", field_id, true);
+    try appendJsonFieldString(&buf, allocator, "key", key, true);
+    try appendJsonFieldString(&buf, allocator, "name", name, true);
+    try appendJsonFieldString(&buf, allocator, "type", field_type, true);
+    if (position) |value| try appendJsonFieldInteger(&buf, allocator, "position", value, true);
+    if (required) |value| try appendJsonFieldBool(&buf, allocator, "required", value, true);
+    if (default_value_json) |value| try appendJsonFieldRaw(&buf, allocator, "default_value", value, true);
+    if (buf.items[buf.items.len - 1] == ',') buf.items.len -= 1;
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildProjectFieldUpdatedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    project_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    field_id: []const u8,
+    update: ProjectFieldUpdate,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, project_id, event_uuid, idem, occurred_at, parents, "project.field_updated", "project");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "field_id", field_id, true);
+    if (update.key) |value| try appendJsonFieldString(&buf, allocator, "key", value, true);
+    if (update.name) |value| try appendJsonFieldString(&buf, allocator, "name", value, true);
+    if (update.field_type) |value| try appendJsonFieldString(&buf, allocator, "type", value, true);
+    if (update.position) |value| try appendJsonFieldInteger(&buf, allocator, "position", value, true);
+    if (update.required) |value| try appendJsonFieldBool(&buf, allocator, "required", value, true);
+    if (update.default_value_json) |value| try appendJsonFieldRaw(&buf, allocator, "default_value", value, true);
+    if (update.state) |value| try appendJsonFieldString(&buf, allocator, "state", value, true);
+    if (buf.items[buf.items.len - 1] == ',') buf.items.len -= 1;
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildProjectFieldRemovedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    project_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    field_id: []const u8,
+) ![]u8 {
+    return try buildProjectSingleStringPayloadJson(allocator, cfg, seq, project_id, event_uuid, idem, occurred_at, parents, "project.field_removed", "field_id", field_id);
+}
+
+pub fn buildProjectFieldOptionAddedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    project_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    field_id: []const u8,
+    option_id: []const u8,
+    name: []const u8,
+    color: ?[]const u8,
+    position: ?i64,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, project_id, event_uuid, idem, occurred_at, parents, "project.field_option_added", "project");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "field_id", field_id, true);
+    try appendJsonFieldString(&buf, allocator, "option_id", option_id, true);
+    try appendJsonFieldString(&buf, allocator, "name", name, true);
+    if (color) |value| try appendJsonFieldString(&buf, allocator, "color", value, true);
+    if (position) |value| try appendJsonFieldInteger(&buf, allocator, "position", value, true);
+    if (buf.items[buf.items.len - 1] == ',') buf.items.len -= 1;
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildProjectFieldOptionUpdatedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    project_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    field_id: []const u8,
+    option_id: []const u8,
+    update: ProjectFieldOptionUpdate,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, project_id, event_uuid, idem, occurred_at, parents, "project.field_option_updated", "project");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "field_id", field_id, true);
+    try appendJsonFieldString(&buf, allocator, "option_id", option_id, true);
+    if (update.name) |value| try appendJsonFieldString(&buf, allocator, "name", value, true);
+    if (update.color) |value| try appendJsonFieldString(&buf, allocator, "color", value, true);
+    if (update.position) |value| try appendJsonFieldInteger(&buf, allocator, "position", value, true);
+    if (update.state) |value| try appendJsonFieldString(&buf, allocator, "state", value, true);
+    if (buf.items[buf.items.len - 1] == ',') buf.items.len -= 1;
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildProjectFieldOptionRemovedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    project_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    field_id: []const u8,
+    option_id: []const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, project_id, event_uuid, idem, occurred_at, parents, "project.field_option_removed", "project");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "field_id", field_id, true);
+    try appendJsonFieldString(&buf, allocator, "option_id", option_id, false);
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildProjectViewCreatedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    project_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    view_id: []const u8,
+    name: []const u8,
+    layout: []const u8,
+    position: ?i64,
+    config_json: ?[]const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, project_id, event_uuid, idem, occurred_at, parents, "project.view_created", "project");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "view_id", view_id, true);
+    try appendJsonFieldString(&buf, allocator, "name", name, true);
+    try appendJsonFieldString(&buf, allocator, "layout", layout, true);
+    if (position) |value| try appendJsonFieldInteger(&buf, allocator, "position", value, true);
+    if (config_json) |value| try appendJsonFieldRaw(&buf, allocator, "config", value, true);
+    if (buf.items[buf.items.len - 1] == ',') buf.items.len -= 1;
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildProjectViewUpdatedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    project_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    view_id: []const u8,
+    update: ProjectViewUpdate,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, project_id, event_uuid, idem, occurred_at, parents, "project.view_updated", "project");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "view_id", view_id, true);
+    if (update.name) |value| try appendJsonFieldString(&buf, allocator, "name", value, true);
+    if (update.layout) |value| try appendJsonFieldString(&buf, allocator, "layout", value, true);
+    if (update.position) |value| try appendJsonFieldInteger(&buf, allocator, "position", value, true);
+    if (update.config_json) |value| try appendJsonFieldRaw(&buf, allocator, "config", value, true);
+    if (update.state) |value| try appendJsonFieldString(&buf, allocator, "state", value, true);
+    if (buf.items[buf.items.len - 1] == ',') buf.items.len -= 1;
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildProjectViewRemovedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    project_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    view_id: []const u8,
+) ![]u8 {
+    return try buildProjectSingleStringPayloadJson(allocator, cfg, seq, project_id, event_uuid, idem, occurred_at, parents, "project.view_removed", "view_id", view_id);
+}
+
+fn buildProjectSingleStringPayloadJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    project_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    event_type: []const u8,
+    key: []const u8,
+    value: []const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, project_id, event_uuid, idem, occurred_at, parents, event_type, "project");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, key, value, false);
     try buf.appendSlice(allocator, "}}");
     return try buf.toOwnedSlice(allocator);
 }
@@ -1113,6 +1477,19 @@ fn appendLegacyInfo(buf: *std.ArrayList(u8), allocator: Allocator, legacy: Legac
     if (legacy.github_issue_number) |number| try appendJsonFieldUnsigned(buf, allocator, "github_issue_number", number, legacy.github_pull_number != null);
     if (legacy.github_pull_number) |number| try appendJsonFieldUnsigned(buf, allocator, "github_pull_number", number, false);
     try buf.appendSlice(allocator, "},");
+}
+
+fn appendJsonFieldRaw(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    key: []const u8,
+    raw_json: []const u8,
+    comma: bool,
+) !void {
+    try appendJsonString(buf, allocator, key);
+    try buf.append(allocator, ':');
+    try buf.appendSlice(allocator, raw_json);
+    if (comma) try buf.append(allocator, ',');
 }
 
 fn appendIssueProjectsField(

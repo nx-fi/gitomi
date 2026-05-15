@@ -104,6 +104,7 @@ pub fn createIndexSchema(db: *SqliteDb) !void {
         \\CREATE TABLE projects (
         \\  id TEXT PRIMARY KEY,
         \\  name TEXT NOT NULL,
+        \\  slug TEXT NOT NULL,
         \\  name_occurred_at TEXT NOT NULL,
         \\  name_actor_principal TEXT NOT NULL,
         \\  name_event_hash TEXT NOT NULL,
@@ -120,13 +121,82 @@ pub fn createIndexSchema(db: *SqliteDb) !void {
         \\  author_device TEXT NOT NULL
         \\);
         \\CREATE INDEX projects_name_idx ON projects(name, id);
+        \\CREATE INDEX projects_slug_idx ON projects(slug, id);
         \\CREATE TABLE project_columns (
         \\  project_id TEXT NOT NULL,
         \\  column_name TEXT NOT NULL,
+        \\  column_ref TEXT NOT NULL,
         \\  add_hash TEXT NOT NULL,
         \\  PRIMARY KEY(project_id, column_name, add_hash)
         \\);
         \\CREATE INDEX project_columns_project_idx ON project_columns(project_id, column_name);
+        \\CREATE INDEX project_columns_ref_idx ON project_columns(project_id, column_ref);
+        \\CREATE TABLE project_memberships (
+        \\  project_id TEXT NOT NULL,
+        \\  issue_id TEXT NOT NULL,
+        \\  add_hash TEXT NOT NULL,
+        \\  created_at TEXT NOT NULL,
+        \\  actor_principal TEXT NOT NULL,
+        \\  PRIMARY KEY(project_id, issue_id, add_hash)
+        \\);
+        \\CREATE INDEX project_memberships_project_idx ON project_memberships(project_id, issue_id);
+        \\CREATE INDEX project_memberships_issue_idx ON project_memberships(issue_id, project_id);
+        \\CREATE TABLE project_fields (
+        \\  id TEXT PRIMARY KEY,
+        \\  project_id TEXT NOT NULL,
+        \\  key TEXT NOT NULL,
+        \\  name TEXT NOT NULL,
+        \\  field_type TEXT NOT NULL,
+        \\  position INTEGER NOT NULL,
+        \\  required INTEGER NOT NULL,
+        \\  default_value_json TEXT NOT NULL,
+        \\  state TEXT NOT NULL,
+        \\  created_at TEXT NOT NULL,
+        \\  actor_principal TEXT NOT NULL,
+        \\  event_hash TEXT NOT NULL,
+        \\  UNIQUE(project_id, key)
+        \\);
+        \\CREATE INDEX project_fields_project_idx ON project_fields(project_id, position, id);
+        \\CREATE INDEX project_fields_key_idx ON project_fields(project_id, key);
+        \\CREATE TABLE project_field_options (
+        \\  id TEXT NOT NULL,
+        \\  project_id TEXT NOT NULL,
+        \\  field_id TEXT NOT NULL,
+        \\  name TEXT NOT NULL,
+        \\  color TEXT NOT NULL,
+        \\  position INTEGER NOT NULL,
+        \\  state TEXT NOT NULL,
+        \\  created_at TEXT NOT NULL,
+        \\  actor_principal TEXT NOT NULL,
+        \\  event_hash TEXT NOT NULL,
+        \\  PRIMARY KEY(field_id, id)
+        \\);
+        \\CREATE INDEX project_field_options_field_idx ON project_field_options(field_id, position, id);
+        \\CREATE TABLE project_field_values (
+        \\  project_id TEXT NOT NULL,
+        \\  issue_id TEXT NOT NULL,
+        \\  field_id TEXT NOT NULL,
+        \\  value_json TEXT NOT NULL,
+        \\  occurred_at TEXT NOT NULL,
+        \\  actor_principal TEXT NOT NULL,
+        \\  event_hash TEXT NOT NULL,
+        \\  PRIMARY KEY(project_id, issue_id, field_id)
+        \\);
+        \\CREATE INDEX project_field_values_project_field_idx ON project_field_values(project_id, field_id, value_json);
+        \\CREATE INDEX project_field_values_issue_idx ON project_field_values(issue_id, project_id);
+        \\CREATE TABLE project_views (
+        \\  id TEXT PRIMARY KEY,
+        \\  project_id TEXT NOT NULL,
+        \\  name TEXT NOT NULL,
+        \\  layout TEXT NOT NULL,
+        \\  position INTEGER NOT NULL,
+        \\  config_json TEXT NOT NULL,
+        \\  state TEXT NOT NULL,
+        \\  created_at TEXT NOT NULL,
+        \\  actor_principal TEXT NOT NULL,
+        \\  event_hash TEXT NOT NULL
+        \\);
+        \\CREATE INDEX project_views_project_idx ON project_views(project_id, position, id);
         \\CREATE TABLE milestones (
         \\  id TEXT PRIMARY KEY,
         \\  title TEXT NOT NULL,
