@@ -1,9 +1,11 @@
 const std = @import("std");
+const comment_mod = @import("../comment.zig");
 const git = @import("../git.zig");
 const index = @import("../index.zig");
 const issues_page = @import("issues.zig");
 const markdown_render = @import("markdown_render.zig");
 const pull = @import("../pull.zig");
+const reaction_mod = @import("../reaction.zig");
 const repo_mod = @import("../repo.zig");
 const shared = @import("shared.zig");
 const util = @import("../util.zig");
@@ -22,10 +24,14 @@ const appendShellStart = shared.appendShellStart;
 const appendRelativeTime = shared.appendRelativeTime;
 const appendTemplate = shared.appendTemplate;
 const commitHref = shared.commitHref;
+const createCommentAddedEvent = comment_mod.createCommentAddedEvent;
+const createCommentReplyEvent = comment_mod.createCommentReplyEvent;
+const createReactionEvent = reaction_mod.createReactionEvent;
 const literalHref = shared.literalHref;
 const pullHref = shared.pullHref;
 const runCommand = git.runCommand;
 const sendRedirect = shared.sendRedirect;
+const sendPlainResponse = shared.sendPlainResponse;
 const sendResponse = shared.sendResponse;
 const sqlite = index.sqlite;
 
@@ -439,7 +445,7 @@ pub fn renderPullDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u
     try appendPullFacts(&buf, allocator, repo, &db, detail, pull_ref);
     try buf.appendSlice(allocator, "<div class=\"pull-tab-content\">");
     switch (tab) {
-        .conversation => try appendPullConversation(&buf, allocator, &db, detail),
+        .conversation => try appendPullConversation(&buf, allocator, &db, detail, raw_ref),
         .commits => try appendPullCommits(&buf, allocator, repo, detail.base_ref, detail.head_ref),
         .files => try appendPullFiles(&buf, allocator, repo, detail.base_ref, detail.head_ref),
     }
@@ -572,15 +578,19 @@ fn appendPullCollectionFact(buf: *std.ArrayList(u8), allocator: Allocator, db: *
     try buf.appendSlice(allocator, "</dd></div>");
 }
 
-fn appendPullConversation(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, detail: PullDetail) !void {
+fn appendPullConversation(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, detail: PullDetail, raw_ref: []const u8) !void {
     try appendTemplate(buf, allocator,
         \\<article class="issue-card pull-card">
-        \\  <div class="comment-meta"><strong>{author}</strong><span>opened
+        \\  <header class="comment-meta"><div><strong>{author}</strong><span>opened
     , .{ .author = detail.author_principal });
     try buf.append(allocator, ' ');
     try appendRelativeTime(buf, allocator, detail.opened_at);
     try appendTemplate(buf, allocator,
         \\</span></div>
+    , .{});
+    try issues_page.appendIssueActionMenu(buf, allocator, "pull-description", "", detail.body, detail.body.len != 0, false);
+    try appendTemplate(buf, allocator,
+        \\</header>
         \\  <div class="markdown-body">
     , .{});
     if (detail.body.len == 0) {
@@ -588,11 +598,14 @@ fn appendPullConversation(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sq
     } else {
         try markdown_render.appendMarkdown(buf, allocator, detail.body);
     }
-    try buf.appendSlice(allocator, "</div></article>");
-    try appendPullComments(buf, allocator, db, detail.id);
+    try buf.appendSlice(allocator, "</div>");
+    try appendPullReactionBar(buf, allocator, db, "pull", detail.id, raw_ref, "");
+    try buf.appendSlice(allocator, "</article>");
+    try appendPullComments(buf, allocator, db, raw_ref, detail.id);
+    try appendPullCommentForm(buf, allocator, raw_ref);
 }
 
-fn appendPullComments(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, pull_id: []const u8) !void {
+fn appendPullComments(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, raw_ref: []const u8, pull_id: []const u8) !void {
     var stmt = try db.prepare(
         \\SELECT id, body, redacted, COALESCE(NULLIF(source_author, ''), author_principal), created_at, reply_parent_id, reply_parent_hash
         \\FROM comments
@@ -603,6 +616,8 @@ fn appendPullComments(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlite
     try stmt.bindText(1, pull_id);
     var shown = false;
     while (try stmt.step()) {
+        const id = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(id);
         const body = try stmt.columnTextDup(allocator, 1);
         defer allocator.free(body);
         const redacted = stmt.columnInt(2) != 0;
@@ -614,20 +629,31 @@ fn appendPullComments(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlite
         defer allocator.free(reply_parent_id);
         const reply_parent_hash = try stmt.columnTextDup(allocator, 6);
         defer allocator.free(reply_parent_hash);
+        const anchor = try std.fmt.allocPrint(allocator, "comment-{s}", .{id[0..@min(id.len, 7)]});
+        defer allocator.free(anchor);
+        var comment_ref_buf: [util.short_object_ref_len]u8 = undefined;
+        const comment_ref = util.shortObjectRef(&comment_ref_buf, id);
+        const comment_ref_value = try std.fmt.allocPrint(allocator, "comment:{s}", .{comment_ref});
+        defer allocator.free(comment_ref_value);
 
         try appendTemplate(buf, allocator,
-            \\<article class="{classes}"><div class="comment-meta"><strong>{author}</strong><span>commented
+            \\<article class="{classes}" id="{anchor}"><header class="comment-meta"><div><strong>{author}</strong><span>commented
         , .{
             .classes = shared.classes("issue-card comment-card", &.{shared.class("is-reply", reply_parent_id.len != 0 or reply_parent_hash.len != 0)}),
+            .anchor = anchor,
             .author = author,
         });
         try buf.append(allocator, ' ');
         try appendRelativeTime(buf, allocator, created_at);
         try buf.appendSlice(allocator, "</span></div>");
+        try issues_page.appendIssueActionMenu(buf, allocator, anchor, comment_ref_value, body, !redacted and body.len != 0, false);
+        try buf.appendSlice(allocator, "</header>");
         if (reply_parent_id.len != 0 or reply_parent_hash.len != 0) {
             try buf.appendSlice(allocator, "<p class=\"reply-note\">Reply to ");
             if (reply_parent_id.len != 0) {
-                try appendTemplate(buf, allocator, "#{reply_parent_id}", .{ .reply_parent_id = reply_parent_id[0..@min(reply_parent_id.len, 7)] });
+                var reply_ref_buf: [util.short_object_ref_len]u8 = undefined;
+                const reply_ref = util.shortObjectRef(&reply_ref_buf, reply_parent_id);
+                try appendTemplate(buf, allocator, "comment:{reply_ref}", .{ .reply_ref = reply_ref });
             } else {
                 try appendTemplate(buf, allocator, "{reply_parent_hash}", .{ .reply_parent_hash = reply_parent_hash[0..@min(reply_parent_hash.len, 12)] });
             }
@@ -639,10 +665,98 @@ fn appendPullComments(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlite
         } else {
             try markdown_render.appendMarkdown(buf, allocator, body);
         }
-        try buf.appendSlice(allocator, "</div></article>");
+        try buf.appendSlice(allocator, "</div>");
+        try appendPullReactionBar(buf, allocator, db, "comment", id, raw_ref, comment_ref_value);
+        try buf.appendSlice(allocator, "</article>");
         shown = true;
     }
     if (!shown) try appendInlineEmpty(buf, allocator, "No comments yet.");
+}
+
+fn appendPullReactionBar(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    object_kind: []const u8,
+    object_id: []const u8,
+    raw_pull_ref: []const u8,
+    target_ref: []const u8,
+) !void {
+    try buf.appendSlice(allocator, "<div class=\"reaction-bar\">");
+    var stmt = try db.prepare(
+        \\SELECT emoji, COUNT(DISTINCT actor_principal)
+        \\FROM reactions
+        \\WHERE object_kind = ? AND object_id = ?
+        \\GROUP BY emoji
+        \\ORDER BY MIN(created_at), emoji
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, object_kind);
+    try stmt.bindText(2, object_id);
+
+    var shown = false;
+    while (try stmt.step()) {
+        const emoji = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(emoji);
+        const count = stmt.columnInt64(1);
+        try appendPullReactionButton(buf, allocator, raw_pull_ref, object_kind, target_ref, emoji, emoji, count);
+        shown = true;
+    }
+    if (!shown) {
+        try appendPullReactionButton(buf, allocator, raw_pull_ref, object_kind, target_ref, "+1", "\xF0\x9F\x91\x8D", 0);
+        try appendPullReactionButton(buf, allocator, raw_pull_ref, object_kind, target_ref, "heart", "\xE2\x9D\xA4\xEF\xB8\x8F", 0);
+        try appendPullReactionButton(buf, allocator, raw_pull_ref, object_kind, target_ref, "eyes", "\xF0\x9F\x91\x80", 0);
+    }
+    try buf.appendSlice(allocator, "</div>");
+}
+
+fn appendPullReactionButton(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    raw_pull_ref: []const u8,
+    object_kind: []const u8,
+    target_ref: []const u8,
+    emoji_value: []const u8,
+    emoji_label: []const u8,
+    count: i64,
+) !void {
+    try buf.appendSlice(allocator, "<form class=\"reaction-form\" method=\"post\" action=\"/pulls/");
+    try shared.appendUrlEncoded(buf, allocator, raw_pull_ref);
+    try appendTemplate(buf, allocator,
+        \\/comments"><input type="hidden" name="action" value="add-reaction"><input type="hidden" name="target_kind" value="{object_kind}">
+    , .{ .object_kind = object_kind });
+    if (target_ref.len != 0) {
+        try appendTemplate(buf, allocator,
+            \\<input type="hidden" name="target_ref" value="{target_ref}">
+        , .{ .target_ref = target_ref });
+    }
+    try appendTemplate(buf, allocator,
+        \\<input type="hidden" name="emoji" value="{emoji_value}"><button class="reaction-button" type="submit"><span class="reaction-emoji">
+    , .{ .emoji_value = emoji_value });
+    try shared.appendHtml(buf, allocator, emoji_label);
+    try appendTemplate(buf, allocator,
+        \\</span>
+    , .{});
+    if (count > 0) {
+        try appendTemplate(buf, allocator, "<span>{count}</span>", .{ .count = count });
+    }
+    try buf.appendSlice(allocator, "</button></form>");
+}
+
+fn appendPullCommentForm(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8) !void {
+    try buf.appendSlice(allocator,
+        \\<form class="issue-card comment-card issue-comment-form" method="post" action="/pulls/
+    );
+    try shared.appendUrlEncoded(buf, allocator, raw_ref);
+    try buf.appendSlice(allocator,
+        \\/comments">
+        \\  <input type="hidden" name="reply_parent_ref" value="" data-reply-parent-ref>
+        \\  <textarea name="body" rows="5" placeholder="Leave a comment" required></textarea>
+        \\  <div class="issue-comment-form-actions">
+        \\    <button class="button primary" type="submit">Comment</button>
+        \\  </div>
+        \\</form>
+    );
 }
 
 fn appendPullCommits(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, base_ref: []const u8, head_ref: []const u8) !void {
@@ -1047,6 +1161,118 @@ pub fn handlePullPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, 
     };
 
     try sendRedirect(allocator, stream, "/pulls");
+}
+
+pub fn handlePullCommentPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
+    const action_owned = try issues_page.formValueOwned(allocator, form_body, "action");
+    defer if (action_owned) |value| allocator.free(value);
+    if (action_owned) |raw_action| {
+        const action = std.mem.trim(u8, raw_action, " \t\r\n");
+        if (std.mem.eql(u8, action, "add-reaction") or std.mem.eql(u8, action, "remove-reaction")) {
+            try index.ensureIndex(allocator, repo);
+            const pull_id = index.resolvePullId(allocator, repo, raw_ref) catch {
+                try sendPlainResponse(allocator, stream, 404, "Not Found", "Pull request not found\n");
+                return;
+            };
+            defer allocator.free(pull_id);
+
+            const emoji_owned = (try issues_page.formValueOwned(allocator, form_body, "emoji")) orelse {
+                try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Emoji is required\n");
+                return;
+            };
+            defer allocator.free(emoji_owned);
+            const emoji = std.mem.trim(u8, emoji_owned, " \t\r\n");
+            if (emoji.len == 0) {
+                try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Emoji is required\n");
+                return;
+            }
+
+            const target_kind_owned = (try issues_page.formValueOwned(allocator, form_body, "target_kind")) orelse try allocator.dupe(u8, "pull");
+            defer allocator.free(target_kind_owned);
+            const target_kind = std.mem.trim(u8, target_kind_owned, " \t\r\n");
+            const add = std.mem.eql(u8, action, "add-reaction");
+            if (std.mem.eql(u8, target_kind, "pull")) {
+                createReactionEvent(allocator, "pull", pull_id, emoji, add) catch {
+                    try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update reaction\n");
+                    return;
+                };
+            } else if (std.mem.eql(u8, target_kind, "comment")) {
+                const target_ref_owned = (try issues_page.formValueOwned(allocator, form_body, "target_ref")) orelse {
+                    try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Comment target is required\n");
+                    return;
+                };
+                defer allocator.free(target_ref_owned);
+                const comment_id = index.resolveCommentId(allocator, repo, target_ref_owned) catch {
+                    try sendPlainResponse(allocator, stream, 404, "Not Found", "Comment not found\n");
+                    return;
+                };
+                defer allocator.free(comment_id);
+                var parent = try index.commentParentInfo(allocator, repo, comment_id);
+                defer parent.deinit();
+                if (!std.mem.eql(u8, parent.parent_kind, "pull") or !std.mem.eql(u8, parent.parent_id, pull_id)) {
+                    try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Comment is not in this pull request\n");
+                    return;
+                }
+                createReactionEvent(allocator, "comment", comment_id, emoji, add) catch {
+                    try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update reaction\n");
+                    return;
+                };
+            } else {
+                try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Unknown reaction target\n");
+                return;
+            }
+
+            const location = try std.fmt.allocPrint(allocator, "/pulls/{s}", .{raw_ref});
+            defer allocator.free(location);
+            try sendRedirect(allocator, stream, location);
+            return;
+        }
+    }
+
+    const body_owned = (try issues_page.formValueOwned(allocator, form_body, "body")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(body_owned);
+    const body = std.mem.trim(u8, body_owned, " \t\r\n");
+    if (body.len == 0) {
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Comment is required\n");
+        return;
+    }
+
+    try index.ensureIndex(allocator, repo);
+    const pull_id = index.resolvePullId(allocator, repo, raw_ref) catch {
+        try sendPlainResponse(allocator, stream, 404, "Not Found", "Pull request not found\n");
+        return;
+    };
+    defer allocator.free(pull_id);
+
+    const reply_ref_owned = try issues_page.formValueOwned(allocator, form_body, "reply_parent_ref");
+    defer if (reply_ref_owned) |value| allocator.free(value);
+    const reply_ref = if (reply_ref_owned) |value| std.mem.trim(u8, value, " \t\r\n") else "";
+    if (reply_ref.len != 0) {
+        const reply_parent_id = index.resolveCommentId(allocator, repo, reply_ref) catch {
+            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Reply target was not found\n");
+            return;
+        };
+        defer allocator.free(reply_parent_id);
+        var parent = try index.commentParentInfo(allocator, repo, reply_parent_id);
+        defer parent.deinit();
+        if (!std.mem.eql(u8, parent.parent_kind, "pull") or !std.mem.eql(u8, parent.parent_id, pull_id)) {
+            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Reply target is not in this pull request\n");
+            return;
+        }
+        createCommentReplyEvent(allocator, "pull", pull_id, reply_parent_id, parent.add_hash, body_owned) catch {
+            try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not add the reply\n");
+            return;
+        };
+    } else {
+        createCommentAddedEvent(allocator, "pull", pull_id, body_owned) catch {
+            try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not add the comment\n");
+            return;
+        };
+    }
+
+    const location = try std.fmt.allocPrint(allocator, "/pulls/{s}", .{raw_ref});
+    defer allocator.free(location);
+    try sendRedirect(allocator, stream, location);
 }
 
 fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const u8) !?[]u8 {

@@ -3,6 +3,7 @@ const comment_mod = @import("../comment.zig");
 const index = @import("../index.zig");
 const issue = @import("../issue.zig");
 const markdown_render = @import("markdown_render.zig");
+const reaction_mod = @import("../reaction.zig");
 const repo_mod = @import("../repo.zig");
 const shared = @import("shared.zig");
 const util = @import("../util.zig");
@@ -17,9 +18,11 @@ const appendShellStart = shared.appendShellStart;
 const appendRelativeTime = shared.appendRelativeTime;
 const appendTemplate = shared.appendTemplate;
 const createCommentAddedEvent = comment_mod.createCommentAddedEvent;
+const createCommentReplyEvent = comment_mod.createCommentReplyEvent;
 const createIssueOpenedEvent = issue.createIssueOpenedEvent;
 const createIssueProjectEvent = issue.createIssueProjectEvent;
 const createIssueStringEvent = issue.createIssueStringEvent;
+const createReactionEvent = reaction_mod.createReactionEvent;
 const ensureIndex = index.ensureIndex;
 const commitHref = shared.commitHref;
 const issueHref = shared.issueHref;
@@ -924,7 +927,7 @@ fn renderIssueDetailPageWithCommentForm(
     try buf.append(allocator, ' ');
     try appendRelativeTime(&buf, allocator, opened_at);
     try buf.appendSlice(allocator, "</span></div>");
-    try appendIssueActionMenu(&buf, allocator, "issue-description", body, body.len != 0, false);
+    try appendIssueActionMenu(&buf, allocator, "issue-description", "", body, body.len != 0, false);
     try appendTemplate(&buf, allocator,
         \\          </header>
         \\          <div class="markdown-body">
@@ -936,10 +939,13 @@ fn renderIssueDetailPageWithCommentForm(
     }
     try buf.appendSlice(allocator,
         \\          </div>
+    );
+    try appendReactionBar(&buf, allocator, &db, "issue", id, raw_ref, "");
+    try buf.appendSlice(allocator,
         \\        </article>
         \\      </div>
     );
-    try appendIssueComments(&buf, allocator, &db, id);
+    try appendIssueComments(&buf, allocator, &db, raw_ref, id);
     try appendIssueCommentForm(&buf, allocator, raw_ref, comment_error, comment_value);
     try buf.appendSlice(allocator, "    </div><aside class=\"issue-meta-sidebar\">");
     try appendIssueSidebar(&buf, allocator, &db, raw_ref, id, display_author, milestone, body);
@@ -1046,7 +1052,7 @@ fn appendLegacyIssueLink(buf: *std.ArrayList(u8), allocator: Allocator, legacy_n
     try shared.appendIssueReferenceLink(buf, allocator, issue_ref);
 }
 
-fn appendIssueComments(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8) !void {
+fn appendIssueComments(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, raw_ref: []const u8, issue_id: []const u8) !void {
     var stmt = try db.prepare(
         \\SELECT id, body, redacted, COALESCE(NULLIF(source_author, ''), author_principal), created_at, reply_parent_id, reply_parent_hash
         \\FROM comments
@@ -1071,6 +1077,10 @@ fn appendIssueComments(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
         defer allocator.free(reply_parent_hash);
         const anchor = try std.fmt.allocPrint(allocator, "comment-{s}", .{id[0..@min(id.len, 7)]});
         defer allocator.free(anchor);
+        var comment_ref_buf: [util.short_object_ref_len]u8 = undefined;
+        const comment_ref = util.shortObjectRef(&comment_ref_buf, id);
+        const comment_ref_value = try std.fmt.allocPrint(allocator, "comment:{s}", .{comment_ref});
+        defer allocator.free(comment_ref_value);
 
         const is_reply = reply_parent_id.len != 0 or reply_parent_hash.len != 0;
         try appendTemplate(buf, allocator,
@@ -1088,7 +1098,7 @@ fn appendIssueComments(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
         try buf.append(allocator, ' ');
         try appendRelativeTime(buf, allocator, created_at);
         try buf.appendSlice(allocator, "</span></div>");
-        try appendIssueActionMenu(buf, allocator, anchor, body, !redacted and body.len != 0, false);
+        try appendIssueActionMenu(buf, allocator, anchor, comment_ref_value, body, !redacted and body.len != 0, false);
         try buf.appendSlice(allocator, "</header>");
         if (reply_parent_id.len != 0 or reply_parent_hash.len != 0) {
             try buf.appendSlice(allocator, "<p class=\"reply-note\">Reply to ");
@@ -1109,25 +1119,99 @@ fn appendIssueComments(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
         } else {
             try markdown_render.appendMarkdown(buf, allocator, body);
         }
-        try buf.appendSlice(allocator, "</div></article></div>");
+        try buf.appendSlice(allocator, "</div>");
+        try appendReactionBar(buf, allocator, db, "comment", id, raw_ref, comment_ref_value);
+        try buf.appendSlice(allocator, "</article></div>");
     }
 }
 
-fn appendIssueActionMenu(
+fn appendReactionBar(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    object_kind: []const u8,
+    object_id: []const u8,
+    raw_issue_ref: []const u8,
+    target_ref: []const u8,
+) !void {
+    try buf.appendSlice(allocator, "<div class=\"reaction-bar\">");
+    var stmt = try db.prepare(
+        \\SELECT emoji, COUNT(DISTINCT actor_principal)
+        \\FROM reactions
+        \\WHERE object_kind = ? AND object_id = ?
+        \\GROUP BY emoji
+        \\ORDER BY MIN(created_at), emoji
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, object_kind);
+    try stmt.bindText(2, object_id);
+
+    var shown = false;
+    while (try stmt.step()) {
+        const emoji = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(emoji);
+        const count = stmt.columnInt64(1);
+        try appendReactionButton(buf, allocator, raw_issue_ref, object_kind, target_ref, emoji, emoji, count);
+        shown = true;
+    }
+    if (!shown) {
+        try appendReactionButton(buf, allocator, raw_issue_ref, object_kind, target_ref, "+1", "\xF0\x9F\x91\x8D", 0);
+        try appendReactionButton(buf, allocator, raw_issue_ref, object_kind, target_ref, "heart", "\xE2\x9D\xA4\xEF\xB8\x8F", 0);
+        try appendReactionButton(buf, allocator, raw_issue_ref, object_kind, target_ref, "eyes", "\xF0\x9F\x91\x80", 0);
+    }
+    try buf.appendSlice(allocator, "</div>");
+}
+
+fn appendReactionButton(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    raw_issue_ref: []const u8,
+    object_kind: []const u8,
+    target_ref: []const u8,
+    emoji_value: []const u8,
+    emoji_label: []const u8,
+    count: i64,
+) !void {
+    try buf.appendSlice(allocator, "<form class=\"reaction-form\" method=\"post\" action=\"/issues/");
+    try shared.appendUrlEncoded(buf, allocator, raw_issue_ref);
+    try appendTemplate(buf, allocator,
+        \\/comments"><input type="hidden" name="action" value="add-reaction"><input type="hidden" name="target_kind" value="{object_kind}">
+    , .{ .object_kind = object_kind });
+    if (target_ref.len != 0) {
+        try appendTemplate(buf, allocator,
+            \\<input type="hidden" name="target_ref" value="{target_ref}">
+        , .{ .target_ref = target_ref });
+    }
+    try appendTemplate(buf, allocator,
+        \\<input type="hidden" name="emoji" value="{emoji_value}"><button class="reaction-button" type="submit"><span class="reaction-emoji">
+    , .{ .emoji_value = emoji_value });
+    try shared.appendHtml(buf, allocator, emoji_label);
+    try appendTemplate(buf, allocator,
+        \\</span>
+    , .{});
+    if (count > 0) {
+        try appendTemplate(buf, allocator, "<span>{count}</span>", .{ .count = count });
+    }
+    try buf.appendSlice(allocator, "</button></form>");
+}
+
+pub fn appendIssueActionMenu(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
     anchor: []const u8,
+    reply_ref: []const u8,
     markdown: []const u8,
     markdown_available: bool,
     edit_available: bool,
 ) !void {
     try appendTemplate(buf, allocator,
-        \\<details class="issue-action-menu" data-issue-menu data-issue-anchor="{anchor}">
+        \\<details class="issue-action-menu" data-issue-menu data-issue-anchor="{anchor}" data-issue-reply-ref="{reply_ref}">
         \\  <summary class="issue-kebab-button" aria-label="Comment actions" title="Comment actions"></summary>
         \\  <template data-issue-markdown>{markdown}</template>
         \\  <div class="issue-action-popover" role="menu">
     , .{
         .anchor = anchor,
+        .reply_ref = reply_ref,
         .markdown = markdown,
     });
     try appendIssueActionMenuItem(buf, allocator, "copy-link", "issue-menu-icon-link", "Copy link", false);
@@ -1173,6 +1257,7 @@ fn appendIssueCommentForm(
     try shared.appendUrlEncoded(buf, allocator, raw_ref);
     try appendTemplate(buf, allocator,
         \\/comments">
+        \\    <input type="hidden" name="reply_parent_ref" value="" data-reply-parent-ref>
         \\    <textarea name="body" rows="5" placeholder="Leave a comment" required>{body_value}</textarea>
     , .{ .body_value = body_value });
     if (error_message) |message| {
@@ -1201,9 +1286,9 @@ fn appendIssueSidebar(
 ) !void {
     try appendIssueSidebarAssignees(buf, allocator, db, raw_ref, issue_id);
     try appendIssueSidebarLabels(buf, allocator, db, raw_ref, issue_id);
-    try appendIssueSidebarText(buf, allocator, "Type", "No type");
+    try appendIssueSidebarType(buf, allocator);
     try appendIssueSidebarProjects(buf, allocator, db, raw_ref, issue_id);
-    try appendIssueSidebarMilestone(buf, allocator, raw_ref, milestone);
+    try appendIssueSidebarMilestone(buf, allocator, db, raw_ref, milestone);
     try appendIssueSidebarRelationships(buf, allocator, db, issue_id, body);
     try appendIssueSidebarDevelopment(buf, allocator, db, issue_id);
     try appendIssueSidebarNotifications(buf, allocator);
@@ -1211,7 +1296,9 @@ fn appendIssueSidebar(
 }
 
 fn appendIssueSidebarAssignees(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, raw_ref: []const u8, issue_id: []const u8) !void {
-    try appendIssueSidebarSectionStart(buf, allocator, "Assignees");
+    try appendIssueSidebarEditableSectionStart(buf, allocator, "Assignees", "Add assignees");
+    try appendIssueSidebarAssigneeMenu(buf, allocator, db, raw_ref, issue_id);
+    try appendIssueSidebarEditableSectionBodyStart(buf, allocator);
     var stmt = try db.prepare("SELECT DISTINCT assignee FROM issue_assignees WHERE issue_id = ? ORDER BY assignee");
     defer stmt.deinit();
     try stmt.bindText(1, issue_id);
@@ -1219,16 +1306,17 @@ fn appendIssueSidebarAssignees(buf: *std.ArrayList(u8), allocator: Allocator, db
     while (try stmt.step()) {
         const assignee = try stmt.columnTextDup(allocator, 0);
         defer allocator.free(assignee);
-        try appendIssueSidebarPerson(buf, allocator, raw_ref, assignee);
+        try appendIssueSidebarPerson(buf, allocator, assignee);
         shown = true;
     }
     if (!shown) try buf.appendSlice(allocator, "<p class=\"issue-sidebar-empty\">No one assigned</p>");
-    try appendIssueSidebarSingleInputForm(buf, allocator, raw_ref, "add-assignee", "value", "Add assignee", "Assignee");
     try appendIssueSidebarSectionEnd(buf, allocator);
 }
 
 fn appendIssueSidebarLabels(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, raw_ref: []const u8, issue_id: []const u8) !void {
-    try appendIssueSidebarSectionStart(buf, allocator, "Labels");
+    try appendIssueSidebarEditableSectionStart(buf, allocator, "Labels", "Apply labels to this issue");
+    try appendIssueSidebarLabelsMenu(buf, allocator, db, raw_ref, issue_id);
+    try appendIssueSidebarEditableSectionBodyStart(buf, allocator);
     var stmt = try db.prepare("SELECT DISTINCT label FROM issue_labels WHERE issue_id = ? ORDER BY label");
     defer stmt.deinit();
     try stmt.bindText(1, issue_id);
@@ -1240,19 +1328,33 @@ fn appendIssueSidebarLabels(buf: *std.ArrayList(u8), allocator: Allocator, db: *
             try buf.appendSlice(allocator, "<div class=\"issue-sidebar-labels\">");
             shown = true;
         }
-        try appendIssueSidebarLabel(buf, allocator, raw_ref, label);
+        try appendIssueSidebarLabel(buf, allocator, label);
     }
     if (shown) {
         try buf.appendSlice(allocator, "</div>");
     } else {
         try buf.appendSlice(allocator, "<p class=\"issue-sidebar-empty\">None yet</p>");
     }
-    try appendIssueSidebarSingleInputForm(buf, allocator, raw_ref, "add-label", "value", "Add label", "Label");
+    try appendIssueSidebarSectionEnd(buf, allocator);
+}
+
+fn appendIssueSidebarType(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try appendIssueSidebarEditableSectionStart(buf, allocator, "Type", "Select issue type");
+    try appendIssueSidebarMenuFilter(buf, allocator, "Filter types");
+    try appendIssueSidebarMenuGroupStart(buf, allocator, "Available types");
+    try appendIssueSidebarTypeOption(buf, allocator, "Bug", "An unexpected problem or behavior", "bug");
+    try appendIssueSidebarTypeOption(buf, allocator, "Feature", "A request, idea, or new functionality", "feature");
+    try appendIssueSidebarTypeOption(buf, allocator, "Task", "A specific piece of work", "task");
+    try appendIssueSidebarMenuGroupEnd(buf, allocator);
+    try appendIssueSidebarEditableSectionBodyStart(buf, allocator);
+    try buf.appendSlice(allocator, "<p class=\"issue-sidebar-empty\">No type</p>");
     try appendIssueSidebarSectionEnd(buf, allocator);
 }
 
 fn appendIssueSidebarProjects(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, raw_ref: []const u8, issue_id: []const u8) !void {
-    try appendIssueSidebarSectionStart(buf, allocator, "Projects");
+    try appendIssueSidebarEditableSectionStart(buf, allocator, "Projects", "Select projects");
+    try appendIssueSidebarProjectsMenu(buf, allocator, db, raw_ref, issue_id);
+    try appendIssueSidebarEditableSectionBodyStart(buf, allocator);
     var stmt = try db.prepare(
         \\SELECT DISTINCT project, column_name
         \\FROM issue_projects
@@ -1270,33 +1372,31 @@ fn appendIssueSidebarProjects(buf: *std.ArrayList(u8), allocator: Allocator, db:
         try buf.appendSlice(allocator, "<span class=\"issue-sidebar-token issue-sidebar-project-token\"><span class=\"issue-sidebar-pill\">");
         try appendTemplate(buf, allocator, "{project}", .{ .project = project });
         if (column.len != 0) try appendTemplate(buf, allocator, " / {column}", .{ .column = column });
-        try buf.appendSlice(allocator, "</span>");
-        try appendIssueSidebarRemoveProjectForm(buf, allocator, raw_ref, project, column);
-        try buf.appendSlice(allocator, "</span>");
+        try buf.appendSlice(allocator, "</span></span>");
         shown = true;
     }
     if (!shown) try buf.appendSlice(allocator, "<p class=\"issue-sidebar-empty\">No projects</p>");
-    try appendIssueSidebarProjectForm(buf, allocator, raw_ref);
     try appendIssueSidebarSectionEnd(buf, allocator);
 }
 
-fn appendIssueSidebarMilestone(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8, milestone: []const u8) !void {
-    try appendIssueSidebarSectionStart(buf, allocator, "Milestone");
+fn appendIssueSidebarMilestone(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, raw_ref: []const u8, milestone: []const u8) !void {
+    try appendIssueSidebarEditableSectionStart(buf, allocator, "Milestone", "Set milestone");
+    try appendIssueSidebarMilestoneMenu(buf, allocator, db, raw_ref, milestone);
+    try appendIssueSidebarEditableSectionBodyStart(buf, allocator);
     if (milestone.len == 0) {
         try buf.appendSlice(allocator, "<p class=\"issue-sidebar-empty\">No milestone</p>");
     } else {
         try buf.appendSlice(allocator, "<span class=\"issue-sidebar-token\"><span class=\"issue-sidebar-pill\">");
         try shared.appendHtml(buf, allocator, milestone);
-        try buf.appendSlice(allocator, "</span>");
-        try appendIssueSidebarRemoveValueForm(buf, allocator, raw_ref, "clear-milestone", "Clear milestone");
-        try buf.appendSlice(allocator, "</span>");
+        try buf.appendSlice(allocator, "</span></span>");
     }
-    try appendIssueSidebarSingleInputForm(buf, allocator, raw_ref, "set-milestone", "milestone", "Set milestone", "Milestone");
     try appendIssueSidebarSectionEnd(buf, allocator);
 }
 
 fn appendIssueSidebarRelationships(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8, body: []const u8) !void {
-    try appendIssueSidebarSectionStart(buf, allocator, "Relationships");
+    try appendIssueSidebarEditableSectionStart(buf, allocator, "Relationships", "Add relationship");
+    try appendIssueSidebarRelationshipsMenu(buf, allocator);
+    try appendIssueSidebarEditableSectionBodyStart(buf, allocator);
     var seen = std.StringHashMap(void).init(allocator);
     defer {
         var keys = seen.keyIterator();
@@ -1327,7 +1427,9 @@ fn appendIssueSidebarRelationships(buf: *std.ArrayList(u8), allocator: Allocator
 }
 
 fn appendIssueSidebarDevelopment(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8) !void {
-    try appendIssueSidebarSectionStart(buf, allocator, "Development");
+    try appendIssueSidebarEditableSectionStart(buf, allocator, "Development", "Link development");
+    try appendIssueSidebarDevelopmentMenu(buf, allocator, db);
+    try appendIssueSidebarEditableSectionBodyStart(buf, allocator);
     var stmt = try db.prepare(
         \\SELECT commit_oid
         \\FROM commit_references
@@ -1378,34 +1480,252 @@ fn appendIssueSidebarNotifications(buf: *std.ArrayList(u8), allocator: Allocator
     try appendIssueSidebarSectionEnd(buf, allocator);
 }
 
-fn appendIssueSidebarText(buf: *std.ArrayList(u8), allocator: Allocator, title: []const u8, value: []const u8) !void {
-    try appendIssueSidebarSectionStart(buf, allocator, title);
-    try appendTemplate(buf, allocator, "<p class=\"issue-sidebar-empty\">{value}</p>", .{ .value = value });
-    try appendIssueSidebarSectionEnd(buf, allocator);
+fn appendIssueSidebarAssigneeMenu(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, raw_ref: []const u8, issue_id: []const u8) !void {
+    try appendIssueSidebarSingleInputForm(buf, allocator, raw_ref, "add-assignee", "value", "Add assignee", "Filter assignees");
+    try appendIssueSidebarMenuGroupStart(buf, allocator, "Assigned");
+    var selected = try db.prepare("SELECT DISTINCT assignee FROM issue_assignees WHERE issue_id = ? ORDER BY lower(assignee), assignee");
+    defer selected.deinit();
+    try selected.bindText(1, issue_id);
+    var shown = false;
+    while (try selected.step()) {
+        const assignee = try selected.columnTextDup(allocator, 0);
+        defer allocator.free(assignee);
+        try appendIssueSidebarAssigneeActionRow(buf, allocator, raw_ref, "remove-assignee", assignee, true);
+        shown = true;
+    }
+    if (!shown) try appendIssueSidebarMenuEmpty(buf, allocator, "No assignees selected.");
+    try appendIssueSidebarMenuGroupEnd(buf, allocator);
+
+    try appendIssueSidebarMenuGroupStart(buf, allocator, "Suggestions");
+    var suggestions = try db.prepare(
+        \\SELECT DISTINCT assignee
+        \\FROM (
+        \\  SELECT assignee AS assignee FROM issue_assignees
+        \\  UNION
+        \\  SELECT COALESCE(NULLIF(m.source_author, ''), i.author_principal) AS assignee
+        \\  FROM issues i
+        \\  LEFT JOIN issue_metadata m ON m.issue_id = i.id
+        \\)
+        \\WHERE assignee <> ''
+        \\  AND assignee NOT IN (SELECT assignee FROM issue_assignees WHERE issue_id = ?)
+        \\ORDER BY lower(assignee), assignee
+        \\LIMIT 20
+    );
+    defer suggestions.deinit();
+    try suggestions.bindText(1, issue_id);
+    shown = false;
+    while (try suggestions.step()) {
+        const assignee = try suggestions.columnTextDup(allocator, 0);
+        defer allocator.free(assignee);
+        try appendIssueSidebarAssigneeActionRow(buf, allocator, raw_ref, "add-assignee", assignee, false);
+        shown = true;
+    }
+    if (!shown) try appendIssueSidebarMenuEmpty(buf, allocator, "No assignee suggestions.");
+    try appendIssueSidebarMenuGroupEnd(buf, allocator);
+}
+
+fn appendIssueSidebarLabelsMenu(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, raw_ref: []const u8, issue_id: []const u8) !void {
+    try appendIssueSidebarSingleInputForm(buf, allocator, raw_ref, "add-label", "value", "Add label", "Filter labels");
+    try appendIssueSidebarMenuGroupStart(buf, allocator, "Selected labels");
+    var selected = try db.prepare("SELECT DISTINCT label FROM issue_labels WHERE issue_id = ? ORDER BY lower(label), label");
+    defer selected.deinit();
+    try selected.bindText(1, issue_id);
+    var shown = false;
+    while (try selected.step()) {
+        const label = try selected.columnTextDup(allocator, 0);
+        defer allocator.free(label);
+        try appendIssueSidebarLabelActionRow(buf, allocator, raw_ref, "remove-label", label, true);
+        shown = true;
+    }
+    if (!shown) try appendIssueSidebarMenuEmpty(buf, allocator, "No labels selected.");
+    try appendIssueSidebarMenuGroupEnd(buf, allocator);
+
+    try appendIssueSidebarMenuGroupStart(buf, allocator, "Suggestions");
+    var suggestions = try db.prepare(
+        \\SELECT DISTINCT label
+        \\FROM issue_labels
+        \\WHERE label NOT IN (SELECT label FROM issue_labels WHERE issue_id = ?)
+        \\ORDER BY lower(label), label
+        \\LIMIT 24
+    );
+    defer suggestions.deinit();
+    try suggestions.bindText(1, issue_id);
+    shown = false;
+    while (try suggestions.step()) {
+        const label = try suggestions.columnTextDup(allocator, 0);
+        defer allocator.free(label);
+        try appendIssueSidebarLabelActionRow(buf, allocator, raw_ref, "add-label", label, false);
+        shown = true;
+    }
+    if (!shown) try appendIssueSidebarMenuEmpty(buf, allocator, "No label suggestions.");
+    try appendIssueSidebarMenuGroupEnd(buf, allocator);
+}
+
+fn appendIssueSidebarProjectsMenu(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, raw_ref: []const u8, issue_id: []const u8) !void {
+    try appendIssueSidebarProjectForm(buf, allocator, raw_ref);
+    try appendIssueSidebarMenuGroupStart(buf, allocator, "Selected projects");
+    var selected = try db.prepare(
+        \\SELECT DISTINCT project, column_name
+        \\FROM issue_projects
+        \\WHERE issue_id = ?
+        \\ORDER BY lower(project), lower(column_name), project, column_name
+    );
+    defer selected.deinit();
+    try selected.bindText(1, issue_id);
+    var shown = false;
+    while (try selected.step()) {
+        const project = try selected.columnTextDup(allocator, 0);
+        defer allocator.free(project);
+        const column = try selected.columnTextDup(allocator, 1);
+        defer allocator.free(column);
+        try appendIssueSidebarProjectActionRow(buf, allocator, raw_ref, "remove-project", project, column, true);
+        shown = true;
+    }
+    if (!shown) try appendIssueSidebarMenuEmpty(buf, allocator, "No projects selected.");
+    try appendIssueSidebarMenuGroupEnd(buf, allocator);
+
+    try appendIssueSidebarMenuGroupStart(buf, allocator, "Suggestions");
+    var suggestions = try db.prepare(
+        \\SELECT DISTINCT candidate.project, candidate.column_name
+        \\FROM (
+        \\  SELECT p.name AS project, pc.column_name AS column_name
+        \\  FROM projects p
+        \\  JOIN project_columns pc ON pc.project_id = p.id
+        \\  WHERE p.state <> 'closed'
+        \\  UNION
+        \\  SELECT project, column_name FROM issue_projects
+        \\) AS candidate
+        \\WHERE candidate.project <> ''
+        \\  AND candidate.column_name <> ''
+        \\  AND NOT EXISTS (
+        \\    SELECT 1 FROM issue_projects ip
+        \\    WHERE ip.issue_id = ?
+        \\      AND ip.project = candidate.project
+        \\      AND ip.column_name = candidate.column_name
+        \\  )
+        \\ORDER BY lower(candidate.project), lower(candidate.column_name), candidate.project, candidate.column_name
+        \\LIMIT 20
+    );
+    defer suggestions.deinit();
+    try suggestions.bindText(1, issue_id);
+    shown = false;
+    while (try suggestions.step()) {
+        const project = try suggestions.columnTextDup(allocator, 0);
+        defer allocator.free(project);
+        const column = try suggestions.columnTextDup(allocator, 1);
+        defer allocator.free(column);
+        try appendIssueSidebarProjectActionRow(buf, allocator, raw_ref, "add-project", project, column, false);
+        shown = true;
+    }
+    if (!shown) try appendIssueSidebarMenuEmpty(buf, allocator, "No project suggestions.");
+    try appendIssueSidebarMenuGroupEnd(buf, allocator);
+}
+
+fn appendIssueSidebarMilestoneMenu(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, raw_ref: []const u8, milestone: []const u8) !void {
+    try appendIssueSidebarSingleInputForm(buf, allocator, raw_ref, "set-milestone", "milestone", "Set milestone", "Filter milestones");
+    try appendIssueSidebarMenuGroupStart(buf, allocator, "Selected milestone");
+    if (milestone.len == 0) {
+        try appendIssueSidebarMenuEmpty(buf, allocator, "No milestone selected.");
+    } else {
+        try appendIssueSidebarMilestoneActionRow(buf, allocator, raw_ref, milestone, true);
+    }
+    try appendIssueSidebarMenuGroupEnd(buf, allocator);
+
+    try appendIssueSidebarMenuGroupStart(buf, allocator, "Suggestions");
+    var suggestions = try db.prepare(
+        \\SELECT DISTINCT candidate.milestone
+        \\FROM (
+        \\  SELECT title AS milestone FROM milestones WHERE state <> 'closed'
+        \\  UNION
+        \\  SELECT milestone FROM issue_metadata WHERE milestone <> ''
+        \\) AS candidate
+        \\WHERE candidate.milestone <> ''
+        \\  AND candidate.milestone <> ?
+        \\ORDER BY lower(candidate.milestone), candidate.milestone
+        \\LIMIT 20
+    );
+    defer suggestions.deinit();
+    try suggestions.bindText(1, milestone);
+    var shown = false;
+    while (try suggestions.step()) {
+        const candidate = try suggestions.columnTextDup(allocator, 0);
+        defer allocator.free(candidate);
+        try appendIssueSidebarMilestoneActionRow(buf, allocator, raw_ref, candidate, false);
+        shown = true;
+    }
+    if (!shown) try appendIssueSidebarMenuEmpty(buf, allocator, "No milestone suggestions.");
+    try appendIssueSidebarMenuGroupEnd(buf, allocator);
+}
+
+fn appendIssueSidebarRelationshipsMenu(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try buf.appendSlice(allocator, "<div class=\"issue-sidebar-command-list\">");
+    try appendIssueSidebarCommand(buf, allocator, "Add parent", "Alt P");
+    try appendIssueSidebarCommand(buf, allocator, "Mark as blocked by", "B B");
+    try appendIssueSidebarCommand(buf, allocator, "Mark as blocking", "B X");
+    try appendIssueSidebarCommand(buf, allocator, "Add security alert", "");
+    try buf.appendSlice(allocator, "</div>");
+}
+
+fn appendIssueSidebarDevelopmentMenu(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb) !void {
+    try appendIssueSidebarMenuFilter(buf, allocator, "Search pull requests");
+    try appendIssueSidebarMenuGroupStart(buf, allocator, "Open pull requests");
+    var stmt = try db.prepare(
+        \\SELECT p.id, p.title, COALESCE(a.number, 0)
+        \\FROM pulls p
+        \\LEFT JOIN legacy_aliases a
+        \\  ON a.provider = 'github' AND a.object_kind = 'pull' AND a.object_id = p.id
+        \\WHERE p.state = 'open'
+        \\ORDER BY p.opened_at DESC
+        \\LIMIT 12
+    );
+    defer stmt.deinit();
+    var shown = false;
+    while (try stmt.step()) {
+        const pull_id = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(pull_id);
+        const title = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(title);
+        const legacy_number = stmt.columnInt64(2);
+        try appendIssueSidebarPullChoice(buf, allocator, pull_id, title, legacy_number);
+        shown = true;
+    }
+    if (!shown) try appendIssueSidebarMenuEmpty(buf, allocator, "No open pull requests.");
+    try appendIssueSidebarMenuGroupEnd(buf, allocator);
 }
 
 fn appendIssueSidebarSectionStart(buf: *std.ArrayList(u8), allocator: Allocator, title: []const u8) !void {
     try appendTemplate(buf, allocator,
-        \\<section class="issue-sidebar-section"><h2>{title}</h2>
+        \\<section class="issue-sidebar-section"><div class="issue-sidebar-heading"><h2>{title}</h2></div>
     , .{ .title = title });
+}
+
+fn appendIssueSidebarEditableSectionStart(buf: *std.ArrayList(u8), allocator: Allocator, title: []const u8, menu_label: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<section class="issue-sidebar-section"><div class="issue-sidebar-heading"><h2>{title}</h2><details class="issue-sidebar-menu" data-issue-sidebar-menu><summary aria-label="{menu_label}" title="{menu_label}"><span class="issue-sidebar-menu-icon" aria-hidden="true"></span></summary><div class="issue-sidebar-popover" role="dialog" aria-label="{menu_label}"><div class="issue-sidebar-popover-title">{menu_label}</div>
+    , .{
+        .title = title,
+        .menu_label = menu_label,
+    });
+}
+
+fn appendIssueSidebarEditableSectionBodyStart(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try buf.appendSlice(allocator, "</div></details></div>");
 }
 
 fn appendIssueSidebarSectionEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
     try buf.appendSlice(allocator, "</section>");
 }
 
-fn appendIssueSidebarPerson(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8, name: []const u8) !void {
-    try buf.appendSlice(allocator, "<div class=\"issue-sidebar-person issue-sidebar-person-editable\">");
+fn appendIssueSidebarPerson(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8) !void {
+    try buf.appendSlice(allocator, "<div class=\"issue-sidebar-person\">");
     try appendIssueAvatar(buf, allocator, name, "");
     try appendTemplate(buf, allocator, "<span>{name}</span>", .{ .name = name });
-    try appendIssueSidebarRemoveNamedValueForm(buf, allocator, raw_ref, "remove-assignee", "value", name, "Remove assignee");
     try buf.appendSlice(allocator, "</div>");
 }
 
-fn appendIssueSidebarLabel(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8, label: []const u8) !void {
+fn appendIssueSidebarLabel(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8) !void {
     try buf.appendSlice(allocator, "<span class=\"issue-sidebar-token\">");
     try appendIssueLabel(buf, allocator, label);
-    try appendIssueSidebarRemoveNamedValueForm(buf, allocator, raw_ref, "remove-label", "value", label, "Remove label");
     try buf.appendSlice(allocator, "</span>");
 }
 
@@ -1418,10 +1738,10 @@ fn appendIssueSidebarSingleInputForm(
     button_label: []const u8,
     placeholder: []const u8,
 ) !void {
-    try buf.appendSlice(allocator, "<form class=\"issue-sidebar-add-form\" method=\"post\" action=\"");
+    try buf.appendSlice(allocator, "<form class=\"issue-sidebar-add-form issue-sidebar-menu-form\" method=\"post\" action=\"");
     try appendIssueSidebarAction(buf, allocator, raw_ref);
     try appendTemplate(buf, allocator,
-        \\"><input type="hidden" name="action" value="{action}"><input name="{input_name}" placeholder="{placeholder}" aria-label="{placeholder}"><button type="submit">{button_label}</button></form>
+        \\"><input type="hidden" name="action" value="{action}"><label class="issue-sidebar-menu-input"><span aria-hidden="true"></span><input name="{input_name}" placeholder="{placeholder}" aria-label="{placeholder}" autocomplete="off" data-issue-sidebar-filter></label><button type="submit">{button_label}</button></form>
     , .{
         .action = action,
         .input_name = input_name,
@@ -1431,11 +1751,176 @@ fn appendIssueSidebarSingleInputForm(
 }
 
 fn appendIssueSidebarProjectForm(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8) !void {
-    try buf.appendSlice(allocator, "<form class=\"issue-sidebar-add-form issue-sidebar-project-form\" method=\"post\" action=\"");
+    try buf.appendSlice(allocator, "<form class=\"issue-sidebar-add-form issue-sidebar-project-form issue-sidebar-menu-form\" method=\"post\" action=\"");
     try appendIssueSidebarAction(buf, allocator, raw_ref);
     try buf.appendSlice(allocator,
-        \\"><input type="hidden" name="action" value="add-project"><input name="project" placeholder="Project" aria-label="Project"><input name="column" placeholder="Column" aria-label="Column"><button type="submit">Add project</button></form>
+        \\"><input type="hidden" name="action" value="add-project"><label class="issue-sidebar-menu-input"><span aria-hidden="true"></span><input name="project" placeholder="Filter projects" aria-label="Project" autocomplete="off" data-issue-sidebar-filter></label><input name="column" placeholder="Column" aria-label="Column" autocomplete="off"><button type="submit">Add project</button></form>
     );
+}
+
+fn appendIssueSidebarMenuFilter(buf: *std.ArrayList(u8), allocator: Allocator, placeholder: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<label class="issue-sidebar-menu-input issue-sidebar-menu-filter"><span aria-hidden="true"></span><input placeholder="{placeholder}" aria-label="{placeholder}" autocomplete="off" data-issue-sidebar-filter></label>
+    , .{ .placeholder = placeholder });
+}
+
+fn appendIssueSidebarMenuGroupStart(buf: *std.ArrayList(u8), allocator: Allocator, title: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="issue-sidebar-menu-group"><div class="issue-sidebar-menu-group-title">{title}</div>
+    , .{ .title = title });
+}
+
+fn appendIssueSidebarMenuGroupEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try buf.appendSlice(allocator, "</div>");
+}
+
+fn appendIssueSidebarMenuEmpty(buf: *std.ArrayList(u8), allocator: Allocator, message: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<p class="issue-sidebar-menu-empty" data-sidebar-filter-text="">{message}</p>
+    , .{ .message = message });
+}
+
+fn appendIssueSidebarAssigneeActionRow(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    raw_ref: []const u8,
+    action: []const u8,
+    assignee: []const u8,
+    selected: bool,
+) !void {
+    try appendIssueSidebarValueActionFormStart(buf, allocator, raw_ref, action, "value", assignee, assignee, selected);
+    try appendIssueAvatar(buf, allocator, assignee, "");
+    try appendTemplate(buf, allocator, "<span class=\"issue-sidebar-picker-primary\">{assignee}</span></button></form>", .{
+        .assignee = assignee,
+    });
+}
+
+fn appendIssueSidebarLabelActionRow(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    raw_ref: []const u8,
+    action: []const u8,
+    label: []const u8,
+    selected: bool,
+) !void {
+    try appendIssueSidebarValueActionFormStart(buf, allocator, raw_ref, action, "value", label, label, selected);
+    try appendIssueLabel(buf, allocator, label);
+    try buf.appendSlice(allocator, "</button></form>");
+}
+
+fn appendIssueSidebarMilestoneActionRow(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    raw_ref: []const u8,
+    milestone: []const u8,
+    selected: bool,
+) !void {
+    if (selected) {
+        try buf.appendSlice(allocator, "<form class=\"issue-sidebar-picker-form\" method=\"post\" action=\"");
+        try appendIssueSidebarAction(buf, allocator, raw_ref);
+        try appendTemplate(buf, allocator,
+            \\"><input type="hidden" name="action" value="clear-milestone"><button class="issue-sidebar-picker-row is-selected" type="submit" data-sidebar-filter-text="{milestone}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span><span class="issue-milestone-icon" aria-hidden="true"></span><span class="issue-sidebar-picker-primary">{milestone}</span></button></form>
+        , .{ .milestone = milestone });
+        return;
+    }
+
+    try buf.appendSlice(allocator, "<form class=\"issue-sidebar-picker-form\" method=\"post\" action=\"");
+    try appendIssueSidebarAction(buf, allocator, raw_ref);
+    try appendTemplate(buf, allocator,
+        \\"><input type="hidden" name="action" value="set-milestone"><input type="hidden" name="milestone" value="{milestone}"><button class="issue-sidebar-picker-row" type="submit" data-sidebar-filter-text="{milestone}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span><span class="issue-milestone-icon" aria-hidden="true"></span><span class="issue-sidebar-picker-primary">{milestone}</span></button></form>
+    , .{ .milestone = milestone });
+}
+
+fn appendIssueSidebarProjectActionRow(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    raw_ref: []const u8,
+    action: []const u8,
+    project: []const u8,
+    column: []const u8,
+    selected: bool,
+) !void {
+    const state_class: []const u8 = if (selected) " is-selected" else "";
+    try buf.appendSlice(allocator, "<form class=\"issue-sidebar-picker-form\" method=\"post\" action=\"");
+    try appendIssueSidebarAction(buf, allocator, raw_ref);
+    try appendTemplate(buf, allocator,
+        \\"><input type="hidden" name="action" value="{action}"><input type="hidden" name="project" value="{project}"><input type="hidden" name="column" value="{column}"><button class="issue-sidebar-picker-row{state_class}" type="submit" data-sidebar-filter-text="{project} {column}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span><span class="issue-sidebar-project-icon" aria-hidden="true"></span><span class="issue-sidebar-picker-text"><span class="issue-sidebar-picker-primary">{project}</span><span class="issue-sidebar-picker-secondary">{column}</span></span></button></form>
+    , .{
+        .action = action,
+        .project = project,
+        .column = column,
+        .state_class = state_class,
+    });
+}
+
+fn appendIssueSidebarValueActionFormStart(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    raw_ref: []const u8,
+    action: []const u8,
+    input_name: []const u8,
+    value: []const u8,
+    filter_text: []const u8,
+    selected: bool,
+) !void {
+    const state_class: []const u8 = if (selected) " is-selected" else "";
+    try buf.appendSlice(allocator, "<form class=\"issue-sidebar-picker-form\" method=\"post\" action=\"");
+    try appendIssueSidebarAction(buf, allocator, raw_ref);
+    try appendTemplate(buf, allocator,
+        \\"><input type="hidden" name="action" value="{action}"><input type="hidden" name="{input_name}" value="{value}"><button class="issue-sidebar-picker-row{state_class}" type="submit" data-sidebar-filter-text="{filter_text}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span>
+    , .{
+        .action = action,
+        .input_name = input_name,
+        .value = value,
+        .filter_text = filter_text,
+        .state_class = state_class,
+    });
+}
+
+fn appendIssueSidebarTypeOption(buf: *std.ArrayList(u8), allocator: Allocator, title: []const u8, description: []const u8, kind: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="issue-sidebar-picker-row issue-sidebar-static-row" data-sidebar-filter-text="{title} {description}"><span class="issue-type-dot issue-type-{kind}" aria-hidden="true"></span><span class="issue-sidebar-picker-text"><span class="issue-sidebar-picker-primary">{title}</span><span class="issue-sidebar-picker-secondary">{description}</span></span></div>
+    , .{
+        .title = title,
+        .description = description,
+        .kind = kind,
+    });
+}
+
+fn appendIssueSidebarCommand(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, shortcut: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<button type="button" disabled><span>{label}</span>
+    , .{ .label = label });
+    if (shortcut.len != 0) {
+        var parts = std.mem.tokenizeScalar(u8, shortcut, ' ');
+        try buf.appendSlice(allocator, "<span class=\"issue-sidebar-command-keys\">");
+        while (parts.next()) |part| {
+            try appendTemplate(buf, allocator, "<kbd>{part}</kbd>", .{ .part = part });
+        }
+        try buf.appendSlice(allocator, "</span>");
+    }
+    try buf.appendSlice(allocator, "</button>");
+}
+
+fn appendIssueSidebarPullChoice(buf: *std.ArrayList(u8), allocator: Allocator, pull_id: []const u8, title: []const u8, legacy_number: i64) !void {
+    var pull_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const pull_ref = util.shortObjectRef(&pull_ref_buf, pull_id);
+    const number_text = try pullNumberText(allocator, pull_ref, legacy_number);
+    defer allocator.free(number_text);
+
+    try buf.appendSlice(allocator, "<a class=\"issue-sidebar-picker-row issue-sidebar-link-choice\" href=\"");
+    try shared.appendHref(buf, allocator, pullHref(pull_ref));
+    try appendTemplate(buf, allocator,
+        \\" data-sidebar-filter-text="{title} {number_text}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span><span class="issue-sidebar-pr-icon" aria-hidden="true"></span><span class="issue-sidebar-picker-text"><span class="issue-sidebar-picker-primary">{title}</span><span class="issue-sidebar-picker-secondary">{number_text}</span></span></a>
+    , .{
+        .title = title,
+        .number_text = number_text,
+    });
+}
+
+fn pullNumberText(allocator: Allocator, pull_ref: []const u8, legacy_number: i64) ![]u8 {
+    if (legacy_number > 0) return try std.fmt.allocPrint(allocator, "#{d}", .{legacy_number});
+    return try std.fmt.allocPrint(allocator, "#{s}", .{pull_ref});
 }
 
 fn appendIssueSidebarRemoveProjectForm(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8, project: []const u8, column: []const u8) !void {
@@ -1803,6 +2288,71 @@ fn writeSidebarStringEventOrFail(
 }
 
 pub fn handleIssueCommentPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
+    const action_owned = try formValueOwned(allocator, form_body, "action");
+    defer if (action_owned) |value| allocator.free(value);
+    if (action_owned) |raw_action| {
+        const action = std.mem.trim(u8, raw_action, " \t\r\n");
+        if (std.mem.eql(u8, action, "add-reaction") or std.mem.eql(u8, action, "remove-reaction")) {
+            try ensureIndex(allocator, repo);
+            const issue_id = index.resolveIssueId(allocator, repo, raw_ref) catch {
+                try sendPlainResponse(allocator, stream, 404, "Not Found", "Issue not found\n");
+                return;
+            };
+            defer allocator.free(issue_id);
+
+            const emoji_owned = (try formValueOwned(allocator, form_body, "emoji")) orelse {
+                try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Emoji is required\n");
+                return;
+            };
+            defer allocator.free(emoji_owned);
+            const emoji = std.mem.trim(u8, emoji_owned, " \t\r\n");
+            if (emoji.len == 0) {
+                try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Emoji is required\n");
+                return;
+            }
+
+            const target_kind_owned = (try formValueOwned(allocator, form_body, "target_kind")) orelse try allocator.dupe(u8, "issue");
+            defer allocator.free(target_kind_owned);
+            const target_kind = std.mem.trim(u8, target_kind_owned, " \t\r\n");
+            const add = std.mem.eql(u8, action, "add-reaction");
+            if (std.mem.eql(u8, target_kind, "issue")) {
+                createReactionEvent(allocator, "issue", issue_id, emoji, add) catch {
+                    try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update reaction\n");
+                    return;
+                };
+            } else if (std.mem.eql(u8, target_kind, "comment")) {
+                const target_ref_owned = (try formValueOwned(allocator, form_body, "target_ref")) orelse {
+                    try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Comment target is required\n");
+                    return;
+                };
+                defer allocator.free(target_ref_owned);
+                const comment_id = index.resolveCommentId(allocator, repo, target_ref_owned) catch {
+                    try sendPlainResponse(allocator, stream, 404, "Not Found", "Comment not found\n");
+                    return;
+                };
+                defer allocator.free(comment_id);
+                var parent = try index.commentParentInfo(allocator, repo, comment_id);
+                defer parent.deinit();
+                if (!std.mem.eql(u8, parent.parent_kind, "issue") or !std.mem.eql(u8, parent.parent_id, issue_id)) {
+                    try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Comment is not in this issue\n");
+                    return;
+                }
+                createReactionEvent(allocator, "comment", comment_id, emoji, add) catch {
+                    try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update reaction\n");
+                    return;
+                };
+            } else {
+                try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Unknown reaction target\n");
+                return;
+            }
+
+            const location = try std.fmt.allocPrint(allocator, "/issues/{s}", .{raw_ref});
+            defer allocator.free(location);
+            try sendRedirect(allocator, stream, location);
+            return;
+        }
+    }
+
     const body_owned = (try formValueOwned(allocator, form_body, "body")) orelse try allocator.dupe(u8, "");
     defer allocator.free(body_owned);
 
@@ -1823,18 +2373,51 @@ pub fn handleIssueCommentPost(allocator: Allocator, repo: Repo, stream: std.net.
     };
     defer allocator.free(issue_id);
 
-    createCommentAddedEvent(allocator, "issue", issue_id, body_owned) catch {
-        const page = try renderIssueDetailPageWithCommentForm(
-            allocator,
-            repo,
-            raw_ref,
-            "Could not add the comment. Check that Gitomi is initialized and Git commit signing is configured.",
-            body_owned,
-        );
-        defer allocator.free(page);
-        try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", page, null);
-        return;
-    };
+    const reply_ref_owned = try formValueOwned(allocator, form_body, "reply_parent_ref");
+    defer if (reply_ref_owned) |value| allocator.free(value);
+    const reply_ref = if (reply_ref_owned) |value| std.mem.trim(u8, value, " \t\r\n") else "";
+    if (reply_ref.len != 0) {
+        const reply_parent_id = index.resolveCommentId(allocator, repo, reply_ref) catch {
+            const page = try renderIssueDetailPageWithCommentForm(allocator, repo, raw_ref, "Reply target was not found.", body_owned);
+            defer allocator.free(page);
+            try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", page, null);
+            return;
+        };
+        defer allocator.free(reply_parent_id);
+        var parent = try index.commentParentInfo(allocator, repo, reply_parent_id);
+        defer parent.deinit();
+        if (!std.mem.eql(u8, parent.parent_kind, "issue") or !std.mem.eql(u8, parent.parent_id, issue_id)) {
+            const page = try renderIssueDetailPageWithCommentForm(allocator, repo, raw_ref, "Reply target is not in this issue.", body_owned);
+            defer allocator.free(page);
+            try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", page, null);
+            return;
+        }
+        createCommentReplyEvent(allocator, "issue", issue_id, reply_parent_id, parent.add_hash, body_owned) catch {
+            const page = try renderIssueDetailPageWithCommentForm(
+                allocator,
+                repo,
+                raw_ref,
+                "Could not add the reply. Check that Gitomi is initialized and Git commit signing is configured.",
+                body_owned,
+            );
+            defer allocator.free(page);
+            try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", page, null);
+            return;
+        };
+    } else {
+        createCommentAddedEvent(allocator, "issue", issue_id, body_owned) catch {
+            const page = try renderIssueDetailPageWithCommentForm(
+                allocator,
+                repo,
+                raw_ref,
+                "Could not add the comment. Check that Gitomi is initialized and Git commit signing is configured.",
+                body_owned,
+            );
+            defer allocator.free(page);
+            try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", page, null);
+            return;
+        };
+    }
 
     const location = try std.fmt.allocPrint(allocator, "/issues/{s}", .{raw_ref});
     defer allocator.free(location);

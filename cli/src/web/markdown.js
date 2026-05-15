@@ -115,6 +115,10 @@
     return document.querySelector(".issue-comment-form textarea[name='body']");
   }
 
+  function commentReplyInput() {
+    return document.querySelector(".issue-comment-form input[name='reply_parent_ref']");
+  }
+
   function appendCommentText(value) {
     const textarea = commentTextarea();
     if (!textarea || !value) return false;
@@ -126,6 +130,12 @@
     textarea.setSelectionRange(end, end);
     textarea.dispatchEvent(new Event("input", { bubbles: true }));
     return true;
+  }
+
+  function setReplyTarget(ref) {
+    const input = commentReplyInput();
+    if (!input) return;
+    input.value = ref || "";
   }
 
   function issueMenuLabel(button) {
@@ -143,6 +153,12 @@
 
   function closeIssueMenus(except) {
     document.querySelectorAll("details[data-issue-menu][open]").forEach(function (menu) {
+      if (menu !== except) menu.open = false;
+    });
+  }
+
+  function closeIssueSidebarMenus(except) {
+    document.querySelectorAll("details[data-issue-sidebar-menu][open]").forEach(function (menu) {
       if (menu !== except) menu.open = false;
     });
   }
@@ -172,7 +188,10 @@
       return;
     }
     if (action === "quote-reply") {
-      if (appendCommentText(quoteMarkdown(markdown))) closeIssueMenus(null);
+      if (appendCommentText(quoteMarkdown(markdown))) {
+        setReplyTarget(menu.dataset.issueReplyRef || "");
+        closeIssueMenus(null);
+      }
     }
   }
 
@@ -184,7 +203,10 @@
       if (summary) summary.setAttribute("aria-expanded", menu.open ? "true" : "false");
       menu.addEventListener("toggle", function () {
         if (summary) summary.setAttribute("aria-expanded", menu.open ? "true" : "false");
-        if (menu.open) closeIssueMenus(menu);
+        if (menu.open) {
+          closeIssueMenus(menu);
+          closeIssueSidebarMenus(null);
+        }
       });
       menu.addEventListener("click", function (event) {
         const target = event.target instanceof Element ? event.target : null;
@@ -206,6 +228,51 @@
     });
     document.addEventListener("keydown", function (event) {
       if (event.key === "Escape") closeIssueMenus(null);
+    });
+  }
+
+  function filterIssueSidebarMenu(input) {
+    const popover = input.closest(".issue-sidebar-popover");
+    if (!popover) return;
+    const query = String(input.value || "").trim().toLowerCase();
+    popover.querySelectorAll("[data-sidebar-filter-text]").forEach(function (row) {
+      const text = String(row.getAttribute("data-sidebar-filter-text") || "").toLowerCase();
+      row.hidden = query.length > 0 && text.indexOf(query) === -1;
+    });
+  }
+
+  function initIssueSidebarMenus() {
+    document.querySelectorAll("details[data-issue-sidebar-menu]").forEach(function (menu) {
+      if (menu.dataset.issueSidebarMenuReady === "yes") return;
+      menu.dataset.issueSidebarMenuReady = "yes";
+      const summary = menu.querySelector("summary");
+      if (summary) summary.setAttribute("aria-expanded", menu.open ? "true" : "false");
+      menu.addEventListener("toggle", function () {
+        if (summary) summary.setAttribute("aria-expanded", menu.open ? "true" : "false");
+        if (menu.open) {
+          closeIssueMenus(null);
+          closeIssueSidebarMenus(menu);
+          const input = menu.querySelector("[data-issue-sidebar-filter]");
+          if (input) window.setTimeout(function () { input.focus(); }, 0);
+        }
+      });
+      menu.querySelectorAll("[data-issue-sidebar-filter]").forEach(function (input) {
+        input.addEventListener("input", function () {
+          filterIssueSidebarMenu(input);
+        });
+      });
+    });
+
+    if (document.body.dataset.issueSidebarMenusReady === "yes") return;
+    document.body.dataset.issueSidebarMenusReady = "yes";
+    document.addEventListener("click", function (event) {
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target || !target.closest("details[data-issue-sidebar-menu]")) {
+        closeIssueSidebarMenus(null);
+      }
+    });
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape") closeIssueSidebarMenus(null);
     });
   }
 
@@ -554,6 +621,7 @@
     renderCodeCopyButtons();
     renderRelativeTimes();
     initIssueActionMenus();
+    initIssueSidebarMenus();
   }
 
   if (document.readyState === "loading") {

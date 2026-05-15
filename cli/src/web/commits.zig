@@ -6,8 +6,8 @@ const shared = @import("shared.zig");
 
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
-const Button = shared.Button;
 const appendEmptyState = shared.appendEmptyState;
+const appendHtml = shared.appendHtml;
 const appendHref = shared.appendHref;
 const appendIssueLinkedText = shared.appendIssueLinkedText;
 const appendOptionalAttr = shared.appendOptionalAttr;
@@ -15,7 +15,6 @@ const appendRepoHeaderShared = shared.appendRepoHeader;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
 const appendTemplate = shared.appendTemplate;
-const codeHref = shared.codeHref;
 const commitHref = shared.commitHref;
 const literalHref = shared.literalHref;
 const runCommand = git.runCommand;
@@ -32,15 +31,35 @@ const CommitListEntry = struct {
     short_hash: []u8,
     subject: []u8,
     author: []u8,
+    email: []u8,
     relative: []u8,
+    date: []u8,
+    signature_status: []u8,
 
     fn deinit(self: CommitListEntry, allocator: Allocator) void {
         allocator.free(self.full_hash);
         allocator.free(self.short_hash);
         allocator.free(self.subject);
         allocator.free(self.author);
+        allocator.free(self.email);
         allocator.free(self.relative);
+        allocator.free(self.date);
+        allocator.free(self.signature_status);
     }
+};
+
+const BranchRef = struct {
+    name: []u8,
+    scope: BranchScope,
+
+    fn deinit(self: BranchRef, allocator: Allocator) void {
+        allocator.free(self.name);
+    }
+};
+
+const BranchScope = enum {
+    local,
+    remote,
 };
 
 const CommitDetail = struct {
@@ -86,54 +105,22 @@ pub fn renderCommitsPage(allocator: Allocator, repo: Repo, target: []const u8) !
     errdefer buf.deinit(allocator);
 
     try appendShellStart(&buf, allocator, repo, "Commits", "commits");
-    try appendRepoHeader(&buf, allocator, repo, ref);
 
     const commits = try loadCommits(allocator, repo, ref, path);
     defer freeCommitList(allocator, commits);
+    const branches = try loadBranchRefs(allocator, repo);
+    defer freeBranchRefs(allocator, branches);
 
-    try buf.appendSlice(allocator, "<section class=\"panel commits-panel\">");
-    try appendTemplate(&buf, allocator,
-        \\<div class="section-head">
-        \\  <div>
-        \\    <p class="eyebrow">History</p>
-        \\    <h1>
-    , .{});
-    if (path.len == 0) {
-        try buf.appendSlice(allocator, "Recent commits");
-    } else {
-        try appendTemplate(&buf, allocator, "Commits for {path}", .{ .path = path });
-    }
-    try buf.appendSlice(allocator,
-        \\</h1>
-        \\    </div>
-        \\  </div>
-    );
-    try shared.appendButtonLink(&buf, allocator, Button{ .label = "Code", .href = codeHref(ref, path) });
-    try buf.appendSlice(allocator,
-        \\</div>
-        \\  <div class="commit-list">
-    );
-
-    for (commits) |commit| {
-        try appendTemplate(&buf, allocator,
-            \\<article class="commit-row"><div><span class="commit-title">
-        , .{});
-        try appendIssueLinkedText(&buf, allocator, commit.subject);
-        try appendTemplate(&buf, allocator,
-            \\</span><p>{author} committed {relative}</p></div><a class="commit-sha" href="{href}"><code>{short_hash}</code></a></article>
-        , .{
-            .href = commitHref(commit.full_hash),
-            .author = commit.author,
-            .relative = commit.relative,
-            .short_hash = commit.short_hash,
-        });
-    }
+    try appendCommitsHeader(&buf, allocator, ref, path, branches);
 
     if (commits.len == 0) {
+        try buf.appendSlice(allocator, "<section class=\"panel commits-panel\">");
         try appendEmptyState(&buf, allocator, "No commits found.", "This ref has no commit history for the selected path.");
+        try buf.appendSlice(allocator, "</section>");
+    } else {
+        try appendCommitTimeline(&buf, allocator, commits);
     }
 
-    try buf.appendSlice(allocator, "</div></section>");
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
 }
@@ -222,6 +209,122 @@ fn renderMissingCommitPage(allocator: Allocator, repo: Repo, sha: []const u8) ![
     return buf.toOwnedSlice(allocator);
 }
 
+fn appendCommitsHeader(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    ref: []const u8,
+    path: []const u8,
+    branches: []const BranchRef,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<section class="commits-page-head">
+        \\  <div>
+        \\    <h1>Commits</h1>
+    , .{});
+    if (path.len != 0) {
+        try appendTemplate(buf, allocator,
+            \\    <p>History for <code>{path}</code></p>
+        , .{ .path = path });
+    }
+    try appendTemplate(buf, allocator,
+        \\  </div>
+        \\</section>
+        \\<div class="commits-toolbar">
+        \\  <form class="commits-branch-form" method="get" action="/commits">
+        \\    <label class="root-branch-select-wrap commits-branch-select-wrap" aria-label="Branch">
+        \\      <span class="button-icon icon-branch" aria-hidden="true"></span>
+        \\      <select class="root-branch-select commits-branch-select" name="ref" onchange="this.form.submit()">
+    , .{});
+    try appendBranchOptions(buf, allocator, branches, ref);
+    try appendTemplate(buf, allocator,
+        \\      </select>
+        \\      <span class="root-caret" aria-hidden="true"></span>
+        \\    </label>
+    , .{});
+    if (path.len != 0) {
+        try appendTemplate(buf, allocator,
+            \\    <input type="hidden" name="path" value="{path}">
+        , .{ .path = path });
+    }
+    try appendTemplate(buf, allocator,
+        \\  </form>
+        \\  <div class="commits-filter-actions">
+        \\    <details class="commits-filter-menu" data-popover-menu>
+        \\      <summary class="button secondary commits-filter-button"><span class="button-icon icon-users" aria-hidden="true"></span><span>All users</span><span class="root-caret" aria-hidden="true"></span></summary>
+        \\      <div class="commits-filter-popover" role="menu"><span class="commits-filter-option selected">All users</span></div>
+        \\    </details>
+        \\    <details class="commits-filter-menu" data-popover-menu>
+        \\      <summary class="button secondary commits-filter-button"><span class="button-icon icon-calendar" aria-hidden="true"></span><span>All time</span><span class="root-caret" aria-hidden="true"></span></summary>
+        \\      <div class="commits-filter-popover" role="menu"><span class="commits-filter-option selected">All time</span></div>
+        \\    </details>
+        \\  </div>
+        \\</div>
+    , .{});
+}
+
+fn appendCommitTimeline(buf: *std.ArrayList(u8), allocator: Allocator, commits: []const CommitListEntry) !void {
+    try buf.appendSlice(allocator, "<div class=\"commits-timeline\">");
+    var active_date: ?[]const u8 = null;
+    var group_open = false;
+    for (commits) |commit| {
+        if (active_date == null or !std.mem.eql(u8, active_date.?, commit.date)) {
+            if (group_open) try buf.appendSlice(allocator, "</div></section>");
+            active_date = commit.date;
+            group_open = true;
+            try appendTemplate(buf, allocator,
+                \\<section class="commit-day">
+                \\  <div class="commit-day-marker" aria-hidden="true"></div>
+                \\  <h2>Commits on 
+            , .{});
+            try appendCommitDateLabel(buf, allocator, commit.date);
+            try appendTemplate(buf, allocator,
+                \\</h2>
+                \\  <div class="panel commit-day-list">
+            , .{});
+        }
+        try appendCommitRow(buf, allocator, commit);
+    }
+    if (group_open) try buf.appendSlice(allocator, "</div></section>");
+    try buf.appendSlice(allocator, "</div>");
+}
+
+fn appendCommitRow(buf: *std.ArrayList(u8), allocator: Allocator, commit: CommitListEntry) !void {
+    const href = commitHref(commit.full_hash);
+    try appendTemplate(buf, allocator,
+        \\<article class="commit-row commit-list-row">
+        \\  <div class="commit-main">
+        \\    <div class="commit-title-line"><span class="commit-title">
+    , .{});
+    try appendIssueLinkedText(buf, allocator, commit.subject);
+    try appendTemplate(buf, allocator,
+        \\</span></div>
+        \\    <p class="commit-meta-line"><span class="commit-avatar" title="{author}" aria-label="{author}">
+    , .{ .author = commit.author });
+    try appendAuthorInitial(buf, allocator, commit.author);
+    try appendTemplate(buf, allocator,
+        \\</span><span>{author} committed {relative}</span></p>
+        \\  </div>
+        \\  <div class="commit-row-actions">
+    , .{
+        .author = commit.author,
+        .relative = commit.relative,
+    });
+    if (isVerifiedSignature(commit.signature_status)) {
+        try buf.appendSlice(allocator, "<span class=\"commit-verified\">Verified</span>");
+    }
+    try appendTemplate(buf, allocator,
+        \\    <a class="commit-sha" href="{href}">{short_hash}</a>
+        \\    <button class="commit-icon-action" type="button" data-copy-text="{full_hash}" aria-label="Copy commit hash" title="Copy commit hash"><span class="button-icon icon-copy" aria-hidden="true"></span></button>
+        \\    <a class="commit-icon-action" href="{href}" aria-label="View commit" title="View commit"><span class="button-icon icon-code" aria-hidden="true"></span></a>
+        \\  </div>
+        \\</article>
+    , .{
+        .href = href,
+        .short_hash = commit.short_hash,
+        .full_hash = commit.full_hash,
+    });
+}
+
 fn appendRepoHeader(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8) !void {
     try appendRepoHeaderShared(buf, allocator, repo, ref, &.{
         .{ .label = "Code", .href = literalHref("/") },
@@ -229,13 +332,13 @@ fn appendRepoHeader(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, r
 }
 
 fn loadCommits(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) ![]CommitListEntry {
-    const format = "--format=%H%x09%h%x09%s%x09%an%x09%cr";
+    const format = "--format=%H%x1f%h%x1f%s%x1f%an%x1f%ae%x1f%cr%x1f%ad%x1f%G?%x1e";
     const raw_opt = if (path.len == 0)
-        try gitMaybe(allocator, repo, &.{ "log", "-50", format, ref }, git.max_git_output)
+        try gitMaybe(allocator, repo, &.{ "log", "-50", "--date=short", format, ref }, git.max_git_output)
     else blk: {
         const pathspec = try std.fmt.allocPrint(allocator, ":(top){s}", .{path});
         defer allocator.free(pathspec);
-        break :blk try gitMaybe(allocator, repo, &.{ "log", "-50", format, ref, "--", pathspec }, git.max_git_output);
+        break :blk try gitMaybe(allocator, repo, &.{ "log", "-50", "--date=short", format, ref, "--", pathspec }, git.max_git_output);
     };
     const raw = raw_opt orelse try allocator.dupe(u8, "");
     defer allocator.free(raw);
@@ -246,21 +349,134 @@ fn loadCommits(allocator: Allocator, repo: Repo, ref: []const u8, path: []const 
         commits.deinit(allocator);
     }
 
-    var lines = std.mem.splitScalar(u8, raw, '\n');
-    while (lines.next()) |line_raw| {
-        const line = std.mem.trimRight(u8, line_raw, "\r");
-        if (line.len == 0) continue;
-        var cols = std.mem.splitScalar(u8, line, '\t');
+    var records = std.mem.splitScalar(u8, raw, 0x1e);
+    while (records.next()) |record_raw| {
+        const record = std.mem.trim(u8, record_raw, "\r\n");
+        if (record.len == 0) continue;
+        var cols = std.mem.splitScalar(u8, record, 0x1f);
         try commits.append(allocator, .{
             .full_hash = try allocator.dupe(u8, cols.next() orelse ""),
             .short_hash = try allocator.dupe(u8, cols.next() orelse ""),
             .subject = try allocator.dupe(u8, cols.next() orelse ""),
             .author = try allocator.dupe(u8, cols.next() orelse ""),
+            .email = try allocator.dupe(u8, cols.next() orelse ""),
             .relative = try allocator.dupe(u8, cols.next() orelse ""),
+            .date = try allocator.dupe(u8, cols.next() orelse ""),
+            .signature_status = try allocator.dupe(u8, cols.next() orelse ""),
         });
     }
 
     return try commits.toOwnedSlice(allocator);
+}
+
+fn loadBranchRefs(allocator: Allocator, repo: Repo) ![]BranchRef {
+    const raw = try gitMaybe(allocator, repo, &.{ "for-each-ref", "--format=%(refname)%09%(refname:short)", "refs/heads", "refs/remotes" }, git.max_git_output) orelse {
+        return allocator.alloc(BranchRef, 0);
+    };
+    defer allocator.free(raw);
+
+    var branches: std.ArrayList(BranchRef) = .empty;
+    errdefer {
+        for (branches.items) |branch| branch.deinit(allocator);
+        branches.deinit(allocator);
+    }
+
+    var lines = std.mem.splitScalar(u8, raw, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        if (trimmed.len == 0) continue;
+        var cols = std.mem.splitScalar(u8, trimmed, '\t');
+        const full_ref = cols.next() orelse continue;
+        const name = cols.next() orelse continue;
+        if (std.mem.endsWith(u8, full_ref, "/HEAD")) continue;
+        const scope = branchScopeForFullRef(full_ref) orelse continue;
+        try branches.append(allocator, .{
+            .name = try allocator.dupe(u8, name),
+            .scope = scope,
+        });
+    }
+    std.mem.sort(BranchRef, branches.items, {}, struct {
+        fn lessThan(_: void, a: BranchRef, b: BranchRef) bool {
+            if (a.scope != b.scope) return @intFromEnum(a.scope) < @intFromEnum(b.scope);
+            return std.ascii.lessThanIgnoreCase(a.name, b.name);
+        }
+    }.lessThan);
+    return branches.toOwnedSlice(allocator);
+}
+
+fn appendBranchOptions(buf: *std.ArrayList(u8), allocator: Allocator, branches: []const BranchRef, selected_ref: []const u8) !void {
+    var found_selected = false;
+    for (branches) |branch| {
+        const selected = std.mem.eql(u8, branch.name, selected_ref);
+        found_selected = found_selected or selected;
+        try appendTemplate(buf, allocator,
+            \\<option value="{name}"{selected_attr}>{name}</option>
+        , .{
+            .name = branch.name,
+            .selected_attr = shared.trustedHtml(if (selected) " selected" else ""),
+        });
+    }
+    if (!found_selected) {
+        try appendTemplate(buf, allocator,
+            \\<option value="{name}" selected>{name}</option>
+        , .{ .name = selected_ref });
+    }
+}
+
+fn branchScopeForFullRef(ref: []const u8) ?BranchScope {
+    if (std.mem.startsWith(u8, ref, "refs/heads/")) return .local;
+    if (std.mem.startsWith(u8, ref, "refs/remotes/")) return .remote;
+    return null;
+}
+
+fn appendAuthorInitial(buf: *std.ArrayList(u8), allocator: Allocator, author: []const u8) !void {
+    for (author) |c| {
+        if (!std.ascii.isAlphanumeric(c)) continue;
+        var initial = [_]u8{std.ascii.toUpper(c)};
+        try appendHtml(buf, allocator, &initial);
+        return;
+    }
+    try buf.append(allocator, '?');
+}
+
+fn isVerifiedSignature(status: []const u8) bool {
+    const trimmed = std.mem.trim(u8, status, " \t\r\n");
+    return trimmed.len != 0 and trimmed[0] == 'G';
+}
+
+fn appendCommitDateLabel(buf: *std.ArrayList(u8), allocator: Allocator, date: []const u8) !void {
+    if (date.len >= 10 and date[4] == '-' and date[7] == '-') {
+        const year = std.fmt.parseUnsigned(u16, date[0..4], 10) catch null;
+        const month = std.fmt.parseUnsigned(u8, date[5..7], 10) catch null;
+        const day = std.fmt.parseUnsigned(u8, date[8..10], 10) catch null;
+        if (year != null and month != null and day != null and month.? >= 1 and month.? <= 12 and day.? >= 1) {
+            try std.fmt.format(buf.writer(allocator), "{s} {d}, {d}", .{ monthName(month.?), day.?, year.? });
+            return;
+        }
+    }
+    if (date.len == 0) {
+        try buf.appendSlice(allocator, "Unknown date");
+    } else {
+        try appendHtml(buf, allocator, date);
+    }
+}
+
+fn monthName(month: u8) []const u8 {
+    return switch (month) {
+        1 => "January",
+        2 => "February",
+        3 => "March",
+        4 => "April",
+        5 => "May",
+        6 => "June",
+        7 => "July",
+        8 => "August",
+        9 => "September",
+        10 => "October",
+        11 => "November",
+        12 => "December",
+        else => "Unknown",
+    };
 }
 
 fn loadCommitDetail(allocator: Allocator, repo: Repo, sha: []const u8) !?CommitDetail {
@@ -553,6 +769,11 @@ fn appendCommitHrefWithContext(buf: *std.ArrayList(u8), allocator: Allocator, ha
 fn freeCommitList(allocator: Allocator, commits: []CommitListEntry) void {
     for (commits) |commit| commit.deinit(allocator);
     allocator.free(commits);
+}
+
+fn freeBranchRefs(allocator: Allocator, branches: []BranchRef) void {
+    for (branches) |branch| branch.deinit(allocator);
+    allocator.free(branches);
 }
 
 fn gitMaybe(allocator: Allocator, repo: Repo, git_args: []const []const u8, max_output_bytes: usize) !?[]u8 {

@@ -196,8 +196,10 @@ pub fn admitStagedGenesisRef(allocator: Allocator, staging_prefix: []const u8) !
         }
     }
 
-    try verifyCommitSignature(allocator, staged_oid);
-    try repo_mod.validateGenesisManifest(allocator, staged_oid);
+    var manifest = try repo_mod.loadGenesisManifest(allocator, staged_oid);
+    defer manifest.deinit();
+    _ = try repo_mod.importOpenPgpPublicKey(allocator, manifest.public_key);
+    try verifyGenesisCommitSignature(allocator, staged_oid, manifest.fingerprint);
     const updated = try gitChecked(allocator, &.{ "update-ref", repo_mod.genesis_ref, staged_oid, "" });
     defer allocator.free(updated);
     try out("created {s}\n", .{repo_mod.genesis_ref});
@@ -282,7 +284,7 @@ pub fn admitStagedInboxRefs(allocator: Allocator, staging_prefix: []const u8) !v
     defer allocator.free(empty_tree);
 
     for (refs) |staged_ref| {
-        try admitStagedInboxRef(allocator, staging_prefix, staged_ref, empty_tree);
+        try admitStagedInboxRef(allocator, staging_prefix, staged_ref, empty_tree, genesis_oid.?);
     }
 }
 
@@ -306,6 +308,7 @@ pub fn admitStagedInboxRef(
     staging_prefix: []const u8,
     staged_ref: []const u8,
     empty_tree: []const u8,
+    genesis_oid: []const u8,
 ) !void {
     const staged_oid = (try resolveOptionalRef(allocator, staged_ref)) orelse return;
     defer allocator.free(staged_oid);
@@ -323,7 +326,7 @@ pub fn admitStagedInboxRef(
         }
 
         if (try isAncestor(allocator, old_oid, staged_oid)) {
-            const admitted = validateInboxRange(allocator, staged_ref, old_oid, empty_tree) catch |err| {
+            const admitted = validateInboxRange(allocator, staged_ref, old_oid, empty_tree, genesis_oid) catch |err| {
                 if (errors.isUserError(err)) {
                     try quarantineStagedRef(allocator, staging_prefix, staged_ref, staged_oid);
                     return;
@@ -346,7 +349,7 @@ pub fn admitStagedInboxRef(
         return;
     }
 
-    const admitted = validateInboxRange(allocator, staged_ref, null, empty_tree) catch |err| {
+    const admitted = validateInboxRange(allocator, staged_ref, null, empty_tree, genesis_oid) catch |err| {
         if (errors.isUserError(err)) {
             try quarantineStagedRef(allocator, staging_prefix, staged_ref, staged_oid);
             return;
@@ -395,12 +398,13 @@ pub fn validateInboxRange(
     ref: []const u8,
     local_base: ?[]const u8,
     empty_tree: []const u8,
+    genesis_oid: []const u8,
 ) !usize {
-    const log = try inboxCommitLog(allocator, ref, local_base);
+    const log = try inboxCommitLog(allocator, ref, local_base, genesis_oid);
     defer allocator.free(log);
 
     var count: usize = 0;
-    var expected_first_parent = local_base;
+    var expected_first_parent: ?[]const u8 = if (local_base) |base| base else genesis_oid;
     var actor_seqs = ActorSeqTracker.init(allocator);
     defer actor_seqs.deinit();
     try seedActorSeqsThroughCommit(allocator, &actor_seqs, local_base);
@@ -497,13 +501,15 @@ fn actorSeqKey(allocator: Allocator, principal: []const u8, device: []const u8) 
     });
 }
 
-fn inboxCommitLog(allocator: Allocator, ref: []const u8, local_base: ?[]const u8) ![]u8 {
+fn inboxCommitLog(allocator: Allocator, ref: []const u8, local_base: ?[]const u8, genesis_oid: []const u8) ![]u8 {
     if (local_base) |base| {
         const range = try std.fmt.allocPrint(allocator, "{s}..{s}", .{ base, ref });
         defer allocator.free(range);
         return gitChecked(allocator, &.{ "log", "--first-parent", "--reverse", inbox_commit_log_format, range });
     }
-    return gitChecked(allocator, &.{ "log", "--first-parent", "--reverse", inbox_commit_log_format, ref });
+    const range = try std.fmt.allocPrint(allocator, "{s}..{s}", .{ genesis_oid, ref });
+    defer allocator.free(range);
+    return gitChecked(allocator, &.{ "log", "--first-parent", "--reverse", inbox_commit_log_format, range });
 }
 
 fn parseInboxCommitRecord(record_raw: []const u8) ?InboxCommitRecord {
@@ -630,6 +636,19 @@ pub fn verifyCommitSignature(allocator: Allocator, commit: []const u8) !void {
     return CliError.UserError;
 }
 
+pub fn verifyGenesisCommitSignature(allocator: Allocator, commit: []const u8, expected_fingerprint: []const u8) !void {
+    try verifyCommitSignature(allocator, commit);
+    const actual_fingerprint = (try git.verifiedCommitSigningKeyFingerprint(allocator, commit)) orelse {
+        try eprint("gt sync: rejecting genesis {s}: signature fingerprint not found\n", .{commit});
+        return CliError.UserError;
+    };
+    defer allocator.free(actual_fingerprint);
+    if (!std.mem.eql(u8, actual_fingerprint, expected_fingerprint)) {
+        try eprint("gt sync: rejecting genesis {s}: signature fingerprint does not match manifest key\n", .{commit});
+        return CliError.UserError;
+    }
+}
+
 fn validateEnvelopeParentHashes(allocator: Allocator, commit: []const u8, parents: []const u8, body: []const u8) !void {
     var parent_list: std.ArrayList([]const u8) = .empty;
     defer parent_list.deinit(allocator);
@@ -652,10 +671,26 @@ fn validateEnvelopeParentHashes(allocator: Allocator, commit: []const u8, parent
         .string => |value| value,
         else => return CliError.UserError,
     };
-    const expected_log = if (parent_list.items.len == 0) "" else parent_list.items[0];
-    if (!std.mem.eql(u8, log_hash, expected_log)) {
-        try eprint("gt sync: rejecting {s}: parent_hashes.log does not match first parent\n", .{commit});
-        return CliError.UserError;
+    const anchor_value = parent_hashes.get("anchor") orelse return CliError.UserError;
+    const anchor_hash = switch (anchor_value) {
+        .string => |value| value,
+        else => return CliError.UserError,
+    };
+    const first_parent = if (parent_list.items.len == 0) null else parent_list.items[0];
+    if (log_hash.len == 0) {
+        if (first_parent == null or anchor_hash.len == 0 or !std.mem.eql(u8, anchor_hash, first_parent.?)) {
+            try eprint("gt sync: rejecting {s}: parent_hashes.anchor does not match root genesis parent\n", .{commit});
+            return CliError.UserError;
+        }
+    } else {
+        if (first_parent == null or !std.mem.eql(u8, log_hash, first_parent.?)) {
+            try eprint("gt sync: rejecting {s}: parent_hashes.log does not match first parent\n", .{commit});
+            return CliError.UserError;
+        }
+        if (anchor_hash.len != 0) {
+            try eprint("gt sync: rejecting {s}: non-root event has parent_hashes.anchor\n", .{commit});
+            return CliError.UserError;
+        }
     }
 
     const causal_value = parent_hashes.get("causal") orelse return CliError.UserError;

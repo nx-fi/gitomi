@@ -152,6 +152,8 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         try shared.sendResponse(allocator, stream, 200, "OK", "image/svg+xml", logo_svg, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/theme.js")) {
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", theme_js, null);
+    } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/ui.js")) {
+        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", ui_js, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/shortcuts.js")) {
         try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", shortcuts_js, null);
     } else if (std.mem.eql(u8, request.method, "GET") and std.mem.eql(u8, request.path, "/tree.js")) {
@@ -241,6 +243,16 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         const body = try pulls_page.renderPullsPage(allocator, repo, request.target);
         defer allocator.free(body);
         try shared.sendResponse(allocator, stream, 200, "OK", "text/html", body, null);
+    } else if (std.mem.eql(u8, request.method, "POST") and ((std.mem.startsWith(u8, request.path, "/pulls/") or std.mem.startsWith(u8, request.path, "/prs/")) and std.mem.endsWith(u8, request.path, "/comments"))) {
+        const prefix = if (std.mem.startsWith(u8, request.path, "/pulls/")) "/pulls/" else "/prs/";
+        const pull_ref_start = prefix.len;
+        const pull_ref_end = request.path.len - "/comments".len;
+        if (pull_ref_start >= pull_ref_end or request.path[pull_ref_end - 1] == '/') {
+            try shared.sendPlainResponse(allocator, stream, 404, "Not Found", "Not found\n");
+            return;
+        }
+        const pull_ref = request.path[pull_ref_start..pull_ref_end];
+        try pulls_page.handlePullCommentPost(allocator, repo, stream, pull_ref, request.body);
     } else if (std.mem.eql(u8, request.method, "GET") and (std.mem.startsWith(u8, request.path, "/pulls/") or std.mem.startsWith(u8, request.path, "/prs/"))) {
         const pull_ref = if (std.mem.startsWith(u8, request.path, "/pulls/"))
             request.path["/pulls/".len..]
@@ -472,6 +484,7 @@ pub fn isLoopbackHost(host: []const u8) bool {
 const web_css = @embedFile("web/style.css");
 const logo_svg = @embedFile("web/logo.svg");
 const theme_js = @embedFile("web/theme.js");
+const ui_js = @embedFile("web/ui.js");
 const shortcuts_js = @embedFile("web/shortcuts.js");
 const tree_js = @embedFile("web/tree.js");
 const code_js = @embedFile("web/code.js");

@@ -820,7 +820,7 @@ fn appendRootCodeToolbar(
         \\      <input type="search" data-root-file-search placeholder="Go to file" autocomplete="off" spellcheck="false">
         \\      <kbd>T</kbd>
         \\    </label>
-        \\    <details class="root-action-menu">
+        \\    <details class="root-action-menu" data-popover-menu>
         \\      <summary class="button secondary root-menu-button">Add file<span class="root-caret" aria-hidden="true"></span></summary>
         \\      <div class="root-action-popover" role="menu">
         \\        <button type="button" role="menuitem">Create new file</button>
@@ -828,7 +828,7 @@ fn appendRootCodeToolbar(
         \\      </div>
         \\    </details>
         \\    <button class="button secondary root-icon-button" type="button" aria-label="Download repository" title="Download repository"><span class="button-icon icon-download" aria-hidden="true"></span></button>
-        \\    <details class="root-action-menu root-code-menu">
+        \\    <details class="root-action-menu root-code-menu" data-popover-menu>
         \\      <summary class="button primary root-menu-button"><span class="button-icon icon-code" aria-hidden="true"></span>Code<span class="root-caret" aria-hidden="true"></span></summary>
         \\      <div class="root-action-popover root-code-popover" role="menu">
         \\        <div class="root-code-popover-head">Clone</div>

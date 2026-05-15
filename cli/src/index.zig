@@ -329,6 +329,8 @@ fn rebuildIndexUnlocked(allocator: Allocator, repo: Repo) !IndexStats {
 
     const expected_repo_id = try expectedRepoIdForIndex(allocator, repo);
     defer if (expected_repo_id) |repo_id| allocator.free(repo_id);
+    const genesis_oid = try git.resolveOptionalRef(allocator, repo_mod.genesis_ref);
+    defer if (genesis_oid) |oid| allocator.free(oid);
     var admission = IndexAdmission.init(allocator, expected_repo_id);
     defer admission.deinit();
 
@@ -344,14 +346,14 @@ fn rebuildIndexUnlocked(allocator: Allocator, repo: Repo) !IndexStats {
     var used_snapshot = false;
     const stats = if (loaded_snapshot) |snapshot| blk: {
         used_snapshot = true;
-        break :blk rebuildIndexFromSnapshot(allocator, repo, refs_raw, snapshot.covered_refs_raw, &admission, empty_tree) catch |err| fallback: {
+        break :blk rebuildIndexFromSnapshot(allocator, repo, refs_raw, snapshot.covered_refs_raw, &admission, empty_tree, genesis_oid) catch |err| fallback: {
             if (err == error.OutOfMemory) return err;
             used_snapshot = false;
             admission.deinit();
             admission = IndexAdmission.init(allocator, expected_repo_id);
-            break :fallback try rebuildIndexFromScratch(allocator, repo, refs_raw, &admission, empty_tree);
+            break :fallback try rebuildIndexFromScratch(allocator, repo, refs_raw, &admission, empty_tree, genesis_oid);
         };
-    } else try rebuildIndexFromScratch(allocator, repo, refs_raw, &admission, empty_tree);
+    } else try rebuildIndexFromScratch(allocator, repo, refs_raw, &admission, empty_tree, genesis_oid);
 
     const snapshot_ptr: ?*const LoadedSnapshot = if (used_snapshot) blk: {
         if (loaded_snapshot) |*snapshot| break :blk snapshot;
@@ -463,6 +465,7 @@ fn rebuildIndexFromScratch(
     refs_raw: []const u8,
     admission: *IndexAdmission,
     empty_tree: []const u8,
+    genesis_oid: ?[]const u8,
 ) !IndexStats {
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READWRITE | sqlite.SQLITE_OPEN_CREATE, false);
     defer db.deinit();
@@ -488,10 +491,13 @@ fn rebuildIndexFromScratch(
         \\DROP TABLE IF EXISTS pull_assignees;
         \\DROP TABLE IF EXISTS pull_reviewers;
         \\DROP TABLE IF EXISTS comments;
+        \\DROP TABLE IF EXISTS reactions;
         \\DROP TABLE IF EXISTS commit_references;
         \\DROP TABLE IF EXISTS legacy_aliases;
         \\DROP TABLE IF EXISTS acl_roles;
         \\DROP TABLE IF EXISTS acl_role_events;
+        \\DROP TABLE IF EXISTS acl_delegations;
+        \\DROP TABLE IF EXISTS acl_delegation_events;
         \\DROP TABLE IF EXISTS identity_devices;
         \\DROP TABLE IF EXISTS identity_device_events;
     );
@@ -529,7 +535,7 @@ fn rebuildIndexFromScratch(
         try ref_stmt.stepDone();
         if (!std.mem.startsWith(u8, ref, "refs/gitomi/inbox/")) continue;
         stats.refs += 1;
-        stats.events += try indexRefEvents(allocator, &event_stmt, admission, ref, null, empty_tree);
+        stats.events += try indexRefEvents(allocator, &event_stmt, admission, ref, null, empty_tree, genesis_oid);
     }
     stats.new_events = stats.events;
 
@@ -549,6 +555,7 @@ fn rebuildIndexFromSnapshot(
     covered_refs_raw: []const u8,
     admission: *IndexAdmission,
     empty_tree: []const u8,
+    genesis_oid: ?[]const u8,
 ) !IndexStats {
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READWRITE, false);
     defer db.deinit();
@@ -596,7 +603,7 @@ fn rebuildIndexFromSnapshot(
         if (!std.mem.startsWith(u8, ref, "refs/gitomi/inbox/")) continue;
         stats.refs += 1;
         const base = findRefOid(covered_refs.items, ref);
-        stats.new_events += try indexRefEvents(allocator, &event_stmt, admission, ref, base, empty_tree);
+        stats.new_events += try indexRefEvents(allocator, &event_stmt, admission, ref, base, empty_tree, genesis_oid);
     }
 
     try projectNewIndexedEvents(allocator, &db);
@@ -1116,8 +1123,14 @@ fn indexRefEvents(
     ref: []const u8,
     base: ?[]const u8,
     empty_tree: []const u8,
+    genesis_oid: ?[]const u8,
 ) !usize {
-    const target = if (base) |base_oid| try std.fmt.allocPrint(allocator, "{s}..{s}", .{ base_oid, ref }) else try allocator.dupe(u8, ref);
+    const target = if (base) |base_oid|
+        try std.fmt.allocPrint(allocator, "{s}..{s}", .{ base_oid, ref })
+    else if (genesis_oid) |anchor|
+        try std.fmt.allocPrint(allocator, "{s}..{s}", .{ anchor, ref })
+    else
+        try allocator.dupe(u8, ref);
     defer allocator.free(target);
 
     const log = try gitChecked(allocator, &.{
@@ -1130,7 +1143,7 @@ fn indexRefEvents(
     defer allocator.free(log);
 
     var count: usize = 0;
-    var expected_first_parent: ?[]const u8 = base;
+    var expected_first_parent: ?[]const u8 = if (base) |base_oid| base_oid else genesis_oid;
     var records = std.mem.splitScalar(u8, log, 0x1e);
     while (records.next()) |record_raw| {
         const record = std.mem.trim(u8, record_raw, "\r\n");
@@ -1158,6 +1171,7 @@ fn indexRefEvents(
         if (subject.len > git.max_event_subject_bytes) continue;
         if (body.len > git.max_event_body_bytes) continue;
         if (!firstParentMatches(parents, expected_first_parent)) continue;
+        if (!(try eventParentHashesMatch(allocator, parents, body))) continue;
         if (!(try verifyCommitSignatureQuiet(allocator, commit))) continue;
 
         var envelope = parseValidatedEnvelope(allocator, body) catch continue;
@@ -1178,6 +1192,52 @@ fn firstParentMatches(parents: []const u8, expected_first_parent: ?[]const u8) b
         return first_parent != null and std.mem.eql(u8, first_parent.?, expected);
     }
     return first_parent == null;
+}
+
+fn eventParentHashesMatch(allocator: Allocator, parents: []const u8, body: []const u8) !bool {
+    var parent_list: std.ArrayList([]const u8) = .empty;
+    defer parent_list.deinit(allocator);
+    var parent_it = std.mem.tokenizeScalar(u8, parents, ' ');
+    while (parent_it.next()) |parent| try parent_list.append(allocator, parent);
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return false;
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return false,
+    };
+    const parent_hashes = switch (root.get("parent_hashes") orelse return false) {
+        .object => |object| object,
+        else => return false,
+    };
+    const log_hash = switch (parent_hashes.get("log") orelse return false) {
+        .string => |value| value,
+        else => return false,
+    };
+    const anchor_hash = switch (parent_hashes.get("anchor") orelse return false) {
+        .string => |value| value,
+        else => return false,
+    };
+    const causal = switch (parent_hashes.get("causal") orelse return false) {
+        .array => |array| array,
+        else => return false,
+    };
+    if (causal.items.len > git.max_causal_parents) return false;
+
+    const first_parent = if (parent_list.items.len == 0) null else parent_list.items[0];
+    if (log_hash.len == 0) {
+        if (first_parent == null or anchor_hash.len == 0 or !std.mem.eql(u8, anchor_hash, first_parent.?)) return false;
+    } else {
+        if (first_parent == null or !std.mem.eql(u8, log_hash, first_parent.?)) return false;
+        if (anchor_hash.len != 0) return false;
+    }
+
+    const expected_causal_len = if (parent_list.items.len == 0) 0 else parent_list.items.len - 1;
+    if (causal.items.len != expected_causal_len) return false;
+    for (causal.items, 0..) |item, idx| {
+        if (item != .string or !std.mem.eql(u8, item.string, parent_list.items[idx + 1])) return false;
+    }
+    return true;
 }
 
 fn verifyCommitSignatureQuiet(allocator: Allocator, commit: []const u8) !bool {
@@ -1238,6 +1298,7 @@ pub const listPullsFromIndex = index_query.listPullsFromIndex;
 pub const showPullFromIndex = index_query.showPullFromIndex;
 pub const listCommentsFromIndex = index_query.listCommentsFromIndex;
 pub const listEventsFromIndex = index_query.listEventsFromIndex;
+pub const CommentParentInfo = index_query.CommentParentInfo;
 pub const resolveProjectId = index_query.resolveProjectId;
 pub const projectNameForId = index_query.projectNameForId;
 pub const resolveMilestoneId = index_query.resolveMilestoneId;
@@ -1263,6 +1324,24 @@ pub fn isIdentityDeviceActive(allocator: Allocator, repo: Repo, principal: []con
     return try index_query.isIdentityDeviceActive(allocator, repo, principal, device);
 }
 
+pub fn hasActiveDelegation(
+    allocator: Allocator,
+    repo: Repo,
+    principal: []const u8,
+    device: []const u8,
+    capability: []const u8,
+    scope: []const u8,
+    fingerprint: []const u8,
+) !bool {
+    try ensureIndex(allocator, repo);
+    return try index_query.hasActiveDelegation(allocator, repo, principal, device, capability, scope, fingerprint);
+}
+
+pub fn authRelatedEventHashes(allocator: Allocator, repo: Repo, principal: []const u8, device: []const u8) ![][]u8 {
+    try ensureIndex(allocator, repo);
+    return try index_query.authRelatedEventHashes(allocator, repo, principal, device);
+}
+
 pub fn resolveIssueId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
     try ensureIndex(allocator, repo);
     return try index_query.resolveIssueId(allocator, repo, raw_ref);
@@ -1286,4 +1365,9 @@ pub fn legacyGithubNumberForObject(allocator: Allocator, repo: Repo, object_kind
 pub fn resolveCommentId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
     try ensureIndex(allocator, repo);
     return try index_query.resolveCommentId(allocator, repo, raw_ref);
+}
+
+pub fn commentParentInfo(allocator: Allocator, repo: Repo, comment_id: []const u8) !index_query.CommentParentInfo {
+    try ensureIndex(allocator, repo);
+    return try index_query.commentParentInfo(allocator, repo, comment_id);
 }

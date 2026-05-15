@@ -218,6 +218,17 @@ pub fn createIndexSchema(db: *SqliteDb) !void {
         \\  reply_parent_hash TEXT NOT NULL
         \\);
         \\CREATE INDEX comments_parent_created_idx ON comments(parent_kind, parent_id, created_at);
+        \\CREATE TABLE reactions (
+        \\  object_kind TEXT NOT NULL,
+        \\  object_id TEXT NOT NULL,
+        \\  emoji TEXT NOT NULL,
+        \\  actor_principal TEXT NOT NULL,
+        \\  add_hash TEXT NOT NULL,
+        \\  created_at TEXT NOT NULL,
+        \\  PRIMARY KEY(object_kind, object_id, emoji, actor_principal, add_hash)
+        \\);
+        \\CREATE INDEX reactions_object_idx ON reactions(object_kind, object_id, emoji);
+        \\CREATE INDEX reactions_actor_idx ON reactions(actor_principal, object_kind, object_id);
         \\CREATE TABLE commit_references (
         \\  commit_oid TEXT NOT NULL,
         \\  object_kind TEXT NOT NULL,
@@ -248,6 +259,29 @@ pub fn createIndexSchema(db: *SqliteDb) !void {
         \\  PRIMARY KEY(principal, event_hash)
         \\);
         \\CREATE INDEX acl_role_events_principal_idx ON acl_role_events(principal);
+        \\CREATE TABLE acl_delegations (
+        \\  principal TEXT NOT NULL,
+        \\  device TEXT NOT NULL,
+        \\  capability TEXT NOT NULL,
+        \\  scope TEXT NOT NULL,
+        \\  key_fingerprint TEXT NOT NULL,
+        \\  public_key TEXT NOT NULL,
+        \\  grant_event_hash TEXT NOT NULL,
+        \\  PRIMARY KEY(principal, device, capability, scope, key_fingerprint)
+        \\);
+        \\CREATE INDEX acl_delegations_principal_idx ON acl_delegations(principal, device, capability);
+        \\CREATE TABLE acl_delegation_events (
+        \\  principal TEXT NOT NULL,
+        \\  device TEXT NOT NULL,
+        \\  capability TEXT NOT NULL,
+        \\  scope TEXT NOT NULL,
+        \\  key_fingerprint TEXT NOT NULL,
+        \\  public_key TEXT NOT NULL,
+        \\  event_hash TEXT NOT NULL,
+        \\  event_type TEXT NOT NULL,
+        \\  PRIMARY KEY(principal, device, capability, scope, event_hash)
+        \\);
+        \\CREATE INDEX acl_delegation_events_principal_idx ON acl_delegation_events(principal, device, capability, scope);
         \\CREATE TABLE identity_devices (
         \\  principal TEXT NOT NULL,
         \\  device TEXT NOT NULL,

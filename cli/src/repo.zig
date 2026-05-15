@@ -19,6 +19,24 @@ const config_max_size = 128 * 1024;
 pub const genesis_ref = "refs/gitomi/genesis";
 pub const genesis_schema = "urn:gitomi:genesis:v1";
 
+pub const AccessMode = enum {
+    open,
+    closed,
+};
+
+pub fn accessModeName(mode: AccessMode) []const u8 {
+    return switch (mode) {
+        .open => "open",
+        .closed => "closed",
+    };
+}
+
+pub fn parseAccessMode(value: []const u8) ?AccessMode {
+    if (std.mem.eql(u8, value, "open")) return .open;
+    if (std.mem.eql(u8, value, "closed")) return .closed;
+    return null;
+}
+
 pub const Repo = struct {
     allocator: Allocator,
     root: []u8,
@@ -60,6 +78,7 @@ pub const Config = struct {
 pub const GenesisManifest = struct {
     allocator: Allocator,
     repo_id: []u8,
+    access_mode: AccessMode,
     owner_principal: []u8,
     owner_role: []u8,
     device_principal: []u8,
@@ -659,6 +678,26 @@ fn openPgpPublicKey(allocator: Allocator, key_id: []const u8) ![]u8 {
     return public_key;
 }
 
+pub fn importOpenPgpPublicKey(allocator: Allocator, public_key: []const u8) !bool {
+    const trimmed = std.mem.trim(u8, public_key, " \t\r\n");
+    if (!std.mem.startsWith(u8, trimmed, "-----BEGIN PGP PUBLIC KEY BLOCK-----")) return false;
+
+    const program = try gpgProgram(allocator);
+    defer allocator.free(program);
+    var argv = [_][]const u8{ program, "--batch", "--import" };
+    var result = try git.runCommand(allocator, &argv, trimmed, git.max_git_output);
+    defer result.deinit();
+    if (result.exitCode() == 0) return true;
+
+    const stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
+    if (stderr.len != 0) {
+        try eprint("gt sync: failed to import genesis OpenPGP key: {s}\n", .{stderr});
+    } else {
+        try eprint("gt sync: failed to import genesis OpenPGP key\n", .{});
+    }
+    return CliError.UserError;
+}
+
 fn gpgProgram(allocator: Allocator) ![]u8 {
     if (gitConfigValue(allocator, "gpg.openpgp.program")) |program| return program else |_| {}
     if (gitConfigValue(allocator, "gpg.program")) |program| return program else |_| {}
@@ -722,6 +761,7 @@ pub fn buildGenesisManifestJson(
     public_key: []const u8,
     fingerprint: []const u8,
     scheme: []const u8,
+    access_mode: AccessMode,
 ) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -732,6 +772,9 @@ pub fn buildGenesisManifestJson(
     try buf.appendSlice(allocator, "\"owner\":{");
     try appendJsonFieldString(&buf, allocator, "principal", cfg.principal, true);
     try appendJsonFieldString(&buf, allocator, "role", "owner", false);
+    try buf.appendSlice(allocator, "},");
+    try buf.appendSlice(allocator, "\"access\":{");
+    try appendJsonFieldString(&buf, allocator, "mode", accessModeName(access_mode), false);
     try buf.appendSlice(allocator, "},");
     try buf.appendSlice(allocator, "\"device\":{");
     try appendJsonFieldString(&buf, allocator, "principal", cfg.principal, true);
@@ -820,6 +863,7 @@ pub fn loadGenesisManifest(allocator: Allocator, commit: []const u8) !GenesisMan
     const owner_principal = jsonString(owner.get("principal")) orelse return invalidGenesis(commit, "owner.principal must be a string");
     const role = jsonString(owner.get("role")) orelse return invalidGenesis(commit, "owner.role must be a string");
     if (!std.mem.eql(u8, role, "owner")) return invalidGenesis(commit, "owner.role must be owner");
+    const access_mode = try genesisAccessMode(commit, root);
     const device = jsonObject(root.get("device")) orelse return invalidGenesis(commit, "device must be an object");
     const device_principal = jsonString(device.get("principal")) orelse return invalidGenesis(commit, "device.principal must be a string");
     const device_id = jsonString(device.get("id")) orelse return invalidGenesis(commit, "device.id must be a string");
@@ -845,6 +889,7 @@ pub fn loadGenesisManifest(allocator: Allocator, commit: []const u8) !GenesisMan
     const manifest = GenesisManifest{
         .allocator = allocator,
         .repo_id = repo_id_owned.?,
+        .access_mode = access_mode,
         .owner_principal = owner_principal_owned.?,
         .owner_role = owner_role_owned.?,
         .device_principal = device_principal_owned.?,
@@ -860,6 +905,12 @@ pub fn loadGenesisManifest(allocator: Allocator, commit: []const u8) !GenesisMan
     public_key_owned = null;
     fingerprint_owned = null;
     return manifest;
+}
+
+fn genesisAccessMode(commit: []const u8, root: std.json.ObjectMap) !AccessMode {
+    const access = jsonObject(root.get("access")) orelse return .closed;
+    const mode = jsonString(access.get("mode")) orelse return invalidGenesis(commit, "access.mode must be open or closed");
+    return parseAccessMode(mode) orelse return invalidGenesis(commit, "access.mode must be open or closed");
 }
 
 fn invalidGenesis(commit: []const u8, message: []const u8) CliError {

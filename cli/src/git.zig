@@ -153,19 +153,24 @@ pub fn inboxHeads(allocator: Allocator) ![][]u8 {
 pub const PreparedEventParents = struct {
     allocator: Allocator,
     old_head: ?[]u8,
+    anchor: ?[]u8,
     all_heads: [][]u8,
     causal_heads: [][]const u8,
 
     pub fn deinit(self: *PreparedEventParents) void {
         if (self.old_head) |head| self.allocator.free(head);
+        if (self.anchor) |anchor| self.allocator.free(anchor);
         freeStringList(self.allocator, self.all_heads);
         self.allocator.free(self.causal_heads);
     }
 };
 
-pub fn prepareEventParents(allocator: Allocator, inbox_ref: []const u8) !PreparedEventParents {
+pub fn prepareEventParents(allocator: Allocator, inbox_ref: []const u8, root_anchor: ?[]const u8) !PreparedEventParents {
     const old_head = try resolveOptionalRef(allocator, inbox_ref);
     errdefer if (old_head) |head| allocator.free(head);
+
+    const anchor = if (old_head == null and root_anchor != null) try allocator.dupe(u8, root_anchor.?) else null;
+    errdefer if (anchor) |value| allocator.free(value);
 
     const all_heads = try inboxHeads(allocator);
     errdefer freeStringList(allocator, all_heads);
@@ -173,7 +178,8 @@ pub fn prepareEventParents(allocator: Allocator, inbox_ref: []const u8) !Prepare
     var causal: std.ArrayList([]const u8) = .empty;
     errdefer causal.deinit(allocator);
 
-    if (old_head) |head| {
+    const first_parent: ?[]const u8 = if (old_head) |head| head else anchor;
+    if (first_parent) |head| {
         for (all_heads) |known_head| {
             if (std.mem.eql(u8, known_head, head)) continue;
             if (try isAncestor(allocator, known_head, head)) continue;
@@ -186,6 +192,7 @@ pub fn prepareEventParents(allocator: Allocator, inbox_ref: []const u8) !Prepare
     return .{
         .allocator = allocator,
         .old_head = old_head,
+        .anchor = anchor,
         .all_heads = all_heads,
         .causal_heads = try causal.toOwnedSlice(allocator),
     };
@@ -222,10 +229,15 @@ pub fn countInboxEvents(allocator: Allocator) !usize {
     });
     defer allocator.free(refs);
 
+    const genesis_oid = try resolveOptionalRef(allocator, "refs/gitomi/genesis");
+    defer if (genesis_oid) |oid| allocator.free(oid);
+
     var count: usize = 0;
     var it = std.mem.tokenizeScalar(u8, refs, '\n');
     while (it.next()) |ref| {
-        const raw = try gitChecked(allocator, &.{ "rev-list", "--first-parent", "--count", ref });
+        const target = if (genesis_oid) |oid| try std.fmt.allocPrint(allocator, "{s}..{s}", .{ oid, ref }) else try allocator.dupe(u8, ref);
+        defer allocator.free(target);
+        const raw = try gitChecked(allocator, &.{ "rev-list", "--first-parent", "--count", target });
         defer allocator.free(raw);
         const trimmed = std.mem.trim(u8, raw, " \t\r\n");
         count += std.fmt.parseUnsigned(usize, trimmed, 10) catch 0;

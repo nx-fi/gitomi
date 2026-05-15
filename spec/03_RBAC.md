@@ -6,7 +6,8 @@ This document defines the normative role-based access control (RBAC) system for 
 
 Initial authorization state is seeded from the signed genesis manifest at
 `refs/gitomi/genesis`. Subsequent authorization state is event-sourced from
-`acl.role_granted`, `acl.role_revoked`, `identity.device_added`, and
+`acl.role_granted`, `acl.role_revoked`, `acl.delegation_granted`,
+`acl.delegation_revoked`, `identity.device_added`, and
 `identity.device_revoked` events as required by the product specification
 (§5.3).
 
@@ -84,6 +85,8 @@ The following table defines the minimum permission set and the lowest role requi
 | `comment.read`              | ✓      | ✓        | ✓           | ✓          | ✓     |
 | `issue.open`                |        | ✓        | ✓           | ✓          | ✓     |
 | `comment.add`               |        | ✓        | ✓           | ✓          | ✓     |
+| `reaction.add`              |        | ✓        | ✓           | ✓          | ✓     |
+| `reaction.remove_own`       |        | ✓        | ✓           | ✓          | ✓     |
 | `pull.open`                 |        |          | ✓           | ✓          | ✓     |
 | `issue.edit_own`            |        |          | ✓           | ✓          | ✓     |
 | `comment.edit_own`          |        |          | ✓           | ✓          | ✓     |
@@ -103,6 +106,7 @@ The following table defines the minimum permission set and the lowest role requi
 | `project.manage`            |        |          |             | ✓          | ✓     |
 | `milestone.manage`          |        |          |             | ✓          | ✓     |
 | `action.run_request`        |        |          |             | ✓          | ✓     |
+| `delegation.manage`         |        |          |             | ✓          | ✓     |
 | `acl.grant`                 |        |          |             |            | ✓     |
 | `acl.revoke`                |        |          |             |            | ✓     |
 | `identity.manage`           |        |          |             |            | ✓     |
@@ -143,6 +147,8 @@ Every event type MUST map to a required permission. The following defines the ma
 | `issue.milestone_set`     | `issue.manage_milestones` | —       |
 | `issue.project_added`     | `issue.manage_projects`   | —       |
 | `issue.project_removed`   | `issue.manage_projects`   | —       |
+| `issue.reaction_added`    | `reaction.add`            | —       |
+| `issue.reaction_removed`  | `reaction.remove_own`     | actor   |
 | `pull.opened`             | `pull.open`               | —       |
 | `pull.title_set`          | `pull.edit_own` or `pull.edit_any` | object |
 | `pull.body_set`           | `pull.edit_own` or `pull.edit_any` | object |
@@ -156,6 +162,8 @@ Every event type MUST map to a required permission. The following defines the ma
 | `pull.reviewer_added`     | `pull.manage_reviewers`   | —       |
 | `pull.reviewer_removed`   | `pull.manage_reviewers`   | —       |
 | `pull.merged`             | `pull.merge`              | —       |
+| `pull.reaction_added`     | `reaction.add`            | —       |
+| `pull.reaction_removed`   | `reaction.remove_own`     | actor   |
 | `project.created`         | `project.manage`          | —       |
 | `project.updated`         | `project.manage`          | —       |
 | `project.column_added`    | `project.manage`          | —       |
@@ -166,14 +174,21 @@ Every event type MUST map to a required permission. The following defines the ma
 | `comment.added`           | `comment.add`             | —       |
 | `comment.body_set`        | `comment.edit_own` or `comment.edit_any` | object |
 | `comment.redacted`        | `comment.edit_own` or `comment.redact_any` | object |
+| `comment.reaction_added`  | `reaction.add`            | —       |
+| `comment.reaction_removed`| `reaction.remove_own`     | actor   |
 | `acl.role_granted`        | `acl.grant`               | —       |
 | `acl.role_revoked`        | `acl.revoke`              | —       |
+| `acl.delegation_granted`  | `delegation.manage`       | —       |
+| `acl.delegation_revoked`  | `delegation.manage`       | —       |
 | `identity.device_added`   | `identity.manage`         | —       |
 | `identity.device_revoked` | `identity.manage`         | —       |
 | `action.run_requested`    | `action.run_request`      | —       |
 | `action.run_completed`    | `action.run_request`      | —       |
 
 When the scope column says "object", the reducer MUST check whether `_own` is sufficient (actor authored the object) or whether `_any` is required.
+When the scope column says "actor", the event is limited by event shape to the
+actor's own projection entries and MUST NOT remove or mutate another
+principal's reaction.
 
 An `issue.opened` event that includes `payload.labels` MUST also require
 `issue.manage_labels`. An `issue.opened` event that includes
@@ -204,9 +219,18 @@ empty ACL state. This removes the circular dependency where
 
 ### 4.2. First Inbox Events
 
-After genesis is accepted, the first inbox event from the genesis device MUST be
-signed by the genesis key and MUST use `parent_hashes.log` equal to the empty
-string. It is authorized against the genesis ACL and identity state.
+After genesis is accepted, the first event on every inbox ref MUST use the
+genesis commit as its first Git parent, MUST use `parent_hashes.log` equal to
+the empty string, and MUST use `parent_hashes.anchor` equal to the genesis
+commit OID. The first inbox event from the genesis device is authorized against
+the genesis ACL and identity state.
+
+The first inbox event from any later device is also rooted at genesis, but it
+MUST be authorized against the event's causal frontier. If the device or role
+was established by inbox events after genesis, those authorization events MUST
+be reachable through the root event's additional parents or related security
+frontier. A root inbox event is therefore not self-authorizing merely because it
+links to genesis.
 
 ### 4.3. Post-Bootstrap State
 
@@ -217,7 +241,9 @@ authorization rules (§5). There is no self-authorizing ACL grant special case.
 
 Before genesis is accepted, implementations MUST treat all principals and
 devices as unauthorized. If a repository has inbox refs but no valid genesis ref,
-those inbox events MUST NOT be admitted into the projection.
+those inbox events MUST NOT be admitted into the projection. An inbox root whose
+first parent is missing, not the local genesis commit, or inconsistent with
+`parent_hashes.anchor` MUST be rejected as chain-invalid.
 
 A fetched genesis ref that conflicts with an existing local genesis ref is a
 trust-root conflict and MUST NOT be auto-merged.
@@ -281,6 +307,31 @@ For `acl.role_revoked`, `payload.role` is a required audit assertion. It MUST
 equal the target principal's effective role at the event's causal frontier.
 Events that attempt to revoke a principal with no effective role, or with a
 different effective role than `payload.role`, MUST be rejected.
+
+### 5.6. Delegation Reducer
+
+The ACL projection MAY also maintain scoped delegations:
+
+```
+(principal, device, capability, scope) → { key_fingerprint, public_key, grant_event_hash }
+```
+
+`acl.delegation_granted` delegates one bounded capability to a principal/device
+pair and binds that delegated actor to explicit signing key material.
+`acl.delegation_revoked` removes the active delegation for the same
+`principal`, `device`, `capability`, and `scope`.
+
+Delegations do not grant an RBAC role. They authorize only the capability named
+in `payload.capability` and only when a reducer has explicit rules for that
+capability. A delegated event MUST still be signed by the key fingerprint in the
+active delegation at the event's causal frontier. If the actor also has an
+ordinary role and device binding, normal role authorization applies first.
+
+The v1 built-in delegated capability is `github.import` with scope `github:*`.
+It authorizes a delegated bot actor to emit imported GitHub `issue.*`,
+`pull.*`, and `comment.*` events supported by the GitHub importer. It does not
+authorize ACL, identity, action, or arbitrary project/milestone management
+events. A `maintainer` or `owner` MAY grant or revoke this delegation.
 
 ## 6. Identity Reducer
 
@@ -352,11 +403,12 @@ Authorization for a new event MUST be evaluated against the identity and ACL sta
 
 When ingesting an event, the authorization check (product specification §5.4, step 4) MUST proceed as follows:
 
-1.  **Resolve effective role**: Look up `actor.principal` in the ACL projection at the event's causal frontier, seeded by genesis. If the principal has no role, reject the event.
-2.  **Resolve device authorization**: Verify `actor.device` is in the identity projection for `actor.principal` at the causal frontier, seeded by genesis. If not, reject the event.
+1.  **Resolve effective role**: Look up `actor.principal` in the ACL projection at the event's causal frontier, seeded by genesis.
+2.  **Resolve device authorization**: If the actor has an effective role, verify `actor.device` is in the identity projection for `actor.principal` at the causal frontier, seeded by genesis. If not, reject the event.
 3.  **Map event type to required permission**: Use the table in §3.3.
 4.  **Check own-object scope**: For scoped permissions, look up the creating event of the target object to determine authorship.
-5.  **Evaluate**: Accept if the effective role satisfies the required permission per the matrix in §3.1. Reject otherwise.
+5.  **Evaluate role authorization**: Accept if the effective role satisfies the required permission per the matrix in §3.1.
+6.  **Evaluate delegation authorization**: If the actor has no effective role, look for an active delegation for `(actor.principal, actor.device)` whose capability explicitly authorizes the event type. Verify the commit signer fingerprint matches the delegated key. Accept only if the delegation authorizes that event; otherwise reject.
 
 ### 7.2. Causal Frontier
 
@@ -392,6 +444,17 @@ CREATE TABLE acl_roles (
     grant_event_hash TEXT NOT NULL
 );
 
+CREATE TABLE acl_delegations (
+    principal TEXT NOT NULL,
+    device TEXT NOT NULL,
+    capability TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    key_fingerprint TEXT NOT NULL,
+    public_key TEXT NOT NULL,
+    grant_event_hash TEXT NOT NULL,
+    PRIMARY KEY (principal, device, capability, scope, key_fingerprint)
+);
+
 CREATE TABLE identity_devices (
     principal TEXT NOT NULL,
     device TEXT NOT NULL,
@@ -409,7 +472,9 @@ These tables are disposable caches rebuilt from the event log, consistent with t
 
 During cache rebuild, the reducer MUST process events in causal order:
 
-1.  Process all `acl.role_granted` and `acl.role_revoked` events to build the ACL projection.
+1.  Process all `acl.role_granted`, `acl.role_revoked`,
+    `acl.delegation_granted`, and `acl.delegation_revoked` events to build the
+    ACL and delegation projection.
 2.  Process all `identity.device_added` and `identity.device_revoked` events to build the identity projection.
 3.  Re-evaluate authorization for all other events against the built ACL and identity projections.
 
@@ -447,6 +512,40 @@ Note: `acl.role_revoked` removes the target principal's single effective role.
 The required `role` field records the role the actor intended to revoke and MUST
 match the target's effective role at the causal frontier; it is not a selective
 partial revoke mechanism.
+
+`acl.delegation_granted`:
+
+```json
+{
+    "principal": "import-bot",
+    "device": "github",
+    "capability": "github.import",
+    "scope": "github:*",
+    "signing_key": {
+        "scheme": "ssh",
+        "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...",
+        "fingerprint": "SHA256:..."
+    }
+}
+```
+
+The corresponding event envelope uses `object.kind = "acl"` and
+`object.id = "acl:import-bot"`. The `signing_key` is the key that MUST sign
+delegated events from `import-bot/github`.
+
+`acl.delegation_revoked`:
+
+```json
+{
+    "principal": "import-bot",
+    "device": "github",
+    "capability": "github.import",
+    "scope": "github:*"
+}
+```
+
+The corresponding event envelope uses `object.kind = "acl"` and
+`object.id = "acl:import-bot"`.
 
 ### 9.2. Identity Event Payloads
 

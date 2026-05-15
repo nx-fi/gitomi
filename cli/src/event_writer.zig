@@ -17,7 +17,7 @@ pub const EventWriter = struct {
     cfg: repo_mod.Config,
     inbox_ref: []u8,
     prepared_parents: git.PreparedEventParents,
-    related_heads: [][]const u8,
+    related_heads: [][]u8,
     persist_config: bool,
 
     pub fn init(allocator: Allocator, command_context: []const u8) !EventWriter {
@@ -76,12 +76,17 @@ pub const EventWriter = struct {
         } else try repo_mod.inboxRef(allocator, cfg);
         errdefer allocator.free(inbox_ref);
 
-        var prepared_parents = try git.prepareEventParents(allocator, inbox_ref);
+        const genesis_oid = (try git.resolveOptionalRef(allocator, repo_mod.genesis_ref)) orelse {
+            try eprint("{s}: Gitomi genesis ref is missing; run `gt init` or `gt sync`\n", .{command_context});
+            return CliError.UserError;
+        };
+        defer allocator.free(genesis_oid);
+
+        var prepared_parents = try git.prepareEventParents(allocator, inbox_ref, genesis_oid);
         errdefer prepared_parents.deinit();
 
-        const related_heads = try allocator.alloc([]const u8, if (prepared_parents.old_head == null) 0 else 1);
-        errdefer allocator.free(related_heads);
-        if (prepared_parents.old_head) |head| related_heads[0] = head;
+        const related_heads = try buildRelatedHeads(allocator, repo, cfg, prepared_parents.old_head);
+        errdefer git.freeStringList(allocator, related_heads);
 
         return .{
             .allocator = allocator,
@@ -95,7 +100,7 @@ pub const EventWriter = struct {
     }
 
     pub fn deinit(self: *EventWriter) void {
-        self.allocator.free(self.related_heads);
+        git.freeStringList(self.allocator, self.related_heads);
         self.prepared_parents.deinit();
         self.allocator.free(self.inbox_ref);
         self.cfg.deinit();
@@ -109,6 +114,7 @@ pub const EventWriter = struct {
     pub fn eventParents(self: *const EventWriter) event_mod.EventParents {
         return .{
             .log = self.prepared_parents.old_head,
+            .anchor = self.prepared_parents.anchor,
             .causal = self.prepared_parents.causal_heads,
             .related = self.related_heads,
         };
@@ -124,6 +130,7 @@ pub const EventWriter = struct {
             subject,
             event_body,
             self.prepared_parents.old_head,
+            self.prepared_parents.anchor,
             self.prepared_parents.causal_heads,
         );
         errdefer self.allocator.free(commit_oid);
@@ -136,6 +143,38 @@ pub const EventWriter = struct {
     }
 };
 
+fn buildRelatedHeads(
+    allocator: Allocator,
+    repo: repo_mod.Repo,
+    cfg: repo_mod.Config,
+    old_head: ?[]const u8,
+) ![][]u8 {
+    var related: std.ArrayList([]u8) = .empty;
+    errdefer git.freeStringList(allocator, related.items);
+
+    if (old_head) |head| {
+        try appendUniqueOwned(allocator, &related, head);
+    }
+
+    const auth_heads = try index.authRelatedEventHashes(allocator, repo, cfg.principal, cfg.device);
+    defer git.freeStringList(allocator, auth_heads);
+    for (auth_heads) |head| {
+        try appendUniqueOwned(allocator, &related, head);
+    }
+
+    return related.toOwnedSlice(allocator);
+}
+
+fn appendUniqueOwned(allocator: Allocator, list: *std.ArrayList([]u8), value: []const u8) !void {
+    if (value.len == 0) return;
+    for (list.items) |existing| {
+        if (std.mem.eql(u8, existing, value)) return;
+    }
+    const owned = try allocator.dupe(u8, value);
+    errdefer allocator.free(owned);
+    try list.append(allocator, owned);
+}
+
 pub fn writeSignedEvent(
     allocator: Allocator,
     command_context: []const u8,
@@ -143,6 +182,7 @@ pub fn writeSignedEvent(
     subject: []const u8,
     event_body: []const u8,
     old_head: ?[]const u8,
+    anchor: ?[]const u8,
     causal_heads: []const []const u8,
 ) ![]u8 {
     const empty_tree = try git.emptyTreeOid(allocator);
@@ -158,7 +198,8 @@ pub fn writeSignedEvent(
     try commit_args.append(allocator, event_body);
     try commit_args.append(allocator, empty_tree);
 
-    if (old_head) |head| {
+    const first_parent: ?[]const u8 = if (old_head) |head| head else anchor;
+    if (first_parent) |head| {
         try commit_args.append(allocator, "-p");
         try commit_args.append(allocator, head);
         for (causal_heads) |known_head| {

@@ -21,6 +21,8 @@ const eprint = io.eprint;
 
 const import_bot_principal = "import-bot";
 const import_bot_device = "github";
+const github_import_capability = "github.import";
+const github_import_scope = "github:*";
 const default_api_url = "https://api.github.com";
 const max_github_json = 32 * 1024 * 1024;
 const gh_current_repo = RepoSlug{
@@ -233,8 +235,8 @@ fn cmdImport(allocator: Allocator, args: []const []const u8) !void {
         }
     }
 
-    try eprint("gt github import: preparing import actor {s}/{s}\n", .{ options.bot_principal, options.bot_device });
-    try ensureImportBot(allocator, options.bot_principal, options.bot_device);
+    try eprint("gt github import: preparing delegated import actor {s}/{s}\n", .{ options.bot_principal, options.bot_device });
+    try ensureImportDelegation(allocator, options.bot_principal, options.bot_device);
 
     var token_owned: ?[]u8 = null;
     defer if (token_owned) |value| allocator.free(value);
@@ -307,41 +309,36 @@ fn githubTokenFromEnv(allocator: Allocator) !?[]u8 {
     };
 }
 
-fn ensureImportBot(allocator: Allocator, principal: []const u8, device: []const u8) !void {
-    var repo = try repo_mod.discoverRepo(allocator);
-    defer repo.deinit();
-
+fn ensureImportDelegation(allocator: Allocator, principal: []const u8, device: []const u8) !void {
     const checked_principal = try util.checkedRefSegment(allocator, principal, "principal");
     defer allocator.free(checked_principal);
     const checked_device = try util.checkedRefSegment(allocator, device, "device");
     defer allocator.free(checked_device);
 
-    if (!(try index.isIdentityDeviceActive(allocator, repo, checked_principal, checked_device))) {
-        try writeImportBotIdentity(allocator, checked_principal, checked_device);
-        try index.ensureIndex(allocator, repo);
-    }
+    var writer = try EventWriter.init(allocator, "gt github import");
+    defer writer.deinit();
 
-    const role = try index.roleForPrincipal(allocator, repo, checked_principal);
+    const role = try index.roleForPrincipal(allocator, writer.repo, writer.cfg.principal);
     defer if (role) |value| allocator.free(value);
     if (role == null or !roleAtLeastMaintainer(role.?)) {
-        try writeImportBotRole(allocator, checked_principal, checked_device);
-        try index.ensureIndex(allocator, repo);
+        try eprint("gt github import: {s} must be maintainer or owner to delegate GitHub import authority\n", .{writer.cfg.principal});
+        return CliError.Unauthorized;
     }
-}
 
-fn roleAtLeastMaintainer(role: []const u8) bool {
-    return std.mem.eql(u8, role, "maintainer") or std.mem.eql(u8, role, "owner");
-}
-
-fn writeImportBotIdentity(allocator: Allocator, principal: []const u8, device: []const u8) !void {
-    var writer = try EventWriter.initForInboxRef(allocator, "gt github import", principal, device);
-    defer writer.deinit();
+    if (!(try index.isIdentityDeviceActive(allocator, writer.repo, writer.cfg.principal, writer.cfg.device))) {
+        try eprint("gt github import: configured actor {s}/{s} is not an active device\n", .{ writer.cfg.principal, writer.cfg.device });
+        return CliError.Unauthorized;
+    }
 
     var signing_key = try repo_mod.configuredSigningKey(allocator);
     defer signing_key.deinit();
     if (std.mem.trim(u8, signing_key.public_key, " \t\r\n").len == 0) {
-        try eprint("gt github import: signing public key is required to authorize import-bot; configure Git signing with user.signingkey\n", .{});
+        try eprint("gt github import: signing public key is required to delegate import-bot; configure Git signing with user.signingkey\n", .{});
         return CliError.MissingArgument;
+    }
+
+    if (try index.hasActiveDelegation(allocator, writer.repo, checked_principal, checked_device, github_import_capability, github_import_scope, signing_key.fingerprint)) {
+        return;
     }
 
     const event_uuid = try util.newUuidV7(allocator);
@@ -350,30 +347,35 @@ fn writeImportBotIdentity(allocator: Allocator, principal: []const u8, device: [
     defer allocator.free(idem);
     const occurred_at = try util.rfc3339Now(allocator);
     defer allocator.free(occurred_at);
-    const body = try event_mod.buildIdentityDeviceAddedJson(allocator, writer.cfg, writer.nextSeq(), principal, device, signing_key.public_key, signing_key.fingerprint, signing_key.scheme, event_uuid, idem, occurred_at, writer.eventParents());
+    const body = try event_mod.buildAclDelegationJson(
+        allocator,
+        writer.cfg,
+        writer.nextSeq(),
+        checked_principal,
+        checked_device,
+        github_import_capability,
+        github_import_scope,
+        .{
+            .scheme = signing_key.scheme,
+            .public_key = signing_key.public_key,
+            .fingerprint = signing_key.fingerprint,
+        },
+        event_uuid,
+        idem,
+        occurred_at,
+        writer.eventParents(),
+        true,
+    );
     defer allocator.free(body);
-    const subject = try std.fmt.allocPrint(allocator, "identity.device_added {s}/{s}", .{ principal, device });
+    const subject = try std.fmt.allocPrint(allocator, "acl.delegation_granted {s}/{s} {s}", .{ checked_principal, checked_device, github_import_capability });
     defer allocator.free(subject);
     const commit = try writer.write("gt github import", subject, body);
     allocator.free(commit);
+    try index.ensureIndex(allocator, writer.repo);
 }
 
-fn writeImportBotRole(allocator: Allocator, principal: []const u8, device: []const u8) !void {
-    var writer = try EventWriter.initForInboxRef(allocator, "gt github import", principal, device);
-    defer writer.deinit();
-
-    const event_uuid = try util.newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try util.newUuidV7(allocator);
-    defer allocator.free(idem);
-    const occurred_at = try util.rfc3339Now(allocator);
-    defer allocator.free(occurred_at);
-    const body = try event_mod.buildAclRoleJson(allocator, writer.cfg, writer.nextSeq(), principal, "maintainer", event_uuid, idem, occurred_at, writer.eventParents(), true);
-    defer allocator.free(body);
-    const subject = try std.fmt.allocPrint(allocator, "acl.role_granted {s} maintainer", .{principal});
-    defer allocator.free(subject);
-    const commit = try writer.write("gt github import", subject, body);
-    allocator.free(commit);
+fn roleAtLeastMaintainer(role: []const u8) bool {
+    return std.mem.eql(u8, role, "maintainer") or std.mem.eql(u8, role, "owner");
 }
 
 fn importFromFile(allocator: Allocator, path: []const u8, options: ImportOptions, stats: *ImportStats) !void {
@@ -1050,6 +1052,7 @@ fn writeImportedCommentAdded(
     }
     const parents = event_mod.EventParents{
         .log = writer.prepared_parents.old_head,
+        .anchor = writer.prepared_parents.anchor,
         .causal = writer.prepared_parents.causal_heads,
         .related = related.items,
     };

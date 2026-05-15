@@ -31,6 +31,19 @@ const parseValidatedEnvelopeObject = event_mod.parseValidatedEnvelopeObject;
 const validateEnvelopeObject = event_mod.validateEnvelopeObject;
 const printIndexedEvent = index_event_row.printIndexedEvent;
 
+pub const CommentParentInfo = struct {
+    allocator: Allocator,
+    parent_kind: []u8,
+    parent_id: []u8,
+    add_hash: []u8,
+
+    pub fn deinit(self: *CommentParentInfo) void {
+        self.allocator.free(self.parent_kind);
+        self.allocator.free(self.parent_id);
+        self.allocator.free(self.add_hash);
+    }
+};
+
 pub fn countIndexedEvents(allocator: Allocator, repo: Repo) !usize {
     if (!fileExists(repo.index_path)) return 0;
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
@@ -90,10 +103,7 @@ pub fn countIndexedEventsInDb(db: *SqliteDb) !usize {
     return if (count <= 0) 0 else @as(usize, @intCast(count));
 }
 
-pub fn requireAuthorizedWrite(allocator: Allocator, repo: Repo, event_body: []const u8) !void {
-    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
-    defer db.deinit();
-
+pub fn requireAuthorizedWrite(allocator: Allocator, _: Repo, event_body: []const u8) !void {
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, event_body, .{}) catch {
         try eprint("gt: refusing to create invalid event envelope: event body is not valid JSON\n", .{});
         return CliError.InvalidEvent;
@@ -119,11 +129,6 @@ pub fn requireAuthorizedWrite(allocator: Allocator, repo: Repo, event_body: []co
         return CliError.InvalidEvent;
     };
     defer envelope.deinit();
-
-    if (try projection.authorizationRejection(allocator, &db, null, envelope, event_body)) |reason| {
-        try eprint("gt: refusing to create unauthorized event: {s}\n", .{reason});
-        return CliError.Unauthorized;
-    }
 }
 
 pub fn roleForPrincipal(allocator: Allocator, repo: Repo, principal: []const u8) !?[]u8 {
@@ -142,6 +147,95 @@ pub fn isIdentityDeviceActive(allocator: Allocator, repo: Repo, principal: []con
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
     return try projection.currentDeviceActive(&db, principal, device);
+}
+
+pub fn hasActiveDelegation(
+    allocator: Allocator,
+    repo: Repo,
+    principal: []const u8,
+    device: []const u8,
+    capability: []const u8,
+    scope: []const u8,
+    fingerprint: []const u8,
+) !bool {
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    var stmt = try db.prepare(
+        \\SELECT 1
+        \\FROM acl_delegations
+        \\WHERE principal = ?
+        \\  AND device = ?
+        \\  AND capability = ?
+        \\  AND scope = ?
+        \\  AND key_fingerprint = ?
+        \\LIMIT 1
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, principal);
+    try stmt.bindText(2, device);
+    try stmt.bindText(3, capability);
+    try stmt.bindText(4, scope);
+    try stmt.bindText(5, fingerprint);
+    return try stmt.step();
+}
+
+pub fn authRelatedEventHashes(allocator: Allocator, repo: Repo, principal: []const u8, device: []const u8) ![][]u8 {
+    if (!fileExists(repo.index_path)) return try allocator.alloc([]u8, 0);
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
+    var hashes: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (hashes.items) |hash| allocator.free(hash);
+        hashes.deinit(allocator);
+    }
+
+    try appendSingleHashQuery(
+        allocator,
+        &db,
+        &hashes,
+        "SELECT grant_event_hash FROM acl_roles WHERE principal = ?",
+        &.{principal},
+    );
+    try appendSingleHashQuery(
+        allocator,
+        &db,
+        &hashes,
+        "SELECT grant_event_hash FROM acl_delegations WHERE principal = ? AND device = ?",
+        &.{ principal, device },
+    );
+    try appendSingleHashQuery(
+        allocator,
+        &db,
+        &hashes,
+        "SELECT added_event_hash FROM identity_devices WHERE principal = ? AND device = ? AND revoked_event_hash IS NULL",
+        &.{ principal, device },
+    );
+
+    return try hashes.toOwnedSlice(allocator);
+}
+
+fn appendSingleHashQuery(
+    allocator: Allocator,
+    db: *SqliteDb,
+    hashes: *std.ArrayList([]u8),
+    comptime sql_text: []const u8,
+    params: []const []const u8,
+) !void {
+    var stmt = try db.prepare(sql_text);
+    defer stmt.deinit();
+    for (params, 0..) |param, idx| try stmt.bindText(@intCast(idx + 1), param);
+    if (!(try stmt.step())) return;
+    const hash = try stmt.columnTextDup(allocator, 0);
+    errdefer allocator.free(hash);
+    if (hash.len == 0) return;
+    for (hashes.items) |existing| {
+        if (std.mem.eql(u8, existing, hash)) {
+            allocator.free(hash);
+            return;
+        }
+    }
+    try hashes.append(allocator, hash);
 }
 
 pub fn listAclFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
@@ -562,7 +656,7 @@ fn legacyGithubNumberForObjectInDb(db: *SqliteDb, object_kind: []const u8, objec
 }
 
 pub fn resolveCommentId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
-    const prefix = if (std.mem.startsWith(u8, raw_ref, "#")) raw_ref[1..] else raw_ref;
+    const prefix = commentRefValue(raw_ref);
     if (prefix.len < 7) {
         try eprint("gt comment: comment reference must be at least 7 hex characters\n", .{});
         return CliError.InvalidReference;
@@ -576,6 +670,12 @@ pub fn resolveCommentId(allocator: Allocator, repo: Repo, raw_ref: []const u8) !
 
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
+
+    if (util.looksLikeUuid(prefix)) {
+        if (try lookupExactObjectIdInDb(allocator, &db, "comments", prefix)) |id| return id;
+    }
+
+    if (try lookupObjectIdByHashRefInDb(allocator, &db, "comments", "comment", prefix)) |id| return id;
 
     const pattern = try std.fmt.allocPrint(allocator, "{s}%", .{prefix});
     defer allocator.free(pattern);
@@ -596,6 +696,43 @@ pub fn resolveCommentId(allocator: Allocator, repo: Repo, raw_ref: []const u8) !
         return CliError.AmbiguousReference;
     }
     return first;
+}
+
+fn commentRefValue(raw_ref: []const u8) []const u8 {
+    const trimmed = std.mem.trim(u8, raw_ref, " \t\r\n");
+    if (std.mem.startsWith(u8, trimmed, "comment:")) return trimmed["comment:".len..];
+    if (std.mem.startsWith(u8, trimmed, "~")) return trimmed[1..];
+    if (std.mem.startsWith(u8, trimmed, "#")) return trimmed[1..];
+    return trimmed;
+}
+
+pub fn commentParentInfo(allocator: Allocator, repo: Repo, comment_id: []const u8) !CommentParentInfo {
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
+    var stmt = try db.prepare(
+        \\SELECT c.parent_kind, c.parent_id, COALESCE(e.event_hash, '')
+        \\FROM comments c
+        \\LEFT JOIN events e
+        \\  ON e.object_id = c.id
+        \\ AND e.event_type = 'comment.added'
+        \\ AND e.domain_status = 'accepted'
+        \\WHERE c.id = ?
+        \\ORDER BY e.event_hash DESC
+        \\LIMIT 1
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, comment_id);
+    if (!(try stmt.step())) {
+        try eprint("gt comment: no comment matches {s}\n", .{comment_id});
+        return CliError.NotFound;
+    }
+    return .{
+        .allocator = allocator,
+        .parent_kind = try stmt.columnTextDup(allocator, 0),
+        .parent_id = try stmt.columnTextDup(allocator, 1),
+        .add_hash = try stmt.columnTextDup(allocator, 2),
+    };
 }
 
 pub fn listIssuesFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
@@ -647,7 +784,8 @@ pub fn listIssuesFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
             }
             try appendIssueCollectionJsonField(&line, allocator, &db, "labels", "SELECT DISTINCT label FROM issue_labels WHERE issue_id = ? ORDER BY label", id, true);
             try appendIssueCollectionJsonField(&line, allocator, &db, "assignees", "SELECT DISTINCT assignee FROM issue_assignees WHERE issue_id = ? ORDER BY assignee", id, true);
-            try appendIssueProjectsJsonField(&line, allocator, &db, id, false);
+            try appendIssueProjectsJsonField(&line, allocator, &db, id, true);
+            try appendReactionsJsonField(&line, allocator, &db, "issue", id, false);
             try line.append(allocator, '}');
             try out("{s}\n", .{line.items});
         } else {
@@ -715,7 +853,8 @@ pub fn showIssueFromIndex(allocator: Allocator, repo: Repo, issue_id: []const u8
         try appendIssueCollectionJsonField(&line, allocator, &db, "labels", "SELECT DISTINCT label FROM issue_labels WHERE issue_id = ? ORDER BY label", id, true);
         try appendIssueCollectionJsonField(&line, allocator, &db, "assignees", "SELECT DISTINCT assignee FROM issue_assignees WHERE issue_id = ? ORDER BY assignee", id, true);
         try appendIssueProjectsJsonField(&line, allocator, &db, id, true);
-        try appendCommitReferencesJsonField(&line, allocator, &db, "commit_references", "issue", id, false);
+        try appendCommitReferencesJsonField(&line, allocator, &db, "commit_references", "issue", id, true);
+        try appendReactionsJsonField(&line, allocator, &db, "issue", id, false);
         try line.append(allocator, '}');
         try out("{s}\n", .{line.items});
         return;
@@ -727,6 +866,8 @@ pub fn showIssueFromIndex(allocator: Allocator, repo: Repo, issue_id: []const u8
     defer allocator.free(assignees);
     const commit_references = try commitReferencesText(allocator, &db, "issue", id);
     defer allocator.free(commit_references);
+    const reactions = try reactionsText(allocator, &db, "issue", id);
+    defer allocator.free(reactions);
 
     try out("id:        {s}\n", .{id});
     try out("state:     {s}\n", .{state});
@@ -750,6 +891,7 @@ pub fn showIssueFromIndex(allocator: Allocator, repo: Repo, issue_id: []const u8
         try out("projects:  {s}\n", .{projects});
     }
     try out("commits:   {s}\n", .{commit_references});
+    try out("reactions: {s}\n", .{reactions});
     try out("\n{s}\n", .{body});
 }
 
@@ -902,7 +1044,8 @@ pub fn listPullsFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
             }
             try appendIssueCollectionJsonField(&line, allocator, &db, "labels", "SELECT DISTINCT label FROM pull_labels WHERE pull_id = ? ORDER BY label", id, true);
             try appendIssueCollectionJsonField(&line, allocator, &db, "assignees", "SELECT DISTINCT assignee FROM pull_assignees WHERE pull_id = ? ORDER BY assignee", id, true);
-            try appendIssueCollectionJsonField(&line, allocator, &db, "reviewers", "SELECT DISTINCT reviewer FROM pull_reviewers WHERE pull_id = ? ORDER BY reviewer", id, false);
+            try appendIssueCollectionJsonField(&line, allocator, &db, "reviewers", "SELECT DISTINCT reviewer FROM pull_reviewers WHERE pull_id = ? ORDER BY reviewer", id, true);
+            try appendReactionsJsonField(&line, allocator, &db, "pull", id, false);
             try line.append(allocator, '}');
             try out("{s}\n", .{line.items});
         } else {
@@ -982,7 +1125,8 @@ pub fn showPullFromIndex(allocator: Allocator, repo: Repo, pull_id: []const u8, 
         try appendIssueCollectionJsonField(&line, allocator, &db, "labels", "SELECT DISTINCT label FROM pull_labels WHERE pull_id = ? ORDER BY label", id, true);
         try appendIssueCollectionJsonField(&line, allocator, &db, "assignees", "SELECT DISTINCT assignee FROM pull_assignees WHERE pull_id = ? ORDER BY assignee", id, true);
         try appendIssueCollectionJsonField(&line, allocator, &db, "reviewers", "SELECT DISTINCT reviewer FROM pull_reviewers WHERE pull_id = ? ORDER BY reviewer", id, true);
-        try appendCommitReferencesJsonField(&line, allocator, &db, "commit_references", "pull", id, false);
+        try appendCommitReferencesJsonField(&line, allocator, &db, "commit_references", "pull", id, true);
+        try appendReactionsJsonField(&line, allocator, &db, "pull", id, false);
         try line.append(allocator, '}');
         try out("{s}\n", .{line.items});
         return;
@@ -996,6 +1140,8 @@ pub fn showPullFromIndex(allocator: Allocator, repo: Repo, pull_id: []const u8, 
     defer allocator.free(reviewers);
     const commit_references = try commitReferencesText(allocator, &db, "pull", id);
     defer allocator.free(commit_references);
+    const reactions = try reactionsText(allocator, &db, "pull", id);
+    defer allocator.free(reactions);
 
     try out("id:         {s}\n", .{id});
     try out("state:      {s}\n", .{state});
@@ -1014,6 +1160,7 @@ pub fn showPullFromIndex(allocator: Allocator, repo: Repo, pull_id: []const u8, 
     try out("assignees:  {s}\n", .{assignees});
     try out("reviewers:  {s}\n", .{reviewers});
     try out("commits:    {s}\n", .{commit_references});
+    try out("reactions:  {s}\n", .{reactions});
     try out("\n{s}\n", .{body});
 }
 
@@ -1066,12 +1213,14 @@ pub fn listCommentsFromIndex(
             if (source_author.len != 0) try appendJsonFieldString(&line, allocator, "source_author", source_author, true);
             if (reply_parent_id.len != 0) try appendJsonFieldString(&line, allocator, "reply_parent_id", reply_parent_id, true);
             if (reply_parent_hash.len != 0) try appendJsonFieldString(&line, allocator, "reply_parent_hash", reply_parent_hash, true);
-            try appendJsonFieldString(&line, allocator, "created_at", created_at, false);
+            try appendJsonFieldString(&line, allocator, "created_at", created_at, true);
+            try appendReactionsJsonField(&line, allocator, &db, "comment", id, false);
             try line.append(allocator, '}');
             try out("{s}\n", .{line.items});
         } else {
-            try out("#{s} {s}: {s}\n", .{
-                id[0..@min(id.len, 7)],
+            var comment_ref_buf: [util.short_object_ref_len]u8 = undefined;
+            try out("comment:{s} {s}: {s}\n", .{
+                util.shortObjectRef(&comment_ref_buf, id),
                 if (source_author.len != 0) source_author else author,
                 if (redacted) "[redacted]" else body,
             });
@@ -1139,6 +1288,105 @@ fn appendIssueProjectsJsonField(
     }
     try buf.append(allocator, ']');
     if (comma) try buf.append(allocator, ',');
+}
+
+fn appendReactionsJsonField(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    object_kind: []const u8,
+    object_id: []const u8,
+    comma: bool,
+) !void {
+    try appendJsonString(buf, allocator, "reactions");
+    try buf.appendSlice(allocator, ":[");
+    var stmt = try db.prepare(
+        \\SELECT emoji, COUNT(DISTINCT actor_principal)
+        \\FROM reactions
+        \\WHERE object_kind = ? AND object_id = ?
+        \\GROUP BY emoji
+        \\ORDER BY MIN(created_at), emoji
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, object_kind);
+    try stmt.bindText(2, object_id);
+
+    var first = true;
+    while (try stmt.step()) {
+        const emoji = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(emoji);
+        const count = stmt.columnInt64(1);
+        if (!first) try buf.append(allocator, ',');
+        first = false;
+        try buf.append(allocator, '{');
+        try appendJsonFieldString(buf, allocator, "emoji", emoji, true);
+        try appendJsonFieldInteger(buf, allocator, "count", count, true);
+        try appendReactionActorsJsonField(buf, allocator, db, object_kind, object_id, emoji, false);
+        try buf.append(allocator, '}');
+    }
+    try buf.append(allocator, ']');
+    if (comma) try buf.append(allocator, ',');
+}
+
+fn appendReactionActorsJsonField(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    object_kind: []const u8,
+    object_id: []const u8,
+    emoji: []const u8,
+    comma: bool,
+) !void {
+    try appendJsonString(buf, allocator, "actors");
+    try buf.appendSlice(allocator, ":[");
+    var stmt = try db.prepare(
+        \\SELECT DISTINCT actor_principal
+        \\FROM reactions
+        \\WHERE object_kind = ? AND object_id = ? AND emoji = ?
+        \\ORDER BY actor_principal
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, object_kind);
+    try stmt.bindText(2, object_id);
+    try stmt.bindText(3, emoji);
+    var first = true;
+    while (try stmt.step()) {
+        const actor = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(actor);
+        if (!first) try buf.append(allocator, ',');
+        first = false;
+        try appendJsonString(buf, allocator, actor);
+    }
+    try buf.append(allocator, ']');
+    if (comma) try buf.append(allocator, ',');
+}
+
+fn reactionsText(allocator: Allocator, db: *SqliteDb, object_kind: []const u8, object_id: []const u8) ![]u8 {
+    var stmt = try db.prepare(
+        \\SELECT emoji, COUNT(DISTINCT actor_principal)
+        \\FROM reactions
+        \\WHERE object_kind = ? AND object_id = ?
+        \\GROUP BY emoji
+        \\ORDER BY MIN(created_at), emoji
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, object_kind);
+    try stmt.bindText(2, object_id);
+
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var first = true;
+    while (try stmt.step()) {
+        const emoji = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(emoji);
+        const count = stmt.columnInt64(1);
+        if (!first) try buf.appendSlice(allocator, ", ");
+        first = false;
+        try buf.appendSlice(allocator, emoji);
+        try std.fmt.format(buf.writer(allocator), " {d}", .{count});
+    }
+    if (first) try buf.appendSlice(allocator, "(none)");
+    return buf.toOwnedSlice(allocator);
 }
 
 fn appendProjectColumnsJsonField(
