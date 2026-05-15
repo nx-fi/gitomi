@@ -1,54 +1,61 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 405 275" role="img" aria-labelledby="title desc">
-  <title id="title">Gitomi logo</title>
-  <desc id="desc">A stylized eye logo with teal circular nodes and a navy pupil.</desc>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="510"
+  height="360"
+  viewBox="0 0 510 360"
+  fill="none"
+  role="img"
+  aria-labelledby="gitomiIconTitle"
+>
+  <title id="gitomiIconTitle">Gitomi icon</title>
+
   <defs>
-    <style>
-      .navy {
-        fill: none;
-        stroke: #0b234a;
-        stroke-width: 15;
-        stroke-linecap: butt;
-        stroke-linejoin: round;
-      }
+    <mask id="gitomi-iris-mask" maskUnits="userSpaceOnUse">
+      <rect x="0" y="0" width="510" height="360" fill="black" />
 
-      .teal-stroke {
-        fill: none;
-        stroke: #14b3a7;
-        stroke-width: 13;
-        stroke-linecap: butt;
-        stroke-linejoin: round;
-      }
+      <!-- Visible iris area -->
+      <circle cx="255" cy="180" r="82" fill="white" />
 
-      .teal-node {
-        fill: #fff;
-        stroke: #14b3a7;
-        stroke-width: 12;
-      }
+      <!-- Git branch negative cutout -->
+      <g
+        fill="none"
+        stroke="black"
+        stroke-width="9"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      >
+        <path d="M255 134 L255 226" />
+        <path d="M255 193 L298 148" />
+      </g>
 
-      .pupil {
-        fill: #081f49;
-      }
+      <!-- Top hollow node -->
+      <circle cx="255" cy="134" r="20" fill="black" />
+      <circle cx="255" cy="134" r="10" fill="white" />
 
-      .highlight {
-        fill: #fff;
-      }
-    </style>
+      <!-- Bottom hollow node -->
+      <circle cx="255" cy="226" r="20" fill="black" />
+      <circle cx="255" cy="226" r="10" fill="white" />
+
+      <!-- Upper-right filled node -->
+      <circle cx="298" cy="148" r="20" fill="black" />
+    </mask>
   </defs>
 
-  <path class="navy" d="M20 137.5C68 68 115 43 166 37" />
-  <path class="navy" d="M231 37C282 43 318 62 352 104" />
-  <path class="navy" d="M20 137.5C68 207 115 232 166 238" />
-  <path class="navy" d="M231 238C282 232 318 213 352 171" />
+  <!-- Eye outline -->
+  <path
+    d="M70 180 C125 120 190 82 255 82 C320 82 385 120 440 180 C385 240 320 278 255 278 C190 278 125 240 70 180 Z"
+    stroke="#10B8AA"
+    stroke-width="22"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
 
-  <path class="teal-stroke" d="M198 55V36" />
-  <path class="teal-stroke" d="M198 219V240" />
-  <path class="teal-stroke" d="M259 137.5H336" />
-  <path class="teal-stroke" d="M180 204A66 66 0 1 1 259 137.5A66 66 0 0 1 198 203" />
-
-  <circle class="teal-node" cx="198" cy="34" r="17" />
-  <circle class="teal-node" cx="198" cy="241" r="17" />
-  <circle class="teal-node" cx="356" cy="137.5" r="17" />
-
-  <circle class="pupil" cx="198" cy="137.5" r="44" />
-  <circle class="highlight" cx="213" cy="123" r="14" />
+  <!-- Iris -->
+  <circle
+    cx="255"
+    cy="180"
+    r="82"
+    fill="#10B8AA"
+    mask="url(#gitomi-iris-mask)"
+  />
 </svg>
