@@ -1030,6 +1030,8 @@ pub fn buildActionRunCompletedJson(
     target_oid: ?[]const u8,
     workflow: ?[]const u8,
     event_name: ?[]const u8,
+    diagnostics_ref: ?[]const u8,
+    diagnostics_oid: ?[]const u8,
 ) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -1042,6 +1044,8 @@ pub fn buildActionRunCompletedJson(
     if (target_oid) |value| try appendJsonFieldString(&buf, allocator, "target_oid", value, true);
     if (workflow) |value| try appendJsonFieldString(&buf, allocator, "workflow", value, true);
     if (event_name) |value| try appendJsonFieldString(&buf, allocator, "event_name", value, true);
+    if (diagnostics_ref) |value| try appendJsonFieldString(&buf, allocator, "diagnostics_ref", value, true);
+    if (diagnostics_oid) |value| try appendJsonFieldString(&buf, allocator, "diagnostics_oid", value, true);
     if (buf.items[buf.items.len - 1] == ',') {
         buf.items.len -= 1;
     }
@@ -1736,6 +1740,8 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!optionalStringWithin(payload, "target_oid", git.max_payload_ref_bytes)) return "action.run_completed payload.target_oid exceeds v1 ref size limit";
         if (!optionalStringWithin(payload, "workflow", git.max_payload_atom_bytes)) return "action.run_completed payload.workflow exceeds v1 field size limit";
         if (!optionalStringWithin(payload, "event_name", git.max_payload_atom_bytes)) return "action.run_completed payload.event_name exceeds v1 field size limit";
+        if (!optionalStringWithin(payload, "diagnostics_ref", git.max_payload_ref_bytes)) return "action.run_completed payload.diagnostics_ref exceeds v1 ref size limit";
+        if (!optionalStringWithin(payload, "diagnostics_oid", git.max_payload_ref_bytes)) return "action.run_completed payload.diagnostics_oid exceeds v1 ref size limit";
         return null;
     }
 

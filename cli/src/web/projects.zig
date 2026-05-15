@@ -41,6 +41,12 @@ const TemplateGroup = enum {
     scratch,
 };
 
+const ProjectView = enum {
+    table,
+    board,
+    roadmap,
+};
+
 const default_project_template_id = "kanban";
 
 const project_templates = [_]ProjectTemplate{
@@ -109,31 +115,88 @@ const project_templates = [_]ProjectTemplate{
     },
 };
 
-pub fn renderProjectsPage(allocator: Allocator, repo: Repo) ![]u8 {
-    if (try shared.renderIndexingPageIfStale(allocator, repo, "Projects", "projects", "/projects")) |body| return body;
+pub fn renderProjectsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]u8 {
+    if (try shared.renderIndexingPageIfStale(allocator, repo, "Projects", "projects", target)) |body| return body;
     try index.ensureIndex(allocator, repo);
 
+    const project_query = try trimmedQueryValueOwned(allocator, target, "project");
+    defer if (project_query) |value| allocator.free(value);
+    const view = try projectViewFromTarget(allocator, target);
+
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
+    if (project_query) |project| {
+        return renderProjectWorkspace(allocator, repo, &db, project, view);
+    }
+
+    return renderProjectIndex(allocator, repo, &db);
+}
+
+fn renderProjectIndex(allocator: Allocator, repo: Repo, db: *SqliteDb) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
     try appendShellStart(&buf, allocator, repo, "Projects", "projects");
-    try buf.appendSlice(allocator, "<section class=\"panel\">");
-    try appendSectionHead(&buf, allocator, "Projects", "Kanban Boards", Button{
+    try buf.appendSlice(allocator, "<section class=\"panel project-index-panel\">");
+    try appendSectionHead(&buf, allocator, "Projects", "Issue Workspaces", Button{
         .label = "New project",
         .href = literalHref("/new-project"),
         .kind = "primary",
     });
-    try buf.appendSlice(allocator, "</section>");
-    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
-    defer db.deinit();
+    try buf.appendSlice(allocator,
+        \\<div class="project-index-grid">
+    );
 
     var projects = try db.prepare(
-        \\SELECT name FROM (
+        \\WITH project_names AS (
         \\  SELECT name FROM projects
         \\  UNION
         \\  SELECT project AS name FROM issue_projects
         \\)
-        \\ORDER BY name
+        \\SELECT
+        \\  pn.name,
+        \\  COALESCE((SELECT p.description FROM projects p WHERE p.name = pn.name ORDER BY p.created_at DESC, p.id DESC LIMIT 1), ''),
+        \\  COALESCE((SELECT p.state FROM projects p WHERE p.name = pn.name ORDER BY p.created_at DESC, p.id DESC LIMIT 1), 'open'),
+        \\  (SELECT COUNT(DISTINCT ip.issue_id) FROM issue_projects ip WHERE ip.project = pn.name),
+        \\  (SELECT COUNT(DISTINCT column_name) FROM (
+        \\     SELECT pc.column_name AS column_name
+        \\     FROM project_columns pc
+        \\     JOIN projects p ON p.id = pc.project_id
+        \\     WHERE p.name = pn.name
+        \\     UNION
+        \\     SELECT ip.column_name AS column_name
+        \\     FROM issue_projects ip
+        \\     WHERE ip.project = pn.name
+        \\  )),
+        \\  COALESCE((SELECT MAX(activity_at) FROM (
+        \\     SELECT p.created_at AS activity_at FROM projects p WHERE p.name = pn.name
+        \\     UNION ALL
+        \\     SELECT i.state_occurred_at AS activity_at
+        \\     FROM issue_projects ip
+        \\     JOIN issues i ON i.id = ip.issue_id
+        \\     WHERE ip.project = pn.name
+        \\  )), '')
+        \\FROM project_names pn
+        \\ORDER BY
+        \\  CASE WHEN COALESCE((SELECT MAX(activity_at) FROM (
+        \\     SELECT p.created_at AS activity_at FROM projects p WHERE p.name = pn.name
+        \\     UNION ALL
+        \\     SELECT i.state_occurred_at AS activity_at
+        \\     FROM issue_projects ip
+        \\     JOIN issues i ON i.id = ip.issue_id
+        \\     WHERE ip.project = pn.name
+        \\  )), '') = '' THEN 1 ELSE 0 END,
+        \\  COALESCE((SELECT MAX(activity_at) FROM (
+        \\     SELECT p.created_at AS activity_at FROM projects p WHERE p.name = pn.name
+        \\     UNION ALL
+        \\     SELECT i.state_occurred_at AS activity_at
+        \\     FROM issue_projects ip
+        \\     JOIN issues i ON i.id = ip.issue_id
+        \\     WHERE ip.project = pn.name
+        \\  )), '') DESC,
+        \\  lower(pn.name),
+        \\  pn.name
     );
     defer projects.deinit();
 
@@ -141,42 +204,146 @@ pub fn renderProjectsPage(allocator: Allocator, repo: Repo) ![]u8 {
     while (try projects.step()) {
         const project = try projects.columnTextDup(allocator, 0);
         defer allocator.free(project);
-        try appendProjectBoard(&buf, allocator, &db, project);
+        const description = try projects.columnTextDup(allocator, 1);
+        defer allocator.free(description);
+        const state = try projects.columnTextDup(allocator, 2);
+        defer allocator.free(state);
+        const issue_count = @as(usize, @intCast(projects.columnInt64(3)));
+        const column_count = @as(usize, @intCast(projects.columnInt64(4)));
+        const activity_at = try projects.columnTextDup(allocator, 5);
+        defer allocator.free(activity_at);
+        try appendProjectIndexCard(&buf, allocator, project, description, state, issue_count, column_count, activity_at);
         shown += 1;
     }
+    try buf.appendSlice(allocator, "</div>");
     if (shown == 0) {
-        try appendEmptyState(&buf, allocator, "No project boards yet.", "Create the first project from this browser UI or with gt project create.");
+        try appendEmptyState(&buf, allocator, "No projects yet.", "Create the first project from this browser UI or with gt project create.");
+    }
+    try buf.appendSlice(allocator, "</section>");
+
+    try appendShellEnd(&buf, allocator);
+    return buf.toOwnedSlice(allocator);
+}
+
+fn renderProjectWorkspace(
+    allocator: Allocator,
+    repo: Repo,
+    db: *SqliteDb,
+    project: []const u8,
+    view: ProjectView,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendShellStart(&buf, allocator, repo, project, "projects");
+    if (!(try projectExists(db, project))) {
+        try appendProjectNotFound(&buf, allocator, project);
+        try appendShellEnd(&buf, allocator);
+        return buf.toOwnedSlice(allocator);
+    }
+
+    switch (view) {
+        .table => try appendProjectTable(&buf, allocator, db, project),
+        .board => try appendProjectBoard(&buf, allocator, db, project),
+        .roadmap => try appendProjectRoadmap(&buf, allocator, db, project),
     }
 
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
 }
 
+fn appendProjectIndexCard(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    project: []const u8,
+    description: []const u8,
+    state: []const u8,
+    issue_count: usize,
+    column_count: usize,
+    activity_at: []const u8,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<article class="project-index-card">
+        \\  <div class="project-index-card-head">
+        \\    <div>
+        \\      <p class="eyebrow">Project</p>
+        \\      <h2><a href="
+    , .{});
+    try appendProjectHref(buf, allocator, project, .board);
+    try appendTemplate(buf, allocator,
+        \\">@{project}</a></h2>
+        \\    </div>
+    , .{ .project = project });
+    try appendStatePill(buf, allocator, state);
+    try buf.appendSlice(allocator, "</div>");
+    if (description.len != 0) {
+        try appendTemplate(buf, allocator,
+            \\<p class="project-index-description">{description}</p>
+        , .{ .description = description });
+    }
+    try appendTemplate(buf, allocator,
+        \\<div class="project-index-stats">
+        \\  <span><strong>{issue_count}</strong> item{s}</span>
+        \\  <span><strong>{column_count}</strong> status {column_word}</span>
+    , .{
+        .issue_count = issue_count,
+        .s = if (issue_count == 1) "" else "s",
+        .column_count = column_count,
+        .column_word = if (column_count == 1) "value" else "values",
+    });
+    if (activity_at.len != 0) {
+        try buf.appendSlice(allocator, "<span>Updated ");
+        try appendRelativeTime(buf, allocator, activity_at);
+        try buf.appendSlice(allocator, "</span>");
+    }
+    try buf.appendSlice(allocator, "</div><div class=\"project-index-actions\">");
+    try appendProjectViewLink(buf, allocator, project, .table, "Table");
+    try appendProjectViewLink(buf, allocator, project, .board, "Board");
+    try appendProjectViewLink(buf, allocator, project, .roadmap, "Roadmap");
+    try buf.appendSlice(allocator, "</div></article>");
+}
+
 fn appendProjectBoard(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, project: []const u8) !void {
     const issue_count = try projectIssueCount(db, project);
+    try appendProjectWorkspaceChromeStart(buf, allocator, db, project, issue_count, .board, "Board");
+    try buf.appendSlice(allocator,
+        \\  <div class="kanban-board">
+    );
+    try appendProjectColumns(buf, allocator, db, project, appendProjectColumn);
+    try buf.appendSlice(allocator,
+        \\  </div>
+        \\</section>
+    );
+}
+
+fn appendProjectWorkspaceChromeStart(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    project: []const u8,
+    issue_count: usize,
+    active_view: ProjectView,
+    title_label: []const u8,
+) !void {
     try appendTemplate(buf, allocator,
         \\<section class="panel kanban-panel project-board-panel">
         \\  <div class="project-board-top">
         \\    <div class="project-title-line">
         \\      <span class="project-lock-icon" aria-hidden="true"></span>
         \\      <div>
-        \\        <p class="eyebrow">Project board</p>
+        \\        <p class="eyebrow">Project {title_label}</p>
         \\        <h1>@{project}</h1>
         \\      </div>
         \\    </div>
-    , .{ .project = project });
+    , .{
+        .title_label = title_label,
+        .project = project,
+    });
     try buf.appendSlice(allocator, "<a class=\"button secondary project-issues-link\" href=\"/issues?project=");
     try shared.appendUrlEncoded(buf, allocator, project);
     try buf.appendSlice(allocator, "\">Open issues</a></div>");
-    try buf.appendSlice(allocator,
-        \\  <div class="project-view-tabs" aria-label="Project views">
-        \\    <span class="project-view-tab active"><span class="project-view-board-icon" aria-hidden="true"></span>Board</span>
-        \\    <a class="project-view-tab" href="/issues?project=
-    );
-    try shared.appendUrlEncoded(buf, allocator, project);
+    try appendProjectViewTabs(buf, allocator, project, active_view, issue_count);
     try appendTemplate(buf, allocator,
-        \\">Issues <span class="issue-count-badge">{issue_count}</span></a>
-        \\  </div>
         \\  <form class="project-filter-bar" method="get" action="/issues">
         \\    <span class="project-filter-icon" aria-hidden="true"></span>
         \\    <input type="hidden" name="project" value="{project}">
@@ -188,10 +355,15 @@ fn appendProjectBoard(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlite
     });
 
     try appendProjectSummary(buf, allocator, db, project, issue_count);
-    try buf.appendSlice(allocator,
-        \\  <div class="kanban-board">
-    );
+}
 
+fn appendProjectColumns(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    project: []const u8,
+    comptime appendColumnFn: fn (*std.ArrayList(u8), Allocator, *SqliteDb, []const u8, []const u8) anyerror!void,
+) !void {
     var columns = try db.prepare(
         \\SELECT column_name FROM (
         \\  SELECT pc.column_name AS column_name
@@ -229,14 +401,318 @@ fn appendProjectBoard(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlite
     while (try columns.step()) {
         const column = try columns.columnTextDup(allocator, 0);
         defer allocator.free(column);
-        try appendProjectColumn(buf, allocator, db, project, column);
+        try appendColumnFn(buf, allocator, db, project, column);
         shown_column = true;
     }
-    if (!shown_column) try appendProjectColumn(buf, allocator, db, project, "");
+    if (!shown_column) try appendColumnFn(buf, allocator, db, project, "");
+}
+
+fn appendProjectTable(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, project: []const u8) !void {
+    const issue_count = try projectIssueCount(db, project);
+    try appendProjectWorkspaceChromeStart(buf, allocator, db, project, issue_count, .table, "Table");
+    try buf.appendSlice(allocator,
+        \\  <div class="project-table-view">
+        \\    <table class="project-data-table">
+        \\      <thead>
+        \\        <tr><th>Title</th><th>Project status</th><th>Issue state</th><th>Assignees</th><th>Labels</th><th>Milestone</th><th>Comments</th><th>Opened</th></tr>
+        \\      </thead>
+        \\      <tbody>
+    );
+    try appendProjectColumns(buf, allocator, db, project, appendProjectTableGroup);
+    try buf.appendSlice(allocator,
+        \\      </tbody>
+        \\    </table>
+        \\  </div>
+        \\</section>
+    );
+}
+
+fn appendProjectRoadmap(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, project: []const u8) !void {
+    const issue_count = try projectIssueCount(db, project);
+    try appendProjectWorkspaceChromeStart(buf, allocator, db, project, issue_count, .roadmap, "Roadmap");
+    try buf.appendSlice(allocator,
+        \\  <div class="project-roadmap-view">
+        \\    <div class="project-roadmap-scale" aria-hidden="true"><span>Unscheduled</span><span>Now</span><span>Next</span><span>Later</span></div>
+    );
+    try appendProjectColumns(buf, allocator, db, project, appendProjectRoadmapLane);
     try buf.appendSlice(allocator,
         \\  </div>
         \\</section>
     );
+}
+
+fn appendProjectTableGroup(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, project: []const u8, column: []const u8) !void {
+    const count = try projectColumnIssueCount(db, project, column);
+    const title = if (column.len == 0) "No status" else column;
+    try appendTemplate(buf, allocator,
+        \\<tr class="project-table-group-row"><th colspan="8"><span class="kanban-status-dot" aria-hidden="true"></span>{title}<span>{count}</span></th></tr>
+    , .{
+        .title = title,
+        .count = count,
+    });
+
+    var rows = try db.prepare(
+        \\SELECT DISTINCT i.id, i.title, i.state,
+        \\       COALESCE(NULLIF(m.source_author, ''), i.author_principal),
+        \\       i.opened_at,
+        \\       COALESCE(m.milestone, ''),
+        \\       COALESCE(a.number, 0),
+        \\       (SELECT COUNT(*) FROM comments c WHERE c.parent_kind = 'issue' AND c.parent_id = i.id)
+        \\FROM issue_projects p
+        \\JOIN issues i ON i.id = p.issue_id
+        \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
+        \\LEFT JOIN legacy_aliases a
+        \\  ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
+        \\WHERE p.project = ? AND p.column_name = ?
+        \\ORDER BY i.opened_at DESC, i.id DESC
+    );
+    defer rows.deinit();
+    try rows.bindText(1, project);
+    try rows.bindText(2, column);
+
+    var shown = false;
+    while (try rows.step()) {
+        const id = try rows.columnTextDup(allocator, 0);
+        defer allocator.free(id);
+        const title_text = try rows.columnTextDup(allocator, 1);
+        defer allocator.free(title_text);
+        const state = try rows.columnTextDup(allocator, 2);
+        defer allocator.free(state);
+        const author = try rows.columnTextDup(allocator, 3);
+        defer allocator.free(author);
+        const opened_at = try rows.columnTextDup(allocator, 4);
+        defer allocator.free(opened_at);
+        const milestone = try rows.columnTextDup(allocator, 5);
+        defer allocator.free(milestone);
+        const legacy_number = rows.columnInt64(6);
+        const comment_count = @as(usize, @intCast(rows.columnInt64(7)));
+        try appendProjectTableIssueRow(buf, allocator, db, id, title_text, state, author, opened_at, milestone, legacy_number, comment_count, column);
+        shown = true;
+    }
+    if (!shown) {
+        try appendTemplate(buf, allocator,
+            \\<tr class="project-table-empty-row"><td colspan="8">No issues</td></tr>
+        , .{});
+    }
+}
+
+fn appendProjectTableIssueRow(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    id: []const u8,
+    title: []const u8,
+    state: []const u8,
+    author: []const u8,
+    opened_at: []const u8,
+    milestone: []const u8,
+    legacy_number: i64,
+    comment_count: usize,
+    column: []const u8,
+) !void {
+    var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const issue_ref = util.shortObjectRef(&issue_ref_buf, id);
+    try appendTemplate(buf, allocator,
+        \\<tr class="project-table-issue-row is-{state}">
+        \\  <td><div class="project-table-title-cell"><span class="issue-state-icon {state}" title="{state}" aria-label="{state}"></span><a href="{href}">{title}</a><small>
+    , .{
+        .state = state,
+        .href = issueHref(issue_ref),
+        .title = title,
+    });
+    if (legacy_number > 0) {
+        try appendTemplate(buf, allocator, "GitHub #{legacy_number}", .{ .legacy_number = legacy_number });
+    } else {
+        try appendTemplate(buf, allocator, "#{id}", .{ .id = issue_ref });
+    }
+    try appendTemplate(buf, allocator,
+        \\</small></div></td>
+        \\  <td><span class="project-status-chip tone-{tone}">{status}</span></td>
+        \\  <td>{state}</td>
+        \\  <td>
+    , .{
+        .tone = columnTone(column),
+        .status = if (column.len == 0) "No status" else column,
+        .state = state,
+    });
+    _ = author;
+    try appendProjectIssueAssignees(buf, allocator, db, id);
+    try buf.appendSlice(allocator, "</td><td>");
+    try appendKanbanCardLabels(buf, allocator, db, id);
+    try appendTemplate(buf, allocator,
+        \\</td><td>{milestone}</td><td>{comment_count}</td><td>
+    , .{
+        .milestone = milestone,
+        .comment_count = comment_count,
+    });
+    try appendRelativeTime(buf, allocator, opened_at);
+    try buf.appendSlice(allocator, "</td></tr>");
+}
+
+fn appendProjectRoadmapLane(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, project: []const u8, column: []const u8) !void {
+    const count = try projectColumnIssueCount(db, project, column);
+    const title = if (column.len == 0) "No status" else column;
+    try appendTemplate(buf, allocator,
+        \\<section class="project-roadmap-lane tone-{tone}">
+        \\  <header><span class="kanban-status-dot" aria-hidden="true"></span><h2>{title}</h2><span>{count}</span></header>
+        \\  <div class="project-roadmap-items">
+    , .{
+        .tone = columnTone(column),
+        .title = title,
+        .count = count,
+    });
+
+    var rows = try db.prepare(
+        \\SELECT DISTINCT i.id, i.title, i.state,
+        \\       COALESCE(NULLIF(m.source_author, ''), i.author_principal),
+        \\       i.opened_at,
+        \\       COALESCE(a.number, 0)
+        \\FROM issue_projects p
+        \\JOIN issues i ON i.id = p.issue_id
+        \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
+        \\LEFT JOIN legacy_aliases a
+        \\  ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
+        \\WHERE p.project = ? AND p.column_name = ?
+        \\ORDER BY i.opened_at DESC, i.id DESC
+    );
+    defer rows.deinit();
+    try rows.bindText(1, project);
+    try rows.bindText(2, column);
+
+    var shown = false;
+    while (try rows.step()) {
+        const id = try rows.columnTextDup(allocator, 0);
+        defer allocator.free(id);
+        const title_text = try rows.columnTextDup(allocator, 1);
+        defer allocator.free(title_text);
+        const state = try rows.columnTextDup(allocator, 2);
+        defer allocator.free(state);
+        const author = try rows.columnTextDup(allocator, 3);
+        defer allocator.free(author);
+        const opened_at = try rows.columnTextDup(allocator, 4);
+        defer allocator.free(opened_at);
+        const legacy_number = rows.columnInt64(5);
+        try appendProjectRoadmapItem(buf, allocator, id, title_text, state, author, opened_at, legacy_number);
+        shown = true;
+    }
+    if (!shown) try buf.appendSlice(allocator, "<div class=\"kanban-empty-drop\">No issues</div>");
+    try buf.appendSlice(allocator, "</div></section>");
+}
+
+fn appendProjectRoadmapItem(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    id: []const u8,
+    title: []const u8,
+    state: []const u8,
+    author: []const u8,
+    opened_at: []const u8,
+    legacy_number: i64,
+) !void {
+    var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const issue_ref = util.shortObjectRef(&issue_ref_buf, id);
+    try appendTemplate(buf, allocator,
+        \\<article class="project-roadmap-item is-{state}">
+        \\  <span class="project-roadmap-bar" aria-hidden="true"></span>
+        \\  <div><a href="{href}">{title}</a><small>
+    , .{
+        .state = state,
+        .href = issueHref(issue_ref),
+        .title = title,
+    });
+    if (legacy_number > 0) {
+        try appendTemplate(buf, allocator, "GitHub #{legacy_number}", .{ .legacy_number = legacy_number });
+    } else {
+        try appendTemplate(buf, allocator, "#{id}", .{ .id = issue_ref });
+    }
+    try appendTemplate(buf, allocator, " by {author} opened ", .{ .author = author });
+    try appendRelativeTime(buf, allocator, opened_at);
+    try buf.appendSlice(allocator, "</small></div></article>");
+}
+
+fn appendProjectViewTabs(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    project: []const u8,
+    active_view: ProjectView,
+    issue_count: usize,
+) !void {
+    try buf.appendSlice(allocator, "<div class=\"project-view-tabs\" aria-label=\"Project views\">");
+    try appendProjectViewTab(buf, allocator, project, active_view, .table, "Table", "project-view-table-icon");
+    try appendProjectViewTab(buf, allocator, project, active_view, .board, "Board", "project-view-board-icon");
+    try appendProjectViewTab(buf, allocator, project, active_view, .roadmap, "Roadmap", "project-view-roadmap-icon");
+    try buf.appendSlice(allocator, "<a class=\"project-view-tab\" href=\"/issues?project=");
+    try shared.appendUrlEncoded(buf, allocator, project);
+    try appendTemplate(buf, allocator,
+        \\">Issues <span class="issue-count-badge">{issue_count}</span></a></div>
+    , .{ .issue_count = issue_count });
+}
+
+fn appendProjectViewTab(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    project: []const u8,
+    active_view: ProjectView,
+    view: ProjectView,
+    label: []const u8,
+    icon_class: []const u8,
+) !void {
+    if (active_view == view) {
+        try appendTemplate(buf, allocator,
+            \\<span class="project-view-tab active"><span class="{icon_class}" aria-hidden="true"></span>{label}</span>
+        , .{
+            .icon_class = icon_class,
+            .label = label,
+        });
+        return;
+    }
+    try appendProjectViewLinkWithClass(buf, allocator, project, view, label, icon_class, "project-view-tab");
+}
+
+fn appendProjectViewLink(buf: *std.ArrayList(u8), allocator: Allocator, project: []const u8, view: ProjectView, label: []const u8) !void {
+    try appendProjectViewLinkWithClass(buf, allocator, project, view, label, "", "button secondary");
+}
+
+fn appendProjectViewLinkWithClass(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    project: []const u8,
+    view: ProjectView,
+    label: []const u8,
+    icon_class: []const u8,
+    class_name: []const u8,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<a class="{class_name}" href="
+    , .{ .class_name = class_name });
+    try appendProjectHref(buf, allocator, project, view);
+    try buf.appendSlice(allocator, "\">");
+    if (icon_class.len != 0) {
+        try appendTemplate(buf, allocator,
+            \\<span class="{icon_class}" aria-hidden="true"></span>
+        , .{ .icon_class = icon_class });
+    }
+    try appendTemplate(buf, allocator, "{label}</a>", .{ .label = label });
+}
+
+fn appendProjectHref(buf: *std.ArrayList(u8), allocator: Allocator, project: []const u8, view: ProjectView) !void {
+    try buf.appendSlice(allocator, "/projects?project=");
+    try shared.appendUrlEncoded(buf, allocator, project);
+    try buf.appendSlice(allocator, "&amp;view=");
+    try buf.appendSlice(allocator, projectViewValue(view));
+}
+
+fn appendProjectNotFound(buf: *std.ArrayList(u8), allocator: Allocator, project: []const u8) !void {
+    try buf.appendSlice(allocator, "<section class=\"panel\">");
+    try appendSectionHead(buf, allocator, "Projects", "Project not found", Button{
+        .label = "New project",
+        .href = literalHref("/new-project"),
+        .kind = "primary",
+    });
+    try appendTemplate(buf, allocator,
+        \\<div class="empty"><strong>@{project}</strong><p>No project or project issue placements match this name.</p></div>
+        \\</section>
+    , .{ .project = project });
 }
 
 fn appendProjectSummary(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, project: []const u8, issue_count: usize) !void {
@@ -696,6 +1172,63 @@ fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const
         return try issues_page.percentDecodeForm(allocator, raw_value);
     }
     return null;
+}
+
+fn trimmedQueryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const u8) !?[]u8 {
+    const owned = try queryValueOwned(allocator, target, wanted_key) orelse return null;
+    const trimmed = std.mem.trim(u8, owned, " \t\r\n");
+    if (trimmed.len == 0) {
+        allocator.free(owned);
+        return null;
+    }
+    if (trimmed.ptr == owned.ptr and trimmed.len == owned.len) return owned;
+    const result = try allocator.dupe(u8, trimmed);
+    allocator.free(owned);
+    return result;
+}
+
+fn projectViewFromTarget(allocator: Allocator, target: []const u8) !ProjectView {
+    const view = try trimmedQueryValueOwned(allocator, target, "view");
+    defer if (view) |value| allocator.free(value);
+    const value = view orelse return .board;
+    if (std.mem.eql(u8, value, "table")) return .table;
+    if (std.mem.eql(u8, value, "roadmap")) return .roadmap;
+    return .board;
+}
+
+fn projectViewValue(view: ProjectView) []const u8 {
+    return switch (view) {
+        .table => "table",
+        .board => "board",
+        .roadmap => "roadmap",
+    };
+}
+
+fn projectExists(db: *SqliteDb, project: []const u8) !bool {
+    var stmt = try db.prepare(
+        \\SELECT 1 FROM projects WHERE name = ?
+        \\UNION
+        \\SELECT 1 FROM issue_projects WHERE project = ?
+        \\LIMIT 1
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, project);
+    try stmt.bindText(2, project);
+    return try stmt.step();
+}
+
+fn appendProjectIssueAssignees(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8) !void {
+    var stmt = try db.prepare("SELECT DISTINCT assignee FROM issue_assignees WHERE issue_id = ? ORDER BY assignee LIMIT 4");
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    var shown = false;
+    while (try stmt.step()) {
+        const assignee = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(assignee);
+        try appendIssueAvatar(buf, allocator, assignee, "project-table-avatar");
+        shown = true;
+    }
+    if (!shown) try buf.appendSlice(allocator, "<span class=\"muted\">Unassigned</span>");
 }
 
 fn appendKanbanCardLabels(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8) !void {

@@ -196,6 +196,16 @@ const RootGitStatus = struct {
     operation_state: RepositoryOperationState = .clean,
 };
 
+const BranchSyncStatus = struct {
+    upstream: []u8,
+    ahead: usize = 0,
+    behind: usize = 0,
+
+    fn deinit(self: BranchSyncStatus, allocator: Allocator) void {
+        allocator.free(self.upstream);
+    }
+};
+
 const RootMarkdownDoc = struct {
     id: []const u8,
     label: []const u8,
@@ -220,9 +230,9 @@ const PathQuery = union(enum) {
 };
 
 const CodeSyncMode = enum {
-    both,
-    pull,
-    push,
+    exchange,
+    import,
+    publish,
 };
 
 const CodeSyncFlashKind = enum {
@@ -267,7 +277,7 @@ pub fn renderCodePage(allocator: Allocator, repo: Repo, target: []const u8) ![]u
 }
 
 pub fn handleCodeSyncPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
-    const action_owned = (try formValueOwned(allocator, form_body, "action")) orelse try allocator.dupe(u8, "both");
+    const action_owned = (try formValueOwned(allocator, form_body, "action")) orelse try allocator.dupe(u8, "exchange");
     defer allocator.free(action_owned);
     const ref_owned = (try formValueOwned(allocator, form_body, "ref")) orelse try defaultRef(allocator, repo);
     defer allocator.free(ref_owned);
@@ -290,12 +300,12 @@ pub fn handleCodeSyncPost(allocator: Allocator, repo: Repo, stream: std.net.Stre
 
 fn runCodeSync(allocator: Allocator, mode: CodeSyncMode) !void {
     switch (mode) {
-        .both => {
+        .exchange => {
             try sync.syncPull(allocator, "origin");
             try sync.syncPush(allocator, "origin");
         },
-        .pull => try sync.syncPull(allocator, "origin"),
-        .push => try sync.syncPush(allocator, "origin"),
+        .import => try sync.syncPull(allocator, "origin"),
+        .publish => try sync.syncPush(allocator, "origin"),
     }
 }
 
@@ -333,25 +343,25 @@ fn codeSyncFlashFromTarget(allocator: Allocator, target: []const u8) !?CodeSyncF
 }
 
 fn parseCodeSyncMode(value: []const u8) ?CodeSyncMode {
-    if (std.mem.eql(u8, value, "both") or std.mem.eql(u8, value, "sync") or std.mem.eql(u8, value, "ok")) return .both;
-    if (std.mem.eql(u8, value, "pull")) return .pull;
-    if (std.mem.eql(u8, value, "push")) return .push;
+    if (std.mem.eql(u8, value, "exchange") or std.mem.eql(u8, value, "both") or std.mem.eql(u8, value, "sync") or std.mem.eql(u8, value, "ok")) return .exchange;
+    if (std.mem.eql(u8, value, "import") or std.mem.eql(u8, value, "receive") or std.mem.eql(u8, value, "pull")) return .import;
+    if (std.mem.eql(u8, value, "publish") or std.mem.eql(u8, value, "export") or std.mem.eql(u8, value, "push")) return .publish;
     return null;
 }
 
 fn codeSyncModeQueryValue(mode: CodeSyncMode) []const u8 {
     return switch (mode) {
-        .both => "both",
-        .pull => "pull",
-        .push => "push",
+        .exchange => "exchange",
+        .import => "import",
+        .publish => "publish",
     };
 }
 
 fn codeSyncSuccessMessage(mode: CodeSyncMode) []const u8 {
     return switch (mode) {
-        .both => "Sync completed against origin.",
-        .pull => "Pulled Gitomi refs from origin.",
-        .push => "Pushed Gitomi refs to origin.",
+        .exchange => "Gitomi refs exchanged with origin.",
+        .import => "Remote Gitomi refs imported from origin.",
+        .publish => "Local Gitomi refs published to origin.",
     };
 }
 
@@ -1085,12 +1095,12 @@ fn appendRootCodeToolbar(
     try appendTemplate(buf, allocator,
         \\    </div>
         \\    <details class="root-action-menu root-sync-menu" data-popover-menu>
-        \\      <summary class="button primary root-menu-button" title="Sync Gitomi refs with origin"><span class="button-icon icon-sync" aria-hidden="true"></span>Sync<span class="root-caret" aria-hidden="true"></span></summary>
+        \\      <summary class="button primary root-menu-button" title="Sync Gitomi refs with origin"><span class="button-icon icon-sync" aria-hidden="true"></span>Sync refs<span class="root-caret" aria-hidden="true"></span></summary>
         \\      <form class="root-action-popover root-sync-popover" method="post" action="/code/sync" role="menu">
         \\        <input type="hidden" name="ref" value="{ref}">
-        \\        <button type="submit" name="action" value="both" role="menuitem">Pull and push</button>
-        \\        <button type="submit" name="action" value="pull" role="menuitem">Pull from origin</button>
-        \\        <button type="submit" name="action" value="push" role="menuitem">Push to origin</button>
+        \\        <button type="submit" name="action" value="exchange" role="menuitem">Exchange Gitomi refs</button>
+        \\        <button type="submit" name="action" value="import" role="menuitem">Import remote Gitomi refs</button>
+        \\        <button type="submit" name="action" value="publish" role="menuitem">Publish local Gitomi refs</button>
         \\      </form>
         \\    </details>
         \\  </div>
@@ -1144,8 +1154,8 @@ fn appendRootCommitBar(
 ) !void {
     try appendTemplate(buf, allocator, "<div class=\"root-commit-row\">", .{});
     if (summary_opt) |summary| {
+        try shared.appendAvatar(buf, allocator, summary.author, "root-commit-avatar");
         try appendTemplate(buf, allocator,
-            \\<span class="root-commit-avatar" aria-hidden="true"></span>
             \\<div class="root-commit-main"><span class="root-commit-author">{author}</span><a class="root-commit-message" href="{href}">{subject}</a></div>
             \\<div class="root-commit-meta"><a class="root-commit-hash" href="{href}">{hash}</a><span>{relative}</span></div>
         , .{
@@ -1156,8 +1166,8 @@ fn appendRootCommitBar(
             .relative = summary.relative,
         });
     } else {
+        try shared.appendAvatar(buf, allocator, "No commits yet", "root-commit-avatar");
         try appendTemplate(buf, allocator,
-            \\<span class="root-commit-avatar" aria-hidden="true"></span>
             \\<div class="root-commit-main"><span class="root-commit-author">No commits yet</span><span class="root-commit-message muted">This ref has no history to summarize.</span></div>
         , .{});
     }
@@ -1564,6 +1574,8 @@ fn appendRootSidebar(
 ) !void {
     const counts = rootEntryCounts(entries);
     const git_status = loadRootGitStatus(allocator, repo) catch null;
+    const branch_sync_status = loadBranchSyncStatus(allocator, repo, ref) catch null;
+    defer if (branch_sync_status) |status| status.deinit(allocator);
     const about_summary = loadReadmeSummaryOwned(allocator, repo, ref, entries) catch null;
     defer if (about_summary) |summary| allocator.free(summary);
     var languages_opt = source_stats.loadRepositoryStats(allocator, repo) catch null;
@@ -1583,6 +1595,20 @@ fn appendRootSidebar(
         \\    <div class="root-sidebar-section">
         \\      <h2>Repository</h2>
         \\      <dl class="root-meta-list">
+    , .{});
+    if (git_status) |status| {
+        try appendRootRepositoryStats(buf, allocator, status);
+    } else {
+        try appendTemplate(buf, allocator,
+            \\        <div><dt>Repository</dt><dd>Unavailable</dd></div>
+        , .{});
+    }
+    try appendTemplate(buf, allocator,
+        \\      </dl>
+        \\    </div>
+        \\    <div class="root-sidebar-section">
+        \\      <h2>Branch</h2>
+        \\      <dl class="root-meta-list">
         \\        <div><dt>Ref</dt><dd><code>{ref}</code></dd></div>
         \\        <div><dt>Root</dt><dd>{files} {files_label}, {directories} {directories_label}</dd></div>
     , .{
@@ -1592,8 +1618,15 @@ fn appendRootSidebar(
         .directories = counts.directories,
         .directories_label = if (counts.directories == 1) "folder" else "folders",
     });
+    if (branch_sync_status) |status| {
+        try appendRootBranchSyncStatus(buf, allocator, status);
+    } else {
+        try appendTemplate(buf, allocator,
+            \\        <div><dt>Sync</dt><dd>No upstream</dd></div>
+        , .{});
+    }
     if (git_status) |status| {
-        try appendRootRepositoryStats(buf, allocator, status);
+        try appendRootBranchStats(buf, allocator, status);
     } else {
         try appendTemplate(buf, allocator,
             \\        <div><dt>Checkout</dt><dd>Unavailable</dd></div>
@@ -1611,19 +1644,6 @@ fn appendRootSidebar(
 
 fn appendRootRepositoryStats(buf: *std.ArrayList(u8), allocator: Allocator, status: RootGitStatus) !void {
     try appendTemplate(buf, allocator,
-        \\        <div><dt>Changes</dt><dd>{staged} staged, {modified} modified, {untracked} untracked</dd></div>
-        \\        <div><dt>Diff</dt><dd><span class="root-diffstat"><span class="root-diffstat-added">+{added}</span><span class="root-diffstat-removed">-{removed}</span></span></dd></div>
-        \\        <div><dt>State</dt><dd>
-    , .{
-        .staged = shared.groupedUnsigned(@intCast(status.staged_paths)),
-        .modified = shared.groupedUnsigned(@intCast(status.unstaged_paths)),
-        .untracked = shared.groupedUnsigned(@intCast(status.untracked_paths)),
-        .added = shared.groupedUnsigned(status.lines_added),
-        .removed = shared.groupedUnsigned(status.lines_removed),
-    });
-    try appendRootRepositoryState(buf, allocator, status);
-    try appendTemplate(buf, allocator,
-        \\</dd></div>
         \\        <div><dt>Worktrees</dt><dd>{worktrees}</dd></div>
         \\        <div><dt>Stashes</dt><dd>{stashes}</dd></div>
         \\        <div><dt>Size</dt><dd>
@@ -1637,6 +1657,34 @@ fn appendRootRepositoryStats(buf: *std.ArrayList(u8), allocator: Allocator, stat
         try appendTemplate(buf, allocator, "Unknown", .{});
     }
     try appendTemplate(buf, allocator, "</dd></div>", .{});
+}
+
+fn appendRootBranchSyncStatus(buf: *std.ArrayList(u8), allocator: Allocator, status: BranchSyncStatus) !void {
+    try appendTemplate(buf, allocator,
+        \\        <div><dt>Sync</dt><dd>{ahead} ahead, {behind} behind <code>{upstream}</code></dd></div>
+    , .{
+        .ahead = shared.groupedUnsigned(@intCast(status.ahead)),
+        .behind = shared.groupedUnsigned(@intCast(status.behind)),
+        .upstream = status.upstream,
+    });
+}
+
+fn appendRootBranchStats(buf: *std.ArrayList(u8), allocator: Allocator, status: RootGitStatus) !void {
+    try appendTemplate(buf, allocator,
+        \\        <div><dt>Changes</dt><dd>{staged} staged, {modified} modified, {untracked} untracked</dd></div>
+        \\        <div><dt>Diff</dt><dd><span class="root-diffstat"><span class="root-diffstat-added">+{added}</span><span class="root-diffstat-removed">-{removed}</span></span></dd></div>
+        \\        <div><dt>State</dt><dd>
+    , .{
+        .staged = shared.groupedUnsigned(@intCast(status.staged_paths)),
+        .modified = shared.groupedUnsigned(@intCast(status.unstaged_paths)),
+        .untracked = shared.groupedUnsigned(@intCast(status.untracked_paths)),
+        .added = shared.groupedUnsigned(status.lines_added),
+        .removed = shared.groupedUnsigned(status.lines_removed),
+    });
+    try appendRootRepositoryState(buf, allocator, status);
+    try appendTemplate(buf, allocator,
+        \\</dd></div>
+    , .{});
 }
 
 fn appendRootRepositoryState(buf: *std.ArrayList(u8), allocator: Allocator, status: RootGitStatus) !void {
@@ -1682,6 +1730,37 @@ fn loadRootGitStatus(allocator: Allocator, repo: Repo) !RootGitStatus {
     status.operation_state = loadRepositoryOperationState(allocator, repo) catch .clean;
 
     return status;
+}
+
+fn loadBranchSyncStatus(allocator: Allocator, repo: Repo, ref: []const u8) !?BranchSyncStatus {
+    const root = try worktreeRootOwned(allocator, repo, ref) orelse try allocator.dupe(u8, repo.root);
+    defer allocator.free(root);
+    const branchish = if (isFilesystemRef(ref)) "HEAD" else ref;
+
+    const upstream_ref = try std.fmt.allocPrint(allocator, "{s}@{{upstream}}", .{branchish});
+    defer allocator.free(upstream_ref);
+
+    const upstream_raw = try gitMaybeAt(allocator, root, &.{ "rev-parse", "--abbrev-ref", "--symbolic-full-name", upstream_ref }, 4096) orelse return null;
+    defer allocator.free(upstream_raw);
+    const upstream = std.mem.trim(u8, upstream_raw, " \t\r\n");
+    if (upstream.len == 0) return null;
+
+    const range = try std.fmt.allocPrint(allocator, "{s}...{s}", .{ upstream_ref, branchish });
+    defer allocator.free(range);
+    const counts_raw = try gitMaybeAt(allocator, root, &.{ "rev-list", "--left-right", "--count", range }, 4096) orelse return null;
+    defer allocator.free(counts_raw);
+
+    var fields = std.mem.tokenizeAny(u8, counts_raw, " \t\r\n");
+    const behind_raw = fields.next() orelse return null;
+    const ahead_raw = fields.next() orelse return null;
+    const behind = std.fmt.parseUnsigned(usize, behind_raw, 10) catch return null;
+    const ahead = std.fmt.parseUnsigned(usize, ahead_raw, 10) catch return null;
+
+    return .{
+        .upstream = try allocator.dupe(u8, upstream),
+        .ahead = ahead,
+        .behind = behind,
+    };
 }
 
 fn parseRootGitStatusV2(status: *RootGitStatus, raw: []const u8) void {
@@ -3911,10 +3990,13 @@ test "web explorer parses remote-tracking branch names" {
 }
 
 test "web explorer parses code sync modes" {
-    try std.testing.expectEqual(CodeSyncMode.both, parseCodeSyncMode("both").?);
-    try std.testing.expectEqual(CodeSyncMode.both, parseCodeSyncMode("ok").?);
-    try std.testing.expectEqual(CodeSyncMode.pull, parseCodeSyncMode("pull").?);
-    try std.testing.expectEqual(CodeSyncMode.push, parseCodeSyncMode("push").?);
+    try std.testing.expectEqual(CodeSyncMode.exchange, parseCodeSyncMode("exchange").?);
+    try std.testing.expectEqual(CodeSyncMode.exchange, parseCodeSyncMode("both").?);
+    try std.testing.expectEqual(CodeSyncMode.exchange, parseCodeSyncMode("ok").?);
+    try std.testing.expectEqual(CodeSyncMode.import, parseCodeSyncMode("import").?);
+    try std.testing.expectEqual(CodeSyncMode.import, parseCodeSyncMode("pull").?);
+    try std.testing.expectEqual(CodeSyncMode.publish, parseCodeSyncMode("publish").?);
+    try std.testing.expectEqual(CodeSyncMode.publish, parseCodeSyncMode("push").?);
     try std.testing.expect(parseCodeSyncMode("clone") == null);
 }
 

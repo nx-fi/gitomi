@@ -18,12 +18,14 @@ const appendJsonFieldUnsigned = json_writer.appendJsonFieldUnsigned;
 
 pub const Options = struct {
     act_path: []const u8 = "act",
+    agent_runner_path: ?[]const u8 = null,
     dry_run: bool = false,
     extra_args: []const []const u8 = &.{},
 };
 
 pub const DaemonOptions = struct {
     act_path: []const u8 = "act",
+    agent_runner_path: ?[]const u8 = null,
     dry_run: bool = false,
     extra_args: []const []const u8 = &.{},
     once: bool = false,
@@ -47,12 +49,60 @@ pub const Workflow = struct {
     path: []u8,
     name: []u8,
     triggers: [][]u8,
+    dialect: WorkflowDialect,
+    jobs: []WorkflowJob,
+    schedules: [][]u8,
 
     pub fn deinit(self: *Workflow) void {
         self.allocator.free(self.path);
         self.allocator.free(self.name);
         for (self.triggers) |trigger| self.allocator.free(trigger);
         self.allocator.free(self.triggers);
+        for (self.jobs) |*job| job.deinit();
+        self.allocator.free(self.jobs);
+        for (self.schedules) |schedule| self.allocator.free(schedule);
+        self.allocator.free(self.schedules);
+    }
+};
+
+pub const WorkflowDialect = enum {
+    github_actions,
+    gitomi,
+
+    fn label(self: WorkflowDialect) []const u8 {
+        return switch (self) {
+            .github_actions => "github-actions",
+            .gitomi => "gitomi",
+        };
+    }
+};
+
+pub const WorkflowJob = struct {
+    allocator: Allocator,
+    id: []u8,
+    backend: []u8,
+    uses: ?[]u8 = null,
+    image: ?[]u8 = null,
+    steps: []WorkflowStep = &.{},
+
+    pub fn deinit(self: *WorkflowJob) void {
+        self.allocator.free(self.id);
+        self.allocator.free(self.backend);
+        if (self.uses) |value| self.allocator.free(value);
+        if (self.image) |value| self.allocator.free(value);
+        for (self.steps) |*step| step.deinit();
+        self.allocator.free(self.steps);
+    }
+};
+
+pub const WorkflowStep = struct {
+    allocator: Allocator,
+    name: ?[]u8 = null,
+    run: ?[]u8 = null,
+
+    pub fn deinit(self: *WorkflowStep) void {
+        if (self.name) |value| self.allocator.free(value);
+        if (self.run) |value| self.allocator.free(value);
     }
 };
 
@@ -99,6 +149,7 @@ const SchedulerState = struct {
     allocator: Allocator,
     exists: bool = false,
     last_event_ordinal: i64 = 0,
+    last_schedule_minute: i64 = 0,
     last_head_oid: []u8,
 
     fn init(allocator: Allocator) !SchedulerState {
@@ -116,6 +167,63 @@ const SchedulerState = struct {
         const owned = try self.allocator.dupe(u8, value);
         self.allocator.free(self.last_head_oid);
         self.last_head_oid = owned;
+    }
+};
+
+const ExecuteResult = struct {
+    allocator: Allocator,
+    conclusion: []const u8,
+    diagnostics_ref: ?[]u8 = null,
+    diagnostics_oid: ?[]u8 = null,
+
+    fn deinit(self: *ExecuteResult) void {
+        if (self.diagnostics_ref) |value| self.allocator.free(value);
+        if (self.diagnostics_oid) |value| self.allocator.free(value);
+    }
+};
+
+const DiagnosticFile = struct {
+    path: []u8,
+    bytes: []u8,
+};
+
+const RunDiagnostics = struct {
+    allocator: Allocator,
+    attempt_id: []u8,
+    files: std.ArrayList(DiagnosticFile) = .empty,
+
+    fn init(allocator: Allocator) !RunDiagnostics {
+        return .{
+            .allocator = allocator,
+            .attempt_id = try util.newUuidV7(allocator),
+        };
+    }
+
+    fn deinit(self: *RunDiagnostics) void {
+        self.allocator.free(self.attempt_id);
+        for (self.files.items) |file| {
+            self.allocator.free(file.path);
+            self.allocator.free(file.bytes);
+        }
+        self.files.deinit(self.allocator);
+    }
+
+    fn addCopy(self: *RunDiagnostics, path: []const u8, bytes: []const u8) !void {
+        try self.files.append(self.allocator, .{
+            .path = try self.allocator.dupe(u8, path),
+            .bytes = try self.allocator.dupe(u8, bytes),
+        });
+    }
+};
+
+const DiagnosticRef = struct {
+    allocator: Allocator,
+    ref: []u8,
+    oid: []u8,
+
+    fn deinit(self: *DiagnosticRef) void {
+        self.allocator.free(self.ref);
+        self.allocator.free(self.oid);
     }
 };
 
@@ -152,9 +260,9 @@ pub fn resolveTarget(allocator: Allocator, target_ref: ?[]const u8, target_oid: 
 }
 
 pub fn loadWorkflows(allocator: Allocator, rev: []const u8) ![]Workflow {
-    const raw = git.gitChecked(allocator, &.{ "ls-tree", "-r", "--name-only", rev, ".github/workflows" }) catch |err| {
+    const raw = git.gitChecked(allocator, &.{ "ls-tree", "-r", "--name-only", rev, ".gitomi/workflows", ".github/workflows" }) catch |err| {
         if (err == CliError.GitFailed) {
-            try io.eprint("gt actions: failed to read .github/workflows from {s}\n", .{rev});
+            try io.eprint("gt actions: failed to read workflow definitions from {s}\n", .{rev});
             return CliError.UserError;
         }
         return err;
@@ -202,11 +310,12 @@ pub fn printWorkflows(allocator: Allocator, target_ref: ?[]const u8, target_oid:
             try line.append(allocator, '{');
             try appendJsonFieldString(&line, allocator, "path", workflow.path, true);
             try appendJsonFieldString(&line, allocator, "name", workflow.name, true);
+            try appendJsonFieldString(&line, allocator, "dialect", workflow.dialect.label(), true);
             try appendJsonFieldStringArray(&line, allocator, "triggers", workflow.triggers, false);
             try line.append(allocator, '}');
             try io.out("{s}\n", .{line.items});
         } else {
-            try io.out("{s}\t{s}\t", .{ workflow.path, workflow.name });
+            try io.out("{s}\t{s}\t{s}\t", .{ workflow.path, workflow.name, workflow.dialect.label() });
             for (workflow.triggers, 0..) |trigger, idx| {
                 if (idx != 0) try io.out(",", .{});
                 try io.out("{s}", .{trigger});
@@ -262,7 +371,7 @@ pub fn completeRun(
 
     var target = try resolveTarget(allocator, target_ref, target_oid);
     defer target.deinit();
-    return try createRunCompletedEvent(allocator, run_id, conclusion, target.target_ref, target.target_oid, workflow, event_name, false);
+    return try createRunCompletedEvent(allocator, run_id, conclusion, target.target_ref, target.target_oid, workflow, event_name, null, null, false);
 }
 
 pub fn scheduleEvent(
@@ -293,43 +402,9 @@ pub fn scheduleEvent(
             continue;
         }
 
-        var request = try createRunRequestedEvent(
-            allocator,
-            workflow.path,
-            target.target_ref,
-            target.target_oid,
-            event_name,
-            event_type,
-            false,
-        );
-        defer request.deinit();
-
-        const conclusion = executeWorkflow(
-            allocator,
-            repo,
-            request.run_id,
-            workflow,
-            target,
-            event_name,
-            event_type,
-            object_id,
-            options,
-        ) catch |err| blk: {
-            if (!errors.isReported(err)) try io.eprint("gt actions: execution failed: {s}\n", .{@errorName(err)});
-            break :blk "failure";
-        };
-        var completed = try createRunCompletedEvent(
-            allocator,
-            request.run_id,
-            conclusion,
-            target.target_ref,
-            target.target_oid,
-            workflow.path,
-            event_name,
-            false,
-        );
-        defer completed.deinit();
-        if (!std.mem.eql(u8, conclusion, "success")) failed = true;
+        if (try requestAndExecuteWorkflow(allocator, repo, workflow, target, event_name, event_type, object_id, options)) {
+            failed = true;
+        }
     }
 
     if (matched == 0) {
@@ -379,7 +454,7 @@ fn runRequestedWithRepo(allocator: Allocator, repo: repo_mod.Repo, run_filter: ?
             continue;
         }
 
-        const conclusion = executeWorkflow(
+        var execution = executeWorkflow(
             allocator,
             repo,
             request.run_id,
@@ -391,20 +466,23 @@ fn runRequestedWithRepo(allocator: Allocator, repo: repo_mod.Repo, run_filter: ?
             options,
         ) catch |err| blk: {
             if (!errors.isReported(err)) try io.eprint("gt actions: execution failed: {s}\n", .{@errorName(err)});
-            break :blk "failure";
+            break :blk ExecuteResult{ .allocator = allocator, .conclusion = "failure" };
         };
+        defer execution.deinit();
         var completed = try createRunCompletedEvent(
             allocator,
             request.run_id,
-            conclusion,
+            execution.conclusion,
             target.target_ref,
             target.target_oid,
             workflow.path,
             request.event_name,
+            execution.diagnostics_ref,
+            execution.diagnostics_oid,
             false,
         );
         defer completed.deinit();
-        if (!std.mem.eql(u8, conclusion, "success")) failed = true;
+        if (!std.mem.eql(u8, execution.conclusion, "success")) failed = true;
     }
 
     if (failed) return CliError.UserError;
@@ -448,8 +526,10 @@ fn runDaemonTick(allocator: Allocator, repo: repo_mod.Repo, options: DaemonOptio
     defer db.deinit();
 
     const max_ordinal = try maxAcceptedOrdinal(&db);
+    const current_schedule_minute = @divTrunc(std.time.timestamp(), 60);
     if (!state.exists and !options.replay) {
         state.last_event_ordinal = max_ordinal;
+        state.last_schedule_minute = current_schedule_minute;
         if (try currentHeadOid(allocator)) |head| {
             defer allocator.free(head);
             try state.setHead(head);
@@ -469,6 +549,8 @@ fn runDaemonTick(allocator: Allocator, repo: repo_mod.Repo, options: DaemonOptio
             try state.setHead(head);
         }
     }
+
+    try scheduleDueWorkflows(allocator, repo, &state, current_schedule_minute, options);
 
     if (!options.dry_run) try saveSchedulerState(allocator, repo, state);
 }
@@ -515,12 +597,110 @@ fn runScheduledEvent(
     };
 }
 
+fn scheduleDueWorkflows(
+    allocator: Allocator,
+    repo: repo_mod.Repo,
+    state: *SchedulerState,
+    current_minute: i64,
+    options: DaemonOptions,
+) !void {
+    if (current_minute <= 0) return;
+    var start_minute = state.last_schedule_minute + 1;
+    if (state.last_schedule_minute <= 0 or options.replay) start_minute = current_minute;
+    if (current_minute - start_minute > 1440) start_minute = current_minute - 1440;
+    if (start_minute > current_minute) return;
+
+    const head = (try currentHeadOid(allocator)) orelse return;
+    defer allocator.free(head);
+    var target = ResolvedTarget{
+        .allocator = allocator,
+        .target_ref = try allocator.dupe(u8, "HEAD"),
+        .target_oid = try allocator.dupe(u8, head),
+    };
+    defer target.deinit();
+
+    const workflows = try loadWorkflows(allocator, target.target_oid);
+    defer freeWorkflows(allocator, workflows);
+
+    var failed = false;
+    var minute = start_minute;
+    while (minute <= current_minute) : (minute += 1) {
+        for (workflows) |workflow| {
+            if (!workflowScheduleDue(workflow, minute * 60)) continue;
+            if (options.dry_run) {
+                try io.out("would run scheduled {s} for minute {d}\n", .{ workflow.path, minute });
+                continue;
+            }
+            if (try requestAndExecuteWorkflow(allocator, repo, workflow, target, "schedule", "workflow.schedule", null, daemonRunOptions(options))) {
+                failed = true;
+            }
+        }
+    }
+    state.last_schedule_minute = current_minute;
+    if (failed) return CliError.UserError;
+}
+
 fn daemonRunOptions(options: DaemonOptions) Options {
     return .{
         .act_path = options.act_path,
+        .agent_runner_path = options.agent_runner_path,
         .dry_run = options.dry_run,
         .extra_args = options.extra_args,
     };
+}
+
+fn requestAndExecuteWorkflow(
+    allocator: Allocator,
+    repo: repo_mod.Repo,
+    workflow: Workflow,
+    target: ResolvedTarget,
+    event_name: []const u8,
+    event_type: []const u8,
+    object_id: ?[]const u8,
+    options: Options,
+) !bool {
+    var request = try createRunRequestedEvent(
+        allocator,
+        workflow.path,
+        target.target_ref,
+        target.target_oid,
+        event_name,
+        event_type,
+        false,
+    );
+    defer request.deinit();
+
+    var execution = executeWorkflow(
+        allocator,
+        repo,
+        request.run_id,
+        workflow,
+        target,
+        event_name,
+        event_type,
+        object_id,
+        options,
+    ) catch |err| blk: {
+        if (!errors.isReported(err)) try io.eprint("gt actions: execution failed: {s}\n", .{@errorName(err)});
+        break :blk ExecuteResult{ .allocator = allocator, .conclusion = "failure" };
+    };
+    defer execution.deinit();
+
+    var completed = try createRunCompletedEvent(
+        allocator,
+        request.run_id,
+        execution.conclusion,
+        target.target_ref,
+        target.target_oid,
+        workflow.path,
+        event_name,
+        execution.diagnostics_ref,
+        execution.diagnostics_oid,
+        false,
+    );
+    defer completed.deinit();
+
+    return !std.mem.eql(u8, execution.conclusion, "success");
 }
 
 pub fn countPendingRequests(allocator: Allocator, repo: repo_mod.Repo) !usize {
@@ -576,6 +756,8 @@ fn loadSchedulerState(allocator: Allocator, repo: repo_mod.Repo, replay: bool) !
             state.last_event_ordinal = std.fmt.parseInt(i64, value, 10) catch 0;
         } else if (std.mem.eql(u8, key, "last_head_oid")) {
             try state.setHead(value);
+        } else if (std.mem.eql(u8, key, "last_schedule_minute")) {
+            state.last_schedule_minute = std.fmt.parseInt(i64, value, 10) catch 0;
         }
     }
     return state;
@@ -587,8 +769,8 @@ fn saveSchedulerState(allocator: Allocator, repo: repo_mod.Repo, state: Schedule
     defer allocator.free(path);
     const contents = try std.fmt.allocPrint(
         allocator,
-        "last_event_ordinal={d}\nlast_head_oid={s}\n",
-        .{ state.last_event_ordinal, state.last_head_oid },
+        "last_event_ordinal={d}\nlast_head_oid={s}\nlast_schedule_minute={d}\n",
+        .{ state.last_event_ordinal, state.last_head_oid, state.last_schedule_minute },
     );
     defer allocator.free(contents);
     const file = try std.fs.createFileAbsolute(path, .{ .truncate = true });
@@ -658,6 +840,8 @@ pub fn createRunCompletedEvent(
     target_oid: ?[]const u8,
     workflow: ?[]const u8,
     event_name: ?[]const u8,
+    diagnostics_ref: ?[]const u8,
+    diagnostics_oid: ?[]const u8,
     quiet: bool,
 ) !CompleteResult {
     var writer = try EventWriter.init(allocator, "gt actions complete");
@@ -684,6 +868,8 @@ pub fn createRunCompletedEvent(
         target_oid,
         workflow,
         event_name,
+        diagnostics_ref,
+        diagnostics_oid,
     );
     defer allocator.free(event_body);
 
@@ -712,12 +898,15 @@ fn executeWorkflow(
     gitomi_event_type: []const u8,
     object_id: ?[]const u8,
     options: Options,
-) ![]const u8 {
+) !ExecuteResult {
     const event_path = try writeActEventPayload(allocator, repo, run_id, workflow, target, event_name, gitomi_event_type, object_id);
     defer {
         std.fs.deleteFileAbsolute(event_path) catch {};
         allocator.free(event_path);
     }
+
+    var diagnostics = try RunDiagnostics.init(allocator);
+    defer diagnostics.deinit();
 
     const worktree_path = try std.fmt.allocPrint(allocator, "/tmp/gitomi-act-{s}", .{run_id});
     defer allocator.free(worktree_path);
@@ -737,6 +926,30 @@ fn executeWorkflow(
         } else |_| {}
     }
 
+    const conclusion = switch (workflow.dialect) {
+        .github_actions => try executeGithubActionsWorkflow(allocator, workflow, event_name, event_path, worktree_path, options, &diagnostics),
+        .gitomi => try executeGitomiWorkflow(allocator, repo, run_id, workflow, target, event_name, gitomi_event_type, event_path, worktree_path, options, &diagnostics),
+    };
+
+    var result = ExecuteResult{ .allocator = allocator, .conclusion = conclusion };
+    if (writeRunDiagnostics(allocator, repo, run_id, workflow, target, conclusion, diagnostics)) |diag_ref| {
+        result.diagnostics_ref = diag_ref.ref;
+        result.diagnostics_oid = diag_ref.oid;
+    } else |err| {
+        if (!errors.isReported(err)) try io.eprint("gt actions: failed to write run diagnostics: {s}\n", .{@errorName(err)});
+    }
+    return result;
+}
+
+fn executeGithubActionsWorkflow(
+    allocator: Allocator,
+    workflow: Workflow,
+    event_name: []const u8,
+    event_path: []const u8,
+    worktree_path: []const u8,
+    options: Options,
+    diagnostics: *RunDiagnostics,
+) ![]const u8 {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
     try argv.append(allocator, options.act_path);
@@ -758,8 +971,328 @@ fn executeWorkflow(
 
     if (result.stdout.len != 0) try io.out("{s}", .{result.stdout});
     if (result.stderr.len != 0) try io.eprint("{s}", .{result.stderr});
+    try addStepLogs(allocator, diagnostics, "act", 1, result.stdout, result.stderr);
 
     return if (result.exitCode() == 0) "success" else "failure";
+}
+
+fn executeGitomiWorkflow(
+    allocator: Allocator,
+    repo: repo_mod.Repo,
+    run_id: []const u8,
+    workflow: Workflow,
+    target: ResolvedTarget,
+    event_name: []const u8,
+    gitomi_event_type: []const u8,
+    event_path: []const u8,
+    worktree_path: []const u8,
+    options: Options,
+    diagnostics: *RunDiagnostics,
+) ![]const u8 {
+    _ = repo;
+    _ = target;
+    _ = event_name;
+    _ = gitomi_event_type;
+
+    if (workflow.jobs.len == 0) {
+        try io.eprint("gt actions: native workflow {s} has no jobs\n", .{workflow.path});
+        return "failure";
+    }
+
+    var action_required = false;
+    for (workflow.jobs) |job| {
+        const conclusion = try executeGitomiJob(allocator, run_id, workflow, job, event_path, worktree_path, options, diagnostics);
+        if (std.mem.eql(u8, conclusion, "failure")) return "failure";
+        if (std.mem.eql(u8, conclusion, "action_required")) action_required = true;
+    }
+    return if (action_required) "action_required" else "success";
+}
+
+fn executeGitomiJob(
+    allocator: Allocator,
+    run_id: []const u8,
+    workflow: Workflow,
+    job: WorkflowJob,
+    event_path: []const u8,
+    worktree_path: []const u8,
+    options: Options,
+    diagnostics: *RunDiagnostics,
+) ![]const u8 {
+    const backend = if (job.backend.len == 0 and job.steps.len != 0) "shell" else job.backend;
+    if (std.mem.eql(u8, backend, "shell")) {
+        return try executeShellJob(allocator, job, worktree_path, diagnostics);
+    }
+    if (std.mem.eql(u8, backend, "container")) {
+        return try executeContainerJob(allocator, job, worktree_path, diagnostics);
+    }
+    if (std.mem.eql(u8, backend, "agent")) {
+        return try executeAgentJob(allocator, run_id, workflow, job, event_path, worktree_path, options, diagnostics);
+    }
+    if (std.mem.eql(u8, backend, "github-actions")) {
+        try io.eprint("gt actions: native job {s} uses github-actions backend; use .github/workflows for act-backed workflows\n", .{job.id});
+        return "action_required";
+    }
+    try io.eprint("gt actions: native job {s} uses unsupported backend '{s}'\n", .{ job.id, backend });
+    return "action_required";
+}
+
+fn executeShellJob(
+    allocator: Allocator,
+    job: WorkflowJob,
+    worktree_path: []const u8,
+    diagnostics: *RunDiagnostics,
+) ![]const u8 {
+    if (job.steps.len == 0) {
+        try io.eprint("gt actions: shell job {s} has no run steps\n", .{job.id});
+        return "failure";
+    }
+    for (job.steps, 0..) |step, idx| {
+        const command = step.run orelse continue;
+        const step_label = step.name orelse command;
+        try io.out("gt actions: {s}[{d}] {s}\n", .{ job.id, idx + 1, step_label });
+        var result = try runCommandInDir(allocator, &.{ "sh", "-lc", command }, worktree_path, null, git.max_git_output);
+        defer result.deinit();
+        if (result.stdout.len != 0) try io.out("{s}", .{result.stdout});
+        if (result.stderr.len != 0) try io.eprint("{s}", .{result.stderr});
+        try addStepLogs(allocator, diagnostics, job.id, idx + 1, result.stdout, result.stderr);
+        if (result.exitCode() != 0) return "failure";
+    }
+    return "success";
+}
+
+fn executeContainerJob(
+    allocator: Allocator,
+    job: WorkflowJob,
+    worktree_path: []const u8,
+    diagnostics: *RunDiagnostics,
+) ![]const u8 {
+    const image = job.image orelse job.uses orelse {
+        try io.eprint("gt actions: container job {s} requires image or uses\n", .{job.id});
+        return "failure";
+    };
+    if (job.steps.len == 0) {
+        try io.eprint("gt actions: container job {s} has no run steps\n", .{job.id});
+        return "failure";
+    }
+
+    const volume = try std.fmt.allocPrint(allocator, "{s}:/workspace", .{worktree_path});
+    defer allocator.free(volume);
+
+    for (job.steps, 0..) |step, idx| {
+        const command = step.run orelse continue;
+        const step_label = step.name orelse command;
+        try io.out("gt actions: {s}[{d}] {s}\n", .{ job.id, idx + 1, step_label });
+        var result = try runCommandInDir(allocator, &.{ "docker", "run", "--rm", "-v", volume, "-w", "/workspace", image, "sh", "-lc", command }, worktree_path, null, git.max_git_output);
+        defer result.deinit();
+        if (result.stdout.len != 0) try io.out("{s}", .{result.stdout});
+        if (result.stderr.len != 0) try io.eprint("{s}", .{result.stderr});
+        try addStepLogs(allocator, diagnostics, job.id, idx + 1, result.stdout, result.stderr);
+        if (result.exitCode() != 0) return "failure";
+    }
+    return "success";
+}
+
+fn executeAgentJob(
+    allocator: Allocator,
+    run_id: []const u8,
+    workflow: Workflow,
+    job: WorkflowJob,
+    event_path: []const u8,
+    worktree_path: []const u8,
+    options: Options,
+    diagnostics: *RunDiagnostics,
+) ![]const u8 {
+    const runner = options.agent_runner_path orelse {
+        try io.eprint("gt actions: agent job {s} requires --agent-runner PATH\n", .{job.id});
+        return "action_required";
+    };
+    const pipeline = job.uses orelse {
+        try io.eprint("gt actions: agent job {s} requires uses: .gitomi/pipelines/<name>\n", .{job.id});
+        return "failure";
+    };
+
+    var result = try runCommandInDir(allocator, &.{
+        runner,
+        "run",
+        "--run-id",
+        run_id,
+        "--job",
+        job.id,
+        "--workflow",
+        workflow.path,
+        "--pipeline",
+        pipeline,
+        "--event",
+        event_path,
+        "--worktree",
+        worktree_path,
+    }, worktree_path, null, git.max_git_output);
+    defer result.deinit();
+    if (result.stdout.len != 0) try io.out("{s}", .{result.stdout});
+    if (result.stderr.len != 0) try io.eprint("{s}", .{result.stderr});
+    try addStepLogs(allocator, diagnostics, job.id, 1, result.stdout, result.stderr);
+    return if (result.exitCode() == 0) "success" else "failure";
+}
+
+fn addStepLogs(
+    allocator: Allocator,
+    diagnostics: *RunDiagnostics,
+    job_id: []const u8,
+    step_number: usize,
+    stdout: []const u8,
+    stderr: []const u8,
+) !void {
+    const safe_job = try sanitizePathSegment(allocator, job_id);
+    defer allocator.free(safe_job);
+    const stdout_path = try std.fmt.allocPrint(allocator, "attempts/{s}/logs/{s}-{d}-stdout.log", .{ diagnostics.attempt_id, safe_job, step_number });
+    defer allocator.free(stdout_path);
+    const stderr_path = try std.fmt.allocPrint(allocator, "attempts/{s}/logs/{s}-{d}-stderr.log", .{ diagnostics.attempt_id, safe_job, step_number });
+    defer allocator.free(stderr_path);
+    try diagnostics.addCopy(stdout_path, stdout);
+    try diagnostics.addCopy(stderr_path, stderr);
+}
+
+fn writeRunDiagnostics(
+    allocator: Allocator,
+    repo: repo_mod.Repo,
+    run_id: []const u8,
+    workflow: Workflow,
+    target: ResolvedTarget,
+    conclusion: []const u8,
+    diagnostics: RunDiagnostics,
+) !DiagnosticRef {
+    const runner_id = try localRunnerId(allocator, repo);
+    defer allocator.free(runner_id);
+
+    const run_ref = try std.fmt.allocPrint(allocator, "refs/gitomi/runs/{s}/{s}", .{ runner_id, run_id });
+    errdefer allocator.free(run_ref);
+
+    const index_path = try std.fmt.allocPrint(allocator, "/tmp/gitomi-run-index-{s}-{s}", .{ run_id, diagnostics.attempt_id });
+    defer {
+        std.fs.deleteFileAbsolute(index_path) catch {};
+        allocator.free(index_path);
+    }
+
+    const run_json = try buildRunDiagnosticJson(allocator, run_id, workflow, target, conclusion, runner_id, diagnostics.attempt_id);
+    defer allocator.free(run_json);
+    try writeDiagnosticBlobToIndex(allocator, repo, index_path, "run.json", run_json);
+
+    const manifest_path = try std.fmt.allocPrint(allocator, "attempts/{s}/manifest.json", .{diagnostics.attempt_id});
+    defer allocator.free(manifest_path);
+    try writeDiagnosticBlobToIndex(allocator, repo, index_path, manifest_path, run_json);
+
+    for (diagnostics.files.items) |file| {
+        try writeDiagnosticBlobToIndex(allocator, repo, index_path, file.path, file.bytes);
+    }
+
+    const index_env = try std.fmt.allocPrint(allocator, "GIT_INDEX_FILE={s}", .{index_path});
+    defer allocator.free(index_env);
+    const tree_raw = try runCheckedInDirSimple(allocator, &.{ "env", index_env, "git", "write-tree" }, repo.root, null, git.max_git_output);
+    const tree_oid = try util.trimOwned(allocator, tree_raw);
+    defer allocator.free(tree_oid);
+
+    const message = try std.fmt.allocPrint(allocator, "gitomi workflow run {s}", .{run_id});
+    defer allocator.free(message);
+    const commit_raw = try runCheckedInDirSimple(allocator, &.{ "git", "commit-tree", tree_oid, "-m", message }, repo.root, null, git.max_git_output);
+    const commit_oid = try util.trimOwned(allocator, commit_raw);
+    errdefer allocator.free(commit_oid);
+
+    const updated = try git.gitChecked(allocator, &.{ "update-ref", run_ref, commit_oid });
+    allocator.free(updated);
+
+    return .{
+        .allocator = allocator,
+        .ref = run_ref,
+        .oid = commit_oid,
+    };
+}
+
+fn writeDiagnosticBlobToIndex(
+    allocator: Allocator,
+    repo: repo_mod.Repo,
+    index_path: []const u8,
+    path: []const u8,
+    bytes: []const u8,
+) !void {
+    const blob_raw = try runCheckedInDirSimple(allocator, &.{ "git", "hash-object", "-w", "--stdin" }, repo.root, bytes, git.max_git_output);
+    const blob_oid = try util.trimOwned(allocator, blob_raw);
+    defer allocator.free(blob_oid);
+
+    const index_env = try std.fmt.allocPrint(allocator, "GIT_INDEX_FILE={s}", .{index_path});
+    defer allocator.free(index_env);
+    const cacheinfo = try std.fmt.allocPrint(allocator, "100644,{s},{s}", .{ blob_oid, path });
+    defer allocator.free(cacheinfo);
+    const updated = try runCheckedInDirSimple(allocator, &.{ "env", index_env, "git", "update-index", "--add", "--cacheinfo", cacheinfo }, repo.root, null, git.max_git_output);
+    allocator.free(updated);
+}
+
+fn buildRunDiagnosticJson(
+    allocator: Allocator,
+    run_id: []const u8,
+    workflow: Workflow,
+    target: ResolvedTarget,
+    conclusion: []const u8,
+    runner_id: []const u8,
+    attempt_id: []const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.append(allocator, '{');
+    try appendJsonFieldString(&buf, allocator, "schema", "urn:gitomi:workflow-run:v1", true);
+    try appendJsonFieldString(&buf, allocator, "run_id", run_id, true);
+    try appendJsonFieldString(&buf, allocator, "attempt_id", attempt_id, true);
+    try appendJsonFieldString(&buf, allocator, "runner_id", runner_id, true);
+    try appendJsonFieldString(&buf, allocator, "workflow", workflow.path, true);
+    try appendJsonFieldString(&buf, allocator, "workflow_name", workflow.name, true);
+    try appendJsonFieldString(&buf, allocator, "dialect", workflow.dialect.label(), true);
+    try appendJsonFieldString(&buf, allocator, "target_ref", target.target_ref orelse "", true);
+    try appendJsonFieldString(&buf, allocator, "target_oid", target.target_oid, true);
+    try appendJsonFieldString(&buf, allocator, "conclusion", conclusion, false);
+    try buf.append(allocator, '}');
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn localRunnerId(allocator: Allocator, repo: repo_mod.Repo) ![]u8 {
+    var cfg = repo_mod.loadConfig(allocator, repo.config_path) catch return allocator.dupe(u8, "local");
+    defer cfg.deinit();
+    return std.fmt.allocPrint(allocator, "{s}-{s}", .{ cfg.principal, cfg.device });
+}
+
+fn runCheckedInDirSimple(
+    allocator: Allocator,
+    argv: []const []const u8,
+    cwd: []const u8,
+    input: ?[]const u8,
+    max_output_bytes: usize,
+) ![]u8 {
+    var result = try runCommandInDir(allocator, argv, cwd, input, max_output_bytes);
+    if (result.exitCode() == 0) {
+        const stdout = result.stdout;
+        allocator.free(result.stderr);
+        return stdout;
+    }
+    defer result.deinit();
+    const stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
+    if (stderr.len != 0) {
+        try io.eprint("{s} failed: {s}\n", .{ argv[0], stderr });
+    } else {
+        try io.eprint("{s} failed\n", .{argv[0]});
+    }
+    return CliError.UserError;
+}
+
+fn sanitizePathSegment(allocator: Allocator, value: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    for (value) |c| {
+        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.') {
+            try out.append(allocator, c);
+        } else {
+            try out.append(allocator, '_');
+        }
+    }
+    if (out.items.len == 0) try out.appendSlice(allocator, "job");
+    return try out.toOwnedSlice(allocator);
 }
 
 fn writeActEventPayload(
@@ -967,11 +1500,17 @@ fn selectRequests(allocator: Allocator, requests: []RunRequest, run_filter: ?[]c
 }
 
 fn isWorkflowPath(path: []const u8) bool {
-    if (!std.mem.startsWith(u8, path, ".github/workflows/")) return false;
+    if (!std.mem.startsWith(u8, path, ".github/workflows/") and !std.mem.startsWith(u8, path, ".gitomi/workflows/")) return false;
     return std.mem.endsWith(u8, path, ".yml") or std.mem.endsWith(u8, path, ".yaml");
 }
 
+fn workflowDialect(path: []const u8) WorkflowDialect {
+    if (std.mem.startsWith(u8, path, ".gitomi/workflows/")) return .gitomi;
+    return .github_actions;
+}
+
 fn parseWorkflow(allocator: Allocator, path: []const u8, bytes: []const u8) !Workflow {
+    const dialect = workflowDialect(path);
     var name: ?[]u8 = null;
     errdefer if (name) |value| allocator.free(value);
     var triggers: std.ArrayList([]u8) = .empty;
@@ -979,9 +1518,28 @@ fn parseWorkflow(allocator: Allocator, path: []const u8, bytes: []const u8) !Wor
         for (triggers.items) |trigger| allocator.free(trigger);
         triggers.deinit(allocator);
     }
+    var schedules: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (schedules.items) |schedule| allocator.free(schedule);
+        schedules.deinit(allocator);
+    }
+    var jobs: std.ArrayList(WorkflowJob) = .empty;
+    errdefer {
+        for (jobs.items) |*job| job.deinit();
+        jobs.deinit(allocator);
+    }
 
     var in_on_block = false;
+    var in_jobs_block = false;
+    var in_schedule_block = false;
     var on_child_indent: ?usize = null;
+    var schedule_indent: ?usize = null;
+    var jobs_child_indent: ?usize = null;
+    var current_job: ?usize = null;
+    var job_field_indent: ?usize = null;
+    var in_steps_block = false;
+    var steps_indent: ?usize = null;
+    var current_step: ?usize = null;
     var lines = std.mem.splitScalar(u8, bytes, '\n');
     while (lines.next()) |line_raw| {
         const clean = std.mem.trim(u8, stripYamlComment(line_raw), " \t\r\n");
@@ -990,7 +1548,16 @@ fn parseWorkflow(allocator: Allocator, path: []const u8, bytes: []const u8) !Wor
 
         if (indent == 0) {
             in_on_block = false;
+            in_jobs_block = false;
+            in_schedule_block = false;
             on_child_indent = null;
+            schedule_indent = null;
+            jobs_child_indent = null;
+            current_job = null;
+            job_field_indent = null;
+            in_steps_block = false;
+            steps_indent = null;
+            current_step = null;
             if (parseYamlKeyValue(clean)) |kv| {
                 if (std.mem.eql(u8, kv.key, "name")) {
                     if (name) |old| allocator.free(old);
@@ -1001,24 +1568,76 @@ fn parseWorkflow(allocator: Allocator, path: []const u8, bytes: []const u8) !Wor
                     } else {
                         try addInlineTriggers(allocator, &triggers, kv.value);
                     }
+                } else if (std.mem.eql(u8, kv.key, "jobs") and dialect == .gitomi) {
+                    in_jobs_block = true;
                 }
             }
             continue;
         }
 
-        if (!in_on_block) continue;
-        if (on_child_indent == null) on_child_indent = indent;
-        if (indent != on_child_indent.?) continue;
-        try addTriggerBlockLine(allocator, &triggers, clean);
+        if (in_on_block) {
+            if (on_child_indent == null) on_child_indent = indent;
+            if (in_schedule_block and schedule_indent != null and indent > schedule_indent.?) {
+                try addScheduleLine(allocator, &schedules, clean);
+                continue;
+            }
+            if (indent == on_child_indent.?) {
+                in_schedule_block = false;
+                schedule_indent = null;
+                if (triggerNameFromBlockLine(clean)) |trigger_name| {
+                    if (std.mem.eql(u8, trigger_name, "schedule")) {
+                        in_schedule_block = true;
+                        schedule_indent = indent;
+                    }
+                }
+                try addTriggerBlockLine(allocator, &triggers, clean);
+                continue;
+            }
+        }
+
+        if (in_jobs_block and dialect == .gitomi) {
+            if (jobs_child_indent == null) jobs_child_indent = indent;
+            if (indent == jobs_child_indent.?) {
+                current_job = try appendWorkflowJob(allocator, &jobs, clean);
+                job_field_indent = null;
+                in_steps_block = false;
+                steps_indent = null;
+                current_step = null;
+                continue;
+            }
+            if (current_job == null) continue;
+            if (job_field_indent == null) job_field_indent = indent;
+            if (indent == job_field_indent.?) {
+                in_steps_block = false;
+                steps_indent = null;
+                current_step = null;
+                try parseJobField(allocator, &jobs.items[current_job.?], clean);
+                if (parseYamlKeyValue(clean)) |kv| {
+                    if (std.mem.eql(u8, kv.key, "steps")) in_steps_block = true;
+                }
+                continue;
+            }
+            if (in_steps_block) {
+                if (steps_indent == null) steps_indent = indent;
+                try parseStepLine(allocator, &jobs.items[current_job.?], &current_step, clean, indent, steps_indent.?);
+            }
+        }
     }
 
     const display_name = name orelse try allocator.dupe(u8, std.fs.path.basename(path));
     name = null;
+    for (schedules.items) |schedule| {
+        _ = schedule;
+        try addTrigger(allocator, &triggers, "workflow.schedule");
+    }
     return .{
         .allocator = allocator,
         .path = try allocator.dupe(u8, path),
         .name = display_name,
         .triggers = try triggers.toOwnedSlice(allocator),
+        .dialect = dialect,
+        .jobs = try jobs.toOwnedSlice(allocator),
+        .schedules = try schedules.toOwnedSlice(allocator),
     };
 }
 
@@ -1028,6 +1647,8 @@ fn workflowMatches(workflow: Workflow, event_type: []const u8, event_name: []con
         if (std.mem.eql(u8, trigger, event_type)) return true;
         if (std.mem.eql(u8, trigger, event_name)) return true;
         if (std.mem.eql(u8, trigger, family)) return true;
+        if (std.mem.eql(u8, trigger, "schedule") and std.mem.eql(u8, event_type, "workflow.schedule")) return true;
+        if (std.mem.eql(u8, trigger, "workflow_dispatch") and std.mem.eql(u8, event_type, "workflow.manual")) return true;
     }
     return false;
 }
@@ -1064,6 +1685,8 @@ fn githubEventName(event_type: []const u8) []const u8 {
     if (std.mem.startsWith(u8, event_type, "issue.")) return "issues";
     if (std.mem.startsWith(u8, event_type, "pull.")) return "pull_request";
     if (std.mem.eql(u8, event_type, "action.run_requested")) return "workflow_dispatch";
+    if (std.mem.eql(u8, event_type, "workflow.manual")) return "workflow_dispatch";
+    if (std.mem.eql(u8, event_type, "workflow.schedule")) return "schedule";
     return event_type;
 }
 
@@ -1077,6 +1700,120 @@ fn githubActionValue(event_type: []const u8) []const u8 {
 fn eventFamily(event_type: []const u8) []const u8 {
     if (std.mem.indexOfScalar(u8, event_type, '.')) |dot| return event_type[0..dot];
     return event_type;
+}
+
+fn workflowScheduleDue(workflow: Workflow, timestamp_seconds: i64) bool {
+    for (workflow.schedules) |cron| {
+        if (cronMatches(cron, timestamp_seconds)) return true;
+    }
+    return false;
+}
+
+const UtcMinute = struct {
+    minute: u8,
+    hour: u8,
+    day_of_month: u8,
+    month: u8,
+    day_of_week: u8,
+};
+
+fn cronMatches(expr: []const u8, timestamp_seconds: i64) bool {
+    var fields: [5][]const u8 = undefined;
+    var count: usize = 0;
+    var it = std.mem.tokenizeAny(u8, expr, " \t");
+    while (it.next()) |field| {
+        if (count >= fields.len) return false;
+        fields[count] = field;
+        count += 1;
+    }
+    if (count != fields.len) return false;
+
+    const minute = utcMinute(timestamp_seconds);
+    return cronFieldMatches(fields[0], minute.minute, 0, 59, false) and
+        cronFieldMatches(fields[1], minute.hour, 0, 23, false) and
+        cronFieldMatches(fields[2], minute.day_of_month, 1, 31, false) and
+        cronFieldMatches(fields[3], minute.month, 1, 12, false) and
+        cronFieldMatches(fields[4], minute.day_of_week, 0, 7, true);
+}
+
+fn cronFieldMatches(field: []const u8, value_raw: u8, min: u8, max: u8, sunday_alias: bool) bool {
+    var parts = std.mem.splitScalar(u8, field, ',');
+    while (parts.next()) |part_raw| {
+        const part = std.mem.trim(u8, part_raw, " \t\r\n");
+        if (part.len == 0) continue;
+        if (cronPartMatches(part, value_raw, min, max, sunday_alias)) return true;
+    }
+    return false;
+}
+
+fn cronPartMatches(part: []const u8, value_raw: u8, min: u8, max: u8, sunday_alias: bool) bool {
+    var base = part;
+    var step: u8 = 1;
+    if (std.mem.indexOfScalar(u8, part, '/')) |slash| {
+        base = part[0..slash];
+        step = std.fmt.parseUnsigned(u8, part[slash + 1 ..], 10) catch return false;
+        if (step == 0) return false;
+    }
+
+    const value: u8 = if (sunday_alias and value_raw == 0) 7 else value_raw;
+    var start: u8 = min;
+    var end: u8 = max;
+    if (!std.mem.eql(u8, base, "*")) {
+        if (std.mem.indexOfScalar(u8, base, '-')) |dash| {
+            start = normalizeCronValue(std.fmt.parseUnsigned(u8, base[0..dash], 10) catch return false, sunday_alias);
+            end = normalizeCronValue(std.fmt.parseUnsigned(u8, base[dash + 1 ..], 10) catch return false, sunday_alias);
+        } else {
+            start = normalizeCronValue(std.fmt.parseUnsigned(u8, base, 10) catch return false, sunday_alias);
+            end = start;
+        }
+    }
+    if (start < min or start > max or end < min or end > max or start > end) return false;
+    if (value < start or value > end) return false;
+    return ((value - start) % step) == 0;
+}
+
+fn normalizeCronValue(value: u8, sunday_alias: bool) u8 {
+    if (sunday_alias and value == 0) return 7;
+    return value;
+}
+
+fn utcMinute(timestamp_seconds: i64) UtcMinute {
+    const seconds_per_day: i64 = 24 * 60 * 60;
+    const seconds = @max(timestamp_seconds, 0);
+    const days = @divTrunc(seconds, seconds_per_day);
+    const seconds_of_day = @mod(seconds, seconds_per_day);
+    const date = civilFromDays(days);
+    return .{
+        .minute = @intCast(@divTrunc(@mod(seconds_of_day, 3600), 60)),
+        .hour = @intCast(@divTrunc(seconds_of_day, 3600)),
+        .day_of_month = @intCast(date.day),
+        .month = @intCast(date.month),
+        .day_of_week = @intCast(@mod(days + 4, 7)),
+    };
+}
+
+const CivilDate = struct {
+    year: i64,
+    month: u8,
+    day: u8,
+};
+
+fn civilFromDays(days_since_epoch: i64) CivilDate {
+    const z = days_since_epoch + 719468;
+    const era = @divTrunc(z, 146097);
+    const doe = z - era * 146097;
+    const yoe = @divTrunc(doe - @divTrunc(doe, 1460) + @divTrunc(doe, 36524) - @divTrunc(doe, 146096), 365);
+    var year = yoe + era * 400;
+    const doy = doe - (365 * yoe + @divTrunc(yoe, 4) - @divTrunc(yoe, 100));
+    const mp = @divTrunc(5 * doy + 2, 153);
+    const day = doy - @divTrunc(153 * mp + 2, 5) + 1;
+    const month = mp + if (mp < 10) @as(i64, 3) else @as(i64, -9);
+    if (month <= 2) year += 1;
+    return .{
+        .year = year,
+        .month = @intCast(month),
+        .day = @intCast(day),
+    };
 }
 
 fn isConclusion(value: []const u8) bool {
@@ -1114,6 +1851,110 @@ fn addTriggerBlockLine(allocator: Allocator, triggers: *std.ArrayList([]u8), lin
     } else {
         try addTrigger(allocator, triggers, line);
     }
+}
+
+fn triggerNameFromBlockLine(line: []const u8) ?[]const u8 {
+    if (std.mem.startsWith(u8, line, "-")) {
+        const scalar = std.mem.trim(u8, line[1..], " \t\r\n");
+        if (scalar.len == 0) return null;
+        if (parseYamlKeyValue(scalar)) |kv| return kv.key;
+        return unquoteScalar(scalar);
+    }
+    if (parseYamlKeyValue(line)) |kv| return kv.key;
+    return unquoteScalar(line);
+}
+
+fn addScheduleLine(allocator: Allocator, schedules: *std.ArrayList([]u8), line: []const u8) !void {
+    var clean = line;
+    if (std.mem.startsWith(u8, clean, "-")) clean = std.mem.trim(u8, clean[1..], " \t\r\n");
+    if (parseYamlKeyValue(clean)) |kv| {
+        if (std.mem.eql(u8, kv.key, "cron")) {
+            const cron = unquoteScalar(kv.value);
+            if (cron.len != 0) try schedules.append(allocator, try allocator.dupe(u8, cron));
+        }
+    }
+}
+
+fn appendWorkflowJob(allocator: Allocator, jobs: *std.ArrayList(WorkflowJob), line: []const u8) !?usize {
+    const kv = parseYamlKeyValue(line) orelse return null;
+    const id = unquoteScalar(kv.key);
+    if (id.len == 0) return null;
+    const idx = jobs.items.len;
+    try jobs.append(allocator, .{
+        .allocator = allocator,
+        .id = try allocator.dupe(u8, id),
+        .backend = try allocator.dupe(u8, ""),
+        .steps = try allocator.alloc(WorkflowStep, 0),
+    });
+    return idx;
+}
+
+fn parseJobField(allocator: Allocator, job: *WorkflowJob, line: []const u8) !void {
+    const kv = parseYamlKeyValue(line) orelse return;
+    if (std.mem.eql(u8, kv.key, "backend") or std.mem.eql(u8, kv.key, "runs-on")) {
+        allocator.free(job.backend);
+        job.backend = try allocator.dupe(u8, normalizeBackend(unquoteScalar(kv.value)));
+    } else if (std.mem.eql(u8, kv.key, "uses")) {
+        if (job.uses) |old| allocator.free(old);
+        job.uses = try allocator.dupe(u8, unquoteScalar(kv.value));
+    } else if (std.mem.eql(u8, kv.key, "image")) {
+        if (job.image) |old| allocator.free(old);
+        job.image = try allocator.dupe(u8, unquoteScalar(kv.value));
+    }
+}
+
+fn parseStepLine(
+    allocator: Allocator,
+    job: *WorkflowJob,
+    current_step: *?usize,
+    line: []const u8,
+    indent: usize,
+    steps_indent: usize,
+) !void {
+    if (indent == steps_indent and std.mem.startsWith(u8, line, "-")) {
+        const idx = try appendWorkflowStep(allocator, job);
+        current_step.* = idx;
+        const rest = std.mem.trim(u8, line[1..], " \t\r\n");
+        if (rest.len != 0) try parseStepField(allocator, &job.steps[idx], rest);
+        return;
+    }
+    if (current_step.*) |idx| {
+        try parseStepField(allocator, &job.steps[idx], line);
+    }
+}
+
+fn appendWorkflowStep(allocator: Allocator, job: *WorkflowJob) !usize {
+    const old = job.steps;
+    const next = try allocator.alloc(WorkflowStep, old.len + 1);
+    for (old, 0..) |step, idx| next[idx] = step;
+    next[old.len] = .{ .allocator = allocator };
+    allocator.free(old);
+    job.steps = next;
+    return old.len;
+}
+
+fn parseStepField(allocator: Allocator, step: *WorkflowStep, line: []const u8) !void {
+    const kv = parseYamlKeyValue(line) orelse return;
+    if (std.mem.eql(u8, kv.key, "name")) {
+        if (step.name) |old| allocator.free(old);
+        step.name = try allocator.dupe(u8, unquoteScalar(kv.value));
+    } else if (std.mem.eql(u8, kv.key, "run")) {
+        if (step.run) |old| allocator.free(old);
+        step.run = try allocator.dupe(u8, unquoteScalar(kv.value));
+    }
+}
+
+fn normalizeBackend(raw: []const u8) []const u8 {
+    if (std.mem.eql(u8, raw, "agent")) return "agent";
+    if (std.mem.eql(u8, raw, "container")) return "container";
+    if (std.mem.eql(u8, raw, "github-actions")) return "github-actions";
+    if (std.mem.startsWith(u8, raw, "ubuntu-") or
+        std.mem.startsWith(u8, raw, "macos-") or
+        std.mem.startsWith(u8, raw, "windows-"))
+    {
+        return "github-actions";
+    }
+    return raw;
 }
 
 fn addInlineTriggers(allocator: Allocator, triggers: *std.ArrayList([]u8), raw: []const u8) !void {

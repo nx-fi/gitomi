@@ -786,6 +786,18 @@ init_repo "$comments"
   comment_id="$(json_field "$comments_json" id)"
   [[ -n "$comment_id" ]] || fail "expected comment id from comment list"
   comment_ref="comment:$(object_ref "$comment_id")"
+  gt issue comment "$issue_ref" --body "Issue alias comment" >/dev/null
+  gt issue close "$issue_ref" --body "Closing note" >/dev/null
+  issues_json="$(gt issue show "$issue_ref" --json)"
+  assert_contains "$issues_json" '"state":"closed"'
+  comments_json="$(gt comment list issue "$issue_ref" --json)"
+  assert_contains "$comments_json" '"body":"Issue alias comment"'
+  assert_contains "$comments_json" '"body":"Closing note"'
+  gt issue reopen "$issue_ref" --body "Reopening note" >/dev/null
+  issues_json="$(gt issue show "$issue_ref" --json)"
+  assert_contains "$issues_json" '"state":"open"'
+  comments_json="$(gt comment list issue "$issue_ref" --json)"
+  assert_contains "$comments_json" '"body":"Reopening note"'
   gt issue react "$issue_ref" +1 >/dev/null
   issue_show_json="$(gt issue show "$issue_ref" --json)"
   assert_contains "$issue_show_json" '"reactions":[{'
@@ -802,9 +814,11 @@ init_repo "$comments"
   comments_json="$(gt comment list issue "$issue_ref" --json)"
   assert_contains "$comments_json" '"reactions":[]'
   gt comment reply "$comment_ref" --body "Reply comment" >/dev/null
+  gt issue comment "$issue_ref" --reply "$comment_ref" --body "Issue alias reply" >/dev/null
   comments_json="$(gt comment list issue "$issue_ref" --json)"
-  assert_line_count "$comments_json" 2
+  assert_line_count "$comments_json" 6
   assert_contains "$comments_json" '"body":"Reply comment"'
+  assert_contains "$comments_json" '"body":"Issue alias reply"'
   assert_contains "$comments_json" '"reply_parent_id":"'"$comment_id"'"'
   assert_contains "$comments_json" '"reply_parent_hash":'
   sleep 1
@@ -869,12 +883,18 @@ init_repo "$pulls_repo"
   assert_contains "$pull_show_json" '"reactions":[{'
   assert_contains "$pull_show_json" '"actors":["alice"]'
   gt comment react "$pull_comment_ref" +1 >/dev/null
-  gt comment reply "$pull_comment_ref" --body "Pull reply" >/dev/null
+  gt pr comment "$pull_ref" --reply "$pull_comment_ref" --body "Pull reply" >/dev/null
   pull_comments="$(gt comment list pr "$pull_ref" --json)"
   assert_line_count "$pull_comments" 2
   assert_contains "$pull_comments" '"body":"Pull reply"'
   assert_contains "$pull_comments" '"reply_parent_id":"'"$pull_comment_id"'"'
   assert_contains "$pull_comments" '"reactions":[{'
+  gt pr comment "$pull_ref" --body "Line note" --file cli/src/pull.zig --side new --line 42 >/dev/null
+  gt pr comment "$pull_ref" --body "Range note" --file cli/src/pull.zig --side old --start-line 10 --end-line 12 >/dev/null
+  pull_comments="$(gt comment list pr "$pull_ref" --json)"
+  assert_line_count "$pull_comments" 4
+  assert_contains "$pull_comments" 'Review comment on `cli/src/pull.zig` (new line 42).'
+  assert_contains "$pull_comments" 'Review comment on `cli/src/pull.zig` (old lines 10-12).'
   sleep 1
   gt pr title "$pull_ref" --title "Updated pull" >/dev/null
   gt pr base "$pull_ref" --base trunk >/dev/null
