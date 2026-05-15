@@ -42,8 +42,8 @@ gt clear remote [--remote REMOTE] [--yes]
 gt reset local [--yes]
 gt reset remote [--remote REMOTE] [--yes]
 gt events list [--json] [--limit N] [--ref REF]
-gt issue list [--json]
-gt issue show ISSUE [--json]
+gt issue list [--json] [--view agent] [--state open|closed|all] [--author PRINCIPAL] [--label LABEL] [--project PROJECT] [--milestone MILESTONE] [--assignee PRINCIPAL] [--sort newest|oldest|updated] [--limit N]
+gt issue show ISSUE [--json] [--view agent]
 gt issue open --title TITLE [--body BODY] [--label LABEL] [--assignee PRINCIPAL]
 gt issue edit ISSUE [--title TITLE] [--body BODY] [--state open|closed] [--label LABEL] [--unlabel LABEL] [--assignee PRINCIPAL] [--unassign PRINCIPAL]
 gt issue title ISSUE --title TITLE
@@ -63,8 +63,8 @@ gt milestone list [--json]
 gt milestone create --title TITLE [--description TEXT] [--due DATE]
 gt milestone edit MILESTONE [--title TITLE] [--description TEXT] [--due DATE] [--state open|closed]
 gt milestone close|reopen MILESTONE
-gt pr list [--json]
-gt pr view PR [--json]
+gt pr list [--json] [--view agent] [--state open|merged|closed|all] [--limit N]
+gt pr view PR [--json] [--view agent] [--include-diff]
 gt pr create --title TITLE --base BASE --head HEAD [--body BODY] [--draft]
 gt pr edit PR [--title TITLE] [--body BODY] [--state open|closed] [--base BASE] [--head HEAD] [--add-label LABEL] [--remove-label LABEL] [--add-assignee PRINCIPAL] [--remove-assignee PRINCIPAL] [--add-reviewer PRINCIPAL] [--remove-reviewer PRINCIPAL]
 gt pr title PR --title TITLE
@@ -120,6 +120,14 @@ into one signed `issue.updated` or `pull.updated` event. `gt issue comment`
 mirrors the issue conversation form, including replies, and `gt issue close`
 or `gt issue reopen` can write the same optional note that the web UI accepts
 when changing issue state.
+
+`gt issue list --view agent` and `gt pr list --view agent` emit single
+aggregated JSON documents with active filters, counts, rows, and suggested
+`cli_commands`. `gt issue show --view agent` and `gt pr view --view agent`
+include detail metadata, comments, reactions, timeline events, commit
+references, and command templates for follow-up actions. `gt pr view --view
+agent --include-diff` also includes a local diff when the pull request base and
+head refs are available.
 
 `gt project create` creates a signed project board event with kanban columns.
 When no columns are supplied it creates `Todo`, `In Progress`, and `Done`.

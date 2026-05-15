@@ -699,6 +699,8 @@ YAML
   assert_contains "$events" '"event_type":"action.run_requested"'
   assert_contains "$events" '"event_type":"action.run_completed"'
   assert_contains "$events" '"diagnostics_ref":"refs/gitomi/runs/alice-laptop/'
+  completed_body="$(git log -1 --format=%B refs/gitomi/inbox/alice/laptop)"
+  assert_contains "$completed_body" '"diagnostics_ref":"refs/gitomi/runs/alice-laptop/'
 
   run_ref="$(git for-each-ref --format='%(refname)' refs/gitomi/runs | head -n 1)"
   [[ -n "$run_ref" ]] || fail "expected native workflow run ref"
@@ -865,6 +867,20 @@ init_repo "$comments"
   assert_contains "$comments_json" '"body":"Issue alias reply"'
   assert_contains "$comments_json" '"reply_parent_id":"'"$comment_id"'"'
   assert_contains "$comments_json" '"reply_parent_hash":'
+  issue_agent="$(gt issue show "$issue_ref" --view agent)"
+  assert_line_count "$issue_agent" 1
+  assert_contains "$issue_agent" '"kind":"issue"'
+  assert_contains "$issue_agent" '"comments":['
+  assert_contains "$issue_agent" '"body":"Issue alias reply"'
+  assert_contains "$issue_agent" '"timeline_events":['
+  assert_contains "$issue_agent" '"cli_commands":{'
+  assert_contains "$issue_agent" '"comment":"gt issue comment #'
+  issue_list_agent="$(gt issue list --view agent --state open --limit 5)"
+  assert_line_count "$issue_list_agent" 1
+  assert_contains "$issue_list_agent" '"kind":"issue_list"'
+  assert_contains "$issue_list_agent" '"filters":{"state":"open"'
+  assert_contains "$issue_list_agent" '"issues":['
+  assert_contains "$issue_list_agent" '"cli_commands":{'
   sleep 1
   gt comment edit "$comment_ref" --body "Edited comment" >/dev/null
   comments_json="$(gt comment list issue "$issue_ref" --json)"
@@ -939,6 +955,24 @@ init_repo "$pulls_repo"
   assert_line_count "$pull_comments" 4
   assert_contains "$pull_comments" 'Review comment on `cli/src/pull.zig` (new line 42).'
   assert_contains "$pull_comments" 'Review comment on `cli/src/pull.zig` (old lines 10-12).'
+  pull_agent="$(gt pr view "$pull_ref" --view agent)"
+  assert_line_count "$pull_agent" 1
+  assert_contains "$pull_agent" '"kind":"pull_request"'
+  assert_contains "$pull_agent" '"comments":['
+  assert_contains "$pull_agent" 'Range note'
+  assert_contains "$pull_agent" '"timeline_events":['
+  assert_contains "$pull_agent" '"cli_commands":{'
+  assert_contains "$pull_agent" '"review_line":"gt pr comment #'
+  pull_agent_with_diff="$(gt pr view "$pull_ref" --view agent --include-diff)"
+  assert_line_count "$pull_agent_with_diff" 1
+  assert_contains "$pull_agent_with_diff" '"diff_available":false'
+  assert_contains "$pull_agent_with_diff" '"refresh_with_diff":"gt pr view #'
+  pull_list_agent="$(gt pr list --view agent --state open --limit 5)"
+  assert_line_count "$pull_list_agent" 1
+  assert_contains "$pull_list_agent" '"kind":"pull_request_list"'
+  assert_contains "$pull_list_agent" '"filters":{"state":"open"'
+  assert_contains "$pull_list_agent" '"pull_requests":['
+  assert_contains "$pull_list_agent" '"cli_commands":{'
   sleep 1
   gt pr title "$pull_ref" --title "Updated pull" >/dev/null
   gt pr base "$pull_ref" --base trunk >/dev/null

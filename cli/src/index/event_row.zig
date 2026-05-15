@@ -10,6 +10,7 @@ const SqliteStmt = sqlite_db.SqliteStmt;
 const appendJsonFieldBool = json_writer.appendJsonFieldBool;
 const appendJsonFieldInteger = json_writer.appendJsonFieldInteger;
 const appendJsonFieldString = json_writer.appendJsonFieldString;
+const appendJsonString = json_writer.appendJsonString;
 const out = io.out;
 
 pub const IndexedEvent = struct {
@@ -29,6 +30,7 @@ pub const IndexedEvent = struct {
     occurred_at: []const u8,
     domain_status: []const u8,
     rejection_reason: []const u8,
+    body: []const u8,
 };
 
 pub fn indexedEventFromStmt(allocator: Allocator, stmt: *SqliteStmt) !IndexedEvent {
@@ -58,6 +60,8 @@ pub fn indexedEventFromStmt(allocator: Allocator, stmt: *SqliteStmt) !IndexedEve
     errdefer if (domain_status) |value| allocator.free(value);
     var rejection_reason: ?[]u8 = try stmt.columnTextDup(allocator, 15);
     errdefer if (rejection_reason) |value| allocator.free(value);
+    var body: ?[]u8 = try stmt.columnTextDup(allocator, 16);
+    errdefer if (body) |value| allocator.free(value);
 
     const event = IndexedEvent{
         .ref = ref.?,
@@ -76,6 +80,7 @@ pub fn indexedEventFromStmt(allocator: Allocator, stmt: *SqliteStmt) !IndexedEve
         .occurred_at = occurred_at.?,
         .domain_status = domain_status.?,
         .rejection_reason = rejection_reason.?,
+        .body = body.?,
     };
     ref = null;
     commit = null;
@@ -90,6 +95,7 @@ pub fn indexedEventFromStmt(allocator: Allocator, stmt: *SqliteStmt) !IndexedEve
     occurred_at = null;
     domain_status = null;
     rejection_reason = null;
+    body = null;
     return event;
 }
 
@@ -107,6 +113,7 @@ pub fn freeIndexedEvent(allocator: Allocator, event: IndexedEvent) void {
     allocator.free(event.occurred_at);
     allocator.free(event.domain_status);
     allocator.free(event.rejection_reason);
+    allocator.free(event.body);
 }
 
 pub fn appendIndexedEventJson(buf: *std.ArrayList(u8), allocator: Allocator, event: IndexedEvent) !void {
@@ -129,9 +136,54 @@ pub fn appendIndexedEventJson(buf: *std.ArrayList(u8), allocator: Allocator, eve
         try appendJsonFieldString(buf, allocator, "actor_principal", event.actor_principal, true);
         try appendJsonFieldString(buf, allocator, "actor_device", event.actor_device, true);
         if (event.seq) |seq| try appendJsonFieldInteger(buf, allocator, "seq", seq, true);
-        try appendJsonFieldString(buf, allocator, "occurred_at", event.occurred_at, false);
+        const has_run_completed_payload = std.mem.eql(u8, event.event_type, "action.run_completed");
+        try appendJsonFieldString(buf, allocator, "occurred_at", event.occurred_at, has_run_completed_payload);
+        if (has_run_completed_payload) {
+            const wrote_payload = try appendRunCompletedPayloadJsonFields(buf, allocator, event.body);
+            if (!wrote_payload and buf.items[buf.items.len - 1] == ',') {
+                buf.items.len -= 1;
+            }
+        }
     }
     try buf.append(allocator, '}');
+}
+
+fn appendRunCompletedPayloadJsonFields(buf: *std.ArrayList(u8), allocator: Allocator, body: []const u8) !bool {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch {
+        try appendJsonString(buf, allocator, "payload_unavailable");
+        try buf.appendSlice(allocator, ":true");
+        return true;
+    };
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => {
+            try appendJsonString(buf, allocator, "payload_unavailable");
+            try buf.appendSlice(allocator, ":true");
+            return true;
+        },
+    };
+    const payload = switch (root.get("payload") orelse return false) {
+        .object => |object| object,
+        else => return false,
+    };
+    var wrote = false;
+    if (payload.get("diagnostics_ref")) |value| {
+        if (value == .string) {
+            try appendJsonFieldString(buf, allocator, "diagnostics_ref", value.string, true);
+            wrote = true;
+        }
+    }
+    if (payload.get("diagnostics_oid")) |value| {
+        if (value == .string) {
+            try appendJsonFieldString(buf, allocator, "diagnostics_oid", value.string, false);
+            wrote = true;
+        }
+    }
+    if (wrote and buf.items[buf.items.len - 1] == ',') {
+        buf.items.len -= 1;
+    }
+    return wrote;
 }
 
 pub fn printIndexedEvent(event: IndexedEvent) !void {
@@ -172,6 +224,7 @@ test "indexed event json carries projection fields" {
         .occurred_at = "2026-05-13T18:30:59Z",
         .domain_status = "accepted",
         .rejection_reason = "",
+        .body = "{}",
     };
 
     var line: std.ArrayList(u8) = .empty;

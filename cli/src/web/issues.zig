@@ -132,7 +132,7 @@ pub fn renderIssuesPage(allocator: Allocator, repo: Repo, target: []const u8) ![
     defer db.deinit();
 
     const requested_filter = try issueStateFilterFromTarget(allocator, target);
-    const counts = try loadIssueCounts(&db);
+    const counts = try work_items.loadIssueCounts(&db);
     const default_state = requested_filter orelse if (counts.open == 0 and counts.closed > 0) IssueStateFilter.closed else IssueStateFilter.open;
     var filters = try issueFiltersFromTarget(allocator, target, default_state);
     defer filters.deinit();
@@ -155,7 +155,7 @@ pub fn renderIssuesPage(allocator: Allocator, repo: Repo, target: []const u8) ![
     }
 
     if (shown == 0) {
-        if (hasRestrictiveIssueFilters(filters)) {
+        if (work_items.hasRestrictiveIssueFilters(filters)) {
             try appendEmptyState(&buf, allocator, "No matching issues.", "Change or clear filters to widen the issue list.");
         } else switch (filters.state) {
             .open => try appendEmptyState(&buf, allocator, "No open issues.", "Closed issues are available from the Closed tab."),
@@ -187,7 +187,7 @@ fn issueFiltersFromTarget(allocator: Allocator, target: []const u8, default_stat
     errdefer filters.deinit();
 
     if (try queryTextFilterOwned(allocator, target, "q")) |query| {
-        if (std.mem.eql(u8, query, issueSearchQuery(default_state))) {
+        if (std.mem.eql(u8, query, work_items.issueSearchQuery(default_state))) {
             allocator.free(query);
         } else {
             filters.q = query;
@@ -224,32 +224,6 @@ fn issueSortFromTarget(allocator: Allocator, target: []const u8) !IssueSort {
     return .newest;
 }
 
-fn issueListSql(allocator: Allocator, filters: IssueFilters) ![]u8 {
-    return work_items.issueListSql(allocator, filters);
-}
-
-fn appendIssueListCondition(sql: *std.ArrayList(u8), allocator: Allocator, conditions: *usize, condition: []const u8) !void {
-    try sql.appendSlice(allocator, if (conditions.* == 0) "\nWHERE " else "\n  AND ");
-    try sql.appendSlice(allocator, condition);
-    conditions.* += 1;
-}
-
-fn bindIssueListFilters(stmt: *index.SqliteStmt, filters: IssueFilters, search_pattern: ?[]const u8) !void {
-    return work_items.bindIssueListFilters(stmt, filters, search_pattern);
-}
-
-fn sqliteLikePatternOwned(allocator: Allocator, value: []const u8) ![]u8 {
-    return work_items.sqliteLikePatternOwned(allocator, value);
-}
-
-fn hasRestrictiveIssueFilters(filters: IssueFilters) bool {
-    return work_items.hasRestrictiveIssueFilters(filters);
-}
-
-fn loadIssueCounts(db: *SqliteDb) !IssueCounts {
-    return work_items.loadIssueCounts(db);
-}
-
 fn appendIssuesToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filters: IssueFilters) !void {
     try appendTemplate(buf, allocator,
         \\<div class="issues-toolbar">
@@ -258,8 +232,8 @@ fn appendIssuesToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filters: I
         \\    <input type="search" name="q" value="{query}" aria-label="Search issues">
         \\    <input type="hidden" name="state" value="{state}">
     , .{
-        .query = filters.q orelse issueSearchQuery(filters.state),
-        .state = issueStateValue(filters.state),
+        .query = filters.q orelse work_items.issueSearchQuery(filters.state),
+        .state = work_items.issueStateValue(filters.state),
     });
     try appendIssueFilterHiddenInputs(buf, allocator, filters);
     try buf.appendSlice(allocator,
@@ -282,7 +256,7 @@ fn appendIssueFilterHiddenInputs(buf: *std.ArrayList(u8), allocator: Allocator, 
     if (filters.sort != .newest) {
         try appendTemplate(buf, allocator,
             \\    <input type="hidden" name="sort" value="{sort}">
-        , .{ .sort = issueSortValue(filters.sort) });
+        , .{ .sort = work_items.issueSortValue(filters.sort) });
     }
 }
 
@@ -529,7 +503,7 @@ fn issueFilterOptionsSql(kind: IssueFilterKind) []const u8 {
 fn appendIssuesHref(buf: *std.ArrayList(u8), allocator: Allocator, filters: IssueFilters, override: IssueHrefOverride) !void {
     try buf.appendSlice(allocator, "/issues");
     var first = true;
-    try appendIssuesHrefParam(buf, allocator, &first, "state", issueStateValue(override.state orelse filters.state));
+    try appendIssuesHrefParam(buf, allocator, &first, "state", work_items.issueStateValue(override.state orelse filters.state));
     if (filterHrefValue(filters, override, "q")) |value| try appendIssuesHrefParam(buf, allocator, &first, "q", value);
     if (filterHrefValue(filters, override, "author")) |value| try appendIssuesHrefParam(buf, allocator, &first, "author", value);
     if (filterHrefValue(filters, override, "label")) |value| try appendIssuesHrefParam(buf, allocator, &first, "label", value);
@@ -538,7 +512,7 @@ fn appendIssuesHref(buf: *std.ArrayList(u8), allocator: Allocator, filters: Issu
     if (filterHrefValue(filters, override, "assignee")) |value| try appendIssuesHrefParam(buf, allocator, &first, "assignee", value);
 
     const sort = override.sort orelse filters.sort;
-    if (sort != .newest) try appendIssuesHrefParam(buf, allocator, &first, "sort", issueSortValue(sort));
+    if (sort != .newest) try appendIssuesHrefParam(buf, allocator, &first, "sort", work_items.issueSortValue(sort));
 }
 
 fn filterHrefValue(filters: IssueFilters, override: IssueHrefOverride, name: []const u8) ?[]const u8 {
@@ -681,18 +655,6 @@ fn appendIssueAssignees(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqli
 
 fn appendIssueAvatar(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8, extra_class: []const u8) !void {
     try shared.appendAvatar(buf, allocator, name, extra_class);
-}
-
-fn issueSearchQuery(filter: IssueStateFilter) []const u8 {
-    return work_items.issueSearchQuery(filter);
-}
-
-fn issueStateValue(filter: IssueStateFilter) []const u8 {
-    return work_items.issueStateValue(filter);
-}
-
-fn issueSortValue(sort: IssueSort) []const u8 {
-    return work_items.issueSortValue(sort);
 }
 
 fn issueSortLabel(sort: IssueSort) []const u8 {
@@ -3365,7 +3327,7 @@ test "issue list SQL includes selected filters" {
     };
     defer filters.deinit();
 
-    const sql = try issueListSql(std.testing.allocator, filters);
+    const sql = try work_items.issueListSql(std.testing.allocator, filters);
     defer std.testing.allocator.free(sql);
     try std.testing.expect(std.mem.indexOf(u8, sql, "i.state = ?") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "i.title LIKE ?") != null);

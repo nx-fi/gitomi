@@ -184,7 +184,7 @@ pub fn renderPullsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]
     defer db.deinit();
 
     const requested_filter = try pullStateFilterFromTarget(allocator, target);
-    const counts = try loadPullCounts(&db);
+    const counts = try work_items.loadPullCounts(&db);
     const filter = requested_filter orelse .open;
 
     try appendShellStart(&buf, allocator, repo, "Pull Requests", "pulls");
@@ -238,14 +238,6 @@ fn pullDetailTabFromTarget(allocator: Allocator, target: []const u8) !PullDetail
     return .conversation;
 }
 
-fn pullListSql(filter: PullStateFilter) []const u8 {
-    return work_items.pullListSql(.{ .state = filter });
-}
-
-fn loadPullCounts(db: *SqliteDb) !PullCounts {
-    return work_items.loadPullCounts(db);
-}
-
 fn appendPullsToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filter: PullStateFilter) !void {
     try appendTemplate(buf, allocator,
         \\<div class="pulls-toolbar issues-toolbar">
@@ -261,8 +253,8 @@ fn appendPullsToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filter: Pul
         \\  </div>
         \\</div>
     , .{
-        .query = pullSearchQuery(filter),
-        .state = pullStateValue(filter),
+        .query = work_items.pullSearchQuery(filter),
+        .state = work_items.pullStateValue(filter),
     });
 }
 
@@ -301,7 +293,7 @@ fn appendPullStateTab(
         \\<a class="{classes}" href="/pulls?state={state}"><span class="issue-tab-icon {icon_class}" aria-hidden="true"></span><span>{label}</span><span class="issue-count-badge">{count}</span></a>
     , .{
         .classes = shared.classes("issues-state-tab", &.{shared.class("active", tab_filter == active_filter)}),
-        .state = pullStateValue(tab_filter),
+        .state = work_items.pullStateValue(tab_filter),
         .icon_class = icon_class,
         .label = label,
         .count = count,
@@ -421,7 +413,7 @@ pub fn renderPullDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
 
-    const detail = (try loadPullDetail(allocator, &db, pull_id)) orelse return renderPullNotFound(allocator, repo, raw_ref);
+    const detail = (try work_items.loadPullDetail(allocator, &db, pull_id)) orelse return renderPullNotFound(allocator, repo, raw_ref);
     defer detail.deinit(allocator);
     const tab = try pullDetailTabFromTarget(allocator, target);
 
@@ -459,10 +451,6 @@ pub fn renderPullDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u
     return buf.toOwnedSlice(allocator);
 }
 
-fn loadPullDetail(allocator: Allocator, db: *SqliteDb, pull_id: []const u8) !?PullDetail {
-    return work_items.loadPullDetail(allocator, db, pull_id);
-}
-
 fn renderPullNotFound(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -485,7 +473,7 @@ pub fn renderPullMergeEditorPage(allocator: Allocator, repo: Repo, raw_ref: []co
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
 
-    const detail = (try loadPullDetail(allocator, &db, pull_id)) orelse return renderPullNotFound(allocator, repo, raw_ref);
+    const detail = (try work_items.loadPullDetail(allocator, &db, pull_id)) orelse return renderPullNotFound(allocator, repo, raw_ref);
     defer detail.deinit(allocator);
 
     const merge_status = try loadPullMergeStatus(allocator, repo, detail);
@@ -840,10 +828,10 @@ fn loadMergeConflictFiles(allocator: Allocator, repo: Repo, detail: PullDetail, 
         files.deinit(allocator);
     }
 
-    const git_refs = (try loadPullGitRefs(allocator, repo, detail)) orelse return try files.toOwnedSlice(allocator);
+    const git_refs = (try work_items.loadPullGitRefs(allocator, repo, detail)) orelse return try files.toOwnedSlice(allocator);
     defer git_refs.deinit(allocator);
 
-    const merge_base = try loadMergeBase(allocator, repo, git_refs.base, git_refs.head);
+    const merge_base = try work_items.loadMergeBase(allocator, repo, git_refs.base, git_refs.head);
     defer if (merge_base) |value| allocator.free(value);
 
     for (conflict_paths) |path| {
@@ -920,7 +908,7 @@ fn freeMergeConflictFiles(allocator: Allocator, files: []MergeConflictFile) void
 fn loadBlobAtRef(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?[]u8 {
     const object = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ ref, path });
     defer allocator.free(object);
-    return gitMaybe(allocator, repo, &.{ "show", object }, max_merge_blob_bytes);
+    return work_items.gitMaybe(allocator, repo, &.{ "show", object }, max_merge_blob_bytes);
 }
 
 fn mergeFileConflictContent(
@@ -1026,22 +1014,22 @@ fn loadPullTabCounts(allocator: Allocator, repo: Repo, db: *SqliteDb, detail: Pu
 
 fn loadPullGitTabCounts(allocator: Allocator, repo: Repo, detail: PullDetail) !PullTabCounts {
     var counts: PullTabCounts = .{};
-    const git_refs = (try loadPullGitRefs(allocator, repo, detail)) orelse return counts;
+    const git_refs = (try work_items.loadPullGitRefs(allocator, repo, detail)) orelse return counts;
     defer git_refs.deinit(allocator);
 
-    const merge_base = try loadMergeBase(allocator, repo, git_refs.base, git_refs.head);
+    const merge_base = try work_items.loadMergeBase(allocator, repo, git_refs.base, git_refs.head);
     defer if (merge_base) |value| allocator.free(value);
     const base = merge_base orelse return counts;
 
     const range = try std.fmt.allocPrint(allocator, "{s}..{s}", .{ base, git_refs.head });
     defer allocator.free(range);
-    if (try gitMaybe(allocator, repo, &.{ "rev-list", "--count", range }, 64 * 1024)) |raw_count| {
+    if (try work_items.gitMaybe(allocator, repo, &.{ "rev-list", "--count", range }, 64 * 1024)) |raw_count| {
         defer allocator.free(raw_count);
         const trimmed = std.mem.trim(u8, raw_count, " \t\r\n");
         counts.commits = std.fmt.parseUnsigned(usize, trimmed, 10) catch null;
     }
 
-    if (try gitMaybe(allocator, repo, &.{ "diff", "--name-only", "--find-renames", base, git_refs.head }, max_pull_diff_bytes)) |raw_files| {
+    if (try work_items.gitMaybe(allocator, repo, &.{ "diff", "--name-only", "--find-renames", base, git_refs.head }, max_pull_diff_bytes)) |raw_files| {
         defer allocator.free(raw_files);
         var files: usize = 0;
         var lines = std.mem.splitScalar(u8, raw_files, '\n');
@@ -1157,10 +1145,6 @@ fn currentActorCanEditInRepo(allocator: Allocator, repo: Repo, author: []const u
     const current_role = if (current_actor) |actor| try index.effectiveWriteRoleForPrincipal(allocator, repo, actor) else null;
     defer if (current_role) |role| allocator.free(role);
     return currentActorCanEditAuthor(current_actor, current_role, author);
-}
-
-fn optionalCount(value: i64) ?usize {
-    return work_items.optionalCount(value);
 }
 
 fn appendPullCommitSummary(buf: *std.ArrayList(u8), allocator: Allocator, count: ?usize) !void {
@@ -1917,7 +1901,7 @@ fn appendPullCommits(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, 
 }
 
 fn appendPullFiles(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, detail: PullDetail, raw_ref: []const u8) !void {
-    const diff_opt = try loadPullDiff(allocator, repo, detail, 3);
+    const diff_opt = try work_items.loadPullDiff(allocator, repo, detail, 3);
     const diff = diff_opt orelse {
         if (detail.changed_files != null or detail.additions != null or detail.deletions != null) {
             const detail_text = try pullImportedFileSummary(allocator, detail);
@@ -1960,15 +1944,15 @@ fn pullGitDataFetchHint(allocator: Allocator, detail: PullDetail) ![]u8 {
 }
 
 fn loadPullCommits(allocator: Allocator, repo: Repo, detail: PullDetail) !?[]PullCommit {
-    const git_refs = (try loadPullGitRefs(allocator, repo, detail)) orelse return null;
+    const git_refs = (try work_items.loadPullGitRefs(allocator, repo, detail)) orelse return null;
     defer git_refs.deinit(allocator);
 
-    const merge_base = try loadMergeBase(allocator, repo, git_refs.base, git_refs.head);
+    const merge_base = try work_items.loadMergeBase(allocator, repo, git_refs.base, git_refs.head);
     defer if (merge_base) |value| allocator.free(value);
     const base = merge_base orelse return null;
     const range = try std.fmt.allocPrint(allocator, "{s}..{s}", .{ base, git_refs.head });
     defer allocator.free(range);
-    const raw = try gitMaybe(allocator, repo, &.{ "log", "--reverse", "--format=%H%x00%h%x00%an%x00%cr%x00%s", range }, git.max_git_output) orelse return null;
+    const raw = try work_items.gitMaybe(allocator, repo, &.{ "log", "--reverse", "--format=%H%x00%h%x00%an%x00%cr%x00%s", range }, git.max_git_output) orelse return null;
     defer allocator.free(raw);
 
     var commits: std.ArrayList(PullCommit) = .empty;
@@ -1990,18 +1974,6 @@ fn loadPullCommits(allocator: Allocator, repo: Repo, detail: PullDetail) !?[]Pul
         });
     }
     return try commits.toOwnedSlice(allocator);
-}
-
-fn loadPullDiff(allocator: Allocator, repo: Repo, detail: PullDetail, context: usize) !?[]u8 {
-    return work_items.loadPullDiff(allocator, repo, detail, context);
-}
-
-fn loadMergeBase(allocator: Allocator, repo: Repo, base_ref: []const u8, head_ref: []const u8) !?[]u8 {
-    return work_items.loadMergeBase(allocator, repo, base_ref, head_ref);
-}
-
-fn loadPullGitRefs(allocator: Allocator, repo: Repo, detail: PullDetail) !?PullGitRefs {
-    return work_items.loadPullGitRefs(allocator, repo, detail);
 }
 
 fn resolveGithubPullHeadCommit(allocator: Allocator, repo: Repo, number: i64) !?[]u8 {
@@ -2039,7 +2011,7 @@ fn resolvePullGitCommit(allocator: Allocator, repo: Repo, raw_ref: []const u8, p
 fn resolveGitCommit(allocator: Allocator, repo: Repo, ref: []const u8) !?[]u8 {
     const commit_ref = try std.fmt.allocPrint(allocator, "{s}^{{commit}}", .{ref});
     defer allocator.free(commit_ref);
-    const raw = try gitMaybe(allocator, repo, &.{ "rev-parse", "--verify", "--quiet", commit_ref }, 1024 * 1024) orelse return null;
+    const raw = try work_items.gitMaybe(allocator, repo, &.{ "rev-parse", "--verify", "--quiet", commit_ref }, 1024 * 1024) orelse return null;
     defer allocator.free(raw);
     const trimmed = std.mem.trim(u8, raw, " \t\r\n");
     if (trimmed.len == 0) return null;
@@ -2062,10 +2034,10 @@ fn isBranchShorthand(ref: []const u8) bool {
 fn loadPullMergeStatus(allocator: Allocator, repo: Repo, detail: PullDetail) !PullMergeStatus {
     if (!std.mem.eql(u8, detail.state, "open")) return .{ .kind = .unavailable };
 
-    const git_refs = (try loadPullGitRefs(allocator, repo, detail)) orelse return .{ .kind = .unavailable };
+    const git_refs = (try work_items.loadPullGitRefs(allocator, repo, detail)) orelse return .{ .kind = .unavailable };
     defer git_refs.deinit(allocator);
 
-    const merge_base = try loadMergeBase(allocator, repo, git_refs.base, git_refs.head);
+    const merge_base = try work_items.loadMergeBase(allocator, repo, git_refs.base, git_refs.head);
     defer if (merge_base) |value| allocator.free(value);
     if (merge_base == null) return .{ .kind = .unavailable };
 
@@ -2331,14 +2303,6 @@ fn commitWord(count: usize) []const u8 {
     return if (count == 1) "commit" else "commits";
 }
 
-fn pullSearchQuery(filter: PullStateFilter) []const u8 {
-    return work_items.pullSearchQuery(filter);
-}
-
-fn pullStateValue(filter: PullStateFilter) []const u8 {
-    return work_items.pullStateValue(filter);
-}
-
 pub fn renderPullForm(
     allocator: Allocator,
     repo: Repo,
@@ -2445,7 +2409,7 @@ pub fn handlePullConflictPost(allocator: Allocator, repo: Repo, stream: std.net.
 
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
-    const detail = (try loadPullDetail(allocator, &db, pull_id)) orelse {
+    const detail = (try work_items.loadPullDetail(allocator, &db, pull_id)) orelse {
         try sendPlainResponse(allocator, stream, 404, "Not Found", "Pull request not found\n");
         return;
     };
@@ -2664,7 +2628,7 @@ pub fn handlePullCommentPost(allocator: Allocator, repo: Repo, stream: std.net.S
             try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Diff comment target is invalid\n");
             return;
         };
-        const comment_body_owned = if (diff_context) |context| try formatDiffCommentBody(allocator, context, body_value) else null;
+        const comment_body_owned = if (diff_context) |context| try work_items.formatDiffCommentBody(allocator, context, body_value) else null;
         defer if (comment_body_owned) |value| allocator.free(value);
         const comment_body = comment_body_owned orelse body_value;
 
@@ -2764,10 +2728,6 @@ fn parseDiffCommentLine(value: []const u8) ?usize {
     if (trimmed.len == 0) return null;
     const parsed = std.fmt.parseUnsigned(usize, trimmed, 10) catch return null;
     return if (parsed == 0) null else parsed;
-}
-
-fn formatDiffCommentBody(allocator: Allocator, context: DiffCommentContext, body: []const u8) ![]u8 {
-    return work_items.formatDiffCommentBody(allocator, context, body);
 }
 
 fn contentHasConflictMarkers(content: []const u8) bool {
@@ -2896,10 +2856,6 @@ fn gitCheckedAt(allocator: Allocator, root: []const u8, git_args: []const []cons
     return error.GitFailed;
 }
 
-fn gitMaybe(allocator: Allocator, repo: Repo, git_args: []const []const u8, max_output_bytes: usize) !?[]u8 {
-    return work_items.gitMaybe(allocator, repo, git_args, max_output_bytes);
-}
-
 fn freePullCommits(allocator: Allocator, commits: []PullCommit) void {
     for (commits) |commit| commit.deinit(allocator);
     allocator.free(commits);
@@ -2944,7 +2900,7 @@ test "parse diff comment context from form fields" {
 }
 
 test "format diff comment body includes file and line range" {
-    const body = try formatDiffCommentBody(std.testing.allocator, .{
+    const body = try work_items.formatDiffCommentBody(std.testing.allocator, .{
         .file = "cli/src/pulls.zig",
         .side = .new,
         .start_line = 139,

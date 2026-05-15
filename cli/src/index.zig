@@ -45,7 +45,7 @@ const appendJsonFieldUnsigned = json_writer.appendJsonFieldUnsigned;
 const appendJsonString = json_writer.appendJsonString;
 
 // This shall never be updated. Keep index compatibility checks additive under v1.
-const index_schema_version = "1";
+const index_schema_version = "2";
 pub const index_event_columns = index_query.index_event_columns;
 const snapshot_schema = "urn:gitomi:snapshot:v1";
 const snapshot_schema_version: u64 = 1;
@@ -493,6 +493,11 @@ fn rebuildIndexFromScratch(
         \\DROP TABLE IF EXISTS issue_projects;
         \\DROP TABLE IF EXISTS projects;
         \\DROP TABLE IF EXISTS project_columns;
+        \\DROP TABLE IF EXISTS project_memberships;
+        \\DROP TABLE IF EXISTS project_fields;
+        \\DROP TABLE IF EXISTS project_field_options;
+        \\DROP TABLE IF EXISTS project_field_values;
+        \\DROP TABLE IF EXISTS project_views;
         \\DROP TABLE IF EXISTS milestones;
         \\DROP TABLE IF EXISTS pulls;
         \\DROP TABLE IF EXISTS pull_labels;
