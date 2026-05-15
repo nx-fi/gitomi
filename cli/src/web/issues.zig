@@ -187,10 +187,13 @@ fn issueFiltersFromTarget(allocator: Allocator, target: []const u8, default_stat
     errdefer filters.deinit();
 
     if (try queryTextFilterOwned(allocator, target, "q")) |query| {
-        if (std.mem.eql(u8, query, work_items.issueSearchQuery(default_state))) {
-            allocator.free(query);
-        } else {
-            filters.q = query;
+        defer allocator.free(query);
+        var parsed = try work_items.parseIssueSearchQuery(allocator, query);
+        defer parsed.deinit(allocator);
+        if (parsed.state) |state| filters.state = state;
+        if (parsed.q) |search| {
+            filters.q = search;
+            parsed.q = null;
         }
     }
     filters.author = try queryTextFilterOwned(allocator, target, "author");
@@ -225,6 +228,8 @@ fn issueSortFromTarget(allocator: Allocator, target: []const u8) !IssueSort {
 }
 
 fn appendIssuesToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filters: IssueFilters) !void {
+    const query = try issueSearchInputValue(allocator, filters);
+    defer allocator.free(query);
     try appendTemplate(buf, allocator,
         \\<div class="issues-toolbar">
         \\  <form class="issues-search" action="/issues" method="get">
@@ -232,7 +237,7 @@ fn appendIssuesToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filters: I
         \\    <input type="search" name="q" value="{query}" aria-label="Search issues">
         \\    <input type="hidden" name="state" value="{state}">
     , .{
-        .query = filters.q orelse work_items.issueSearchQuery(filters.state),
+        .query = query,
         .state = work_items.issueStateValue(filters.state),
     });
     try appendIssueFilterHiddenInputs(buf, allocator, filters);
@@ -245,6 +250,12 @@ fn appendIssuesToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filters: I
         \\  </div>
         \\</div>
     );
+}
+
+fn issueSearchInputValue(allocator: Allocator, filters: IssueFilters) ![]u8 {
+    const prefix = work_items.issueSearchQuery(filters.state);
+    if (filters.q) |query| return std.fmt.allocPrint(allocator, "{s} {s}", .{ prefix, query });
+    return std.fmt.allocPrint(allocator, "{s} ", .{prefix});
 }
 
 fn appendIssueFilterHiddenInputs(buf: *std.ArrayList(u8), allocator: Allocator, filters: IssueFilters) !void {
@@ -328,7 +339,7 @@ fn appendIssueFilterMenu(
 ) !void {
     const active = issueFilterValue(filters, kind);
     try appendTemplate(buf, allocator,
-        \\<details{classes}><summary>{label}
+        \\<details{classes} data-popover-menu><summary>{label}
     , .{
         .classes = shared.classAttr("issues-filter-menu", &.{shared.class("active", active != null)}),
         .label = issueFilterLabel(kind),
@@ -398,7 +409,7 @@ fn appendIssueFilterMenuLink(
 
 fn appendIssueSortMenu(buf: *std.ArrayList(u8), allocator: Allocator, filters: IssueFilters) !void {
     try appendTemplate(buf, allocator,
-        \\<details{classes}><summary>{label}</summary><div class="issues-filter-popover" role="menu">
+        \\<details{classes} data-popover-menu><summary>{label}</summary><div class="issues-filter-popover" role="menu">
     , .{
         .classes = shared.classAttr("issues-filter-menu", &.{shared.class("active", filters.sort != .newest)}),
         .label = issueSortLabel(filters.sort),
@@ -1554,7 +1565,7 @@ pub fn appendIssueActionMenu(
     edit_href: []const u8,
 ) !void {
     try appendTemplate(buf, allocator,
-        \\<details class="issue-action-menu" data-issue-menu data-issue-anchor="{anchor}" data-issue-reply-ref="{reply_ref}" data-issue-edit-href="{edit_href}">
+        \\<details class="issue-action-menu" data-popover-menu data-issue-menu data-issue-anchor="{anchor}" data-issue-reply-ref="{reply_ref}" data-issue-edit-href="{edit_href}">
         \\  <summary class="issue-kebab-button" aria-label="Comment actions" title="Comment actions"></summary>
         \\  <template data-issue-markdown>{markdown}</template>
         \\  <div class="issue-action-popover" role="menu">
@@ -2097,7 +2108,7 @@ fn appendIssueSidebarSectionStart(buf: *std.ArrayList(u8), allocator: Allocator,
 
 fn appendIssueSidebarEditableSectionStart(buf: *std.ArrayList(u8), allocator: Allocator, title: []const u8, menu_label: []const u8) !void {
     try appendTemplate(buf, allocator,
-        \\<section class="issue-sidebar-section"><div class="issue-sidebar-heading"><h2>{title}</h2><details class="issue-sidebar-menu" data-issue-sidebar-menu><summary aria-label="{menu_label}" title="{menu_label}"><span class="issue-sidebar-menu-icon" aria-hidden="true"></span></summary><div class="issue-sidebar-popover" role="dialog" aria-label="{menu_label}"><div class="issue-sidebar-popover-title">{menu_label}</div>
+        \\<section class="issue-sidebar-section"><div class="issue-sidebar-heading"><h2>{title}</h2><details class="issue-sidebar-menu" data-popover-menu data-issue-sidebar-menu><summary aria-label="{menu_label}" title="{menu_label}"><span class="issue-sidebar-menu-icon" aria-hidden="true"></span></summary><div class="issue-sidebar-popover" role="dialog" aria-label="{menu_label}"><div class="issue-sidebar-popover-title">{menu_label}</div>
     , .{
         .title = title,
         .menu_label = menu_label,

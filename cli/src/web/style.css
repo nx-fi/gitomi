@@ -195,6 +195,10 @@ code {
   background: color-mix(in srgb, var(--topbar-text) 8%, transparent);
   text-decoration: none;
 }
+.topbar nav .button-icon {
+  width: 15px;
+  height: 15px;
+}
 .nav-badge {
   display: inline-grid;
   place-items: center;
@@ -4416,8 +4420,19 @@ main.page-code:has(.root-page-grid) {
   border-color: var(--border-strong);
 }
 .milestones-panel,
+.labels-panel,
 .access-table-panel {
   overflow: hidden;
+}
+.labels-name-cell {
+  min-width: 180px;
+}
+.labels-count-cell {
+  width: 150px;
+  font-variant-numeric: tabular-nums;
+}
+.labels-total-cell {
+  font-weight: 700;
 }
 .milestone-title-cell {
   display: flex;
@@ -5040,7 +5055,7 @@ main.page-actions {
   transform: rotate(45deg);
 }
 .actions-runs-panel {
-  overflow: hidden;
+  overflow: visible;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -5065,20 +5080,113 @@ main.page-actions {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 22px;
+  flex-wrap: wrap;
+  gap: 4px;
   color: var(--muted);
   font-size: 12px;
   font-weight: 700;
   white-space: nowrap;
 }
-.actions-runs-filters span::after {
+.actions-filter-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+.actions-filter-menu summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 190px;
+  min-height: 32px;
+  padding: 0 8px;
+  overflow: hidden;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  font: inherit;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  list-style: none;
+}
+.actions-filter-menu summary::-webkit-details-marker {
+  display: none;
+}
+.actions-filter-menu[open] summary,
+.actions-filter-menu.active summary,
+.actions-filter-menu summary:hover {
+  color: var(--text);
+  background: var(--button-secondary-bg);
+}
+.actions-filter-menu summary::after {
   content: "";
   display: inline-block;
+  flex: 0 0 auto;
   margin-left: 6px;
   border-top: 4px solid currentColor;
   border-right: 4px solid transparent;
   border-left: 4px solid transparent;
   vertical-align: 2px;
+}
+.actions-filter-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 24;
+  display: grid;
+  width: max-content;
+  min-width: 220px;
+  max-width: min(320px, calc(100vw - 24px));
+  max-height: 340px;
+  padding: 6px 0;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
+}
+.actions-filter-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 12px;
+  color: var(--text);
+  font-weight: 600;
+}
+.actions-filter-option:hover,
+.actions-filter-option.selected {
+  background: var(--panel-strong);
+  text-decoration: none;
+}
+.actions-filter-option.selected::before {
+  content: "";
+  width: 7px;
+  height: 4px;
+  border-bottom: 2px solid currentColor;
+  border-left: 2px solid currentColor;
+  transform: rotate(-45deg);
+}
+.actions-filter-option.selected {
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+}
+.actions-filter-option span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.actions-filter-option small {
+  color: var(--muted);
+  font-weight: 700;
+}
+.actions-filter-empty {
+  padding: 10px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
 }
 .actions-run-row {
   display: grid;
@@ -6735,6 +6843,18 @@ a.root-file-commit:hover {
 }
 .icon-code {
   --button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Cpath d='m16 18 6-6-6-6'/%3E%3Cpath d='m8 6-6 6 6 6'/%3E%3C/g%3E%3C/svg%3E");
+}
+.icon-issues {
+  --button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='M12 8h.01M11 12h1v5h1'/%3E%3C/g%3E%3C/svg%3E");
+}
+.icon-pull-request {
+  --button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Ccircle cx='6' cy='18' r='3'/%3E%3Ccircle cx='6' cy='6' r='3'/%3E%3Ccircle cx='18' cy='18' r='3'/%3E%3Cpath d='M6 9v6M9 6h3a6 6 0 0 1 6 6v3'/%3E%3C/g%3E%3C/svg%3E");
+}
+.icon-workflow {
+  --button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Crect x='3' y='4' width='6' height='6' rx='1'/%3E%3Crect x='15' y='4' width='6' height='6' rx='1'/%3E%3Crect x='9' y='14' width='6' height='6' rx='1'/%3E%3Cpath d='M9 7h6M6 10v2a4 4 0 0 0 4 4M18 10v2a4 4 0 0 1-4 4'/%3E%3C/g%3E%3C/svg%3E");
+}
+.icon-settings {
+  --button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Ccircle cx='12' cy='12' r='3'/%3E%3Cpath d='M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.36.17.7.37 1 .6.32.24.7.4 1.1.4H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1Z'/%3E%3C/g%3E%3C/svg%3E");
 }
 .icon-symbols {
   --button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Cpath d='M7 7h10M7 17h10M12 7v10'/%3E%3Ccircle cx='7' cy='7' r='2'/%3E%3Ccircle cx='17' cy='7' r='2'/%3E%3Ccircle cx='12' cy='17' r='2'/%3E%3C/g%3E%3C/svg%3E");

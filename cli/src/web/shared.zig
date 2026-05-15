@@ -331,11 +331,11 @@ pub fn appendShellStart(
         \\  <a class="brand" href="/"><img class="brand-logo" src="/logo.svg" alt="" width="47" height="32"><span>{repo_name}</span></a>
         \\  <nav>
     , .{ .repo_name = std.fs.path.basename(repo.root) });
-    try appendNavLink(buf, allocator, active, "code", "/", "Code", null);
-    try appendNavLink(buf, allocator, active, "issues", "/issues", "Issues", stats.issues);
-    try appendNavLink(buf, allocator, active, "pulls", "/pulls", "PRs", stats.pulls);
-    try appendNavLink(buf, allocator, active, "actions", "/actions", "Workflows", null);
-    try appendNavLink(buf, allocator, active, "projects", "/projects", "Projects", null);
+    try appendNavLink(buf, allocator, active, "code", "/", "Code", "icon-code", null);
+    try appendNavLink(buf, allocator, active, "issues", "/issues", "Issues", "icon-issues", stats.issues);
+    try appendNavLink(buf, allocator, active, "pulls", "/pulls", "Pull Requests", "icon-pull-request", stats.pulls);
+    try appendNavLink(buf, allocator, active, "actions", "/actions", "Workflows", "icon-workflow", null);
+    try appendNavLink(buf, allocator, active, "projects", "/projects", "Projects", "icon-projects", null);
     try appendSettingsNavLink(buf, allocator, active);
     try buf.appendSlice(allocator,
         \\  </nav>
@@ -558,6 +558,7 @@ pub fn appendNavLink(
     id: []const u8,
     href: []const u8,
     label: []const u8,
+    icon: []const u8,
     count: ?usize,
 ) !void {
     try appendTemplate(buf, allocator,
@@ -572,8 +573,11 @@ pub fn appendNavLink(
         , .{ .id = id });
     }
     try appendTemplate(buf, allocator,
-        \\>{label}
-    , .{ .label = label });
+        \\><span class="button-icon {icon}" aria-hidden="true"></span><span>{label}</span>
+    , .{
+        .icon = icon,
+        .label = label,
+    });
     if (count) |value| {
         if (value > 0) {
             try appendTemplate(buf, allocator,
@@ -586,12 +590,12 @@ pub fn appendNavLink(
 
 fn appendSettingsNavLink(buf: *std.ArrayList(u8), allocator: Allocator, active: []const u8) !void {
     try appendTemplate(buf, allocator,
-        \\<a{class_attr} href="/settings">Settings</a>
+        \\<a{class_attr} href="/settings"><span class="button-icon icon-settings" aria-hidden="true"></span><span>Settings</span></a>
     , .{ .class_attr = classAttr("", &.{class("active", isSettingsActive(active))}) });
 }
 
 fn isSettingsActive(active: []const u8) bool {
-    return std.mem.eql(u8, active, "events") or std.mem.eql(u8, active, "access");
+    return std.mem.eql(u8, active, "events") or std.mem.eql(u8, active, "labels") or std.mem.eql(u8, active, "access");
 }
 
 pub fn appendSettingsLayoutStart(buf: *std.ArrayList(u8), allocator: Allocator, active: []const u8) !void {
@@ -601,6 +605,7 @@ pub fn appendSettingsLayoutStart(buf: *std.ArrayList(u8), allocator: Allocator, 
         \\    <nav class="project-page-tabs settings-page-tabs" aria-label="Settings sections">
     );
     try appendSettingsTab(buf, allocator, active, "events", "/events", "icon-history", "Activity");
+    try appendSettingsTab(buf, allocator, active, "labels", "/labels", "icon-labels", "Labels");
     try appendSettingsTab(buf, allocator, active, "access", "/access", "icon-users", "Access");
     try buf.appendSlice(allocator,
         \\    </nav>

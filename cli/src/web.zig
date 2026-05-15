@@ -8,6 +8,7 @@ const index = @import("index.zig");
 const io = @import("io.zig");
 const access_page = @import("web/access.zig");
 const issues_page = @import("web/issues.zig");
+const labels_page = @import("web/labels.zig");
 const milestones_page = @import("web/milestones.zig");
 const overview_page = @import("web/overview.zig");
 const projects_page = @import("web/projects.zig");
@@ -105,6 +106,7 @@ const exact_routes = [_]Route{
     .{ .method = "POST", .path = "/access/roles", .handler = handleAccessRolePost },
     .{ .method = "POST", .path = "/access/devices", .handler = handleAccessDevicePost },
     .{ .method = "GET", .path = "/settings", .handler = handleSettingsPage },
+    .{ .method = "GET", .path = "/labels", .handler = handleLabelsPage },
     .{ .method = "GET", .path = "/actions", .handler = handleActionsPage },
     .{ .method = "POST", .path = "/actions/request", .handler = handleActionsRequestPost },
     .{ .method = "POST", .path = "/actions/run-requested", .handler = handleRunRequestedPost },
@@ -566,6 +568,10 @@ fn handleAccessPage(ctx: WebContext) !void {
 
 fn handleSettingsPage(ctx: WebContext) !void {
     try shared.sendRedirect(ctx.allocator, ctx.stream, "/events");
+}
+
+fn handleLabelsPage(ctx: WebContext) !void {
+    try sendOwnedHtml(ctx, try labels_page.renderLabelsPage(ctx.allocator, ctx.repo));
 }
 
 fn handleAccessRolePost(ctx: WebContext) !void {
