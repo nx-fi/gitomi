@@ -1,5 +1,6 @@
 const std = @import("std");
 const actions = @import("actions.zig");
+const auth_binding = @import("auth_binding.zig");
 const comment = @import("comment.zig");
 const errors = @import("errors.zig");
 const event_mod = @import("event.zig");
@@ -347,11 +348,13 @@ fn cmdFsck(allocator: Allocator, args: []const []const u8) !void {
 
     const genesis_oid = try git.resolveOptionalRef(allocator, repo_mod.genesis_ref);
     defer if (genesis_oid) |oid| allocator.free(oid);
+    var genesis_valid_for_auth = false;
     if (genesis_oid) |oid| {
         if (repo_mod.loadGenesisManifest(allocator, oid)) |manifest_value| {
             var manifest = manifest_value;
             defer manifest.deinit();
             sync.verifyGenesisCommitSignature(allocator, oid, manifest.fingerprint) catch try checker.fail("{s}: signature verification failed", .{repo_mod.genesis_ref});
+            genesis_valid_for_auth = true;
         } else |_| {
             try checker.fail("{s}: invalid genesis manifest", .{repo_mod.genesis_ref});
         }
@@ -368,9 +371,13 @@ fn cmdFsck(allocator: Allocator, args: []const []const u8) !void {
     const empty_tree = try git.emptyTreeOid(allocator);
     defer allocator.free(empty_tree);
 
+    var auth_verifier: ?auth_binding.Verifier = if (genesis_valid_for_auth) try auth_binding.Verifier.init(allocator) else null;
+    defer if (auth_verifier) |*verifier| verifier.deinit();
+
     for (refs) |ref| {
         if (genesis_oid) |oid| {
-            try fsck.checkInboxRef(allocator, &checker, ref, empty_tree, oid);
+            const verifier_ptr = if (auth_verifier) |*verifier| verifier else null;
+            try fsck.checkInboxRef(allocator, &checker, verifier_ptr, ref, empty_tree, oid);
         }
     }
 

@@ -1,4 +1,5 @@
 const std = @import("std");
+const auth_binding = @import("auth_binding.zig");
 const errors = @import("errors.zig");
 const event_mod = @import("event.zig");
 const git = @import("git.zig");
@@ -88,16 +89,19 @@ fn isMissingRemoteGenesis(stderr: []const u8) bool {
 }
 
 pub fn syncPush(allocator: Allocator, remote: []const u8) !void {
-    try validateConfiguredRepoIfPresent(allocator);
-
-    const inbox_refs = try listRefs(allocator, "refs/gitomi/inbox");
-    defer freeStringList(allocator, inbox_refs);
+    const configured_inbox_ref = try configuredInboxRefIfPresent(allocator);
+    defer if (configured_inbox_ref) |ref| allocator.free(ref);
+    const own_inbox_oid = if (configured_inbox_ref) |ref|
+        try resolveOptionalRef(allocator, ref)
+    else
+        null;
+    defer if (own_inbox_oid) |oid| allocator.free(oid);
 
     const genesis_oid = try resolveOptionalRef(allocator, repo_mod.genesis_ref);
     defer if (genesis_oid) |oid| allocator.free(oid);
 
-    if (inbox_refs.len == 0 and genesis_oid == null) {
-        try out("no local Gitomi refs to push\n", .{});
+    if (own_inbox_oid == null and genesis_oid == null) {
+        try out("no local Gitomi genesis or configured inbox ref to push\n", .{});
         return;
     }
 
@@ -106,15 +110,20 @@ pub fn syncPush(allocator: Allocator, remote: []const u8) !void {
         try pushGenesisRef(allocator, remote);
     }
 
-    try pushInboxRefs(allocator, remote, inbox_refs);
+    var inbox_refs: [1][]const u8 = undefined;
+    const refs = if (configured_inbox_ref != null and own_inbox_oid != null) blk: {
+        inbox_refs[0] = configured_inbox_ref.?;
+        break :blk inbox_refs[0..];
+    } else inbox_refs[0..0];
+    try pushInboxRefs(allocator, remote, refs);
 }
 
-fn validateConfiguredRepoIfPresent(allocator: Allocator) !void {
+fn configuredInboxRefIfPresent(allocator: Allocator) !?[]u8 {
     var repo = try repo_mod.discoverRepo(allocator);
     defer repo.deinit();
 
     var cfg = repo_mod.loadConfig(allocator, repo.config_path) catch |err| switch (err) {
-        CliError.ConfigNotFound => return,
+        CliError.ConfigNotFound => return null,
         CliError.ConfigInvalid => {
             try eprint("gt sync: invalid Gitomi config; run `gt init` or fix .git/gitomi/config.toml\n", .{});
             return err;
@@ -124,11 +133,12 @@ fn validateConfiguredRepoIfPresent(allocator: Allocator) !void {
     defer cfg.deinit();
 
     try repo_mod.validateConfigRepoId(allocator, cfg);
+    return try repo_mod.inboxRef(allocator, cfg);
 }
 
-fn pushInboxRefs(allocator: Allocator, remote: []const u8, refs: [][]u8) !void {
+fn pushInboxRefs(allocator: Allocator, remote: []const u8, refs: []const []const u8) !void {
     if (refs.len == 0) {
-        try out("no authoritative Gitomi inbox refs to push\n", .{});
+        try out("no configured Gitomi inbox ref to push\n", .{});
         return;
     }
     if (refs.len > git.max_default_inbox_refs) {
@@ -408,6 +418,8 @@ pub fn validateInboxRange(
     var actor_seqs = ActorSeqTracker.init(allocator);
     defer actor_seqs.deinit();
     try seedActorSeqsThroughCommit(allocator, &actor_seqs, local_base);
+    var auth_verifier = try auth_binding.Verifier.init(allocator);
+    defer auth_verifier.deinit();
     var records = std.mem.splitScalar(u8, log, 0x1e);
     while (records.next()) |record_raw| {
         const record = parseInboxCommitRecord(record_raw) orelse {
@@ -421,6 +433,16 @@ pub fn validateInboxRange(
         }
         var envelope = try validateInboxRecord(allocator, record, expected_first_parent, empty_tree);
         defer envelope.deinit();
+        if (try auth_verifier.checkAndRemember(.{
+            .ref = ref,
+            .commit = record.commit,
+            .tree = record.tree,
+            .subject = record.subject,
+            .body = record.body,
+        }, envelope)) |reason| {
+            try eprint("gt sync: rejecting {s} on {s}: signing key is not authorized for actor {s}/{s}: {s}\n", .{ record.commit, ref, envelope.actor_principal, envelope.actor_device, reason });
+            return CliError.UserError;
+        }
         try actor_seqs.remember(record.commit, ref, envelope.actor_principal, envelope.actor_device, envelope.seq);
         expected_first_parent = record.commit;
         count += 1;

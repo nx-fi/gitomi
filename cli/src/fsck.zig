@@ -1,4 +1,5 @@
 const std = @import("std");
+const auth_binding = @import("auth_binding.zig");
 const event_mod = @import("event.zig");
 const git = @import("git.zig");
 const util = @import("util.zig");
@@ -87,7 +88,7 @@ pub const State = struct {
     }
 };
 
-pub fn checkInboxRef(allocator: Allocator, fsck: *State, ref: []const u8, empty_tree: []const u8, genesis_oid: []const u8) !void {
+pub fn checkInboxRef(allocator: Allocator, fsck: *State, auth_verifier: ?*auth_binding.Verifier, ref: []const u8, empty_tree: []const u8, genesis_oid: []const u8) !void {
     fsck.refs += 1;
     try checkInboxRefName(fsck, ref);
 
@@ -101,7 +102,7 @@ pub fn checkInboxRef(allocator: Allocator, fsck: *State, ref: []const u8, empty_
     while (it.next()) |commit_raw| {
         const commit = std.mem.trim(u8, commit_raw, " \t\r\n");
         if (commit.len == 0) continue;
-        try checkInboxCommit(allocator, fsck, ref, commit, expected_first_parent, empty_tree);
+        try checkInboxCommit(allocator, fsck, auth_verifier, ref, commit, expected_first_parent, empty_tree);
         expected_first_parent = commit;
     }
 }
@@ -135,6 +136,7 @@ pub fn checkInboxRefName(fsck: *State, ref: []const u8) !void {
 fn checkInboxCommit(
     allocator: Allocator,
     fsck: *State,
+    auth_verifier: ?*auth_binding.Verifier,
     ref: []const u8,
     commit: []const u8,
     expected_first_parent: ?[]const u8,
@@ -172,6 +174,11 @@ fn checkInboxCommit(
         defer parsed.deinit();
         try fsck.checkRepoId(commit, parsed.repo_id);
         try fsck.checkActorSeq(commit, parsed.actor_principal, parsed.actor_device, @intCast(parsed.seq));
+        if (auth_verifier) |verifier| {
+            if (try verifier.checkExisting(commit, parsed)) |reason| {
+                try fsck.fail("{s}: {s}: signing key is not authorized for actor {s}/{s}: {s}", .{ ref, commit, parsed.actor_principal, parsed.actor_device, reason });
+            }
+        }
     }
 }
 

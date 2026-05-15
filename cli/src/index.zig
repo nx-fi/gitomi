@@ -1280,6 +1280,8 @@ fn insertValidatedIndexedEvent(
 const projectIndexedEvents = index_projection.projectIndexedEvents;
 const projectNewIndexedEvents = index_projection.projectNewIndexedEvents;
 const rebuildDerivedCommitReferences = index_projection.rebuildDerivedCommitReferences;
+pub const projectStoredEvent = index_projection.projectStoredEvent;
+pub const signingKeyBindingRejection = index_projection.signingKeyBindingRejection;
 pub const insertIndexedEvent = index_projection.insertIndexedEvent;
 
 pub const countIndexedEvents = index_query.countIndexedEvents;
@@ -1317,6 +1319,16 @@ pub fn roleForPrincipal(allocator: Allocator, repo: Repo, principal: []const u8)
 pub fn countOwners(allocator: Allocator, repo: Repo) !usize {
     try ensureIndex(allocator, repo);
     return try index_query.countOwners(allocator, repo);
+}
+
+pub fn effectiveWriteRoleForPrincipal(allocator: Allocator, repo: Repo, principal: []const u8) !?[]u8 {
+    try ensureIndex(allocator, repo);
+    return try index_query.effectiveWriteRoleForPrincipal(allocator, repo, principal);
+}
+
+pub fn actorDeviceAuthorizedForWrite(allocator: Allocator, repo: Repo, principal: []const u8, device: []const u8) !bool {
+    try ensureIndex(allocator, repo);
+    return try index_query.actorDeviceAuthorizedForWrite(allocator, repo, principal, device);
 }
 
 pub fn isIdentityDeviceActive(allocator: Allocator, repo: Repo, principal: []const u8, device: []const u8) !bool {

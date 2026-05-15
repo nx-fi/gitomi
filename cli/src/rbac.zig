@@ -26,6 +26,14 @@ pub fn createAclGrantEvent(allocator: Allocator, raw_principal: []const u8, role
     var writer = try EventWriter.init(allocator, "gt acl grant");
     defer writer.deinit();
 
+    const actor_role = try loadAuthorizedActorRole(allocator, &writer, "gt acl grant");
+    defer allocator.free(actor_role);
+    if (!event_mod.roleAtLeast(actor_role, role)) {
+        try eprint("gt acl grant: refusing to grant {s}; current actor {s} has role {s}\n", .{ role, writer.cfg.principal, actor_role });
+        return CliError.Unauthorized;
+    }
+    try requireActorRoleAtLeast(&writer, actor_role, "owner", "gt acl grant", "grant ACL roles");
+
     const event_body = try buildAclEvent(allocator, &writer, principal, role, true);
     defer allocator.free(event_body);
 
@@ -45,6 +53,10 @@ pub fn createAclRevokeEvent(allocator: Allocator, raw_principal: []const u8) !vo
 
     var writer = try EventWriter.init(allocator, "gt acl revoke");
     defer writer.deinit();
+
+    const actor_role = try loadAuthorizedActorRole(allocator, &writer, "gt acl revoke");
+    defer allocator.free(actor_role);
+    try requireActorRoleAtLeast(&writer, actor_role, "owner", "gt acl revoke", "revoke ACL roles");
 
     const role = (try index.roleForPrincipal(allocator, writer.repo, principal)) orelse {
         try eprint("gt acl revoke: {s} has no effective role\n", .{principal});
@@ -84,6 +96,7 @@ pub fn createIdentityDeviceAddedEvent(
 
     var writer = try EventWriter.init(allocator, "gt identity add-device");
     defer writer.deinit();
+    try requireActorOwner(allocator, &writer, "gt identity add-device", "add identity devices");
 
     var configured_key: ?repo_mod.SigningKey = null;
     defer if (configured_key) |*key| key.deinit();
@@ -122,6 +135,8 @@ pub fn createIdentityDeviceRevokedEvent(allocator: Allocator, raw_principal: []c
 
     var writer = try EventWriter.init(allocator, "gt identity revoke-device");
     defer writer.deinit();
+    try requireActorOwner(allocator, &writer, "gt identity revoke-device", "revoke identity devices");
+
     if (!(try index.isIdentityDeviceActive(allocator, writer.repo, principal, device))) {
         try eprint("gt identity revoke-device: {s}/{s} is not an active device\n", .{ principal, device });
         return CliError.NotFound;
@@ -138,6 +153,39 @@ pub fn createIdentityDeviceRevokedEvent(allocator: Allocator, raw_principal: []c
     try out("revoked device {s}/{s}\n", .{ principal, device });
     try out("  commit: {s}\n", .{commit_oid});
     try out("  ref:    {s}\n", .{writer.inbox_ref});
+}
+
+fn requireActorOwner(allocator: Allocator, writer: *const EventWriter, command_context: []const u8, action: []const u8) !void {
+    const actor_role = try loadAuthorizedActorRole(allocator, writer, command_context);
+    defer allocator.free(actor_role);
+    try requireActorRoleAtLeast(writer, actor_role, "owner", command_context, action);
+}
+
+fn loadAuthorizedActorRole(allocator: Allocator, writer: *const EventWriter, command_context: []const u8) ![]u8 {
+    const actor_role = (try index.effectiveWriteRoleForPrincipal(allocator, writer.repo, writer.cfg.principal)) orelse {
+        try eprint("{s}: current actor {s} has no effective role\n", .{ command_context, writer.cfg.principal });
+        return CliError.Unauthorized;
+    };
+    errdefer allocator.free(actor_role);
+
+    if (!(try index.actorDeviceAuthorizedForWrite(allocator, writer.repo, writer.cfg.principal, writer.cfg.device))) {
+        try eprint("{s}: current actor device {s}/{s} is not active\n", .{ command_context, writer.cfg.principal, writer.cfg.device });
+        return CliError.Unauthorized;
+    }
+
+    return actor_role;
+}
+
+fn requireActorRoleAtLeast(
+    writer: *const EventWriter,
+    actor_role: []const u8,
+    required_role: []const u8,
+    command_context: []const u8,
+    action: []const u8,
+) !void {
+    if (event_mod.roleAtLeast(actor_role, required_role)) return;
+    try eprint("{s}: owner role required to {s}; current actor {s} has role {s}\n", .{ command_context, action, writer.cfg.principal, actor_role });
+    return CliError.Unauthorized;
 }
 
 fn buildAclEvent(allocator: Allocator, writer: *const EventWriter, principal: []const u8, role: []const u8, grant: bool) ![]u8 {

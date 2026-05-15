@@ -63,6 +63,8 @@ pub const IssueUpdate = struct {
     title: ?[]const u8 = null,
     body: ?[]const u8 = null,
     state: ?[]const u8 = null,
+    milestone: ?[]const u8 = null,
+    projects: []const IssueProjectPlacement = &.{},
     labels_added: []const []const u8 = &.{},
     labels_removed: []const []const u8 = &.{},
     assignees_added: []const []const u8 = &.{},
@@ -72,6 +74,8 @@ pub const IssueUpdate = struct {
         return self.title != null or
             self.body != null or
             self.state != null or
+            self.milestone != null or
+            self.projects.len != 0 or
             self.labels_added.len != 0 or
             self.labels_removed.len != 0 or
             self.assignees_added.len != 0 or
@@ -353,6 +357,8 @@ pub fn buildIssueUpdatedJson(
     if (update.title) |value| try appendJsonFieldString(&buf, allocator, "title", value, true);
     if (update.body) |value| try appendJsonFieldString(&buf, allocator, "body", value, true);
     if (update.state) |value| try appendJsonFieldString(&buf, allocator, "state", value, true);
+    if (update.milestone) |value| try appendJsonFieldString(&buf, allocator, "milestone", value, true);
+    if (update.projects.len != 0) try appendIssueProjectsField(&buf, allocator, "projects", update.projects, true);
     if (update.labels_added.len != 0) try appendJsonFieldStringArray(&buf, allocator, "labels_added", update.labels_added, true);
     if (update.labels_removed.len != 0) try appendJsonFieldStringArray(&buf, allocator, "labels_removed", update.labels_removed, true);
     if (update.assignees_added.len != 0) try appendJsonFieldStringArray(&buf, allocator, "assignees_added", update.assignees_added, true);
@@ -1360,11 +1366,20 @@ pub fn isKnownObjectKind(kind: []const u8) bool {
 }
 
 pub fn isKnownRole(role: []const u8) bool {
-    return std.mem.eql(u8, role, "reader") or
-        std.mem.eql(u8, role, "reporter") or
-        std.mem.eql(u8, role, "contributor") or
-        std.mem.eql(u8, role, "maintainer") or
-        std.mem.eql(u8, role, "owner");
+    return roleRank(role) != 0;
+}
+
+pub fn roleRank(role: []const u8) u8 {
+    if (std.mem.eql(u8, role, "reader")) return 1;
+    if (std.mem.eql(u8, role, "reporter")) return 2;
+    if (std.mem.eql(u8, role, "contributor")) return 3;
+    if (std.mem.eql(u8, role, "maintainer")) return 4;
+    if (std.mem.eql(u8, role, "owner")) return 5;
+    return 0;
+}
+
+pub fn roleAtLeast(actual: []const u8, required: []const u8) bool {
+    return roleRank(actual) >= roleRank(required) and roleRank(required) != 0;
 }
 
 pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, payload: std.json.ObjectMap) ?[]const u8 {
@@ -1424,6 +1439,9 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!optionalString(payload, "body")) return "issue.updated payload.body must be a string";
         if (!optionalStringWithin(payload, "body", git.max_payload_text_bytes)) return "issue.updated payload.body exceeds v1 text size limit";
         if (!optionalState(payload, "state", &.{ "open", "closed" })) return "issue.updated payload.state must be open or closed";
+        if (!optionalString(payload, "milestone")) return "issue.updated payload.milestone must be a string";
+        if (!optionalStringWithin(payload, "milestone", git.max_payload_atom_bytes)) return "issue.updated payload.milestone exceeds v1 field size limit";
+        if (!optionalIssueProjectsWithin(payload, "projects", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "issue.updated payload.projects must be project objects within v1 collection limits";
         if (!optionalStringArray(payload, "labels_added")) return "issue.updated payload.labels_added must be an array of strings";
         if (!optionalStringArrayWithin(payload, "labels_added", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "issue.updated payload.labels_added exceeds v1 collection limits";
         if (!optionalStringArray(payload, "labels_removed")) return "issue.updated payload.labels_removed must be an array of strings";
@@ -1432,7 +1450,7 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!optionalStringArrayWithin(payload, "assignees_added", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "issue.updated payload.assignees_added exceeds v1 collection limits";
         if (!optionalStringArray(payload, "assignees_removed")) return "issue.updated payload.assignees_removed must be an array of strings";
         if (!optionalStringArrayWithin(payload, "assignees_removed", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "issue.updated payload.assignees_removed exceeds v1 collection limits";
-        if (!hasAnyKey(payload, &.{ "title", "body", "state", "labels_added", "labels_removed", "assignees_added", "assignees_removed" })) return "issue.updated payload must contain at least one update field";
+        if (!hasAnyKey(payload, &.{ "title", "body", "state", "milestone", "projects", "labels_added", "labels_removed", "assignees_added", "assignees_removed" })) return "issue.updated payload must contain at least one update field";
         return null;
     }
     if (std.mem.eql(u8, event_type, "issue.title_set")) return requirePayloadStringWithin(payload, "issue.title_set", "title", git.max_payload_title_bytes);
@@ -2058,6 +2076,43 @@ test "issue opened event json passes envelope validation" {
     try validateEventEnvelope(std.testing.allocator, "test-commit", body);
 }
 
+test "issue updated event json supports milestone and projects" {
+    var cfg = Config{
+        .allocator = std.testing.allocator,
+        .repo_id = try std.testing.allocator.dupe(u8, "018f0000-0000-7000-8000-000000000001"),
+        .principal = try std.testing.allocator.dupe(u8, "alice"),
+        .device = try std.testing.allocator.dupe(u8, "laptop"),
+        .seq = 0,
+    };
+    defer cfg.deinit();
+
+    const projects = [_]IssueProjectPlacement{.{ .project = "Roadmap", .column = "Doing" }};
+    const body = try buildIssueUpdatedJson(
+        std.testing.allocator,
+        cfg,
+        1,
+        "018f0000-0000-7000-8000-000000000002",
+        "018f0000-0000-7000-8000-000000000003",
+        "018f0000-0000-7000-8000-000000000004",
+        "2026-05-13T18:30:59Z",
+        .{},
+        .{ .milestone = "v2.0", .projects = projects[0..] },
+    );
+    defer std.testing.allocator.free(body);
+
+    var envelope = try parseValidatedEnvelope(std.testing.allocator, body);
+    defer envelope.deinit();
+    try std.testing.expectEqualStrings("issue.updated", envelope.event_type);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+    defer parsed.deinit();
+    const payload = parsed.value.object.get("payload").?.object;
+    try std.testing.expectEqualStrings("v2.0", payload.get("milestone").?.string);
+    const project = payload.get("projects").?.array.items[0].object;
+    try std.testing.expectEqualStrings("Roadmap", project.get("project").?.string);
+    try std.testing.expectEqualStrings("Doing", project.get("column").?.string);
+}
+
 test "validated envelope rejects oversized payload fields and arrays" {
     var cfg = Config{
         .allocator = std.testing.allocator,
@@ -2222,6 +2277,40 @@ test "validated envelope rejects pull state_set merged" {
         \\  "repo_id": "018f0000-0000-7000-8000-000000000001",
         \\  "event_uuid": "018f0000-0000-7000-8000-000000000002",
         \\  "event_type": "pull.state_set",
+        \\  "object": {
+        \\    "kind": "pull",
+        \\    "id": "018f0000-0000-7000-8000-000000000003"
+        \\  },
+        \\  "idempotency_key": "018f0000-0000-7000-8000-000000000004",
+        \\  "actor": {
+        \\    "principal": "alice",
+        \\    "device": "laptop"
+        \\  },
+        \\  "parent_hashes": {
+        \\    "log": "",
+        \\    "anchor": "",
+        \\    "causal": [],
+        \\    "related": []
+        \\  },
+        \\  "seq": 1,
+        \\  "occurred_at": "2026-05-13T18:30:59Z",
+        \\  "legacy": {},
+        \\  "payload": {
+        \\    "state": "merged"
+        \\  }
+        \\}
+    ;
+
+    try std.testing.expectError(error.InvalidEventEnvelope, parseValidatedEnvelope(std.testing.allocator, body));
+}
+
+test "validated envelope rejects pull updated merged" {
+    const body =
+        \\{
+        \\  "$schema": "urn:gitomi:event:v1",
+        \\  "repo_id": "018f0000-0000-7000-8000-000000000001",
+        \\  "event_uuid": "018f0000-0000-7000-8000-000000000002",
+        \\  "event_type": "pull.updated",
         \\  "object": {
         \\    "kind": "pull",
         \\    "id": "018f0000-0000-7000-8000-000000000003"

@@ -143,6 +143,20 @@ pub fn countOwners(allocator: Allocator, repo: Repo) !usize {
     return try projection.countCurrentOwners(&db);
 }
 
+pub fn effectiveWriteRoleForPrincipal(allocator: Allocator, repo: Repo, principal: []const u8) !?[]u8 {
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    if ((try accessModeFromDb(allocator, &db)) == .open) return try allocator.dupe(u8, "owner");
+    return try projection.currentRole(allocator, &db, principal);
+}
+
+pub fn actorDeviceAuthorizedForWrite(allocator: Allocator, repo: Repo, principal: []const u8, device: []const u8) !bool {
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    if ((try accessModeFromDb(allocator, &db)) == .open) return true;
+    return try projection.currentDeviceActive(&db, principal, device);
+}
+
 pub fn isIdentityDeviceActive(allocator: Allocator, repo: Repo, principal: []const u8, device: []const u8) !bool {
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
@@ -236,6 +250,15 @@ fn appendSingleHashQuery(
         }
     }
     try hashes.append(allocator, hash);
+}
+
+fn accessModeFromDb(allocator: Allocator, db: *SqliteDb) !repo_mod.AccessMode {
+    var stmt = try db.prepare("SELECT value FROM meta WHERE key = 'access_mode'");
+    defer stmt.deinit();
+    if (!(try stmt.step())) return .closed;
+    const value = try stmt.columnTextDup(allocator, 0);
+    defer allocator.free(value);
+    return repo_mod.parseAccessMode(value) orelse .closed;
 }
 
 pub fn listAclFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
