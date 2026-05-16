@@ -8,7 +8,6 @@ const Repo = repo_mod.Repo;
 const appendEmptyState = shared.appendEmptyState;
 const appendHtml = shared.appendHtml;
 const appendHref = shared.appendHref;
-const appendIssueLinkedText = shared.appendIssueLinkedText;
 const appendOptionalAttr = shared.appendOptionalAttr;
 const appendRepoHeaderShared = shared.appendRepoHeader;
 const appendShellEnd = shared.appendShellEnd;
@@ -110,6 +109,8 @@ pub fn renderCommitsPage(allocator: Allocator, repo: Repo, target: []const u8) !
     defer freeCommitList(allocator, commits);
     const branches = try loadBranchRefs(allocator, repo);
     defer freeBranchRefs(allocator, branches);
+    var reference_resolver = shared.InternalReferenceResolver.init(allocator, repo);
+    defer reference_resolver.deinit();
 
     try appendCommitsHeader(&buf, allocator, ref, path, branches);
 
@@ -125,7 +126,7 @@ pub fn renderCommitsPage(allocator: Allocator, repo: Repo, target: []const u8) !
         try buf.appendSlice(allocator, "</section>");
         if (pagination.page > 1) try appendCommitsPagination(&buf, allocator, ref, path, pagination, shown_commits, false);
     } else {
-        try appendCommitTimeline(&buf, allocator, commits[0..shown_commits]);
+        try appendCommitTimeline(&buf, allocator, &reference_resolver, commits[0..shown_commits]);
         try appendCommitsPagination(&buf, allocator, ref, path, pagination, shown_commits, has_next_page);
     }
 
@@ -151,6 +152,8 @@ pub fn renderCommitPage(allocator: Allocator, repo: Repo, target: []const u8) ![
 
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
+    var reference_resolver = shared.InternalReferenceResolver.init(allocator, repo);
+    defer reference_resolver.deinit();
 
     try appendShellStart(&buf, allocator, repo, "Commit", "commits");
     try shared.appendDetailBackButton(&buf, allocator, shared.literalHref("/commits"), "Back to commits");
@@ -162,7 +165,7 @@ pub fn renderCommitPage(allocator: Allocator, repo: Repo, target: []const u8) ![
         \\      <p class="eyebrow">Commit</p>
         \\      <h1>
     , .{});
-    try appendIssueLinkedText(&buf, allocator, detail.subject);
+    try shared.appendInternalReferenceLinkedText(&buf, allocator, &reference_resolver, detail.subject);
     try appendTemplate(&buf, allocator,
         \\</h1>
         \\      <p class="commit-full-hash">{full_hash}</p>
@@ -269,7 +272,12 @@ fn appendCommitsHeader(
     , .{});
 }
 
-fn appendCommitTimeline(buf: *std.ArrayList(u8), allocator: Allocator, commits: []const CommitListEntry) !void {
+fn appendCommitTimeline(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    reference_resolver: *shared.InternalReferenceResolver,
+    commits: []const CommitListEntry,
+) !void {
     try buf.appendSlice(allocator, "<div class=\"commits-timeline\">");
     var active_date: ?[]const u8 = null;
     var group_open = false;
@@ -289,7 +297,7 @@ fn appendCommitTimeline(buf: *std.ArrayList(u8), allocator: Allocator, commits: 
                 \\  <div class="panel commit-day-list">
             , .{});
         }
-        try appendCommitRow(buf, allocator, commit);
+        try appendCommitRow(buf, allocator, reference_resolver, commit);
     }
     if (group_open) try buf.appendSlice(allocator, "</div></section>");
     try buf.appendSlice(allocator, "</div>");
@@ -324,17 +332,22 @@ fn appendCommitsPagination(
     try shared.appendPaginationNav(buf, allocator, "Commit pages", summary, previous_href, next_href);
 }
 
-fn appendCommitRow(buf: *std.ArrayList(u8), allocator: Allocator, commit: CommitListEntry) !void {
+fn appendCommitRow(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    reference_resolver: *shared.InternalReferenceResolver,
+    commit: CommitListEntry,
+) !void {
     const commit_href = commitHref(commit.full_hash);
     const code_href = codeHref(commit.full_hash, "");
     try appendTemplate(buf, allocator,
         \\<article class="commit-row commit-list-row">
         \\  <div class="commit-main">
-        \\    <div class="commit-title-line"><a class="commit-title" href="{commit_href}">
+        \\    <div class="commit-title-line"><span class="commit-title">
     , .{ .commit_href = commit_href });
-    try appendHtml(buf, allocator, commit.subject);
+    try shared.appendInternalReferenceLinkedTextWithDefaultHref(buf, allocator, reference_resolver, commit.subject, commit_href);
     try appendTemplate(buf, allocator,
-        \\</a></div>
+        \\</span></div>
         \\    <p class="commit-meta-line">
     , .{});
     try shared.appendAvatar(buf, allocator, commit.author, "commit-avatar");

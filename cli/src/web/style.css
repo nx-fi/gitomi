@@ -6905,8 +6905,14 @@ main.page-code:has(.root-code-toolbar) .repo-actions {
   text-overflow: clip;
   white-space: nowrap;
 }
+.root-commit-message a,
+.root-file-commit a {
+  color: inherit;
+}
 .root-commit-message:hover,
-a.root-file-commit:hover {
+.root-commit-message a:hover,
+a.root-file-commit:hover,
+.root-file-commit a:hover {
   color: var(--blue);
   text-decoration: none;
 }
@@ -8009,7 +8015,8 @@ a.root-file-commit:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.commit-bar strong a {
+.commit-bar strong > a:only-child,
+.commit-bar-subject {
   display: block;
   max-width: 100%;
   overflow: hidden;
@@ -8017,11 +8024,16 @@ a.root-file-commit:hover {
   text-overflow: clip;
   white-space: nowrap;
 }
+.commit-bar-subject a {
+  color: inherit;
+}
 .commit-hash:hover,
-.commit-bar strong a:hover {
+.commit-bar strong a:hover,
+.commit-bar-subject a:hover {
+  color: var(--blue);
   text-decoration: none;
 }
-.commit-bar span {
+.commit-bar > span {
   margin-left: auto;
   color: var(--muted);
   white-space: nowrap;
@@ -8080,9 +8092,11 @@ a.root-file-commit:hover {
   white-space: nowrap;
 }
 .file-commit a {
+  color: inherit;
+}
+.file-commit > a:only-child {
   display: block;
   max-width: 100%;
-  color: inherit;
 }
 .file-commit a:hover {
   color: var(--blue);
@@ -8789,6 +8803,13 @@ a.root-file-commit:hover {
 .commit-title {
   color: var(--text);
   font-weight: 700;
+}
+.commit-title a {
+  color: inherit;
+}
+.commit-title a:hover {
+  color: var(--blue);
+  text-decoration: none;
 }
 .commit-row p {
   margin: 3px 0 0;
