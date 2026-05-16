@@ -5,7 +5,6 @@ const event_mod = @import("event.zig");
 const event_writer_mod = @import("event_writer.zig");
 const index = @import("index.zig");
 const io = @import("io.zig");
-const repo_mod = @import("repo.zig");
 const util = @import("util.zig");
 
 const Allocator = std.mem.Allocator;
@@ -16,7 +15,6 @@ const out = io.out;
 const isIssueState = cmd_common.isIssueState;
 const newUuidV7 = util.newUuidV7;
 const requireNonEmptyOption = cmd_common.requireNonEmptyOption;
-const resolveMilestoneIdForCommand = cmd_common.resolveMilestoneIdForCommand;
 const rfc3339Now = util.rfc3339Now;
 
 pub fn createMilestoneCreatedEvent(
@@ -154,6 +152,9 @@ pub fn cmdMilestone(allocator: Allocator, args: []const []const u8) !void {
         return CliError.UserError;
     }
 
+    var command_repo = cmd_common.CommandRepo.init(allocator);
+    defer command_repo.deinit();
+
     if (std.mem.eql(u8, args[0], "list")) {
         var json = false;
         var i: usize = 1;
@@ -165,9 +166,7 @@ pub fn cmdMilestone(allocator: Allocator, args: []const []const u8) !void {
                 return CliError.UserError;
             }
         }
-        var repo = try repo_mod.discoverRepo(allocator);
-        defer repo.deinit();
-        try index.ensureIndex(allocator, repo);
+        const repo = try command_repo.indexedRepo();
         try index.listMilestonesFromIndex(allocator, repo, json);
         return;
     }
@@ -232,7 +231,7 @@ pub fn cmdMilestone(allocator: Allocator, args: []const []const u8) !void {
             try requireNonEmptyOption("gt milestone edit", "--title", title);
         }
 
-        const milestone_id = try resolveMilestoneIdForCommand(allocator, args[1]);
+        const milestone_id = try command_repo.resolveMilestoneId(args[1]);
         defer allocator.free(milestone_id);
         try milestone.createMilestoneUpdatedEvent(allocator, milestone_id, update);
         return;
@@ -243,7 +242,7 @@ pub fn cmdMilestone(allocator: Allocator, args: []const []const u8) !void {
             try io.eprint("gt milestone {s}: expected MILESTONE\n", .{args[0]});
             return CliError.UserError;
         }
-        const milestone_id = try resolveMilestoneIdForCommand(allocator, args[1]);
+        const milestone_id = try command_repo.resolveMilestoneId(args[1]);
         defer allocator.free(milestone_id);
         const state: []const u8 = if (std.mem.eql(u8, args[0], "close")) "closed" else "open";
         try milestone.createMilestoneStringEvent(allocator, milestone_id, "milestone.state_set", "state", state);

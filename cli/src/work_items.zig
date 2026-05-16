@@ -47,6 +47,7 @@ pub const IssueListOptions = struct {
     assignee: ?[]u8 = null,
     sort: IssueSort = .newest,
     limit: ?usize = null,
+    offset: ?usize = null,
 
     pub fn deinit(self: *IssueListOptions) void {
         if (self.q) |value| self.allocator.free(value);
@@ -133,7 +134,14 @@ pub const PullCounts = struct {
 pub const PullListOptions = struct {
     state: PullStateFilter = .all,
     q: ?[]const u8 = null,
+    author: ?[]const u8 = null,
+    label: ?[]const u8 = null,
+    assignee: ?[]const u8 = null,
+    reviewer: ?[]const u8 = null,
+    base: ?[]const u8 = null,
+    head: ?[]const u8 = null,
     limit: ?usize = null,
+    offset: ?usize = null,
 };
 
 pub const PullListRow = struct {
@@ -282,8 +290,24 @@ pub fn issueSearchQuery(filter: IssueStateFilter) []const u8 {
     return switch (filter) {
         .open => "is:issue state:open",
         .closed => "is:issue state:closed",
-        .all => "is:issue",
+        .all => "is:issue state:all",
     };
+}
+
+pub fn issueFilterQueryOwned(allocator: Allocator, filters: IssueListOptions) ![]u8 {
+    var query: std.ArrayList(u8) = .empty;
+    errdefer query.deinit(allocator);
+
+    try appendSearchFilterToken(&query, allocator, "is", "issue");
+    try appendSearchFilterToken(&query, allocator, "state", issueStateValue(filters.state));
+    if (filters.author) |value| try appendSearchFilterToken(&query, allocator, "author", value);
+    if (filters.label) |value| try appendSearchFilterToken(&query, allocator, "label", value);
+    if (filters.project) |value| try appendSearchFilterToken(&query, allocator, "project", value);
+    if (filters.milestone) |value| try appendSearchFilterToken(&query, allocator, "milestone", value);
+    if (filters.assignee) |value| try appendSearchFilterToken(&query, allocator, "assignee", value);
+    if (filters.sort != .newest) try appendSearchFilterToken(&query, allocator, "sort", issueSortValue(filters.sort));
+    if (filters.q) |value| try appendSearchValueToken(&query, allocator, value);
+    return query.toOwnedSlice(allocator);
 }
 
 pub fn issueStateFilterFromValue(value: []const u8) ?IssueStateFilter {
@@ -296,24 +320,52 @@ pub fn issueStateFilterFromValue(value: []const u8) ?IssueStateFilter {
 pub const ParsedIssueSearchQuery = struct {
     state: ?IssueStateFilter = null,
     q: ?[]u8 = null,
+    author: ?[]u8 = null,
+    label: ?[]u8 = null,
+    project: ?[]u8 = null,
+    milestone: ?[]u8 = null,
+    assignee: ?[]u8 = null,
+    sort: ?IssueSort = null,
 
     pub fn deinit(self: *ParsedIssueSearchQuery, allocator: Allocator) void {
         if (self.q) |value| allocator.free(value);
+        if (self.author) |value| allocator.free(value);
+        if (self.label) |value| allocator.free(value);
+        if (self.project) |value| allocator.free(value);
+        if (self.milestone) |value| allocator.free(value);
+        if (self.assignee) |value| allocator.free(value);
     }
 };
 
 pub const ParsedPullSearchQuery = struct {
     state: ?PullStateFilter = null,
     q: ?[]u8 = null,
+    author: ?[]u8 = null,
+    label: ?[]u8 = null,
+    assignee: ?[]u8 = null,
+    reviewer: ?[]u8 = null,
+    base: ?[]u8 = null,
+    head: ?[]u8 = null,
 
     pub fn deinit(self: *ParsedPullSearchQuery, allocator: Allocator) void {
         if (self.q) |value| allocator.free(value);
+        if (self.author) |value| allocator.free(value);
+        if (self.label) |value| allocator.free(value);
+        if (self.assignee) |value| allocator.free(value);
+        if (self.reviewer) |value| allocator.free(value);
+        if (self.base) |value| allocator.free(value);
+        if (self.head) |value| allocator.free(value);
     }
 };
 
 const SearchToken = struct {
-    value: []const u8,
+    value: []u8,
     quoted: bool = false,
+};
+
+const SearchPredicate = struct {
+    key: []const u8,
+    value: []const u8,
 };
 
 pub fn parseIssueSearchQuery(allocator: Allocator, query: []const u8) !ParsedIssueSearchQuery {
@@ -324,14 +376,9 @@ pub fn parseIssueSearchQuery(allocator: Allocator, query: []const u8) !ParsedIss
     errdefer terms.deinit(allocator);
 
     var cursor: usize = 0;
-    while (nextSearchToken(query, &cursor)) |token| {
-        if (!token.quoted) {
-            if (std.ascii.eqlIgnoreCase(token.value, "is:issue")) continue;
-            if (issueStateFilterFromSearchToken(token.value)) |state| {
-                parsed.state = state;
-                continue;
-            }
-        }
+    while (try nextSearchTokenOwned(allocator, query, &cursor)) |token| {
+        defer allocator.free(token.value);
+        if (!token.quoted and try parseIssueSearchPredicate(allocator, &parsed, token.value)) continue;
         try appendSearchTerm(&terms, allocator, token.value);
     }
 
@@ -347,19 +394,9 @@ pub fn parsePullSearchQuery(allocator: Allocator, query: []const u8) !ParsedPull
     errdefer terms.deinit(allocator);
 
     var cursor: usize = 0;
-    while (nextSearchToken(query, &cursor)) |token| {
-        if (!token.quoted) {
-            if (std.ascii.eqlIgnoreCase(token.value, "is:pr") or
-                std.ascii.eqlIgnoreCase(token.value, "is:pull") or
-                std.ascii.eqlIgnoreCase(token.value, "is:pull-request"))
-            {
-                continue;
-            }
-            if (pullStateFilterFromSearchToken(token.value)) |state| {
-                parsed.state = state;
-                continue;
-            }
-        }
+    while (try nextSearchTokenOwned(allocator, query, &cursor)) |token| {
+        defer allocator.free(token.value);
+        if (!token.quoted and try parsePullSearchPredicate(allocator, &parsed, token.value)) continue;
         try appendSearchTerm(&terms, allocator, token.value);
     }
 
@@ -367,22 +404,42 @@ pub fn parsePullSearchQuery(allocator: Allocator, query: []const u8) !ParsedPull
     return parsed;
 }
 
-fn nextSearchToken(query: []const u8, cursor: *usize) ?SearchToken {
+fn nextSearchTokenOwned(allocator: Allocator, query: []const u8, cursor: *usize) !?SearchToken {
     while (cursor.* < query.len and std.ascii.isWhitespace(query[cursor.*])) : (cursor.* += 1) {}
     if (cursor.* >= query.len) return null;
 
-    if (query[cursor.*] == '"') {
-        const start = cursor.* + 1;
+    var value: std.ArrayList(u8) = .empty;
+    errdefer value.deinit(allocator);
+    const starts_quoted = query[cursor.*] == '"';
+
+    while (cursor.* < query.len) {
+        const c = query[cursor.*];
+        if (std.ascii.isWhitespace(c)) break;
+
+        if (c == '"') {
+            cursor.* += 1;
+            while (cursor.* < query.len) {
+                const quoted = query[cursor.*];
+                if (quoted == '"') {
+                    cursor.* += 1;
+                    break;
+                }
+                if (quoted == '\\' and cursor.* + 1 < query.len) {
+                    try value.append(allocator, query[cursor.* + 1]);
+                    cursor.* += 2;
+                    continue;
+                }
+                try value.append(allocator, quoted);
+                cursor.* += 1;
+            }
+            continue;
+        }
+
+        try value.append(allocator, c);
         cursor.* += 1;
-        while (cursor.* < query.len and query[cursor.*] != '"') : (cursor.* += 1) {}
-        const end = cursor.*;
-        if (cursor.* < query.len) cursor.* += 1;
-        return .{ .value = query[start..end], .quoted = true };
     }
 
-    const start = cursor.*;
-    while (cursor.* < query.len and !std.ascii.isWhitespace(query[cursor.*])) : (cursor.* += 1) {}
-    return .{ .value = query[start..cursor.*] };
+    return .{ .value = try value.toOwnedSlice(allocator), .quoted = starts_quoted };
 }
 
 fn appendSearchTerm(terms: *std.ArrayList(u8), allocator: Allocator, value: []const u8) !void {
@@ -391,24 +448,93 @@ fn appendSearchTerm(terms: *std.ArrayList(u8), allocator: Allocator, value: []co
     try terms.appendSlice(allocator, value);
 }
 
-fn issueStateFilterFromSearchToken(token: []const u8) ?IssueStateFilter {
-    if (std.ascii.startsWithIgnoreCase(token, "state:")) {
-        return issueStateFilterFromValueIgnoreCase(token["state:".len..]);
+fn parseIssueSearchPredicate(allocator: Allocator, parsed: *ParsedIssueSearchQuery, token: []const u8) !bool {
+    const predicate = searchPredicate(token) orelse return false;
+    if (std.ascii.eqlIgnoreCase(predicate.key, "is") or std.ascii.eqlIgnoreCase(predicate.key, "type")) {
+        if (isIssueObjectValue(predicate.value)) return true;
+        if (issueStateFilterFromValueIgnoreCase(predicate.value)) |state| {
+            parsed.state = state;
+            return true;
+        }
+        return false;
     }
-    if (std.ascii.startsWithIgnoreCase(token, "is:")) {
-        return issueStateFilterFromValueIgnoreCase(token["is:".len..]);
+    if (std.ascii.eqlIgnoreCase(predicate.key, "state")) {
+        if (issueStateFilterFromValueIgnoreCase(predicate.value)) |state| {
+            parsed.state = state;
+            return true;
+        }
+        return false;
     }
-    return null;
+    if (std.ascii.eqlIgnoreCase(predicate.key, "author")) return try setParsedSearchValue(allocator, &parsed.author, predicate.value);
+    if (std.ascii.eqlIgnoreCase(predicate.key, "label")) return try setParsedSearchValue(allocator, &parsed.label, predicate.value);
+    if (std.ascii.eqlIgnoreCase(predicate.key, "project")) return try setParsedSearchValue(allocator, &parsed.project, predicate.value);
+    if (std.ascii.eqlIgnoreCase(predicate.key, "milestone")) return try setParsedSearchValue(allocator, &parsed.milestone, predicate.value);
+    if (std.ascii.eqlIgnoreCase(predicate.key, "assignee")) return try setParsedSearchValue(allocator, &parsed.assignee, predicate.value);
+    if (std.ascii.eqlIgnoreCase(predicate.key, "sort")) {
+        if (issueSortFromValueIgnoreCase(predicate.value)) |sort| {
+            parsed.sort = sort;
+            return true;
+        }
+        return false;
+    }
+    return false;
 }
 
-fn pullStateFilterFromSearchToken(token: []const u8) ?PullStateFilter {
-    if (std.ascii.startsWithIgnoreCase(token, "state:")) {
-        return pullStateFilterFromValueIgnoreCase(token["state:".len..]);
+fn parsePullSearchPredicate(allocator: Allocator, parsed: *ParsedPullSearchQuery, token: []const u8) !bool {
+    const predicate = searchPredicate(token) orelse return false;
+    if (std.ascii.eqlIgnoreCase(predicate.key, "is") or std.ascii.eqlIgnoreCase(predicate.key, "type")) {
+        if (isPullObjectValue(predicate.value)) return true;
+        if (pullStateFilterFromValueIgnoreCase(predicate.value)) |state| {
+            parsed.state = state;
+            return true;
+        }
+        return false;
     }
-    if (std.ascii.startsWithIgnoreCase(token, "is:")) {
-        return pullStateFilterFromValueIgnoreCase(token["is:".len..]);
+    if (std.ascii.eqlIgnoreCase(predicate.key, "state")) {
+        if (pullStateFilterFromValueIgnoreCase(predicate.value)) |state| {
+            parsed.state = state;
+            return true;
+        }
+        return false;
     }
-    return null;
+    if (std.ascii.eqlIgnoreCase(predicate.key, "author")) return try setParsedSearchValue(allocator, &parsed.author, predicate.value);
+    if (std.ascii.eqlIgnoreCase(predicate.key, "label")) return try setParsedSearchValue(allocator, &parsed.label, predicate.value);
+    if (std.ascii.eqlIgnoreCase(predicate.key, "assignee")) return try setParsedSearchValue(allocator, &parsed.assignee, predicate.value);
+    if (std.ascii.eqlIgnoreCase(predicate.key, "reviewer")) return try setParsedSearchValue(allocator, &parsed.reviewer, predicate.value);
+    if (std.ascii.eqlIgnoreCase(predicate.key, "base")) return try setParsedSearchValue(allocator, &parsed.base, predicate.value);
+    if (std.ascii.eqlIgnoreCase(predicate.key, "head")) return try setParsedSearchValue(allocator, &parsed.head, predicate.value);
+    return false;
+}
+
+fn searchPredicate(token: []const u8) ?SearchPredicate {
+    const colon = std.mem.indexOfScalar(u8, token, ':') orelse return null;
+    if (colon == 0) return null;
+    return .{
+        .key = token[0..colon],
+        .value = token[colon + 1 ..],
+    };
+}
+
+fn setParsedSearchValue(allocator: Allocator, slot: *?[]u8, value: []const u8) !bool {
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    if (trimmed.len == 0) return true;
+    const owned = try allocator.dupe(u8, trimmed);
+    if (slot.*) |previous| allocator.free(previous);
+    slot.* = owned;
+    return true;
+}
+
+fn isIssueObjectValue(value: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(value, "issue") or std.ascii.eqlIgnoreCase(value, "issues");
+}
+
+fn isPullObjectValue(value: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(value, "pr") or
+        std.ascii.eqlIgnoreCase(value, "prs") or
+        std.ascii.eqlIgnoreCase(value, "pull") or
+        std.ascii.eqlIgnoreCase(value, "pulls") or
+        std.ascii.eqlIgnoreCase(value, "pull-request") or
+        std.ascii.eqlIgnoreCase(value, "pull-requests");
 }
 
 fn issueStateFilterFromValueIgnoreCase(value: []const u8) ?IssueStateFilter {
@@ -423,6 +549,13 @@ fn pullStateFilterFromValueIgnoreCase(value: []const u8) ?PullStateFilter {
     if (std.ascii.eqlIgnoreCase(value, "merged")) return .merged;
     if (std.ascii.eqlIgnoreCase(value, "closed")) return .closed;
     if (std.ascii.eqlIgnoreCase(value, "all")) return .all;
+    return null;
+}
+
+fn issueSortFromValueIgnoreCase(value: []const u8) ?IssueSort {
+    if (std.ascii.eqlIgnoreCase(value, "newest")) return .newest;
+    if (std.ascii.eqlIgnoreCase(value, "oldest")) return .oldest;
+    if (std.ascii.eqlIgnoreCase(value, "updated")) return .updated;
     return null;
 }
 
@@ -443,7 +576,13 @@ pub fn hasRestrictiveIssueFilters(filters: IssueListOptions) bool {
 }
 
 pub fn hasRestrictivePullFilters(filters: PullListOptions) bool {
-    return filters.q != null;
+    return filters.q != null or
+        filters.author != null or
+        filters.label != null or
+        filters.assignee != null or
+        filters.reviewer != null or
+        filters.base != null or
+        filters.head != null;
 }
 
 pub fn pullStateValue(filter: PullStateFilter) []const u8 {
@@ -460,8 +599,65 @@ pub fn pullSearchQuery(filter: PullStateFilter) []const u8 {
         .open => "is:pr state:open",
         .merged => "is:pr state:merged",
         .closed => "is:pr state:closed",
-        .all => "is:pr",
+        .all => "is:pr state:all",
     };
+}
+
+pub fn pullFilterQueryOwned(allocator: Allocator, filters: PullListOptions) ![]u8 {
+    var query: std.ArrayList(u8) = .empty;
+    errdefer query.deinit(allocator);
+
+    try appendSearchFilterToken(&query, allocator, "is", "pr");
+    try appendSearchFilterToken(&query, allocator, "state", pullStateValue(filters.state));
+    if (filters.author) |value| try appendSearchFilterToken(&query, allocator, "author", value);
+    if (filters.label) |value| try appendSearchFilterToken(&query, allocator, "label", value);
+    if (filters.assignee) |value| try appendSearchFilterToken(&query, allocator, "assignee", value);
+    if (filters.reviewer) |value| try appendSearchFilterToken(&query, allocator, "reviewer", value);
+    if (filters.base) |value| try appendSearchFilterToken(&query, allocator, "base", value);
+    if (filters.head) |value| try appendSearchFilterToken(&query, allocator, "head", value);
+    if (filters.q) |value| try appendSearchValueToken(&query, allocator, value);
+    return query.toOwnedSlice(allocator);
+}
+
+fn appendSearchFilterToken(query: *std.ArrayList(u8), allocator: Allocator, key: []const u8, value: []const u8) !void {
+    if (value.len == 0) return;
+    try appendSearchTokenSeparator(query, allocator);
+    try query.appendSlice(allocator, key);
+    try query.append(allocator, ':');
+    try appendSearchTokenValue(query, allocator, value);
+}
+
+fn appendSearchValueToken(query: *std.ArrayList(u8), allocator: Allocator, value: []const u8) !void {
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    if (trimmed.len == 0) return;
+    try appendSearchTokenSeparator(query, allocator);
+    try appendSearchTokenValue(query, allocator, trimmed);
+}
+
+fn appendSearchTokenSeparator(query: *std.ArrayList(u8), allocator: Allocator) !void {
+    if (query.items.len != 0) try query.append(allocator, ' ');
+}
+
+fn appendSearchTokenValue(query: *std.ArrayList(u8), allocator: Allocator, value: []const u8) !void {
+    if (!searchTokenNeedsQuote(value)) {
+        try query.appendSlice(allocator, value);
+        return;
+    }
+
+    try query.append(allocator, '"');
+    for (value) |c| {
+        if (c == '"' or c == '\\') try query.append(allocator, '\\');
+        try query.append(allocator, c);
+    }
+    try query.append(allocator, '"');
+}
+
+fn searchTokenNeedsQuote(value: []const u8) bool {
+    if (value.len == 0) return true;
+    for (value) |c| {
+        if (std.ascii.isWhitespace(c) or c == ':' or c == '"' or c == '\\') return true;
+    }
+    return false;
 }
 
 pub fn pullStateFilterFromValue(value: []const u8) ?PullStateFilter {
@@ -525,6 +721,7 @@ pub fn issueListSql(allocator: Allocator, filters: IssueListOptions) ![]u8 {
         .updated => "\nORDER BY i.state_occurred_at DESC, i.opened_at DESC, i.id DESC",
     });
     if (filters.limit) |_| try sql.appendSlice(allocator, "\nLIMIT ?");
+    if (filters.limit != null and filters.offset != null) try sql.appendSlice(allocator, "\nOFFSET ?");
     return sql.toOwnedSlice(allocator);
 }
 
@@ -583,6 +780,12 @@ pub fn bindIssueListFilters(stmt: *SqliteStmt, filters: IssueListOptions, search
     }
     if (filters.limit) |value| {
         try stmt.bindInt64(idx, @intCast(value));
+        idx += 1;
+    }
+    if (filters.limit != null) {
+        if (filters.offset) |value| {
+            try stmt.bindInt64(idx, @intCast(value));
+        }
     }
 }
 
@@ -687,11 +890,19 @@ pub fn pullListSql(allocator: Allocator, options: PullListOptions) ![]u8 {
             \\(p.title LIKE ? ESCAPE '\' OR p.body LIKE ? ESCAPE '\' OR COALESCE(NULLIF(pm.source_author, ''), p.author_principal) LIKE ? ESCAPE '\' OR p.base_ref LIKE ? ESCAPE '\' OR p.head_ref LIKE ? ESCAPE '\' OR EXISTS (SELECT 1 FROM comments c WHERE c.parent_kind = 'pull' AND c.parent_id = p.id AND c.body LIKE ? ESCAPE '\'))
         );
     }
+    if (options.author != null) try appendPullListCondition(&sql, allocator, &conditions, "COALESCE(NULLIF(pm.source_author, ''), p.author_principal) = ?");
+    if (options.label != null) try appendPullListCondition(&sql, allocator, &conditions, "EXISTS (SELECT 1 FROM pull_labels pl WHERE pl.pull_id = p.id AND pl.label = ?)");
+    if (options.assignee != null) try appendPullListCondition(&sql, allocator, &conditions, "EXISTS (SELECT 1 FROM pull_assignees pa WHERE pa.pull_id = p.id AND pa.assignee = ?)");
+    if (options.reviewer != null) try appendPullListCondition(&sql, allocator, &conditions, "EXISTS (SELECT 1 FROM pull_reviewers pr WHERE pr.pull_id = p.id AND pr.reviewer = ?)");
+    if (options.base != null) try appendPullListCondition(&sql, allocator, &conditions, "p.base_ref = ?");
+    if (options.head != null) try appendPullListCondition(&sql, allocator, &conditions, "p.head_ref = ?");
 
     try sql.appendSlice(allocator, switch (options.state) {
         .open => "\nORDER BY p.opened_at DESC, p.id DESC",
         .merged, .closed, .all => "\nORDER BY p.state_occurred_at DESC, p.opened_at DESC, p.id DESC",
     });
+    if (options.limit) |_| try sql.appendSlice(allocator, "\nLIMIT ?");
+    if (options.limit != null and options.offset != null) try sql.appendSlice(allocator, "\nOFFSET ?");
     return sql.toOwnedSlice(allocator);
 }
 
@@ -731,6 +942,39 @@ pub fn bindPullListFilters(stmt: *SqliteStmt, filters: PullListOptions, search_p
         idx += 1;
         try stmt.bindText(idx, pattern);
         idx += 1;
+    }
+    if (filters.author) |value| {
+        try stmt.bindText(idx, value);
+        idx += 1;
+    }
+    if (filters.label) |value| {
+        try stmt.bindText(idx, value);
+        idx += 1;
+    }
+    if (filters.assignee) |value| {
+        try stmt.bindText(idx, value);
+        idx += 1;
+    }
+    if (filters.reviewer) |value| {
+        try stmt.bindText(idx, value);
+        idx += 1;
+    }
+    if (filters.base) |value| {
+        try stmt.bindText(idx, value);
+        idx += 1;
+    }
+    if (filters.head) |value| {
+        try stmt.bindText(idx, value);
+        idx += 1;
+    }
+    if (filters.limit) |value| {
+        try stmt.bindInt64(idx, @intCast(value));
+        idx += 1;
+    }
+    if (filters.limit != null) {
+        if (filters.offset) |value| {
+            try stmt.bindInt64(idx, @intCast(value));
+        }
     }
 }
 
@@ -1067,12 +1311,12 @@ fn appendIssueFiltersJsonField(buf: *std.ArrayList(u8), allocator: Allocator, fi
     try buf.append(allocator, ':');
     try buf.append(allocator, '{');
     try appendJsonFieldString(buf, allocator, "state", issueStateValue(filters.state), true);
-    try appendJsonFieldString(buf, allocator, "sort", issueSortValue(filters.sort), true);
-    try appendOptionalStringJsonField(buf, allocator, "q", filters.q, true);
-    try appendOptionalStringJsonField(buf, allocator, "author", filters.author, true);
-    try appendOptionalStringJsonField(buf, allocator, "label", filters.label, true);
-    try appendOptionalStringJsonField(buf, allocator, "project", filters.project, true);
-    try appendOptionalStringJsonField(buf, allocator, "milestone", filters.milestone, true);
+    try appendJsonFieldString(buf, allocator, "sort", issueSortValue(filters.sort), filters.q != null or filters.author != null or filters.label != null or filters.project != null or filters.milestone != null or filters.assignee != null or filters.limit != null);
+    try appendOptionalStringJsonField(buf, allocator, "q", filters.q, filters.author != null or filters.label != null or filters.project != null or filters.milestone != null or filters.assignee != null or filters.limit != null);
+    try appendOptionalStringJsonField(buf, allocator, "author", filters.author, filters.label != null or filters.project != null or filters.milestone != null or filters.assignee != null or filters.limit != null);
+    try appendOptionalStringJsonField(buf, allocator, "label", filters.label, filters.project != null or filters.milestone != null or filters.assignee != null or filters.limit != null);
+    try appendOptionalStringJsonField(buf, allocator, "project", filters.project, filters.milestone != null or filters.assignee != null or filters.limit != null);
+    try appendOptionalStringJsonField(buf, allocator, "milestone", filters.milestone, filters.assignee != null or filters.limit != null);
     try appendOptionalStringJsonField(buf, allocator, "assignee", filters.assignee, filters.limit != null);
     if (filters.limit) |value| try appendJsonFieldInteger(buf, allocator, "limit", @intCast(value), false);
     try buf.append(allocator, '}');
@@ -1083,8 +1327,14 @@ fn appendPullFiltersJsonField(buf: *std.ArrayList(u8), allocator: Allocator, fil
     try appendJsonString(buf, allocator, "filters");
     try buf.append(allocator, ':');
     try buf.append(allocator, '{');
-    try appendJsonFieldString(buf, allocator, "state", pullStateValue(filters.state), true);
-    try appendOptionalStringJsonField(buf, allocator, "q", filters.q, filters.limit != null);
+    try appendJsonFieldString(buf, allocator, "state", pullStateValue(filters.state), filters.q != null or filters.author != null or filters.label != null or filters.assignee != null or filters.reviewer != null or filters.base != null or filters.head != null or filters.limit != null);
+    try appendOptionalStringJsonField(buf, allocator, "q", filters.q, filters.author != null or filters.label != null or filters.assignee != null or filters.reviewer != null or filters.base != null or filters.head != null or filters.limit != null);
+    try appendOptionalStringJsonField(buf, allocator, "author", filters.author, filters.label != null or filters.assignee != null or filters.reviewer != null or filters.base != null or filters.head != null or filters.limit != null);
+    try appendOptionalStringJsonField(buf, allocator, "label", filters.label, filters.assignee != null or filters.reviewer != null or filters.base != null or filters.head != null or filters.limit != null);
+    try appendOptionalStringJsonField(buf, allocator, "assignee", filters.assignee, filters.reviewer != null or filters.base != null or filters.head != null or filters.limit != null);
+    try appendOptionalStringJsonField(buf, allocator, "reviewer", filters.reviewer, filters.base != null or filters.head != null or filters.limit != null);
+    try appendOptionalStringJsonField(buf, allocator, "base", filters.base, filters.head != null or filters.limit != null);
+    try appendOptionalStringJsonField(buf, allocator, "head", filters.head, filters.limit != null);
     if (filters.limit) |value| try appendJsonFieldInteger(buf, allocator, "limit", @intCast(value), false);
     try buf.append(allocator, '}');
     if (comma) try buf.append(allocator, ',');
@@ -1390,15 +1640,28 @@ pub fn loadPullGitRefs(allocator: Allocator, repo: Repo, detail: PullDetail) !?P
     const prefer_remote = detail.legacy_number > 0;
     const base = (try resolvePullGitCommit(allocator, repo, detail.base_ref, prefer_remote)) orelse return null;
     errdefer allocator.free(base);
-    const head: ?[]u8 = if (detail.legacy_number > 0) blk: {
-        if (try resolveGithubPullHeadCommit(allocator, repo, detail.legacy_number)) |oid| break :blk oid;
-        break :blk try resolvePullGitCommit(allocator, repo, detail.head_ref, prefer_remote);
-    } else try resolvePullGitCommit(allocator, repo, detail.head_ref, prefer_remote);
+    const head = try resolvePullHeadGitCommit(allocator, repo, detail, prefer_remote);
     const owned_head = head orelse {
         allocator.free(base);
         return null;
     };
     return .{ .base = base, .head = owned_head };
+}
+
+fn resolvePullHeadGitCommit(allocator: Allocator, repo: Repo, detail: PullDetail, prefer_remote: bool) !?[]u8 {
+    if (detail.legacy_number > 0) {
+        if (try resolveGithubPullHeadCommit(allocator, repo, detail.legacy_number)) |github_head| {
+            if (try resolveLocalPullBranchCommit(allocator, repo, detail.head_ref)) |local_head| {
+                if (try gitCommitIsAncestor(allocator, repo, github_head, local_head)) {
+                    allocator.free(github_head);
+                    return local_head;
+                }
+                allocator.free(local_head);
+            }
+            return github_head;
+        }
+    }
+    return try resolvePullGitCommit(allocator, repo, detail.head_ref, prefer_remote);
 }
 
 fn resolveGithubPullHeadCommit(allocator: Allocator, repo: Repo, number: i64) !?[]u8 {
@@ -1413,6 +1676,33 @@ fn resolveFormattedGithubPullRef(allocator: Allocator, repo: Repo, comptime patt
     const ref = try std.fmt.allocPrint(allocator, pattern, .{number});
     defer allocator.free(ref);
     return try resolveGitCommit(allocator, repo, ref);
+}
+
+fn resolveLocalPullBranchCommit(allocator: Allocator, repo: Repo, raw_ref: []const u8) !?[]u8 {
+    const local_ref = (try localPullBranchRef(allocator, raw_ref)) orelse return null;
+    defer allocator.free(local_ref);
+    return try resolveGitCommit(allocator, repo, local_ref);
+}
+
+fn localPullBranchRef(allocator: Allocator, raw_ref: []const u8) !?[]u8 {
+    const heads_prefix = "refs/heads/";
+    if (std.mem.startsWith(u8, raw_ref, heads_prefix)) {
+        const branch_name = raw_ref[heads_prefix.len..];
+        if (!isSafeLocalBranchName(branch_name)) return null;
+        return try allocator.dupe(u8, raw_ref);
+    }
+    if (!isBranchShorthand(raw_ref)) return null;
+    return try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{raw_ref});
+}
+
+fn gitCommitIsAncestor(allocator: Allocator, repo: Repo, ancestor: []const u8, descendant: []const u8) !bool {
+    var result = try gitRun(allocator, repo, &.{ "merge-base", "--is-ancestor", ancestor, descendant }, 1024 * 1024);
+    defer result.deinit();
+    if (result.exitCode()) |code| {
+        if (code == 0) return true;
+        if (code == 1) return false;
+    }
+    return error.GitFailed;
 }
 
 fn resolvePullGitCommit(allocator: Allocator, repo: Repo, raw_ref: []const u8, prefer_remote: bool) !?[]u8 {
@@ -1441,9 +1731,14 @@ fn resolveGitCommit(allocator: Allocator, repo: Repo, ref: []const u8) !?[]u8 {
 }
 
 fn isBranchShorthand(ref: []const u8) bool {
-    if (ref.len == 0) return false;
     if (std.mem.startsWith(u8, ref, "refs/")) return false;
     if (std.mem.startsWith(u8, ref, "origin/")) return false;
+    if (std.mem.eql(u8, ref, "HEAD")) return false;
+    return isSafeLocalBranchName(ref);
+}
+
+fn isSafeLocalBranchName(ref: []const u8) bool {
+    if (ref.len == 0) return false;
     if (std.mem.startsWith(u8, ref, "-")) return false;
     if (std.mem.endsWith(u8, ref, ".lock")) return false;
     if (std.mem.indexOf(u8, ref, "..") != null) return false;
@@ -1454,13 +1749,7 @@ fn isBranchShorthand(ref: []const u8) bool {
 }
 
 pub fn gitMaybe(allocator: Allocator, repo: Repo, git_args: []const []const u8, max_output_bytes: usize) !?[]u8 {
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(allocator);
-    try argv.append(allocator, "git");
-    try argv.append(allocator, "-C");
-    try argv.append(allocator, repo.root);
-    for (git_args) |arg| try argv.append(allocator, arg);
-    var result = try git.runCommand(allocator, argv.items, null, max_output_bytes);
+    var result = try gitRun(allocator, repo, git_args, max_output_bytes);
     if (result.exitCode() == 0) {
         const stdout = result.stdout;
         allocator.free(result.stderr);
@@ -1468,6 +1757,16 @@ pub fn gitMaybe(allocator: Allocator, repo: Repo, git_args: []const []const u8, 
     }
     result.deinit();
     return null;
+}
+
+fn gitRun(allocator: Allocator, repo: Repo, git_args: []const []const u8, max_output_bytes: usize) !git.RunOutput {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.append(allocator, "git");
+    try argv.append(allocator, "-C");
+    try argv.append(allocator, repo.root);
+    for (git_args) |arg| try argv.append(allocator, arg);
+    return git.runCommand(allocator, argv.items, null, max_output_bytes);
 }
 
 pub const DiffCommentSide = enum {
@@ -1517,31 +1816,103 @@ test "formats single-line and range diff comments" {
     try std.testing.expectEqualStrings("Review comment on `src/main.zig` (old lines 3-5).\n\nNeeds work", range);
 }
 
+test "pull git refs derive local branch refs only from safe branch names" {
+    const shorthand = (try localPullBranchRef(std.testing.allocator, "feature/conflict-fix")).?;
+    defer std.testing.allocator.free(shorthand);
+    try std.testing.expectEqualStrings("refs/heads/feature/conflict-fix", shorthand);
+
+    const full = (try localPullBranchRef(std.testing.allocator, "refs/heads/origin/feature")).?;
+    defer std.testing.allocator.free(full);
+    try std.testing.expectEqualStrings("refs/heads/origin/feature", full);
+
+    try std.testing.expect((try localPullBranchRef(std.testing.allocator, "origin/feature")) == null);
+    try std.testing.expect((try localPullBranchRef(std.testing.allocator, "refs/remotes/origin/feature")) == null);
+    try std.testing.expect((try localPullBranchRef(std.testing.allocator, "HEAD")) == null);
+    try std.testing.expect((try localPullBranchRef(std.testing.allocator, "feature^{commit}")) == null);
+}
+
 test "work item search query filters state and keeps text terms" {
     var issue_query = try parseIssueSearchQuery(std.testing.allocator, "is:issue state:open web new test");
     defer issue_query.deinit(std.testing.allocator);
     try std.testing.expectEqual(IssueStateFilter.open, issue_query.state.?);
     try std.testing.expectEqualStrings("web new test", issue_query.q.?);
 
-    var quoted_issue_query = try parseIssueSearchQuery(std.testing.allocator, "is:closed \"manual filter\"");
+    var quoted_issue_query = try parseIssueSearchQuery(std.testing.allocator, "is:closed label:\"good first issue\" assignee:alice sort:updated \"manual filter\"");
     defer quoted_issue_query.deinit(std.testing.allocator);
     try std.testing.expectEqual(IssueStateFilter.closed, quoted_issue_query.state.?);
+    try std.testing.expectEqual(IssueSort.updated, quoted_issue_query.sort.?);
+    try std.testing.expectEqualStrings("good first issue", quoted_issue_query.label.?);
+    try std.testing.expectEqualStrings("alice", quoted_issue_query.assignee.?);
     try std.testing.expectEqualStrings("manual filter", quoted_issue_query.q.?);
 
-    var pull_query = try parsePullSearchQuery(std.testing.allocator, "is:pr state:merged branch search");
+    var pull_query = try parsePullSearchQuery(std.testing.allocator, "is:pr state:merged author:alice label:review reviewer:bob base:main head:\"feature branch\" branch search");
     defer pull_query.deinit(std.testing.allocator);
     try std.testing.expectEqual(PullStateFilter.merged, pull_query.state.?);
+    try std.testing.expectEqualStrings("alice", pull_query.author.?);
+    try std.testing.expectEqualStrings("review", pull_query.label.?);
+    try std.testing.expectEqualStrings("bob", pull_query.reviewer.?);
+    try std.testing.expectEqualStrings("main", pull_query.base.?);
+    try std.testing.expectEqualStrings("feature branch", pull_query.head.?);
     try std.testing.expectEqualStrings("branch search", pull_query.q.?);
+}
+
+test "work item search query formatter emits canonical filters" {
+    var issue_filters = IssueListOptions{
+        .allocator = std.testing.allocator,
+        .state = .closed,
+        .q = try std.testing.allocator.dupe(u8, "manual filter"),
+        .label = try std.testing.allocator.dupe(u8, "good first issue"),
+        .assignee = try std.testing.allocator.dupe(u8, "alice"),
+        .sort = .updated,
+    };
+    defer issue_filters.deinit();
+    const issue_query = try issueFilterQueryOwned(std.testing.allocator, issue_filters);
+    defer std.testing.allocator.free(issue_query);
+    try std.testing.expectEqualStrings("is:issue state:closed label:\"good first issue\" assignee:alice sort:updated \"manual filter\"", issue_query);
+
+    const pull_query = try pullFilterQueryOwned(std.testing.allocator, .{
+        .state = .all,
+        .q = "branch search",
+        .reviewer = "bob",
+        .head = "feature branch",
+    });
+    defer std.testing.allocator.free(pull_query);
+    try std.testing.expectEqualStrings("is:pr state:all reviewer:bob head:\"feature branch\" \"branch search\"", pull_query);
 }
 
 test "pull list SQL includes search filter" {
     const sql = try pullListSql(std.testing.allocator, .{
         .state = .open,
         .q = "feature",
+        .label = "review",
+        .reviewer = "alice",
     });
     defer std.testing.allocator.free(sql);
     try std.testing.expect(std.mem.indexOf(u8, sql, "p.state = ?") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "p.title LIKE ?") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "p.base_ref LIKE ?") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "comments c") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "pull_labels") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "pull_reviewers") != null);
+}
+
+test "work item list SQL supports limit and offset pagination" {
+    const issue_sql = try issueListSql(std.testing.allocator, .{
+        .allocator = std.testing.allocator,
+        .state = .open,
+        .limit = 26,
+        .offset = 50,
+    });
+    defer std.testing.allocator.free(issue_sql);
+    try std.testing.expect(std.mem.indexOf(u8, issue_sql, "LIMIT ?") != null);
+    try std.testing.expect(std.mem.indexOf(u8, issue_sql, "OFFSET ?") != null);
+
+    const pull_sql = try pullListSql(std.testing.allocator, .{
+        .state = .closed,
+        .limit = 26,
+        .offset = 50,
+    });
+    defer std.testing.allocator.free(pull_sql);
+    try std.testing.expect(std.mem.indexOf(u8, pull_sql, "LIMIT ?") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pull_sql, "OFFSET ?") != null);
 }
