@@ -61,8 +61,7 @@ pub fn sendCachedAsset(
         .{ .name = "Cache-Control", .value = "public, max-age=86400" },
         .{ .name = "ETag", .value = etag },
     };
-    var asset_response = response;
-    asset_response.options.compression = .none;
+    const asset_response = responseForAssetRequest(response, request);
 
     if (etagMatches(request.headerValue("if-none-match"), etag)) {
         try asset_response.notModifiedHeaders(&extra);
@@ -74,6 +73,13 @@ pub fn sendCachedAsset(
     } else {
         try asset_response.sendWithHeaders(200, "OK", item.content_type, item.body, &extra, .{ .charset = true });
     }
+}
+
+fn responseForAssetRequest(response: response_mod.Response, request: request_mod.Request) response_mod.Response {
+    var asset_response = response;
+    asset_response.options.compression = .none;
+    asset_response.options.head = request.method == .HEAD;
+    return asset_response;
 }
 
 pub fn staticAssetEtagOwned(allocator: std.mem.Allocator, body: []const u8) ![]u8 {
@@ -157,6 +163,18 @@ test "static asset etags include a content hash" {
     const second = try staticAssetEtagOwned(std.testing.allocator, "wxyz");
     defer std.testing.allocator.free(second);
     try std.testing.expect(!std.mem.eql(u8, first, second));
+}
+
+test "static assets enforce head requests" {
+    const raw =
+        "HEAD /asset.txt HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1\r\n" ++
+        "\r\n";
+    const request = try request_mod.Request.parse(raw);
+    const response = response_mod.Response.init(std.testing.allocator, undefined);
+    const asset_response = responseForAssetRequest(response, request);
+    try std.testing.expect(asset_response.options.head);
+    try std.testing.expectEqual(response_mod.Compression.none, asset_response.options.compression);
 }
 
 test "middleware chain executes in order" {

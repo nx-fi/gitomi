@@ -140,7 +140,7 @@ pub const Response = struct {
     ) !void {
         try validateStatus(status, reason);
         try validateHeaderValue(content_type);
-        try validateHeaders(extra_headers);
+        try validateExtraHeaders(extra_headers);
 
         const may_compress = self.options.compression == .gzip and
             statusAllowsBody(status) and
@@ -170,7 +170,7 @@ pub const Response = struct {
             try appendHeader(&headers, self.allocator, "Content-Encoding", "gzip");
             try appendHeader(&headers, self.allocator, "Vary", "Accept-Encoding");
         }
-        try appendHeaderInt(&headers, self.allocator, "Content-Length", response_body.len);
+        try appendContentLengthIfAllowed(&headers, self.allocator, status, response_body.len);
         for (extra_headers) |header| try appendHeader(&headers, self.allocator, header.name, header.value);
         try headers.appendSlice(self.allocator, "\r\n");
 
@@ -237,7 +237,7 @@ pub const Response = struct {
     ) !ChunkedResponse {
         try validateStatus(status, reason);
         try validateHeaderValue(content_type);
-        try validateHeaders(extra_headers);
+        try validateExtraHeaders(extra_headers);
 
         var headers: std.ArrayList(u8) = .empty;
         defer headers.deinit(self.allocator);
@@ -347,6 +347,10 @@ fn appendHeaderInt(buf: *std.ArrayList(u8), allocator: Allocator, name: []const 
     try std.fmt.format(buf.writer(allocator), "{s}: {d}\r\n", .{ name, value });
 }
 
+fn appendContentLengthIfAllowed(buf: *std.ArrayList(u8), allocator: Allocator, status: u16, value: usize) !void {
+    if (statusAllowsBody(status)) try appendHeaderInt(buf, allocator, "Content-Length", value);
+}
+
 fn parseRawHeaders(allocator: Allocator, raw: []const u8) ![]Header {
     if (raw.len == 0) return allocator.alloc(Header, 0);
     if (!std.mem.endsWith(u8, raw, "\r\n")) return error.BadHeaderValue;
@@ -368,15 +372,20 @@ fn parseRawHeaders(allocator: Allocator, raw: []const u8) ![]Header {
     return headers.toOwnedSlice(allocator);
 }
 
-fn validateHeaders(headers: []const Header) !void {
+fn validateExtraHeaders(headers: []const Header) !void {
     for (headers) |header| {
-        try validateHeaderName(header.name);
+        try validateExtraHeaderName(header.name);
         try validateHeaderValue(header.value);
     }
 }
 
 pub fn validateHeaderName(name: []const u8) !void {
     try request_mod.validateHeaderName(name);
+}
+
+pub fn validateExtraHeaderName(name: []const u8) !void {
+    try validateHeaderName(name);
+    if (isManagedExtraHeaderName(name)) return error.ManagedResponseHeader;
 }
 
 pub fn validateHeaderValue(value: []const u8) !void {
@@ -393,6 +402,19 @@ fn hasHeader(headers: []const Header, wanted: []const u8) bool {
         if (std.ascii.eqlIgnoreCase(header.name, wanted)) return true;
     }
     return false;
+}
+
+fn isManagedExtraHeaderName(name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(name, "content-length") or
+        std.ascii.eqlIgnoreCase(name, "transfer-encoding") or
+        std.ascii.eqlIgnoreCase(name, "connection") or
+        std.ascii.eqlIgnoreCase(name, "content-type") or
+        std.ascii.eqlIgnoreCase(name, "keep-alive") or
+        std.ascii.eqlIgnoreCase(name, "proxy-authenticate") or
+        std.ascii.eqlIgnoreCase(name, "proxy-authorization") or
+        std.ascii.eqlIgnoreCase(name, "te") or
+        std.ascii.eqlIgnoreCase(name, "trailer") or
+        std.ascii.eqlIgnoreCase(name, "upgrade");
 }
 
 fn statusAllowsBody(status: u16) bool {
@@ -479,4 +501,30 @@ test "common response headers close the connection" {
     try appendCommonHeaders(&headers, std.testing.allocator);
     try std.testing.expect(std.mem.indexOf(u8, headers.items, "Connection: close\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, headers.items, "keep-alive") == null);
+}
+
+test "bodyless response headers do not emit content length" {
+    var headers: std.ArrayList(u8) = .empty;
+    defer headers.deinit(std.testing.allocator);
+    try appendContentLengthIfAllowed(&headers, std.testing.allocator, 204, 10);
+    try appendContentLengthIfAllowed(&headers, std.testing.allocator, 304, 10);
+    try std.testing.expectEqual(@as(usize, 0), headers.items.len);
+
+    try appendContentLengthIfAllowed(&headers, std.testing.allocator, 200, 10);
+    try std.testing.expectEqualStrings("Content-Length: 10\r\n", headers.items);
+}
+
+test "extra response headers reject managed and hop by hop names" {
+    try std.testing.expectError(error.ManagedResponseHeader, validateExtraHeaders(&[_]Header{
+        .{ .name = "Content-Length", .value = "1" },
+    }));
+    try std.testing.expectError(error.ManagedResponseHeader, validateExtraHeaders(&[_]Header{
+        .{ .name = "Transfer-Encoding", .value = "chunked" },
+    }));
+    try std.testing.expectError(error.ManagedResponseHeader, validateExtraHeaders(&[_]Header{
+        .{ .name = "Connection", .value = "keep-alive" },
+    }));
+    try std.testing.expectError(error.ManagedResponseHeader, validateExtraHeaders(&[_]Header{
+        .{ .name = "Content-Type", .value = "text/plain" },
+    }));
 }

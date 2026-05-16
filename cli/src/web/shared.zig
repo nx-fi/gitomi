@@ -1479,14 +1479,19 @@ pub fn sendResponse(
     extra_headers: ?[]const u8,
 ) !void {
     try validateRawExtraHeaders(extra_headers orelse "");
-    const headers = try std.fmt.allocPrint(
-        allocator,
-        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\n{s}\r\n",
-        .{ status, reason, content_type, body.len, extra_headers orelse "" },
+    var headers: std.ArrayList(u8) = .empty;
+    defer headers.deinit(allocator);
+    try std.fmt.format(
+        headers.writer(allocator),
+        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}; charset=utf-8\r\n",
+        .{ status, reason, content_type },
     );
-    defer allocator.free(headers);
-    try stream.writeAll(headers);
-    try stream.writeAll(body);
+    try appendContentLengthIfAllowed(&headers, allocator, status, body.len);
+    try headers.appendSlice(allocator, "Connection: close\r\nX-Content-Type-Options: nosniff\r\n");
+    try headers.appendSlice(allocator, extra_headers orelse "");
+    try headers.appendSlice(allocator, "\r\n");
+    try stream.writeAll(headers.items);
+    if (statusAllowsBody(status) and body.len > 0) try stream.writeAll(body);
 }
 
 pub fn sendBinaryResponse(
@@ -1499,14 +1504,27 @@ pub fn sendBinaryResponse(
     extra_headers: ?[]const u8,
 ) !void {
     try validateRawExtraHeaders(extra_headers orelse "");
-    const headers = try std.fmt.allocPrint(
-        allocator,
-        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\n{s}\r\n",
-        .{ status, reason, content_type, body.len, extra_headers orelse "" },
+    var headers: std.ArrayList(u8) = .empty;
+    defer headers.deinit(allocator);
+    try std.fmt.format(
+        headers.writer(allocator),
+        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\n",
+        .{ status, reason, content_type },
     );
-    defer allocator.free(headers);
-    try stream.writeAll(headers);
-    try stream.writeAll(body);
+    try appendContentLengthIfAllowed(&headers, allocator, status, body.len);
+    try headers.appendSlice(allocator, "Connection: close\r\nX-Content-Type-Options: nosniff\r\n");
+    try headers.appendSlice(allocator, extra_headers orelse "");
+    try headers.appendSlice(allocator, "\r\n");
+    try stream.writeAll(headers.items);
+    if (statusAllowsBody(status) and body.len > 0) try stream.writeAll(body);
+}
+
+fn statusAllowsBody(status: u16) bool {
+    return status != 204 and status != 304 and status >= 200;
+}
+
+fn appendContentLengthIfAllowed(buf: *std.ArrayList(u8), allocator: Allocator, status: u16, body_len: usize) !void {
+    if (statusAllowsBody(status)) try std.fmt.format(buf.writer(allocator), "Content-Length: {d}\r\n", .{body_len});
 }
 
 fn validateRawExtraHeaders(raw: []const u8) !void {
@@ -1519,9 +1537,27 @@ fn validateRawExtraHeaders(raw: []const u8) !void {
         rest = rest[end + 2 ..];
         if (line.len == 0) continue;
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.BadHeaderValue;
-        try zwf_response.validateHeaderName(std.mem.trim(u8, line[0..colon], " \t"));
+        try zwf_response.validateExtraHeaderName(std.mem.trim(u8, line[0..colon], " \t"));
         try zwf_response.validateHeaderValue(std.mem.trim(u8, line[colon + 1 ..], " \t"));
     }
+}
+
+test "legacy response helpers omit content length for 204" {
+    var headers: std.ArrayList(u8) = .empty;
+    defer headers.deinit(std.testing.allocator);
+    try appendContentLengthIfAllowed(&headers, std.testing.allocator, 204, 10);
+    try appendContentLengthIfAllowed(&headers, std.testing.allocator, 304, 10);
+    try std.testing.expectEqual(@as(usize, 0), headers.items.len);
+
+    try appendContentLengthIfAllowed(&headers, std.testing.allocator, 200, 10);
+    try std.testing.expectEqualStrings("Content-Length: 10\r\n", headers.items);
+}
+
+test "legacy raw extra headers reject managed names" {
+    try std.testing.expectError(error.ManagedResponseHeader, validateRawExtraHeaders("Content-Length: 1\r\n"));
+    try std.testing.expectError(error.ManagedResponseHeader, validateRawExtraHeaders("Transfer-Encoding: chunked\r\n"));
+    try std.testing.expectError(error.ManagedResponseHeader, validateRawExtraHeaders("Connection: keep-alive\r\n"));
+    try std.testing.expectError(error.ManagedResponseHeader, validateRawExtraHeaders("Content-Type: text/plain\r\n"));
 }
 
 fn loadWebStats(allocator: Allocator, repo: Repo) !WebStats {

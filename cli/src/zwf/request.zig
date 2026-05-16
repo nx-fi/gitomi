@@ -159,6 +159,7 @@ pub const HeaderMap = struct {
             while (tokens.next()) |raw_token| {
                 const token = std.mem.trim(u8, raw_token, " \t");
                 if (token.len == 0) return error.BadRequest;
+                if (saw_chunked) return error.BadRequest;
                 if (std.ascii.eqlIgnoreCase(token, "chunked")) {
                     saw_chunked = true;
                 } else if (!std.ascii.eqlIgnoreCase(token, "identity")) {
@@ -776,6 +777,16 @@ test "request parser decodes chunked bodies in owned mode" {
     defer parsed.deinit(std.testing.allocator);
     try std.testing.expectEqual(Method.POST, parsed.method);
     try std.testing.expectEqualStrings("hello world", parsed.body);
+}
+
+test "request parser rejects chunked transfer coding when not final" {
+    const raw =
+        "POST /upload HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1\r\n" ++
+        "Transfer-Encoding: chunked, identity\r\n" ++
+        "\r\n" ++
+        "0\r\n\r\n";
+    try std.testing.expectError(error.BadRequest, Request.parseOwned(std.testing.allocator, raw));
 }
 
 test "chunked body framing checks decoded length before arithmetic" {
