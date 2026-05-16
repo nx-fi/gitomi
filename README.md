@@ -65,7 +65,9 @@ gt web
 
 Gitomi serves a loopback-only browser interface by default. It includes code
 browsing, issue and project views, workflow pages, event inspection, ref
-diagnostics, and keyboard shortcuts for fast navigation.
+diagnostics, and keyboard shortcuts for fast navigation. The web server is
+intended for local use only; Zig does not yet provide HTTP/2 server support, so
+Gitomi does not treat this endpoint as production-facing infrastructure.
 
 ## Sync With a Remote
 
