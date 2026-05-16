@@ -193,11 +193,10 @@ fn handleWebConnectionWithContext(allocator: Allocator, app_context: WebAppConte
         .response = zwf.Response.initWithRequest(allocator, stream, request),
     };
 
-    if (isForbiddenCrossOriginWrite(request)) {
+    if (!isValidCsrfRequest(request)) {
         try shared.sendPlainResponse(allocator, stream, 403, "Forbidden", "Forbidden\n");
         return;
     }
-
     if (try zwf.middleware.sendStaticAssets(ctx.response, ctx.request, &vendor_assets)) return;
 
     const router = WebRouter.init(&routes);
@@ -324,10 +323,10 @@ fn isSameOriginPost(request: HttpRequest) bool {
     if (!isLoopbackHost(request_authority.host)) return false;
 
     if (request.headerValue("origin")) |origin| {
-        if (sourceUrlMatchesAuthority(origin, request_authority)) return true;
+        return sourceUrlMatchesAuthority(origin, request_authority);
     }
     if (request.headerValue("referer")) |referer| {
-        if (sourceUrlMatchesAuthority(referer, request_authority)) return true;
+        return sourceUrlMatchesAuthority(referer, request_authority);
     }
     return false;
 }
@@ -655,6 +654,11 @@ pub fn parseHttpRequest(raw: []const u8) !HttpRequest {
 
 pub fn parseHttpRequestOwned(allocator: Allocator, raw: []const u8) !HttpRequest {
     return zwf.Request.parseOwned(allocator, raw);
+}
+
+fn isValidCsrfRequest(request: HttpRequest) bool {
+    if (request.method != .POST) return true;
+    return isSameOriginPost(request);
 }
 
 fn requireSameOriginActionPost(ctx: WebContext) !bool {
@@ -1037,6 +1041,53 @@ test "web code sync requires trusted same-origin post headers" {
             "action=exchange",
     );
     try std.testing.expect(!isSameOriginPost(missing_origin));
+}
+
+test "web CSRF validation requires same-origin POST metadata" {
+    const same_origin = try parseHttpRequest(
+        "POST /issues HTTP/1.1\r\n" ++
+            "Host: 127.0.0.1:12655\r\n" ++
+            "Origin: http://127.0.0.1:12655\r\n" ++
+            "Content-Length: 0\r\n" ++
+            "\r\n",
+    );
+    try std.testing.expect(isValidCsrfRequest(same_origin));
+
+    const same_referer = try parseHttpRequest(
+        "POST /issues HTTP/1.1\r\n" ++
+            "Host: localhost:12655\r\n" ++
+            "Referer: http://localhost:12655/new-issue\r\n" ++
+            "Content-Length: 0\r\n" ++
+            "\r\n",
+    );
+    try std.testing.expect(isValidCsrfRequest(same_referer));
+
+    const rebinding_attempt = try parseHttpRequest(
+        "POST /issues HTTP/1.1\r\n" ++
+            "Host: attacker.test:12655\r\n" ++
+            "Origin: http://attacker.test:12655\r\n" ++
+            "Content-Length: 0\r\n" ++
+            "\r\n",
+    );
+    try std.testing.expect(!isValidCsrfRequest(rebinding_attempt));
+
+    const cross_origin = try parseHttpRequest(
+        "POST /issues HTTP/1.1\r\n" ++
+            "Host: 127.0.0.1:12655\r\n" ++
+            "Origin: https://attacker.example\r\n" ++
+            "Referer: http://127.0.0.1:12655/new-issue\r\n" ++
+            "Content-Length: 0\r\n" ++
+            "\r\n",
+    );
+    try std.testing.expect(!isValidCsrfRequest(cross_origin));
+
+    const missing_metadata = try parseHttpRequest(
+        "POST /issues HTTP/1.1\r\n" ++
+            "Host: 127.0.0.1:12655\r\n" ++
+            "Content-Length: 0\r\n" ++
+            "\r\n",
+    );
+    try std.testing.expect(!isValidCsrfRequest(missing_metadata));
 }
 
 test "actions csrf guard accepts same-origin posts" {
