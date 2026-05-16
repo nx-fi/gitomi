@@ -30,7 +30,8 @@ pub const CookieSession = struct {
         response: response_mod.Response,
     ) !Session {
         if (try request.cookieValueOwned(allocator, self.name)) |existing| {
-            return .{ .id = existing, .created = false };
+            if (isValidId(existing)) return .{ .id = existing, .created = false };
+            allocator.free(existing);
         }
 
         const id = try generateIdOwned(allocator);
@@ -43,20 +44,52 @@ pub const CookieSession = struct {
     }
 };
 
+pub fn encodedIdSize() usize {
+    return std.base64.url_safe_no_pad.Encoder.calcSize(id_bytes);
+}
+
 pub fn generateIdOwned(allocator: Allocator) ![]u8 {
     var random_bytes: [id_bytes]u8 = undefined;
     std.crypto.random.bytes(&random_bytes);
-    const size = std.base64.url_safe_no_pad.Encoder.calcSize(random_bytes.len);
+    const size = encodedIdSize();
     const id = try allocator.alloc(u8, size);
     _ = std.base64.url_safe_no_pad.Encoder.encode(id, &random_bytes);
     return id;
 }
 
+pub fn isValidId(value: []const u8) bool {
+    if (value.len != encodedIdSize()) return false;
+    for (value) |c| {
+        if (!(std.ascii.isAlphanumeric(c) or c == '-' or c == '_')) return false;
+    }
+    return true;
+}
+
 test "session ids are URL-safe" {
     const id = try generateIdOwned(std.testing.allocator);
     defer std.testing.allocator.free(id);
-    try std.testing.expect(id.len > 32);
-    for (id) |c| {
-        try std.testing.expect(std.ascii.isAlphanumeric(c) or c == '-' or c == '_');
-    }
+    try std.testing.expect(isValidId(id));
+    try std.testing.expect(!isValidId("abc"));
+    try std.testing.expect(!isValidId("..........................................."));
+}
+
+test "cookie sessions ignore malformed existing ids" {
+    const raw =
+        "GET / HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1\r\n" ++
+        "Cookie: zwf_session=../../bad\r\n" ++
+        "\r\n";
+    const request = try request_mod.Request.parse(raw);
+
+    const stream: std.net.Stream = undefined;
+    var session = try (CookieSession{}).loadOrCreate(
+        std.testing.allocator,
+        request,
+        response_mod.Response.init(std.testing.allocator, stream),
+    );
+    defer session.deinit(std.testing.allocator);
+
+    try std.testing.expect(session.created);
+    try std.testing.expect(isValidId(session.id));
+    try std.testing.expect(session.set_cookie != null);
 }
