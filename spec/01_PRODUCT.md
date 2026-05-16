@@ -290,10 +290,54 @@ as merged even if a local clone cannot currently prove that `base_ref` contains
 the recorded commit. Implementations SHOULD separately report whether the local
 Data Plane confirms the recorded merge result.
 
+Gitomi pull request state does not own the Data Plane branch lifecycle. Merging
+or closing a pull request MUST NOT implicitly delete a local branch or remote
+tracking ref. A branch whose name is the `head_ref` of a merged or closed pull
+request and is not referenced by any open pull request is an inactive pull
+request branch for presentation purposes. Forge UIs SHOULD hide inactive pull
+request branches from default branch selectors and branch counts, while keeping
+them reachable by direct ref lookup and in explicit refs/admin views. This
+matches the practical effect of GitHub's "delete branch after merge" workflow
+without destroying local-first user state.
+
+Deleting a remote branch after a merge is a Git ref deletion in that remote
+repository, not a pull request metadata change. Local clones MAY continue to
+hold stale `refs/remotes/<remote>/...` tracking refs until an explicit prune
+operation, such as `git fetch --prune <remote>`, removes them. Implementations
+SHOULD expose pruning as an explicit user action and MUST distinguish it from
+deleting local `refs/heads/...` branches.
+
 Structured reviews are optional in v1. Requested reviewers are modeled directly
 on the pull request. General review discussion is represented by comments whose
 `parent_kind` is `pull`. Implementations MAY add future `review.*` events or
 line-scoped comment metadata while preserving this base pull request model.
+
+### 4.8. Issue and Pull Request Filter Language
+
+Issue and pull request list search boxes use one canonical, GitHub-like filter
+language. A query is a whitespace-separated sequence of terms. A term is either
+free text or a predicate of the form `key:value`. Values containing whitespace,
+literal colons, backslashes, or double quotes MUST be double-quoted; inside
+double quotes, `\"` represents a literal double quote and `\\` represents a
+literal backslash. Predicate keys and enumerated values are ASCII
+case-insensitive. Unknown predicates are treated as free text so newer query
+terms do not break older readers.
+
+The canonical issue predicate order is:
+
+`is:issue state:<state> author:<principal> label:<label> project:<project> milestone:<milestone> assignee:<principal> sort:<sort> <free-text>`
+
+Issue state values are `open`, `closed`, and `all`. Issue sort values are
+`newest`, `oldest`, and `updated`. The `is:<state>` form MAY be accepted as a
+state alias, but canonical renderers MUST emit `state:<state>`.
+
+The canonical pull request predicate order is:
+
+`is:pr state:<state> author:<principal> label:<label> assignee:<principal> reviewer:<principal> base:<ref> head:<ref> <free-text>`
+
+Pull request state values are `open`, `merged`, `closed`, and `all`. The
+`is:pull` and `is:pull-request` object aliases and `is:<state>` state aliases
+MAY be accepted, but canonical renderers MUST emit `is:pr state:<state>`.
 
 ## 5. Identity, Signing, and Authorization
 
@@ -432,8 +476,11 @@ The following issue fields MUST be modeled as causal scalar registers:
 *   `title`
 *   `body`
 *   `state` (`open` or `closed`)
+*   `pipeline` (work pipeline stage, such as `Todo`, `Pending`, `In Review`,
+    or `Done`)
+*   `priority` (planning priority, such as `P0`, `P1`, `P2`, or `P3`)
+*   `type` (issue kind, such as `bug`, `feature`, or `task`)
 *   `milestone`
-*   implementation-defined scalar metadata such as `priority`
 
 The following issue collections MUST be modeled as Observed-Remove Sets:
 
@@ -606,12 +653,18 @@ added at the same event hash. Implementations SHOULD create new projects with
 a small default column set such as `Todo`, `In Progress`, and `Done` when the
 user did not provide columns.
 
-Issue placements on a project board are expressed with `issue.project_added`
-and `issue.project_removed`, not by mutating the project object. This keeps
-issue card movement causally attached to the issue history. Implementations MAY
-display imported or legacy placements for projects that do not have a
-corresponding accepted `project.created` event, but created project objects are
-the canonical way to preserve empty boards, board metadata, and empty columns.
+Issue membership in a project is expressed with `issue.project_added` and
+`issue.project_removed`, not by mutating the project object. This keeps project
+membership causally attached to the issue history. Implementations MAY display
+imported or legacy placements for projects that do not have a corresponding
+accepted `project.created` event, but created project objects are the canonical
+way to preserve empty boards, board metadata, and empty columns.
+
+Project board movement in the richer projects model is expressed by updating the
+issue's `pipeline` scalar, not by removing and re-adding project membership. The
+legacy `(project, column)` placement remains a compatibility representation for
+imported or older kanban boards; clients MUST NOT silently translate conflicting
+legacy columns from multiple projects into a single issue pipeline value.
 
 A visible project projection MUST NOT expose more than 128 kanban columns. An
 event that would exceed this limit after reduction MUST be domain-rejected with

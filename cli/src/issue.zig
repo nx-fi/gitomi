@@ -7,7 +7,6 @@ const event_writer_mod = @import("event_writer.zig");
 const index = @import("index.zig");
 const io = @import("io.zig");
 const reaction = @import("reaction.zig");
-const repo_mod = @import("repo.zig");
 const util = @import("util.zig");
 const work_items = @import("work_items.zig");
 
@@ -26,20 +25,15 @@ const newUuidV7 = util.newUuidV7;
 const rfc3339Now = util.rfc3339Now;
 const shortObjectRef = util.shortObjectRef;
 const short_object_ref_len = util.short_object_ref_len;
-const createCommentForParentCommand = comment.createCommentForParentCommand;
+const createCommentForParentCommandWithRepo = comment.createCommentForParentCommandWithRepo;
 const dupeNonEmptyOption = cmd_common.dupeNonEmptyOption;
 const isIssueState = cmd_common.isIssueState;
 const jsonStringArgument = cmd_common.jsonStringArgument;
 const parseBodyReplyOptions = cmd_common.parseBodyReplyOptions;
 const parseCollectionMutation = cmd_common.parseCollectionMutation;
 const parsePositiveIntegerOption = cmd_common.parsePositiveIntegerOption;
-const projectNameForCommand = cmd_common.projectNameForCommand;
 const requireBodyOption = cmd_common.requireBodyOption;
 const requireNonEmptyOption = cmd_common.requireNonEmptyOption;
-const resolveIssueIdForCommand = cmd_common.resolveIssueIdForCommand;
-const resolveProjectColumnForCommand = cmd_common.resolveProjectColumnForCommand;
-const resolveProjectFieldIdForCommand = cmd_common.resolveProjectFieldIdForCommand;
-const resolveProjectIdForCommand = cmd_common.resolveProjectIdForCommand;
 const validateJsonArgument = cmd_common.validateJsonArgument;
 
 pub fn createIssueOpenedEvent(
@@ -345,6 +339,9 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
         return CliError.UserError;
     }
 
+    var command_repo = cmd_common.CommandRepo.init(allocator);
+    defer command_repo.deinit();
+
     if (std.mem.eql(u8, args[0], "list")) {
         var json = false;
         var agent_view = false;
@@ -406,9 +403,7 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
             }
         }
 
-        var repo = try repo_mod.discoverRepo(allocator);
-        defer repo.deinit();
-        try index.ensureIndex(allocator, repo);
+        const repo = try command_repo.indexedRepo();
         if (agent_view) {
             var db = try work_items.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
             defer db.deinit();
@@ -472,10 +467,8 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
             }
         }
 
-        var repo = try repo_mod.discoverRepo(allocator);
-        defer repo.deinit();
-        try index.ensureIndex(allocator, repo);
-        const issue_id = try index.resolveIssueId(allocator, repo, args[1]);
+        const repo = try command_repo.indexedRepo();
+        const issue_id = try command_repo.resolveIssueId(args[1]);
         defer allocator.free(issue_id);
         if (agent_view) {
             var db = try work_items.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
@@ -559,7 +552,7 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
             try requireNonEmptyOption("gt issue edit", "--title", title);
         }
 
-        const issue_id = try resolveIssueIdForCommand(allocator, args[1]);
+        const issue_id = try command_repo.resolveIssueId(args[1]);
         defer allocator.free(issue_id);
         try issue.createIssueUpdatedEvent(allocator, issue_id, update);
         return;
@@ -588,7 +581,7 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
             try io.eprint("gt issue {s}: {s} is required\n", .{ args[0], option_name });
             return CliError.UserError;
         }
-        const issue_id = try resolveIssueIdForCommand(allocator, args[1]);
+        const issue_id = try command_repo.resolveIssueId(args[1]);
         defer allocator.free(issue_id);
         try issue.createIssueStringEvent(allocator, issue_id, event_type, payload_key, value.?);
         return;
@@ -601,9 +594,9 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
         }
         const options = try parseBodyReplyOptions("gt issue comment", args, 2);
         const body = try requireBodyOption("gt issue comment", options.body);
-        const issue_id = try resolveIssueIdForCommand(allocator, args[1]);
+        const issue_id = try command_repo.resolveIssueId(args[1]);
         defer allocator.free(issue_id);
-        try createCommentForParentCommand(allocator, "gt issue comment", "issue", "issue", issue_id, body, options.reply_ref);
+        try createCommentForParentCommandWithRepo(&command_repo, allocator, "gt issue comment", "issue", "issue", issue_id, body, options.reply_ref);
         return;
     }
 
@@ -623,7 +616,7 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
                 return CliError.UserError;
             }
         }
-        const issue_id = try resolveIssueIdForCommand(allocator, args[1]);
+        const issue_id = try command_repo.resolveIssueId(args[1]);
         defer allocator.free(issue_id);
         if (body) |comment_body| {
             try requireNonEmptyOption(if (std.mem.eql(u8, args[0], "close")) "gt issue close" else "gt issue reopen", "--body", comment_body);
@@ -651,7 +644,7 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
             try io.eprint("gt issue {s}: value must not be empty\n", .{collection});
             return CliError.UserError;
         }
-        const issue_id = try resolveIssueIdForCommand(allocator, object_ref);
+        const issue_id = try command_repo.resolveIssueId(object_ref);
         defer allocator.free(issue_id);
         const event_type = try std.fmt.allocPrint(allocator, "issue.{s}_{s}", .{ collection, if (std.mem.eql(u8, op, "add")) "added" else "removed" });
         defer allocator.free(event_type);
@@ -679,7 +672,7 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
             try io.eprint("gt issue milestone: --milestone is required\n", .{});
             return CliError.UserError;
         }
-        const issue_id = try resolveIssueIdForCommand(allocator, args[1]);
+        const issue_id = try command_repo.resolveIssueId(args[1]);
         defer allocator.free(issue_id);
         try issue.createIssueStringEvent(allocator, issue_id, "issue.milestone_set", "milestone", value.?);
         return;
@@ -713,13 +706,13 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
             try io.eprint("gt issue project: --column is required\n", .{});
             return CliError.UserError;
         }
-        const issue_id = try resolveIssueIdForCommand(allocator, issue_ref);
+        const issue_id = try command_repo.resolveIssueId(issue_ref);
         defer allocator.free(issue_id);
-        const project_id = try resolveProjectIdForCommand(allocator, project_name);
+        const project_id = try command_repo.resolveProjectId(project_name);
         defer allocator.free(project_id);
-        const canonical_project_name = try projectNameForCommand(allocator, project_id);
+        const canonical_project_name = try command_repo.projectName(project_id);
         defer allocator.free(canonical_project_name);
-        var resolved_column = try resolveProjectColumnForCommand(allocator, project_id, column.?);
+        var resolved_column = try command_repo.resolveProjectColumn(project_id, column.?);
         defer resolved_column.deinit(allocator);
         try issue.createIssueProjectEvent(allocator, issue_id, canonical_project_name, resolved_column.column, project_id, resolved_column.column_ref, std.mem.eql(u8, op, "add"));
         return;
@@ -730,7 +723,7 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
             try io.eprint("gt issue project-field: expected ISSUE set|clear PROJECT FIELD\n", .{});
             return CliError.UserError;
         }
-        const issue_id = try resolveIssueIdForCommand(allocator, args[1]);
+        const issue_id = try command_repo.resolveIssueId(args[1]);
         defer allocator.free(issue_id);
         const op = args[2];
         if (!std.mem.eql(u8, op, "set") and !std.mem.eql(u8, op, "clear")) {
@@ -739,9 +732,9 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
         }
         const project_ref = args[3];
         const field_ref = args[4];
-        const project_id = try resolveProjectIdForCommand(allocator, project_ref);
+        const project_id = try command_repo.resolveProjectId(project_ref);
         defer allocator.free(project_id);
-        const field_id = try resolveProjectFieldIdForCommand(allocator, project_id, field_ref);
+        const field_id = try command_repo.resolveProjectFieldId(project_id, field_ref);
         defer allocator.free(field_id);
 
         if (std.mem.eql(u8, op, "clear")) {
@@ -790,7 +783,7 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
             try io.eprint("gt issue {s}: expected ISSUE EMOJI\n", .{args[0]});
             return CliError.UserError;
         }
-        const issue_id = try resolveIssueIdForCommand(allocator, args[1]);
+        const issue_id = try command_repo.resolveIssueId(args[1]);
         defer allocator.free(issue_id);
         try reaction.createReactionEvent(allocator, "issue", issue_id, args[2], std.mem.eql(u8, args[0], "react"));
         return;

@@ -1,0 +1,64 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="408"
+  height="234"
+  viewBox="51 63 408 234"
+  fill="none"
+  role="img"
+  aria-labelledby="gitomiIconTitle"
+>
+  <title id="gitomiIconTitle">Gitomi icon</title>
+
+  <defs>
+    <clipPath id="gitomi-iris-clip">
+      <circle cx="255" cy="180" r="92" />
+    </clipPath>
+  </defs>
+
+  <!-- Filled eye with iris cutout -->
+  <path
+    fill="#10B8AA"
+    fill-rule="evenodd"
+    clip-rule="evenodd"
+    d="
+      M70 180
+      C125 120 190 82 255 82
+      C320 82 385 120 440 180
+      C385 240 320 278 255 278
+      C190 278 125 240 70 180
+      Z
+
+      M255 88
+      A92 92 0 1 0 255 272
+      A92 92 0 1 0 255 88
+      Z
+    "
+  />
+
+  <g clip-path="url(#gitomi-iris-clip)">
+    <!-- Straight lines -->
+    <g
+      stroke="#10B8AA"
+      stroke-width="12"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      fill="none"
+    >
+      <path d="M238 150 L238 210" />
+      <path d="M238 194 L300 158" />
+    </g>
+
+    <!-- Outline circles -->
+    <g
+      stroke="#10B8AA"
+      stroke-width="15"
+      fill="none"
+    >
+      <circle cx="238" cy="128" r="22" />
+      <circle cx="238" cy="232" r="22" />
+    </g>
+
+    <!-- Filled circle -->
+    <circle cx="300" cy="158" r="22" fill="#10B8AA" />
+  </g>
+</svg>

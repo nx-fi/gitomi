@@ -114,7 +114,7 @@ pub fn renderActionsPage(allocator: Allocator, repo: Repo, target: []const u8) !
 }
 
 fn renderActionsPageWithMessage(allocator: Allocator, repo: Repo, target: []const u8, message: ?[]const u8) ![]u8 {
-    if (try shared.renderIndexingPageIfStale(allocator, repo, "Workflows", "actions", "/actions")) |body| return body;
+    if (try shared.renderIndexingPageIfStale(allocator, repo, "Workflows", "actions", "/workflows")) |body| return body;
     try ensureIndex(allocator, repo);
 
     var buf: std.ArrayList(u8) = .empty;
@@ -206,7 +206,7 @@ fn appendActionsSidebar(
     try appendTemplate(buf, allocator,
         \\>
         \\    <summary>Request workflow</summary>
-        \\    <form method="post" action="/actions/request">
+        \\    <form method="post" action="/workflows/request">
         \\      <label>Workflow<select name="workflow" required>
     , .{});
     for (workflows) |workflow| {
@@ -235,7 +235,7 @@ fn appendActionsSidebar(
     try appendTemplate(buf, allocator,
         \\      </div>
         \\    </form>
-        \\    <form method="post" action="/actions/run-requested">
+        \\    <form method="post" action="/workflows/run-requested">
         \\      <button class="button secondary" type="submit">Run pending ({pending})</button>
         \\    </form>
         \\  </details>
@@ -308,7 +308,7 @@ fn appendActionsMain(
         \\    <h1>{title}</h1>
         \\    <p>{subtitle}</p>
         \\  </div>
-        \\  <form class="actions-filter" method="get" action="/actions">
+        \\  <form class="actions-filter" method="get" action="/workflows">
     , .{
         .title = selected_title,
         .subtitle = if (filters.workflow == null) "Showing runs from all workflows" else "Showing runs from the selected workflow",
@@ -566,11 +566,11 @@ fn appendRunRequestForm(buf: *std.ArrayList(u8), allocator: Allocator, row: RunR
     const disabled = pending_only and !std.mem.eql(u8, row.conclusion, "pending");
     if (pending_only) {
         try appendTemplate(buf, allocator,
-            \\<form method="post" action="/actions/run-requested"><input type="hidden" name="run" value="{run_id}">
+            \\<form method="post" action="/workflows/run-requested"><input type="hidden" name="run" value="{run_id}">
         , .{ .run_id = row.run_id });
     } else {
         try appendTemplate(buf, allocator,
-            \\<form method="post" action="/actions/request"><input type="hidden" name="workflow" value="{workflow}"><input type="hidden" name="event" value="{event_name}">
+            \\<form method="post" action="/workflows/request"><input type="hidden" name="workflow" value="{workflow}"><input type="hidden" name="event" value="{event_name}">
         , .{
             .workflow = row.workflow,
             .event_name = row.event_name,
@@ -625,6 +625,9 @@ fn appendWorkflowOverview(
 fn appendSelectedWorkflow(buf: *std.ArrayList(u8), allocator: Allocator, workflow: actions.Workflow, run_count: usize) !void {
     try appendTemplate(buf, allocator,
         \\<section class="actions-workflow-detail">
+    , .{});
+    try shared.appendDetailBackButton(buf, allocator, shared.literalHref("/workflows"), "Back to workflows");
+    try appendTemplate(buf, allocator,
         \\  <div class="actions-workflow-detail-head">
         \\    <div>
         \\      <span class="actions-kicker">{dialect}</span>
@@ -859,7 +862,7 @@ fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const
 }
 
 fn appendActionsHref(buf: *std.ArrayList(u8), allocator: Allocator, filters: ActionsFilters, override: ActionsHrefOverride) !void {
-    try buf.appendSlice(allocator, "/actions");
+    try buf.appendSlice(allocator, "/workflows");
     var first = true;
     if (actionsFilterHrefValue(filters, override, "workflow")) |value| try appendActionsHrefParam(buf, allocator, &first, "workflow", value);
     if (actionsFilterHrefValue(filters, override, "q")) |value| try appendActionsHrefParam(buf, allocator, &first, "q", value);
@@ -891,7 +894,7 @@ fn appendActionsHrefParam(buf: *std.ArrayList(u8), allocator: Allocator, first: 
 }
 
 test "web actions filters parse and preserve href parameters" {
-    var filters = try actionsFiltersFromTarget(std.testing.allocator, "/actions?workflow=.github/workflows/ci.yml&q=deploy+main&event=push&status=success&branch=refs/heads/main&actor=alice");
+    var filters = try actionsFiltersFromTarget(std.testing.allocator, "/workflows?workflow=.github/workflows/ci.yml&q=deploy+main&event=push&status=success&branch=refs/heads/main&actor=alice");
     defer filters.deinit();
 
     try std.testing.expectEqualStrings(".github/workflows/ci.yml", filters.workflow.?);
@@ -907,7 +910,7 @@ test "web actions filters parse and preserve href parameters" {
         .param_name = "status",
         .param_value = null,
     });
-    try std.testing.expectEqualStrings("/actions?workflow=.github/workflows/ci.yml&amp;q=deploy%20main&amp;event=push&amp;branch=refs/heads/main&amp;actor=alice", buf.items);
+    try std.testing.expectEqualStrings("/workflows?workflow=.github/workflows/ci.yml&amp;q=deploy%20main&amp;event=push&amp;branch=refs/heads/main&amp;actor=alice", buf.items);
 }
 
 fn workflowRunCount(workflow: []const u8, runs: []const RunRow) usize {
@@ -1324,7 +1327,7 @@ pub fn handleActionsRequestPost(allocator: Allocator, repo: Repo, stream: std.ne
     const target_ref = std.mem.trim(u8, ref_owned, " \t\r\n");
     const target_oid = std.mem.trim(u8, oid_owned, " \t\r\n");
     if (workflow.len == 0) {
-        const body = try renderActionsPageWithMessage(allocator, repo, "/actions", "Workflow is required.");
+        const body = try renderActionsPageWithMessage(allocator, repo, "/workflows", "Workflow is required.");
         defer allocator.free(body);
         try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", body, null);
         return;
@@ -1338,14 +1341,14 @@ pub fn handleActionsRequestPost(allocator: Allocator, repo: Repo, stream: std.ne
         if (event_name.len == 0) "workflow_dispatch" else event_name,
         null,
     ) catch {
-        const body = try renderActionsPageWithMessage(allocator, repo, "/actions", "Could not request the workflow. Check signing and the workflow selector.");
+        const body = try renderActionsPageWithMessage(allocator, repo, "/workflows", "Could not request the workflow. Check signing and the workflow selector.");
         defer allocator.free(body);
         try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", body, null);
         return;
     };
     defer result.deinit();
 
-    try sendRedirect(allocator, stream, "/actions?requested=1");
+    try sendRedirect(allocator, stream, "/workflows?requested=1");
 }
 
 pub fn handleRunRequestedPost(allocator: Allocator, stream: std.net.Stream, form_body: []const u8) !void {
@@ -1364,5 +1367,5 @@ pub fn handleRunRequestedPost(allocator: Allocator, stream: std.net.Stream, form
         try sendPlainResponse(allocator, stream, 409, "Conflict", "No matching pending action run\n");
         return;
     };
-    try sendRedirect(allocator, stream, "/actions?run=1");
+    try sendRedirect(allocator, stream, "/workflows?run=1");
 }
