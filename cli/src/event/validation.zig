@@ -425,6 +425,8 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!optionalStringArrayWithin(payload, "assignees", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "issue.opened payload.assignees exceeds v1 collection limits";
         if (!optionalStringWithin(payload, "source_author", git.max_payload_atom_bytes)) return "issue.opened payload.source_author exceeds v1 field size limit";
         if (!optionalStringWithin(payload, "milestone", git.max_payload_atom_bytes)) return "issue.opened payload.milestone exceeds v1 field size limit";
+        if (!optionalIssuePriority(payload, "priority")) return "issue.opened payload.priority must be P0, P1, P2, or P3";
+        if (!optionalIssueStatus(payload, "status")) return "issue.opened payload.status must be Draft, Pending, WIP, Review, Done, or Failed";
         if (!optionalIssueProjectsWithin(payload, "projects", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "issue.opened payload.projects must be project objects within v1 collection limits";
         return null;
     }
@@ -436,6 +438,8 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!optionalState(payload, "state", &.{ "open", "closed" })) return "issue.updated payload.state must be open or closed";
         if (!optionalString(payload, "milestone")) return "issue.updated payload.milestone must be a string";
         if (!optionalStringWithin(payload, "milestone", git.max_payload_atom_bytes)) return "issue.updated payload.milestone exceeds v1 field size limit";
+        if (!optionalIssuePriority(payload, "priority")) return "issue.updated payload.priority must be P0, P1, P2, or P3";
+        if (!optionalIssueStatus(payload, "status")) return "issue.updated payload.status must be Draft, Pending, WIP, Review, Done, or Failed";
         if (!optionalIssueProjectsWithin(payload, "projects", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "issue.updated payload.projects must be project objects within v1 collection limits";
         if (!optionalStringArray(payload, "labels_added")) return "issue.updated payload.labels_added must be an array of strings";
         if (!optionalStringArrayWithin(payload, "labels_added", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "issue.updated payload.labels_added exceeds v1 collection limits";
@@ -445,13 +449,21 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!optionalStringArrayWithin(payload, "assignees_added", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "issue.updated payload.assignees_added exceeds v1 collection limits";
         if (!optionalStringArray(payload, "assignees_removed")) return "issue.updated payload.assignees_removed must be an array of strings";
         if (!optionalStringArrayWithin(payload, "assignees_removed", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "issue.updated payload.assignees_removed exceeds v1 collection limits";
-        if (!hasAnyKey(payload, &.{ "title", "body", "state", "milestone", "projects", "labels_added", "labels_removed", "assignees_added", "assignees_removed" })) return "issue.updated payload must contain at least one update field";
+        if (!hasAnyKey(payload, &.{ "title", "body", "state", "milestone", "priority", "status", "projects", "labels_added", "labels_removed", "assignees_added", "assignees_removed" })) return "issue.updated payload must contain at least one update field";
         return null;
     }
     if (std.mem.eql(u8, event_type, "issue.title_set")) return requirePayloadStringWithin(payload, "issue.title_set", "title", git.max_payload_title_bytes);
     if (std.mem.eql(u8, event_type, "issue.body_set")) return requirePayloadStringWithin(payload, "issue.body_set", "body", git.max_payload_text_bytes);
     if (std.mem.eql(u8, event_type, "issue.state_set")) {
         if (!hasState(payload, "state", &.{ "open", "closed" })) return "issue.state_set payload.state must be open or closed";
+        return null;
+    }
+    if (std.mem.eql(u8, event_type, "issue.priority_set")) {
+        if (!hasIssuePriority(payload, "priority")) return "issue.priority_set payload.priority must be P0, P1, P2, or P3";
+        return null;
+    }
+    if (std.mem.eql(u8, event_type, "issue.status_set")) {
+        if (!hasIssueStatus(payload, "status")) return "issue.status_set payload.status must be Draft, Pending, WIP, Review, Done, or Failed";
         return null;
     }
     if (std.mem.eql(u8, event_type, "issue.label_added") or std.mem.eql(u8, event_type, "issue.label_removed")) return requirePayloadStringWithin(payload, event_type, "label", git.max_payload_atom_bytes);
@@ -705,6 +717,10 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!hasString(payload, "merge_oid") and !hasString(payload, "target_oid")) return "pull.merged payload.merge_oid or payload.target_oid must be a string";
         if (!optionalStringWithin(payload, "merge_oid", git.max_payload_ref_bytes)) return "pull.merged payload.merge_oid exceeds v1 ref size limit";
         if (!optionalStringWithin(payload, "target_oid", git.max_payload_ref_bytes)) return "pull.merged payload.target_oid exceeds v1 ref size limit";
+        if (!optionalStringWithin(payload, "base_oid", git.max_payload_ref_bytes)) return "pull.merged payload.base_oid exceeds v1 ref size limit";
+        if (!optionalStringWithin(payload, "head_oid", git.max_payload_ref_bytes)) return "pull.merged payload.head_oid exceeds v1 ref size limit";
+        if (!optionalStringWithin(payload, "remote", git.max_payload_atom_bytes)) return "pull.merged payload.remote exceeds v1 field size limit";
+        if (!optionalStringWithin(payload, "remote_ref", git.max_payload_ref_bytes)) return "pull.merged payload.remote_ref exceeds v1 ref size limit";
         return null;
     }
 
@@ -846,6 +862,34 @@ fn validProjectViewLayout(value: []const u8) bool {
     return std.mem.eql(u8, value, "table") or
         std.mem.eql(u8, value, "board") or
         std.mem.eql(u8, value, "roadmap");
+}
+
+fn optionalIssuePriority(object: std.json.ObjectMap, key: []const u8) bool {
+    if (object.get(key) == null) return true;
+    return hasIssuePriority(object, key);
+}
+
+fn hasIssuePriority(object: std.json.ObjectMap, key: []const u8) bool {
+    const value = jsonString(object.get(key)) orelse return false;
+    return std.mem.eql(u8, value, "P0") or
+        std.mem.eql(u8, value, "P1") or
+        std.mem.eql(u8, value, "P2") or
+        std.mem.eql(u8, value, "P3");
+}
+
+fn optionalIssueStatus(object: std.json.ObjectMap, key: []const u8) bool {
+    if (object.get(key) == null) return true;
+    return hasIssueStatus(object, key);
+}
+
+fn hasIssueStatus(object: std.json.ObjectMap, key: []const u8) bool {
+    const value = jsonString(object.get(key)) orelse return false;
+    return std.mem.eql(u8, value, "Draft") or
+        std.mem.eql(u8, value, "Pending") or
+        std.mem.eql(u8, value, "WIP") or
+        std.mem.eql(u8, value, "Review") or
+        std.mem.eql(u8, value, "Done") or
+        std.mem.eql(u8, value, "Failed");
 }
 
 fn jsonValueWithin(value: std.json.Value, max_bytes: usize) bool {

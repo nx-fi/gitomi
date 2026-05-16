@@ -373,6 +373,22 @@ pub fn isIssueState(value: []const u8) bool {
     return std.mem.eql(u8, value, "open") or std.mem.eql(u8, value, "closed");
 }
 
+pub fn isIssuePriority(value: []const u8) bool {
+    return std.mem.eql(u8, value, "P0") or
+        std.mem.eql(u8, value, "P1") or
+        std.mem.eql(u8, value, "P2") or
+        std.mem.eql(u8, value, "P3");
+}
+
+pub fn isIssueStatus(value: []const u8) bool {
+    return std.mem.eql(u8, value, "Draft") or
+        std.mem.eql(u8, value, "Pending") or
+        std.mem.eql(u8, value, "WIP") or
+        std.mem.eql(u8, value, "Review") or
+        std.mem.eql(u8, value, "Done") or
+        std.mem.eql(u8, value, "Failed");
+}
+
 pub fn isProjectState(value: []const u8) bool {
     return std.mem.eql(u8, value, "open") or std.mem.eql(u8, value, "closed");
 }

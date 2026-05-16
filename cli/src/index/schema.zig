@@ -91,7 +91,15 @@ pub fn createIndexSchema(db: *SqliteDb) !void {
         \\CREATE TABLE issue_metadata (
         \\  issue_id TEXT PRIMARY KEY,
         \\  source_author TEXT NOT NULL,
-        \\  milestone TEXT NOT NULL
+        \\  milestone TEXT NOT NULL,
+        \\  priority TEXT NOT NULL,
+        \\  priority_occurred_at TEXT NOT NULL,
+        \\  priority_actor_principal TEXT NOT NULL,
+        \\  priority_event_hash TEXT NOT NULL,
+        \\  status TEXT NOT NULL,
+        \\  status_occurred_at TEXT NOT NULL,
+        \\  status_actor_principal TEXT NOT NULL,
+        \\  status_event_hash TEXT NOT NULL
         \\);
         \\CREATE TABLE issue_projects (
         \\  issue_id TEXT NOT NULL,

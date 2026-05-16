@@ -259,6 +259,8 @@ fn requiredIndexTablesExist(db: *SqliteDb) bool {
     defer projects_slug.deinit();
     var project_columns_ref = db.prepare("SELECT column_ref FROM project_columns LIMIT 0") catch return false;
     defer project_columns_ref.deinit();
+    var issue_metadata_fields = db.prepare("SELECT priority, status, priority_event_hash, status_event_hash FROM issue_metadata LIMIT 0") catch return false;
+    defer issue_metadata_fields.deinit();
     var project_memberships = db.prepare("SELECT project_id FROM project_memberships LIMIT 0") catch return false;
     defer project_memberships.deinit();
     var project_fields = db.prepare("SELECT id FROM project_fields LIMIT 0") catch return false;

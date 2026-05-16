@@ -3,223 +3,333 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Gitomi is a local-first forge that stores issues, pull requests, projects, milestones, access control, and workflow runs inside Git.">
+  <meta name="description" content="Gitomi keeps your entire development workflow - issues, PRs, projects, workflows, and agent activity - inside your Git repository.">
   <script>
     (function () {
       try {
         var stored = localStorage.getItem("gitomi.theme");
-        var system = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-        document.documentElement.dataset.theme = stored === "light" || stored === "dark" ? stored : system;
+        document.documentElement.dataset.theme = stored === "light" || stored === "dark" ? stored : "dark";
       } catch (_) {
-        document.documentElement.dataset.theme = "light";
+        document.documentElement.dataset.theme = "dark";
       }
     }());
   </script>
-  <title>Gitomi - A local-first forge that lives inside Git</title>
+  <title>Gitomi - Own your project, not just your code</title>
   <link rel="icon" href="./assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="./assets/webui.css">
   <link rel="stylesheet" href="./assets/site.css">
 </head>
 <body class="site-shell">
-  <header class="topbar site-topbar">
-    <a class="brand" href="#top" aria-label="Gitomi home">
-      <img class="brand-logo" src="./assets/logo.svg" alt="" width="47" height="32">
-      <span>Gitomi</span>
-    </a>
-    <nav aria-label="Primary">
-      
-          <a href="#why" class="active">
-            <span class="button-icon icon-issues" aria-hidden="true"></span>
-            Why
-          </a>
-        
-          <a href="#model" class="">
-            <span class="button-icon icon-branch" aria-hidden="true"></span>
-            Model
-          </a>
-        
-          <a href="#surface" class="">
-            <span class="button-icon icon-projects" aria-hidden="true"></span>
-            Surface
-          </a>
-        
-          <a href="#start" class="">
-            <span class="button-icon icon-code" aria-hidden="true"></span>
-            Start
-          </a>
-        
-          <a href="#docs" class="">
-            <span class="button-icon icon-book" aria-hidden="true"></span>
-            Docs
-          </a>
-        
-    </nav>
-    <div class="topbar-actions">
-      <a class="button secondary site-nav-button" href="#start">Install</a>
-      <button class="theme-toggle" type="button" data-theme-toggle aria-pressed="false" aria-label="Toggle dark mode" title="Toggle dark mode">
-        <span class="theme-toggle-track" aria-hidden="true"><span class="theme-toggle-thumb"></span></span>
-        <span class="theme-toggle-label" data-theme-label>Light</span>
-      </button>
-    </div>
-  </header>
+  <div class="ambient-grid" aria-hidden="true"></div>
+  <div class="corner-actions" aria-label="Site actions">
+    <a class="github-link" href="https://github.com/nx-fi/gitomi" target="_blank" rel="noreferrer">GitHub</a>
+    <button class="theme-toggle theme-float" type="button" data-theme-toggle aria-pressed="true" aria-label="Toggle dark mode" title="Toggle dark mode">
+      <span class="theme-toggle-track" aria-hidden="true"><span class="theme-toggle-thumb"></span></span>
+      <span class="theme-toggle-label" data-theme-label>Dark</span>
+    </button>
+  </div>
 
   <main id="top" class="site-main">
-    <section class="site-hero" aria-labelledby="hero-title">
-      <div class="hero-visual" aria-hidden="true">
-        <div class="hero-window panel">
-          <div class="hero-window-head">
-            <span></span><span></span><span></span>
-            <strong>gitomi/local-first-forge</strong>
+    <section class="hero-section" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <a class="hero-brand" href="#top" aria-label="Gitomi home">
+          <img src="./assets/logo.svg" alt="" width="47" height="32">
+          <span>Gitomi</span>
+        </a>
+        <p class="pain-line">Open source, free forever.</p>
+        <h1 id="hero-title">Own your <span class="hero-rotator" data-typewriter data-words="project|tasks|workflows|collaboration">project</span>, not just your code.</h1>
+        <p class="hero-lede">Gitomi keeps issues, pull requests, Kanban boards, workflows, and agent activity inside your Git repository - so you can work offline, sync with any Git remote, or self-host without losing your collaboration history.</p>
+        <div class="hero-install command-code">
+          <pre><code>curl gitomi.com/install.sh</code></pre>
+          <button class="command-copy install-copy" type="button" data-copy-command title="Copy install command" aria-label="Copy install command">
+            <span class="button-icon icon-copy" aria-hidden="true"></span>
+          </button>
+        </div>
+        <div class="hero-actions">
+          <a class="button primary" href="#start">Start locally</a>
+          <a class="button secondary" href="#how">See how it works</a>
+        </div>
+        <p class="trust-line">No central database. No required server. No custom transport.</p>
+      </div>
+
+      <div class="hero-stage" aria-hidden="true">
+        <div class="repo-card parallax-layer" data-parallax data-depth="-8">
+          <span class="button-icon icon-branch" aria-hidden="true"></span>
+          <strong>refs/gitomi/*</strong>
+          <small>signed project history</small>
+        </div>
+        
+    <div class="browser-shot parallax-layer" data-parallax data-depth="16">
+      <div class="shot-chrome">
+        <span class="window-dot red"></span>
+        <span class="window-dot amber"></span>
+        <span class="window-dot green"></span>
+        <code>localhost:3821/projects/portable-v1</code>
+      </div>
+      <div class="app-sim">
+        <aside class="sim-sidebar">
+          <strong>Gitomi</strong>
+          <span class="is-active"><span class="button-icon icon-projects" aria-hidden="true"></span> Board</span>
+          <span><span class="button-icon icon-issues" aria-hidden="true"></span> Issues</span>
+          <span><span class="button-icon icon-pull-request" aria-hidden="true"></span> PRs</span>
+          <span><span class="button-icon icon-workflow" aria-hidden="true"></span> Runs</span>
+          <span><span class="button-icon icon-branch" aria-hidden="true"></span> Refs</span>
+        </aside>
+        <section class="sim-board" aria-label="Simulated Gitomi project board">
+          <div class="sim-toolbar">
+            <div>
+              <p>Project</p>
+              <strong>Own the workflow</strong>
+            </div>
+            <span class="sim-button">Sync refs</span>
           </div>
-          <div class="hero-window-body">
-            <aside>
-              <span class="side-active">Code</span>
-              <span>Issues</span>
-              <span>Pull Requests</span>
-              <span>Projects</span>
-              <span>Workflows</span>
-            </aside>
-            <div class="hero-board">
-              <div class="hero-ref-line">
-                <code>refs/gitomi/inbox/alice/laptop</code>
-                <b>signed</b>
-              </div>
-              <div class="hero-issue-row">
-                <i class="dot"></i>
-                <div><strong>Plan v1 release notes</strong><small>#b41a908 opened locally</small></div>
-                <em>open</em>
-              </div>
-              <div class="hero-issue-row">
-                <i class="dot is-blue"></i>
-                <div><strong>Review sync admission rules</strong><small>pull request from feature/fsck</small></div>
-                <em>ready</em>
-              </div>
-              <div class="hero-lanes">
-                <span style="--h:42%;--c:#54aeef"></span>
-                <span style="--h:72%;--c:#2da44e"></span>
-                <span style="--h:58%;--c:#a475f9"></span>
-                <span style="--h:84%;--c:#bf8700"></span>
-                <span style="--h:50%;--c:#cf222e"></span>
-              </div>
+          <div class="kanban-grid">
+            <div class="kanban-lane">
+              <h3>Local queue</h3>
+              <article>
+                <span class="issue-id">#128</span>
+                <strong>Agent trace belongs in repo history</strong>
+                <small>signed by alice/laptop</small>
+              </article>
+              <article>
+                <span class="issue-id green">#129</span>
+                <strong>Offline PR review from train Wi-Fi</strong>
+                <small>3 comments pending sync</small>
+              </article>
+            </div>
+            <div class="kanban-lane is-hot">
+              <h3>Review</h3>
+              <article class="is-selected">
+                <span class="issue-id coral">PR-44</span>
+                <strong>Replace hosted issue sync</strong>
+                <small>checks passed locally</small>
+              </article>
+              <article>
+                <span class="issue-id amber">RUN</span>
+                <strong>workflow: release-notes</strong>
+                <small>artifact stored with event</small>
+              </article>
+            </div>
+            <div class="kanban-lane">
+              <h3>Accepted</h3>
+              <article>
+                <span class="issue-id cyan">ACL</span>
+                <strong>RBAC reducer verified</strong>
+                <small>projection rebuilt</small>
+              </article>
+            </div>
+          </div>
+        </section>
+      </div>
+      <div class="click-cursor" aria-hidden="true"><span></span></div>
+    </div>
+  
+        <div class="terminal-shot parallax-layer" data-parallax data-depth="22">
+          <div class="terminal-head">
+            <span></span>
+            <strong>alice@repo</strong>
+          </div>
+          <pre><code><span class="prompt">$</span> <span data-typewriter data-words="gt issue open --title own-the-workflow|git fetch origin refs/gitomi/*|gt web --offline-ready">gt issue open --title own-the-workflow</span><span class="typing-caret"></span>
+<span class="ok">accepted</span> event 9f2a1c4 projected locally
+<span class="muted">sync</span> ordinary git transport ready</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <section id="how" class="proof-section">
+      <div class="section-copy">
+        <p class="eyebrow">Repository-owned collaboration</p>
+        <h2>All project data lives in Git.</h2>
+        <p>Issues, pull requests, comments, milestones, project Kanban, workflow runs, and agent activity are stored as Git-backed project history. Your repo becomes the source of truth for both code and collaboration.</p>
+      </div>
+      <div class="repo-visual parallax-layer" data-parallax data-depth="10" aria-label="Repository ref layout">
+        <div class="repo-window">
+          <div class="repo-window-head">
+            <span class="window-dot red"></span>
+            <span class="window-dot amber"></span>
+            <span class="window-dot green"></span>
+            <strong>Your repository</strong>
+            <code>refs/gitomi/*</code>
+          </div>
+          <div class="repo-visual-grid">
+            <div class="repo-tree">
+              <div><span class="tree-glyph">main</span><strong>code branches</strong><small>normal Git</small></div>
+              <div><span class="tree-glyph">v1.0</span><strong>tags</strong><small>normal Git</small></div>
+              <div class="is-live"><span class="tree-glyph">refs/gitomi</span><strong>project history</strong><small>signed commits</small></div>
+              <div><span class="tree-glyph sub">issues</span><strong>#128, #129, #131</strong><small>events</small></div>
+              <div><span class="tree-glyph sub">pulls</span><strong>PR-44, PR-45</strong><small>reviews</small></div>
+              <div><span class="tree-glyph sub">runs</span><strong>workflows + agents</strong><small>outputs</small></div>
+            </div>
+            <div class="event-stack">
+              <article>
+                <span class="event-kind">issue.opened</span>
+                <strong>Move workflow into Git</strong>
+                <small>alice/laptop signed 9f2a1c4</small>
+              </article>
+              <article>
+                <span class="event-kind green">project.card.moved</span>
+                <strong>Kanban state projected locally</strong>
+                <small>refs fetched, index rebuilt</small>
+              </article>
+              <article>
+                <span class="event-kind violet">agent.run.finished</span>
+                <strong>Trace and artifact attached</strong>
+                <small>durable result in repo history</small>
+              </article>
             </div>
           </div>
         </div>
-      </div>
-      <div class="hero-copy">
-        <img src="./assets/logo.svg" alt="" width="94" height="54">
-        <p class="eyebrow">Local-first collaboration</p>
-        <h1 id="hero-title">Gitomi</h1>
-        <p class="hero-lede">A Git-native forge for issues, pull requests, project boards, milestones, access control, and workflow runs. The source of truth is signed commits under <code>refs/gitomi/*</code>.</p>
-        <div class="hero-actions">
-          <a class="button primary" href="#start">Get Started</a>
-          <a class="button secondary" href="#model">See the Model</a>
+        <div class="proof-chips">
+          <span>Issues</span><span>Pull requests</span><span>Comments</span><span>Milestones</span><span>Project Kanban</span><span>Workflow runs</span><span>Agent activity</span>
         </div>
       </div>
     </section>
 
-    <section id="why" class="site-band why-band">
-      <div class="site-section-head">
-        <p class="eyebrow">Why Gitomi</p>
-        <h2>Collaboration state that follows the repository.</h2>
-        <p>Gitomi keeps social and automation state in normal Git refs, so a clone, fetch, push, bundle, mirror, or fork can carry the forge with the code.</p>
+    <section class="sync-section">
+      <div class="section-copy">
+        <p class="eyebrow">Ordinary Git transport</p>
+        <h2>Use any Git host, or host it yourself.</h2>
+        <p>Gitomi syncs through ordinary Git. Use an existing Git service, a private remote, a mirror, or a fully local setup. If Git can fetch and push, your project workflow can move with it.</p>
       </div>
-      <div class="why-grid">
-        <article class="why-card panel">
-          <span class="button-icon icon-branch" aria-hidden="true"></span>
-          <h3>Plain Git replication</h3>
-          <p>Issues, PRs, projects, and runs move through ordinary Git transport. There is no central database to promote into the authority path.</p>
-        </article>
-        <article class="why-card panel">
-          <span class="button-icon icon-check" aria-hidden="true"></span>
-          <h3>Signed event history</h3>
-          <p>Every user-facing change is a native signed commit. Reducers validate identity, sequence, RBAC, and causal context before projecting state.</p>
-        </article>
-        <article class="why-card panel">
-          <span class="button-icon icon-sync" aria-hidden="true"></span>
-          <h3>Offline-friendly by design</h3>
-          <p>Each device writes to its own inbox ref. Replicas merge deterministic projections when they reconnect and sync.</p>
-        </article>
-      </div>
-    </section>
-
-    <section id="model" class="site-band model-band">
-      <div class="site-section-head compact">
-        <p class="eyebrow">Storage model</p>
-        <h2>Two planes, one repository.</h2>
-      </div>
-      <div class="model-grid">
-        <article class="model-panel panel">
-          <div class="model-kicker"><span class="button-icon icon-code" aria-hidden="true"></span> Data plane</div>
-          <h3>Branches, tags, trees, and blobs stay standard.</h3>
-          <p>Gitomi does not put issue or workflow state into the working tree. Source code remains ordinary Git data.</p>
-        </article>
-        <article class="model-panel panel accent">
-          <div class="model-kicker"><span class="button-icon icon-branch" aria-hidden="true"></span> Control plane</div>
-          <h3>Signed append-only event commits live under <code>refs/gitomi/inbox/*</code>.</h3>
-          <p>The current view is derived into a disposable local index that can be rebuilt from valid refs.</p>
-        </article>
-      </div>
-      <ol class="ref-flow" aria-label="Gitomi sync flow">
-        <li><strong>Write</strong><span>Local actor signs an event commit.</span></li>
-        <li><strong>Fetch</strong><span>Remote inbox refs land in staging.</span></li>
-        <li><strong>Validate</strong><span>Signatures, event envelopes, chains, and RBAC are checked.</span></li>
-        <li><strong>Project</strong><span>Accepted events rebuild issues, PRs, boards, runs, and ACLs.</span></li>
-      </ol>
-    </section>
-
-    <section id="surface" class="site-band">
-      <div class="site-section-head">
-        <p class="eyebrow">Product surface</p>
-        <h2>Forge workflows without hosted lock-in.</h2>
-      </div>
-      <div class="feature-grid">
-        
-            <article class="feature-card panel">
-              <span class="button-icon icon-issues" aria-hidden="true"></span>
-              <h3>Issues and pull requests</h3>
-              <p>Open, label, assign, comment, review, and merge without moving collaboration state into a hosted database.</p>
-            </article>
-          
-            <article class="feature-card panel">
-              <span class="button-icon icon-projects" aria-hidden="true"></span>
-              <h3>Project boards and milestones</h3>
-              <p>Plan work through kanban boards, milestone status, and issue placement events that sync with the repository.</p>
-            </article>
-          
-            <article class="feature-card panel">
-              <span class="button-icon icon-workflow" aria-hidden="true"></span>
-              <h3>Local workflow runs</h3>
-              <p>Discover native Gitomi workflows or GitHub Actions-compatible files and run them locally with signed results.</p>
-            </article>
-          
-            <article class="feature-card panel">
-              <span class="button-icon icon-sync" aria-hidden="true"></span>
-              <h3>GitHub migration path</h3>
-              <p>Import existing GitHub issues and pull requests, preserve legacy numbers, and export transitions back when needed.</p>
-            </article>
-          
-      </div>
-      <div class="webui-strip panel">
-        <div>
-          <p class="eyebrow">Local web UI</p>
-          <h3>Browse code, issues, pull requests, projects, workflows, events, refs, and repository diagnostics.</h3>
+      <div class="sync-map" aria-hidden="true">
+        <div class="sync-terminal parallax-layer" data-parallax data-depth="8">
+          <div class="terminal-head">
+            <span></span>
+            <strong>git transport</strong>
+          </div>
+          <pre><code><span class="prompt">$</span> git fetch origin 'refs/gitomi/*:refs/gitomi/staging/*'
+<span class="ok">remote</span> 42 project events received
+<span class="prompt">$</span> gt sync --admit
+<span class="ok">accepted</span> signatures, RBAC, chains
+<span class="muted">projection</span> issues + PRs + boards rebuilt</code></pre>
         </div>
-        <ul>
-          <li><span class="button-icon icon-search" aria-hidden="true"></span> Code explorer</li>
-          <li><span class="button-icon icon-pull-request" aria-hidden="true"></span> Review threads</li>
-          <li><span class="button-icon icon-workflow" aria-hidden="true"></span> Workflow runs</li>
-        </ul>
+        <div class="remote-stack">
+          <article>
+            <span class="button-icon icon-code"></span>
+            <strong>Local clone</strong>
+            <small>create signed events</small>
+          </article>
+          <article>
+            <span class="button-icon icon-sync"></span>
+            <strong>Any Git remote</strong>
+            <small>fetch / push refs</small>
+          </article>
+          <article>
+            <span class="button-icon icon-branch"></span>
+            <strong>Mirror or bundle</strong>
+            <small>portable history</small>
+          </article>
+          <article>
+            <span class="button-icon icon-projects"></span>
+            <strong>Self-host</strong>
+            <small>no required server</small>
+          </article>
+        </div>
+        <div class="packet-rail">
+          <span>fetch</span>
+          <span>validate</span>
+          <span>project</span>
+          <span>push</span>
+        </div>
       </div>
     </section>
 
-    <section id="start" class="site-band start-band">
-      <div class="site-section-head">
-        <p class="eyebrow">Quick start</p>
-        <h2>Build the CLI and initialize a repository.</h2>
+    <section class="offline-section">
+      <div class="section-copy">
+        <p class="eyebrow">Local-first work</p>
+        <h2>Work offline. Sync later.</h2>
+        <p>Open issues, review pull requests, move cards, inspect workflow results, and continue working from your local clone. Reconnect when you are ready. Gitomi syncs project state through Git.</p>
+      </div>
+      <div class="offline-lab" aria-hidden="true">
+        <article class="device-panel parallax-layer" data-parallax data-depth="14">
+          <div class="device-head">
+            <span></span>
+            <strong>offline laptop</strong>
+            <em>3 events queued</em>
+          </div>
+          <ul>
+            <li><b>#131</b><span>Open issue</span><small>local</small></li>
+            <li><b>PR-45</b><span>Review changes</span><small>local</small></li>
+            <li><b>RUN</b><span>Inspect workflow result</span><small>local</small></li>
+          </ul>
+        </article>
+        <article class="device-panel is-online parallax-layer" data-parallax data-depth="-10">
+          <div class="device-head">
+            <span></span>
+            <strong>team catches up</strong>
+            <em>accepted</em>
+          </div>
+          <div class="projection-bars">
+            <span style="--bar:74%"></span>
+            <span style="--bar:48%"></span>
+            <span style="--bar:88%"></span>
+            <span style="--bar:61%"></span>
+          </div>
+          <p>deterministic projection rebuilt from accepted refs</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="agent-section">
+      <div class="section-copy">
+        <p class="eyebrow">Agent-native project record</p>
+        <h2>Built for agents, not just humans.</h2>
+        <p>Agent work should be reviewable, traceable, and part of the project record. Gitomi gives agents a native workflow: tasks, permissions, traces, outputs, and durable results tied to your repository.</p>
+      </div>
+      <div class="agent-console parallax-layer" data-parallax data-depth="12" aria-hidden="true">
+        <div class="console-title">
+          <span class="button-icon icon-workflow"></span>
+          <strong>agent-run/issue-128</strong>
+          <em>signed output</em>
+        </div>
+        <ol>
+          <li><span>context</span><code>refs/heads/main + issue #128</code></li>
+          <li><span>permission</span><code>write inbox only</code></li>
+          <li><span>trace</span><code>tests, diff, review notes</code></li>
+          <li><span>result</span><code>durable event commit</code></li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="workflow-section">
+      <div class="section-copy">
+        <p class="eyebrow">Familiar model, different ownership</p>
+        <h2>Replace the platform. Keep the workflow.</h2>
+        <p>Use the familiar model: issues, pull requests, comments, labels, milestones, boards, workflows, and a local web UI. The difference is that your team owns the data, the workflow, and the history.</p>
+      </div>
+      <div class="workflow-grid">
+        <article>
+          <span class="button-icon icon-issues" aria-hidden="true"></span>
+          <strong>Issues and comments</strong>
+          <p>Portable project discussion with signed history.</p>
+        </article>
+        <article>
+          <span class="button-icon icon-pull-request" aria-hidden="true"></span>
+          <strong>Pull request reviews</strong>
+          <p>Review state travels with the repository.</p>
+        </article>
+        <article>
+          <span class="button-icon icon-projects" aria-hidden="true"></span>
+          <strong>Kanban and milestones</strong>
+          <p>Planning state is rebuilt from Git events.</p>
+        </article>
+        <article>
+          <span class="button-icon icon-workflow" aria-hidden="true"></span>
+          <strong>Workflows and agents</strong>
+          <p>Runs, traces, and outputs join project history.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="start" class="start-section">
+      <div class="section-copy">
+        <p class="eyebrow">Start locally</p>
+        <h2>Bring Gitomi into an existing repository.</h2>
+        <p>Build the CLI, initialize a local identity, and open the web UI. No central database is required for the project record.</p>
       </div>
       <div class="command-grid">
         
-    <article class="command-card panel">
+    <article class="command-card">
       <div>
         <p class="eyebrow">Build</p>
         <p>Compile the Zig CLI from the repository checkout.</p>
@@ -234,7 +344,7 @@ zig build
       </div>
     </article>
   
-    <article class="command-card panel">
+    <article class="command-card">
       <div>
         <p class="eyebrow">Initialize</p>
         <p>Attach Gitomi to an existing Git repository with a signed local device.</p>
@@ -244,12 +354,12 @@ zig build
           <span class="button-icon icon-copy" aria-hidden="true"></span>
         </button>
         <pre><code>gt init --principal alice --device laptop
-gt issue open --title &quot;Write the release notes&quot; --body &quot;Collect highlights for v1.&quot;
+gt issue open --title &quot;Move workflow into Git&quot;
 gt issue list</code></pre>
       </div>
     </article>
   
-    <article class="command-card panel">
+    <article class="command-card">
       <div>
         <p class="eyebrow">Browse</p>
         <p>Start the loopback web UI for code, issues, projects, events, workflows, and refs.</p>
@@ -265,12 +375,12 @@ gt issue list</code></pre>
       </div>
     </section>
 
-    <section id="docs" class="site-band docs-band">
-      <div class="docs-panel panel">
+    <section class="docs-section">
+      <div class="docs-panel">
         <div>
           <p class="eyebrow">Reference</p>
-          <h2>Designed for inspectability.</h2>
-          <p>The normative design is split across product, ref layout, RBAC, workflows, and project web UI specs in the repository. The implemented CLI covers initialization, sync, fsck, events, issues, pull requests, comments, projects, milestones, actions, GitHub import/export, and the local web UI.</p>
+          <h2>Inspect the model before trusting it.</h2>
+          <p>The repository includes the product, ref layout, and CLI references behind the implementation.</p>
         </div>
         <div class="docs-links" aria-label="Documentation links">
           <a href="./docs/README.md"><span class="button-icon icon-book" aria-hidden="true"></span> README</a>
@@ -284,7 +394,7 @@ gt issue list</code></pre>
 
   <footer class="site-footer">
     <img src="./assets/logo.svg" alt="" width="47" height="32">
-    <span>Gitomi stores forge state in Git, not around it.</span>
+    <span>Gitomi keeps your entire development workflow inside your Git repository.</span>
   </footer>
 
   <script src="./assets/theme.js"></script>

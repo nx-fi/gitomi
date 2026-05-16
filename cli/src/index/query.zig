@@ -937,7 +937,8 @@ pub fn listIssuesFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
 
     var stmt = try db.prepare(
         \\SELECT i.id, i.title, i.state, i.author_principal, i.opened_at, i.body,
-        \\       COALESCE(m.source_author, ''), COALESCE(m.milestone, '')
+        \\       COALESCE(m.source_author, ''), COALESCE(m.milestone, ''),
+        \\       COALESCE(m.priority, ''), COALESCE(m.status, '')
         \\FROM issues i
         \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
         \\ORDER BY i.opened_at DESC, i.id DESC
@@ -961,6 +962,10 @@ pub fn listIssuesFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
         defer allocator.free(source_author);
         const milestone = try stmt.columnTextDup(allocator, 7);
         defer allocator.free(milestone);
+        const priority = try stmt.columnTextDup(allocator, 8);
+        defer allocator.free(priority);
+        const status = try stmt.columnTextDup(allocator, 9);
+        defer allocator.free(status);
 
         if (json) {
             var line: std.ArrayList(u8) = .empty;
@@ -974,6 +979,8 @@ pub fn listIssuesFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
             if (source_author.len != 0) try appendJsonFieldString(&line, allocator, "source_author", source_author, true);
             try appendJsonFieldString(&line, allocator, "opened_at", opened_at, true);
             if (milestone.len != 0) try appendJsonFieldString(&line, allocator, "milestone", milestone, true);
+            if (priority.len != 0) try appendJsonFieldString(&line, allocator, "priority", priority, true);
+            if (status.len != 0) try appendJsonFieldString(&line, allocator, "status", status, true);
             if (try legacyGithubNumberForObjectInDb(&db, "issue", id)) |number| {
                 try appendJsonFieldInteger(&line, allocator, "legacy_github_issue_number", number, true);
             }
@@ -997,7 +1004,8 @@ pub fn showIssueFromIndex(allocator: Allocator, repo: Repo, issue_id: []const u8
 
     var stmt = try db.prepare(
         \\SELECT i.id, i.title, i.state, i.author_principal, i.author_device, i.opened_at, i.body,
-        \\       COALESCE(m.source_author, ''), COALESCE(m.milestone, '')
+        \\       COALESCE(m.source_author, ''), COALESCE(m.milestone, ''),
+        \\       COALESCE(m.priority, ''), COALESCE(m.status, '')
         \\FROM issues i
         \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
         \\WHERE i.id = ?
@@ -1028,6 +1036,10 @@ pub fn showIssueFromIndex(allocator: Allocator, repo: Repo, issue_id: []const u8
     defer allocator.free(source_author);
     const milestone = try stmt.columnTextDup(allocator, 8);
     defer allocator.free(milestone);
+    const priority = try stmt.columnTextDup(allocator, 9);
+    defer allocator.free(priority);
+    const status = try stmt.columnTextDup(allocator, 10);
+    defer allocator.free(status);
 
     if (json) {
         var line: std.ArrayList(u8) = .empty;
@@ -1042,6 +1054,8 @@ pub fn showIssueFromIndex(allocator: Allocator, repo: Repo, issue_id: []const u8
         if (source_author.len != 0) try appendJsonFieldString(&line, allocator, "source_author", source_author, true);
         try appendJsonFieldString(&line, allocator, "opened_at", opened_at, true);
         if (milestone.len != 0) try appendJsonFieldString(&line, allocator, "milestone", milestone, true);
+        if (priority.len != 0) try appendJsonFieldString(&line, allocator, "priority", priority, true);
+        if (status.len != 0) try appendJsonFieldString(&line, allocator, "status", status, true);
         if (try legacyGithubNumberForObjectInDb(&db, "issue", id)) |number| {
             try appendJsonFieldInteger(&line, allocator, "legacy_github_issue_number", number, true);
         }
@@ -1079,6 +1093,12 @@ pub fn showIssueFromIndex(allocator: Allocator, repo: Repo, issue_id: []const u8
     try out("assignees: {s}\n", .{assignees});
     if (milestone.len != 0) {
         try out("milestone: {s}\n", .{milestone});
+    }
+    if (priority.len != 0) {
+        try out("priority:  {s}\n", .{priority});
+    }
+    if (status.len != 0) {
+        try out("status:    {s}\n", .{status});
     }
     const projects = try issueProjectsText(allocator, &db, id);
     defer allocator.free(projects);

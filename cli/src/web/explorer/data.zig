@@ -47,6 +47,7 @@ pub fn loadRootGitStatus(allocator: Allocator, repo: Repo) !RootGitStatus {
     try loadRootDiffStats(allocator, repo, &status);
     status.worktree_count = loadWorktreeCount(allocator, repo) catch 1;
     if (status.worktree_count == 0) status.worktree_count = 1;
+    status.disk_size_bytes = loadDiskSizeBytes(allocator, repo) catch null;
     status.operation_state = loadRepositoryOperationState(allocator, repo) catch .clean;
 
     return status;

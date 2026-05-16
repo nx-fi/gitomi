@@ -13,6 +13,7 @@ const ActionRunCompletedMetadata = model.ActionRunCompletedMetadata;
 const IssueProjectPlacement = model.IssueProjectPlacement;
 const IssueOpenedMetadata = model.IssueOpenedMetadata;
 const PullOpenedMetadata = model.PullOpenedMetadata;
+const PullMergedMetadata = model.PullMergedMetadata;
 const CommentAddedMetadata = model.CommentAddedMetadata;
 const DelegationSigningKey = model.DelegationSigningKey;
 const IssueUpdate = model.IssueUpdate;
@@ -130,6 +131,12 @@ pub fn buildIssueOpenedJsonWithLegacyAndMetadata(
     }
     if (metadata.milestone) |value| {
         if (value.len != 0) try appendJsonFieldString(&buf, allocator, "milestone", value, true);
+    }
+    if (metadata.priority) |value| {
+        if (value.len != 0) try appendJsonFieldString(&buf, allocator, "priority", value, true);
+    }
+    if (metadata.status) |value| {
+        if (value.len != 0) try appendJsonFieldString(&buf, allocator, "status", value, true);
     }
     if (metadata.projects.len != 0) {
         try appendIssueProjectsField(&buf, allocator, "projects", metadata.projects, true);
@@ -271,6 +278,8 @@ pub fn buildIssueUpdatedJson(
     if (update.body) |value| try appendJsonFieldString(&buf, allocator, "body", value, true);
     if (update.state) |value| try appendJsonFieldString(&buf, allocator, "state", value, true);
     if (update.milestone) |value| try appendJsonFieldString(&buf, allocator, "milestone", value, true);
+    if (update.priority) |value| try appendJsonFieldString(&buf, allocator, "priority", value, true);
+    if (update.status) |value| try appendJsonFieldString(&buf, allocator, "status", value, true);
     if (update.projects.len != 0) try appendIssueProjectsField(&buf, allocator, "projects", update.projects, true);
     if (update.labels_added.len != 0) try appendJsonFieldStringArray(&buf, allocator, "labels_added", update.labels_added, true);
     if (update.labels_removed.len != 0) try appendJsonFieldStringArray(&buf, allocator, "labels_removed", update.labels_removed, true);
@@ -1079,6 +1088,34 @@ pub fn buildPullMergedJson(
     merge_oid: ?[]const u8,
     target_oid: ?[]const u8,
 ) ![]u8 {
+    return buildPullMergedJsonWithMetadata(
+        allocator,
+        cfg,
+        seq,
+        pull_id,
+        event_uuid,
+        idem,
+        occurred_at,
+        parents,
+        merge_oid,
+        target_oid,
+        .{},
+    );
+}
+
+pub fn buildPullMergedJsonWithMetadata(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    pull_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    merge_oid: ?[]const u8,
+    target_oid: ?[]const u8,
+    metadata: PullMergedMetadata,
+) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
@@ -1086,6 +1123,10 @@ pub fn buildPullMergedJson(
     try buf.appendSlice(allocator, "\"payload\":{");
     if (merge_oid) |value| try appendJsonFieldString(&buf, allocator, "merge_oid", value, true);
     if (target_oid) |value| try appendJsonFieldString(&buf, allocator, "target_oid", value, true);
+    if (metadata.base_oid) |value| try appendJsonFieldString(&buf, allocator, "base_oid", value, true);
+    if (metadata.head_oid) |value| try appendJsonFieldString(&buf, allocator, "head_oid", value, true);
+    if (metadata.remote) |value| try appendJsonFieldString(&buf, allocator, "remote", value, true);
+    if (metadata.remote_ref) |value| try appendJsonFieldString(&buf, allocator, "remote_ref", value, true);
     if (buf.items[buf.items.len - 1] == ',') {
         buf.items.len -= 1;
     }

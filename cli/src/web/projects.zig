@@ -22,6 +22,7 @@ const appendStatePill = shared.appendStatePill;
 const appendTemplate = shared.appendTemplate;
 const createIssueOpenedWithMetadataEvent = issue_mod.createIssueOpenedWithMetadataEvent;
 const createIssueProjectEvent = issue_mod.createIssueProjectEvent;
+const createIssueStringEvent = issue_mod.createIssueStringEvent;
 const createProjectCreatedEvent = project_mod.createProjectCreatedEvent;
 const formValueOwned = issues_page.formValueOwned;
 const issueHref = shared.issueHref;
@@ -54,6 +55,11 @@ const ProjectView = enum {
 };
 
 const default_project_template_id = "kanban";
+const default_project_priority = "P3";
+const default_project_status = "Draft";
+const project_status_values = [_][]const u8{ "Draft", "Pending", "WIP", "Review", "Done", "Failed" };
+const project_priority_values = [_][]const u8{ "P0", "P1", "P2", "P3" };
+const default_project_status_columns = "Draft, Pending, WIP, Review, Done, Failed";
 
 const project_templates = [_]ProjectTemplate{
     .{
@@ -61,7 +67,7 @@ const project_templates = [_]ProjectTemplate{
         .title = "Team planning",
         .source = "Gitomi",
         .description = "Manage team work items, upcoming cycles, and capacity.",
-        .columns = "Backlog, Todo, In Progress, In Review, Done",
+        .columns = default_project_status_columns,
         .group = .featured,
         .preview = "table",
     },
@@ -70,7 +76,7 @@ const project_templates = [_]ProjectTemplate{
         .title = "Kanban",
         .source = "Gitomi",
         .description = "Visualize project status and limit work in progress.",
-        .columns = "Todo, In Progress, Done",
+        .columns = default_project_status_columns,
         .group = .featured,
         .preview = "board",
     },
@@ -79,7 +85,7 @@ const project_templates = [_]ProjectTemplate{
         .title = "Feature release",
         .source = "Gitomi",
         .description = "Prioritize, review, and ship a focused release.",
-        .columns = "Todo, In Progress, In Review, Done",
+        .columns = default_project_status_columns,
         .group = .featured,
         .preview = "table",
     },
@@ -88,7 +94,7 @@ const project_templates = [_]ProjectTemplate{
         .title = "Bug tracker",
         .source = "Gitomi",
         .description = "Track, triage, and resolve reported bugs.",
-        .columns = "Triage, Backlog, Ready, In Progress, Done",
+        .columns = default_project_status_columns,
         .group = .featured,
         .preview = "board",
     },
@@ -97,7 +103,7 @@ const project_templates = [_]ProjectTemplate{
         .title = "Table",
         .source = "Start from scratch",
         .description = "Start from a compact list of work items.",
-        .columns = "Todo",
+        .columns = default_project_status_columns,
         .group = .scratch,
         .preview = "table",
     },
@@ -106,7 +112,7 @@ const project_templates = [_]ProjectTemplate{
         .title = "Board",
         .source = "Start from scratch",
         .description = "Start with a lightweight Kanban workflow.",
-        .columns = "Todo, In Progress, Done",
+        .columns = default_project_status_columns,
         .group = .scratch,
         .preview = "board",
     },
@@ -115,7 +121,7 @@ const project_templates = [_]ProjectTemplate{
         .title = "Roadmap",
         .source = "Start from scratch",
         .description = "Organize work by planning horizon.",
-        .columns = "Now, Next, Later, Done",
+        .columns = default_project_status_columns,
         .group = .scratch,
         .preview = "roadmap",
     },
@@ -389,6 +395,10 @@ fn appendProjectColumns(
     project: []const u8,
     comptime appendColumnFn: fn (*std.ArrayList(u8), Allocator, *SqliteDb, []const u8, []const u8) anyerror!void,
 ) !void {
+    for (project_status_values) |status| {
+        try appendColumnFn(buf, allocator, db, project, status);
+    }
+
     var columns = try db.prepare(
         \\SELECT column_name FROM (
         \\  SELECT pc.column_name AS column_name
@@ -422,14 +432,12 @@ fn appendProjectColumns(
     defer columns.deinit();
     try columns.bindText(1, project);
     try columns.bindText(2, project);
-    var shown_column = false;
     while (try columns.step()) {
         const column = try columns.columnTextDup(allocator, 0);
         defer allocator.free(column);
+        if (isProjectStatusValue(column)) continue;
         try appendColumnFn(buf, allocator, db, project, column);
-        shown_column = true;
     }
-    if (!shown_column) try appendColumnFn(buf, allocator, db, project, "");
 }
 
 fn appendProjectColumnOptions(
@@ -439,58 +447,30 @@ fn appendProjectColumnOptions(
     project: []const u8,
     selected: ?[]const u8,
 ) !void {
-    var columns = try db.prepare(
-        \\SELECT column_name FROM (
-        \\  SELECT pc.column_name AS column_name
-        \\  FROM project_columns pc
-        \\  JOIN projects p ON p.id = pc.project_id
-        \\  WHERE p.name = ?
-        \\  UNION
-        \\  SELECT column_name
-        \\  FROM issue_projects
-        \\  WHERE project = ?
-        \\)
-        \\ORDER BY
-        \\  CASE lower(column_name)
-        \\    WHEN 'triage' THEN 5
-        \\    WHEN 'backlog' THEN 10
-        \\    WHEN 'todo' THEN 20
-        \\    WHEN 'to do' THEN 20
-        \\    WHEN 'ready' THEN 30
-        \\    WHEN 'in progress' THEN 40
-        \\    WHEN 'doing' THEN 40
-        \\    WHEN 'in review' THEN 50
-        \\    WHEN 'review' THEN 50
-        \\    WHEN 'done' THEN 60
-        \\    WHEN 'completed' THEN 60
-        \\    WHEN 'closed' THEN 60
-        \\    ELSE 70
-        \\  END,
-        \\  lower(column_name),
-        \\  column_name
-    );
-    defer columns.deinit();
-    try columns.bindText(1, project);
-    try columns.bindText(2, project);
-
-    var shown = false;
-    while (try columns.step()) {
-        const column = try columns.columnTextDup(allocator, 0);
-        defer allocator.free(column);
+    _ = db;
+    _ = project;
+    for (project_status_values) |status| {
         try appendTemplate(buf, allocator,
             \\<option value="{value}"{selected}>{label}</option>
         , .{
-            .value = column,
-            .selected = shared.trustedHtml(if (selected) |current| if (std.mem.eql(u8, current, column)) " selected" else "" else ""),
-            .label = if (column.len == 0) "No status" else column,
+            .value = status,
+            .selected = shared.trustedHtml(if (selected) |current| if (std.mem.eql(u8, current, status)) " selected" else "" else if (std.mem.eql(u8, status, default_project_status)) " selected" else ""),
+            .label = status,
         });
-        shown = true;
     }
-    if (!shown) {
+}
+
+fn appendProjectPriorityOptions(buf: *std.ArrayList(u8), allocator: Allocator, selected: []const u8) !void {
+    if (selected.len == 0) {
+        try buf.appendSlice(allocator, "<option value=\"\">Keep current</option>");
+    }
+    for (project_priority_values) |priority| {
         try appendTemplate(buf, allocator,
-            \\<option value=""{selected}>No status</option>
+            \\<option value="{value}"{selected}>{label}</option>
         , .{
-            .selected = shared.trustedHtml(if (selected) |current| if (current.len == 0) " selected" else "" else ""),
+            .value = priority,
+            .selected = shared.trustedHtml(if (std.mem.eql(u8, selected, priority)) " selected" else ""),
+            .label = priority,
         });
     }
 }
@@ -502,7 +482,7 @@ fn appendProjectTable(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlite
         \\  <div class="project-table-view">
         \\    <table class="project-data-table">
         \\      <thead>
-        \\        <tr><th>Title</th><th>Project status</th><th>Issue state</th><th>Assignees</th><th>Labels</th><th>Milestone</th><th>Comments</th><th>Opened</th></tr>
+        \\        <tr><th>Title</th><th>Priority</th><th>Status</th><th>Issue state</th><th>Assignees</th><th>Labels</th><th>Milestone</th><th>Comments</th><th>Opened</th></tr>
         \\      </thead>
         \\      <tbody>
     );
@@ -533,30 +513,51 @@ fn appendProjectTableGroup(buf: *std.ArrayList(u8), allocator: Allocator, db: *S
     const count = try projectColumnIssueCount(db, project, column);
     const title = if (column.len == 0) "No status" else column;
     try appendTemplate(buf, allocator,
-        \\<tr class="project-table-group-row"><th colspan="8"><span class="kanban-status-dot" aria-hidden="true"></span>{title}<span>{count}</span></th></tr>
+        \\<tr class="project-table-group-row"><th colspan="9"><span class="kanban-status-dot" aria-hidden="true"></span>{title}<span>{count}</span></th></tr>
     , .{
         .title = title,
         .count = count,
     });
 
     var rows = try db.prepare(
+        \\WITH project_items AS (
+        \\  SELECT pi.issue_id,
+        \\         CASE
+        \\           WHEN COALESCE(m.status, '') <> '' THEN m.status
+        \\           ELSE pi.legacy_column
+        \\         END AS effective_status
+        \\  FROM (
+        \\    SELECT issue_id, column_name AS legacy_column
+        \\    FROM issue_projects
+        \\    WHERE project = ?
+        \\    UNION
+        \\    SELECT pm.issue_id, ''
+        \\    FROM project_memberships pm
+        \\    JOIN projects p ON p.id = pm.project_id
+        \\    WHERE p.name = ?
+        \\  ) pi
+        \\  LEFT JOIN issue_metadata m ON m.issue_id = pi.issue_id
+        \\)
         \\SELECT DISTINCT i.id, i.title, i.state,
         \\       COALESCE(NULLIF(m.source_author, ''), i.author_principal),
         \\       i.opened_at,
         \\       COALESCE(m.milestone, ''),
+        \\       COALESCE(m.priority, ''),
+        \\       COALESCE(m.status, ''),
         \\       COALESCE(a.number, 0),
         \\       (SELECT COUNT(*) FROM comments c WHERE c.parent_kind = 'issue' AND c.parent_id = i.id)
-        \\FROM issue_projects p
+        \\FROM project_items p
         \\JOIN issues i ON i.id = p.issue_id
         \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
         \\LEFT JOIN legacy_aliases a
         \\  ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
-        \\WHERE p.project = ? AND p.column_name = ?
+        \\WHERE p.effective_status = ?
         \\ORDER BY i.opened_at DESC, i.id DESC
     );
     defer rows.deinit();
     try rows.bindText(1, project);
-    try rows.bindText(2, column);
+    try rows.bindText(2, project);
+    try rows.bindText(3, column);
 
     var shown = false;
     while (try rows.step()) {
@@ -572,14 +573,18 @@ fn appendProjectTableGroup(buf: *std.ArrayList(u8), allocator: Allocator, db: *S
         defer allocator.free(opened_at);
         const milestone = try rows.columnTextDup(allocator, 5);
         defer allocator.free(milestone);
-        const legacy_number = rows.columnInt64(6);
-        const comment_count = @as(usize, @intCast(rows.columnInt64(7)));
-        try appendProjectTableIssueRow(buf, allocator, db, id, title_text, state, author, opened_at, milestone, legacy_number, comment_count, column);
+        const priority = try rows.columnTextDup(allocator, 6);
+        defer allocator.free(priority);
+        const status = try rows.columnTextDup(allocator, 7);
+        defer allocator.free(status);
+        const legacy_number = rows.columnInt64(8);
+        const comment_count = @as(usize, @intCast(rows.columnInt64(9)));
+        try appendProjectTableIssueRow(buf, allocator, db, id, title_text, state, author, opened_at, milestone, priority, effectiveStatusLabel(status, column), legacy_number, comment_count);
         shown = true;
     }
     if (!shown) {
         try appendTemplate(buf, allocator,
-            \\<tr class="project-table-empty-row"><td colspan="8">No issues</td></tr>
+            \\<tr class="project-table-empty-row"><td colspan="9">No issues</td></tr>
         , .{});
     }
 }
@@ -594,9 +599,10 @@ fn appendProjectTableIssueRow(
     author: []const u8,
     opened_at: []const u8,
     milestone: []const u8,
+    priority: []const u8,
+    status: []const u8,
     legacy_number: i64,
     comment_count: usize,
-    column: []const u8,
 ) !void {
     var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
     const issue_ref = util.shortObjectRef(&issue_ref_buf, id);
@@ -615,12 +621,15 @@ fn appendProjectTableIssueRow(
     }
     try appendTemplate(buf, allocator,
         \\</small></div></td>
+        \\  <td><span class="project-priority-chip tone-{priority_tone}">{priority}</span></td>
         \\  <td><span class="project-status-chip tone-{tone}">{status}</span></td>
         \\  <td>{state}</td>
         \\  <td>
     , .{
-        .tone = columnTone(column),
-        .status = if (column.len == 0) "No status" else column,
+        .priority_tone = priorityTone(priority),
+        .priority = if (priority.len == 0) "None" else priority,
+        .tone = columnTone(status),
+        .status = if (status.len == 0) "No status" else status,
         .state = state,
     });
     _ = author;
@@ -651,21 +660,40 @@ fn appendProjectRoadmapLane(buf: *std.ArrayList(u8), allocator: Allocator, db: *
     });
 
     var rows = try db.prepare(
+        \\WITH project_items AS (
+        \\  SELECT pi.issue_id,
+        \\         CASE
+        \\           WHEN COALESCE(m.status, '') <> '' THEN m.status
+        \\           ELSE pi.legacy_column
+        \\         END AS effective_status
+        \\  FROM (
+        \\    SELECT issue_id, column_name AS legacy_column
+        \\    FROM issue_projects
+        \\    WHERE project = ?
+        \\    UNION
+        \\    SELECT pm.issue_id, ''
+        \\    FROM project_memberships pm
+        \\    JOIN projects p ON p.id = pm.project_id
+        \\    WHERE p.name = ?
+        \\  ) pi
+        \\  LEFT JOIN issue_metadata m ON m.issue_id = pi.issue_id
+        \\)
         \\SELECT DISTINCT i.id, i.title, i.state,
         \\       COALESCE(NULLIF(m.source_author, ''), i.author_principal),
         \\       i.opened_at,
         \\       COALESCE(a.number, 0)
-        \\FROM issue_projects p
+        \\FROM project_items p
         \\JOIN issues i ON i.id = p.issue_id
         \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
         \\LEFT JOIN legacy_aliases a
         \\  ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
-        \\WHERE p.project = ? AND p.column_name = ?
+        \\WHERE p.effective_status = ?
         \\ORDER BY i.opened_at DESC, i.id DESC
     );
     defer rows.deinit();
     try rows.bindText(1, project);
-    try rows.bindText(2, column);
+    try rows.bindText(2, project);
+    try rows.bindText(3, column);
 
     var shown = false;
     while (try rows.step()) {
@@ -757,16 +785,21 @@ fn appendProjectItemActions(
         \\        <label>Title<input name="title" required></label>
         \\        <label>Body<textarea name="body" rows="4"></textarea></label>
         \\        <div class="grid two">
-        \\          <label>Status<select name="column">
+        \\          <label>Priority<select name="priority">
     , .{
         .project = project,
         .view = projectViewValue(active_view),
     });
+    try appendProjectPriorityOptions(buf, allocator, default_project_priority);
+    try buf.appendSlice(allocator,
+        \\          </select></label>
+        \\          <label>Status<select name="column">
+    );
     try appendProjectColumnOptions(buf, allocator, db, project, null);
     try appendTemplate(buf, allocator,
         \\          </select></label>
-        \\          <label>Labels<input name="labels" placeholder="bug, docs"></label>
         \\        </div>
+        \\        <label>Labels<input name="labels" placeholder="bug, docs"></label>
         \\        <label>Assignees<input name="assignees" placeholder="alice, bob"></label>
         \\        <div class="form-actions"><button class="button primary" type="submit">Create issue</button></div>
         \\      </form>
@@ -780,11 +813,16 @@ fn appendProjectItemActions(
         \\        <input type="hidden" name="project" value="{project}">
         \\        <input type="hidden" name="view" value="{view}">
         \\        <label>Issue<input name="issue" placeholder="#123 or issue:abcdef0" required></label>
-        \\        <label>Status<select name="column">
+        \\        <label>Priority<select name="priority">
     , .{
         .project = project,
         .view = projectViewValue(active_view),
     });
+    try appendProjectPriorityOptions(buf, allocator, "");
+    try buf.appendSlice(allocator,
+        \\        </select></label>
+        \\        <label>Status<select name="column">
+    );
     try appendProjectColumnOptions(buf, allocator, db, project, null);
     try buf.appendSlice(allocator,
         \\        </select></label>
@@ -915,6 +953,7 @@ fn appendProjectColumn(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
         \\            <input type="hidden" name="action" value="create-issue">
         \\            <input type="hidden" name="project" value="{project}">
         \\            <input type="hidden" name="column" value="{column}">
+        \\            <input type="hidden" name="priority" value="{default_priority}">
         \\            <input type="hidden" name="view" value="board">
         \\            <input name="title" placeholder="New issue title" aria-label="New issue title" required>
         \\            <button class="button primary" type="submit">Create</button>
@@ -923,6 +962,7 @@ fn appendProjectColumn(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
         \\            <input type="hidden" name="action" value="add-existing">
         \\            <input type="hidden" name="project" value="{project}">
         \\            <input type="hidden" name="column" value="{column}">
+        \\            <input type="hidden" name="priority" value="">
         \\            <input type="hidden" name="view" value="board">
         \\            <input name="issue" placeholder="#123 or issue:abcdef0" aria-label="Issue" required>
         \\            <button class="button secondary" type="submit">Add</button>
@@ -937,28 +977,50 @@ fn appendProjectColumn(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
         .tone = tone,
         .project = project,
         .column = column,
+        .default_priority = default_project_priority,
         .title = title,
         .count = count,
         .note = note,
     });
 
     var cards = try db.prepare(
+        \\WITH project_items AS (
+        \\  SELECT pi.issue_id,
+        \\         CASE
+        \\           WHEN COALESCE(m.status, '') <> '' THEN m.status
+        \\           ELSE pi.legacy_column
+        \\         END AS effective_status
+        \\  FROM (
+        \\    SELECT issue_id, column_name AS legacy_column
+        \\    FROM issue_projects
+        \\    WHERE project = ?
+        \\    UNION
+        \\    SELECT pm.issue_id, ''
+        \\    FROM project_memberships pm
+        \\    JOIN projects p ON p.id = pm.project_id
+        \\    WHERE p.name = ?
+        \\  ) pi
+        \\  LEFT JOIN issue_metadata m ON m.issue_id = pi.issue_id
+        \\)
         \\SELECT DISTINCT i.id, i.title, i.state,
         \\       COALESCE(NULLIF(m.source_author, ''), i.author_principal),
         \\       i.opened_at,
+        \\       COALESCE(m.priority, ''),
+        \\       COALESCE(m.status, ''),
         \\       COALESCE(a.number, 0),
         \\       (SELECT COUNT(*) FROM comments c WHERE c.parent_kind = 'issue' AND c.parent_id = i.id)
-        \\FROM issue_projects p
+        \\FROM project_items p
         \\JOIN issues i ON i.id = p.issue_id
         \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
         \\LEFT JOIN legacy_aliases a
         \\  ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
-        \\WHERE p.project = ? AND p.column_name = ?
+        \\WHERE p.effective_status = ?
         \\ORDER BY i.opened_at DESC, i.id DESC
     );
     defer cards.deinit();
     try cards.bindText(1, project);
-    try cards.bindText(2, column);
+    try cards.bindText(2, project);
+    try cards.bindText(3, column);
     var shown = false;
     while (try cards.step()) {
         const id = try cards.columnTextDup(allocator, 0);
@@ -971,8 +1033,12 @@ fn appendProjectColumn(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
         defer allocator.free(author);
         const opened_at = try cards.columnTextDup(allocator, 4);
         defer allocator.free(opened_at);
-        const legacy_number = cards.columnInt64(5);
-        const comment_count = @as(usize, @intCast(cards.columnInt64(6)));
+        const priority = try cards.columnTextDup(allocator, 5);
+        defer allocator.free(priority);
+        const status = try cards.columnTextDup(allocator, 6);
+        defer allocator.free(status);
+        const legacy_number = cards.columnInt64(7);
+        const comment_count = @as(usize, @intCast(cards.columnInt64(8)));
 
         var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
         const issue_ref = util.shortObjectRef(&issue_ref_buf, id);
@@ -1005,6 +1071,14 @@ fn appendProjectColumn(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
         });
         try appendKanbanCardLabels(buf, allocator, db, id);
         try appendTemplate(buf, allocator,
+            \\  <div class="kanban-card-fields"><span class="project-priority-chip tone-{priority_tone}">{priority}</span><span class="project-status-chip tone-{status_tone}">{status}</span></div>
+        , .{
+            .priority_tone = priorityTone(priority),
+            .priority = if (priority.len == 0) "None" else priority,
+            .status_tone = columnTone(effectiveStatusLabel(status, column)),
+            .status = effectiveStatusLabel(status, column),
+        });
+        try appendTemplate(buf, allocator,
             \\  <p class="kanban-card-meta">Opened by {author}
         , .{ .author = author });
         try buf.append(allocator, ' ');
@@ -1022,9 +1096,21 @@ fn appendProjectColumn(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
 }
 
 fn projectIssueCount(db: *SqliteDb, project: []const u8) !usize {
-    var stmt = try db.prepare("SELECT COUNT(DISTINCT issue_id) FROM issue_projects WHERE project = ?");
+    var stmt = try db.prepare(
+        \\SELECT COUNT(DISTINCT issue_id) FROM (
+        \\  SELECT issue_id
+        \\  FROM issue_projects
+        \\  WHERE project = ?
+        \\  UNION
+        \\  SELECT pm.issue_id
+        \\  FROM project_memberships pm
+        \\  JOIN projects p ON p.id = pm.project_id
+        \\  WHERE p.name = ?
+        \\)
+    );
     defer stmt.deinit();
     try stmt.bindText(1, project);
+    try stmt.bindText(2, project);
     if (!(try stmt.step())) return 0;
     return @intCast(stmt.columnInt64(0));
 }
@@ -1032,12 +1118,30 @@ fn projectIssueCount(db: *SqliteDb, project: []const u8) !usize {
 fn projectColumnIssueCount(db: *SqliteDb, project: []const u8, column: []const u8) !usize {
     var stmt = try db.prepare(
         \\SELECT COUNT(DISTINCT issue_id)
-        \\FROM issue_projects
-        \\WHERE project = ? AND column_name = ?
+        \\FROM (
+        \\  SELECT pi.issue_id,
+        \\         CASE
+        \\           WHEN COALESCE(m.status, '') <> '' THEN m.status
+        \\           ELSE pi.legacy_column
+        \\         END AS effective_status
+        \\  FROM (
+        \\    SELECT issue_id, column_name AS legacy_column
+        \\    FROM issue_projects
+        \\    WHERE project = ?
+        \\    UNION
+        \\    SELECT pm.issue_id, ''
+        \\    FROM project_memberships pm
+        \\    JOIN projects p ON p.id = pm.project_id
+        \\    WHERE p.name = ?
+        \\  ) pi
+        \\  LEFT JOIN issue_metadata m ON m.issue_id = pi.issue_id
+        \\)
+        \\WHERE effective_status = ?
     );
     defer stmt.deinit();
     try stmt.bindText(1, project);
-    try stmt.bindText(2, column);
+    try stmt.bindText(2, project);
+    try stmt.bindText(3, column);
     if (!(try stmt.step())) return 0;
     return @intCast(stmt.columnInt64(0));
 }
@@ -1145,8 +1249,17 @@ pub fn handleProjectPost(allocator: Allocator, repo: Repo, stream: std.net.Strea
         return;
     }
 
-    var columns = try splitCommaFields(allocator, columns_owned);
+    const effective_columns = if (std.mem.trim(u8, columns_owned, " \t\r\n").len == 0) default_project_status_columns else columns_owned;
+    var columns = try splitCommaFields(allocator, effective_columns);
     defer columns.deinit(allocator);
+    for (columns.items) |column| {
+        if (!isProjectStatusValue(column)) {
+            const body = try renderProjectForm(allocator, repo, "Status values must be Draft, Pending, WIP, Review, Done, or Failed.", name_owned, description_owned, effective_columns, template_owned);
+            defer allocator.free(body);
+            try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", body, null);
+            return;
+        }
+    }
 
     createProjectCreatedEvent(allocator, name, description_owned, columns.items) catch {
         const body = try renderProjectForm(
@@ -1171,8 +1284,10 @@ pub fn handleProjectItemPost(allocator: Allocator, repo: Repo, stream: std.net.S
     defer allocator.free(action_owned);
     const project_owned = try formTrimmedOwned(allocator, form_body, "project");
     defer allocator.free(project_owned);
-    const column_owned = try formTrimmedOwned(allocator, form_body, "column");
+    var column_owned = try formTrimmedOwned(allocator, form_body, "column");
     defer allocator.free(column_owned);
+    const priority_owned = try formTrimmedOwned(allocator, form_body, "priority");
+    defer allocator.free(priority_owned);
     const view_owned = try formTrimmedOwned(allocator, form_body, "view");
     defer allocator.free(view_owned);
     const request_mode_owned = try formTrimmedOwned(allocator, form_body, "request_mode");
@@ -1182,6 +1297,18 @@ pub fn handleProjectItemPost(allocator: Allocator, repo: Repo, stream: std.net.S
     const view = projectViewFromValue(view_owned);
     if (project_owned.len == 0) {
         try sendProjectItemError(allocator, stream, wants_async, 422, "Unprocessable Entity", "Project is required\n");
+        return;
+    }
+    if (column_owned.len == 0) {
+        allocator.free(column_owned);
+        column_owned = try allocator.dupe(u8, default_project_status);
+    }
+    if (!isProjectStatusValue(column_owned)) {
+        try sendProjectItemError(allocator, stream, wants_async, 422, "Unprocessable Entity", "Status must be Draft, Pending, WIP, Review, Done, or Failed\n");
+        return;
+    }
+    if (priority_owned.len != 0 and !isProjectPriorityValue(priority_owned)) {
+        try sendProjectItemError(allocator, stream, wants_async, 422, "Unprocessable Entity", "Priority must be P0, P1, P2, or P3\n");
         return;
     }
 
@@ -1212,7 +1339,11 @@ pub fn handleProjectItemPost(allocator: Allocator, repo: Repo, stream: std.net.S
             body_owned,
             labels.items,
             assignees.items,
-            .{ .projects = placements[0..] },
+            .{
+                .priority = if (priority_owned.len == 0) default_project_priority else priority_owned,
+                .status = column_owned,
+                .projects = placements[0..],
+            },
         ) catch {
             try sendProjectItemError(allocator, stream, wants_async, 500, "Internal Server Error", "Could not create issue\n");
             return;
@@ -1230,8 +1361,8 @@ pub fn handleProjectItemPost(allocator: Allocator, repo: Repo, stream: std.net.S
             return;
         };
         defer allocator.free(issue_id);
-        replaceIssueProjectPlacement(allocator, repo, issue_id, project_owned, column_owned) catch {
-            try sendProjectItemError(allocator, stream, wants_async, 500, "Internal Server Error", "Could not update issue project placement\n");
+        updateIssueProjectMetadata(allocator, repo, issue_id, project_owned, column_owned, priority_owned) catch {
+            try sendProjectItemError(allocator, stream, wants_async, 500, "Internal Server Error", "Could not update issue project metadata\n");
             return;
         };
     } else if (std.mem.eql(u8, action_owned, "remove")) {
@@ -1370,8 +1501,8 @@ fn appendProjectConfigForm(
         \\    <input type="hidden" name="template" value="{template_id}">
         \\    <label>Name<input name="name" value="{name_value}" autofocus required></label>
         \\    <label>Description<textarea name="description" rows="4">{description_value}</textarea></label>
-        \\    <label>Columns<input name="columns" value="{columns_value}" placeholder="Todo, In Progress, Done"></label>
-        \\    <div class="project-column-chips" aria-label="Template columns">
+        \\    <label>Status values<input name="columns" value="{columns_value}" placeholder="Draft, Pending, WIP, Review, Done, Failed"></label>
+        \\    <div class="project-column-chips" aria-label="Template status values">
     , .{
         .title = selected_template.title,
         .description = selected_template.description,
@@ -1403,7 +1534,7 @@ fn appendColumnChips(buf: *std.ArrayList(u8), allocator: Allocator, columns_valu
         , .{ .column = column });
         shown = true;
     }
-    if (!shown) try buf.appendSlice(allocator, "<span>Todo</span><span>In Progress</span><span>Done</span>");
+    if (!shown) try buf.appendSlice(allocator, "<span>Draft</span><span>Pending</span><span>WIP</span><span>Review</span><span>Done</span><span>Failed</span>");
 }
 
 fn appendProjectTemplateSearchScript(buf: *std.ArrayList(u8), allocator: Allocator) !void {
@@ -1533,6 +1664,26 @@ fn replaceIssueProjectPlacement(
     }
     if (!has_target) {
         try createIssueProjectEvent(allocator, issue_id, project, column, null, null, true);
+    }
+}
+
+fn updateIssueProjectMetadata(
+    allocator: Allocator,
+    repo: Repo,
+    issue_id: []const u8,
+    project: []const u8,
+    status: []const u8,
+    priority: []const u8,
+) !void {
+    var existing = try loadIssueProjectColumns(allocator, repo, issue_id, project, null);
+    defer freeColumnList(allocator, &existing);
+
+    if (existing.items.len == 0) {
+        try createIssueProjectEvent(allocator, issue_id, project, status, null, null, true);
+    }
+    try createIssueStringEvent(allocator, issue_id, "issue.status_set", "status", status);
+    if (priority.len != 0) {
+        try createIssueStringEvent(allocator, issue_id, "issue.priority_set", "priority", priority);
     }
 }
 
@@ -1671,6 +1822,10 @@ fn issueLabelKind(label: []const u8) []const u8 {
 
 fn columnTone(column: []const u8) []const u8 {
     if (column.len == 0) return "neutral";
+    if (asciiEqlIgnoreCase(column, "Draft")) return "draft";
+    if (asciiEqlIgnoreCase(column, "Pending")) return "pending";
+    if (asciiEqlIgnoreCase(column, "WIP")) return "progress";
+    if (asciiEqlIgnoreCase(column, "Failed")) return "failed";
     if (asciiContainsIgnoreCase(column, "done") or asciiContainsIgnoreCase(column, "complete") or asciiContainsIgnoreCase(column, "closed")) return "done";
     if (asciiContainsIgnoreCase(column, "progress") or asciiContainsIgnoreCase(column, "doing")) return "progress";
     if (asciiContainsIgnoreCase(column, "review")) return "review";
@@ -1681,6 +1836,11 @@ fn columnTone(column: []const u8) []const u8 {
 
 fn columnDescription(column: []const u8) []const u8 {
     if (column.len == 0) return "Issues without a project column";
+    if (asciiEqlIgnoreCase(column, "Draft")) return "Scoped but not ready";
+    if (asciiEqlIgnoreCase(column, "Pending")) return "Waiting to start";
+    if (asciiEqlIgnoreCase(column, "WIP")) return "Actively being worked on";
+    if (asciiEqlIgnoreCase(column, "Review")) return "Waiting for review";
+    if (asciiEqlIgnoreCase(column, "Failed")) return "Needs recovery before moving on";
     if (asciiContainsIgnoreCase(column, "done") or asciiContainsIgnoreCase(column, "complete") or asciiContainsIgnoreCase(column, "closed")) return "This has been completed";
     if (asciiContainsIgnoreCase(column, "progress") or asciiContainsIgnoreCase(column, "doing")) return "This is actively being worked on";
     if (asciiContainsIgnoreCase(column, "review")) return "Waiting for review";
@@ -1692,6 +1852,32 @@ fn columnDescription(column: []const u8) []const u8 {
     if (asciiContainsIgnoreCase(column, "next")) return "Planned next";
     if (asciiContainsIgnoreCase(column, "later")) return "Parked for later";
     return "Issues in this stage";
+}
+
+fn priorityTone(priority: []const u8) []const u8 {
+    if (std.mem.eql(u8, priority, "P0")) return "p0";
+    if (std.mem.eql(u8, priority, "P1")) return "p1";
+    if (std.mem.eql(u8, priority, "P2")) return "p2";
+    if (std.mem.eql(u8, priority, "P3")) return "p3";
+    return "none";
+}
+
+fn isProjectPriorityValue(value: []const u8) bool {
+    for (project_priority_values) |priority| {
+        if (std.mem.eql(u8, value, priority)) return true;
+    }
+    return false;
+}
+
+fn isProjectStatusValue(value: []const u8) bool {
+    for (project_status_values) |status| {
+        if (std.mem.eql(u8, value, status)) return true;
+    }
+    return false;
+}
+
+fn effectiveStatusLabel(status: []const u8, fallback: []const u8) []const u8 {
+    return if (status.len != 0) status else fallback;
 }
 
 fn asciiContainsIgnoreCase(haystack: []const u8, needle: []const u8) bool {

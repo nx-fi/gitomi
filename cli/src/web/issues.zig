@@ -1294,6 +1294,7 @@ fn issueTimelineEventIcon(event_type: []const u8, body: []const u8) []const u8 {
         if (issueEventPayloadStringEquals(body, "state", "open")) return "is-open";
         return "is-state";
     }
+    if (std.mem.eql(u8, event_type, "issue.priority_set") or std.mem.eql(u8, event_type, "issue.status_set")) return "is-project";
     if (std.mem.eql(u8, event_type, "issue.updated")) {
         if (issueEventPayloadStringEquals(body, "state", "closed")) return "is-closed";
         if (issueEventPayloadStringEquals(body, "state", "open")) return "is-open";
@@ -1328,6 +1329,14 @@ fn appendIssueTimelineEventMessage(
         try buf.appendSlice(allocator, "edited the description");
     } else if (std.mem.eql(u8, event_type, "issue.state_set")) {
         try appendIssueStateTimelineMessage(buf, allocator, event_mod.jsonString(payload.get("state")) orelse "");
+    } else if (std.mem.eql(u8, event_type, "issue.priority_set")) {
+        try appendTemplate(buf, allocator, "set priority to <span class=\"issue-event-value\">{priority}</span>", .{
+            .priority = event_mod.jsonString(payload.get("priority")) orelse "priority",
+        });
+    } else if (std.mem.eql(u8, event_type, "issue.status_set")) {
+        try appendTemplate(buf, allocator, "set status to <span class=\"issue-event-value\">{status}</span>", .{
+            .status = event_mod.jsonString(payload.get("status")) orelse "status",
+        });
     } else if (std.mem.eql(u8, event_type, "issue.label_added")) {
         try buf.appendSlice(allocator, "added ");
         try appendIssueLabel(buf, allocator, event_mod.jsonString(payload.get("label")) orelse "label");
@@ -1420,6 +1429,10 @@ fn appendIssueUpdatedTimelineMessage(buf: *std.ArrayList(u8), allocator: Allocat
         try appendIssueStateTimelineMessage(buf, allocator, state);
     } else if (event_mod.jsonString(payload.get("milestone"))) |milestone| {
         try appendIssueMilestoneTimelineMessage(buf, allocator, milestone);
+    } else if (event_mod.jsonString(payload.get("priority"))) |priority| {
+        try appendTemplate(buf, allocator, "set priority to <span class=\"issue-event-value\">{priority}</span>", .{ .priority = priority });
+    } else if (event_mod.jsonString(payload.get("status"))) |status| {
+        try appendTemplate(buf, allocator, "set status to <span class=\"issue-event-value\">{status}</span>", .{ .status = status });
     } else if (firstStringFromJsonArray(payload, "labels_added")) |label| {
         try buf.appendSlice(allocator, "added ");
         try appendIssueLabel(buf, allocator, label);

@@ -10,6 +10,7 @@ const event_schema = model.event_schema;
 const IssueProjectPlacement = model.IssueProjectPlacement;
 const buildIssueOpenedJson = builders.buildIssueOpenedJson;
 const buildIssueUpdatedJson = builders.buildIssueUpdatedJson;
+const buildPullMergedJsonWithMetadata = builders.buildPullMergedJsonWithMetadata;
 const validateEventEnvelope = validation.validateEventEnvelope;
 const parseValidatedEnvelope = validation.parseValidatedEnvelope;
 
@@ -78,6 +79,46 @@ test "issue opened event json passes envelope validation" {
     defer std.testing.allocator.free(body);
 
     try validateEventEnvelope(std.testing.allocator, "test-commit", body);
+}
+
+test "pull merged event json records confirmed remote publication" {
+    var cfg = Config{
+        .allocator = std.testing.allocator,
+        .repo_id = try std.testing.allocator.dupe(u8, "018f0000-0000-7000-8000-000000000001"),
+        .principal = try std.testing.allocator.dupe(u8, "alice"),
+        .device = try std.testing.allocator.dupe(u8, "laptop"),
+        .seq = 0,
+    };
+    defer cfg.deinit();
+
+    const body = try buildPullMergedJsonWithMetadata(
+        std.testing.allocator,
+        cfg,
+        1,
+        "018f0000-0000-7000-8000-000000000002",
+        "018f0000-0000-7000-8000-000000000003",
+        "018f0000-0000-7000-8000-000000000004",
+        "2026-05-13T18:30:59Z",
+        .{},
+        "cccccccccccccccccccccccccccccccccccccccc",
+        null,
+        .{
+            .base_oid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            .head_oid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            .remote = "origin",
+            .remote_ref = "refs/heads/main",
+        },
+    );
+    defer std.testing.allocator.free(body);
+
+    try validateEventEnvelope(std.testing.allocator, "test-commit", body);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+    defer parsed.deinit();
+    const payload = parsed.value.object.get("payload").?.object;
+    try std.testing.expectEqualStrings("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", payload.get("base_oid").?.string);
+    try std.testing.expectEqualStrings("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", payload.get("head_oid").?.string);
+    try std.testing.expectEqualStrings("origin", payload.get("remote").?.string);
+    try std.testing.expectEqualStrings("refs/heads/main", payload.get("remote_ref").?.string);
 }
 
 test "issue updated event json supports milestone and projects" {

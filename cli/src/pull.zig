@@ -132,6 +132,16 @@ pub fn createPullMergedEvent(
     merge_oid: ?[]const u8,
     target_oid: ?[]const u8,
 ) !void {
+    try createPullMergedEventWithMetadata(allocator, pull_id, merge_oid, target_oid, .{});
+}
+
+pub fn createPullMergedEventWithMetadata(
+    allocator: Allocator,
+    pull_id: []const u8,
+    merge_oid: ?[]const u8,
+    target_oid: ?[]const u8,
+    metadata: event_mod.PullMergedMetadata,
+) !void {
     var writer = try EventWriter.init(allocator, "gt pr");
     defer writer.deinit();
 
@@ -143,7 +153,7 @@ pub fn createPullMergedEvent(
     defer allocator.free(occurred_at);
     const event_parents = writer.eventParents();
 
-    const event_body = try event_mod.buildPullMergedJson(
+    const event_body = try event_mod.buildPullMergedJsonWithMetadata(
         allocator,
         writer.cfg,
         writer.nextSeq(),
@@ -154,6 +164,7 @@ pub fn createPullMergedEvent(
         event_parents,
         merge_oid,
         target_oid,
+        metadata,
     );
     defer allocator.free(event_body);
 

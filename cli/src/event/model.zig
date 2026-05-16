@@ -49,6 +49,8 @@ pub const IssueProjectPlacement = struct {
 pub const IssueOpenedMetadata = struct {
     source_author: ?[]const u8 = null,
     milestone: ?[]const u8 = null,
+    priority: ?[]const u8 = null,
+    status: ?[]const u8 = null,
     projects: []const IssueProjectPlacement = &.{},
 };
 
@@ -61,6 +63,13 @@ pub const PullOpenedMetadata = struct {
     changed_files: ?u64 = null,
     additions: ?u64 = null,
     deletions: ?u64 = null,
+};
+
+pub const PullMergedMetadata = struct {
+    base_oid: ?[]const u8 = null,
+    head_oid: ?[]const u8 = null,
+    remote: ?[]const u8 = null,
+    remote_ref: ?[]const u8 = null,
 };
 
 pub const CommentAddedMetadata = struct {
@@ -80,6 +89,8 @@ pub const IssueUpdate = struct {
     body: ?[]const u8 = null,
     state: ?[]const u8 = null,
     milestone: ?[]const u8 = null,
+    priority: ?[]const u8 = null,
+    status: ?[]const u8 = null,
     projects: []const IssueProjectPlacement = &.{},
     labels_added: []const []const u8 = &.{},
     labels_removed: []const []const u8 = &.{},
@@ -91,6 +102,8 @@ pub const IssueUpdate = struct {
             self.body != null or
             self.state != null or
             self.milestone != null or
+            self.priority != null or
+            self.status != null or
             self.projects.len != 0 or
             self.labels_added.len != 0 or
             self.labels_removed.len != 0 or
