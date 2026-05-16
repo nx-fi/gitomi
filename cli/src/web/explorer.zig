@@ -1873,11 +1873,27 @@ fn appendRootRepositoryStats(buf: *std.ArrayList(u8), allocator: Allocator, stat
         .worktrees = shared.groupedUnsigned(@intCast(status.worktree_count)),
     });
     if (status.disk_size_bytes) |bytes| {
-        try appendByteSize(buf, allocator, bytes);
+        try appendRepositoryDiskSize(buf, allocator, bytes);
     } else {
         try appendTemplate(buf, allocator, "Unknown", .{});
     }
     try appendTemplate(buf, allocator, "</dd></div>", .{});
+}
+
+fn appendRepositoryDiskSize(buf: *std.ArrayList(u8), allocator: Allocator, size: usize) !void {
+    const mib: u128 = 1024 * 1024;
+    const gib: u128 = 1024 * mib;
+    const bytes = @as(u128, size);
+
+    if (bytes >= gib) {
+        const hundredths = bytes * 100 / gib;
+        try appendFmt(buf, allocator, "{d}.{d:0>2} GB", .{ hundredths / 100, hundredths % 100 });
+        return;
+    }
+
+    var megabytes = bytes / mib;
+    if (megabytes == 0 and bytes != 0) megabytes = 1;
+    try appendFmt(buf, allocator, "{d} MB", .{megabytes});
 }
 
 fn appendRootBranchSyncStatus(buf: *std.ArrayList(u8), allocator: Allocator, status: BranchSyncStatus) !void {
@@ -2210,6 +2226,18 @@ test "web explorer parses prompt-style repository status" {
     try std.testing.expectEqual(@as(usize, 1), status.conflict_paths);
     try std.testing.expectEqual(@as(u64, 24), status.lines_added);
     try std.testing.expectEqual(@as(u64, 16), status.lines_removed);
+}
+
+test "web explorer formats repository disk size as MB then GB" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendRepositoryDiskSize(&buf, std.testing.allocator, 123 * 1024 * 1024);
+    try std.testing.expectEqualStrings("123 MB", buf.items);
+
+    buf.clearRetainingCapacity();
+    try appendRepositoryDiskSize(&buf, std.testing.allocator, 1536 * 1024 * 1024);
+    try std.testing.expectEqualStrings("1.50 GB", buf.items);
 }
 
 test "web explorer only falls back to remote tracking for branch shorthands" {

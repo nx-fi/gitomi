@@ -44,10 +44,12 @@ gt reset remote [--remote REMOTE] [--yes]
 gt events list [--json] [--limit N] [--ref REF]
 gt issue list [--json] [--view agent] [--state open|closed|all] [--author PRINCIPAL] [--label LABEL] [--project PROJECT] [--milestone MILESTONE] [--assignee PRINCIPAL] [--sort newest|oldest|updated] [--limit N]
 gt issue show ISSUE [--json] [--view agent]
-gt issue open --title TITLE [--body BODY] [--label LABEL] [--assignee PRINCIPAL]
-gt issue edit ISSUE [--title TITLE] [--body BODY] [--state open|closed] [--label LABEL] [--unlabel LABEL] [--assignee PRINCIPAL] [--unassign PRINCIPAL]
+gt issue open --title TITLE [--body BODY] [--priority P0|P1|P2|P3] [--status Draft|Pending|WIP|Review|Done|Failed] [--label LABEL] [--assignee PRINCIPAL]
+gt issue edit ISSUE [--title TITLE] [--body BODY] [--state open|closed] [--priority P0|P1|P2|P3] [--status Draft|Pending|WIP|Review|Done|Failed] [--label LABEL] [--unlabel LABEL] [--assignee PRINCIPAL] [--unassign PRINCIPAL]
 gt issue title ISSUE --title TITLE
 gt issue body ISSUE --body BODY
+gt issue priority ISSUE --priority P0|P1|P2|P3
+gt issue status ISSUE --status Draft|Pending|WIP|Review|Done|Failed
 gt issue comment ISSUE --body BODY [--reply COMMENT]
 gt issue close|reopen ISSUE [--body BODY]
 gt issue label ISSUE add|remove LABEL
@@ -140,7 +142,12 @@ state, and `gt milestone close` / `gt milestone reopen` change milestone state.
 `gt pull` remains accepted as a compatibility alias for `gt pr`. `gt pr view`
 also accepts `show`, and `gt pr create` also accepts `open` and `new`.
 `gt pr comment` can reply to an existing comment or add the same file/line
-review note produced from the pull request Files tab.
+review note produced from the pull request Files tab. Pull request merge and
+conflict-resolution semantics are specified in
+`../spec/06_PULL_REQUEST_MERGE_SEMANTICS.md`: web-initiated merges are
+remote-first, use detached temporary worktrees or equivalent object-level
+operations for computation, and must not update the active local worktree or
+local base/head branches by default.
 
 `gt sync` fetches remote genesis and inbox refs into `refs/gitomi/staging/*`,
 then admits only compatible genesis refs and new or fast-forward inbox refs into

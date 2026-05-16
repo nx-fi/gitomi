@@ -40,7 +40,6 @@ const sqlite = index.sqlite;
 const max_pull_diff_bytes = work_items.max_pull_diff_bytes;
 const max_merge_blob_bytes = 2 * 1024 * 1024;
 const merge_context_radius = 15;
-const zero_oid = "0000000000000000000000000000000000000000";
 
 const PullStateFilter = work_items.PullStateFilter;
 const PullFilters = work_items.PullListOptions;
@@ -101,6 +100,34 @@ const PullTabCounts = struct {
 
 const PullGitRefs = work_items.PullGitRefs;
 
+const RemoteBranchTarget = struct {
+    remote: []u8,
+    branch: []u8,
+    remote_ref: []u8,
+    tracking_ref: []u8,
+
+    fn deinit(self: RemoteBranchTarget, allocator: Allocator) void {
+        allocator.free(self.remote);
+        allocator.free(self.branch);
+        allocator.free(self.remote_ref);
+        allocator.free(self.tracking_ref);
+    }
+};
+
+const PullMergeSnapshot = struct {
+    expected_base_oid: []u8,
+    expected_head_oid: []u8,
+    base_target: RemoteBranchTarget,
+    head_target: ?RemoteBranchTarget = null,
+
+    fn deinit(self: PullMergeSnapshot, allocator: Allocator) void {
+        allocator.free(self.expected_base_oid);
+        allocator.free(self.expected_head_oid);
+        self.base_target.deinit(allocator);
+        if (self.head_target) |target| target.deinit(allocator);
+    }
+};
+
 const PullMergeStatusKind = enum {
     unavailable,
     clean,
@@ -110,11 +137,11 @@ const PullMergeStatusKind = enum {
 const PullMergeStatus = struct {
     kind: PullMergeStatusKind = .unavailable,
     conflict_files: ?[][]u8 = null,
-    git_refs: ?PullGitRefs = null,
+    snapshot: ?PullMergeSnapshot = null,
 
     fn deinit(self: PullMergeStatus, allocator: Allocator) void {
         if (self.conflict_files) |files| freeConflictFiles(allocator, files);
-        if (self.git_refs) |refs| refs.deinit(allocator);
+        if (self.snapshot) |snapshot| snapshot.deinit(allocator);
     }
 
     fn hasConflicts(self: PullMergeStatus) bool {
@@ -172,6 +199,11 @@ const FormField = struct {
         allocator.free(self.name);
         allocator.free(self.value);
     }
+};
+
+const SubmittedExpectedOids = struct {
+    base_oid: []const u8,
+    head_oid: []const u8,
 };
 
 const DiffCommentSide = work_items.DiffCommentSide;
@@ -648,11 +680,17 @@ pub fn renderPullMergeEditorPage(allocator: Allocator, repo: Repo, raw_ref: []co
         return buf.toOwnedSlice(allocator);
     }
 
+    const snapshot = merge_status.snapshot orelse {
+        try appendMergeEditorEmptyState(&buf, allocator, raw_ref, "Merge refs unavailable.", "Refresh after fetching the configured remote branches.");
+        try appendShellEnd(&buf, allocator);
+        return buf.toOwnedSlice(allocator);
+    };
+
     const conflict_files = merge_status.conflict_files orelse &[_][]u8{};
-    const files = try loadMergeConflictFiles(allocator, repo, detail, conflict_files);
+    const files = try loadMergeConflictFiles(allocator, repo, detail, snapshot, conflict_files);
     defer freeMergeConflictFiles(allocator, files);
 
-    try appendMergeEditor(&buf, allocator, detail, raw_ref, pull_ref, files, error_message);
+    try appendMergeEditor(&buf, allocator, detail, raw_ref, pull_ref, snapshot, files, error_message);
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
 }
@@ -671,6 +709,7 @@ fn appendMergeEditor(
     detail: PullDetail,
     raw_ref: []const u8,
     pull_ref: []const u8,
+    snapshot: PullMergeSnapshot,
     files: []const MergeConflictFile,
     error_message: ?[]const u8,
 ) !void {
@@ -722,6 +761,8 @@ fn appendMergeEditor(
 
     try appendTemplate(buf, allocator,
         \\  <input type="hidden" name="file_count" value="{file_count}">
+        \\  <input type="hidden" name="expected_base_oid" value="{expected_base_oid}">
+        \\  <input type="hidden" name="expected_head_oid" value="{expected_head_oid}">
         \\  <div class="merge-editor-layout">
         \\    <aside class="merge-editor-sidebar">
         \\      <strong>{file_count} {file_word}</strong>
@@ -729,6 +770,8 @@ fn appendMergeEditor(
     , .{
         .file_count = files.len,
         .file_word = if (files.len == 1) "file" else "files",
+        .expected_base_oid = snapshot.expected_base_oid,
+        .expected_head_oid = snapshot.expected_head_oid,
     });
     for (files, 0..) |file, index_value| {
         try appendTemplate(buf, allocator,
@@ -977,21 +1020,18 @@ fn appendMergeLine(
     try appendTemplate(buf, allocator, ">{line}</code></div>", .{ .line = line.text });
 }
 
-fn loadMergeConflictFiles(allocator: Allocator, repo: Repo, detail: PullDetail, conflict_paths: []const []const u8) ![]MergeConflictFile {
+fn loadMergeConflictFiles(allocator: Allocator, repo: Repo, detail: PullDetail, snapshot: PullMergeSnapshot, conflict_paths: []const []const u8) ![]MergeConflictFile {
     var files: std.ArrayList(MergeConflictFile) = .empty;
     errdefer {
         for (files.items) |file| file.deinit(allocator);
         files.deinit(allocator);
     }
 
-    const git_refs = (try work_items.loadPullGitRefs(allocator, repo, detail)) orelse return try files.toOwnedSlice(allocator);
-    defer git_refs.deinit(allocator);
-
-    const merge_base = try work_items.loadMergeBase(allocator, repo, git_refs.base, git_refs.head);
+    const merge_base = try work_items.loadMergeBase(allocator, repo, snapshot.expected_base_oid, snapshot.expected_head_oid);
     defer if (merge_base) |value| allocator.free(value);
 
     for (conflict_paths) |path| {
-        try files.append(allocator, try loadMergeConflictFile(allocator, repo, detail, git_refs.base, git_refs.head, merge_base, path));
+        try files.append(allocator, try loadMergeConflictFile(allocator, repo, detail, snapshot.expected_base_oid, snapshot.expected_head_oid, merge_base, path));
     }
     return try files.toOwnedSlice(allocator);
 }
@@ -1861,7 +1901,8 @@ fn appendPullMergeabilityTimeline(
     if (!std.mem.eql(u8, detail.state, "open")) return;
     if (detail.draft) return;
     if (merge_status.kind == .clean) {
-        try appendPullReadyToMergeTimeline(buf, allocator, raw_ref, commit_count, csrf_token, merge_error);
+        const snapshot = merge_status.snapshot orelse return;
+        try appendPullReadyToMergeTimeline(buf, allocator, raw_ref, commit_count, snapshot, csrf_token, merge_error);
         return;
     }
     if (!merge_status.hasConflicts()) return;
@@ -1904,6 +1945,7 @@ fn appendPullReadyToMergeTimeline(
     allocator: Allocator,
     raw_ref: []const u8,
     commit_count: ?usize,
+    snapshot: PullMergeSnapshot,
     csrf_token: []const u8,
     merge_error: ?[]const u8,
 ) !void {
@@ -1931,6 +1973,8 @@ fn appendPullReadyToMergeTimeline(
     try appendTemplate(buf, allocator,
         \\/merge">
         \\      <input type="hidden" name="{csrf_field}" value="{csrf}">
+        \\      <input type="hidden" name="expected_base_oid" value="{expected_base_oid}">
+        \\      <input type="hidden" name="expected_head_oid" value="{expected_head_oid}">
         \\      <div class="pull-merge-actions">
         \\        <div class="pull-merge-button-group">
         \\          <button class="button primary pull-merge-submit" type="submit" name="method" value="merge"><span class="button-icon icon-pull-request" aria-hidden="true"></span><span data-merge-submit-label>Merge pull request</span></button>
@@ -1952,6 +1996,8 @@ fn appendPullReadyToMergeTimeline(
         .commit_phrase = commit_phrase,
         .csrf_field = zwf.csrf.field_name,
         .csrf = csrf_token,
+        .expected_base_oid = snapshot.expected_base_oid,
+        .expected_head_oid = snapshot.expected_head_oid,
         .pull_ref = raw_ref,
     });
 }
@@ -2258,24 +2304,6 @@ fn resolveFormattedGithubPullRef(allocator: Allocator, repo: Repo, comptime patt
     return try resolveGitCommit(allocator, repo, ref);
 }
 
-fn resolvePullGitCommit(allocator: Allocator, repo: Repo, raw_ref: []const u8, prefer_remote: bool) !?[]u8 {
-    if (prefer_remote and isBranchShorthand(raw_ref)) {
-        const remote_ref = try std.fmt.allocPrint(allocator, "refs/remotes/origin/{s}", .{raw_ref});
-        defer allocator.free(remote_ref);
-        if (try resolveGitCommit(allocator, repo, remote_ref)) |oid| return oid;
-    }
-
-    if (try resolveGitCommit(allocator, repo, raw_ref)) |oid| return oid;
-
-    if (!prefer_remote and isBranchShorthand(raw_ref)) {
-        const remote_ref = try std.fmt.allocPrint(allocator, "refs/remotes/origin/{s}", .{raw_ref});
-        defer allocator.free(remote_ref);
-        if (try resolveGitCommit(allocator, repo, remote_ref)) |oid| return oid;
-    }
-
-    return null;
-}
-
 fn resolveGitCommit(allocator: Allocator, repo: Repo, ref: []const u8) !?[]u8 {
     const commit_ref = try std.fmt.allocPrint(allocator, "{s}^{{commit}}", .{ref});
     defer allocator.free(commit_ref);
@@ -2304,16 +2332,132 @@ fn isSafeLocalBranchName(ref: []const u8) bool {
     return true;
 }
 
+fn remoteBranchTargetForPullRef(allocator: Allocator, repo: Repo, ref: []const u8) !?RemoteBranchTarget {
+    const heads_prefix = "refs/heads/";
+    if (std.mem.startsWith(u8, ref, heads_prefix)) {
+        return try remoteBranchTargetForBranch(allocator, repo, null, ref[heads_prefix.len..]);
+    }
+
+    const remotes_prefix = "refs/remotes/";
+    if (std.mem.startsWith(u8, ref, remotes_prefix)) {
+        const rest = ref[remotes_prefix.len..];
+        const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
+        return try remoteBranchTargetForBranch(allocator, repo, rest[0..slash], rest[slash + 1 ..]);
+    }
+
+    if (std.mem.indexOfScalar(u8, ref, '/')) |slash| {
+        const maybe_remote = ref[0..slash];
+        const maybe_branch = ref[slash + 1 ..];
+        if (try remoteExists(allocator, repo, maybe_remote)) {
+            return try remoteBranchTargetForBranch(allocator, repo, maybe_remote, maybe_branch);
+        }
+    }
+
+    if (!isBranchShorthand(ref)) return null;
+    return try remoteBranchTargetForBranch(allocator, repo, null, ref);
+}
+
+fn remoteBranchTargetForBranch(allocator: Allocator, repo: Repo, remote_hint: ?[]const u8, branch: []const u8) !?RemoteBranchTarget {
+    if (!isSafeLocalBranchName(branch)) return null;
+
+    const remote = if (remote_hint) |hint|
+        try configuredRemoteName(allocator, repo, hint)
+    else
+        try defaultRemoteForBranch(allocator, repo, branch);
+    const owned_remote = remote orelse return null;
+    errdefer allocator.free(owned_remote);
+
+    const owned_branch = try allocator.dupe(u8, branch);
+    errdefer allocator.free(owned_branch);
+    const remote_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch});
+    errdefer allocator.free(remote_ref);
+    const tracking_ref = try std.fmt.allocPrint(allocator, "refs/remotes/{s}/{s}", .{ owned_remote, branch });
+    errdefer allocator.free(tracking_ref);
+
+    return .{
+        .remote = owned_remote,
+        .branch = owned_branch,
+        .remote_ref = remote_ref,
+        .tracking_ref = tracking_ref,
+    };
+}
+
+fn defaultRemoteForBranch(allocator: Allocator, repo: Repo, branch: []const u8) !?[]u8 {
+    const config_key = try std.fmt.allocPrint(allocator, "branch.{s}.remote", .{branch});
+    defer allocator.free(config_key);
+    if (try gitConfigValueAt(allocator, repo, config_key)) |remote| {
+        errdefer allocator.free(remote);
+        if (try remoteExists(allocator, repo, remote)) return remote;
+        allocator.free(remote);
+    }
+    if (try remoteExists(allocator, repo, "origin")) return try allocator.dupe(u8, "origin");
+    return try singleConfiguredRemote(allocator, repo);
+}
+
+fn configuredRemoteName(allocator: Allocator, repo: Repo, remote: []const u8) !?[]u8 {
+    if (!isSafeRemoteName(remote)) return null;
+    if (!(try remoteExists(allocator, repo, remote))) return null;
+    return try allocator.dupe(u8, remote);
+}
+
+fn remoteExists(allocator: Allocator, repo: Repo, remote: []const u8) !bool {
+    if (!isSafeRemoteName(remote)) return false;
+    var result = try gitRunAt(allocator, repo.root, &.{ "remote", "get-url", "--push", remote }, 1024 * 1024);
+    defer result.deinit();
+    return result.exitCode() == 0 and std.mem.trim(u8, result.stdout, " \t\r\n").len != 0;
+}
+
+fn singleConfiguredRemote(allocator: Allocator, repo: Repo) !?[]u8 {
+    const raw = try gitCheckedAt(allocator, repo.root, &.{"remote"}, 1024 * 1024);
+    defer allocator.free(raw);
+
+    var found: ?[]const u8 = null;
+    var lines = std.mem.tokenizeScalar(u8, raw, '\n');
+    while (lines.next()) |raw_line| {
+        const remote = std.mem.trim(u8, raw_line, " \t\r\n");
+        if (!isSafeRemoteName(remote)) continue;
+        if (found != null) return null;
+        found = remote;
+    }
+    return if (found) |remote| try allocator.dupe(u8, remote) else null;
+}
+
+fn isSafeRemoteName(remote: []const u8) bool {
+    if (remote.len == 0 or std.mem.eql(u8, remote, ".")) return false;
+    if (std.mem.startsWith(u8, remote, "-")) return false;
+    if (std.mem.indexOf(u8, remote, "..") != null) return false;
+    if (std.mem.indexOfAny(u8, remote, " \t\r\n\x00:^~?*[\\") != null) return false;
+    return true;
+}
+
+fn gitConfigValueAt(allocator: Allocator, repo: Repo, key: []const u8) !?[]u8 {
+    var result = try gitRunAt(allocator, repo.root, &.{ "config", "--get", key }, 512 * 1024);
+    defer result.deinit();
+    if (result.exitCode() != 0) return null;
+    const trimmed = std.mem.trim(u8, result.stdout, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    return try allocator.dupe(u8, trimmed);
+}
+
+fn fetchRemoteBranches(allocator: Allocator, repo: Repo, remote: []const u8) !void {
+    var result = try gitRunAt(allocator, repo.root, &.{ "fetch", "--no-tags", remote }, git.max_git_output);
+    defer result.deinit();
+    if (result.exitCode() != 0) return error.RemoteFetchFailed;
+}
+
 fn loadPullMergeStatus(allocator: Allocator, repo: Repo, detail: PullDetail) !PullMergeStatus {
     if (!std.mem.eql(u8, detail.state, "open")) return .{ .kind = .unavailable };
 
-    const git_refs = (try work_items.loadPullGitRefs(allocator, repo, detail)) orelse return .{ .kind = .unavailable };
-    errdefer git_refs.deinit(allocator);
+    const snapshot = (loadPullMergeSnapshot(allocator, repo, detail) catch |err| switch (err) {
+        error.RemoteFetchFailed => return .{ .kind = .unavailable },
+        else => return err,
+    }) orelse return .{ .kind = .unavailable };
+    errdefer snapshot.deinit(allocator);
 
-    const merge_base = try work_items.loadMergeBase(allocator, repo, git_refs.base, git_refs.head);
+    const merge_base = try work_items.loadMergeBase(allocator, repo, snapshot.expected_base_oid, snapshot.expected_head_oid);
     defer if (merge_base) |value| allocator.free(value);
     if (merge_base == null) {
-        git_refs.deinit(allocator);
+        snapshot.deinit(allocator);
         return .{ .kind = .unavailable };
     }
 
@@ -2328,15 +2472,15 @@ fn loadPullMergeStatus(allocator: Allocator, repo: Repo, detail: PullDetail) !Pu
         "--name-only",
         "--no-messages",
         "-z",
-        git_refs.head,
-        git_refs.base,
+        snapshot.expected_base_oid,
+        snapshot.expected_head_oid,
     });
 
     var result = try runCommand(allocator, argv.items, null, max_pull_diff_bytes);
     defer result.deinit();
-    if (result.exitCode() == 0) return .{ .kind = .clean, .git_refs = git_refs };
+    if (result.exitCode() == 0) return .{ .kind = .clean, .snapshot = snapshot };
     if (result.exitCode() != 1) {
-        git_refs.deinit(allocator);
+        snapshot.deinit(allocator);
         return .{ .kind = .unavailable };
     }
 
@@ -2344,14 +2488,65 @@ fn loadPullMergeStatus(allocator: Allocator, repo: Repo, detail: PullDetail) !Pu
     errdefer freeConflictFiles(allocator, conflict_files);
     if (conflict_files.len == 0) {
         freeConflictFiles(allocator, conflict_files);
-        git_refs.deinit(allocator);
+        snapshot.deinit(allocator);
         return .{ .kind = .unavailable };
     }
     return .{
         .kind = .conflicts,
         .conflict_files = conflict_files,
-        .git_refs = git_refs,
+        .snapshot = snapshot,
     };
+}
+
+fn loadPullMergeSnapshot(allocator: Allocator, repo: Repo, detail: PullDetail) !?PullMergeSnapshot {
+    var base_target = (try remoteBranchTargetForPullRef(allocator, repo, detail.base_ref)) orelse return null;
+    var base_target_owned = true;
+    defer if (base_target_owned) base_target.deinit(allocator);
+
+    try fetchRemoteBranches(allocator, repo, base_target.remote);
+
+    const head_target = try remoteBranchTargetForPullRef(allocator, repo, detail.head_ref);
+    var head_target_owned = head_target != null;
+    defer if (head_target_owned) if (head_target) |target| target.deinit(allocator);
+
+    if (head_target) |target| {
+        if (!std.mem.eql(u8, target.remote, base_target.remote)) {
+            try fetchRemoteBranches(allocator, repo, target.remote);
+        }
+    }
+
+    const base_oid = (try resolveGitCommit(allocator, repo, base_target.tracking_ref)) orelse return null;
+    errdefer allocator.free(base_oid);
+
+    const head_oid = (try resolvePullHeadForMergeSnapshot(allocator, repo, detail, head_target)) orelse {
+        allocator.free(base_oid);
+        return null;
+    };
+    errdefer allocator.free(head_oid);
+
+    const snapshot = PullMergeSnapshot{
+        .expected_base_oid = base_oid,
+        .expected_head_oid = head_oid,
+        .base_target = base_target,
+        .head_target = head_target,
+    };
+    base_target_owned = false;
+    head_target_owned = false;
+    return snapshot;
+}
+
+fn resolvePullHeadForMergeSnapshot(allocator: Allocator, repo: Repo, detail: PullDetail, head_target: ?RemoteBranchTarget) !?[]u8 {
+    if (detail.legacy_number > 0) {
+        if (try resolveGithubPullHeadCommit(allocator, repo, detail.legacy_number)) |oid| return oid;
+    }
+    if (head_target) |target| {
+        return try resolveGitCommit(allocator, repo, target.tracking_ref);
+    }
+    if (try localHeadRefName(allocator, detail.head_ref)) |local_head| {
+        allocator.free(local_head);
+        return null;
+    }
+    return try resolveGitCommit(allocator, repo, detail.head_ref);
 }
 
 fn parseMergeTreeConflictFiles(allocator: Allocator, raw: []const u8) ![][]u8 {
@@ -2730,6 +2925,11 @@ pub fn handlePullConflictPost(allocator: Allocator, repo: Repo, stream: std.net.
     const fields = try parseFormFieldsOwned(allocator, form_body);
     defer freeFormFields(allocator, fields);
 
+    const submitted_oids = submittedExpectedOids(fields) orelse {
+        try sendMergeEditorError(allocator, repo, stream, raw_ref, 409, "Conflict", "The merge state was not confirmed. Refresh the page and try again.");
+        return;
+    };
+
     var resolved: std.ArrayList(ResolvedConflictFile) = .empty;
     defer resolved.deinit(allocator);
     for (conflict_files, 0..) |path, index_value| {
@@ -2758,12 +2958,16 @@ pub fn handlePullConflictPost(allocator: Allocator, repo: Repo, stream: std.net.
         try resolved.append(allocator, .{ .path = path, .content = content });
     }
 
-    const git_refs = merge_status.git_refs orelse {
+    const snapshot = merge_status.snapshot orelse {
         try sendMergeEditorError(allocator, repo, stream, raw_ref, 409, "Conflict", "Git did not return the pull request refs.");
         return;
     };
+    if (!submittedOidsMatchSnapshot(submitted_oids, snapshot)) {
+        try sendMergeEditorError(allocator, repo, stream, raw_ref, 409, "Conflict", "The pull request changed after this page was rendered. Refresh and try again.");
+        return;
+    }
 
-    const merge_commit = commitPullConflictResolution(allocator, repo, detail, git_refs, raw_ref, resolved.items) catch |err| {
+    const merge_commit = commitPullConflictResolution(allocator, repo, snapshot, raw_ref, resolved.items) catch |err| {
         const message = mergeCommitErrorMessage(err) orelse return err;
         try sendMergeEditorError(allocator, repo, stream, raw_ref, 422, "Unprocessable Entity", message);
         return;
@@ -2813,6 +3017,10 @@ pub fn handlePullMergePost(allocator: Allocator, repo: Repo, stream: std.net.Str
         try sendPullMergeError(allocator, repo, stream, raw_ref, csrf_token, 422, "Unprocessable Entity", "Unknown merge method.");
         return;
     };
+    const submitted_oids = submittedExpectedOids(fields) orelse {
+        try sendPullMergeError(allocator, repo, stream, raw_ref, csrf_token, 409, "Conflict", "The merge state was not confirmed. Refresh the page and try again.");
+        return;
+    };
 
     const merge_status = try loadPullMergeStatus(allocator, repo, detail);
     defer merge_status.deinit(allocator);
@@ -2824,15 +3032,28 @@ pub fn handlePullMergePost(allocator: Allocator, repo: Repo, stream: std.net.Str
         try sendPullMergeError(allocator, repo, stream, raw_ref, csrf_token, 409, "Conflict", "The local repository could not verify that this pull request can be merged cleanly.");
         return;
     }
+    const snapshot = merge_status.snapshot orelse {
+        try sendPullMergeError(allocator, repo, stream, raw_ref, csrf_token, 409, "Conflict", "The local repository could not resolve the confirmed merge refs.");
+        return;
+    };
+    if (!submittedOidsMatchSnapshot(submitted_oids, snapshot)) {
+        try sendPullMergeError(allocator, repo, stream, raw_ref, csrf_token, 409, "Conflict", "The pull request changed after this page was rendered. Refresh and try again.");
+        return;
+    }
 
-    const merge_result = mergePullIntoBase(allocator, repo, detail, raw_ref, method) catch |err| {
+    const merge_result = mergePullIntoBase(allocator, repo, detail, raw_ref, snapshot, method) catch |err| {
         const message = pullMergeErrorMessage(err) orelse return err;
         try sendPullMergeError(allocator, repo, stream, raw_ref, csrf_token, 422, "Unprocessable Entity", message);
         return;
     };
     defer merge_result.deinit(allocator);
 
-    pull.createPullMergedEvent(allocator, pull_id, merge_result.merge_oid, merge_result.target_oid) catch {
+    pull.createPullMergedEventWithMetadata(allocator, pull_id, merge_result.merge_oid, merge_result.target_oid, .{
+        .base_oid = snapshot.expected_base_oid,
+        .head_oid = snapshot.expected_head_oid,
+        .remote = snapshot.base_target.remote,
+        .remote_ref = snapshot.base_target.remote_ref,
+    }) catch {
         try sendPullMergeError(allocator, repo, stream, raw_ref, csrf_token, 500, "Internal Server Error", "The base branch was updated, but Gitomi could not record the pull.merged event.");
         return;
     };
@@ -3093,6 +3314,28 @@ fn findFormField(fields: []const FormField, name: []const u8) ?[]const u8 {
     return null;
 }
 
+fn submittedExpectedOids(fields: []const FormField) ?SubmittedExpectedOids {
+    const base = std.mem.trim(u8, findFormField(fields, "expected_base_oid") orelse return null, " \t\r\n");
+    const head = std.mem.trim(u8, findFormField(fields, "expected_head_oid") orelse return null, " \t\r\n");
+    if (!isFullGitOid(base) or !isFullGitOid(head)) return null;
+    return .{ .base_oid = base, .head_oid = head };
+}
+
+fn submittedOidsMatchSnapshot(submitted: SubmittedExpectedOids, snapshot: PullMergeSnapshot) bool {
+    return std.mem.eql(u8, submitted.base_oid, snapshot.expected_base_oid) and
+        std.mem.eql(u8, submitted.head_oid, snapshot.expected_head_oid);
+}
+
+fn isFullGitOid(value: []const u8) bool {
+    if (value.len != 40 and value.len != 64) return false;
+    for (value) |c| {
+        if (!((c >= '0' and c <= '9') or
+            (c >= 'a' and c <= 'f') or
+            (c >= 'A' and c <= 'F'))) return false;
+    }
+    return true;
+}
+
 fn parseDiffCommentContext(fields: []const FormField) !?DiffCommentContext {
     const raw_file = findFormField(fields, "diff_file");
     const raw_side = findFormField(fields, "diff_side");
@@ -3156,44 +3399,22 @@ fn mergePullIntoBase(
     repo: Repo,
     detail: PullDetail,
     raw_ref: []const u8,
+    snapshot: PullMergeSnapshot,
     method: PullMergeMethod,
 ) !PullMergeResult {
-    const update_ref = try localBaseUpdateRef(allocator, repo, detail.base_ref);
-    defer allocator.free(update_ref);
-
-    const old_base_raw = try gitCheckedAt(allocator, repo.root, &.{ "rev-parse", "--verify", update_ref }, 1024 * 1024);
-    defer allocator.free(old_base_raw);
-    const old_base = try allocator.dupe(u8, std.mem.trim(u8, old_base_raw, " \t\r\n"));
-    defer allocator.free(old_base);
-    if (old_base.len == 0) return error.NoLocalBaseBranch;
-
-    const head_commit = (try resolvePullHeadForMerge(allocator, repo, detail)) orelse return error.NoPullHeadCommit;
-    defer allocator.free(head_commit);
-
-    if (!(try mergeWouldBeClean(allocator, repo, old_base, head_commit))) return error.MergeConflicts;
+    if (!(try mergeWouldBeClean(allocator, repo, snapshot.expected_base_oid, snapshot.expected_head_oid))) return error.MergeConflicts;
 
     const result = switch (method) {
-        .merge_commit => try createMergeCommitOnBase(allocator, repo, detail, raw_ref, old_base, head_commit),
-        .squash => try createSquashCommitOnBase(allocator, repo, detail, raw_ref, old_base, head_commit),
-        .rebase => try rebasePullOntoBase(allocator, repo, old_base, head_commit),
+        .merge_commit => try createMergeCommitOnBase(allocator, repo, detail, raw_ref, snapshot.expected_base_oid, snapshot.expected_head_oid),
+        .squash => try createSquashCommitOnBase(allocator, repo, detail, raw_ref, snapshot.expected_base_oid, snapshot.expected_head_oid),
+        .rebase => try rebasePullOntoBase(allocator, repo, snapshot.expected_base_oid, snapshot.expected_head_oid),
     };
     errdefer result.deinit(allocator);
 
     const target = result.merge_oid orelse result.target_oid orelse return error.MergeCommitFailed;
-    const update_output = gitCheckedAt(allocator, repo.root, &.{ "update-ref", update_ref, target, old_base }, git.max_git_output) catch |err| switch (err) {
-        error.GitFailed => return error.BaseUpdateFailed,
-        else => return err,
-    };
-    allocator.free(update_output);
+    if (!(try commitIsAncestorAt(allocator, repo, snapshot.expected_base_oid, target))) return error.NonFastForwardResult;
+    try pushRemoteBranchWithLease(allocator, repo, snapshot.base_target, target, snapshot.expected_base_oid);
     return result;
-}
-
-fn resolvePullHeadForMerge(allocator: Allocator, repo: Repo, detail: PullDetail) !?[]u8 {
-    const prefer_remote = detail.legacy_number > 0;
-    if (detail.legacy_number > 0) {
-        if (try resolveGithubPullHeadCommit(allocator, repo, detail.legacy_number)) |oid| return oid;
-    }
-    return try resolvePullGitCommit(allocator, repo, detail.head_ref, prefer_remote);
 }
 
 fn mergeWouldBeClean(allocator: Allocator, repo: Repo, base_commit: []const u8, head_commit: []const u8) !bool {
@@ -3328,6 +3549,28 @@ fn worktreeHasStagedChanges(allocator: Allocator, tmp_worktree: []const u8) !boo
     return error.GitFailed;
 }
 
+fn commitIsAncestorAt(allocator: Allocator, repo: Repo, ancestor: []const u8, descendant: []const u8) !bool {
+    var result = try gitRunAt(allocator, repo.root, &.{ "merge-base", "--is-ancestor", ancestor, descendant }, git.max_git_output);
+    defer result.deinit();
+    if (result.exitCode()) |code| {
+        if (code == 0) return true;
+        if (code == 1) return false;
+    }
+    return error.GitFailed;
+}
+
+fn pushRemoteBranchWithLease(allocator: Allocator, repo: Repo, target: RemoteBranchTarget, new_oid: []const u8, expected_oid: []const u8) !void {
+    const lease = try std.fmt.allocPrint(allocator, "--force-with-lease={s}:{s}", .{ target.remote_ref, expected_oid });
+    defer allocator.free(lease);
+    const refspec = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ new_oid, target.remote_ref });
+    defer allocator.free(refspec);
+    const push_output = gitCheckedAt(allocator, repo.root, &.{ "push", target.remote, lease, refspec }, git.max_git_output) catch |err| switch (err) {
+        error.GitFailed => return error.RemoteBranchUpdateFailed,
+        else => return err,
+    };
+    allocator.free(push_output);
+}
+
 fn cleanupTempWorktree(allocator: Allocator, repo_root: []const u8, tmp_worktree: []const u8, worktree_created: *bool) void {
     if (worktree_created.*) {
         var remove_result = gitRunAt(allocator, repo_root, &.{ "worktree", "remove", "--force", tmp_worktree }, 1024 * 1024) catch null;
@@ -3336,27 +3579,17 @@ fn cleanupTempWorktree(allocator: Allocator, repo_root: []const u8, tmp_worktree
     std.fs.deleteTreeAbsolute(tmp_worktree) catch {};
 }
 
-fn localBaseUpdateRef(allocator: Allocator, repo: Repo, base_ref: []const u8) ![]u8 {
-    const symbolic_raw = gitCheckedAt(allocator, repo.root, &.{ "rev-parse", "--symbolic-full-name", "--verify", base_ref }, 1024 * 1024) catch |err| switch (err) {
-        error.GitFailed => return error.NoLocalBaseBranch,
-        else => return err,
-    };
-    defer allocator.free(symbolic_raw);
-    const symbolic = std.mem.trim(u8, symbolic_raw, " \t\r\n");
-    if (!std.mem.startsWith(u8, symbolic, "refs/heads/")) return error.NoLocalBaseBranch;
-    return allocator.dupe(u8, symbolic);
-}
-
 fn pullMergeErrorMessage(err: anyerror) ?[]const u8 {
     return switch (err) {
-        error.NoLocalBaseBranch => "The pull request base must be a local branch before the web UI can update it.",
+        error.NoLocalBaseBranch => "The pull request base must be available on a configured remote before the web UI can merge it.",
         error.NoPullHeadCommit => "The pull request head commit is not available in the local repository.",
         error.MergeStatusUnavailable => "The local repository could not verify mergeability for this pull request.",
         error.MergeConflicts => "This pull request has conflicts with the current base branch.",
         error.MergeFailed => "Git could not merge this pull request into a temporary worktree.",
         error.RebaseFailed => "Git could not rebase this pull request onto the base branch.",
         error.MergeCommitFailed => "Git could not identify the merged target commit.",
-        error.BaseUpdateFailed => "Git could not update the base branch. It may have changed while the merge was running.",
+        error.NonFastForwardResult => "The selected merge method did not produce a fast-forward result for the confirmed base.",
+        error.BaseUpdateFailed, error.RemoteBranchUpdateFailed => "Git could not update the remote base branch. It may have changed while the merge was running.",
         error.GitFailed => "Git could not complete the merge. Check the repository state and commit signing configuration.",
         else => null,
     };
@@ -3365,21 +3598,12 @@ fn pullMergeErrorMessage(err: anyerror) ?[]const u8 {
 fn commitPullConflictResolution(
     allocator: Allocator,
     repo: Repo,
-    detail: PullDetail,
-    git_refs: PullGitRefs,
+    snapshot: PullMergeSnapshot,
     raw_ref: []const u8,
     resolved_files: []const ResolvedConflictFile,
 ) ![]u8 {
     if (resolved_files.len == 0) return error.NoConflictResolutions;
-    const update_ref = try ensureLocalHeadUpdateRef(allocator, repo, detail.head_ref, git_refs.head);
-    defer allocator.free(update_ref);
-
-    const old_head_raw = try gitCheckedAt(allocator, repo.root, &.{ "rev-parse", "--verify", update_ref }, 1024 * 1024);
-    defer allocator.free(old_head_raw);
-    const old_head = try allocator.dupe(u8, std.mem.trim(u8, old_head_raw, " \t\r\n"));
-    defer allocator.free(old_head);
-    if (old_head.len == 0) return error.NoLocalHeadBranch;
-    if (!std.mem.eql(u8, old_head, git_refs.head)) return error.PullHeadChanged;
+    const head_target = snapshot.head_target orelse return error.NoRemoteHeadBranch;
 
     const tmp_worktree = try tempPath(allocator, "gitomi-merge-worktree");
     defer allocator.free(tmp_worktree);
@@ -3392,11 +3616,11 @@ fn commitPullConflictResolution(
         std.fs.deleteTreeAbsolute(tmp_worktree) catch {};
     }
 
-    const worktree_add_raw = try gitCheckedAt(allocator, repo.root, &.{ "worktree", "add", "--detach", tmp_worktree, old_head }, git.max_git_output);
+    const worktree_add_raw = try gitCheckedAt(allocator, repo.root, &.{ "worktree", "add", "--detach", tmp_worktree, snapshot.expected_head_oid }, git.max_git_output);
     allocator.free(worktree_add_raw);
     worktree_created = true;
 
-    var merge_result = try gitRunAt(allocator, tmp_worktree, &.{ "merge", "--no-ff", "--no-commit", git_refs.base }, git.max_git_output);
+    var merge_result = try gitRunAt(allocator, tmp_worktree, &.{ "merge", "--no-ff", "--no-commit", snapshot.expected_base_oid }, git.max_git_output);
     defer merge_result.deinit();
     if (merge_result.exitCode()) |code| {
         if (code != 0 and code != 1) return error.MergePreparationFailed;
@@ -3430,8 +3654,7 @@ fn commitPullConflictResolution(
     errdefer allocator.free(commit_oid);
     if (commit_oid.len == 0) return error.MergeCommitFailed;
 
-    const update_output = try gitCheckedAt(allocator, repo.root, &.{ "update-ref", update_ref, commit_oid, old_head }, git.max_git_output);
-    allocator.free(update_output);
+    try pushRemoteBranchWithLease(allocator, repo, head_target, commit_oid, snapshot.expected_head_oid);
     return commit_oid;
 }
 
@@ -3455,35 +3678,6 @@ fn lsFilesStagesAreRegularFile(raw: []const u8, path: []const u8) bool {
     return found;
 }
 
-fn ensureLocalHeadUpdateRef(allocator: Allocator, repo: Repo, head_ref: []const u8, expected_head: []const u8) ![]u8 {
-    return localHeadUpdateRef(allocator, repo, head_ref) catch |err| switch (err) {
-        error.NoLocalHeadBranch => {
-            const update_ref = (try localHeadRefName(allocator, head_ref)) orelse return error.NoLocalHeadBranch;
-            errdefer allocator.free(update_ref);
-            const create_output = gitCheckedAt(allocator, repo.root, &.{ "update-ref", update_ref, expected_head, zero_oid }, git.max_git_output) catch |create_err| switch (create_err) {
-                error.GitFailed => return error.NoLocalHeadBranch,
-                else => return create_err,
-            };
-            allocator.free(create_output);
-            return update_ref;
-        },
-        else => return err,
-    };
-}
-
-fn localHeadUpdateRef(allocator: Allocator, repo: Repo, head_ref: []const u8) ![]u8 {
-    const update_ref = (try localHeadRefName(allocator, head_ref)) orelse return error.NoLocalHeadBranch;
-    errdefer allocator.free(update_ref);
-    const commit_ref = try std.fmt.allocPrint(allocator, "{s}^{{commit}}", .{update_ref});
-    defer allocator.free(commit_ref);
-    const raw = gitCheckedAt(allocator, repo.root, &.{ "rev-parse", "--verify", "--quiet", commit_ref }, 1024 * 1024) catch |err| switch (err) {
-        error.GitFailed => return error.NoLocalHeadBranch,
-        else => return err,
-    };
-    defer allocator.free(raw);
-    return update_ref;
-}
-
 fn localHeadRefName(allocator: Allocator, head_ref: []const u8) !?[]u8 {
     const heads_prefix = "refs/heads/";
     if (std.mem.startsWith(u8, head_ref, heads_prefix)) {
@@ -3497,13 +3691,14 @@ fn localHeadRefName(allocator: Allocator, head_ref: []const u8) !?[]u8 {
 
 fn mergeCommitErrorMessage(err: anyerror) ?[]const u8 {
     return switch (err) {
-        error.NoLocalHeadBranch => "The pull request head must be a local branch before the web resolver can update it.",
+        error.NoLocalHeadBranch, error.NoRemoteHeadBranch => "The pull request head must be a writable branch on the configured remote before the web resolver can update it.",
         error.NoConflictResolutions => "No conflict resolutions were submitted.",
         error.PullHeadChanged => "The local pull request head no longer matches the conflicts shown by the web resolver. Refresh the page and try again.",
         error.UnsafeConflictPath => "A conflicting path is not safe to write from the web resolver.",
         error.MergePreparationFailed => "Git could not prepare a merge worktree for this pull request.",
         error.UnresolvedConflicts => "Git still reports unresolved conflicts after applying the submitted files.",
         error.MergeCommitFailed => "Git could not create the merge-resolution commit.",
+        error.RemoteBranchUpdateFailed => "Git could not update the remote pull request branch. It may have changed while the resolution was being committed.",
         error.GitFailed => "Git could not commit the resolution. Check the repository state and signing configuration.",
         else => null,
     };
@@ -3605,10 +3800,43 @@ test "pull merge form includes csrf token" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
 
-    try appendPullReadyToMergeTimeline(&buf, std.testing.allocator, "1", 1, "token-123", null);
+    var snapshot = PullMergeSnapshot{
+        .expected_base_oid = try std.testing.allocator.dupe(u8, "1111111111111111111111111111111111111111"),
+        .expected_head_oid = try std.testing.allocator.dupe(u8, "2222222222222222222222222222222222222222"),
+        .base_target = .{
+            .remote = try std.testing.allocator.dupe(u8, "origin"),
+            .branch = try std.testing.allocator.dupe(u8, "main"),
+            .remote_ref = try std.testing.allocator.dupe(u8, "refs/heads/main"),
+            .tracking_ref = try std.testing.allocator.dupe(u8, "refs/remotes/origin/main"),
+        },
+    };
+    defer snapshot.deinit(std.testing.allocator);
+
+    try appendPullReadyToMergeTimeline(&buf, std.testing.allocator, "1", 1, snapshot, "token-123", null);
 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "name=\"_csrf\" value=\"token-123\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "name=\"expected_base_oid\" value=\"1111111111111111111111111111111111111111\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "name=\"expected_head_oid\" value=\"2222222222222222222222222222222222222222\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "action=\"/pulls/1/merge\"") != null);
+}
+
+test "submitted merge oids require full hex object ids" {
+    const fields = try parseFormFieldsOwned(
+        std.testing.allocator,
+        "expected_base_oid=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&expected_head_oid=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+    );
+    defer freeFormFields(std.testing.allocator, fields);
+
+    const submitted = submittedExpectedOids(fields).?;
+    try std.testing.expectEqualStrings("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", submitted.base_oid);
+    try std.testing.expectEqualStrings("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", submitted.head_oid);
+
+    const short_fields = try parseFormFieldsOwned(
+        std.testing.allocator,
+        "expected_base_oid=abc&expected_head_oid=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+    );
+    defer freeFormFields(std.testing.allocator, short_fields);
+    try std.testing.expect(submittedExpectedOids(short_fields) == null);
 }
 
 test "merge editor counts conflict groups" {

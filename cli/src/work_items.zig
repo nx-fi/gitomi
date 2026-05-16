@@ -1075,6 +1075,8 @@ pub fn prepareTimelineStmt(db: *SqliteDb, object_kind: []const u8, object_id: []
         \\    'issue.title_set',
         \\    'issue.body_set',
         \\    'issue.state_set',
+        \\    'issue.priority_set',
+        \\    'issue.status_set',
         \\    'issue.updated',
         \\    'issue.label_added',
         \\    'issue.label_removed',

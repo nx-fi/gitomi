@@ -57,7 +57,16 @@ pub fn applyIssueProjection(allocator: Allocator, db: *SqliteDb, event_hash: []c
         const title = event_mod.jsonString(payload.get("title")) orelse return "invalid_event_envelope";
         const body_value = event_mod.jsonString(payload.get("body")) orelse "";
         try insertIssueOpened(db, event_hash, envelope, title, body_value);
-        try upsertIssueMetadata(db, envelope.object_id, event_mod.jsonString(payload.get("source_author")) orelse "", event_mod.jsonString(payload.get("milestone")) orelse "");
+        try upsertIssueMetadata(
+            db,
+            envelope.object_id,
+            event_mod.jsonString(payload.get("source_author")) orelse "",
+            event_mod.jsonString(payload.get("milestone")) orelse "",
+            event_mod.jsonString(payload.get("priority")) orelse "",
+            event_mod.jsonString(payload.get("status")) orelse "",
+            event_hash,
+            envelope,
+        );
         try insertLegacyAliasFromEnvelope(db, "issue", envelope.object_id, legacy);
         try insertPayloadStringArray(db, payload, "labels", insert_issue_label_sql, envelope.object_id, event_hash);
         try insertPayloadStringArray(db, payload, "assignees", insert_issue_assignee_sql, envelope.object_id, event_hash);
@@ -78,6 +87,12 @@ pub fn applyIssueProjection(allocator: Allocator, db: *SqliteDb, event_hash: []c
     } else if (std.mem.eql(u8, envelope.event_type, "issue.state_set")) {
         const state = event_mod.jsonString(payload.get("state")) orelse return "invalid_event_envelope";
         try updateIssueScalar(allocator, db, envelope.object_id, state, event_hash, envelope, "state", "state_occurred_at", "state_actor_principal", "state_event_hash");
+    } else if (std.mem.eql(u8, envelope.event_type, "issue.priority_set")) {
+        const priority = event_mod.jsonString(payload.get("priority")) orelse return "invalid_event_envelope";
+        try updateIssueMetadataScalar(allocator, db, envelope.object_id, priority, event_hash, envelope, "priority", "priority_occurred_at", "priority_actor_principal", "priority_event_hash");
+    } else if (std.mem.eql(u8, envelope.event_type, "issue.status_set")) {
+        const status = event_mod.jsonString(payload.get("status")) orelse return "invalid_event_envelope";
+        try updateIssueMetadataScalar(allocator, db, envelope.object_id, status, event_hash, envelope, "status", "status_occurred_at", "status_actor_principal", "status_event_hash");
     } else if (std.mem.eql(u8, envelope.event_type, "issue.label_added")) {
         const label = event_mod.jsonString(payload.get("label")) orelse return "invalid_event_envelope";
         try insertIssueCollectionValue(db, insert_issue_label_sql, envelope.object_id, label, event_hash);
@@ -152,6 +167,12 @@ fn applyIssueUpdated(
     if (event_mod.jsonString(payload.get("milestone"))) |milestone| {
         try upsertIssueMilestone(db, envelope.object_id, milestone);
     }
+    if (event_mod.jsonString(payload.get("priority"))) |priority| {
+        try updateIssueMetadataScalar(allocator, db, envelope.object_id, priority, event_hash, envelope, "priority", "priority_occurred_at", "priority_actor_principal", "priority_event_hash");
+    }
+    if (event_mod.jsonString(payload.get("status"))) |status| {
+        try updateIssueMetadataScalar(allocator, db, envelope.object_id, status, event_hash, envelope, "status", "status_occurred_at", "status_actor_principal", "status_event_hash");
+    }
     try insertPayloadIssueProjects(db, payload, "projects", envelope.object_id, event_hash);
     try insertPayloadStringArray(db, payload, "labels_added", insert_issue_label_sql, envelope.object_id, event_hash);
     try insertPayloadStringArray(db, payload, "assignees_added", insert_issue_assignee_sql, envelope.object_id, event_hash);
@@ -190,10 +211,23 @@ fn insertIssueOpened(db: *SqliteDb, event_hash: []const u8, envelope: ValidatedE
     try stmt.stepDone();
 }
 
-fn upsertIssueMetadata(db: *SqliteDb, issue_id: []const u8, source_author: []const u8, milestone: []const u8) !void {
+fn upsertIssueMetadata(
+    db: *SqliteDb,
+    issue_id: []const u8,
+    source_author: []const u8,
+    milestone: []const u8,
+    priority: []const u8,
+    status: []const u8,
+    event_hash: []const u8,
+    envelope: ValidatedEnvelope,
+) !void {
     var stmt = try db.prepare(
-        \\INSERT INTO issue_metadata(issue_id, source_author, milestone)
-        \\VALUES (?, ?, ?)
+        \\INSERT INTO issue_metadata(
+        \\  issue_id, source_author, milestone,
+        \\  priority, priority_occurred_at, priority_actor_principal, priority_event_hash,
+        \\  status, status_occurred_at, status_actor_principal, status_event_hash
+        \\)
+        \\VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         \\ON CONFLICT(issue_id) DO UPDATE SET
         \\  source_author = excluded.source_author,
         \\  milestone = excluded.milestone
@@ -202,13 +236,25 @@ fn upsertIssueMetadata(db: *SqliteDb, issue_id: []const u8, source_author: []con
     try stmt.bindText(1, issue_id);
     try stmt.bindText(2, source_author);
     try stmt.bindText(3, milestone);
+    try stmt.bindText(4, priority);
+    try stmt.bindText(5, envelope.occurred_at);
+    try stmt.bindText(6, envelope.actor_principal);
+    try stmt.bindText(7, event_hash);
+    try stmt.bindText(8, status);
+    try stmt.bindText(9, envelope.occurred_at);
+    try stmt.bindText(10, envelope.actor_principal);
+    try stmt.bindText(11, event_hash);
     try stmt.stepDone();
 }
 
 fn upsertIssueMilestone(db: *SqliteDb, issue_id: []const u8, milestone: []const u8) !void {
     var stmt = try db.prepare(
-        \\INSERT INTO issue_metadata(issue_id, source_author, milestone)
-        \\VALUES (?, '', ?)
+        \\INSERT INTO issue_metadata(
+        \\  issue_id, source_author, milestone,
+        \\  priority, priority_occurred_at, priority_actor_principal, priority_event_hash,
+        \\  status, status_occurred_at, status_actor_principal, status_event_hash
+        \\)
+        \\VALUES (?, '', ?, '', '', '', '', '', '', '', '')
         \\ON CONFLICT(issue_id) DO UPDATE SET milestone = excluded.milestone
     );
     defer stmt.deinit();
@@ -307,6 +353,51 @@ fn updateIssueScalar(
     }
 
     var update = try db.prepare("UPDATE issues SET " ++ value_col ++ " = ?, " ++ occurred_at_col ++ " = ?, " ++ actor_col ++ " = ?, " ++ event_hash_col ++ " = ? WHERE id = ?");
+    defer update.deinit();
+    try update.bindText(1, value);
+    try update.bindText(2, envelope.occurred_at);
+    try update.bindText(3, envelope.actor_principal);
+    try update.bindText(4, event_hash);
+    try update.bindText(5, issue_id);
+    try update.stepDone();
+}
+
+fn updateIssueMetadataScalar(
+    allocator: Allocator,
+    db: *SqliteDb,
+    issue_id: []const u8,
+    value: []const u8,
+    event_hash: []const u8,
+    envelope: ValidatedEnvelope,
+    comptime value_col: []const u8,
+    comptime occurred_at_col: []const u8,
+    comptime actor_col: []const u8,
+    comptime event_hash_col: []const u8,
+) !void {
+    var ensure = try db.prepare(
+        \\INSERT OR IGNORE INTO issue_metadata(
+        \\  issue_id, source_author, milestone,
+        \\  priority, priority_occurred_at, priority_actor_principal, priority_event_hash,
+        \\  status, status_occurred_at, status_actor_principal, status_event_hash
+        \\)
+        \\VALUES (?, '', '', '', '', '', '', '', '', '', '')
+    );
+    defer ensure.deinit();
+    try ensure.bindText(1, issue_id);
+    try ensure.stepDone();
+
+    var select = try db.prepare("SELECT " ++ occurred_at_col ++ ", " ++ actor_col ++ ", " ++ event_hash_col ++ " FROM issue_metadata WHERE issue_id = ?");
+    defer select.deinit();
+    try select.bindText(1, issue_id);
+    if (!(try select.step())) return;
+    const old_event_hash = try select.columnTextDup(allocator, 2);
+    defer allocator.free(old_event_hash);
+
+    if (old_event_hash.len != 0 and !(try eventWins(allocator, event_hash, old_event_hash))) {
+        return;
+    }
+
+    var update = try db.prepare("UPDATE issue_metadata SET " ++ value_col ++ " = ?, " ++ occurred_at_col ++ " = ?, " ++ actor_col ++ " = ?, " ++ event_hash_col ++ " = ? WHERE issue_id = ?");
     defer update.deinit();
     try update.bindText(1, value);
     try update.bindText(2, envelope.occurred_at);

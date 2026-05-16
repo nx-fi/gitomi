@@ -617,7 +617,7 @@ fn eventAuthorizationRejection(
         return null;
     }
     if (std.mem.eql(u8, envelope.event_type, "issue.updated")) {
-        if (payloadHasAny(payload, &.{ "title", "body", "state" }) and !(try canEditObject(allocator, db, role, envelope.actor_principal, "issue", envelope.object_id))) return "insufficient_role";
+        if (payloadHasAny(payload, &.{ "title", "body", "state", "priority", "status" }) and !(try canEditObject(allocator, db, role, envelope.actor_principal, "issue", envelope.object_id))) return "insufficient_role";
         if (payloadHasAny(payload, &.{"milestone"}) and !roleAtLeast(role, "maintainer")) return "insufficient_role";
         if (payloadContainsNonEmptyArray(payload, "projects") and !roleAtLeast(role, "maintainer")) return "insufficient_role";
         if (payloadContainsNonEmptyArray(payload, "labels_added") or payloadContainsNonEmptyArray(payload, "labels_removed")) {
@@ -630,7 +630,9 @@ fn eventAuthorizationRejection(
     }
     if (std.mem.eql(u8, envelope.event_type, "issue.title_set") or
         std.mem.eql(u8, envelope.event_type, "issue.body_set") or
-        std.mem.eql(u8, envelope.event_type, "issue.state_set"))
+        std.mem.eql(u8, envelope.event_type, "issue.state_set") or
+        std.mem.eql(u8, envelope.event_type, "issue.priority_set") or
+        std.mem.eql(u8, envelope.event_type, "issue.status_set"))
     {
         return if (try canEditObject(allocator, db, role, envelope.actor_principal, "issue", envelope.object_id)) null else "insufficient_role";
     }
@@ -782,6 +784,8 @@ fn delegationAuthorizationRejection(
 fn githubImportDelegatesEvent(event_type: []const u8) bool {
     return std.mem.eql(u8, event_type, "issue.opened") or
         std.mem.eql(u8, event_type, "issue.state_set") or
+        std.mem.eql(u8, event_type, "issue.priority_set") or
+        std.mem.eql(u8, event_type, "issue.status_set") or
         std.mem.eql(u8, event_type, "issue.project_added") or
         std.mem.eql(u8, event_type, "pull.opened") or
         std.mem.eql(u8, event_type, "pull.state_set") or
