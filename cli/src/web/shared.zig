@@ -5,6 +5,7 @@ const index = @import("../index.zig");
 const json_writer = @import("../json_writer.zig");
 const repo_mod = @import("../repo.zig");
 const util = @import("../util.zig");
+const zwf_response = @import("../zwf/response.zig");
 const nouns_assets = @import("vendor/nouns-assets/image_data.zig");
 
 const Allocator = std.mem.Allocator;
@@ -20,6 +21,7 @@ const loadConfig = repo_mod.loadConfig;
 const default_web_shortcut_leader = "Space";
 const default_web_shortcut_keys = "A S D F J K L E R U I O W Q P Z X C V B N M G H Y T";
 const default_web_shortcut_timeout_ms: u64 = 900;
+const asset_version = "20260516";
 
 const WebStats = struct {
     inbox_refs: usize = 0,
@@ -64,6 +66,103 @@ pub const Button = struct {
     label: []const u8,
     href: Href,
     kind: []const u8 = "secondary",
+};
+
+const WorkItemReferenceKind = enum {
+    issue,
+    pull,
+};
+
+pub const InternalReferenceResolver = struct {
+    allocator: Allocator,
+    db: ?index.SqliteDb = null,
+
+    pub fn init(allocator: Allocator, repo: Repo) InternalReferenceResolver {
+        if (!(index.isIndexFresh(allocator, repo) catch false)) {
+            return .{ .allocator = allocator };
+        }
+
+        const db = index.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, true) catch {
+            return .{ .allocator = allocator };
+        };
+        return .{ .allocator = allocator, .db = db };
+    }
+
+    pub fn deinit(self: *InternalReferenceResolver) void {
+        if (self.db) |*db| db.deinit();
+        self.db = null;
+    }
+
+    pub fn hrefForHashReference(self: *InternalReferenceResolver, token: []const u8) Href {
+        if (self.matchesWorkItem(.issue, token)) return issueHref(token);
+        if (self.matchesWorkItem(.pull, token)) return pullHref(token);
+        if (util.isObjectRefPrefix(token)) return commitHref(token);
+        return issueHref(token);
+    }
+
+    fn matchesWorkItem(self: *InternalReferenceResolver, kind: WorkItemReferenceKind, token: []const u8) bool {
+        if (self.db == null) return false;
+        if (util.isObjectRefPrefix(token) and (self.matchesObjectHashRef(kind, token) catch false)) return true;
+        if (positiveDecimalReferenceNumber(token)) |number| {
+            if (self.matchesLegacyNumber(kind, number) catch false) return true;
+        }
+        return false;
+    }
+
+    fn matchesObjectHashRef(self: *InternalReferenceResolver, kind: WorkItemReferenceKind, token: []const u8) !bool {
+        const sql_text: []const u8 = switch (kind) {
+            .issue => "SELECT id FROM issues ORDER BY id",
+            .pull => "SELECT id FROM pulls ORDER BY id",
+        };
+        const db = if (self.db) |*value| value else return false;
+        var stmt = try db.prepare(sql_text);
+        defer stmt.deinit();
+
+        while (try stmt.step()) {
+            const id = try stmt.columnTextDup(self.allocator, 0);
+            defer self.allocator.free(id);
+            var ref_buf: [util.max_object_ref_len]u8 = undefined;
+            const candidate_ref = util.objectRefPrefix(ref_buf[0..token.len], id);
+            if (asciiEqlIgnoreCase(candidate_ref, token)) return true;
+        }
+        return false;
+    }
+
+    fn matchesLegacyNumber(self: *InternalReferenceResolver, kind: WorkItemReferenceKind, number: i64) !bool {
+        const db = if (self.db) |*value| value else return false;
+        var stmt = try db.prepare(
+            \\SELECT 1
+            \\FROM legacy_aliases
+            \\WHERE provider = 'github'
+            \\  AND object_kind = ?
+            \\  AND number = ?
+            \\LIMIT 1
+        );
+        defer stmt.deinit();
+        try stmt.bindText(1, workItemReferenceKindName(kind));
+        try stmt.bindInt64(2, number);
+        return try stmt.step();
+    }
+};
+
+fn workItemReferenceKindName(kind: WorkItemReferenceKind) []const u8 {
+    return switch (kind) {
+        .issue => "issue",
+        .pull => "pull",
+    };
+}
+
+pub const Pagination = struct {
+    page: usize = 1,
+    per_page: usize,
+
+    pub fn offset(self: Pagination) usize {
+        return (self.page - 1) * self.per_page;
+    }
+
+    pub fn queryLimit(self: Pagination) usize {
+        return self.per_page + 1;
+    }
 };
 
 pub fn literalHref(value: []const u8) Href {
@@ -138,6 +237,67 @@ pub fn appendIssueLinkedText(buf: *std.ArrayList(u8), allocator: Allocator, valu
         i += 1;
     }
     if (plain_start < value.len) try appendHtml(buf, allocator, value[plain_start..]);
+}
+
+pub fn appendInternalReferenceLinkedText(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    resolver: *InternalReferenceResolver,
+    value: []const u8,
+) !void {
+    try appendInternalReferenceLinkedTextWithDefaultHref(buf, allocator, resolver, value, null);
+}
+
+pub fn appendInternalReferenceLinkedTextWithDefaultHref(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    resolver: *InternalReferenceResolver,
+    value: []const u8,
+    default_href: ?Href,
+) !void {
+    var plain_start: usize = 0;
+    var i: usize = 0;
+    while (i < value.len) {
+        if (issueReferenceEnd(value, i)) |end| {
+            if (plain_start < i) try appendLinkedTextPlainSegment(buf, allocator, value[plain_start..i], default_href);
+            try appendInternalReferenceLink(buf, allocator, resolver, value[i + 1 .. end]);
+            i = end;
+            plain_start = i;
+            continue;
+        }
+        i += 1;
+    }
+    if (plain_start < value.len) try appendLinkedTextPlainSegment(buf, allocator, value[plain_start..], default_href);
+}
+
+fn appendLinkedTextPlainSegment(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    value: []const u8,
+    default_href: ?Href,
+) !void {
+    const href = default_href orelse {
+        try appendHtml(buf, allocator, value);
+        return;
+    };
+    try buf.appendSlice(allocator, "<a href=\"");
+    try appendHref(buf, allocator, href);
+    try buf.appendSlice(allocator, "\">");
+    try appendHtml(buf, allocator, value);
+    try buf.appendSlice(allocator, "</a>");
+}
+
+fn appendInternalReferenceLink(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    resolver: *InternalReferenceResolver,
+    token: []const u8,
+) !void {
+    try buf.appendSlice(allocator, "<a href=\"");
+    try appendHref(buf, allocator, resolver.hrefForHashReference(token));
+    try buf.appendSlice(allocator, "\">#");
+    try appendHtml(buf, allocator, token);
+    try buf.appendSlice(allocator, "</a>");
 }
 
 pub fn appendRelativeTime(buf: *std.ArrayList(u8), allocator: Allocator, timestamp: []const u8) !void {
@@ -257,8 +417,21 @@ fn isPositiveDecimalReference(value: []const u8) bool {
     return has_non_zero;
 }
 
+fn positiveDecimalReferenceNumber(value: []const u8) ?i64 {
+    if (!isPositiveDecimalReference(value)) return null;
+    return std.fmt.parseInt(i64, value, 10) catch null;
+}
+
 fn isReferenceTrailingIdentifier(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '-' or c == '_';
+}
+
+fn asciiEqlIgnoreCase(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |left, right| {
+        if (std.ascii.toLower(left) != std.ascii.toLower(right)) return false;
+    }
+    return true;
 }
 
 pub fn class(name: []const u8, enabled: bool) Class {
@@ -319,10 +492,10 @@ pub fn appendShellStart(
     try appendTemplate(buf, allocator,
         \\ - Gitomi</title>
         \\  <link rel="icon" href="/logo.svg" type="image/svg+xml">
-        \\  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/devicons/devicon@latest/devicon.min.css">
+        \\  <link rel="stylesheet" href="/vendor/devicon/devicon.min.css?v={asset_version}">
         \\  <link rel="stylesheet" href="/vendor/katex/katex.min.css">
-        \\  <link rel="stylesheet" href="/style.css">
-    , .{});
+        \\  <link rel="stylesheet" href="/style.css?v={asset_version}">
+    , .{ .asset_version = asset_version });
     try appendShortcutConfigScript(buf, allocator, cfg_opt);
     try appendTemplate(buf, allocator,
         \\</head>
@@ -334,7 +507,7 @@ pub fn appendShellStart(
     try appendNavLink(buf, allocator, active, "code", "/", "Code", "icon-code", null);
     try appendNavLink(buf, allocator, active, "issues", "/issues", "Issues", "icon-issues", stats.issues);
     try appendNavLink(buf, allocator, active, "pulls", "/pulls", "Pull Requests", "icon-pull-request", stats.pulls);
-    try appendNavLink(buf, allocator, active, "actions", "/actions", "Workflows", "icon-workflow", null);
+    try appendNavLink(buf, allocator, active, "actions", "/workflows", "Workflows", "icon-workflow", null);
     try appendNavLink(buf, allocator, active, "projects", "/projects", "Projects", "icon-projects", null);
     try appendSettingsNavLink(buf, allocator, active);
     try buf.appendSlice(allocator,
@@ -525,30 +698,30 @@ fn appendShortcutConfigScript(buf: *std.ArrayList(u8), allocator: Allocator, cfg
 }
 
 pub fn appendShellEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
-    try buf.appendSlice(allocator,
+    try appendTemplate(buf, allocator,
         \\</main>
-        \\<script src="/theme.js"></script>
-        \\<script src="/ui.js"></script>
-        \\<script src="/shortcuts.js"></script>
-        \\<script src="/tree.js"></script>
-        \\<script src="/code.js"></script>
-        \\<script src="/projects.js"></script>
-        \\<script src="/vendor/marked/marked.umd.js"></script>
+        \\<script src="/theme.js?v={asset_version}"></script>
+        \\<script src="/ui.js?v={asset_version}"></script>
+        \\<script src="/shortcuts.js?v={asset_version}"></script>
+        \\<script src="/tree.js?v={asset_version}"></script>
+        \\<script src="/code.js?v={asset_version}"></script>
+        \\<script src="/projects.js?v={asset_version}"></script>
+        \\<script src="/vendor/marked/marked.umd.min.js"></script>
         \\<script src="/vendor/dompurify/purify.min.js"></script>
         \\<script src="/vendor/katex/katex.min.js"></script>
         \\<script src="/vendor/katex/auto-render.min.js"></script>
         \\<script src="/vendor/mermaid/mermaid.min.js"></script>
-        \\<script src="/markdown.js"></script>
-        \\<script src="/vendor/hljs/all-languages.js"></script>
-        \\<script src="/highlight/zig.js"></script>
-        \\<script src="/highlight/solidity.js"></script>
-        \\<script src="/highlight/tla.js"></script>
-        \\<script src="/highlight/init.js"></script>
-        \\<script src="/diff.js"></script>
-        \\<script src="/merge.js"></script>
+        \\<script src="/markdown.js?v={asset_version}"></script>
+        \\<script src="/vendor/hljs/all-languages.min.js"></script>
+        \\<script src="/highlight/zig.js?v={asset_version}"></script>
+        \\<script src="/highlight/solidity.js?v={asset_version}"></script>
+        \\<script src="/highlight/tla.js?v={asset_version}"></script>
+        \\<script src="/highlight/init.js?v={asset_version}"></script>
+        \\<script src="/diff.js?v={asset_version}"></script>
+        \\<script src="/merge.js?v={asset_version}"></script>
         \\</body>
         \\</html>
-    );
+    , .{ .asset_version = asset_version });
 }
 
 pub fn appendNavLink(
@@ -877,6 +1050,15 @@ pub fn appendButtonLink(buf: *std.ArrayList(u8), allocator: Allocator, button: B
     });
 }
 
+pub fn appendDetailBackButton(buf: *std.ArrayList(u8), allocator: Allocator, href: Href, label: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<nav class="detail-back-nav" aria-label="Detail navigation"><a class="detail-back-button" href="{href}" aria-label="{label}" title="{label}"><span class="button-icon icon-arrow-left" aria-hidden="true"></span></a></nav>
+    , .{
+        .href = href,
+        .label = label,
+    });
+}
+
 pub fn appendSectionHead(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -979,11 +1161,12 @@ fn renderIndexingPage(
     try buf.appendSlice(allocator,
         \\<section class="panel indexing-panel">
         \\  <div class="indexing-cue">
-        \\    <span class="index-spinner" aria-hidden="true"></span>
-        \\    <div>
+        \\    <span class="index-spinner-wrap" aria-hidden="true"><span class="index-spinner"></span></span>
+        \\    <div class="indexing-copy">
         \\      <p class="eyebrow">Index refresh</p>
         \\      <h1>Updating Gitomi index</h1>
         \\      <p class="muted">Reading Gitomi events and refreshing local projections. This page will continue automatically.</p>
+        \\      <p class="indexing-status" role="status" aria-live="polite" data-index-status>Starting index rebuild...</p>
         \\    </div>
         \\  </div>
         \\  <div class="index-progress" aria-hidden="true"><span></span></div>
@@ -995,9 +1178,38 @@ fn renderIndexingPage(
     try appendJsonString(&buf, allocator, return_target);
     try buf.appendSlice(allocator,
         \\;
-        \\  fetch("/index/rebuild", { cache: "no-store" }).then(function () {
+        \\  var status = document.querySelector("[data-index-status]");
+        \\  var startedAt = Date.now();
+        \\  var messages = [
+        \\    [0, "Starting index rebuild..."],
+        \\    [1500, "Scanning Gitomi refs and snapshots..."],
+        \\    [5000, "Replaying imported events into the local projection..."],
+        \\    [15000, "Still indexing. Large imports can take a few minutes."],
+        \\    [45000, "Still working. The page will open automatically when the index is ready."]
+        \\  ];
+        \\  function statusText(base) {
+        \\    var seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+        \\    return base + " " + seconds + "s elapsed.";
+        \\  }
+        \\  function updateStatus() {
+        \\    if (!status) return;
+        \\    var elapsed = Date.now() - startedAt;
+        \\    var text = messages[0][1];
+        \\    for (var i = 0; i < messages.length; i += 1) {
+        \\      if (elapsed >= messages[i][0]) text = messages[i][1];
+        \\    }
+        \\    status.textContent = statusText(text);
+        \\  }
+        \\  updateStatus();
+        \\  var statusTimer = window.setInterval(updateStatus, 2500);
+        \\  fetch("/index/rebuild", { cache: "no-store" }).then(function (response) {
+        \\    if (!response.ok) throw new Error("index rebuild failed");
+        \\    window.clearInterval(statusTimer);
+        \\    if (status) status.textContent = "Index ready. Opening page...";
         \\    window.location.replace(next);
         \\  }).catch(function () {
+        \\    window.clearInterval(statusTimer);
+        \\    if (status) status.textContent = "Index update did not finish. Retrying...";
         \\    setTimeout(function () { window.location.reload(); }, 2500);
         \\  });
         \\}());
@@ -1263,7 +1475,144 @@ pub fn appendFmt(
     try buf.appendSlice(allocator, text);
 }
 
+pub fn paginationFromTarget(allocator: Allocator, target: []const u8, default_per_page: usize, max_per_page: usize) !Pagination {
+    const page_value = try queryValueOwned(allocator, target, "page");
+    defer if (page_value) |value| allocator.free(value);
+    const per_page_value = try queryValueOwned(allocator, target, "per_page");
+    defer if (per_page_value) |value| allocator.free(value);
+
+    const per_page = parsePositiveQueryUsize(per_page_value, default_per_page, max_per_page);
+    return .{
+        .page = parsePositiveQueryUsize(page_value, 1, 1_000_000),
+        .per_page = per_page,
+    };
+}
+
+fn parsePositiveQueryUsize(raw: ?[]const u8, fallback: usize, max_value: usize) usize {
+    const value = raw orelse return fallback;
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    if (trimmed.len == 0) return fallback;
+    const parsed = std.fmt.parseUnsigned(usize, trimmed, 10) catch return fallback;
+    if (parsed == 0) return fallback;
+    return @min(parsed, max_value);
+}
+
+pub fn appendPaginationQueryParams(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    first: *bool,
+    pagination: Pagination,
+    page: usize,
+    default_per_page: usize,
+) !void {
+    if (page > 1) {
+        var page_buf: [32]u8 = undefined;
+        const value = try std.fmt.bufPrint(&page_buf, "{d}", .{page});
+        try appendQueryParam(buf, allocator, first, "page", value);
+    }
+    if (pagination.per_page != default_per_page) {
+        var per_page_buf: [32]u8 = undefined;
+        const value = try std.fmt.bufPrint(&per_page_buf, "{d}", .{pagination.per_page});
+        try appendQueryParam(buf, allocator, first, "per_page", value);
+    }
+}
+
+pub fn appendQueryParam(buf: *std.ArrayList(u8), allocator: Allocator, first: *bool, name: []const u8, value: []const u8) !void {
+    try buf.appendSlice(allocator, if (first.*) "?" else "&amp;");
+    first.* = false;
+    try appendUrlEncoded(buf, allocator, name);
+    try buf.append(allocator, '=');
+    try appendUrlEncoded(buf, allocator, value);
+}
+
+pub fn appendPaginationNav(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    aria_label: []const u8,
+    summary: []const u8,
+    previous_href: ?[]const u8,
+    next_href: ?[]const u8,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<nav class="pagination" aria-label="{aria_label}">
+        \\  <span class="pagination-summary">{summary}</span>
+        \\  <span class="pagination-actions">
+    , .{
+        .aria_label = aria_label,
+        .summary = summary,
+    });
+    try appendPaginationAction(buf, allocator, "Previous", previous_href);
+    try appendPaginationAction(buf, allocator, "Next", next_href);
+    try buf.appendSlice(allocator,
+        \\  </span>
+        \\</nav>
+    );
+}
+
+fn appendPaginationAction(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, href: ?[]const u8) !void {
+    if (href) |value| {
+        try buf.appendSlice(allocator, "<a class=\"button secondary pagination-link\" href=\"");
+        try buf.appendSlice(allocator, value);
+        try appendTemplate(buf, allocator, "\">{label}</a>", .{ .label = label });
+    } else {
+        try appendTemplate(buf, allocator, "<span class=\"button secondary pagination-link disabled\" aria-disabled=\"true\">{label}</span>", .{ .label = label });
+    }
+}
+
+pub fn paginationSummaryOwned(allocator: Allocator, pagination: Pagination, shown: usize, total: ?usize) ![]u8 {
+    if (shown == 0) return std.fmt.allocPrint(allocator, "Page {d}", .{pagination.page});
+    const first = pagination.offset() + 1;
+    const last = pagination.offset() + shown;
+    if (total) |value| {
+        return std.fmt.allocPrint(allocator, "Showing {d}-{d} of {d}", .{ first, last, value });
+    }
+    return std.fmt.allocPrint(allocator, "Showing {d}-{d}", .{ first, last });
+}
+
+pub fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const u8) !?[]u8 {
+    const query_start = std.mem.indexOfScalar(u8, target, '?') orelse return null;
+    var fields = std.mem.splitScalar(u8, target[query_start + 1 ..], '&');
+    while (fields.next()) |field| {
+        if (field.len == 0) continue;
+        const equals = std.mem.indexOfScalar(u8, field, '=') orelse field.len;
+        const raw_key = field[0..equals];
+        const raw_value = if (equals < field.len) field[equals + 1 ..] else "";
+        const key = try percentDecodeForm(allocator, raw_key);
+        defer allocator.free(key);
+        if (!std.mem.eql(u8, key, wanted_key)) continue;
+        return try percentDecodeForm(allocator, raw_value);
+    }
+    return null;
+}
+
+pub fn percentDecodeForm(allocator: Allocator, value: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var i: usize = 0;
+    while (i < value.len) {
+        const c = value[i];
+        if (c == '+') {
+            try out.append(allocator, ' ');
+            i += 1;
+        } else if (c == '%' and i + 2 < value.len) {
+            const decoded = std.fmt.parseInt(u8, value[i + 1 .. i + 3], 16) catch null;
+            if (decoded) |byte| {
+                try out.append(allocator, byte);
+                i += 3;
+            } else {
+                try out.append(allocator, c);
+                i += 1;
+            }
+        } else {
+            try out.append(allocator, c);
+            i += 1;
+        }
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 pub fn sendRedirect(allocator: Allocator, stream: std.net.Stream, location: []const u8) !void {
+    try zwf_response.validateHeaderValue(location);
     const extra = try std.fmt.allocPrint(allocator, "Location: {s}\r\n", .{location});
     defer allocator.free(extra);
     try sendResponse(allocator, stream, 303, "See Other", "text/plain", "See Other\n", extra);
@@ -1288,14 +1637,20 @@ pub fn sendResponse(
     body: []const u8,
     extra_headers: ?[]const u8,
 ) !void {
-    const headers = try std.fmt.allocPrint(
-        allocator,
-        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\n{s}\r\n",
-        .{ status, reason, content_type, body.len, extra_headers orelse "" },
+    try validateRawExtraHeaders(extra_headers orelse "");
+    var headers: std.ArrayList(u8) = .empty;
+    defer headers.deinit(allocator);
+    try std.fmt.format(
+        headers.writer(allocator),
+        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}; charset=utf-8\r\n",
+        .{ status, reason, content_type },
     );
-    defer allocator.free(headers);
-    try stream.writeAll(headers);
-    try stream.writeAll(body);
+    try appendContentLengthIfAllowed(&headers, allocator, status, body.len);
+    try headers.appendSlice(allocator, "Connection: close\r\nX-Content-Type-Options: nosniff\r\n");
+    try headers.appendSlice(allocator, extra_headers orelse "");
+    try headers.appendSlice(allocator, "\r\n");
+    try stream.writeAll(headers.items);
+    if (statusAllowsBody(status) and body.len > 0) try stream.writeAll(body);
 }
 
 pub fn sendBinaryResponse(
@@ -1307,14 +1662,61 @@ pub fn sendBinaryResponse(
     body: []const u8,
     extra_headers: ?[]const u8,
 ) !void {
-    const headers = try std.fmt.allocPrint(
-        allocator,
-        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\n{s}\r\n",
-        .{ status, reason, content_type, body.len, extra_headers orelse "" },
+    try validateRawExtraHeaders(extra_headers orelse "");
+    var headers: std.ArrayList(u8) = .empty;
+    defer headers.deinit(allocator);
+    try std.fmt.format(
+        headers.writer(allocator),
+        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\n",
+        .{ status, reason, content_type },
     );
-    defer allocator.free(headers);
-    try stream.writeAll(headers);
-    try stream.writeAll(body);
+    try appendContentLengthIfAllowed(&headers, allocator, status, body.len);
+    try headers.appendSlice(allocator, "Connection: close\r\nX-Content-Type-Options: nosniff\r\n");
+    try headers.appendSlice(allocator, extra_headers orelse "");
+    try headers.appendSlice(allocator, "\r\n");
+    try stream.writeAll(headers.items);
+    if (statusAllowsBody(status) and body.len > 0) try stream.writeAll(body);
+}
+
+fn statusAllowsBody(status: u16) bool {
+    return status != 204 and status != 304 and status >= 200;
+}
+
+fn appendContentLengthIfAllowed(buf: *std.ArrayList(u8), allocator: Allocator, status: u16, body_len: usize) !void {
+    if (statusAllowsBody(status)) try std.fmt.format(buf.writer(allocator), "Content-Length: {d}\r\n", .{body_len});
+}
+
+fn validateRawExtraHeaders(raw: []const u8) !void {
+    if (raw.len == 0) return;
+    if (!std.mem.endsWith(u8, raw, "\r\n")) return error.BadHeaderValue;
+    var rest = raw;
+    while (rest.len > 0) {
+        const end = std.mem.indexOf(u8, rest, "\r\n") orelse return error.BadHeaderValue;
+        const line = rest[0..end];
+        rest = rest[end + 2 ..];
+        if (line.len == 0) continue;
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.BadHeaderValue;
+        try zwf_response.validateExtraHeaderName(std.mem.trim(u8, line[0..colon], " \t"));
+        try zwf_response.validateHeaderValue(std.mem.trim(u8, line[colon + 1 ..], " \t"));
+    }
+}
+
+test "legacy response helpers omit content length for 204" {
+    var headers: std.ArrayList(u8) = .empty;
+    defer headers.deinit(std.testing.allocator);
+    try appendContentLengthIfAllowed(&headers, std.testing.allocator, 204, 10);
+    try appendContentLengthIfAllowed(&headers, std.testing.allocator, 304, 10);
+    try std.testing.expectEqual(@as(usize, 0), headers.items.len);
+
+    try appendContentLengthIfAllowed(&headers, std.testing.allocator, 200, 10);
+    try std.testing.expectEqualStrings("Content-Length: 10\r\n", headers.items);
+}
+
+test "legacy raw extra headers reject managed names" {
+    try std.testing.expectError(error.ManagedResponseHeader, validateRawExtraHeaders("Content-Length: 1\r\n"));
+    try std.testing.expectError(error.ManagedResponseHeader, validateRawExtraHeaders("Transfer-Encoding: chunked\r\n"));
+    try std.testing.expectError(error.ManagedResponseHeader, validateRawExtraHeaders("Connection: keep-alive\r\n"));
+    try std.testing.expectError(error.ManagedResponseHeader, validateRawExtraHeaders("Content-Type: text/plain\r\n"));
 }
 
 fn loadWebStats(allocator: Allocator, repo: Repo) !WebStats {
@@ -1393,6 +1795,32 @@ test "web template supports typed href classes and formatters" {
     try std.testing.expectEqualStrings("<a class=\"button active\" href=\"/code?ref=feature/test&amp;path=src/a%20b.zig&amp;view=preview\">12,345 83.3%</a>", buf.items);
 }
 
+test "web pagination query parsing and params clamp values" {
+    const pagination = try paginationFromTarget(std.testing.allocator, "/issues?page=3&per_page=250", 25, 100);
+    try std.testing.expectEqual(@as(usize, 3), pagination.page);
+    try std.testing.expectEqual(@as(usize, 100), pagination.per_page);
+    try std.testing.expectEqual(@as(usize, 200), pagination.offset());
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    var first = true;
+    try appendQueryParam(&buf, std.testing.allocator, &first, "state", "open");
+    try appendPaginationQueryParams(&buf, std.testing.allocator, &first, pagination, 4, 25);
+    try std.testing.expectEqualStrings("?state=open&amp;page=4&amp;per_page=100", buf.items);
+}
+
+test "web detail back button renders accessible icon link" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendDetailBackButton(&buf, std.testing.allocator, literalHref("/issues"), "Back to issues");
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "class=\"detail-back-button\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "aria-label=\"Back to issues\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "icon-arrow-left") != null);
+}
+
 test "web avatar renders vendored nouns asset svg" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
@@ -1413,4 +1841,48 @@ test "web issue linked text autolinks legacy and hash references" {
     try appendIssueLinkedText(&buf, std.testing.allocator, "Refs #42, #A1B2C3D, not #abc, #abcdef0g, or #018f0000-uuid.");
 
     try std.testing.expectEqualStrings("Refs <a href=\"/issues/42\">#42</a>, <a href=\"/issues/A1B2C3D\">#A1B2C3D</a>, not #abc, #abcdef0g, or #018f0000-uuid.", buf.items);
+}
+
+test "web internal reference linked text prefers work items before commits" {
+    const allocator = std.testing.allocator;
+    var db = try index.SqliteDb.openWithOptions(allocator, ":memory:", index.sqlite.SQLITE_OPEN_READWRITE | index.sqlite.SQLITE_OPEN_CREATE, true, .{ .enable_wal = false });
+    var close_db = true;
+    defer if (close_db) db.deinit();
+
+    try db.exec(
+        \\CREATE TABLE issues(id TEXT NOT NULL);
+        \\CREATE TABLE pulls(id TEXT NOT NULL);
+        \\CREATE TABLE legacy_aliases(provider TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL, number INTEGER NOT NULL);
+        \\INSERT INTO issues(id) VALUES ('issue-object-1');
+        \\INSERT INTO pulls(id) VALUES ('pull-object-1');
+        \\INSERT INTO legacy_aliases(provider, object_kind, object_id, number) VALUES ('github', 'issue', 'issue-object-1', 42);
+        \\INSERT INTO legacy_aliases(provider, object_kind, object_id, number) VALUES ('github', 'pull', 'pull-object-1', 42);
+    );
+
+    var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const issue_ref = util.shortObjectRef(&issue_ref_buf, "issue-object-1");
+    var pull_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const pull_ref = util.shortObjectRef(&pull_ref_buf, "pull-object-1");
+
+    var resolver = InternalReferenceResolver{ .allocator = allocator, .db = db };
+    close_db = false;
+    defer resolver.deinit();
+
+    const input = try std.fmt.allocPrint(allocator, "Issue #{s}, pull #{s}, fallback #abcdef0, legacy #42.", .{ issue_ref, pull_ref });
+    defer allocator.free(input);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try appendInternalReferenceLinkedText(&buf, allocator, &resolver, input);
+
+    const issue_href = try std.fmt.allocPrint(allocator, "href=\"/issues/{s}\"", .{issue_ref});
+    defer allocator.free(issue_href);
+    const pull_href = try std.fmt.allocPrint(allocator, "href=\"/pulls/{s}\"", .{pull_ref});
+    defer allocator.free(pull_href);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, issue_href) != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, pull_href) != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/commit?sha=abcdef0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues/42\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/pulls/42\"") == null);
 }

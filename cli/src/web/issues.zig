@@ -41,6 +41,9 @@ const IssueCounts = work_items.IssueCounts;
 const IssueSort = work_items.IssueSort;
 const IssueFilters = work_items.IssueListOptions;
 
+const issues_default_page_size = 25;
+const issues_max_page_size = 100;
+
 const IssueFilterKind = enum {
     author,
     label,
@@ -49,11 +52,53 @@ const IssueFilterKind = enum {
     assignee,
 };
 
+const issue_sidebar_csrf_field = "csrf_token";
+const issue_sidebar_csrf_token_len = 64;
+
+var issue_sidebar_csrf_mutex: std.Thread.Mutex = .{};
+var issue_sidebar_csrf_ready = false;
+var issue_sidebar_csrf_token: [issue_sidebar_csrf_token_len]u8 = undefined;
+
+fn issueSidebarCsrfToken() []const u8 {
+    issue_sidebar_csrf_mutex.lock();
+    defer issue_sidebar_csrf_mutex.unlock();
+
+    if (!issue_sidebar_csrf_ready) {
+        var random_bytes: [issue_sidebar_csrf_token_len / 2]u8 = undefined;
+        std.crypto.random.bytes(&random_bytes);
+        const hex = "0123456789abcdef";
+        for (random_bytes, 0..) |byte, i| {
+            issue_sidebar_csrf_token[i * 2] = hex[@as(usize, byte >> 4)];
+            issue_sidebar_csrf_token[i * 2 + 1] = hex[@as(usize, byte & 0x0f)];
+        }
+        issue_sidebar_csrf_ready = true;
+    }
+
+    return issue_sidebar_csrf_token[0..];
+}
+
+fn validateIssueSidebarCsrf(allocator: Allocator, stream: std.net.Stream, form_body: []const u8) !bool {
+    const token_owned = (try formValueOwned(allocator, form_body, issue_sidebar_csrf_field)) orelse {
+        try sendPlainResponse(allocator, stream, 403, "Forbidden", "Invalid sidebar form token\n");
+        return false;
+    };
+    defer allocator.free(token_owned);
+
+    const token = std.mem.trim(u8, token_owned, " \t\r\n");
+    if (!std.mem.eql(u8, token, issueSidebarCsrfToken())) {
+        try sendPlainResponse(allocator, stream, 403, "Forbidden", "Invalid sidebar form token\n");
+        return false;
+    }
+    return true;
+}
+
 const IssueHrefOverride = struct {
     state: ?IssueStateFilter = null,
     sort: ?IssueSort = null,
     param_name: ?[]const u8 = null,
     param_value: ?[]const u8 = null,
+    page: ?usize = null,
+    per_page: ?usize = null,
 };
 
 const IssueProjectSummary = struct {
@@ -136,6 +181,9 @@ pub fn renderIssuesPage(allocator: Allocator, repo: Repo, target: []const u8) ![
     const default_state = requested_filter orelse if (counts.open == 0 and counts.closed > 0) IssueStateFilter.closed else IssueStateFilter.open;
     var filters = try issueFiltersFromTarget(allocator, target, default_state);
     defer filters.deinit();
+    const pagination = try shared.paginationFromTarget(allocator, target, issues_default_page_size, issues_max_page_size);
+    filters.limit = pagination.queryLimit();
+    filters.offset = pagination.offset();
 
     try appendShellStart(&buf, allocator, repo, "Issues", "issues");
     try appendIssuesToolbar(&buf, allocator, filters);
@@ -146,7 +194,12 @@ pub fn renderIssuesPage(allocator: Allocator, repo: Repo, target: []const u8) ![
     defer stmt.deinit();
 
     var shown: usize = 0;
+    var has_next_page = false;
     while (try stmt.step()) {
+        if (shown >= pagination.per_page) {
+            has_next_page = true;
+            break;
+        }
         const row = try work_items.issueListRowFromStmt(allocator, &stmt);
         defer row.deinit(allocator);
         const task_summary = shared.markdownTaskSummary(row.body);
@@ -155,13 +208,19 @@ pub fn renderIssuesPage(allocator: Allocator, repo: Repo, target: []const u8) ![
     }
 
     if (shown == 0) {
-        if (work_items.hasRestrictiveIssueFilters(filters)) {
+        if (pagination.page > 1) {
+            try appendEmptyState(&buf, allocator, "No issues on this page.", "Use the previous page or change filters to return to matching issues.");
+        } else if (work_items.hasRestrictiveIssueFilters(filters)) {
             try appendEmptyState(&buf, allocator, "No matching issues.", "Change or clear filters to widen the issue list.");
         } else switch (filters.state) {
             .open => try appendEmptyState(&buf, allocator, "No open issues.", "Closed issues are available from the Closed tab."),
             .closed => try appendEmptyState(&buf, allocator, "No closed issues.", "Open issues are available from the Open tab."),
             .all => try appendEmptyState(&buf, allocator, "No issues yet.", "Create the first local issue from this browser UI or with gt issue open."),
         }
+    }
+
+    if (shown != 0 or pagination.page > 1) {
+        try appendIssuesPagination(&buf, allocator, filters, pagination, shown, has_next_page);
     }
 
     try buf.appendSlice(allocator, "</section>");
@@ -186,23 +245,35 @@ fn issueFiltersFromTarget(allocator: Allocator, target: []const u8, default_stat
     };
     errdefer filters.deinit();
 
-    if (try queryTextFilterOwned(allocator, target, "q")) |query| {
-        defer allocator.free(query);
-        var parsed = try work_items.parseIssueSearchQuery(allocator, query);
-        defer parsed.deinit(allocator);
-        if (parsed.state) |state| filters.state = state;
-        if (parsed.q) |search| {
-            filters.q = search;
-            parsed.q = null;
-        }
-    }
     filters.author = try queryTextFilterOwned(allocator, target, "author");
     filters.label = try queryTextFilterOwned(allocator, target, "label");
     filters.project = try queryTextFilterOwned(allocator, target, "project");
     filters.milestone = try queryTextFilterOwned(allocator, target, "milestone");
     filters.assignee = try queryTextFilterOwned(allocator, target, "assignee");
     filters.sort = try issueSortFromTarget(allocator, target);
+
+    if (try queryTextFilterOwned(allocator, target, "q")) |query| {
+        defer allocator.free(query);
+        var parsed = try work_items.parseIssueSearchQuery(allocator, query);
+        defer parsed.deinit(allocator);
+        if (parsed.state) |state| filters.state = state;
+        if (parsed.sort) |sort| filters.sort = sort;
+        takeIssueFilterValue(&filters, &filters.q, &parsed.q);
+        takeIssueFilterValue(&filters, &filters.author, &parsed.author);
+        takeIssueFilterValue(&filters, &filters.label, &parsed.label);
+        takeIssueFilterValue(&filters, &filters.project, &parsed.project);
+        takeIssueFilterValue(&filters, &filters.milestone, &parsed.milestone);
+        takeIssueFilterValue(&filters, &filters.assignee, &parsed.assignee);
+    }
     return filters;
+}
+
+fn takeIssueFilterValue(filters: *IssueFilters, slot: *?[]u8, source: *?[]u8) void {
+    if (source.*) |value| {
+        if (slot.*) |previous| filters.allocator.free(previous);
+        slot.* = value;
+        source.* = null;
+    }
 }
 
 fn queryTextFilterOwned(allocator: Allocator, target: []const u8, name: []const u8) !?[]u8 {
@@ -235,12 +306,9 @@ fn appendIssuesToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filters: I
         \\  <form class="issues-search" action="/issues" method="get">
         \\    <span class="issues-search-icon" aria-hidden="true"></span>
         \\    <input type="search" name="q" value="{query}" aria-label="Search issues">
-        \\    <input type="hidden" name="state" value="{state}">
     , .{
         .query = query,
-        .state = work_items.issueStateValue(filters.state),
     });
-    try appendIssueFilterHiddenInputs(buf, allocator, filters);
     try buf.appendSlice(allocator,
         \\  </form>
         \\  <div class="issues-toolbar-actions">
@@ -253,33 +321,7 @@ fn appendIssuesToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filters: I
 }
 
 fn issueSearchInputValue(allocator: Allocator, filters: IssueFilters) ![]u8 {
-    const prefix = work_items.issueSearchQuery(filters.state);
-    if (filters.q) |query| return std.fmt.allocPrint(allocator, "{s} {s}", .{ prefix, query });
-    return std.fmt.allocPrint(allocator, "{s} ", .{prefix});
-}
-
-fn appendIssueFilterHiddenInputs(buf: *std.ArrayList(u8), allocator: Allocator, filters: IssueFilters) !void {
-    try appendHiddenInputIfPresent(buf, allocator, "author", filters.author);
-    try appendHiddenInputIfPresent(buf, allocator, "label", filters.label);
-    try appendHiddenInputIfPresent(buf, allocator, "project", filters.project);
-    try appendHiddenInputIfPresent(buf, allocator, "milestone", filters.milestone);
-    try appendHiddenInputIfPresent(buf, allocator, "assignee", filters.assignee);
-    if (filters.sort != .newest) {
-        try appendTemplate(buf, allocator,
-            \\    <input type="hidden" name="sort" value="{sort}">
-        , .{ .sort = work_items.issueSortValue(filters.sort) });
-    }
-}
-
-fn appendHiddenInputIfPresent(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8, value: ?[]const u8) !void {
-    if (value) |payload| {
-        try appendTemplate(buf, allocator,
-            \\    <input type="hidden" name="{name}" value="{value}">
-        , .{
-            .name = name,
-            .value = payload,
-        });
-    }
+    return work_items.issueFilterQueryOwned(allocator, filters);
 }
 
 fn appendIssuesListHeader(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, filters: IssueFilters, counts: IssueCounts) !void {
@@ -514,16 +556,23 @@ fn issueFilterOptionsSql(kind: IssueFilterKind) []const u8 {
 fn appendIssuesHref(buf: *std.ArrayList(u8), allocator: Allocator, filters: IssueFilters, override: IssueHrefOverride) !void {
     try buf.appendSlice(allocator, "/issues");
     var first = true;
-    try appendIssuesHrefParam(buf, allocator, &first, "state", work_items.issueStateValue(override.state orelse filters.state));
-    if (filterHrefValue(filters, override, "q")) |value| try appendIssuesHrefParam(buf, allocator, &first, "q", value);
-    if (filterHrefValue(filters, override, "author")) |value| try appendIssuesHrefParam(buf, allocator, &first, "author", value);
-    if (filterHrefValue(filters, override, "label")) |value| try appendIssuesHrefParam(buf, allocator, &first, "label", value);
-    if (filterHrefValue(filters, override, "project")) |value| try appendIssuesHrefParam(buf, allocator, &first, "project", value);
-    if (filterHrefValue(filters, override, "milestone")) |value| try appendIssuesHrefParam(buf, allocator, &first, "milestone", value);
-    if (filterHrefValue(filters, override, "assignee")) |value| try appendIssuesHrefParam(buf, allocator, &first, "assignee", value);
+    try shared.appendQueryParam(buf, allocator, &first, "state", work_items.issueStateValue(override.state orelse filters.state));
+    if (filterHrefValue(filters, override, "q")) |value| try shared.appendQueryParam(buf, allocator, &first, "q", value);
+    if (filterHrefValue(filters, override, "author")) |value| try shared.appendQueryParam(buf, allocator, &first, "author", value);
+    if (filterHrefValue(filters, override, "label")) |value| try shared.appendQueryParam(buf, allocator, &first, "label", value);
+    if (filterHrefValue(filters, override, "project")) |value| try shared.appendQueryParam(buf, allocator, &first, "project", value);
+    if (filterHrefValue(filters, override, "milestone")) |value| try shared.appendQueryParam(buf, allocator, &first, "milestone", value);
+    if (filterHrefValue(filters, override, "assignee")) |value| try shared.appendQueryParam(buf, allocator, &first, "assignee", value);
 
     const sort = override.sort orelse filters.sort;
-    if (sort != .newest) try appendIssuesHrefParam(buf, allocator, &first, "sort", work_items.issueSortValue(sort));
+    if (sort != .newest) try shared.appendQueryParam(buf, allocator, &first, "sort", work_items.issueSortValue(sort));
+    if (override.page) |page| {
+        const pagination = shared.Pagination{
+            .page = page,
+            .per_page = override.per_page orelse issues_default_page_size,
+        };
+        try shared.appendPaginationQueryParams(buf, allocator, &first, pagination, page, issues_default_page_size);
+    }
 }
 
 fn filterHrefValue(filters: IssueFilters, override: IssueHrefOverride, name: []const u8) ?[]const u8 {
@@ -539,12 +588,31 @@ fn filterHrefValue(filters: IssueFilters, override: IssueHrefOverride, name: []c
     return null;
 }
 
-fn appendIssuesHrefParam(buf: *std.ArrayList(u8), allocator: Allocator, first: *bool, name: []const u8, value: []const u8) !void {
-    try buf.appendSlice(allocator, if (first.*) "?" else "&amp;");
-    first.* = false;
-    try shared.appendUrlEncoded(buf, allocator, name);
-    try buf.append(allocator, '=');
-    try shared.appendUrlEncoded(buf, allocator, value);
+fn issuesHrefOwned(allocator: Allocator, filters: IssueFilters, pagination: shared.Pagination, page: usize) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try appendIssuesHref(&buf, allocator, filters, .{
+        .page = page,
+        .per_page = pagination.per_page,
+    });
+    return buf.toOwnedSlice(allocator);
+}
+
+fn appendIssuesPagination(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    filters: IssueFilters,
+    pagination: shared.Pagination,
+    shown: usize,
+    has_next_page: bool,
+) !void {
+    const previous_href = if (pagination.page > 1) try issuesHrefOwned(allocator, filters, pagination, pagination.page - 1) else null;
+    defer if (previous_href) |href| allocator.free(href);
+    const next_href = if (has_next_page) try issuesHrefOwned(allocator, filters, pagination, pagination.page + 1) else null;
+    defer if (next_href) |href| allocator.free(href);
+    const summary = try shared.paginationSummaryOwned(allocator, pagination, shown, null);
+    defer allocator.free(summary);
+    try shared.appendPaginationNav(buf, allocator, "Issues pages", summary, previous_href, next_href);
 }
 
 fn appendIssueListRow(
@@ -732,6 +800,7 @@ fn renderIssueDetailPageWithCommentForm(
     defer if (can_edit_issue) allocator.free(issue_edit_href);
 
     try appendShellStart(&buf, allocator, repo, detail.title, "issues");
+    try shared.appendDetailBackButton(&buf, allocator, shared.literalHref("/issues"), "Back to issues");
     try buf.appendSlice(allocator, "<section class=\"issue-page\">");
     try appendIssuePageHeader(&buf, allocator, raw_ref, detail.id, detail.title, detail.state, display_author, detail.opened_at, detail.state_occurred_at, detail.comment_count, detail.legacy_number, can_edit_issue);
     try appendTemplate(&buf, allocator,
@@ -882,6 +951,7 @@ fn renderIssueNotFound(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     try appendShellStart(&buf, allocator, repo, "Issue Not Found", "issues");
+    try shared.appendDetailBackButton(&buf, allocator, shared.literalHref("/issues"), "Back to issues");
     const detail = try std.fmt.allocPrint(allocator, "No issue matches {s}.", .{raw_ref});
     defer allocator.free(detail);
     try appendEmptyState(&buf, allocator, "Issue not found.", detail);
@@ -2148,21 +2218,22 @@ fn appendIssueSidebarSingleInputForm(
     try buf.appendSlice(allocator, "<form class=\"issue-sidebar-add-form issue-sidebar-menu-form\" method=\"post\" action=\"");
     try appendIssueSidebarAction(buf, allocator, raw_ref);
     try appendTemplate(buf, allocator,
-        \\"><input type="hidden" name="action" value="{action}"><label class="issue-sidebar-menu-input"><span aria-hidden="true"></span><input name="{input_name}" placeholder="{placeholder}" aria-label="{placeholder}" autocomplete="off" data-issue-sidebar-filter></label><button type="submit">{button_label}</button></form>
+        \\"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="action" value="{action}"><label class="issue-sidebar-menu-input"><span aria-hidden="true"></span><input name="{input_name}" placeholder="{placeholder}" aria-label="{placeholder}" autocomplete="off" data-issue-sidebar-filter></label><button type="submit">{button_label}</button></form>
     , .{
         .action = action,
         .input_name = input_name,
         .placeholder = placeholder,
         .button_label = button_label,
+        .csrf_token = issueSidebarCsrfToken(),
     });
 }
 
 fn appendIssueSidebarProjectForm(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8) !void {
     try buf.appendSlice(allocator, "<form class=\"issue-sidebar-add-form issue-sidebar-project-form issue-sidebar-menu-form\" method=\"post\" action=\"");
     try appendIssueSidebarAction(buf, allocator, raw_ref);
-    try buf.appendSlice(allocator,
-        \\"><input type="hidden" name="action" value="add-project"><label class="issue-sidebar-menu-input"><span aria-hidden="true"></span><input name="project" placeholder="Filter projects" aria-label="Project" autocomplete="off" data-issue-sidebar-filter></label><input name="column" placeholder="Column" aria-label="Column" autocomplete="off"><button type="submit">Add project</button></form>
-    );
+    try appendTemplate(buf, allocator,
+        \\"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="action" value="add-project"><label class="issue-sidebar-menu-input"><span aria-hidden="true"></span><input name="project" placeholder="Filter projects" aria-label="Project" autocomplete="off" data-issue-sidebar-filter></label><input name="column" placeholder="Column" aria-label="Column" autocomplete="off"><button type="submit">Add project</button></form>
+    , .{ .csrf_token = issueSidebarCsrfToken() });
 }
 
 fn appendIssueSidebarMenuFilter(buf: *std.ArrayList(u8), allocator: Allocator, placeholder: []const u8) !void {
@@ -2226,16 +2297,22 @@ fn appendIssueSidebarMilestoneActionRow(
         try buf.appendSlice(allocator, "<form class=\"issue-sidebar-picker-form\" method=\"post\" action=\"");
         try appendIssueSidebarAction(buf, allocator, raw_ref);
         try appendTemplate(buf, allocator,
-            \\"><input type="hidden" name="action" value="clear-milestone"><button class="issue-sidebar-picker-row is-selected" type="submit" data-sidebar-filter-text="{milestone}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span><span class="issue-milestone-icon" aria-hidden="true"></span><span class="issue-sidebar-picker-primary">{milestone}</span></button></form>
-        , .{ .milestone = milestone });
+            \\"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="action" value="clear-milestone"><button class="issue-sidebar-picker-row is-selected" type="submit" data-sidebar-filter-text="{milestone}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span><span class="issue-milestone-icon" aria-hidden="true"></span><span class="issue-sidebar-picker-primary">{milestone}</span></button></form>
+        , .{
+            .milestone = milestone,
+            .csrf_token = issueSidebarCsrfToken(),
+        });
         return;
     }
 
     try buf.appendSlice(allocator, "<form class=\"issue-sidebar-picker-form\" method=\"post\" action=\"");
     try appendIssueSidebarAction(buf, allocator, raw_ref);
     try appendTemplate(buf, allocator,
-        \\"><input type="hidden" name="action" value="set-milestone"><input type="hidden" name="milestone" value="{milestone}"><button class="issue-sidebar-picker-row" type="submit" data-sidebar-filter-text="{milestone}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span><span class="issue-milestone-icon" aria-hidden="true"></span><span class="issue-sidebar-picker-primary">{milestone}</span></button></form>
-    , .{ .milestone = milestone });
+        \\"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="action" value="set-milestone"><input type="hidden" name="milestone" value="{milestone}"><button class="issue-sidebar-picker-row" type="submit" data-sidebar-filter-text="{milestone}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span><span class="issue-milestone-icon" aria-hidden="true"></span><span class="issue-sidebar-picker-primary">{milestone}</span></button></form>
+    , .{
+        .milestone = milestone,
+        .csrf_token = issueSidebarCsrfToken(),
+    });
 }
 
 fn appendIssueSidebarProjectActionRow(
@@ -2251,12 +2328,13 @@ fn appendIssueSidebarProjectActionRow(
     try buf.appendSlice(allocator, "<form class=\"issue-sidebar-picker-form\" method=\"post\" action=\"");
     try appendIssueSidebarAction(buf, allocator, raw_ref);
     try appendTemplate(buf, allocator,
-        \\"><input type="hidden" name="action" value="{action}"><input type="hidden" name="project" value="{project}"><input type="hidden" name="column" value="{column}"><button class="issue-sidebar-picker-row{state_class}" type="submit" data-sidebar-filter-text="{project} {column}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span><span class="issue-sidebar-project-icon" aria-hidden="true"></span><span class="issue-sidebar-picker-text"><span class="issue-sidebar-picker-primary">{project}</span><span class="issue-sidebar-picker-secondary">{column}</span></span></button></form>
+        \\"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="action" value="{action}"><input type="hidden" name="project" value="{project}"><input type="hidden" name="column" value="{column}"><button class="issue-sidebar-picker-row{state_class}" type="submit" data-sidebar-filter-text="{project} {column}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span><span class="issue-sidebar-project-icon" aria-hidden="true"></span><span class="issue-sidebar-picker-text"><span class="issue-sidebar-picker-primary">{project}</span><span class="issue-sidebar-picker-secondary">{column}</span></span></button></form>
     , .{
         .action = action,
         .project = project,
         .column = column,
         .state_class = state_class,
+        .csrf_token = issueSidebarCsrfToken(),
     });
 }
 
@@ -2274,13 +2352,14 @@ fn appendIssueSidebarValueActionFormStart(
     try buf.appendSlice(allocator, "<form class=\"issue-sidebar-picker-form\" method=\"post\" action=\"");
     try appendIssueSidebarAction(buf, allocator, raw_ref);
     try appendTemplate(buf, allocator,
-        \\"><input type="hidden" name="action" value="{action}"><input type="hidden" name="{input_name}" value="{value}"><button class="issue-sidebar-picker-row{state_class}" type="submit" data-sidebar-filter-text="{filter_text}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span>
+        \\"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="action" value="{action}"><input type="hidden" name="{input_name}" value="{value}"><button class="issue-sidebar-picker-row{state_class}" type="submit" data-sidebar-filter-text="{filter_text}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span>
     , .{
         .action = action,
         .input_name = input_name,
         .value = value,
         .filter_text = filter_text,
         .state_class = state_class,
+        .csrf_token = issueSidebarCsrfToken(),
     });
 }
 
@@ -2334,10 +2413,11 @@ fn appendIssueSidebarRemoveProjectForm(buf: *std.ArrayList(u8), allocator: Alloc
     try buf.appendSlice(allocator, "<form class=\"issue-sidebar-remove-form\" method=\"post\" action=\"");
     try appendIssueSidebarAction(buf, allocator, raw_ref);
     try appendTemplate(buf, allocator,
-        \\"><input type="hidden" name="action" value="remove-project"><input type="hidden" name="project" value="{project}"><input type="hidden" name="column" value="{column}"><button type="submit" aria-label="Remove project">x</button></form>
+        \\"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="action" value="remove-project"><input type="hidden" name="project" value="{project}"><input type="hidden" name="column" value="{column}"><button type="submit" aria-label="Remove project">x</button></form>
     , .{
         .project = project,
         .column = column,
+        .csrf_token = issueSidebarCsrfToken(),
     });
 }
 
@@ -2345,10 +2425,11 @@ fn appendIssueSidebarRemoveValueForm(buf: *std.ArrayList(u8), allocator: Allocat
     try buf.appendSlice(allocator, "<form class=\"issue-sidebar-remove-form\" method=\"post\" action=\"");
     try appendIssueSidebarAction(buf, allocator, raw_ref);
     try appendTemplate(buf, allocator,
-        \\"><input type="hidden" name="action" value="{action}"><button type="submit" aria-label="{label}">x</button></form>
+        \\"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="action" value="{action}"><button type="submit" aria-label="{label}">x</button></form>
     , .{
         .action = action,
         .label = label,
+        .csrf_token = issueSidebarCsrfToken(),
     });
 }
 
@@ -2364,12 +2445,13 @@ fn appendIssueSidebarRemoveNamedValueForm(
     try buf.appendSlice(allocator, "<form class=\"issue-sidebar-remove-form\" method=\"post\" action=\"");
     try appendIssueSidebarAction(buf, allocator, raw_ref);
     try appendTemplate(buf, allocator,
-        \\"><input type="hidden" name="action" value="{action}"><input type="hidden" name="{input_name}" value="{value}"><button type="submit" aria-label="{label}">x</button></form>
+        \\"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="action" value="{action}"><input type="hidden" name="{input_name}" value="{value}"><button type="submit" aria-label="{label}">x</button></form>
     , .{
         .action = action,
         .input_name = input_name,
         .value = value,
         .label = label,
+        .csrf_token = issueSidebarCsrfToken(),
     });
 }
 
@@ -2683,6 +2765,8 @@ fn parsePositiveDecimal(value: []const u8) ?i64 {
 }
 
 pub fn handleIssueSidebarPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
+    if (!(try validateIssueSidebarCsrf(allocator, stream, form_body))) return;
+
     try ensureIndex(allocator, repo);
     const issue_id = index.resolveIssueId(allocator, repo, raw_ref) catch {
         try sendPlainResponse(allocator, stream, 404, "Not Found", "Issue not found\n");
