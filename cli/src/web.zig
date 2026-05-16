@@ -576,10 +576,12 @@ fn handleRunRequestedRedirect(ctx: WebContext) !void {
 }
 
 fn handleActionsRequestPost(ctx: WebContext) !void {
+    if (!try requireSameOriginActionPost(ctx)) return;
     try actions_page.handleActionsRequestPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
 }
 
 fn handleRunRequestedPost(ctx: WebContext) !void {
+    if (!try requireSameOriginActionPost(ctx)) return;
     try actions_page.handleRunRequestedPost(ctx.allocator, ctx.stream, ctx.request.body);
 }
 
@@ -648,6 +650,57 @@ pub fn parseHttpRequest(raw: []const u8) !HttpRequest {
 
 pub fn parseHttpRequestOwned(allocator: Allocator, raw: []const u8) !HttpRequest {
     return zwf.Request.parseOwned(allocator, raw);
+}
+
+fn requireSameOriginActionPost(ctx: WebContext) !bool {
+    if (isSameOriginBrowserRequest(ctx.request)) return true;
+    try shared.sendPlainResponse(ctx.allocator, ctx.stream, 403, "Forbidden", "Forbidden: same-origin request required\n");
+    return false;
+}
+
+fn isSameOriginBrowserRequest(request: HttpRequest) bool {
+    const host = request.headerValue("host") orelse return false;
+    // Reject Host values that are not loopback addresses to prevent DNS rebinding:
+    // an attacker cannot serve evil.example pointing to 127.0.0.1 and have the
+    // loopback check pass, because evil.example is not a recognised loopback name.
+    if (!isLoopbackHost(hostnameFromHeader(host))) return false;
+    if (request.headerValue("origin")) |origin| {
+        return sourceMatchesHost(origin, host);
+    }
+    if (request.headerValue("referer")) |referer| {
+        return sourceMatchesHost(referer, host);
+    }
+    return false;
+}
+
+fn sourceMatchesHost(source: []const u8, host: []const u8) bool {
+    const source_host = httpSourceHost(source) orelse return false;
+    return std.ascii.eqlIgnoreCase(source_host, std.mem.trim(u8, host, " \t"));
+}
+
+fn httpSourceHost(source: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, source, " \t");
+    const rest = if (std.mem.startsWith(u8, trimmed, "http://"))
+        trimmed["http://".len..]
+    else
+        return null;
+    const end = std.mem.indexOfAny(u8, rest, "/?#") orelse rest.len;
+    if (end == 0) return null;
+    return rest[0..end];
+}
+
+/// Extracts the hostname from a Host header value, stripping the optional port.
+/// Examples: "127.0.0.1:12655" → "127.0.0.1", "[::1]:12655" → "::1", "localhost" → "localhost".
+fn hostnameFromHeader(host_header: []const u8) []const u8 {
+    if (host_header.len > 0 and host_header[0] == '[') {
+        const close = std.mem.indexOfScalar(u8, host_header, ']') orelse return host_header;
+        if (close > 1) return host_header[1..close];
+        return host_header;
+    }
+    if (std.mem.lastIndexOfScalar(u8, host_header, ':')) |colon| {
+        return host_header[0..colon];
+    }
+    return host_header;
 }
 
 pub fn parseContentLength(headers: []const u8) !usize {
@@ -876,6 +929,9 @@ test "web request parser separates method path and body" {
     try std.testing.expectEqualStrings("/issues?x=1", request.target);
     try std.testing.expectEqualStrings("/issues", request.path);
     try std.testing.expectEqualStrings("title=Smoke", request.body);
+    try std.testing.expectEqualStrings("127.0.0.1", request.headerValue("host").?);
+    try std.testing.expect(request.headerValue("origin") == null);
+    try std.testing.expect(request.headerValue("referer") == null);
     try std.testing.expect(request.range == null);
     try std.testing.expectEqualStrings("127.0.0.1", request.headerValue("host").?);
 }
@@ -919,6 +975,50 @@ test "web code sync requires trusted same-origin post headers" {
             "action=exchange",
     );
     try std.testing.expect(!isSameOriginPost(missing_origin));
+}
+
+test "actions csrf guard accepts same-origin posts" {
+    const raw =
+        "POST /actions/request HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1:12655\r\n" ++
+        "Origin: http://127.0.0.1:12655\r\n" ++
+        "Content-Length: 0\r\n" ++
+        "\r\n";
+    const request = try parseHttpRequest(raw);
+    try std.testing.expect(isSameOriginBrowserRequest(request));
+}
+
+test "actions csrf guard rejects cross-origin and missing browser source" {
+    const cross_origin =
+        "POST /actions/request HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1:12655\r\n" ++
+        "Origin: http://evil.example\r\n" ++
+        "Referer: http://127.0.0.1:12655/actions\r\n" ++
+        "Content-Length: 0\r\n" ++
+        "\r\n";
+    const cross_origin_request = try parseHttpRequest(cross_origin);
+    try std.testing.expect(!isSameOriginBrowserRequest(cross_origin_request));
+
+    const missing_source =
+        "POST /actions/request HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1:12655\r\n" ++
+        "Content-Length: 0\r\n" ++
+        "\r\n";
+    const missing_source_request = try parseHttpRequest(missing_source);
+    try std.testing.expect(!isSameOriginBrowserRequest(missing_source_request));
+}
+
+test "actions csrf guard rejects dns-rebound non-loopback host" {
+    // A DNS-rebinding attack sends a matching Origin/Host pair but with a
+    // non-loopback hostname; the loopback check must reject it.
+    const dns_rebound =
+        "POST /actions/request HTTP/1.1\r\n" ++
+        "Host: evil.example:12655\r\n" ++
+        "Origin: http://evil.example:12655\r\n" ++
+        "Content-Length: 0\r\n" ++
+        "\r\n";
+    const dns_rebound_request = try parseHttpRequest(dns_rebound);
+    try std.testing.expect(!isSameOriginBrowserRequest(dns_rebound_request));
 }
 
 test "web request parser accepts byte ranges" {
