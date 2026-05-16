@@ -1,17 +1,29 @@
 const std = @import("std");
+const event_mod = @import("../event.zig");
+const event_writer_mod = @import("../event_writer.zig");
 const index = @import("../index.zig");
+const issue_mod = @import("../issue.zig");
+const issues_page = @import("issues.zig");
+const pull_mod = @import("../pull.zig");
 const repo_mod = @import("../repo.zig");
 const shared = @import("shared.zig");
+const util = @import("../util.zig");
 
 const Allocator = std.mem.Allocator;
+const EventWriter = event_writer_mod.EventWriter;
 const Repo = repo_mod.Repo;
 const SqliteDb = index.SqliteDb;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
 const appendTemplate = shared.appendTemplate;
 const appendUrlEncoded = shared.appendUrlEncoded;
+const formValueOwned = issues_page.formValueOwned;
 const groupedUnsigned = shared.groupedUnsigned;
+const sendPlainResponse = shared.sendPlainResponse;
+const sendRedirect = shared.sendRedirect;
 const sqlite = index.sqlite;
+const newUuidV7 = util.newUuidV7;
+const rfc3339Now = util.rfc3339Now;
 
 pub fn renderLabelsPage(allocator: Allocator, repo: Repo) ![]u8 {
     if (try shared.renderIndexingPageIfStale(allocator, repo, "Labels", "labels", "/labels")) |body| return body;
@@ -28,21 +40,40 @@ pub fn renderLabelsPage(allocator: Allocator, repo: Repo) ![]u8 {
     try shared.appendSettingsLayoutStart(&buf, allocator, "labels");
     try appendLabelsHeader(&buf, allocator);
     try appendLabelsToolbar(&buf, allocator);
+    try appendLabelDialog(&buf, allocator);
     try appendLabelsListStart(&buf, allocator, label_count);
 
     var stmt = try db.prepare(
-        \\SELECT label, SUM(issue_count), SUM(pull_count)
-        \\FROM (
-        \\  SELECT label, COUNT(DISTINCT issue_id) AS issue_count, 0 AS pull_count
-        \\  FROM issue_labels
-        \\  GROUP BY label
-        \\  UNION ALL
-        \\  SELECT label, 0 AS issue_count, COUNT(DISTINCT pull_id) AS pull_count
-        \\  FROM pull_labels
+        \\WITH label_names AS (
+        \\  SELECT name AS label FROM label_definitions
+        \\  UNION
+        \\  SELECT label FROM issue_labels
+        \\  UNION
+        \\  SELECT label FROM pull_labels
+        \\),
+        \\usage_totals AS (
+        \\  SELECT label, SUM(issue_count) AS issue_count, SUM(pull_count) AS pull_count
+        \\  FROM (
+        \\    SELECT label, COUNT(DISTINCT issue_id) AS issue_count, 0 AS pull_count
+        \\    FROM issue_labels
+        \\    GROUP BY label
+        \\    UNION ALL
+        \\    SELECT label, 0 AS issue_count, COUNT(DISTINCT pull_id) AS pull_count
+        \\    FROM pull_labels
+        \\    GROUP BY label
+        \\  )
         \\  GROUP BY label
         \\)
-        \\GROUP BY label
-        \\ORDER BY lower(label), label
+        \\SELECT label_names.label,
+        \\       COALESCE(label_definitions.id, ''),
+        \\       COALESCE(label_definitions.description, ''),
+        \\       COALESCE(label_definitions.color, ''),
+        \\       COALESCE(usage_totals.issue_count, 0),
+        \\       COALESCE(usage_totals.pull_count, 0)
+        \\FROM label_names
+        \\LEFT JOIN label_definitions ON label_definitions.name = label_names.label
+        \\LEFT JOIN usage_totals ON usage_totals.label = label_names.label
+        \\ORDER BY lower(label_names.label), label_names.label
     );
     defer stmt.deinit();
 
@@ -50,9 +81,15 @@ pub fn renderLabelsPage(allocator: Allocator, repo: Repo) ![]u8 {
     while (try stmt.step()) {
         const label = try stmt.columnTextDup(allocator, 0);
         defer allocator.free(label);
-        const issue_count = @as(usize, @intCast(stmt.columnInt64(1)));
-        const pull_count = @as(usize, @intCast(stmt.columnInt64(2)));
-        try appendLabelRow(&buf, allocator, label, issue_count, pull_count);
+        const label_id = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(label_id);
+        const description = try stmt.columnTextDup(allocator, 2);
+        defer allocator.free(description);
+        const color = try stmt.columnTextDup(allocator, 3);
+        defer allocator.free(color);
+        const issue_count = @as(usize, @intCast(stmt.columnInt64(4)));
+        const pull_count = @as(usize, @intCast(stmt.columnInt64(5)));
+        try appendLabelRow(&buf, allocator, label, label_id, description, color, issue_count, pull_count);
         shown += 1;
     }
 
@@ -71,10 +108,361 @@ pub fn renderLabelsPage(allocator: Allocator, repo: Repo) ![]u8 {
     return buf.toOwnedSlice(allocator);
 }
 
+pub fn handleLabelsPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
+    try index.ensureIndex(allocator, repo);
+
+    const action_owned = (try formValueOwned(allocator, form_body, "action")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(action_owned);
+    const action = std.mem.trim(u8, action_owned, " \t\r\n");
+
+    const label_owned = (try formValueOwned(allocator, form_body, "label")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(label_owned);
+    const label = std.mem.trim(u8, label_owned, " \t\r\n");
+
+    if (std.mem.eql(u8, action, "create")) {
+        const new_label_owned = (try formValueOwned(allocator, form_body, "new_label")) orelse try allocator.dupe(u8, "");
+        defer allocator.free(new_label_owned);
+        const new_label = std.mem.trim(u8, new_label_owned, " \t\r\n");
+        if (new_label.len == 0) {
+            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Label name is required\n");
+            return;
+        }
+
+        const description_owned = (try formValueOwned(allocator, form_body, "description")) orelse try allocator.dupe(u8, "");
+        defer allocator.free(description_owned);
+        const description = std.mem.trim(u8, description_owned, " \t\r\n");
+
+        const color_owned = (try formValueOwned(allocator, form_body, "color")) orelse try allocator.dupe(u8, "");
+        defer allocator.free(color_owned);
+        const color = normalizeLabelColorOwned(allocator, color_owned, new_label) catch {
+            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Color must be a hex value like #0075ca\n");
+            return;
+        };
+        defer allocator.free(color);
+
+        var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+        defer db.deinit();
+        if (try labelNameExists(&db, new_label)) {
+            try sendPlainResponse(allocator, stream, 409, "Conflict", "Label already exists\n");
+            return;
+        }
+
+        writeLabelCreatedEvent(allocator, new_label, description, color) catch {
+            try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not create label\n");
+            return;
+        };
+        try sendRedirect(allocator, stream, "/labels");
+        return;
+    }
+
+    if (label.len == 0) {
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Label is required\n");
+        return;
+    }
+
+    if (std.mem.eql(u8, action, "update") or std.mem.eql(u8, action, "rename")) {
+        const new_label_owned = (try formValueOwned(allocator, form_body, "new_label")) orelse try allocator.dupe(u8, "");
+        defer allocator.free(new_label_owned);
+        const new_label = std.mem.trim(u8, new_label_owned, " \t\r\n");
+        if (new_label.len == 0) {
+            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "New label name is required\n");
+            return;
+        }
+
+        const description_owned = (try formValueOwned(allocator, form_body, "description")) orelse try allocator.dupe(u8, "");
+        defer allocator.free(description_owned);
+        const description = std.mem.trim(u8, description_owned, " \t\r\n");
+
+        const color_owned = (try formValueOwned(allocator, form_body, "color")) orelse try allocator.dupe(u8, "");
+        defer allocator.free(color_owned);
+        const color = normalizeLabelColorOwned(allocator, color_owned, new_label) catch {
+            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Color must be a hex value like #0075ca\n");
+            return;
+        };
+        defer allocator.free(color);
+
+        var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+        defer db.deinit();
+        var definition = try loadLabelDefinitionByName(allocator, &db, label);
+        defer if (definition) |*value| value.deinit(allocator);
+
+        if (!std.mem.eql(u8, label, new_label) and try labelNameExists(&db, new_label)) {
+            try sendPlainResponse(allocator, stream, 409, "Conflict", "Label already exists\n");
+            return;
+        }
+
+        if (definition) |existing| {
+            var update = event_mod.LabelUpdate{};
+            if (!std.mem.eql(u8, label, new_label)) update.name = new_label;
+            if (!std.mem.eql(u8, existing.description, description)) update.description = description;
+            if (!std.mem.eql(u8, existing.color, color)) update.color = color;
+            if (update.hasChanges()) {
+                writeLabelUpdatedEvent(allocator, existing.id, update) catch {
+                    try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update label\n");
+                    return;
+                };
+            }
+        } else {
+            writeLabelCreatedEvent(allocator, new_label, description, color) catch {
+                try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update label\n");
+                return;
+            };
+        }
+
+        if (!std.mem.eql(u8, label, new_label)) {
+            mutateLabelEverywhere(allocator, repo, label, new_label) catch {
+                try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not rename label\n");
+                return;
+            };
+        }
+    } else if (std.mem.eql(u8, action, "delete")) {
+        var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+        defer db.deinit();
+        var definition = try loadLabelDefinitionByName(allocator, &db, label);
+        defer if (definition) |*value| value.deinit(allocator);
+        if (definition) |existing| {
+            writeLabelDeletedEvent(allocator, existing.id) catch {
+                try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not delete label\n");
+                return;
+            };
+        }
+        mutateLabelEverywhere(allocator, repo, label, null) catch {
+            try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not delete label\n");
+            return;
+        };
+    } else {
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Unknown label action\n");
+        return;
+    }
+
+    try sendRedirect(allocator, stream, "/labels");
+}
+
+const LabelDefinition = struct {
+    id: []u8,
+    description: []u8,
+    color: []u8,
+
+    fn deinit(self: *LabelDefinition, allocator: Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.description);
+        allocator.free(self.color);
+    }
+};
+
+fn loadLabelDefinitionByName(allocator: Allocator, db: *SqliteDb, label: []const u8) !?LabelDefinition {
+    var stmt = try db.prepare("SELECT id, description, color FROM label_definitions WHERE name = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, label);
+    if (!(try stmt.step())) return null;
+    return .{
+        .id = try stmt.columnTextDup(allocator, 0),
+        .description = try stmt.columnTextDup(allocator, 1),
+        .color = try stmt.columnTextDup(allocator, 2),
+    };
+}
+
+fn labelNameExists(db: *SqliteDb, label: []const u8) !bool {
+    var stmt = try db.prepare(
+        \\SELECT 1
+        \\FROM (
+        \\  SELECT name AS label FROM label_definitions
+        \\  UNION
+        \\  SELECT label FROM issue_labels
+        \\  UNION
+        \\  SELECT label FROM pull_labels
+        \\)
+        \\WHERE label = ?
+        \\LIMIT 1
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, label);
+    return try stmt.step();
+}
+
+fn writeLabelCreatedEvent(allocator: Allocator, name: []const u8, description: []const u8, color: []const u8) !void {
+    var writer = try EventWriter.init(allocator, "gt label create");
+    defer writer.deinit();
+
+    const label_id = try newUuidV7(allocator);
+    defer allocator.free(label_id);
+    const event_uuid = try newUuidV7(allocator);
+    defer allocator.free(event_uuid);
+    const idem = try newUuidV7(allocator);
+    defer allocator.free(idem);
+    const occurred_at = try rfc3339Now(allocator);
+    defer allocator.free(occurred_at);
+
+    const event_body = try event_mod.buildLabelCreatedJson(
+        allocator,
+        writer.cfg,
+        writer.nextSeq(),
+        label_id,
+        event_uuid,
+        idem,
+        occurred_at,
+        writer.eventParents(),
+        name,
+        description,
+        color,
+    );
+    defer allocator.free(event_body);
+
+    const subject = try std.fmt.allocPrint(allocator, "label.created @{s} {s}", .{ label_id[0..@min(label_id.len, 7)], name });
+    defer allocator.free(subject);
+    const commit_oid = try writer.write("gt label", subject, event_body);
+    defer allocator.free(commit_oid);
+}
+
+fn writeLabelUpdatedEvent(allocator: Allocator, label_id: []const u8, update: event_mod.LabelUpdate) !void {
+    if (!update.hasChanges()) return;
+
+    var writer = try EventWriter.init(allocator, "gt label edit");
+    defer writer.deinit();
+
+    const event_uuid = try newUuidV7(allocator);
+    defer allocator.free(event_uuid);
+    const idem = try newUuidV7(allocator);
+    defer allocator.free(idem);
+    const occurred_at = try rfc3339Now(allocator);
+    defer allocator.free(occurred_at);
+
+    const event_body = try event_mod.buildLabelUpdatedJson(
+        allocator,
+        writer.cfg,
+        writer.nextSeq(),
+        label_id,
+        event_uuid,
+        idem,
+        occurred_at,
+        writer.eventParents(),
+        update,
+    );
+    defer allocator.free(event_body);
+
+    const subject = try std.fmt.allocPrint(allocator, "label.updated @{s}", .{label_id[0..@min(label_id.len, 7)]});
+    defer allocator.free(subject);
+    const commit_oid = try writer.write("gt label", subject, event_body);
+    defer allocator.free(commit_oid);
+}
+
+fn writeLabelDeletedEvent(allocator: Allocator, label_id: []const u8) !void {
+    var writer = try EventWriter.init(allocator, "gt label delete");
+    defer writer.deinit();
+
+    const event_uuid = try newUuidV7(allocator);
+    defer allocator.free(event_uuid);
+    const idem = try newUuidV7(allocator);
+    defer allocator.free(idem);
+    const occurred_at = try rfc3339Now(allocator);
+    defer allocator.free(occurred_at);
+
+    const event_body = try event_mod.buildLabelDeletedJson(
+        allocator,
+        writer.cfg,
+        writer.nextSeq(),
+        label_id,
+        event_uuid,
+        idem,
+        occurred_at,
+        writer.eventParents(),
+    );
+    defer allocator.free(event_body);
+
+    const subject = try std.fmt.allocPrint(allocator, "label.deleted @{s}", .{label_id[0..@min(label_id.len, 7)]});
+    defer allocator.free(subject);
+    const commit_oid = try writer.write("gt label", subject, event_body);
+    defer allocator.free(commit_oid);
+}
+
+fn mutateLabelEverywhere(allocator: Allocator, repo: Repo, label: []const u8, new_label: ?[]const u8) !void {
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
+    var issue_ids = try loadIdsForLabel(allocator, &db, "SELECT DISTINCT issue_id FROM issue_labels WHERE label = ? ORDER BY issue_id", label);
+    defer deinitIdList(allocator, &issue_ids);
+    var pull_ids = try loadIdsForLabel(allocator, &db, "SELECT DISTINCT pull_id FROM pull_labels WHERE label = ? ORDER BY pull_id", label);
+    defer deinitIdList(allocator, &pull_ids);
+
+    for (issue_ids.items) |issue_id| {
+        try mutateIssueLabel(allocator, issue_id, label, new_label);
+    }
+    for (pull_ids.items) |pull_id| {
+        try mutatePullLabel(allocator, pull_id, label, new_label);
+    }
+}
+
+fn loadIdsForLabel(allocator: Allocator, db: *SqliteDb, comptime sql_text: []const u8, label: []const u8) !std.ArrayList([]u8) {
+    var ids: std.ArrayList([]u8) = .empty;
+    errdefer deinitIdList(allocator, &ids);
+
+    var stmt = try db.prepare(sql_text);
+    defer stmt.deinit();
+    try stmt.bindText(1, label);
+    while (try stmt.step()) {
+        try ids.append(allocator, try stmt.columnTextDup(allocator, 0));
+    }
+    return ids;
+}
+
+fn deinitIdList(allocator: Allocator, ids: *std.ArrayList([]u8)) void {
+    for (ids.items) |id| allocator.free(id);
+    ids.deinit(allocator);
+}
+
+fn mutateIssueLabel(allocator: Allocator, issue_id: []const u8, label: []const u8, new_label: ?[]const u8) !void {
+    const removed = [_][]const u8{label};
+    if (new_label) |value| {
+        const added = [_][]const u8{value};
+        try issue_mod.createIssueUpdatedEvent(allocator, issue_id, .{
+            .labels_added = added[0..],
+            .labels_removed = removed[0..],
+        });
+        return;
+    }
+    try issue_mod.createIssueUpdatedEvent(allocator, issue_id, .{
+        .labels_removed = removed[0..],
+    });
+}
+
+fn mutatePullLabel(allocator: Allocator, pull_id: []const u8, label: []const u8, new_label: ?[]const u8) !void {
+    const removed = [_][]const u8{label};
+    if (new_label) |value| {
+        const added = [_][]const u8{value};
+        try pull_mod.createPullUpdatedEvent(allocator, pull_id, .{
+            .labels_added = added[0..],
+            .labels_removed = removed[0..],
+        });
+        return;
+    }
+    try pull_mod.createPullUpdatedEvent(allocator, pull_id, .{
+        .labels_removed = removed[0..],
+    });
+}
+
+fn normalizeLabelColorOwned(allocator: Allocator, raw_color: []const u8, label: []const u8) ![]u8 {
+    const trimmed = std.mem.trim(u8, raw_color, " \t\r\n");
+    if (trimmed.len == 0) return allocator.dupe(u8, defaultLabelColor(label));
+    if (!validHexColor(trimmed)) return error.InvalidLabelColor;
+    const color = try allocator.dupe(u8, trimmed);
+    for (color) |*c| c.* = std.ascii.toLower(c.*);
+    return color;
+}
+
+fn validHexColor(value: []const u8) bool {
+    if (value.len != 7 or value[0] != '#') return false;
+    for (value[1..]) |c| {
+        if (!std.ascii.isHex(c)) return false;
+    }
+    return true;
+}
+
 fn countLabels(db: *SqliteDb) !usize {
     var stmt = try db.prepare(
         \\SELECT COUNT(*)
         \\FROM (
+        \\  SELECT name AS label FROM label_definitions
+        \\  UNION
         \\  SELECT label FROM issue_labels
         \\  UNION
         \\  SELECT label FROM pull_labels
@@ -90,8 +478,35 @@ fn appendLabelsHeader(buf: *std.ArrayList(u8), allocator: Allocator) !void {
         \\<section class="labels-page" data-labels-page>
         \\  <header class="labels-page-head">
         \\    <h1>Labels</h1>
-        \\    <button class="button primary labels-new-button" type="button" disabled>New label</button>
+        \\    <button class="button primary labels-new-button" type="button" data-label-new-toggle>New label</button>
         \\  </header>
+    );
+}
+
+fn appendLabelDialog(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try buf.appendSlice(allocator,
+        \\  <div class="labels-dialog-backdrop" data-label-dialog hidden>
+        \\    <div class="labels-dialog" role="dialog" aria-modal="true" aria-labelledby="label-dialog-title">
+        \\      <form method="post" action="/labels" data-label-dialog-form>
+        \\        <header class="labels-dialog-head">
+        \\          <h2 id="label-dialog-title" data-label-dialog-title>New label</h2>
+        \\          <button class="labels-dialog-close" type="button" aria-label="Close" data-label-dialog-close>x</button>
+        \\        </header>
+        \\        <div class="labels-dialog-body">
+        \\          <div class="labels-dialog-preview"><span class="issue-label label-custom" style="--label-color: #0075ca" data-label-dialog-preview>label</span></div>
+        \\          <input type="hidden" name="action" value="create" data-label-dialog-action>
+        \\          <input type="hidden" name="label" value="" data-label-dialog-original>
+        \\          <label class="labels-dialog-field">Name<input class="labels-dialog-input" type="text" name="new_label" required data-label-dialog-name></label>
+        \\          <label class="labels-dialog-field">Description<textarea class="labels-dialog-textarea" name="description" rows="4" data-label-dialog-description></textarea></label>
+        \\          <label class="labels-dialog-field">Color<span class="labels-color-control"><button class="button secondary labels-color-random" type="button" aria-label="Choose another color" title="Choose another color" data-label-color-random><span class="button-icon icon-sync" aria-hidden="true"></span></button><input class="labels-dialog-input" type="text" name="color" value="#0075ca" pattern="#[0-9a-fA-F]{6}" data-label-dialog-color></span></label>
+        \\        </div>
+        \\        <footer class="labels-dialog-actions">
+        \\          <button class="button secondary" type="button" data-label-dialog-cancel>Cancel</button>
+        \\          <button class="button primary" type="submit" data-label-dialog-submit>Create label</button>
+        \\        </footer>
+        \\      </form>
+        \\    </div>
+        \\  </div>
     );
 }
 
@@ -127,26 +542,34 @@ fn appendLabelRow(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
     label: []const u8,
+    label_id: []const u8,
+    description: []const u8,
+    color: []const u8,
     issue_count: usize,
     pull_count: usize,
 ) !void {
     const total_count = issue_count + pull_count;
     const summary = try labelUsageSummaryOwned(allocator, issue_count, pull_count);
     defer allocator.free(summary);
+    const effective_description = if (description.len == 0) summary else description;
+    const effective_color = if (validHexColor(color)) color else defaultLabelColor(label);
     try appendTemplate(buf, allocator,
-        \\<article class="labels-list-row" data-label-row data-label-name="{label}" data-label-total="{total_count}" data-label-search-text="{label} {summary}">
+        \\<article class="labels-list-row" data-label-row data-label-name="{label}" data-label-id="{label_id}" data-label-description="{description}" data-label-color="{color}" data-label-total="{total_count}" data-label-search-text="{label} {description} {summary}">
         \\  <div class="labels-row-main">
     , .{
         .label = label,
+        .label_id = label_id,
+        .description = description,
+        .color = effective_color,
         .total_count = total_count,
         .summary = summary,
     });
-    try appendLabelChip(buf, allocator, label);
+    try appendLabelChip(buf, allocator, label, effective_color);
     try appendTemplate(buf, allocator,
-        \\    <p>{summary}</p>
+        \\    <p>{description}</p>
         \\  </div>
         \\  <div class="labels-row-links">
-    , .{ .summary = summary });
+    , .{ .description = effective_description });
     try appendIssueLink(buf, allocator, label, issue_count);
     try appendTemplate(buf, allocator,
         \\    <span>{pull_count} {pull_label}</span>
@@ -155,7 +578,7 @@ fn appendLabelRow(
         .pull_count = groupedUnsigned(@intCast(pull_count)),
         .pull_label = if (pull_count == 1) "pull request" else "pull requests",
     });
-    try appendLabelActionMenu(buf, allocator);
+    try appendLabelActionMenu(buf, allocator, label);
     try buf.appendSlice(allocator, "</article>");
 }
 
@@ -188,26 +611,45 @@ fn appendIssueLink(buf: *std.ArrayList(u8), allocator: Allocator, label: []const
     });
 }
 
-fn appendLabelActionMenu(buf: *std.ArrayList(u8), allocator: Allocator) !void {
-    try buf.appendSlice(allocator,
+fn appendLabelActionMenu(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8) !void {
+    try appendTemplate(buf, allocator,
         \\<details class="issue-action-menu labels-row-menu" data-popover-menu>
         \\  <summary class="issue-kebab-button" aria-label="Label actions" title="Label actions"></summary>
         \\  <div class="issue-action-popover labels-row-popover" role="menu">
-        \\    <button type="button" role="menuitem" disabled>Edit label</button>
-        \\    <button type="button" role="menuitem" disabled>Delete label</button>
+        \\    <button type="button" role="menuitem" data-label-edit-toggle>Edit label</button>
+        \\    <form method="post" action="/labels"><input type="hidden" name="action" value="delete"><input type="hidden" name="label" value="{label}"><button type="submit" role="menuitem">Delete label</button></form>
         \\  </div>
         \\</details>
-    );
+    , .{ .label = label });
 }
 
-fn appendLabelChip(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8) !void {
+fn appendLabelChip(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, color: []const u8) !void {
     try appendTemplate(buf, allocator,
-        \\<span class="issue-label {kind} {color_class}">{label}</span>
+        \\<span class="issue-label label-custom" style="--label-color: {color}">{label}</span>
     , .{
-        .kind = labelKind(label),
-        .color_class = labelColorClass(label),
+        .color = color,
         .label = label,
     });
+}
+
+const default_label_colors = [_][]const u8{
+    "#0075ca",
+    "#d73a4a",
+    "#a2eeef",
+    "#7057ff",
+    "#008672",
+    "#e4e669",
+    "#d876e3",
+    "#b60205",
+    "#0e8a16",
+    "#fbca04",
+    "#5319e7",
+    "#cfd3d7",
+};
+
+fn defaultLabelColor(label: []const u8) []const u8 {
+    const index_value: usize = @intCast(std.hash.Wyhash.hash(0, label) % default_label_colors.len);
+    return default_label_colors[index_value];
 }
 
 fn labelKind(label: []const u8) []const u8 {

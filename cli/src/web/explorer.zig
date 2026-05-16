@@ -191,7 +191,6 @@ const RootGitStatus = struct {
     lines_added: u64 = 0,
     lines_removed: u64 = 0,
     worktree_count: usize = 0,
-    stash_count: usize = 0,
     disk_size_bytes: ?usize = null,
     operation_state: RepositoryOperationState = .clean,
 };
@@ -1645,11 +1644,9 @@ fn appendRootSidebar(
 fn appendRootRepositoryStats(buf: *std.ArrayList(u8), allocator: Allocator, status: RootGitStatus) !void {
     try appendTemplate(buf, allocator,
         \\        <div><dt>Worktrees</dt><dd>{worktrees}</dd></div>
-        \\        <div><dt>Stashes</dt><dd>{stashes}</dd></div>
         \\        <div><dt>Size</dt><dd>
     , .{
         .worktrees = shared.groupedUnsigned(@intCast(status.worktree_count)),
-        .stashes = shared.groupedUnsigned(@intCast(status.stash_count)),
     });
     if (status.disk_size_bytes) |bytes| {
         try appendByteSize(buf, allocator, bytes);
@@ -1725,7 +1722,6 @@ fn loadRootGitStatus(allocator: Allocator, repo: Repo) !RootGitStatus {
     try loadRootDiffStats(allocator, repo, &status);
     status.worktree_count = loadWorktreeCount(allocator, repo) catch 1;
     if (status.worktree_count == 0) status.worktree_count = 1;
-    status.stash_count = loadStashCount(allocator, repo) catch 0;
     status.disk_size_bytes = loadDiskSizeBytes(allocator, repo) catch null;
     status.operation_state = loadRepositoryOperationState(allocator, repo) catch .clean;
 
@@ -1906,12 +1902,6 @@ fn worktreeBranchLabel(ref: []const u8) []const u8 {
     const heads_prefix = "refs/heads/";
     if (std.mem.startsWith(u8, ref, heads_prefix)) return ref[heads_prefix.len..];
     return ref;
-}
-
-fn loadStashCount(allocator: Allocator, repo: Repo) !usize {
-    const raw = try gitMaybe(allocator, repo, &.{ "stash", "list" }, git.max_git_output) orelse return 0;
-    defer allocator.free(raw);
-    return countNonEmptyLines(raw);
 }
 
 fn loadDiskSizeBytes(allocator: Allocator, repo: Repo) !?usize {

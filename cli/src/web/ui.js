@@ -119,6 +119,16 @@
       const sortLabel = page.querySelector("[data-label-sort-label]");
       const sortButtons = Array.from(page.querySelectorAll("[data-label-sort]"));
       const rows = Array.from(page.querySelectorAll("[data-label-row]"));
+      const dialog = page.querySelector("[data-label-dialog]");
+      const dialogTitle = dialog ? dialog.querySelector("[data-label-dialog-title]") : null;
+      const dialogAction = dialog ? dialog.querySelector("[data-label-dialog-action]") : null;
+      const dialogOriginal = dialog ? dialog.querySelector("[data-label-dialog-original]") : null;
+      const dialogName = dialog ? dialog.querySelector("[data-label-dialog-name]") : null;
+      const dialogDescription = dialog ? dialog.querySelector("[data-label-dialog-description]") : null;
+      const dialogColor = dialog ? dialog.querySelector("[data-label-dialog-color]") : null;
+      const dialogPreview = dialog ? dialog.querySelector("[data-label-dialog-preview]") : null;
+      const dialogSubmit = dialog ? dialog.querySelector("[data-label-dialog-submit]") : null;
+      const labelColors = ["#0075ca", "#d73a4a", "#a2eeef", "#7057ff", "#008672", "#e4e669", "#d876e3", "#b60205", "#0e8a16", "#fbca04", "#5319e7", "#cfd3d7"];
       let sortMode = "name";
 
       function setSelectedSort() {
@@ -154,6 +164,103 @@
         if (countWord) countWord.textContent = visibleRows.length === 1 ? "label" : "labels";
         if (empty) empty.hidden = rows.length === 0 || visibleRows.length !== 0;
       }
+
+      function normalizedColor(value) {
+        const color = String(value || "").trim();
+        return /^#[0-9a-f]{6}$/i.test(color) ? color.toLowerCase() : "#0075ca";
+      }
+
+      function setDialogPreview() {
+        if (!dialogPreview) return;
+        const name = dialogName && dialogName.value.trim() ? dialogName.value.trim() : "label";
+        const color = normalizedColor(dialogColor ? dialogColor.value : "");
+        dialogPreview.textContent = name;
+        dialogPreview.style.setProperty("--label-color", color);
+      }
+
+      function setDialogColor(value) {
+        if (dialogColor) dialogColor.value = normalizedColor(value);
+        setDialogPreview();
+      }
+
+      function closeLabelDialog() {
+        if (!dialog) return;
+        dialog.hidden = true;
+        document.body.classList.remove("has-modal");
+      }
+
+      function openLabelDialog(mode, row) {
+        if (!dialog) return;
+        const creating = mode === "create";
+        const name = creating ? "" : (row.dataset.labelName || "");
+        const description = creating ? "" : (row.dataset.labelDescription || "");
+        const color = creating ? "#0075ca" : (row.dataset.labelColor || "#0075ca");
+        if (dialogTitle) dialogTitle.textContent = creating ? "New label" : "Edit label";
+        if (dialogAction) dialogAction.value = creating ? "create" : "update";
+        if (dialogOriginal) dialogOriginal.value = name;
+        if (dialogName) dialogName.value = name;
+        if (dialogDescription) dialogDescription.value = description;
+        setDialogColor(color);
+        if (dialogSubmit) dialogSubmit.textContent = creating ? "Create label" : "Save changes";
+        dialog.hidden = false;
+        document.body.classList.add("has-modal");
+        if (dialogName) {
+          dialogName.focus();
+          dialogName.select();
+        }
+      }
+
+      page.addEventListener("click", function (event) {
+        const newToggle = event.target.closest("[data-label-new-toggle]");
+        if (newToggle && page.contains(newToggle)) {
+          openLabelDialog("create", null);
+          event.preventDefault();
+          return;
+        }
+
+        const editToggle = event.target.closest("[data-label-edit-toggle]");
+        if (editToggle && page.contains(editToggle)) {
+          const row = editToggle.closest("[data-label-row]");
+          if (row) openLabelDialog("edit", row);
+          const menu = editToggle.closest("details");
+          if (menu) {
+            menu.open = false;
+            setExpanded(menu);
+          }
+          event.preventDefault();
+          return;
+        }
+
+        const cancel = event.target.closest("[data-label-dialog-cancel], [data-label-dialog-close]");
+        if (cancel && page.contains(cancel)) {
+          closeLabelDialog();
+          event.preventDefault();
+          return;
+        }
+
+        const randomColor = event.target.closest("[data-label-color-random]");
+        if (randomColor && page.contains(randomColor)) {
+          const current = normalizedColor(dialogColor ? dialogColor.value : "");
+          const next = labelColors[(labelColors.indexOf(current) + 1 + labelColors.length) % labelColors.length];
+          setDialogColor(next);
+          event.preventDefault();
+          return;
+        }
+
+        if (dialog && event.target === dialog) {
+          closeLabelDialog();
+          event.preventDefault();
+        }
+      });
+
+      if (dialogName) dialogName.addEventListener("input", setDialogPreview);
+      if (dialogColor) dialogColor.addEventListener("input", setDialogPreview);
+      page.addEventListener("keydown", function (event) {
+        if (event.key === "Escape" && dialog && !dialog.hidden) {
+          closeLabelDialog();
+          event.preventDefault();
+        }
+      });
 
       if (search) {
         search.addEventListener("input", applyLabelsView);

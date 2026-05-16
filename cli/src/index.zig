@@ -316,6 +316,8 @@ fn requiredIndexTablesExist(db: *SqliteDb) bool {
     defer project_field_values.deinit();
     var project_views = db.prepare("SELECT id FROM project_views LIMIT 0") catch return false;
     defer project_views.deinit();
+    var label_definitions = db.prepare("SELECT id FROM label_definitions LIMIT 0") catch return false;
+    defer label_definitions.deinit();
     return true;
 }
 
@@ -513,6 +515,7 @@ fn rebuildIndexFromScratch(
         \\DROP TABLE IF EXISTS project_field_values;
         \\DROP TABLE IF EXISTS project_views;
         \\DROP TABLE IF EXISTS milestones;
+        \\DROP TABLE IF EXISTS label_definitions;
         \\DROP TABLE IF EXISTS pulls;
         \\DROP TABLE IF EXISTS pull_labels;
         \\DROP TABLE IF EXISTS pull_assignees;
