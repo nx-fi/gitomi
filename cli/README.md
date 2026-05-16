@@ -97,8 +97,9 @@ gt actions daemon [--once] [--replay] [--interval-ms N] [--dry-run] [--act PATH]
 gt runs prune [--dry-run] [--max-age-days N] [--max-count N] [--max-bytes N]
 gt sync [--remote REMOTE] [--pull-only|--push-only]
 gt github import [--repo OWNER/REPO] [--token TOKEN] [--from-file PATH] [--no-comments] [--no-projects]
-gt github export --repo OWNER/REPO [--token TOKEN] [--dry-run] [--map-file PATH] [--reuse-legacy]
-gt web [--host 127.0.0.1] [--port 12655]
+gt github export --repo OWNER/REPO [--token TOKEN] [--use-gh] [--dry-run] [--map-file PATH] [--reuse-legacy]
+gt github live [--repo OWNER/REPO] --webhook-url URL [--secret SECRET] [--host 127.0.0.1] [--port 12656] [--path /github/webhook] [--remote REMOTE] [--interval-ms N] [--once] [--no-subscribe] [--dry-run] [--no-git-sync]
+gt web [--local|--live] [--host 127.0.0.1] [--port 12655] [--repo OWNER/REPO] [--webhook-url URL] [--secret SECRET] [--live-host 127.0.0.1] [--live-port 12656] [--live-path /github/webhook] [--remote REMOTE] [--interval-ms N] [--no-subscribe] [--dry-run] [--no-git-sync]
 ```
 
 `gt init` writes a signed genesis manifest to `refs/gitomi/genesis`, including
@@ -242,12 +243,27 @@ placements; pass `--no-projects` to skip GitHub project-card discovery.
 `gt github export` replays accepted Gitomi issue, pull, and comment transitions
 through the GitHub API. It stores the Gitomi UUID to GitHub number mapping in
 `.git/gitomi/github/<owner>/<repo>/map.jsonl`; use `--dry-run` to print the API
-requests without network writes, or `--reuse-legacy` when exporting back to the
-same GitHub repository that was imported.
+requests without network writes, `--use-gh` to route writes through the local
+GitHub CLI credentials, or `--reuse-legacy` when exporting back to the same
+GitHub repository that was imported.
+
+`gt github live` runs the normal local Gitomi workflow with a two-way GitHub
+bridge. It subscribes the current repository to a GitHub webhook through
+`gh api`, listens locally for `issues`, `pull_request`, `issue_comment`, and
+`push` events, imports GitHub changes as delegated `import-bot/github` events,
+and periodically exports accepted local issue, pull, and comment events back to
+GitHub through the GitHub CLI. Live state and the export map are stored under
+`.git/gitomi/github/<owner>/<repo>/`; use `--no-subscribe` when the webhook
+already exists, `--once` for one webhook request plus one export pass, or
+`--no-git-sync` to skip the surrounding Gitomi `gt sync` pull/push steps.
 
 `gt web` starts a local-only GitHub-like web UI for the current repository. It
 binds to loopback on port 12655 by default, retrying nearby random ports if that
-port is occupied. It opens on a committed-tree code explorer, also serves
+port is occupied. `--local` is the default mode. `--live` starts the web UI and a
+GitHub live sync daemon in the same process; the web UI remains loopback-only,
+while the live webhook listener uses `--live-host`, `--live-port`, and
+`--live-path` and requires `--webhook-url` unless `--no-subscribe` is used. It
+opens on a committed-tree code explorer, also serves
 overview/issues/projects/workflows/events/refs pages, and can create signed issue
 events and workflow run requests through the same storage path as the CLI. The
 projects page renders kanban boards from signed project and issue placement

@@ -783,12 +783,31 @@ fn delegationAuthorizationRejection(
 
 fn githubImportDelegatesEvent(event_type: []const u8) bool {
     return std.mem.eql(u8, event_type, "issue.opened") or
+        std.mem.eql(u8, event_type, "issue.updated") or
+        std.mem.eql(u8, event_type, "issue.title_set") or
+        std.mem.eql(u8, event_type, "issue.body_set") or
         std.mem.eql(u8, event_type, "issue.state_set") or
+        std.mem.eql(u8, event_type, "issue.label_added") or
+        std.mem.eql(u8, event_type, "issue.label_removed") or
+        std.mem.eql(u8, event_type, "issue.assignee_added") or
+        std.mem.eql(u8, event_type, "issue.assignee_removed") or
+        std.mem.eql(u8, event_type, "issue.milestone_set") or
         std.mem.eql(u8, event_type, "issue.priority_set") or
         std.mem.eql(u8, event_type, "issue.status_set") or
         std.mem.eql(u8, event_type, "issue.project_added") or
         std.mem.eql(u8, event_type, "pull.opened") or
+        std.mem.eql(u8, event_type, "pull.updated") or
+        std.mem.eql(u8, event_type, "pull.title_set") or
+        std.mem.eql(u8, event_type, "pull.body_set") or
         std.mem.eql(u8, event_type, "pull.state_set") or
+        std.mem.eql(u8, event_type, "pull.base_set") or
+        std.mem.eql(u8, event_type, "pull.head_set") or
+        std.mem.eql(u8, event_type, "pull.label_added") or
+        std.mem.eql(u8, event_type, "pull.label_removed") or
+        std.mem.eql(u8, event_type, "pull.assignee_added") or
+        std.mem.eql(u8, event_type, "pull.assignee_removed") or
+        std.mem.eql(u8, event_type, "pull.reviewer_added") or
+        std.mem.eql(u8, event_type, "pull.reviewer_removed") or
         std.mem.eql(u8, event_type, "pull.merged") or
         std.mem.eql(u8, event_type, "comment.added");
 }

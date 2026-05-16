@@ -8,6 +8,8 @@ const event_mod = @import("event.zig");
 const fsck = @import("fsck.zig");
 const git = @import("git.zig");
 const github = @import("github.zig");
+const github_common = @import("github/common.zig");
+const github_live = @import("github/live.zig");
 const index = @import("index.zig");
 const io = @import("io.zig");
 const issue = @import("issue.zig");
@@ -256,8 +258,9 @@ fn printUsage() !void {
         \\  gt runs prune [--dry-run] [--max-age-days N] [--max-count N] [--max-bytes N]
         \\  gt sync [--remote REMOTE] [--pull-only|--push-only]
         \\  gt github import [--repo OWNER/REPO] [--token TOKEN] [--from-file PATH] [--no-comments] [--no-projects]
-        \\  gt github export --repo OWNER/REPO [--token TOKEN] [--dry-run] [--map-file PATH] [--reuse-legacy]
-        \\  gt web [--host 127.0.0.1] [--port 12655]
+        \\  gt github export --repo OWNER/REPO [--token TOKEN] [--use-gh] [--dry-run] [--map-file PATH] [--reuse-legacy]
+        \\  gt github live [--repo OWNER/REPO] --webhook-url URL [--secret SECRET] [--host 127.0.0.1] [--port 12656] [--path /github/webhook] [--remote REMOTE] [--interval-ms N] [--once] [--no-subscribe] [--dry-run] [--no-git-sync]
+        \\  gt web [--local|--live] [--host 127.0.0.1] [--port 12655] [--repo OWNER/REPO] [--webhook-url URL] [--secret SECRET] [--live-host 127.0.0.1] [--live-port 12656] [--live-path /github/webhook] [--remote REMOTE] [--interval-ms N] [--no-subscribe] [--dry-run] [--no-git-sync]
         \\
         \\Gitomi stores local state in .git/gitomi and signed events in refs/gitomi/inbox/*.
         \\
@@ -1020,11 +1023,45 @@ fn cmdSync(allocator: Allocator, args: []const []const u8) !void {
 
 fn cmdWeb(allocator: Allocator, args: []const []const u8) !void {
     var options = web.Options{};
+    const WebMode = enum { local, live };
+    var mode: WebMode = .local;
+    var mode_set = false;
+
+    var live_repo_arg: ?github_common.RepoSlug = null;
+    var live_resolved_repo: ?github_live.ResolvedRepo = null;
+    defer if (live_resolved_repo) |value| value.deinit(allocator);
+    var live_host: []const u8 = github_live.default_host;
+    var live_port: u16 = github_live.default_port;
+    var live_path: []const u8 = github_live.default_path;
+    var live_webhook_url: ?[]const u8 = null;
+    var live_secret: ?[]const u8 = null;
+    var live_remote: []const u8 = "origin";
+    var live_interval_ms: u64 = github_live.default_interval_ms;
+    var live_subscribe = true;
+    var live_dry_run = false;
+    var live_git_sync = true;
+    var live_bot_principal: []const u8 = "import-bot";
+    var live_bot_device: []const u8 = "github";
+    var live_option_seen = false;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--host")) {
+        if (std.mem.eql(u8, arg, "--local")) {
+            if (mode_set and mode != .local) {
+                try io.eprint("gt web: --local and --live are mutually exclusive\n", .{});
+                return CliError.InvalidArgument;
+            }
+            mode = .local;
+            mode_set = true;
+        } else if (std.mem.eql(u8, arg, "--live")) {
+            if (mode_set and mode != .live) {
+                try io.eprint("gt web: --local and --live are mutually exclusive\n", .{});
+                return CliError.InvalidArgument;
+            }
+            mode = .live;
+            mode_set = true;
+        } else if (std.mem.eql(u8, arg, "--host")) {
             options.host = try util.requireValue(args, &i, "--host");
         } else if (std.mem.eql(u8, arg, "--port")) {
             const raw = try util.requireValue(args, &i, "--port");
@@ -1035,10 +1072,68 @@ fn cmdWeb(allocator: Allocator, args: []const []const u8) !void {
             options.port_supplied = true;
         } else if (std.mem.eql(u8, arg, "--once")) {
             options.once = true;
+        } else if (std.mem.eql(u8, arg, "--repo")) {
+            live_option_seen = true;
+            live_repo_arg = try github_common.parseRepoSlug(try util.requireValue(args, &i, "--repo"));
+        } else if (std.mem.eql(u8, arg, "--webhook-url")) {
+            live_option_seen = true;
+            live_webhook_url = try util.requireValue(args, &i, "--webhook-url");
+        } else if (std.mem.eql(u8, arg, "--secret")) {
+            live_option_seen = true;
+            live_secret = try util.requireValue(args, &i, "--secret");
+        } else if (std.mem.eql(u8, arg, "--remote")) {
+            live_option_seen = true;
+            live_remote = try util.requireValue(args, &i, "--remote");
+        } else if (std.mem.eql(u8, arg, "--interval-ms")) {
+            live_option_seen = true;
+            live_interval_ms = std.fmt.parseUnsigned(u64, try util.requireValue(args, &i, "--interval-ms"), 10) catch {
+                try io.eprint("gt web: --interval-ms must be a non-negative integer\n", .{});
+                return CliError.InvalidArgument;
+            };
+        } else if (std.mem.eql(u8, arg, "--live-host")) {
+            live_option_seen = true;
+            live_host = try util.requireValue(args, &i, "--live-host");
+        } else if (std.mem.eql(u8, arg, "--live-port")) {
+            live_option_seen = true;
+            live_port = std.fmt.parseUnsigned(u16, try util.requireValue(args, &i, "--live-port"), 10) catch {
+                try io.eprint("gt web: --live-port must be an integer from 1 to 65535\n", .{});
+                return CliError.InvalidArgument;
+            };
+        } else if (std.mem.eql(u8, arg, "--live-path") or std.mem.eql(u8, arg, "--path")) {
+            live_option_seen = true;
+            live_path = try util.requireValue(args, &i, arg);
+            if (live_path.len == 0 or live_path[0] != '/') {
+                try io.eprint("gt web: --live-path must start with '/'\n", .{});
+                return CliError.InvalidArgument;
+            }
+        } else if (std.mem.eql(u8, arg, "--no-subscribe")) {
+            live_option_seen = true;
+            live_subscribe = false;
+        } else if (std.mem.eql(u8, arg, "--dry-run")) {
+            live_option_seen = true;
+            live_dry_run = true;
+        } else if (std.mem.eql(u8, arg, "--no-git-sync")) {
+            live_option_seen = true;
+            live_git_sync = false;
+        } else if (std.mem.eql(u8, arg, "--import-bot")) {
+            live_option_seen = true;
+            live_bot_principal = try util.requireValue(args, &i, "--import-bot");
+        } else if (std.mem.eql(u8, arg, "--device")) {
+            live_option_seen = true;
+            live_bot_device = try util.requireValue(args, &i, "--device");
         } else {
             try io.eprint("gt web: unknown option '{s}'\n", .{arg});
             return CliError.InvalidArgument;
         }
+    }
+
+    if (live_option_seen and mode != .live) {
+        try io.eprint("gt web: GitHub live options require --live\n", .{});
+        return CliError.InvalidArgument;
+    }
+    if (mode == .live and options.once) {
+        try io.eprint("gt web: --live cannot be combined with --once\n", .{});
+        return CliError.InvalidArgument;
     }
 
     if (!web.isLoopbackHost(options.host)) {
@@ -1048,6 +1143,33 @@ fn cmdWeb(allocator: Allocator, args: []const []const u8) !void {
 
     var repo = try repo_mod.discoverRepo(allocator);
     defer repo.deinit();
+
+    if (mode == .live) {
+        if (live_repo_arg == null) {
+            live_resolved_repo = try github_live.resolveCurrentRepo(allocator);
+            live_repo_arg = live_resolved_repo.?.slug;
+        }
+        if (live_subscribe and live_webhook_url == null) {
+            try io.eprint("gt web: --webhook-url is required with --live unless --no-subscribe is used\n", .{});
+            return CliError.MissingArgument;
+        }
+        try github_live.startDaemon(allocator, .{
+            .repo = live_repo_arg.?,
+            .host = live_host,
+            .port = live_port,
+            .path = live_path,
+            .webhook_url = live_webhook_url,
+            .secret = live_secret,
+            .remote = live_remote,
+            .interval_ms = live_interval_ms,
+            .once = false,
+            .subscribe = live_subscribe,
+            .dry_run = live_dry_run,
+            .git_sync = live_git_sync,
+            .bot_principal = live_bot_principal,
+            .bot_device = live_bot_device,
+        });
+    }
 
     try web.serve(allocator, repo, options);
 }

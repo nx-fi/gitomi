@@ -73,44 +73,53 @@
     });
   }
 
-  function initParallax() {
-    if (reduceMotion) return;
+  function initFloatingBrand() {
+    const brand = document.querySelector("[data-floating-brand]");
+    const slot = document.querySelector("[data-brand-slot]");
+    if (!brand || !slot) return;
 
-    const layers = Array.from(document.querySelectorAll("[data-parallax]"));
-    if (!layers.length) return;
-
-    let pointerX = 0;
-    let pointerY = 0;
+    let startTop = 0;
+    let startLeft = 0;
+    let dockTop = 18;
+    let dockLeft = 18;
+    let startScale = 1.16;
+    let dockScale = 0.78;
     let ticking = false;
 
     function clamp(value, min, max) {
       return Math.min(max, Math.max(min, value));
     }
 
+    function ease(value) {
+      return value * value * (3 - 2 * value);
+    }
+
+    function lerp(from, to, amount) {
+      return from + (to - from) * amount;
+    }
+
+    function measure() {
+      const rect = slot.getBoundingClientRect();
+      startTop = rect.top + window.scrollY;
+      startLeft = rect.left;
+      dockTop = window.innerWidth <= 820 ? 12 : 18;
+      dockLeft = window.innerWidth <= 820 ? 12 : 18;
+      startScale = window.innerWidth <= 520 ? 0.92 : 1.16;
+      dockScale = window.innerWidth <= 520 ? 0.68 : 0.78;
+    }
+
     function update() {
-      const viewportHeight = window.innerHeight || 1;
+      const scrollY = window.scrollY || window.pageYOffset || 0;
+      const progress = ease(clamp(scrollY / 320, 0, 1));
+      const naturalTop = startTop - scrollY;
+      const top = lerp(naturalTop, dockTop, progress);
+      const left = lerp(startLeft, dockLeft, progress);
+      const scale = lerp(startScale, dockScale, progress);
 
-      layers.forEach((layer) => {
-        const depth = Number.parseFloat(layer.getAttribute("data-depth") || "10");
-        const rect = layer.getBoundingClientRect();
-        const centerOffset = rect.top + rect.height / 2 - viewportHeight / 2;
-        const progress = clamp(centerOffset / (viewportHeight * 0.7), -1, 1);
-        const explode = clamp(Math.abs(progress) * 1.18, 0, 1);
-        const scrollX = progress * depth * 4.2;
-        const scrollY = -progress * Math.abs(depth) * 8.6;
-        const rotate = progress * depth * 0.08;
-        const mouseX = pointerX * depth * 0.72;
-        const mouseY = pointerY * Math.abs(depth) * 0.42;
-
-        layer.style.setProperty("--progress", progress.toFixed(3));
-        layer.style.setProperty("--explode", explode.toFixed(3));
-        layer.style.setProperty("--mouse-x", `${mouseX.toFixed(2)}px`);
-        layer.style.setProperty("--mouse-y", `${mouseY.toFixed(2)}px`);
-        layer.style.setProperty("--scroll-x", `${scrollX.toFixed(2)}px`);
-        layer.style.setProperty("--scroll-y", `${scrollY.toFixed(2)}px`);
-        layer.style.setProperty("--scroll-rotate", `${rotate.toFixed(2)}deg`);
-      });
-
+      brand.style.setProperty("--brand-top", `${top.toFixed(2)}px`);
+      brand.style.setProperty("--brand-left", `${left.toFixed(2)}px`);
+      brand.style.setProperty("--brand-scale", scale.toFixed(3));
+      brand.classList.toggle("is-docked", progress > 0.92);
       ticking = false;
     }
 
@@ -120,21 +129,16 @@
       window.requestAnimationFrame(update);
     }
 
-    window.addEventListener(
-      "pointermove",
-      (event) => {
-        pointerX = (event.clientX / Math.max(window.innerWidth, 1) - 0.5) * 2;
-        pointerY = (event.clientY / Math.max(window.innerHeight, 1) - 0.5) * 2;
-        requestUpdate();
-      },
-      { passive: true }
-    );
+    measure();
+    update();
     window.addEventListener("scroll", requestUpdate, { passive: true });
-    window.addEventListener("resize", requestUpdate);
-    requestUpdate();
+    window.addEventListener("resize", () => {
+      measure();
+      requestUpdate();
+    });
   }
 
   initCopyButtons();
   initTypewriter();
-  initParallax();
+  initFloatingBrand();
 })();

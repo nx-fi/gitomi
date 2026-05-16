@@ -62,14 +62,14 @@ pub const GitHubClient = struct {
     };
 
     fn requestInternal(self: GitHubClient, method: []const u8, path: []const u8, body: ?[]const u8, options: RequestOptions) !?[]u8 {
-        if (self.use_gh) return try self.requestGhInternal(method, path, body, options);
-
         if (self.dry_run) {
             try out("{s} {s}", .{ method, path });
             if (body) |bytes| try out(" {s}", .{bytes});
             try out("\n", .{});
             return try self.allocator.dupe(u8, "{}");
         }
+
+        if (self.use_gh) return try self.requestGhInternal(method, path, body, options);
 
         const url = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.api_url, path });
         defer self.allocator.free(url);
