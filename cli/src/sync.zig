@@ -51,6 +51,28 @@ pub fn syncPull(allocator: Allocator, remote: []const u8) !void {
     try admitStagedInboxRefs(allocator, staging_prefix);
 }
 
+fn expectedRepoIdForAdmission(allocator: Allocator, genesis_oid: []const u8) ![]u8 {
+    var repo = try repo_mod.discoverRepo(allocator);
+    defer repo.deinit();
+
+    var cfg = repo_mod.loadConfig(allocator, repo.config_path) catch |err| switch (err) {
+        CliError.ConfigNotFound => {
+            var manifest = try repo_mod.loadGenesisManifest(allocator, genesis_oid);
+            defer manifest.deinit();
+            return try allocator.dupe(u8, manifest.repo_id);
+        },
+        CliError.ConfigInvalid => {
+            try eprint("gt sync: invalid Gitomi config; run `gt init` or fix .git/gitomi/config.toml\n", .{});
+            return err;
+        },
+        else => return err,
+    };
+    defer cfg.deinit();
+
+    try repo_mod.validateConfigRepoId(allocator, cfg);
+    return try allocator.dupe(u8, cfg.repo_id);
+}
+
 fn clearStagedRemoteRefs(allocator: Allocator, staging_prefix: []const u8) !void {
     const refs = try listRefs(allocator, staging_prefix);
     defer git.freeStringList(allocator, refs);
@@ -290,11 +312,14 @@ pub fn admitStagedInboxRefs(allocator: Allocator, staging_prefix: []const u8) !v
         return CliError.UserError;
     }
 
+    const expected_repo_id = try expectedRepoIdForAdmission(allocator, genesis_oid.?);
+    defer allocator.free(expected_repo_id);
+
     const empty_tree = try emptyTreeOid(allocator);
     defer allocator.free(empty_tree);
 
     for (refs) |staged_ref| {
-        try admitStagedInboxRef(allocator, staging_prefix, staged_ref, empty_tree, genesis_oid.?);
+        try admitStagedInboxRef(allocator, staging_prefix, staged_ref, empty_tree, genesis_oid.?, expected_repo_id);
     }
 }
 
@@ -319,6 +344,7 @@ pub fn admitStagedInboxRef(
     staged_ref: []const u8,
     empty_tree: []const u8,
     genesis_oid: []const u8,
+    expected_repo_id: []const u8,
 ) !void {
     const staged_oid = (try resolveOptionalRef(allocator, staged_ref)) orelse return;
     defer allocator.free(staged_oid);
@@ -336,7 +362,7 @@ pub fn admitStagedInboxRef(
         }
 
         if (try isAncestor(allocator, old_oid, staged_oid)) {
-            const admitted = validateInboxRange(allocator, staged_ref, old_oid, empty_tree, genesis_oid) catch |err| {
+            const admitted = validateInboxRange(allocator, staged_ref, old_oid, empty_tree, genesis_oid, expected_repo_id) catch |err| {
                 if (errors.isUserError(err)) {
                     try quarantineStagedRef(allocator, staging_prefix, staged_ref, staged_oid);
                     return;
@@ -359,7 +385,7 @@ pub fn admitStagedInboxRef(
         return;
     }
 
-    const admitted = validateInboxRange(allocator, staged_ref, null, empty_tree, genesis_oid) catch |err| {
+    const admitted = validateInboxRange(allocator, staged_ref, null, empty_tree, genesis_oid, expected_repo_id) catch |err| {
         if (errors.isUserError(err)) {
             try quarantineStagedRef(allocator, staging_prefix, staged_ref, staged_oid);
             return;
@@ -409,6 +435,7 @@ pub fn validateInboxRange(
     local_base: ?[]const u8,
     empty_tree: []const u8,
     genesis_oid: []const u8,
+    expected_repo_id: []const u8,
 ) !usize {
     const log = try inboxCommitLog(allocator, ref, local_base, genesis_oid);
     defer allocator.free(log);
@@ -433,6 +460,7 @@ pub fn validateInboxRange(
         }
         var envelope = try validateInboxRecord(allocator, record, expected_first_parent, empty_tree);
         defer envelope.deinit();
+        try validateEnvelopeRepoId(record.commit, ref, envelope.repo_id, expected_repo_id);
         if (try auth_verifier.checkAndRemember(.{
             .ref = ref,
             .commit = record.commit,
@@ -448,6 +476,12 @@ pub fn validateInboxRange(
         count += 1;
     }
     return count;
+}
+
+fn validateEnvelopeRepoId(commit: []const u8, ref: []const u8, repo_id: []const u8, expected_repo_id: []const u8) !void {
+    if (std.mem.eql(u8, repo_id, expected_repo_id)) return;
+    try eprint("gt sync: rejecting {s} on {s}: repo_id {s} does not match local repo_id {s}\n", .{ commit, ref, repo_id, expected_repo_id });
+    return CliError.UserError;
 }
 
 fn rememberActorSeq(
@@ -638,6 +672,24 @@ test "staged ref mapping rejects outside and non-inbox refs" {
             std.testing.allocator,
             "refs/gitomi/staging/origin",
             "refs/gitomi/staging/origin/genesis",
+        ),
+    );
+}
+
+test "envelope repo id validation rejects foreign repositories" {
+    try validateEnvelopeRepoId(
+        "commit-1",
+        "refs/gitomi/inbox/alice/laptop",
+        "018f0000-0000-7000-8000-000000000001",
+        "018f0000-0000-7000-8000-000000000001",
+    );
+    try std.testing.expectError(
+        CliError.UserError,
+        validateEnvelopeRepoId(
+            "commit-2",
+            "refs/gitomi/inbox/alice/laptop",
+            "018f0000-0000-7000-8000-000000000002",
+            "018f0000-0000-7000-8000-000000000001",
         ),
     );
 }
