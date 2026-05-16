@@ -50,13 +50,25 @@ pub const GitHubClient = struct {
     dry_run: bool = false,
 
     pub fn request(self: GitHubClient, method: []const u8, path: []const u8, body: ?[]const u8) ![]u8 {
-        if (self.use_gh) return self.requestGh(method, path, body);
+        return (try self.requestInternal(method, path, body, .{})).?;
+    }
+
+    pub fn requestAllowNotFound(self: GitHubClient, method: []const u8, path: []const u8, body: ?[]const u8) !?[]u8 {
+        return try self.requestInternal(method, path, body, .{ .not_found_as_null = true });
+    }
+
+    const RequestOptions = struct {
+        not_found_as_null: bool = false,
+    };
+
+    fn requestInternal(self: GitHubClient, method: []const u8, path: []const u8, body: ?[]const u8, options: RequestOptions) !?[]u8 {
+        if (self.use_gh) return try self.requestGhInternal(method, path, body, options);
 
         if (self.dry_run) {
             try out("{s} {s}", .{ method, path });
             if (body) |bytes| try out(" {s}", .{bytes});
             try out("\n", .{});
-            return self.allocator.dupe(u8, "{}");
+            return try self.allocator.dupe(u8, "{}");
         }
 
         const url = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.api_url, path });
@@ -102,6 +114,7 @@ pub const GitHubClient = struct {
 
         defer result.deinit();
         const stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
+        if (options.not_found_as_null and githubRequestStderrIsNotFound(stderr)) return null;
         if (stderr.len != 0) {
             try eprint("gt github: GitHub API request failed: {s}\n", .{stderr});
         } else {
@@ -111,6 +124,10 @@ pub const GitHubClient = struct {
     }
 
     pub fn requestGh(self: GitHubClient, method: []const u8, path: []const u8, body: ?[]const u8) ![]u8 {
+        return (try self.requestGhInternal(method, path, body, .{})).?;
+    }
+
+    fn requestGhInternal(self: GitHubClient, method: []const u8, path: []const u8, body: ?[]const u8, options: RequestOptions) !?[]u8 {
         const endpoint = std.mem.trimLeft(u8, path, "/");
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(self.allocator);
@@ -139,6 +156,7 @@ pub const GitHubClient = struct {
 
         defer result.deinit();
         const stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
+        if (options.not_found_as_null and githubRequestStderrIsNotFound(stderr)) return null;
         if (stderr.len != 0) {
             try eprint("gt github: gh api request failed: {s}\n", .{stderr});
         } else {
@@ -163,6 +181,12 @@ pub fn githubTokenFromEnv(allocator: Allocator) !?[]u8 {
         },
         else => return err,
     };
+}
+
+pub fn githubRequestStderrIsNotFound(stderr: []const u8) bool {
+    return std.mem.indexOf(u8, stderr, "HTTP 404") != null or
+        std.mem.indexOf(u8, stderr, "returned error: 404") != null or
+        std.mem.indexOf(u8, stderr, "error: 404") != null;
 }
 
 pub fn githubSizedString(allocator: Allocator, value: ?[]const u8, fallback: []const u8, max_bytes: usize) ![]u8 {

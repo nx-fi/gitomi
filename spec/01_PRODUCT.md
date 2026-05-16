@@ -290,6 +290,23 @@ as merged even if a local clone cannot currently prove that `base_ref` contains
 the recorded commit. Implementations SHOULD separately report whether the local
 Data Plane confirms the recorded merge result.
 
+Gitomi pull request state does not own the Data Plane branch lifecycle. Merging
+or closing a pull request MUST NOT implicitly delete a local branch or remote
+tracking ref. A branch whose name is the `head_ref` of a merged or closed pull
+request and is not referenced by any open pull request is an inactive pull
+request branch for presentation purposes. Forge UIs SHOULD hide inactive pull
+request branches from default branch selectors and branch counts, while keeping
+them reachable by direct ref lookup and in explicit refs/admin views. This
+matches the practical effect of GitHub's "delete branch after merge" workflow
+without destroying local-first user state.
+
+Deleting a remote branch after a merge is a Git ref deletion in that remote
+repository, not a pull request metadata change. Local clones MAY continue to
+hold stale `refs/remotes/<remote>/...` tracking refs until an explicit prune
+operation, such as `git fetch --prune <remote>`, removes them. Implementations
+SHOULD expose pruning as an explicit user action and MUST distinguish it from
+deleting local `refs/heads/...` branches.
+
 Structured reviews are optional in v1. Requested reviewers are modeled directly
 on the pull request. General review discussion is represented by comments whose
 `parent_kind` is `pull`. Implementations MAY add future `review.*` events or

@@ -203,6 +203,7 @@ pub const CodeSyncMode = enum {
     exchange,
     import,
     publish,
+    prune_remote,
 };
 
 pub const CodeSyncFlashKind = enum {

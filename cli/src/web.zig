@@ -16,6 +16,7 @@ const pulls_page = @import("web/pulls.zig");
 const refs_page = @import("web/refs.zig");
 const repo_mod = @import("repo.zig");
 const shared = @import("web/shared.zig");
+const worktrees_page = @import("web/worktrees.zig");
 const zwf = @import("zwf.zig");
 
 const Allocator = std.mem.Allocator;
@@ -64,6 +65,7 @@ const routes = [_]Route{
     Route.get("/index/rebuild", handleIndexRebuild),
     Route.get("/nav/stats", handleNavStats),
     Route.get("/", handleCodePage),
+    Route.get("/code/root/:component", handleCodeRootComponent),
     Route.get("/code", handleCodePage),
     Route.post("/code/sync", handleCodeSyncPost),
     Route.get("/blame", handleBlamePage),
@@ -108,6 +110,7 @@ const routes = [_]Route{
     Route.get("/events", handleEventsPage),
     Route.get("/refs", handleRefsPage),
     Route.post("/refs/sync", handleRefsSyncPost),
+    Route.get("/worktrees", handleWorktreesPage),
     Route.get("/new-issue", handleNewIssuePage),
     Route.get("/new-pull", handleNewPullPage),
     Route.get("/new-pr", handleNewPullPage),
@@ -235,6 +238,18 @@ fn handleCodePage(ctx: WebContext) !void {
     try sendOwnedHtml(ctx, try explorer.renderCodePage(ctx.allocator, ctx.repo, ctx.request.target));
 }
 
+fn handleCodeRootComponent(ctx: WebContext) !void {
+    const component = ctx.request.param("component") orelse {
+        try sendPlainNotFound(ctx);
+        return;
+    };
+    const body = try explorer.renderCodeRootComponent(ctx.allocator, ctx.repo, ctx.request.target, component) orelse {
+        try sendPlainNotFound(ctx);
+        return;
+    };
+    try sendOwnedResponse(ctx, 200, "OK", "text/html", body, "Cache-Control: no-store\r\n");
+}
+
 fn handleCodeSyncPost(ctx: WebContext) !void {
     try explorer.handleCodeSyncPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
 }
@@ -330,6 +345,8 @@ fn handlePullActionPost(ctx: WebContext) !void {
 
     if (std.mem.eql(u8, action, "conflicts")) {
         try pulls_page.handlePullConflictPost(ctx.allocator, ctx.repo, ctx.stream, pull_ref, ctx.request.body);
+    } else if (std.mem.eql(u8, action, "merge")) {
+        try pulls_page.handlePullMergePost(ctx.allocator, ctx.repo, ctx.stream, pull_ref, ctx.request.body);
     } else if (std.mem.eql(u8, action, "checklist")) {
         try pulls_page.handlePullChecklistPost(ctx.allocator, ctx.repo, ctx.stream, pull_ref, ctx.request.body);
     } else if (std.mem.eql(u8, action, "comments")) {
@@ -441,6 +458,10 @@ fn handleRefsPage(ctx: WebContext) !void {
 
 fn handleRefsSyncPost(ctx: WebContext) !void {
     try refs_page.handleRefsSyncPost(ctx.allocator, ctx.repo, ctx.stream);
+}
+
+fn handleWorktreesPage(ctx: WebContext) !void {
+    try sendOwnedHtml(ctx, try worktrees_page.renderWorktreesPage(ctx.allocator, ctx.repo));
 }
 
 fn handleNewIssuePage(ctx: WebContext) !void {

@@ -266,6 +266,13 @@ pub const Request = struct {
         return self.headers.containsToken(name, token);
     }
 
+    pub fn isFormUrlEncoded(self: Request) bool {
+        const content_type = self.headerValue("content-type") orelse return false;
+        const semicolon = std.mem.indexOfScalar(u8, content_type, ';') orelse content_type.len;
+        const media_type = std.mem.trim(u8, content_type[0..semicolon], " \t");
+        return std.ascii.eqlIgnoreCase(media_type, "application/x-www-form-urlencoded");
+    }
+
     pub fn keepAlive(self: Request) bool {
         if (self.headerContainsToken("connection", "close")) return false;
         if (self.version == .http10) return self.headerContainsToken("connection", "keep-alive");
@@ -315,6 +322,7 @@ fn parseWithAllocator(allocator: ?Allocator, raw: []const u8) !Request {
     const request_line = lines.next() orelse return error.BadRequest;
     const request_line_info = try parseRequestLine(request_line);
     try validateHeaderBlock(headers.raw);
+    try validateHostForVersion(headers, request_line_info.version);
 
     const body_start = std.math.add(usize, header_end, 4) catch return error.BadRequest;
     const plan = try readPlanFromHeaders(headers);
@@ -384,6 +392,50 @@ fn readPlanFromHeaders(headers: HeaderMap) !ReadPlan {
     }
     if (content_len) |len| return .{ .content_length = len };
     return .{ .none = {} };
+}
+
+fn validateHostForVersion(headers: HeaderMap, version: HttpVersion) !void {
+    if (version != .http11) return;
+
+    var count: usize = 0;
+    var it = HeaderIterator.init(headers.raw);
+    while (it.next()) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, "host")) continue;
+        count += 1;
+        if (count > 1) return error.BadRequest;
+        try validateHostHeaderValue(header.value);
+    }
+    if (count != 1) return error.BadRequest;
+}
+
+fn validateHostHeaderValue(value: []const u8) !void {
+    if (value.len == 0) return error.BadRequest;
+    for (value) |c| {
+        if (isCtl(c) or c == ' ' or c == '\t' or c == '/' or c == '\\') return error.BadRequest;
+    }
+
+    if (value[0] == '[') {
+        const close = std.mem.indexOfScalar(u8, value, ']') orelse return error.BadRequest;
+        if (close <= 1) return error.BadRequest;
+        if (close + 1 == value.len) return;
+        if (value[close + 1] != ':') return error.BadRequest;
+        try validateHostPort(value[close + 2 ..]);
+        return;
+    }
+
+    if (std.mem.indexOfScalar(u8, value, ':')) |colon| {
+        if (std.mem.indexOfScalar(u8, value[colon + 1 ..], ':') != null) return error.BadRequest;
+        if (colon == 0) return error.BadRequest;
+        try validateHostPort(value[colon + 1 ..]);
+        return;
+    }
+}
+
+fn validateHostPort(port: []const u8) !void {
+    if (port.len == 0) return error.BadRequest;
+    for (port) |c| {
+        if (c < '0' or c > '9') return error.BadRequest;
+    }
 }
 
 pub fn readPlan(headers: []const u8) !ReadPlan {
@@ -758,9 +810,27 @@ test "request parser rejects malformed headers and duplicate content length" {
     ));
 }
 
+test "request parser requires exactly one valid host for http11" {
+    try std.testing.expectError(error.BadRequest, Request.parse(
+        "GET / HTTP/1.1\r\n\r\n",
+    ));
+    try std.testing.expectError(error.BadRequest, Request.parse(
+        "GET / HTTP/1.1\r\nHost: example.test\r\nHost: other.test\r\n\r\n",
+    ));
+    try std.testing.expectError(error.BadRequest, Request.parse(
+        "GET / HTTP/1.1\r\nHost: bad host\r\n\r\n",
+    ));
+    try std.testing.expectError(error.BadRequest, Request.parse(
+        "GET / HTTP/1.1\r\nHost: example.test:\r\n\r\n",
+    ));
+
+    const parsed = try Request.parse("GET / HTTP/1.0\r\n\r\n");
+    try std.testing.expectEqual(HttpVersion.http10, parsed.version);
+}
+
 test "request parser rejects overflowing content length arithmetic" {
     const raw =
-        "POST / HTTP/1.1\r\nContent-Length: " ++
+        "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: " ++
         std.fmt.comptimePrint("{d}", .{std.math.maxInt(usize)}) ++
         "\r\n\r\n";
     try std.testing.expectError(error.RequestTooLarge, Request.parse(raw));
@@ -831,6 +901,28 @@ test "request helper honors accept encoding q zero" {
         "\r\n";
     const allowed_parsed = try Request.parse(allowed);
     try std.testing.expect(allowed_parsed.acceptsGzip());
+}
+
+test "request helper detects url encoded form content type" {
+    const form =
+        "POST / HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1\r\n" ++
+        "Content-Type: application/x-www-form-urlencoded; charset=utf-8\r\n" ++
+        "Content-Length: 9\r\n" ++
+        "\r\n" ++
+        "name=ZWF!";
+    const form_parsed = try Request.parse(form);
+    try std.testing.expect(form_parsed.isFormUrlEncoded());
+
+    const json =
+        "POST / HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1\r\n" ++
+        "Content-Type: application/json\r\n" ++
+        "Content-Length: 2\r\n" ++
+        "\r\n" ++
+        "{}";
+    const json_parsed = try Request.parse(json);
+    try std.testing.expect(!json_parsed.isFormUrlEncoded());
 }
 
 test "form parser decodes url encoded values" {

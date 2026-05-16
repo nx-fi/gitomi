@@ -22,6 +22,7 @@ const githubFixtureProjects = common.githubFixtureProjects;
 const freeProjectPlacements = common.freeProjectPlacements;
 const urlPathEscape = common.urlPathEscape;
 const parseResponseNumber = common.parseResponseNumber;
+const githubRequestStderrIsNotFound = common.githubRequestStderrIsNotFound;
 const issueNumberFromContentUrl = importer.issueNumberFromContentUrl;
 const githubIssueCreateBody = exporter.githubIssueCreateBody;
 const githubPullCreateBody = exporter.githubPullCreateBody;
@@ -76,6 +77,12 @@ test "github repo slugs and API paths are validated" {
     const gh_path = try gh_client.repoPath(std.testing.allocator, "/issues");
     defer std.testing.allocator.free(gh_path);
     try std.testing.expectEqualStrings("/repos/{owner}/{repo}/issues", gh_path);
+}
+
+test "github optional request detects gh and curl 404 output" {
+    try std.testing.expect(githubRequestStderrIsNotFound("gh: Not Found (HTTP 404)"));
+    try std.testing.expect(githubRequestStderrIsNotFound("curl: (22) The requested URL returned error: 404"));
+    try std.testing.expect(!githubRequestStderrIsNotFound("gh: Internal Server Error (HTTP 500)"));
 }
 
 test "github import helpers extract labels authors milestones and counts" {

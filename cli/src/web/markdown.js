@@ -1394,6 +1394,8 @@
     initMarkdownEditors();
   }
 
+  document.addEventListener("gitomi:partial-refresh", renderMarkdownEnhancements);
+
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", renderMarkdownEnhancements);
   } else {

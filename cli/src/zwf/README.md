@@ -17,7 +17,7 @@ The server has socket read/write timeouts and bounded request parsing, but it sh
 - `response.zig`: response writer, typed headers, redirects, cookies, `HEAD` handling, binary/text helpers, and chunked response streaming.
 - `router.zig`: method routes, static routes, path parameters, and allowed-method discovery.
 - `middleware.zig`: static asset serving with content-hash ETags, cache validators, and structured middleware chains.
-- `session.zig`: cookie-backed session ID creation with generated-ID format validation. The caller owns persistence, authorization binding, and session data.
+- `session.zig`: cookie-backed session ID transport with generated-ID format validation. It does not sign or authorize IDs; the caller owns server-side lookup, rotation on authentication changes, authorization binding, and session data.
 - `csrf.zig`: CSRF token generation, extraction, and constant-time verification helpers.
 - `html.zig` and `layout.zig`: small HTML rendering helpers used by Gitomi's pages.
 
@@ -64,7 +64,8 @@ try response.sendWithHeaders(200, "OK", "text/plain", "done\n", &headers, .{ .ch
 - Responses validate status text and header names/values before writing.
 - Caller-provided response headers may not override framework-managed framing, content type, or hop-by-hop headers.
 - Static assets use content-hash ETags and are sent uncompressed so validators identify the exact representation.
-- The stored gzip writer exists for explicit callers, but automatic request-driven gzip is disabled because the current implementation does not perform useful compression.
+- ZWF does not currently provide response compression.
+- CSRF form token extraction only parses `application/x-www-form-urlencoded` bodies.
 
 ## Maintenance Rules
 
@@ -82,5 +83,7 @@ For quick checks while working on ZWF without rebuilding all of Gitomi:
 env ZIG_GLOBAL_CACHE_DIR=/tmp/gitomi-zig-cache zig test src/zwf/request.zig
 env ZIG_GLOBAL_CACHE_DIR=/tmp/gitomi-zig-cache zig test src/zwf/response.zig
 env ZIG_GLOBAL_CACHE_DIR=/tmp/gitomi-zig-cache zig test src/zwf/middleware.zig
+env ZIG_GLOBAL_CACHE_DIR=/tmp/gitomi-zig-cache zig test src/zwf/csrf.zig
+env ZIG_GLOBAL_CACHE_DIR=/tmp/gitomi-zig-cache zig test src/zwf/session.zig
 env ZIG_GLOBAL_CACHE_DIR=/tmp/gitomi-zig-cache zig test src/zwf/server.zig
 ```

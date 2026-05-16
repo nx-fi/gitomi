@@ -565,6 +565,106 @@
     document.querySelectorAll("[data-symbols-sidebar]").forEach(initSymbolsResize);
   }
 
+  function syncRootSidebarScroll(sidebar) {
+    const rect = sidebar.getBoundingClientRect();
+    const height = Math.max(sidebar.scrollHeight || 0, rect.height || 0);
+    sidebar.style.setProperty("--root-sidebar-height", `${Math.ceil(height)}px`);
+  }
+
+  function syncRootSidebars(root) {
+    const scope = root || document;
+    scope.querySelectorAll(".root-sidebar").forEach(function (sidebar) {
+      syncRootSidebarScroll(sidebar);
+    });
+  }
+
+  function initRootSidebarScroll(root) {
+    const scope = root || document;
+    scope.querySelectorAll(".root-sidebar").forEach(function (sidebar) {
+      syncRootSidebarScroll(sidebar);
+      if (sidebar.dataset.rootSidebarScrollReady === "yes") return;
+      sidebar.dataset.rootSidebarScrollReady = "yes";
+
+      if ("ResizeObserver" in window) {
+        const observer = new ResizeObserver(function () {
+          syncRootSidebarScroll(sidebar);
+        });
+        observer.observe(sidebar);
+        sidebar.gitomiRootSidebarObserver = observer;
+      }
+    });
+  }
+
+  function notifyPartialRefresh(root) {
+    document.dispatchEvent(new CustomEvent("gitomi:partial-refresh", {
+      detail: { root: root || document },
+    }));
+  }
+
+  function partialErrorNode(slot) {
+    const section = document.createElement("div");
+    section.className = "root-sidebar-section root-sidebar-error";
+
+    const heading = document.createElement("h2");
+    heading.textContent = slot.dataset.rootPartialLabel || "Section";
+    section.appendChild(heading);
+
+    const message = document.createElement("p");
+    message.className = "root-sidebar-empty";
+    message.textContent = "Could not load this section.";
+    section.appendChild(message);
+
+    const retry = document.createElement("button");
+    retry.className = "button secondary root-partial-retry";
+    retry.type = "button";
+    retry.textContent = "Retry";
+    retry.addEventListener("click", function () {
+      loadRootPartial(slot, true);
+    });
+    section.appendChild(retry);
+
+    return section;
+  }
+
+  async function loadRootPartial(slot, retrying) {
+    const url = slot.dataset.rootPartial;
+    if (!url) return;
+    if (!retrying && slot.dataset.rootPartialReady === "yes") return;
+    slot.dataset.rootPartialReady = "yes";
+    slot.setAttribute("aria-busy", "true");
+
+    try {
+      const response = await fetch(url, {
+        cache: "no-store",
+        headers: { Accept: "text/html" },
+      });
+      if (!response.ok) throw new Error("partial load failed");
+      const html = (await response.text()).trim();
+      const parent = slot.parentElement;
+      if (!html) {
+        slot.remove();
+        notifyPartialRefresh(parent);
+        return;
+      }
+
+      const template = document.createElement("template");
+      template.innerHTML = html;
+      slot.replaceWith(template.content);
+      notifyPartialRefresh(parent);
+    } catch (_) {
+      slot.removeAttribute("aria-busy");
+      if (slot.hasAttribute("data-root-partial-silent")) return;
+      slot.replaceChildren(partialErrorNode(slot));
+    }
+  }
+
+  function initRootPartials(root) {
+    const scope = root || document;
+    scope.querySelectorAll("[data-root-partial]").forEach(function (slot) {
+      loadRootPartial(slot, false);
+    });
+  }
+
   function initCodeControls() {
     initRightPanelOffsets();
     initCopyButtons();
@@ -572,7 +672,22 @@
     initTextCopyButtons();
     initCodeLineActionControls();
     initSymbolsToggles();
+    initRootSidebarScroll(document);
+    initRootPartials(document);
   }
+
+  document.addEventListener("gitomi:partial-refresh", function (event) {
+    const detail = event.detail || {};
+    initRootSidebarScroll(document);
+    window.requestAnimationFrame(function () {
+      syncRootSidebars(document);
+    });
+    initRootPartials(detail.root || document);
+  });
+
+  window.addEventListener("resize", function () {
+    syncRootSidebars(document);
+  });
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", initCodeControls);

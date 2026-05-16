@@ -151,6 +151,7 @@ const ImportStats = struct {
 const ImportedObject = struct {
     id: []u8,
     is_new: bool,
+    comment_count: ?u64 = null,
 };
 
 const ImportedCommentRef = struct {
@@ -257,10 +258,13 @@ fn importFromFile(allocator: Allocator, path: []const u8, options: ImportOptions
             const number = jsonInteger(item.object.get("number")) orelse continue;
             const projects = try githubFixtureProjects(allocator, root, "issue", number, item.object);
             defer freeProjectPlacements(allocator, projects);
-            const issue_result = try importIssueObject(allocator, item.object, projects, options, stats);
+            var writer = try EventWriter.initForActor(allocator, "gt github import", options.bot_principal, options.bot_device);
+            defer writer.deinit();
+            const issue_result = try importIssueObject(allocator, &writer, item.object, projects, stats);
             defer if (issue_result) |result| allocator.free(result.id);
             if (issue_result) |result| {
-                if (result.is_new) try importFixtureComments(allocator, root, "issue", item.object, result.id, options, stats);
+                if (result.is_new) try importFixtureComments(allocator, &writer, root, "issue", item.object, result.id, options, stats);
+                try writer.commitStaged();
             }
         }
     }
@@ -268,10 +272,13 @@ fn importFromFile(allocator: Allocator, path: []const u8, options: ImportOptions
         try eprint("gt github import: importing {d} fixture pull record{s}\n", .{ pulls.items.len, if (pulls.items.len == 1) "" else "s" });
         for (pulls.items) |item| {
             if (item != .object) continue;
-            const pull_result = try importPullObject(allocator, item.object, options, stats);
+            var writer = try EventWriter.initForActor(allocator, "gt github import", options.bot_principal, options.bot_device);
+            defer writer.deinit();
+            const pull_result = try importPullObject(allocator, &writer, item.object, stats);
             defer if (pull_result) |result| allocator.free(result.id);
             if (pull_result) |result| {
-                if (result.is_new) try importFixtureComments(allocator, root, "pull", item.object, result.id, options, stats);
+                if (result.is_new) try importFixtureComments(allocator, &writer, root, "pull", item.object, result.id, options, stats);
+                try writer.commitStaged();
             }
         }
     }
@@ -279,6 +286,7 @@ fn importFromFile(allocator: Allocator, path: []const u8, options: ImportOptions
 
 fn importFixtureComments(
     allocator: Allocator,
+    writer: *EventWriter,
     root: std.json.ObjectMap,
     parent_kind: []const u8,
     object: std.json.ObjectMap,
@@ -296,7 +304,7 @@ fn importFixtureComments(
     defer allocator.free(key);
     const comments = jsonArray(comments_root.get(key)) orelse return;
     try eprint("gt github import: importing {d} fixture comment{s} for {s} #{d}\n", .{ comments.items.len, if (comments.items.len == 1) "" else "s", parent_kind, number });
-    try importCommentsArray(allocator, parent_kind, parent_id, comments, options, stats);
+    try importCommentsArray(allocator, writer, parent_kind, parent_id, comments, stats);
 }
 
 fn importFromApi(allocator: Allocator, client: GitHubClient, options: ImportOptions, stats: *ImportStats) !void {
@@ -320,10 +328,14 @@ fn importFromApi(allocator: Allocator, client: GitHubClient, options: ImportOpti
         for (issues.items) |item| {
             if (item != .object) continue;
             if (item.object.get("pull_request") != null) continue;
-            const issue_result = try importIssueObject(allocator, item.object, &.{}, options, stats);
+            const number = jsonInteger(item.object.get("number")) orelse continue;
+            var writer = try EventWriter.initForActor(allocator, "gt github import", options.bot_principal, options.bot_device);
+            defer writer.deinit();
+            const issue_result = try importIssueObject(allocator, &writer, item.object, &.{}, stats);
             defer if (issue_result) |result| allocator.free(result.id);
             if (issue_result) |result| {
-                if (result.is_new) try importApiComments(allocator, client, "issue", jsonInteger(item.object.get("number")) orelse continue, result.id, options, stats);
+                if (result.is_new and shouldFetchApiComments(result.comment_count)) try importApiComments(allocator, &writer, client, "issue", number, result.id, options, stats);
+                try writer.commitStaged();
             }
         }
         if (issues.items.len < 100) break;
@@ -349,10 +361,13 @@ fn importFromApi(allocator: Allocator, client: GitHubClient, options: ImportOpti
         for (pulls.items) |item| {
             if (item != .object) continue;
             const number = jsonInteger(item.object.get("number")) orelse continue;
-            const pull_result = try importApiPullObject(allocator, client, item.object, options, stats);
+            var writer = try EventWriter.initForActor(allocator, "gt github import", options.bot_principal, options.bot_device);
+            defer writer.deinit();
+            const pull_result = try importApiPullObject(allocator, &writer, client, item.object, stats);
             defer if (pull_result) |result| allocator.free(result.id);
             if (pull_result) |result| {
-                if (result.is_new) try importApiComments(allocator, client, "pull", number, result.id, options, stats);
+                if (result.is_new and shouldFetchApiComments(result.comment_count)) try importApiComments(allocator, &writer, client, "pull", number, result.id, options, stats);
+                try writer.commitStaged();
             }
         }
         if (pulls.items.len < 100) break;
@@ -368,9 +383,9 @@ fn importFromApi(allocator: Allocator, client: GitHubClient, options: ImportOpti
 
 fn importApiPullObject(
     allocator: Allocator,
+    writer: *EventWriter,
     client: GitHubClient,
     summary: std.json.ObjectMap,
-    options: ImportOptions,
     stats: *ImportStats,
 ) !?ImportedObject {
     const number = jsonInteger(summary.get("number")) orelse return null;
@@ -398,11 +413,12 @@ fn importApiPullObject(
             return CliError.InvalidArgument;
         },
     };
-    return try importPullObject(allocator, pull, options, stats);
+    return try importPullObject(allocator, writer, pull, stats);
 }
 
 fn importApiComments(
     allocator: Allocator,
+    writer: *EventWriter,
     client: GitHubClient,
     parent_kind: []const u8,
     number: i64,
@@ -411,28 +427,48 @@ fn importApiComments(
     stats: *ImportStats,
 ) !void {
     if (!options.include_comments) return;
-    try eprint("gt github import: fetching comments for {s} #{d}\n", .{ parent_kind, number });
-    const suffix = try std.fmt.allocPrint(allocator, "/issues/{d}/comments?per_page=100", .{number});
-    defer allocator.free(suffix);
-    const path = try client.repoPath(allocator, suffix);
-    defer allocator.free(path);
-    const raw = try client.request("GET", path, null);
-    defer allocator.free(raw);
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{});
-    defer parsed.deinit();
-    const comments = switch (parsed.value) {
-        .array => |array| array,
-        else => return,
-    };
-    try eprint("gt github import: {s} #{d}: {d} comment{s}\n", .{ parent_kind, number, comments.items.len, if (comments.items.len == 1) "" else "s" });
-    try importCommentsArray(allocator, parent_kind, parent_id, comments, options, stats);
+
+    var repo = try repo_mod.discoverRepo(allocator);
+    defer repo.deinit();
+    try index.ensureIndex(allocator, repo);
+    var db = try index.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
+    var comment_refs = std.AutoHashMap(i64, ImportedCommentRef).init(allocator);
+    defer freeImportedCommentRefs(allocator, &comment_refs);
+
+    var total: usize = 0;
+    var page: usize = 1;
+    while (page <= options.max_pages) : (page += 1) {
+        try eprint("gt github import: fetching comments for {s} #{d} page {d}\n", .{ parent_kind, number, page });
+        const suffix = try std.fmt.allocPrint(allocator, "/issues/{d}/comments?per_page=100&page={d}", .{ number, page });
+        defer allocator.free(suffix);
+        const path = try client.repoPath(allocator, suffix);
+        defer allocator.free(path);
+        const raw = try client.request("GET", path, null);
+        defer allocator.free(raw);
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{});
+        defer parsed.deinit();
+        const comments = switch (parsed.value) {
+            .array => |array| array,
+            else => return,
+        };
+        if (comments.items.len == 0) break;
+        total += comments.items.len;
+        try importCommentsArrayWithContext(allocator, &db, &comment_refs, writer, parent_kind, parent_id, comments, stats);
+        if (comments.items.len < 100) break;
+    }
+    try eprint("gt github import: {s} #{d}: {d} comment{s}\n", .{ parent_kind, number, total, if (total == 1) "" else "s" });
 }
 
 fn importClassicProjects(allocator: Allocator, client: GitHubClient, options: ImportOptions, stats: *ImportStats) !void {
     try eprint("gt github import: fetching classic project boards\n", .{});
     const path = try client.repoPath(allocator, "/projects?per_page=100");
     defer allocator.free(path);
-    const raw = try client.request("GET", path, null);
+    const raw = (try client.requestAllowNotFound("GET", path, null)) orelse {
+        try eprint("gt github import: classic project boards unavailable; skipping\n", .{});
+        return;
+    };
     defer allocator.free(raw);
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{});
     defer parsed.deinit();
@@ -460,7 +496,7 @@ fn importClassicProjectColumns(
 ) !void {
     const path = try std.fmt.allocPrint(allocator, "/projects/{d}/columns?per_page=100", .{project_id});
     defer allocator.free(path);
-    const raw = try client.request("GET", path, null);
+    const raw = (try client.requestAllowNotFound("GET", path, null)) orelse return;
     defer allocator.free(raw);
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{});
     defer parsed.deinit();
@@ -487,7 +523,7 @@ fn importClassicProjectCards(
 ) !void {
     const path = try std.fmt.allocPrint(allocator, "/projects/columns/{d}/cards?per_page=100", .{column_id});
     defer allocator.free(path);
-    const raw = try client.request("GET", path, null);
+    const raw = (try client.requestAllowNotFound("GET", path, null)) orelse return;
     defer allocator.free(raw);
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{});
     defer parsed.deinit();
@@ -515,7 +551,10 @@ fn importClassicProjectCards(
         defer allocator.free(project);
         const column = try githubSizedString(allocator, column_name, "", git.max_payload_atom_bytes);
         defer allocator.free(column);
-        try writeImportedIssueProjectAdded(allocator, options, issue_id, occurred_at, project, column);
+        var writer = try EventWriter.initForActor(allocator, "gt github import", options.bot_principal, options.bot_device);
+        defer writer.deinit();
+        try writeImportedIssueProjectAdded(allocator, &writer, issue_id, occurred_at, project, column);
+        try writer.commitStaged();
         stats.project_cards += 1;
     }
 }
@@ -546,9 +585,9 @@ pub fn issueNumberFromContentUrl(url: []const u8) ?i64 {
 
 fn importIssueObject(
     allocator: Allocator,
+    writer: *EventWriter,
     issue: std.json.ObjectMap,
     projects: []const event_mod.IssueProjectPlacement,
-    options: ImportOptions,
     stats: *ImportStats,
 ) !?ImportedObject {
     const number = jsonInteger(issue.get("number")) orelse return null;
@@ -574,25 +613,26 @@ fn importIssueObject(
     defer allocator.free(source_author);
     const milestone = try githubSizedString(allocator, githubMilestoneTitle(issue), "", git.max_payload_atom_bytes);
     defer allocator.free(milestone);
+    const comment_count = githubOptionalUnsignedField(issue, &.{ "comments", "comment_count" });
 
     const issue_id = try util.newUuidV7(allocator);
     errdefer allocator.free(issue_id);
     try eprint("gt github import: importing issue #{d}\n", .{number});
-    try writeImportedIssueOpened(allocator, options, issue_id, @intCast(number), occurred_at, title, body, labels, assignees, source_author, milestone, projects);
+    try writeImportedIssueOpened(allocator, writer, issue_id, @intCast(number), occurred_at, title, body, labels, assignees, source_author, milestone, projects);
     stats.issues += 1;
 
     if (event_mod.jsonString(issue.get("state"))) |state| {
         if (std.mem.eql(u8, state, "closed")) {
             const closed_at = try githubTimestampOrNow(allocator, firstJsonValue(issue.get("closed_at"), issue.get("updated_at")));
             defer allocator.free(closed_at);
-            try writeImportedStringEvent(allocator, options, "issue", issue_id, "issue.state_set", "state", "closed", closed_at);
+            try writeImportedStringEvent(allocator, writer, "issue", issue_id, "issue.state_set", "state", "closed", closed_at);
         }
     }
 
-    return .{ .id = issue_id, .is_new = true };
+    return .{ .id = issue_id, .is_new = true, .comment_count = comment_count };
 }
 
-fn importPullObject(allocator: Allocator, pull: std.json.ObjectMap, options: ImportOptions, stats: *ImportStats) !?ImportedObject {
+fn importPullObject(allocator: Allocator, writer: *EventWriter, pull: std.json.ObjectMap, stats: *ImportStats) !?ImportedObject {
     const number = jsonInteger(pull.get("number")) orelse return null;
     var repo = try repo_mod.discoverRepo(allocator);
     defer repo.deinit();
@@ -620,13 +660,14 @@ fn importPullObject(allocator: Allocator, pull: std.json.ObjectMap, options: Imp
     defer git.freeStringList(allocator, assignees);
     const reviewers = try githubPullReviewers(allocator, pull);
     defer git.freeStringList(allocator, reviewers);
+    const comment_count = githubOptionalUnsignedField(pull, &.{ "comments", "comment_count" });
 
     const pull_id = try util.newUuidV7(allocator);
     errdefer allocator.free(pull_id);
     try eprint("gt github import: importing pull #{d}\n", .{number});
     try writeImportedPullOpened(
         allocator,
-        options,
+        writer,
         pull_id,
         @intCast(number),
         occurred_at,
@@ -652,25 +693,29 @@ fn importPullObject(allocator: Allocator, pull: std.json.ObjectMap, options: Imp
         if (std.mem.eql(u8, state, "closed")) {
             if (event_mod.jsonString(pull.get("merged_at"))) |merged_at| {
                 if (merged_at.len != 0) {
-                    try writeImportedPullMerged(allocator, options, pull_id, merged_at, event_mod.jsonString(pull.get("merge_commit_sha")) orelse "", null);
-                    return .{ .id = pull_id, .is_new = true };
+                    try writeImportedPullMerged(allocator, writer, pull_id, merged_at, event_mod.jsonString(pull.get("merge_commit_sha")) orelse "", null);
+                    return .{ .id = pull_id, .is_new = true, .comment_count = comment_count };
                 }
             }
             const closed_at = try githubTimestampOrNow(allocator, firstJsonValue(pull.get("closed_at"), pull.get("updated_at")));
             defer allocator.free(closed_at);
-            try writeImportedStringEvent(allocator, options, "pull", pull_id, "pull.state_set", "state", "closed", closed_at);
+            try writeImportedStringEvent(allocator, writer, "pull", pull_id, "pull.state_set", "state", "closed", closed_at);
         }
     }
 
-    return .{ .id = pull_id, .is_new = true };
+    return .{ .id = pull_id, .is_new = true, .comment_count = comment_count };
+}
+
+fn shouldFetchApiComments(comment_count: ?u64) bool {
+    return comment_count == null or comment_count.? != 0;
 }
 
 fn importCommentsArray(
     allocator: Allocator,
+    writer: *EventWriter,
     parent_kind: []const u8,
     parent_id: []const u8,
     comments: std.json.Array,
-    options: ImportOptions,
     stats: *ImportStats,
 ) !void {
     var repo = try repo_mod.discoverRepo(allocator);
@@ -680,12 +725,21 @@ fn importCommentsArray(
     defer db.deinit();
 
     var comment_refs = std.AutoHashMap(i64, ImportedCommentRef).init(allocator);
-    defer {
-        var values = comment_refs.valueIterator();
-        while (values.next()) |value| value.deinit(allocator);
-        comment_refs.deinit();
-    }
+    defer freeImportedCommentRefs(allocator, &comment_refs);
 
+    try importCommentsArrayWithContext(allocator, &db, &comment_refs, writer, parent_kind, parent_id, comments, stats);
+}
+
+fn importCommentsArrayWithContext(
+    allocator: Allocator,
+    db: *index.SqliteDb,
+    comment_refs: *std.AutoHashMap(i64, ImportedCommentRef),
+    writer: *EventWriter,
+    parent_kind: []const u8,
+    parent_id: []const u8,
+    comments: std.json.Array,
+    stats: *ImportStats,
+) !void {
     var imported: usize = 0;
     for (comments.items) |item| {
         if (item != .object) continue;
@@ -694,15 +748,15 @@ fn importCommentsArray(
         if (std.mem.trim(u8, body, " \t\r\n").len == 0) continue;
         const occurred_at = try githubTimestampOrNow(allocator, item.object.get("created_at"));
         defer allocator.free(occurred_at);
-        if (try importedCommentExists(&db, parent_kind, parent_id, occurred_at, body)) continue;
+        if (try importedCommentExists(db, parent_kind, parent_id, occurred_at, body)) continue;
         const source_author = try githubSizedString(allocator, githubAuthorLogin(item.object), "", git.max_payload_atom_bytes);
         defer allocator.free(source_author);
-        const reply = try importedCommentReply(allocator, item.object, &comment_refs);
+        const reply = try importedCommentReply(allocator, item.object, comment_refs);
         defer if (reply.parent_id) |value| allocator.free(value);
         defer if (reply.parent_hash) |value| allocator.free(value);
         var written = try writeImportedCommentAdded(
             allocator,
-            options,
+            writer,
             parent_kind,
             parent_id,
             occurred_at,
@@ -731,6 +785,12 @@ fn importCommentsArray(
         var parent_ref_buf: [util.short_object_ref_len]u8 = undefined;
         try eprint("gt github import: imported {d} new comment{s} for {s} #{s}\n", .{ imported, if (imported == 1) "" else "s", parent_kind, util.shortObjectRef(&parent_ref_buf, parent_id) });
     }
+}
+
+fn freeImportedCommentRefs(allocator: Allocator, comment_refs: *std.AutoHashMap(i64, ImportedCommentRef)) void {
+    var values = comment_refs.valueIterator();
+    while (values.next()) |value| value.deinit(allocator);
+    comment_refs.deinit();
 }
 
 const ImportedCommentReply = struct {
@@ -775,7 +835,7 @@ fn importedCommentExists(db: *index.SqliteDb, parent_kind: []const u8, parent_id
 
 fn writeImportedIssueOpened(
     allocator: Allocator,
-    options: ImportOptions,
+    writer: *EventWriter,
     issue_id: []const u8,
     number: u64,
     occurred_at: []const u8,
@@ -787,9 +847,6 @@ fn writeImportedIssueOpened(
     milestone: []const u8,
     projects: []const event_mod.IssueProjectPlacement,
 ) !void {
-    var writer = try EventWriter.initForActor(allocator, "gt github import", options.bot_principal, options.bot_device);
-    defer writer.deinit();
-
     const event_uuid = try util.newUuidV7(allocator);
     defer allocator.free(event_uuid);
     const idem = try util.newUuidV7(allocator);
@@ -802,7 +859,7 @@ fn writeImportedIssueOpened(
         event_uuid,
         idem,
         occurred_at,
-        writer.eventParents(),
+        writer.stagedEventParents(),
         title,
         body_text,
         labels,
@@ -821,13 +878,13 @@ fn writeImportedIssueOpened(
     defer allocator.free(subject_prefix);
     const subject = try githubSubject(allocator, subject_prefix, title);
     defer allocator.free(subject);
-    const commit = try writer.write("gt github import", subject, body);
+    const commit = try writer.stage("gt github import", subject, body);
     allocator.free(commit);
 }
 
 fn writeImportedPullOpened(
     allocator: Allocator,
-    options: ImportOptions,
+    writer: *EventWriter,
     pull_id: []const u8,
     number: u64,
     occurred_at: []const u8,
@@ -838,9 +895,6 @@ fn writeImportedPullOpened(
     draft: bool,
     metadata: event_mod.PullOpenedMetadata,
 ) !void {
-    var writer = try EventWriter.initForActor(allocator, "gt github import", options.bot_principal, options.bot_device);
-    defer writer.deinit();
-
     const event_uuid = try util.newUuidV7(allocator);
     defer allocator.free(event_uuid);
     const idem = try util.newUuidV7(allocator);
@@ -853,7 +907,7 @@ fn writeImportedPullOpened(
         event_uuid,
         idem,
         occurred_at,
-        writer.eventParents(),
+        writer.stagedEventParents(),
         title,
         body_text,
         base_ref,
@@ -869,13 +923,13 @@ fn writeImportedPullOpened(
     defer allocator.free(subject_prefix);
     const subject = try githubSubject(allocator, subject_prefix, title);
     defer allocator.free(subject);
-    const commit = try writer.write("gt github import", subject, body);
+    const commit = try writer.stage("gt github import", subject, body);
     allocator.free(commit);
 }
 
 fn writeImportedStringEvent(
     allocator: Allocator,
-    options: ImportOptions,
+    writer: *EventWriter,
     object_kind: []const u8,
     object_id: []const u8,
     event_type: []const u8,
@@ -883,79 +937,70 @@ fn writeImportedStringEvent(
     payload_value: []const u8,
     occurred_at: []const u8,
 ) !void {
-    var writer = try EventWriter.initForActor(allocator, "gt github import", options.bot_principal, options.bot_device);
-    defer writer.deinit();
-
     const event_uuid = try util.newUuidV7(allocator);
     defer allocator.free(event_uuid);
     const idem = try util.newUuidV7(allocator);
     defer allocator.free(idem);
     const body = if (std.mem.eql(u8, object_kind, "issue"))
-        try event_mod.buildIssueStringPayloadJson(allocator, writer.cfg, writer.nextSeq(), object_id, event_uuid, idem, occurred_at, writer.eventParents(), event_type, payload_key, payload_value)
+        try event_mod.buildIssueStringPayloadJson(allocator, writer.cfg, writer.nextSeq(), object_id, event_uuid, idem, occurred_at, writer.stagedEventParents(), event_type, payload_key, payload_value)
     else
-        try event_mod.buildPullStringPayloadJson(allocator, writer.cfg, writer.nextSeq(), object_id, event_uuid, idem, occurred_at, writer.eventParents(), event_type, payload_key, payload_value);
+        try event_mod.buildPullStringPayloadJson(allocator, writer.cfg, writer.nextSeq(), object_id, event_uuid, idem, occurred_at, writer.stagedEventParents(), event_type, payload_key, payload_value);
     defer allocator.free(body);
     var object_ref_buf: [util.short_object_ref_len]u8 = undefined;
     const object_ref = util.shortObjectRef(&object_ref_buf, object_id);
     const subject = try std.fmt.allocPrint(allocator, "{s} #{s}", .{ event_type, object_ref });
     defer allocator.free(subject);
-    const commit = try writer.write("gt github import", subject, body);
+    const commit = try writer.stage("gt github import", subject, body);
     allocator.free(commit);
 }
 
 fn writeImportedIssueProjectAdded(
     allocator: Allocator,
-    options: ImportOptions,
+    writer: *EventWriter,
     issue_id: []const u8,
     occurred_at: []const u8,
     project: []const u8,
     column: []const u8,
 ) !void {
-    var writer = try EventWriter.initForActor(allocator, "gt github import", options.bot_principal, options.bot_device);
-    defer writer.deinit();
-
     const event_uuid = try util.newUuidV7(allocator);
     defer allocator.free(event_uuid);
     const idem = try util.newUuidV7(allocator);
     defer allocator.free(idem);
-    const body = try event_mod.buildIssueProjectEventJson(allocator, writer.cfg, writer.nextSeq(), issue_id, event_uuid, idem, occurred_at, writer.eventParents(), "issue.project_added", project, column, null, null);
+    const body = try event_mod.buildIssueProjectEventJson(allocator, writer.cfg, writer.nextSeq(), issue_id, event_uuid, idem, occurred_at, writer.stagedEventParents(), "issue.project_added", project, column, null, null);
     defer allocator.free(body);
     var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
     const issue_ref = util.shortObjectRef(&issue_ref_buf, issue_id);
     const subject = try std.fmt.allocPrint(allocator, "issue.project_added #{s} {s}", .{ issue_ref, project });
     defer allocator.free(subject);
-    const commit = try writer.write("gt github import", subject, body);
+    const commit = try writer.stage("gt github import", subject, body);
     allocator.free(commit);
 }
 
 fn writeImportedPullMerged(
     allocator: Allocator,
-    options: ImportOptions,
+    writer: *EventWriter,
     pull_id: []const u8,
     occurred_at: []const u8,
     merge_oid: []const u8,
     target_oid: ?[]const u8,
 ) !void {
-    var writer = try EventWriter.initForActor(allocator, "gt github import", options.bot_principal, options.bot_device);
-    defer writer.deinit();
-
     const event_uuid = try util.newUuidV7(allocator);
     defer allocator.free(event_uuid);
     const idem = try util.newUuidV7(allocator);
     defer allocator.free(idem);
-    const body = try event_mod.buildPullMergedJson(allocator, writer.cfg, writer.nextSeq(), pull_id, event_uuid, idem, occurred_at, writer.eventParents(), if (merge_oid.len == 0) null else merge_oid, target_oid);
+    const body = try event_mod.buildPullMergedJson(allocator, writer.cfg, writer.nextSeq(), pull_id, event_uuid, idem, occurred_at, writer.stagedEventParents(), if (merge_oid.len == 0) null else merge_oid, target_oid);
     defer allocator.free(body);
     var pull_ref_buf: [util.short_object_ref_len]u8 = undefined;
     const pull_ref = util.shortObjectRef(&pull_ref_buf, pull_id);
     const subject = try std.fmt.allocPrint(allocator, "pull.merged #{s}", .{pull_ref});
     defer allocator.free(subject);
-    const commit = try writer.write("gt github import", subject, body);
+    const commit = try writer.stage("gt github import", subject, body);
     allocator.free(commit);
 }
 
 fn writeImportedCommentAdded(
     allocator: Allocator,
-    options: ImportOptions,
+    writer: *EventWriter,
     parent_kind: []const u8,
     parent_id: []const u8,
     occurred_at: []const u8,
@@ -964,9 +1009,6 @@ fn writeImportedCommentAdded(
     reply_parent_id: []const u8,
     reply_parent_hash: []const u8,
 ) !ImportedCommentRef {
-    var writer = try EventWriter.initForActor(allocator, "gt github import", options.bot_principal, options.bot_device);
-    defer writer.deinit();
-
     var comment_id: ?[]u8 = try util.newUuidV7(allocator);
     errdefer if (comment_id) |value| allocator.free(value);
     const event_uuid = try util.newUuidV7(allocator);
@@ -975,7 +1017,8 @@ fn writeImportedCommentAdded(
     defer allocator.free(idem);
     var related: std.ArrayList([]const u8) = .empty;
     defer related.deinit(allocator);
-    try related.appendSlice(allocator, writer.related_heads);
+    const base_parents = writer.stagedEventParents();
+    try related.appendSlice(allocator, base_parents.related);
     if (reply_parent_hash.len != 0) {
         var seen = false;
         for (related.items) |hash| {
@@ -987,9 +1030,9 @@ fn writeImportedCommentAdded(
         if (!seen) try related.append(allocator, reply_parent_hash);
     }
     const parents = event_mod.EventParents{
-        .log = writer.prepared_parents.old_head,
-        .anchor = writer.prepared_parents.anchor,
-        .causal = writer.prepared_parents.causal_heads,
+        .log = base_parents.log,
+        .anchor = base_parents.anchor,
+        .causal = base_parents.causal,
         .related = related.items,
     };
     const body = try event_mod.buildCommentAddedJsonWithMetadata(
@@ -1013,7 +1056,7 @@ fn writeImportedCommentAdded(
     defer allocator.free(body);
     const subject = try std.fmt.allocPrint(allocator, "comment.added #{s}", .{comment_id.?[0..7]});
     defer allocator.free(subject);
-    const commit = try writer.write("gt github import", subject, body);
+    const commit = try writer.stage("gt github import", subject, body);
     errdefer allocator.free(commit);
     const result = ImportedCommentRef{
         .id = comment_id.?,
