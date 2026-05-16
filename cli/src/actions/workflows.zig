@@ -794,7 +794,10 @@ pub fn addScheduleLine(
             }
         }
         if (schedules.items[idx].cron.len == 0) {
-            _ = schedules.pop();
+            if (schedules.pop()) |removed_value| {
+                var removed = removed_value;
+                removed.deinit();
+            }
             current_schedule.* = null;
         }
         return;
