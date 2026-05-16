@@ -7,7 +7,6 @@ const git = @import("git.zig");
 const index = @import("index.zig");
 const io = @import("io.zig");
 const reaction = @import("reaction.zig");
-const repo_mod = @import("repo.zig");
 const util = @import("util.zig");
 
 const Allocator = std.mem.Allocator;
@@ -16,12 +15,8 @@ const comment = @This();
 const out = io.out;
 const eprint = io.eprint;
 const EventWriter = event_writer_mod.EventWriter;
-const commentParentForCommand = cmd_common.commentParentForCommand;
 const newUuidV7 = util.newUuidV7;
 const rfc3339Now = util.rfc3339Now;
-const resolveCommentIdForCommand = cmd_common.resolveCommentIdForCommand;
-const resolveIssueIdForCommand = cmd_common.resolveIssueIdForCommand;
-const resolvePullIdForCommand = cmd_common.resolvePullIdForCommand;
 const shortObjectRef = util.shortObjectRef;
 const short_object_ref_len = util.short_object_ref_len;
 
@@ -167,15 +162,30 @@ pub fn createCommentForParentCommand(
     body: []const u8,
     reply_ref: ?[]const u8,
 ) !void {
+    var command_repo = cmd_common.CommandRepo.init(allocator);
+    defer command_repo.deinit();
+    try createCommentForParentCommandWithRepo(&command_repo, allocator, context, parent_kind, parent_label, parent_id, body, reply_ref);
+}
+
+pub fn createCommentForParentCommandWithRepo(
+    command_repo: *cmd_common.CommandRepo,
+    allocator: Allocator,
+    context: []const u8,
+    parent_kind: []const u8,
+    parent_label: []const u8,
+    parent_id: []const u8,
+    body: []const u8,
+    reply_ref: ?[]const u8,
+) !void {
     if (reply_ref) |raw_ref| {
         const reply_target = std.mem.trim(u8, raw_ref, " \t\r\n");
         if (reply_target.len == 0) {
             try io.eprint("{s}: --reply must not be empty\n", .{context});
             return CliError.UserError;
         }
-        const reply_parent_id = try resolveCommentIdForCommand(allocator, reply_target);
+        const reply_parent_id = try command_repo.resolveCommentId(reply_target);
         defer allocator.free(reply_parent_id);
-        var reply_parent = try commentParentForCommand(allocator, reply_parent_id);
+        var reply_parent = try command_repo.commentParent(reply_parent_id);
         defer reply_parent.deinit();
         if (!std.mem.eql(u8, reply_parent.parent_kind, parent_kind) or !std.mem.eql(u8, reply_parent.parent_id, parent_id)) {
             try io.eprint("{s}: reply target is not in this {s}\n", .{ context, parent_label });
@@ -202,6 +212,9 @@ pub fn cmdComment(allocator: Allocator, args: []const []const u8) !void {
         return CliError.UserError;
     }
 
+    var command_repo = cmd_common.CommandRepo.init(allocator);
+    defer command_repo.deinit();
+
     if (std.mem.eql(u8, args[0], "list")) {
         if (args.len < 3 or (!isCommentParentKind(args[1]))) {
             try io.eprint("gt comment list: expected issue ISSUE or pr PR [--json]\n", .{});
@@ -219,13 +232,11 @@ pub fn cmdComment(allocator: Allocator, args: []const []const u8) !void {
             }
         }
         const parent_id = if (std.mem.eql(u8, parent_kind, "issue"))
-            try resolveIssueIdForCommand(allocator, args[2])
+            try command_repo.resolveIssueId(args[2])
         else
-            try resolvePullIdForCommand(allocator, args[2]);
+            try command_repo.resolvePullId(args[2]);
         defer allocator.free(parent_id);
-        var repo = try repo_mod.discoverRepo(allocator);
-        defer repo.deinit();
-        try index.ensureIndex(allocator, repo);
+        const repo = try command_repo.indexedRepo();
         try index.listCommentsFromIndex(allocator, repo, parent_kind, parent_id, json);
         return;
     }
@@ -251,9 +262,9 @@ pub fn cmdComment(allocator: Allocator, args: []const []const u8) !void {
             return CliError.UserError;
         }
         const parent_id = if (std.mem.eql(u8, parent_kind, "issue"))
-            try resolveIssueIdForCommand(allocator, args[2])
+            try command_repo.resolveIssueId(args[2])
         else
-            try resolvePullIdForCommand(allocator, args[2]);
+            try command_repo.resolvePullId(args[2]);
         defer allocator.free(parent_id);
         try comment.createCommentAddedEvent(allocator, parent_kind, parent_id, body.?);
         return;
@@ -278,9 +289,9 @@ pub fn cmdComment(allocator: Allocator, args: []const []const u8) !void {
             try io.eprint("gt comment reply: --body is required\n", .{});
             return CliError.UserError;
         }
-        const reply_parent_id = try resolveCommentIdForCommand(allocator, args[1]);
+        const reply_parent_id = try command_repo.resolveCommentId(args[1]);
         defer allocator.free(reply_parent_id);
-        var reply_parent = try commentParentForCommand(allocator, reply_parent_id);
+        var reply_parent = try command_repo.commentParent(reply_parent_id);
         defer reply_parent.deinit();
         try comment.createCommentReplyEvent(allocator, reply_parent.parent_kind, reply_parent.parent_id, reply_parent_id, reply_parent.add_hash, body.?);
         return;
@@ -305,7 +316,7 @@ pub fn cmdComment(allocator: Allocator, args: []const []const u8) !void {
             try io.eprint("gt comment edit: --body is required\n", .{});
             return CliError.UserError;
         }
-        const comment_id = try resolveCommentIdForCommand(allocator, args[1]);
+        const comment_id = try command_repo.resolveCommentId(args[1]);
         defer allocator.free(comment_id);
         try comment.createCommentBodySetEvent(allocator, comment_id, body.?);
         return;
@@ -326,7 +337,7 @@ pub fn cmdComment(allocator: Allocator, args: []const []const u8) !void {
                 return CliError.UserError;
             }
         }
-        const comment_id = try resolveCommentIdForCommand(allocator, args[1]);
+        const comment_id = try command_repo.resolveCommentId(args[1]);
         defer allocator.free(comment_id);
         try comment.createCommentRedactedEvent(allocator, comment_id, reason);
         return;
@@ -337,7 +348,7 @@ pub fn cmdComment(allocator: Allocator, args: []const []const u8) !void {
             try io.eprint("gt comment {s}: expected COMMENT EMOJI\n", .{args[0]});
             return CliError.UserError;
         }
-        const comment_id = try resolveCommentIdForCommand(allocator, args[1]);
+        const comment_id = try command_repo.resolveCommentId(args[1]);
         defer allocator.free(comment_id);
         try reaction.createReactionEvent(allocator, "comment", comment_id, args[2], std.mem.eql(u8, args[0], "react"));
         return;
