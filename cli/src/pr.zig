@@ -12,7 +12,7 @@ const work_items = @import("work_items.zig");
 
 const Allocator = std.mem.Allocator;
 const CliError = errors.CliError;
-const pull_mod = @This();
+const pr_mod = @This();
 const out = io.out;
 const eprint = io.eprint;
 const EventWriter = event_writer_mod.EventWriter;
@@ -265,7 +265,7 @@ pub fn cmdPr(allocator: Allocator, args: []const []const u8, command_context: []
                 };
                 filtered = true;
             } else if (std.mem.eql(u8, arg, "--limit")) {
-                filters.limit = try parsePositiveIntegerOption(if (std.mem.eql(u8, command_context, "gt pull")) "gt pull list" else "gt pr list", "--limit", try util.requireValue(args, &i, "--limit"));
+                filters.limit = try parsePositiveIntegerOption("gt pr list", "--limit", try util.requireValue(args, &i, "--limit"));
                 filtered = true;
             } else {
                 try io.eprint("{s} list: unknown option '{s}'\n", .{ command_context, arg });
@@ -443,7 +443,7 @@ pub fn cmdPr(allocator: Allocator, args: []const []const u8, command_context: []
 
         const pull_id = try command_repo.resolvePullId(args[1]);
         defer allocator.free(pull_id);
-        try pull_mod.createPullUpdatedEvent(allocator, pull_id, update);
+        try pr_mod.createPullUpdatedEvent(allocator, pull_id, update);
         return;
     }
 
@@ -497,7 +497,7 @@ pub fn cmdPr(allocator: Allocator, args: []const []const u8, command_context: []
         }
         const pull_id = try command_repo.resolvePullId(args[1]);
         defer allocator.free(pull_id);
-        try pull_mod.createPullStringEvent(allocator, pull_id, event_type, payload_key, value.?);
+        try pr_mod.createPullStringEvent(allocator, pull_id, event_type, payload_key, value.?);
         return;
     }
 
@@ -509,7 +509,7 @@ pub fn cmdPr(allocator: Allocator, args: []const []const u8, command_context: []
         const pull_id = try command_repo.resolvePullId(args[1]);
         defer allocator.free(pull_id);
         const state: []const u8 = if (std.mem.eql(u8, args[0], "close")) "closed" else "open";
-        try pull_mod.createPullStringEvent(allocator, pull_id, "pull.state_set", "state", state);
+        try pr_mod.createPullStringEvent(allocator, pull_id, "pull.state_set", "state", state);
         return;
     }
 
@@ -537,12 +537,12 @@ pub fn cmdPr(allocator: Allocator, args: []const []const u8, command_context: []
         defer allocator.free(pull_id);
         const event_type = try std.fmt.allocPrint(allocator, "pull.{s}_{s}", .{ collection, if (std.mem.eql(u8, op, "add")) "added" else "removed" });
         defer allocator.free(event_type);
-        try pull_mod.createPullStringEvent(allocator, pull_id, event_type, collection, args[3]);
+        try pr_mod.createPullStringEvent(allocator, pull_id, event_type, collection, args[3]);
         return;
     }
 
     if (std.mem.eql(u8, args[0], "comment")) {
-        const comment_context = if (std.mem.eql(u8, command_context, "gt pull")) "gt pull comment" else "gt pr comment";
+        const comment_context = "gt pr comment";
         if (args.len < 2) {
             try io.eprint("{s}: PR is required\n", .{comment_context});
             return CliError.UserError;
@@ -640,7 +640,7 @@ pub fn cmdPr(allocator: Allocator, args: []const []const u8, command_context: []
         }
         const pull_id = try command_repo.resolvePullId(args[1]);
         defer allocator.free(pull_id);
-        try pull_mod.createPullMergedEvent(allocator, pull_id, merge_oid, target_oid);
+        try pr_mod.createPullMergedEvent(allocator, pull_id, merge_oid, target_oid);
         return;
     }
 
@@ -687,5 +687,5 @@ pub fn cmdPr(allocator: Allocator, args: []const []const u8, command_context: []
         return CliError.UserError;
     }
 
-    try pull_mod.createPullOpenedEvent(allocator, title.?, body, base_ref.?, head_ref.?, draft);
+    try pr_mod.createPullOpenedEvent(allocator, title.?, body, base_ref.?, head_ref.?, draft);
 }

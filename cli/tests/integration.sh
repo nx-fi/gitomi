@@ -1152,8 +1152,6 @@ init_repo "$pulls_repo"
   pull_id="$(json_field "$pulls_json" id)"
   [[ -n "$pull_id" ]] || fail "expected pull id from pull list"
   pull_ref="#$(object_ref "$pull_id")"
-  legacy_pulls_json="$(gt pull list --json)"
-  assert_contains "$legacy_pulls_json" '"id":"'"$pull_id"'"'
   pull_show="$(gt pr view "$pull_ref")"
   assert_contains "$pull_show" "id:         $pull_id"
   assert_contains "$pull_show" "base:       main"
@@ -1183,12 +1181,12 @@ init_repo "$pulls_repo"
   assert_contains "$pull_comments" '"body":"Pull reply"'
   assert_contains "$pull_comments" '"reply_parent_id":"'"$pull_comment_id"'"'
   assert_contains "$pull_comments" '"reactions":[{'
-  gt pr comment "$pull_ref" --body "Line note" --file cli/src/pull.zig --side new --line 42 >/dev/null
-  gt pr comment "$pull_ref" --body "Range note" --file cli/src/pull.zig --side old --start-line 10 --end-line 12 >/dev/null
+  gt pr comment "$pull_ref" --body "Line note" --file cli/src/pr.zig --side new --line 42 >/dev/null
+  gt pr comment "$pull_ref" --body "Range note" --file cli/src/pr.zig --side old --start-line 10 --end-line 12 >/dev/null
   pull_comments="$(gt comment list pr "$pull_ref" --json)"
   assert_line_count "$pull_comments" 4
-  assert_contains "$pull_comments" 'Review comment on `cli/src/pull.zig` (new line 42).'
-  assert_contains "$pull_comments" 'Review comment on `cli/src/pull.zig` (old lines 10-12).'
+  assert_contains "$pull_comments" 'Review comment on `cli/src/pr.zig` (new line 42).'
+  assert_contains "$pull_comments" 'Review comment on `cli/src/pr.zig` (old lines 10-12).'
   pull_agent="$(gt pr view "$pull_ref" --view agent)"
   assert_line_count "$pull_agent" 1
   assert_contains "$pull_agent" '"kind":"pull_request"'

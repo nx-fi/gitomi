@@ -140,8 +140,8 @@ named milestones, `gt milestone edit` updates title, description, due date, or
 state, and `gt milestone close` / `gt milestone reopen` change milestone state.
 `gt issue milestone` assigns or clears an issue milestone.
 
-`gt pull` remains accepted as a compatibility alias for `gt pr`. `gt pr view`
-also accepts `show`, and `gt pr create` also accepts `open` and `new`.
+`gt pr view` also accepts `show`, and `gt pr create` also accepts `open` and
+`new`.
 `gt pr comment` can reply to an existing comment or add the same file/line
 review note produced from the pull request Files tab. Pull request merge and
 conflict-resolution semantics are specified in

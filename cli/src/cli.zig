@@ -15,7 +15,7 @@ const io = @import("io.zig");
 const issue = @import("issue.zig");
 const milestone = @import("milestone.zig");
 const project = @import("project.zig");
-const pull_mod = @import("pull.zig");
+const pr_mod = @import("pr.zig");
 const rbac = @import("rbac.zig");
 const repo_mod = @import("repo.zig");
 const reset = @import("reset.zig");
@@ -55,7 +55,6 @@ const command_dispatch = std.StaticStringMap(Command).initComptime(.{
     .{ "milestone", Command{ .handler = runMilestone, .command_name = "gt milestone" } },
     .{ "milestones", Command{ .handler = runMilestone, .command_name = "gt milestones" } },
     .{ "pr", Command{ .handler = runPr, .command_name = "gt pr" } },
-    .{ "pull", Command{ .handler = runPr, .command_name = "gt pull" } },
     .{ "comment", Command{ .handler = runComment, .command_name = "gt comment" } },
     .{ "acl", Command{ .handler = runAcl, .command_name = "gt acl" } },
     .{ "identity", Command{ .handler = runIdentity, .command_name = "gt identity" } },
@@ -148,7 +147,7 @@ fn runMilestone(allocator: Allocator, args: []const []const u8, _: []const u8) !
 }
 
 fn runPr(allocator: Allocator, args: []const []const u8, command_name: []const u8) !void {
-    try pull_mod.cmdPr(allocator, args, command_name);
+    try pr_mod.cmdPr(allocator, args, command_name);
 }
 
 fn runComment(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
