@@ -258,6 +258,7 @@ fn renderProjectWorkspace(
     errdefer buf.deinit(allocator);
 
     try appendShellStart(&buf, allocator, repo, project, "projects");
+    try shared.appendDetailBackButton(&buf, allocator, shared.literalHref("/projects"), "Back to projects");
     if (!(try projectExists(db, project))) {
         try appendProjectNotFound(&buf, allocator, project);
         try appendShellEnd(&buf, allocator);
@@ -293,7 +294,7 @@ fn appendProjectIndexCard(
     , .{});
     try appendProjectHref(buf, allocator, project, .board);
     try appendTemplate(buf, allocator,
-        \\">@{project}</a></h2>
+        \\">{project}</a></h2>
         \\    </div>
     , .{ .project = project });
     try appendStatePill(buf, allocator, state);
@@ -348,16 +349,17 @@ fn appendProjectWorkspaceChromeStart(
     title_label: []const u8,
 ) !void {
     try appendTemplate(buf, allocator,
-        \\<section class="panel kanban-panel project-board-panel">
+        \\<section class="panel kanban-panel project-board-panel project-detail-panel project-detail-{view}">
         \\  <div class="project-board-top">
         \\    <div class="project-title-line">
         \\      <span class="project-lock-icon" aria-hidden="true"></span>
         \\      <div>
         \\        <p class="eyebrow">Project {title_label}</p>
-        \\        <h1>@{project}</h1>
+        \\        <h1>{project}</h1>
         \\      </div>
         \\    </div>
     , .{
+        .view = projectViewValue(active_view),
         .title_label = title_label,
         .project = project,
     });
@@ -856,7 +858,7 @@ fn appendProjectNotFound(buf: *std.ArrayList(u8), allocator: Allocator, project:
         .kind = "primary",
     });
     try appendTemplate(buf, allocator,
-        \\<div class="empty"><strong>@{project}</strong><p>No project or project issue placements match this name.</p></div>
+        \\<div class="empty"><strong>{project}</strong><p>No project or project issue placements match this name.</p></div>
         \\</section>
     , .{ .project = project });
 }
@@ -1708,4 +1710,38 @@ fn asciiEqlIgnoreCase(a: []const u8, b: []const u8) bool {
         if (std.ascii.toLower(left) != std.ascii.toLower(right)) return false;
     }
     return true;
+}
+
+test "project workspace title does not prepend at sign" {
+    var db = try SqliteDb.openWithOptions(
+        std.testing.allocator,
+        ":memory:",
+        sqlite.SQLITE_OPEN_READWRITE | sqlite.SQLITE_OPEN_CREATE,
+        true,
+        .{ .enable_wal = false },
+    );
+    defer db.deinit();
+    try db.exec("CREATE TABLE projects (id TEXT, name TEXT, description TEXT, state TEXT, created_at TEXT)");
+    try db.exec("CREATE TABLE project_columns (project_id TEXT, column_name TEXT)");
+    try db.exec("CREATE TABLE issue_projects (project TEXT, column_name TEXT, issue_id TEXT)");
+    try db.exec("INSERT INTO projects (id, name, description, state, created_at) VALUES ('p1', 'Release & Plan', '', 'open', '2026-05-16T00:00:00Z')");
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    try appendProjectWorkspaceChromeStart(&buf, std.testing.allocator, &db, "Release & Plan", 0, .board, "Board");
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<h1>Release &amp; Plan</h1>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<h1>@Release") == null);
+}
+
+test "project index and not found names do not prepend at sign" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendProjectIndexCard(&buf, std.testing.allocator, "Release & Plan", "", "open", 0, 0, "");
+    try appendProjectNotFound(&buf, std.testing.allocator, "Release & Plan");
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, ">Release &amp; Plan</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<strong>Release &amp; Plan</strong>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "@Release") == null);
 }

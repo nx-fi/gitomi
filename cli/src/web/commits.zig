@@ -20,6 +20,8 @@ const literalHref = shared.literalHref;
 const runCommand = git.runCommand;
 
 const max_commit_diff_bytes = 8 * 1024 * 1024;
+const commits_default_page_size = 50;
+const commits_max_page_size = 100;
 
 const DiffHunkRange = struct {
     old_start: usize,
@@ -100,25 +102,34 @@ pub fn renderCommitsPage(allocator: Allocator, repo: Repo, target: []const u8) !
     else
         try allocator.dupe(u8, "");
     defer allocator.free(path);
+    const pagination = try shared.paginationFromTarget(allocator, target, commits_default_page_size, commits_max_page_size);
 
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
     try appendShellStart(&buf, allocator, repo, "Commits", "commits");
 
-    const commits = try loadCommits(allocator, repo, ref, path);
+    const commits = try loadCommits(allocator, repo, ref, path, pagination);
     defer freeCommitList(allocator, commits);
     const branches = try loadBranchRefs(allocator, repo);
     defer freeBranchRefs(allocator, branches);
 
     try appendCommitsHeader(&buf, allocator, ref, path, branches);
 
-    if (commits.len == 0) {
+    const shown_commits = @min(commits.len, pagination.per_page);
+    const has_next_page = commits.len > pagination.per_page;
+    if (shown_commits == 0) {
         try buf.appendSlice(allocator, "<section class=\"panel commits-panel\">");
-        try appendEmptyState(&buf, allocator, "No commits found.", "This ref has no commit history for the selected path.");
+        if (pagination.page > 1) {
+            try appendEmptyState(&buf, allocator, "No commits on this page.", "Use the previous page to return to this ref's commit history.");
+        } else {
+            try appendEmptyState(&buf, allocator, "No commits found.", "This ref has no commit history for the selected path.");
+        }
         try buf.appendSlice(allocator, "</section>");
+        if (pagination.page > 1) try appendCommitsPagination(&buf, allocator, ref, path, pagination, shown_commits, false);
     } else {
-        try appendCommitTimeline(&buf, allocator, commits);
+        try appendCommitTimeline(&buf, allocator, commits[0..shown_commits]);
+        try appendCommitsPagination(&buf, allocator, ref, path, pagination, shown_commits, has_next_page);
     }
 
     try appendShellEnd(&buf, allocator);
@@ -148,6 +159,7 @@ pub fn renderCommitPage(allocator: Allocator, repo: Repo, target: []const u8) ![
     errdefer buf.deinit(allocator);
 
     try appendShellStart(&buf, allocator, repo, "Commit", "commits");
+    try shared.appendDetailBackButton(&buf, allocator, shared.literalHref("/commits"), "Back to commits");
     try appendRepoHeader(&buf, allocator, repo, detail.short_hash);
     try appendTemplate(&buf, allocator,
         \\<section class="panel commit-detail">
@@ -203,6 +215,7 @@ fn renderMissingCommitPage(allocator: Allocator, repo: Repo, sha: []const u8) ![
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     try appendShellStart(&buf, allocator, repo, "Commit Not Found", "commits");
+    try shared.appendDetailBackButton(&buf, allocator, shared.literalHref("/commits"), "Back to commits");
     try appendRepoHeader(&buf, allocator, repo, "commit");
     try appendEmptyState(&buf, allocator, "Commit not found.", sha);
     try appendShellEnd(&buf, allocator);
@@ -288,6 +301,35 @@ fn appendCommitTimeline(buf: *std.ArrayList(u8), allocator: Allocator, commits: 
     try buf.appendSlice(allocator, "</div>");
 }
 
+fn commitsHrefOwned(allocator: Allocator, ref: []const u8, path: []const u8, pagination: shared.Pagination, page: usize) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.appendSlice(allocator, "/commits");
+    var first = true;
+    try shared.appendQueryParam(&buf, allocator, &first, "ref", ref);
+    if (path.len != 0) try shared.appendQueryParam(&buf, allocator, &first, "path", path);
+    try shared.appendPaginationQueryParams(&buf, allocator, &first, pagination, page, commits_default_page_size);
+    return buf.toOwnedSlice(allocator);
+}
+
+fn appendCommitsPagination(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    ref: []const u8,
+    path: []const u8,
+    pagination: shared.Pagination,
+    shown: usize,
+    has_next_page: bool,
+) !void {
+    const previous_href = if (pagination.page > 1) try commitsHrefOwned(allocator, ref, path, pagination, pagination.page - 1) else null;
+    defer if (previous_href) |href| allocator.free(href);
+    const next_href = if (has_next_page) try commitsHrefOwned(allocator, ref, path, pagination, pagination.page + 1) else null;
+    defer if (next_href) |href| allocator.free(href);
+    const summary = try shared.paginationSummaryOwned(allocator, pagination, shown, null);
+    defer allocator.free(summary);
+    try shared.appendPaginationNav(buf, allocator, "Commit pages", summary, previous_href, next_href);
+}
+
 fn appendCommitRow(buf: *std.ArrayList(u8), allocator: Allocator, commit: CommitListEntry) !void {
     const commit_href = commitHref(commit.full_hash);
     const code_href = codeHref(commit.full_hash, "");
@@ -333,14 +375,18 @@ fn appendRepoHeader(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, r
     });
 }
 
-fn loadCommits(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) ![]CommitListEntry {
+fn loadCommits(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8, pagination: shared.Pagination) ![]CommitListEntry {
     const format = "--format=%H%x1f%h%x1f%s%x1f%an%x1f%ae%x1f%cr%x1f%ad%x1f%G?%x1e";
+    const max_count = try std.fmt.allocPrint(allocator, "--max-count={d}", .{pagination.queryLimit()});
+    defer allocator.free(max_count);
+    const skip = try std.fmt.allocPrint(allocator, "--skip={d}", .{pagination.offset()});
+    defer allocator.free(skip);
     const raw_opt = if (path.len == 0)
-        try gitMaybe(allocator, repo, &.{ "log", "-50", "--date=short", format, ref }, git.max_git_output)
+        try gitMaybe(allocator, repo, &.{ "log", max_count, skip, "--date=short", format, ref }, git.max_git_output)
     else blk: {
         const pathspec = try std.fmt.allocPrint(allocator, ":(top){s}", .{path});
         defer allocator.free(pathspec);
-        break :blk try gitMaybe(allocator, repo, &.{ "log", "-50", "--date=short", format, ref, "--", pathspec }, git.max_git_output);
+        break :blk try gitMaybe(allocator, repo, &.{ "log", max_count, skip, "--date=short", format, ref, "--", pathspec }, git.max_git_output);
     };
     const raw = raw_opt orelse try allocator.dupe(u8, "");
     defer allocator.free(raw);

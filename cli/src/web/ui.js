@@ -283,10 +283,51 @@
     });
   }
 
+  function initPullMergeMethodMenus() {
+    document.querySelectorAll(".pull-merge-button-group").forEach(function (group) {
+      if (group.dataset.mergeMenuReady === "yes") return;
+      group.dataset.mergeMenuReady = "yes";
+
+      const submit = group.querySelector(".pull-merge-submit");
+      const label = submit ? submit.querySelector("[data-merge-submit-label]") : null;
+      const menu = group.querySelector(".pull-merge-method-menu");
+      const options = Array.from(group.querySelectorAll(".pull-merge-method-option"));
+      if (!submit || !label || !menu || options.length === 0) return;
+
+      function selectMethod(option) {
+        const method = option.value || "merge";
+        const text = option.dataset.mergeButtonLabel || method;
+        submit.value = method;
+        label.textContent = text;
+        options.forEach(function (item) {
+          const selected = item === option;
+          item.classList.toggle("is-selected", selected);
+          item.setAttribute("aria-checked", selected ? "true" : "false");
+        });
+      }
+
+      options.forEach(function (option) {
+        option.addEventListener("click", function (event) {
+          event.preventDefault();
+          selectMethod(option);
+          menu.open = false;
+          setExpanded(menu);
+          submit.focus();
+        });
+      });
+
+      const selected = options.find(function (option) {
+        return option.classList.contains("is-selected");
+      });
+      if (selected) selectMethod(selected);
+    });
+  }
+
   function initUi() {
     initPopoverMenus();
     initNavStats();
     initLabelsPage();
+    initPullMergeMethodMenus();
   }
 
   if (document.readyState === "loading") {

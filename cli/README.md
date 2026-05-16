@@ -241,10 +241,12 @@ same GitHub repository that was imported.
 `gt web` starts a local-only GitHub-like web UI for the current repository. It
 binds to loopback on port 12655 by default, retrying nearby random ports if that
 port is occupied. It opens on a committed-tree code explorer, also serves
-overview/issues/projects/actions/events/refs pages, and can create signed issue
+overview/issues/projects/workflows/events/refs pages, and can create signed issue
 events and workflow run requests through the same storage path as the CLI. The
 projects page renders kanban boards from signed project and issue placement
-events and can create new project boards.
+events and can create new project boards. The web server is intended for local
+use only; Zig does not yet provide HTTP/2 server support, so Gitomi does not
+treat this endpoint as production-facing infrastructure.
 
 The web UI supports keyboard shortcuts across pages. Press Space by default to
 show keystroke hints for visible clickable elements, press Space twice to open
