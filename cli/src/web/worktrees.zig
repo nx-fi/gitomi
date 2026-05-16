@@ -502,7 +502,7 @@ fn worktreeTotals(worktrees: []const WorktreeSummary) WorktreeTotals {
         if (worktree.prunable != null) totals.prunable += 1;
         if (worktree.status) |status| {
             if (worktreeHasChanges(status)) totals.changed += 1;
-            if (status.conflict_paths != 0) totals.conflicts += 1;
+            totals.conflicts += status.conflict_paths;
         }
     }
     return totals;
