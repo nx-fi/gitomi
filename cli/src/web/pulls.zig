@@ -1886,15 +1886,17 @@ fn appendPullReadyToMergeTimeline(
     try appendTemplate(buf, allocator,
         \\/merge">
         \\      <div class="pull-merge-actions">
-        \\        <button class="button primary pull-merge-submit" type="submit" name="method" value="merge"><span class="button-icon icon-pull-request" aria-hidden="true"></span><span>Merge pull request</span></button>
-        \\        <details class="pull-merge-method-menu" data-popover-menu>
-        \\          <summary class="button primary pull-merge-method-toggle" aria-label="Choose merge method" title="Choose merge method"><span class="button-icon icon-chevron-down" aria-hidden="true"></span></summary>
-        \\          <div class="pull-merge-method-popover" role="menu" aria-label="Merge methods">
-        \\            <button class="pull-merge-method-option is-selected" type="submit" name="method" value="merge" role="menuitem"><span class="pull-merge-method-check" aria-hidden="true"></span><span><strong>Create a merge commit</strong><em>All commits from <code>{head_ref}</code> will be added to <code>{base_ref}</code> via a merge commit.</em></span></button>
-        \\            <button class="pull-merge-method-option" type="submit" name="method" value="squash" role="menuitem"><span class="pull-merge-method-check" aria-hidden="true"></span><span><strong>Squash and merge</strong><em>The commits from <code>{head_ref}</code> will be combined into one commit on <code>{base_ref}</code>.</em></span></button>
-        \\            <button class="pull-merge-method-option" type="submit" name="method" value="rebase" role="menuitem"><span class="pull-merge-method-check" aria-hidden="true"></span><span><strong>Rebase and merge</strong><em>The commits from <code>{head_ref}</code> will be rebased onto <code>{base_ref}</code>.</em></span></button>
-        \\          </div>
-        \\        </details>
+        \\        <div class="pull-merge-button-group">
+        \\          <button class="button primary pull-merge-submit" type="submit" name="method" value="merge"><span class="button-icon icon-pull-request" aria-hidden="true"></span><span data-merge-submit-label>Merge pull request</span></button>
+        \\          <details class="pull-merge-method-menu" data-popover-menu>
+        \\            <summary class="button primary pull-merge-method-toggle" aria-label="Choose merge method" title="Choose merge method"><span class="button-icon icon-chevron-down" aria-hidden="true"></span></summary>
+        \\            <div class="pull-merge-method-popover" role="menu" aria-label="Merge methods">
+        \\              <button class="pull-merge-method-option is-selected" type="submit" name="method" value="merge" role="menuitemradio" aria-checked="true" data-merge-button-label="Merge pull request"><span class="pull-merge-method-check" aria-hidden="true"></span><span><strong>Create a merge commit</strong><em>All commits from <code>{head_ref}</code> will be added to <code>{base_ref}</code> via a merge commit.</em></span></button>
+        \\              <button class="pull-merge-method-option" type="submit" name="method" value="squash" role="menuitemradio" aria-checked="false" data-merge-button-label="Squash and merge"><span class="pull-merge-method-check" aria-hidden="true"></span><span><strong>Squash and merge</strong><em>The commits from <code>{head_ref}</code> will be combined into one commit on <code>{base_ref}</code>.</em></span></button>
+        \\              <button class="pull-merge-method-option" type="submit" name="method" value="rebase" role="menuitemradio" aria-checked="false" data-merge-button-label="Rebase and merge"><span class="pull-merge-method-check" aria-hidden="true"></span><span><strong>Rebase and merge</strong><em>The commits from <code>{head_ref}</code> will be rebased onto <code>{base_ref}</code>.</em></span></button>
+        \\            </div>
+        \\          </details>
+        \\        </div>
         \\        <span class="pull-merge-command-hint">You can also merge this with <code>gt pr merge #{pull_ref}</code> after applying the target branch update.</span>
         \\      </div>
         \\    </form>
