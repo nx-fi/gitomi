@@ -83,18 +83,32 @@
     let pointerY = 0;
     let ticking = false;
 
+    function clamp(value, min, max) {
+      return Math.min(max, Math.max(min, value));
+    }
+
     function update() {
       const viewportHeight = window.innerHeight || 1;
 
       layers.forEach((layer) => {
         const depth = Number.parseFloat(layer.getAttribute("data-depth") || "10");
         const rect = layer.getBoundingClientRect();
-        const centerOffset = (rect.top + rect.height / 2 - viewportHeight / 2) / viewportHeight;
-        const x = pointerX * depth;
-        const y = pointerY * depth - centerOffset * depth * 0.42;
+        const centerOffset = rect.top + rect.height / 2 - viewportHeight / 2;
+        const progress = clamp(centerOffset / (viewportHeight * 0.7), -1, 1);
+        const explode = clamp(Math.abs(progress) * 1.18, 0, 1);
+        const scrollX = progress * depth * 4.2;
+        const scrollY = -progress * Math.abs(depth) * 8.6;
+        const rotate = progress * depth * 0.08;
+        const mouseX = pointerX * depth * 0.72;
+        const mouseY = pointerY * Math.abs(depth) * 0.42;
 
-        layer.style.setProperty("--move-x", `${x.toFixed(2)}px`);
-        layer.style.setProperty("--move-y", `${y.toFixed(2)}px`);
+        layer.style.setProperty("--progress", progress.toFixed(3));
+        layer.style.setProperty("--explode", explode.toFixed(3));
+        layer.style.setProperty("--mouse-x", `${mouseX.toFixed(2)}px`);
+        layer.style.setProperty("--mouse-y", `${mouseY.toFixed(2)}px`);
+        layer.style.setProperty("--scroll-x", `${scrollX.toFixed(2)}px`);
+        layer.style.setProperty("--scroll-y", `${scrollY.toFixed(2)}px`);
+        layer.style.setProperty("--scroll-rotate", `${rotate.toFixed(2)}deg`);
       });
 
       ticking = false;
