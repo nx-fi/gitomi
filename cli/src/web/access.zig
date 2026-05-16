@@ -29,6 +29,8 @@ const Flash = struct {
     message: []const u8,
 };
 
+const csrf_field_name = "csrf_token";
+
 const roles = [_][]const u8{
     "reader",
     "reporter",
@@ -37,11 +39,16 @@ const roles = [_][]const u8{
     "owner",
 };
 
-pub fn renderAccessPage(allocator: Allocator, repo: Repo) ![]u8 {
-    return renderAccessPageWithFlash(allocator, repo, null);
+pub fn renderAccessPage(allocator: Allocator, repo: Repo, csrf_token: []const u8) ![]u8 {
+    return renderAccessPageWithFlash(allocator, repo, csrf_token, null);
 }
 
-pub fn handleAccessRolePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
+pub fn handleAccessRolePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8, csrf_token: []const u8) !void {
+    if (!try validateCsrfToken(allocator, form_body, csrf_token)) {
+        try sendAccessError(allocator, repo, stream, 403, "Forbidden", "Invalid access form token. Reload the page and try again.", csrf_token);
+        return;
+    }
+
     const action_owned = (try formValueOwned(allocator, form_body, "action")) orelse try allocator.dupe(u8, "");
     defer allocator.free(action_owned);
     const action = std.mem.trim(u8, action_owned, " \t\r\n");
@@ -49,7 +56,7 @@ pub fn handleAccessRolePost(allocator: Allocator, repo: Repo, stream: std.net.St
     defer allocator.free(principal_owned);
     const principal = std.mem.trim(u8, principal_owned, " \t\r\n");
     if (principal.len == 0) {
-        try sendAccessError(allocator, repo, stream, 422, "Unprocessable Entity", "Principal is required.");
+        try sendAccessError(allocator, repo, stream, 422, "Unprocessable Entity", "Principal is required.", csrf_token);
         return;
     }
 
@@ -58,27 +65,32 @@ pub fn handleAccessRolePost(allocator: Allocator, repo: Repo, stream: std.net.St
         defer allocator.free(role_owned);
         const role = std.mem.trim(u8, role_owned, " \t\r\n");
         if (!event_mod.isKnownRole(role)) {
-            try sendAccessError(allocator, repo, stream, 422, "Unprocessable Entity", "Role must be reader, reporter, contributor, maintainer, or owner.");
+            try sendAccessError(allocator, repo, stream, 422, "Unprocessable Entity", "Role must be reader, reporter, contributor, maintainer, or owner.", csrf_token);
             return;
         }
         rbac.createAclGrantEvent(allocator, principal, role) catch {
-            try sendAccessError(allocator, repo, stream, 500, "Internal Server Error", "Could not grant the role. Check that your actor is an owner and the target role is allowed.");
+            try sendAccessError(allocator, repo, stream, 500, "Internal Server Error", "Could not grant the role. Check that your actor is an owner and the target role is allowed.", csrf_token);
             return;
         };
     } else if (std.mem.eql(u8, action, "revoke-role")) {
         rbac.createAclRevokeEvent(allocator, principal) catch {
-            try sendAccessError(allocator, repo, stream, 500, "Internal Server Error", "Could not revoke the role. The principal may have no role or this may be the last owner.");
+            try sendAccessError(allocator, repo, stream, 500, "Internal Server Error", "Could not revoke the role. The principal may have no role or this may be the last owner.", csrf_token);
             return;
         };
     } else {
-        try sendAccessError(allocator, repo, stream, 422, "Unprocessable Entity", "Unknown role action.");
+        try sendAccessError(allocator, repo, stream, 422, "Unprocessable Entity", "Unknown role action.", csrf_token);
         return;
     }
 
     try sendRedirect(allocator, stream, "/access");
 }
 
-pub fn handleAccessDevicePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
+pub fn handleAccessDevicePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8, csrf_token: []const u8) !void {
+    if (!try validateCsrfToken(allocator, form_body, csrf_token)) {
+        try sendAccessError(allocator, repo, stream, 403, "Forbidden", "Invalid access form token. Reload the page and try again.", csrf_token);
+        return;
+    }
+
     const action_owned = (try formValueOwned(allocator, form_body, "action")) orelse try allocator.dupe(u8, "");
     defer allocator.free(action_owned);
     const action = std.mem.trim(u8, action_owned, " \t\r\n");
@@ -89,7 +101,7 @@ pub fn handleAccessDevicePost(allocator: Allocator, repo: Repo, stream: std.net.
     const principal = std.mem.trim(u8, principal_owned, " \t\r\n");
     const device = std.mem.trim(u8, device_owned, " \t\r\n");
     if (principal.len == 0 or device.len == 0) {
-        try sendAccessError(allocator, repo, stream, 422, "Unprocessable Entity", "Principal and device are required.");
+        try sendAccessError(allocator, repo, stream, 422, "Unprocessable Entity", "Principal and device are required.", csrf_token);
         return;
     }
 
@@ -104,11 +116,11 @@ pub fn handleAccessDevicePost(allocator: Allocator, repo: Repo, stream: std.net.
         const fingerprint = std.mem.trim(u8, fingerprint_owned, " \t\r\n");
         const scheme = std.mem.trim(u8, scheme_owned, " \t\r\n");
         if (public_key.len == 0) {
-            try sendAccessError(allocator, repo, stream, 422, "Unprocessable Entity", "Signing public key is required when adding a device from the web UI.");
+            try sendAccessError(allocator, repo, stream, 422, "Unprocessable Entity", "Signing public key is required when adding a device from the web UI.", csrf_token);
             return;
         }
         if (scheme.len == 0) {
-            try sendAccessError(allocator, repo, stream, 422, "Unprocessable Entity", "Signing scheme is required.");
+            try sendAccessError(allocator, repo, stream, 422, "Unprocessable Entity", "Signing scheme is required.", csrf_token);
             return;
         }
         rbac.createIdentityDeviceAddedEvent(
@@ -119,29 +131,44 @@ pub fn handleAccessDevicePost(allocator: Allocator, repo: Repo, stream: std.net.
             if (fingerprint.len == 0) null else fingerprint,
             scheme,
         ) catch {
-            try sendAccessError(allocator, repo, stream, 500, "Internal Server Error", "Could not add the device. Check that your actor is an owner and the signing key is valid.");
+            try sendAccessError(allocator, repo, stream, 500, "Internal Server Error", "Could not add the device. Check that your actor is an owner and the signing key is valid.", csrf_token);
             return;
         };
     } else if (std.mem.eql(u8, action, "revoke-device")) {
         rbac.createIdentityDeviceRevokedEvent(allocator, principal, device) catch {
-            try sendAccessError(allocator, repo, stream, 500, "Internal Server Error", "Could not revoke the device. It may already be inactive or your actor may not be an owner.");
+            try sendAccessError(allocator, repo, stream, 500, "Internal Server Error", "Could not revoke the device. It may already be inactive or your actor may not be an owner.", csrf_token);
             return;
         };
     } else {
-        try sendAccessError(allocator, repo, stream, 422, "Unprocessable Entity", "Unknown device action.");
+        try sendAccessError(allocator, repo, stream, 422, "Unprocessable Entity", "Unknown device action.", csrf_token);
         return;
     }
 
     try sendRedirect(allocator, stream, "/access");
 }
 
-fn sendAccessError(allocator: Allocator, repo: Repo, stream: std.net.Stream, status: u16, reason: []const u8, message: []const u8) !void {
-    const body = try renderAccessPageWithFlash(allocator, repo, .{ .kind = .failure, .message = message });
+fn validateCsrfToken(allocator: Allocator, form_body: []const u8, csrf_token: []const u8) !bool {
+    const submitted_owned = (try formValueOwned(allocator, form_body, csrf_field_name)) orelse return false;
+    defer allocator.free(submitted_owned);
+    const submitted = std.mem.trim(u8, submitted_owned, " \t\r\n");
+    return submitted.len == csrf_token.len and std.mem.eql(u8, submitted, csrf_token);
+}
+
+fn appendCsrfInput(buf: *std.ArrayList(u8), allocator: Allocator, csrf_token: []const u8) !void {
+    try buf.appendSlice(allocator, "<input type=\"hidden\" name=\"");
+    try shared.appendHtml(buf, allocator, csrf_field_name);
+    try buf.appendSlice(allocator, "\" value=\"");
+    try shared.appendHtml(buf, allocator, csrf_token);
+    try buf.appendSlice(allocator, "\">");
+}
+
+fn sendAccessError(allocator: Allocator, repo: Repo, stream: std.net.Stream, status: u16, reason: []const u8, message: []const u8, csrf_token: []const u8) !void {
+    const body = try renderAccessPageWithFlash(allocator, repo, csrf_token, .{ .kind = .failure, .message = message });
     defer allocator.free(body);
     try sendResponse(allocator, stream, status, reason, "text/html", body, null);
 }
 
-fn renderAccessPageWithFlash(allocator: Allocator, repo: Repo, flash: ?Flash) ![]u8 {
+fn renderAccessPageWithFlash(allocator: Allocator, repo: Repo, csrf_token: []const u8, flash: ?Flash) ![]u8 {
     if (try shared.renderIndexingPageIfStale(allocator, repo, "Access", "access", "/access")) |body| return body;
     try index.ensureIndex(allocator, repo);
 
@@ -164,26 +191,29 @@ fn renderAccessPageWithFlash(allocator: Allocator, repo: Repo, flash: ?Flash) ![
         });
     }
     try buf.appendSlice(allocator, "<div class=\"access-grid\">");
-    try appendGrantRoleForm(&buf, allocator);
-    try appendAddDeviceForm(&buf, allocator);
+    try appendGrantRoleForm(&buf, allocator, csrf_token);
+    try appendAddDeviceForm(&buf, allocator, csrf_token);
     try buf.appendSlice(allocator, "</div></section>");
 
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
-    try appendRoleTable(&buf, allocator, &db);
-    try appendDeviceTable(&buf, allocator, &db);
+    try appendRoleTable(&buf, allocator, &db, csrf_token);
+    try appendDeviceTable(&buf, allocator, &db, csrf_token);
 
     try shared.appendSettingsLayoutEnd(&buf, allocator);
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
 }
 
-fn appendGrantRoleForm(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+fn appendGrantRoleForm(buf: *std.ArrayList(u8), allocator: Allocator, csrf_token: []const u8) !void {
     try buf.appendSlice(allocator,
         \\<section class="access-card">
         \\  <h2>Grant role</h2>
         \\  <form class="issue-form access-form" method="post" action="/access/roles">
         \\    <input type="hidden" name="action" value="grant-role">
+    );
+    try appendCsrfInput(buf, allocator, csrf_token);
+    try buf.appendSlice(allocator,
         \\    <label>Principal<input name="principal" required></label>
         \\    <label>Role<select name="role">
     );
@@ -198,12 +228,15 @@ fn appendGrantRoleForm(buf: *std.ArrayList(u8), allocator: Allocator) !void {
     );
 }
 
-fn appendAddDeviceForm(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+fn appendAddDeviceForm(buf: *std.ArrayList(u8), allocator: Allocator, csrf_token: []const u8) !void {
     try buf.appendSlice(allocator,
         \\<section class="access-card">
         \\  <h2>Add device</h2>
         \\  <form class="issue-form access-form" method="post" action="/access/devices">
         \\    <input type="hidden" name="action" value="add-device">
+    );
+    try appendCsrfInput(buf, allocator, csrf_token);
+    try buf.appendSlice(allocator,
         \\    <div class="access-form-row">
         \\      <label>Principal<input name="principal" required></label>
         \\      <label>Device<input name="device" required></label>
@@ -219,7 +252,7 @@ fn appendAddDeviceForm(buf: *std.ArrayList(u8), allocator: Allocator) !void {
     );
 }
 
-fn appendRoleTable(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb) !void {
+fn appendRoleTable(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, csrf_token: []const u8) !void {
     try buf.appendSlice(allocator,
         \\<section class="panel access-table-panel">
         \\  <div class="section-head"><div><p class="eyebrow">ACL</p><h1>Role Grants</h1></div></div>
@@ -245,7 +278,9 @@ fn appendRoleTable(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb)
             .role = role,
             .hash = grant_event_hash[0..@min(grant_event_hash.len, 12)],
         });
-        try buf.appendSlice(allocator, "<form class=\"access-row-form\" method=\"post\" action=\"/access/roles\"><input type=\"hidden\" name=\"action\" value=\"revoke-role\"><input type=\"hidden\" name=\"principal\" value=\"");
+        try buf.appendSlice(allocator, "<form class=\"access-row-form\" method=\"post\" action=\"/access/roles\"><input type=\"hidden\" name=\"action\" value=\"revoke-role\">");
+        try appendCsrfInput(buf, allocator, csrf_token);
+        try buf.appendSlice(allocator, "<input type=\"hidden\" name=\"principal\" value=\"");
         try shared.appendHtml(buf, allocator, principal);
         try buf.appendSlice(allocator, "\"><button class=\"button secondary\" type=\"submit\">Revoke</button></form></td></tr>");
         shown += 1;
@@ -259,7 +294,7 @@ fn appendRoleTable(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb)
     );
 }
 
-fn appendDeviceTable(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb) !void {
+fn appendDeviceTable(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, csrf_token: []const u8) !void {
     try buf.appendSlice(allocator,
         \\<section class="panel access-table-panel">
         \\  <div class="section-head"><div><p class="eyebrow">Identity</p><h1>Devices</h1></div></div>
@@ -298,7 +333,9 @@ fn appendDeviceTable(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteD
             .public_key = public_key[0..@min(public_key.len, 48)],
         });
         if (active) {
-            try buf.appendSlice(allocator, "<form class=\"access-row-form\" method=\"post\" action=\"/access/devices\"><input type=\"hidden\" name=\"action\" value=\"revoke-device\"><input type=\"hidden\" name=\"principal\" value=\"");
+            try buf.appendSlice(allocator, "<form class=\"access-row-form\" method=\"post\" action=\"/access/devices\"><input type=\"hidden\" name=\"action\" value=\"revoke-device\">");
+            try appendCsrfInput(buf, allocator, csrf_token);
+            try buf.appendSlice(allocator, "<input type=\"hidden\" name=\"principal\" value=\"");
             try shared.appendHtml(buf, allocator, principal);
             try buf.appendSlice(allocator, "\"><input type=\"hidden\" name=\"device\" value=\"");
             try shared.appendHtml(buf, allocator, device);

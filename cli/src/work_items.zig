@@ -1640,15 +1640,28 @@ pub fn loadPullGitRefs(allocator: Allocator, repo: Repo, detail: PullDetail) !?P
     const prefer_remote = detail.legacy_number > 0;
     const base = (try resolvePullGitCommit(allocator, repo, detail.base_ref, prefer_remote)) orelse return null;
     errdefer allocator.free(base);
-    const head: ?[]u8 = if (detail.legacy_number > 0) blk: {
-        if (try resolveGithubPullHeadCommit(allocator, repo, detail.legacy_number)) |oid| break :blk oid;
-        break :blk try resolvePullGitCommit(allocator, repo, detail.head_ref, prefer_remote);
-    } else try resolvePullGitCommit(allocator, repo, detail.head_ref, prefer_remote);
+    const head = try resolvePullHeadGitCommit(allocator, repo, detail, prefer_remote);
     const owned_head = head orelse {
         allocator.free(base);
         return null;
     };
     return .{ .base = base, .head = owned_head };
+}
+
+fn resolvePullHeadGitCommit(allocator: Allocator, repo: Repo, detail: PullDetail, prefer_remote: bool) !?[]u8 {
+    if (detail.legacy_number > 0) {
+        if (try resolveGithubPullHeadCommit(allocator, repo, detail.legacy_number)) |github_head| {
+            if (try resolveLocalPullBranchCommit(allocator, repo, detail.head_ref)) |local_head| {
+                if (try gitCommitIsAncestor(allocator, repo, github_head, local_head)) {
+                    allocator.free(github_head);
+                    return local_head;
+                }
+                allocator.free(local_head);
+            }
+            return github_head;
+        }
+    }
+    return try resolvePullGitCommit(allocator, repo, detail.head_ref, prefer_remote);
 }
 
 fn resolveGithubPullHeadCommit(allocator: Allocator, repo: Repo, number: i64) !?[]u8 {
@@ -1663,6 +1676,33 @@ fn resolveFormattedGithubPullRef(allocator: Allocator, repo: Repo, comptime patt
     const ref = try std.fmt.allocPrint(allocator, pattern, .{number});
     defer allocator.free(ref);
     return try resolveGitCommit(allocator, repo, ref);
+}
+
+fn resolveLocalPullBranchCommit(allocator: Allocator, repo: Repo, raw_ref: []const u8) !?[]u8 {
+    const local_ref = (try localPullBranchRef(allocator, raw_ref)) orelse return null;
+    defer allocator.free(local_ref);
+    return try resolveGitCommit(allocator, repo, local_ref);
+}
+
+fn localPullBranchRef(allocator: Allocator, raw_ref: []const u8) !?[]u8 {
+    const heads_prefix = "refs/heads/";
+    if (std.mem.startsWith(u8, raw_ref, heads_prefix)) {
+        const branch_name = raw_ref[heads_prefix.len..];
+        if (!isSafeLocalBranchName(branch_name)) return null;
+        return try allocator.dupe(u8, raw_ref);
+    }
+    if (!isBranchShorthand(raw_ref)) return null;
+    return try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{raw_ref});
+}
+
+fn gitCommitIsAncestor(allocator: Allocator, repo: Repo, ancestor: []const u8, descendant: []const u8) !bool {
+    var result = try gitRun(allocator, repo, &.{ "merge-base", "--is-ancestor", ancestor, descendant }, 1024 * 1024);
+    defer result.deinit();
+    if (result.exitCode()) |code| {
+        if (code == 0) return true;
+        if (code == 1) return false;
+    }
+    return error.GitFailed;
 }
 
 fn resolvePullGitCommit(allocator: Allocator, repo: Repo, raw_ref: []const u8, prefer_remote: bool) !?[]u8 {
@@ -1691,9 +1731,14 @@ fn resolveGitCommit(allocator: Allocator, repo: Repo, ref: []const u8) !?[]u8 {
 }
 
 fn isBranchShorthand(ref: []const u8) bool {
-    if (ref.len == 0) return false;
     if (std.mem.startsWith(u8, ref, "refs/")) return false;
     if (std.mem.startsWith(u8, ref, "origin/")) return false;
+    if (std.mem.eql(u8, ref, "HEAD")) return false;
+    return isSafeLocalBranchName(ref);
+}
+
+fn isSafeLocalBranchName(ref: []const u8) bool {
+    if (ref.len == 0) return false;
     if (std.mem.startsWith(u8, ref, "-")) return false;
     if (std.mem.endsWith(u8, ref, ".lock")) return false;
     if (std.mem.indexOf(u8, ref, "..") != null) return false;
@@ -1704,13 +1749,7 @@ fn isBranchShorthand(ref: []const u8) bool {
 }
 
 pub fn gitMaybe(allocator: Allocator, repo: Repo, git_args: []const []const u8, max_output_bytes: usize) !?[]u8 {
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(allocator);
-    try argv.append(allocator, "git");
-    try argv.append(allocator, "-C");
-    try argv.append(allocator, repo.root);
-    for (git_args) |arg| try argv.append(allocator, arg);
-    var result = try git.runCommand(allocator, argv.items, null, max_output_bytes);
+    var result = try gitRun(allocator, repo, git_args, max_output_bytes);
     if (result.exitCode() == 0) {
         const stdout = result.stdout;
         allocator.free(result.stderr);
@@ -1718,6 +1757,16 @@ pub fn gitMaybe(allocator: Allocator, repo: Repo, git_args: []const []const u8, 
     }
     result.deinit();
     return null;
+}
+
+fn gitRun(allocator: Allocator, repo: Repo, git_args: []const []const u8, max_output_bytes: usize) !git.RunOutput {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.append(allocator, "git");
+    try argv.append(allocator, "-C");
+    try argv.append(allocator, repo.root);
+    for (git_args) |arg| try argv.append(allocator, arg);
+    return git.runCommand(allocator, argv.items, null, max_output_bytes);
 }
 
 pub const DiffCommentSide = enum {
@@ -1765,6 +1814,21 @@ test "formats single-line and range diff comments" {
     }, "Needs work");
     defer std.testing.allocator.free(range);
     try std.testing.expectEqualStrings("Review comment on `src/main.zig` (old lines 3-5).\n\nNeeds work", range);
+}
+
+test "pull git refs derive local branch refs only from safe branch names" {
+    const shorthand = (try localPullBranchRef(std.testing.allocator, "feature/conflict-fix")).?;
+    defer std.testing.allocator.free(shorthand);
+    try std.testing.expectEqualStrings("refs/heads/feature/conflict-fix", shorthand);
+
+    const full = (try localPullBranchRef(std.testing.allocator, "refs/heads/origin/feature")).?;
+    defer std.testing.allocator.free(full);
+    try std.testing.expectEqualStrings("refs/heads/origin/feature", full);
+
+    try std.testing.expect((try localPullBranchRef(std.testing.allocator, "origin/feature")) == null);
+    try std.testing.expect((try localPullBranchRef(std.testing.allocator, "refs/remotes/origin/feature")) == null);
+    try std.testing.expect((try localPullBranchRef(std.testing.allocator, "HEAD")) == null);
+    try std.testing.expect((try localPullBranchRef(std.testing.allocator, "feature^{commit}")) == null);
 }
 
 test "work item search query filters state and keeps text terms" {

@@ -903,6 +903,21 @@ YAML
   git commit -m "Change workflow on head" >/dev/null
   head_oid="$(git rev-parse HEAD)"
 
+  git checkout -b attacker-base main >/dev/null
+  cat > .gitomi/workflows/review.yml <<'YAML'
+name: Pull Source Policy
+on:
+  pull.opened:
+jobs:
+  review:
+    backend: shell
+    steps:
+      - run: exit 42
+YAML
+  git add .gitomi/workflows/review.yml
+  git commit -m "Add attacker base workflow" >/dev/null
+  attacker_base_oid="$(git rev-parse HEAD)"
+
   git checkout main >/dev/null
   gt pr create --title "Source split" -B main -H feature >/dev/null
   pull_json="$(gt pr list --json)"
@@ -915,6 +930,13 @@ YAML
   assert_contains "$inbox_log" '"source_code_from":"head"'
   assert_contains "$inbox_log" '"workflow_source_oid":"'"$base_oid"'"'
   assert_contains "$inbox_log" '"target_oid":"'"$head_oid"'"'
+  assert_contains "$inbox_log" '"conclusion":"success"'
+
+  gt pr base "$pull_id" --base attacker-base >/dev/null
+  gt actions run --event pull.opened --object-id "$pull_id" >/dev/null
+  inbox_log="$(git log --format=%B refs/gitomi/inbox/alice/laptop)"
+  assert_contains "$inbox_log" '"workflow_source_oid":"'"$base_oid"'"'
+  assert_not_contains "$inbox_log" '"workflow_source_oid":"'"$attacker_base_oid"'"'
   assert_contains "$inbox_log" '"conclusion":"success"'
 
   run_ref="$(git for-each-ref --format='%(refname)' refs/gitomi/runs | head -n 1)"

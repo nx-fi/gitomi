@@ -317,26 +317,21 @@ fn rebuildIndexUnlocked(allocator: Allocator, repo: Repo) !IndexStats {
     const limits = SnapshotLimits{};
     enforceSnapshotRetention(allocator, limits) catch {};
 
-    var loaded_snapshot = try loadNewestValidSnapshot(allocator, repo, refs_raw, limits);
-    defer if (loaded_snapshot) |*snapshot| snapshot.deinit();
+    // Do not hydrate the live projection from snapshot SQLite files. Snapshot refs are
+    // ordinary Git refs that may arrive from a remote, so their embedded databases
+    // cannot be trusted as authoritative projection state unless every covered event
+    // has been replay-authenticated. Rebuild from signed event commits instead;
+    // snapshots remain only a write-side cache until a verified loader exists.
+    const stats = try rebuildIndexFromScratch(allocator, repo, refs_raw, &admission, empty_tree, genesis_oid);
 
-    var used_snapshot = false;
-    const stats = if (loaded_snapshot) |snapshot| blk: {
-        used_snapshot = true;
-        break :blk rebuildIndexFromSnapshot(allocator, repo, refs_raw, snapshot.covered_refs_raw, &admission, empty_tree, genesis_oid) catch |err| fallback: {
-            if (err == error.OutOfMemory) return err;
-            used_snapshot = false;
-            admission.deinit();
-            admission = IndexAdmission.init(allocator, expected_repo_id);
-            break :fallback try rebuildIndexFromScratch(allocator, repo, refs_raw, &admission, empty_tree, genesis_oid);
-        };
-    } else try rebuildIndexFromScratch(allocator, repo, refs_raw, &admission, empty_tree, genesis_oid);
+    // For snapshot creation policy, read only the manifest JSON of the newest snapshot
+    // (no SQLite data is loaded) to determine whether inbox coverage has advanced.
+    // This prevents a snapshot from being written on every branch/tag update when no
+    // new inbox events have arrived since the last snapshot.
+    var maybe_snapshot_meta = loadNewestCoveringSnapshotMeta(allocator, refs_raw, limits) catch null;
+    defer if (maybe_snapshot_meta) |*s| s.deinit();
 
-    const snapshot_ptr: ?*const LoadedSnapshot = if (used_snapshot) blk: {
-        if (loaded_snapshot) |*snapshot| break :blk snapshot;
-        break :blk null;
-    } else null;
-    if (shouldCreateSnapshot(snapshot_ptr, stats, SnapshotPolicy{}, std.time.timestamp())) {
+    if (shouldCreateSnapshot(if (maybe_snapshot_meta) |*m| m else null, stats, SnapshotPolicy{}, std.time.timestamp())) {
         createIndexSnapshot(allocator, repo, refs_raw, limits) catch {};
         enforceSnapshotRetention(allocator, limits) catch {};
     }
@@ -532,74 +527,6 @@ fn rebuildIndexFromScratch(
     return stats;
 }
 
-fn rebuildIndexFromSnapshot(
-    allocator: Allocator,
-    repo: Repo,
-    refs_raw: []const u8,
-    covered_refs_raw: []const u8,
-    admission: *IndexAdmission,
-    empty_tree: []const u8,
-    genesis_oid: ?[]const u8,
-) !IndexStats {
-    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READWRITE, false);
-    defer db.deinit();
-
-    if (!(try isSchemaFresh(allocator, &db))) return error.InvalidSnapshot;
-    try seedAdmissionFromIndexedEvents(allocator, &db, admission);
-
-    const db_refs = try indexedRefsRaw(allocator, &db);
-    defer allocator.free(db_refs);
-    if (!std.mem.eql(u8, db_refs, covered_refs_raw)) return error.InvalidSnapshot;
-
-    var covered_refs = try parseRefsRaw(allocator, covered_refs_raw);
-    defer freeRefHeads(allocator, &covered_refs);
-
-    try db.exec("BEGIN IMMEDIATE");
-    var committed = false;
-    errdefer if (!committed) db.exec("ROLLBACK") catch {};
-
-    try db.exec("DELETE FROM ref_heads");
-    var ref_stmt = try db.prepare("INSERT INTO ref_heads(ref, oid) VALUES (?, ?)");
-    defer ref_stmt.deinit();
-
-    var event_stmt = try db.prepare(
-        \\INSERT INTO events(
-        \\  ref, "commit", event_hash, tree, subject, body, empty_tree, valid_json,
-        \\  event_type, object_kind, object_id, actor_principal, actor_device, seq, occurred_at,
-        \\  domain_status, rejection_reason
-        \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    );
-    defer event_stmt.deinit();
-
-    var stats = IndexStats{};
-    var it = std.mem.tokenizeScalar(u8, refs_raw, '\n');
-    while (it.next()) |line| {
-        const tab = std.mem.indexOfScalar(u8, line, '\t') orelse continue;
-        const ref = std.mem.trim(u8, line[0..tab], " \t\r\n");
-        const oid = std.mem.trim(u8, line[tab + 1 ..], " \t\r\n");
-        if (ref.len == 0) continue;
-
-        try ref_stmt.reset();
-        try ref_stmt.bindText(1, ref);
-        try ref_stmt.bindText(2, oid);
-        try ref_stmt.stepDone();
-
-        if (!std.mem.startsWith(u8, ref, "refs/gitomi/inbox/")) continue;
-        stats.refs += 1;
-        const base = findRefOid(covered_refs.items, ref);
-        stats.new_events += try indexRefEvents(allocator, &event_stmt, admission, ref, base, empty_tree, genesis_oid);
-    }
-
-    try projectNewIndexedEvents(allocator, &db);
-    try rebuildDerivedCommitReferences(allocator, &db, refs_raw);
-
-    try db.exec("COMMIT");
-    committed = true;
-
-    stats.events = try countIndexedEventsInDb(&db);
-    return stats;
-}
-
 pub fn currentIndexRefsRaw(allocator: Allocator) ![]u8 {
     return gitChecked(allocator, &.{
         "for-each-ref",
@@ -629,51 +556,6 @@ pub fn indexedRefsRaw(allocator: Allocator, db: *SqliteDb) ![]u8 {
         try buf.append(allocator, '\n');
     }
     return buf.toOwnedSlice(allocator);
-}
-
-fn seedAdmissionFromIndexedEvents(allocator: Allocator, db: *SqliteDb, admission: *IndexAdmission) !void {
-    var stmt = try db.prepare("SELECT body FROM events WHERE valid_json != 0 ORDER BY ordinal");
-    defer stmt.deinit();
-
-    while (try stmt.step()) {
-        const body = try stmt.columnTextDup(allocator, 0);
-        defer allocator.free(body);
-        var envelope = parseValidatedEnvelope(allocator, body) catch return error.InvalidSnapshot;
-        defer envelope.deinit();
-        try admission.remember(envelope);
-    }
-}
-
-fn parseRefsRaw(allocator: Allocator, raw: []const u8) !std.ArrayList(RefHead) {
-    var refs: std.ArrayList(RefHead) = .empty;
-    errdefer freeRefHeads(allocator, &refs);
-
-    var it = std.mem.tokenizeScalar(u8, raw, '\n');
-    while (it.next()) |line| {
-        const tab = std.mem.indexOfScalar(u8, line, '\t') orelse continue;
-        const ref = std.mem.trim(u8, line[0..tab], " \t\r\n");
-        const oid = std.mem.trim(u8, line[tab + 1 ..], " \t\r\n");
-        if (ref.len == 0 or oid.len == 0) continue;
-        try refs.append(allocator, .{
-            .allocator = allocator,
-            .ref = try allocator.dupe(u8, ref),
-            .oid = try allocator.dupe(u8, oid),
-        });
-    }
-
-    return refs;
-}
-
-fn freeRefHeads(allocator: Allocator, refs: *std.ArrayList(RefHead)) void {
-    for (refs.items) |*ref| ref.deinit();
-    refs.deinit(allocator);
-}
-
-fn findRefOid(refs: []const RefHead, wanted: []const u8) ?[]const u8 {
-    for (refs) |ref| {
-        if (std.mem.eql(u8, ref.ref, wanted)) return ref.oid;
-    }
-    return null;
 }
 
 pub fn enforceSnapshotRetention(allocator: Allocator, limits: SnapshotLimits) !void {
@@ -828,6 +710,13 @@ test "index admission can be seeded from remembered snapshot events" {
     try std.testing.expectError(error.InvalidSnapshot, admission.remember(wrong_repo));
 }
 
+test "first parent matcher handles root and merge histories" {
+    try std.testing.expect(firstParentMatches("", null));
+    try std.testing.expect(!firstParentMatches("parent-a", null));
+    try std.testing.expect(firstParentMatches("parent-a parent-b", "parent-a"));
+    try std.testing.expect(!firstParentMatches("parent-b parent-a", "parent-a"));
+}
+
 test "ref head parsing skips malformed rows and finds oids" {
     const raw =
         " refs/gitomi/genesis \tabc123\n" ++
@@ -863,13 +752,6 @@ test "snapshot manifest round trips covered refs and rejects invalid metadata" {
     );
 }
 
-test "first parent matcher handles root and merge histories" {
-    try std.testing.expect(firstParentMatches("", null));
-    try std.testing.expect(!firstParentMatches("parent-a", null));
-    try std.testing.expect(firstParentMatches("parent-a parent-b", "parent-a"));
-    try std.testing.expect(!firstParentMatches("parent-b parent-a", "parent-a"));
-}
-
 test "snapshot prune numbers require unsigned integers" {
     try std.testing.expectEqual(@as(u64, 42), try parseSnapshotPruneNumber("42", "max-count"));
     try std.testing.expectError(CliError.UserError, parseSnapshotPruneNumber("-1", "max-count"));
@@ -899,216 +781,15 @@ fn testEnvelope(
     };
 }
 
-fn loadNewestValidSnapshot(
-    allocator: Allocator,
-    repo: Repo,
-    current_refs_raw: []const u8,
-    limits: SnapshotLimits,
-) !?LoadedSnapshot {
-    var refs = try loadSnapshotRefs(allocator);
-    defer freeSnapshotRefs(allocator, &refs);
-
-    for (refs.items) |*ref| {
-        const bytes = snapshotTreeBytes(allocator, ref.oid) catch continue;
-        if (limits.max_tree_bytes != 0 and bytes > limits.max_tree_bytes) continue;
-        if (try loadSnapshotCandidate(allocator, repo, ref, current_refs_raw, limits)) |snapshot| return snapshot;
-    }
-    return null;
-}
-
-fn loadSnapshotCandidate(
-    allocator: Allocator,
-    repo: Repo,
-    ref: *const SnapshotRef,
-    current_refs_raw: []const u8,
-    limits: SnapshotLimits,
-) !?LoadedSnapshot {
-    const manifest_bytes = snapshotShowFile(allocator, ref.oid, snapshot_manifest_path, limits) catch return null;
-    defer allocator.free(manifest_bytes);
-
-    const covered_refs_raw = parseSnapshotManifest(allocator, manifest_bytes) catch return null;
-    errdefer allocator.free(covered_refs_raw);
-
-    const coverage_ok = snapshotCoverageValid(allocator, covered_refs_raw, current_refs_raw) catch false;
-    if (!coverage_ok) {
-        allocator.free(covered_refs_raw);
-        return null;
-    }
-
-    const index_bytes = snapshotShowFile(allocator, ref.oid, snapshot_index_path, limits) catch {
-        allocator.free(covered_refs_raw);
-        return null;
-    };
-    defer allocator.free(index_bytes);
-    if (limits.max_tree_bytes != 0 and index_bytes.len + manifest_bytes.len > limits.max_tree_bytes) {
-        allocator.free(covered_refs_raw);
-        return null;
-    }
-
-    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.snapshot.{s}.tmp", .{ repo.index_path, ref.oid[0..@min(ref.oid.len, 12)] });
-    defer allocator.free(tmp_path);
-    std.fs.cwd().deleteFile(tmp_path) catch {};
-    index_sqlite.deleteSidecarFiles(allocator, tmp_path);
-    errdefer {
-        std.fs.cwd().deleteFile(tmp_path) catch {};
-        index_sqlite.deleteSidecarFiles(allocator, tmp_path);
-    }
-    try writeFileBytes(tmp_path, index_bytes);
-
-    {
-        var db = SqliteDb.open(allocator, tmp_path, sqlite.SQLITE_OPEN_READONLY, true) catch {
-            allocator.free(covered_refs_raw);
-            return null;
-        };
-        defer db.deinit();
-        if (!(try isSchemaFresh(allocator, &db))) {
-            allocator.free(covered_refs_raw);
-            return null;
-        }
-        const indexed_refs = indexedRefsRaw(allocator, &db) catch {
-            allocator.free(covered_refs_raw);
-            return null;
-        };
-        defer allocator.free(indexed_refs);
-        if (!std.mem.eql(u8, indexed_refs, covered_refs_raw)) {
-            allocator.free(covered_refs_raw);
-            return null;
-        }
-    }
-
-    if (!(try prepareIndexPathForReplacement(allocator, repo.index_path))) {
-        allocator.free(covered_refs_raw);
-        return null;
-    }
-    try std.fs.cwd().rename(tmp_path, repo.index_path);
-    index_sqlite.deleteSidecarFiles(allocator, repo.index_path);
-    return .{
-        .allocator = allocator,
-        .ref = try allocator.dupe(u8, ref.ref),
-        .oid = try allocator.dupe(u8, ref.oid),
-        .covered_refs_raw = covered_refs_raw,
-        .timestamp = ref.timestamp,
-        .exact = std.mem.eql(u8, covered_refs_raw, current_refs_raw),
-    };
-}
-
-fn parseSnapshotManifest(allocator: Allocator, bytes: []const u8) ![]u8 {
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
-    defer parsed.deinit();
-    const root = switch (parsed.value) {
-        .object => |object| object,
-        else => return error.InvalidSnapshot,
-    };
-
-    const schema = event_mod.jsonString(root.get("$schema")) orelse return error.InvalidSnapshot;
-    if (!std.mem.eql(u8, schema, snapshot_schema)) return error.InvalidSnapshot;
-
-    const version_value = root.get("schema_version") orelse return error.InvalidSnapshot;
-    const version = switch (version_value) {
-        .integer => |value| value,
-        else => return error.InvalidSnapshot,
-    };
-    if (version < 0 or @as(u64, @intCast(version)) != snapshot_schema_version) return error.InvalidSnapshot;
-
-    const index_version = event_mod.jsonString(root.get("index_schema_version")) orelse return error.InvalidSnapshot;
-    if (!std.mem.eql(u8, index_version, index_schema_version)) return error.InvalidSnapshot;
-
-    const covered_refs_raw = event_mod.jsonString(root.get("covered_refs_raw")) orelse return error.InvalidSnapshot;
-    if (std.mem.trim(u8, covered_refs_raw, " \t\r\n").len == 0) return error.InvalidSnapshot;
-
-    const state = switch (root.get("state") orelse return error.InvalidSnapshot) {
-        .object => |object| object,
-        else => return error.InvalidSnapshot,
-    };
-    const state_format = event_mod.jsonString(state.get("format")) orelse return error.InvalidSnapshot;
-    const state_path = event_mod.jsonString(state.get("path")) orelse return error.InvalidSnapshot;
-    if (!std.mem.eql(u8, state_format, "sqlite-index")) return error.InvalidSnapshot;
-    if (!std.mem.eql(u8, state_path, snapshot_index_path)) return error.InvalidSnapshot;
-
-    return allocator.dupe(u8, covered_refs_raw);
-}
-
-fn snapshotCoverageValid(allocator: Allocator, covered_refs_raw: []const u8, current_refs_raw: []const u8) !bool {
-    var covered_refs = try parseRefsRaw(allocator, covered_refs_raw);
-    defer freeRefHeads(allocator, &covered_refs);
-    if (covered_refs.items.len == 0) return false;
-
-    var current_refs = try parseRefsRaw(allocator, current_refs_raw);
-    defer freeRefHeads(allocator, &current_refs);
-
-    for (covered_refs.items) |covered| {
-        if (isDataPlaneIndexRef(covered.ref)) continue;
-
-        const current_oid = findRefOid(current_refs.items, covered.ref) orelse return false;
-        if (std.mem.eql(u8, covered.ref, repo_mod.genesis_ref)) {
-            if (!std.mem.eql(u8, current_oid, covered.oid)) return false;
-        } else if (std.mem.startsWith(u8, covered.ref, "refs/gitomi/inbox/")) {
-            if (!(try git.isAncestor(allocator, covered.oid, current_oid))) return false;
-        } else {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-fn isDataPlaneIndexRef(ref: []const u8) bool {
-    return std.mem.startsWith(u8, ref, "refs/heads/") or std.mem.startsWith(u8, ref, "refs/tags/");
-}
-
-fn snapshotShowFile(allocator: Allocator, oid: []const u8, path: []const u8, limits: SnapshotLimits) ![]u8 {
-    const object_path = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ oid, path });
-    defer allocator.free(object_path);
-    return gitCheckedMax(allocator, &.{ "show", object_path }, snapshotMaxOutputBytes(limits));
-}
-
-fn writeFileBytes(path: []const u8, bytes: []const u8) !void {
-    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(bytes);
-}
-
-fn prepareIndexPathForReplacement(allocator: Allocator, path: []const u8) !bool {
-    if (!fileExists(path)) {
-        index_sqlite.deleteSidecarFiles(allocator, path);
-        return true;
-    }
-
-    {
-        var db = SqliteDb.openWithOptions(allocator, path, sqlite.SQLITE_OPEN_READWRITE, true, .{ .enable_wal = false }) catch return false;
-        defer db.deinit();
-        db.checkpointWal() catch return false;
-        db.exec("PRAGMA journal_mode=DELETE") catch return false;
-    }
-    index_sqlite.deleteSidecarFiles(allocator, path);
-    return true;
-}
-
-fn standaloneIndexBytes(allocator: Allocator, repo: Repo, limits: SnapshotLimits) ![]u8 {
-    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.snapshot-copy.tmp", .{repo.index_path});
-    defer allocator.free(tmp_path);
-    std.fs.cwd().deleteFile(tmp_path) catch {};
-    index_sqlite.deleteSidecarFiles(allocator, tmp_path);
-    defer {
-        std.fs.cwd().deleteFile(tmp_path) catch {};
-        index_sqlite.deleteSidecarFiles(allocator, tmp_path);
-    }
-
-    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
-    defer db.deinit();
-    try db.backupToFile(tmp_path);
-
-    const stat = std.fs.cwd().statFile(tmp_path) catch return error.FileNotFound;
-    if (stat.size == 0) return error.InvalidSnapshot;
-    if (limits.max_tree_bytes != 0 and stat.size > limits.max_tree_bytes) return error.FileTooBig;
-
-    return try std.fs.cwd().readFileAlloc(allocator, tmp_path, snapshotMaxOutputBytes(limits));
-}
-
 fn createIndexSnapshot(allocator: Allocator, repo: Repo, refs_raw: []const u8, limits: SnapshotLimits) !void {
     if (std.mem.trim(u8, refs_raw, " \t\r\n").len == 0) return;
 
-    const index_bytes = standaloneIndexBytes(allocator, repo, limits) catch return;
+    const stat = std.fs.cwd().statFile(repo.index_path) catch return;
+    if (stat.size == 0) return;
+    if (limits.max_tree_bytes != 0 and stat.size > limits.max_tree_bytes) return;
+
+    const max_bytes = snapshotMaxOutputBytes(limits);
+    const index_bytes = std.fs.cwd().readFileAlloc(allocator, repo.index_path, max_bytes) catch return;
     defer allocator.free(index_bytes);
 
     const manifest = try buildSnapshotManifest(allocator, refs_raw);
@@ -1254,6 +935,148 @@ fn snapshotMaxOutputBytes(limits: SnapshotLimits) usize {
     return @intCast(capped);
 }
 
+fn parseRefsRaw(allocator: Allocator, raw: []const u8) !std.ArrayList(RefHead) {
+    var refs: std.ArrayList(RefHead) = .empty;
+    errdefer freeRefHeads(allocator, &refs);
+
+    var it = std.mem.tokenizeScalar(u8, raw, '\n');
+    while (it.next()) |line| {
+        const tab = std.mem.indexOfScalar(u8, line, '\t') orelse continue;
+        const ref = std.mem.trim(u8, line[0..tab], " \t\r\n");
+        const oid = std.mem.trim(u8, line[tab + 1 ..], " \t\r\n");
+        if (ref.len == 0 or oid.len == 0) continue;
+        try refs.append(allocator, .{
+            .allocator = allocator,
+            .ref = try allocator.dupe(u8, ref),
+            .oid = try allocator.dupe(u8, oid),
+        });
+    }
+
+    return refs;
+}
+
+fn freeRefHeads(allocator: Allocator, refs: *std.ArrayList(RefHead)) void {
+    for (refs.items) |*ref| ref.deinit();
+    refs.deinit(allocator);
+}
+
+fn findRefOid(refs: []const RefHead, wanted: []const u8) ?[]const u8 {
+    for (refs) |ref| {
+        if (std.mem.eql(u8, ref.ref, wanted)) return ref.oid;
+    }
+    return null;
+}
+
+fn isDataPlaneIndexRef(ref: []const u8) bool {
+    return std.mem.startsWith(u8, ref, "refs/heads/") or std.mem.startsWith(u8, ref, "refs/tags/");
+}
+
+fn snapshotShowFile(allocator: Allocator, oid: []const u8, path: []const u8, limits: SnapshotLimits) ![]u8 {
+    const object_path = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ oid, path });
+    defer allocator.free(object_path);
+    return gitCheckedMax(allocator, &.{ "show", object_path }, snapshotMaxOutputBytes(limits));
+}
+
+fn parseSnapshotManifest(allocator: Allocator, bytes: []const u8) ![]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return error.InvalidSnapshot,
+    };
+
+    const schema = event_mod.jsonString(root.get("$schema")) orelse return error.InvalidSnapshot;
+    if (!std.mem.eql(u8, schema, snapshot_schema)) return error.InvalidSnapshot;
+
+    const version_value = root.get("schema_version") orelse return error.InvalidSnapshot;
+    const version = switch (version_value) {
+        .integer => |value| value,
+        else => return error.InvalidSnapshot,
+    };
+    if (version < 0 or @as(u64, @intCast(version)) != snapshot_schema_version) return error.InvalidSnapshot;
+
+    const index_version = event_mod.jsonString(root.get("index_schema_version")) orelse return error.InvalidSnapshot;
+    if (!std.mem.eql(u8, index_version, index_schema_version)) return error.InvalidSnapshot;
+
+    const covered_refs_raw = event_mod.jsonString(root.get("covered_refs_raw")) orelse return error.InvalidSnapshot;
+    if (std.mem.trim(u8, covered_refs_raw, " \t\r\n").len == 0) return error.InvalidSnapshot;
+
+    const state = switch (root.get("state") orelse return error.InvalidSnapshot) {
+        .object => |object| object,
+        else => return error.InvalidSnapshot,
+    };
+    const state_format = event_mod.jsonString(state.get("format")) orelse return error.InvalidSnapshot;
+    const state_path = event_mod.jsonString(state.get("path")) orelse return error.InvalidSnapshot;
+    if (!std.mem.eql(u8, state_format, "sqlite-index")) return error.InvalidSnapshot;
+    if (!std.mem.eql(u8, state_path, snapshot_index_path)) return error.InvalidSnapshot;
+
+    return allocator.dupe(u8, covered_refs_raw);
+}
+
+fn snapshotCoverageValid(allocator: Allocator, covered_refs_raw: []const u8, current_refs_raw: []const u8) !bool {
+    var covered_refs = try parseRefsRaw(allocator, covered_refs_raw);
+    defer freeRefHeads(allocator, &covered_refs);
+    if (covered_refs.items.len == 0) return false;
+
+    var current_refs = try parseRefsRaw(allocator, current_refs_raw);
+    defer freeRefHeads(allocator, &current_refs);
+
+    for (covered_refs.items) |covered| {
+        if (isDataPlaneIndexRef(covered.ref)) continue;
+
+        const current_oid = findRefOid(current_refs.items, covered.ref) orelse return false;
+        if (std.mem.eql(u8, covered.ref, repo_mod.genesis_ref)) {
+            if (!std.mem.eql(u8, current_oid, covered.oid)) return false;
+        } else if (std.mem.startsWith(u8, covered.ref, "refs/gitomi/inbox/")) {
+            if (!(try git.isAncestor(allocator, covered.oid, current_oid))) return false;
+        } else {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/// Reads only the manifest JSON of the newest snapshot ref (no SQLite data is loaded)
+/// and returns a synthetic LoadedSnapshot for use by shouldCreateSnapshot.  This
+/// allows the snapshot creation policy to suppress redundant snapshots when no new
+/// inbox events have arrived since the last snapshot (e.g. on a bare branch/tag update).
+fn loadNewestCoveringSnapshotMeta(
+    allocator: Allocator,
+    current_refs_raw: []const u8,
+    limits: SnapshotLimits,
+) !?LoadedSnapshot {
+    var refs = try loadSnapshotRefs(allocator);
+    defer freeSnapshotRefs(allocator, &refs);
+
+    for (refs.items) |*ref| {
+        const manifest_bytes = snapshotShowFile(allocator, ref.oid, snapshot_manifest_path, limits) catch continue;
+        defer allocator.free(manifest_bytes);
+
+        const covered_refs_raw = parseSnapshotManifest(allocator, manifest_bytes) catch continue;
+        errdefer allocator.free(covered_refs_raw);
+
+        const coverage_ok = snapshotCoverageValid(allocator, covered_refs_raw, current_refs_raw) catch {
+            allocator.free(covered_refs_raw);
+            continue;
+        };
+        if (!coverage_ok) {
+            allocator.free(covered_refs_raw);
+            continue;
+        }
+
+        return .{
+            .allocator = allocator,
+            .ref = try allocator.dupe(u8, ref.ref),
+            .oid = try allocator.dupe(u8, ref.oid),
+            .covered_refs_raw = covered_refs_raw,
+            .timestamp = ref.timestamp,
+            .exact = std.mem.eql(u8, covered_refs_raw, current_refs_raw),
+        };
+    }
+    return null;
+}
+
 fn indexRefEvents(
     allocator: Allocator,
     event_stmt: *SqliteStmt,
@@ -1359,7 +1182,6 @@ fn insertValidatedIndexedEvent(
 }
 
 const projectIndexedEvents = index_projection.projectIndexedEvents;
-const projectNewIndexedEvents = index_projection.projectNewIndexedEvents;
 const rebuildDerivedCommitReferences = index_projection.rebuildDerivedCommitReferences;
 pub const projectStoredEvent = index_projection.projectStoredEvent;
 pub const signingKeyBindingRejection = index_projection.signingKeyBindingRejection;

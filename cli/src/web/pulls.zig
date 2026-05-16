@@ -11,6 +11,7 @@ const shared = @import("shared.zig");
 const source_stats = @import("source_stats.zig");
 const util = @import("../util.zig");
 const work_items = @import("../work_items.zig");
+const zwf = @import("../zwf.zig");
 
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
@@ -39,6 +40,7 @@ const sqlite = index.sqlite;
 const max_pull_diff_bytes = work_items.max_pull_diff_bytes;
 const max_merge_blob_bytes = 2 * 1024 * 1024;
 const merge_context_radius = 15;
+const zero_oid = "0000000000000000000000000000000000000000";
 
 const PullStateFilter = work_items.PullStateFilter;
 const PullFilters = work_items.PullListOptions;
@@ -549,11 +551,11 @@ fn appendPullRowCollection(
     if (shown) try buf.appendSlice(allocator, "</span>");
 }
 
-pub fn renderPullDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u8, target: []const u8) ![]u8 {
-    return renderPullDetailPageWithMergeError(allocator, repo, raw_ref, target, null);
+pub fn renderPullDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u8, target: []const u8, csrf_token: []const u8) ![]u8 {
+    return renderPullDetailPageWithMergeError(allocator, repo, raw_ref, target, csrf_token, null);
 }
 
-fn renderPullDetailPageWithMergeError(allocator: Allocator, repo: Repo, raw_ref: []const u8, target: []const u8, merge_error: ?[]const u8) ![]u8 {
+fn renderPullDetailPageWithMergeError(allocator: Allocator, repo: Repo, raw_ref: []const u8, target: []const u8, csrf_token: []const u8, merge_error: ?[]const u8) ![]u8 {
     if (try shared.renderIndexingPageIfStale(allocator, repo, "Pull Request", "pulls", target)) |body| return body;
     try index.ensureIndex(allocator, repo);
     const pull_id = index.resolvePullId(allocator, repo, raw_ref) catch {
@@ -592,7 +594,7 @@ fn renderPullDetailPageWithMergeError(allocator: Allocator, repo: Repo, raw_ref:
     defer if (current_role) |role| allocator.free(role);
     const can_edit_pull = currentActorCanEditAuthor(current_actor, current_role, detail.author_principal);
     switch (tab) {
-        .conversation => try appendPullConversation(&buf, allocator, &db, detail, raw_ref, tab_counts, current_actor, can_edit_pull, merge_status, merge_error),
+        .conversation => try appendPullConversation(&buf, allocator, &db, detail, raw_ref, tab_counts, current_actor, can_edit_pull, merge_status, csrf_token, merge_error),
         .commits => try appendPullCommits(&buf, allocator, repo, detail),
         .files => try appendPullFiles(&buf, allocator, repo, detail, raw_ref),
     }
@@ -1020,6 +1022,16 @@ fn loadMergeConflictFile(
         };
     };
 
+    const current_is_regular = try treePathIsRegularFile(allocator, repo, head_commit, path);
+    const ancestor_is_regular = try treePathIsRegularFile(allocator, repo, base_oid, path);
+    const incoming_is_regular = try treePathIsRegularFile(allocator, repo, base_commit, path);
+    if (!current_is_regular or !ancestor_is_regular or !incoming_is_regular) {
+        return .{
+            .path = owned_path,
+            .message = try allocator.dupe(u8, "Only regular-file conflicts are editable in the web resolver."),
+        };
+    }
+
     const current = try loadBlobAtRef(allocator, repo, head_commit, path);
     defer if (current) |value| allocator.free(value);
     const ancestor = try loadBlobAtRef(allocator, repo, base_oid, path);
@@ -1063,6 +1075,29 @@ fn loadBlobAtRef(allocator: Allocator, repo: Repo, ref: []const u8, path: []cons
     const object = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ ref, path });
     defer allocator.free(object);
     return work_items.gitMaybe(allocator, repo, &.{ "show", object }, max_merge_blob_bytes);
+}
+
+fn treePathIsRegularFile(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !bool {
+    const raw = try work_items.gitMaybe(allocator, repo, &.{ "ls-tree", "-z", ref, "--", path }, 1024 * 1024) orelse return false;
+    defer allocator.free(raw);
+    return lsTreeRecordIsRegularFile(raw, path);
+}
+
+fn lsTreeRecordIsRegularFile(raw: []const u8, path: []const u8) bool {
+    var records = std.mem.splitScalar(u8, raw, 0);
+    while (records.next()) |record| {
+        if (record.len == 0) continue;
+        const tab = std.mem.indexOfScalar(u8, record, '\t') orelse continue;
+        if (!std.mem.eql(u8, record[tab + 1 ..], path)) continue;
+        const space = std.mem.indexOfScalar(u8, record[0..tab], ' ') orelse return false;
+        return isRegularGitMode(record[0..space]);
+    }
+    return false;
+}
+
+fn isRegularGitMode(mode: []const u8) bool {
+    return std.mem.eql(u8, mode, "100644") or
+        std.mem.eql(u8, mode, "100755");
 }
 
 fn mergeFileConflictContent(
@@ -1662,6 +1697,7 @@ fn appendPullConversation(
     current_actor: ?[]const u8,
     can_edit_pull: bool,
     merge_status: PullMergeStatus,
+    csrf_token: []const u8,
     merge_error: ?[]const u8,
 ) !void {
     try appendTemplate(buf, allocator,
@@ -1700,7 +1736,7 @@ fn appendPullConversation(
     try appendPullReactionBar(buf, allocator, db, "pull", detail.id, raw_ref, "", current_actor);
     try buf.appendSlice(allocator, "</article></div>");
     try appendPullComments(buf, allocator, db, raw_ref, detail.id, current_actor);
-    try appendPullMergeabilityTimeline(buf, allocator, detail, raw_ref, counts.commits, merge_status, merge_error);
+    try appendPullMergeabilityTimeline(buf, allocator, detail, raw_ref, counts.commits, merge_status, csrf_token, merge_error);
     try appendPullResolutionTimeline(buf, allocator, detail);
     try appendPullCommentForm(buf, allocator, raw_ref, current_actor);
     try buf.appendSlice(allocator, "</div>");
@@ -1819,12 +1855,13 @@ fn appendPullMergeabilityTimeline(
     raw_ref: []const u8,
     commit_count: ?usize,
     merge_status: PullMergeStatus,
+    csrf_token: []const u8,
     merge_error: ?[]const u8,
 ) !void {
     if (!std.mem.eql(u8, detail.state, "open")) return;
     if (detail.draft) return;
     if (merge_status.kind == .clean) {
-        try appendPullReadyToMergeTimeline(buf, allocator, raw_ref, commit_count, merge_error);
+        try appendPullReadyToMergeTimeline(buf, allocator, raw_ref, commit_count, csrf_token, merge_error);
         return;
     }
     if (!merge_status.hasConflicts()) return;
@@ -1867,6 +1904,7 @@ fn appendPullReadyToMergeTimeline(
     allocator: Allocator,
     raw_ref: []const u8,
     commit_count: ?usize,
+    csrf_token: []const u8,
     merge_error: ?[]const u8,
 ) !void {
     const commit_phrase = try mergeMethodCommitPhrase(allocator, commit_count);
@@ -1892,6 +1930,7 @@ fn appendPullReadyToMergeTimeline(
     try shared.appendUrlEncoded(buf, allocator, raw_ref);
     try appendTemplate(buf, allocator,
         \\/merge">
+        \\      <input type="hidden" name="{csrf_field}" value="{csrf}">
         \\      <div class="pull-merge-actions">
         \\        <div class="pull-merge-button-group">
         \\          <button class="button primary pull-merge-submit" type="submit" name="method" value="merge"><span class="button-icon icon-pull-request" aria-hidden="true"></span><span data-merge-submit-label>Merge pull request</span></button>
@@ -1911,6 +1950,8 @@ fn appendPullReadyToMergeTimeline(
         \\</div>
     , .{
         .commit_phrase = commit_phrase,
+        .csrf_field = zwf.csrf.field_name,
+        .csrf = csrf_token,
         .pull_ref = raw_ref,
     });
 }
@@ -2246,9 +2287,14 @@ fn resolveGitCommit(allocator: Allocator, repo: Repo, ref: []const u8) !?[]u8 {
 }
 
 fn isBranchShorthand(ref: []const u8) bool {
-    if (ref.len == 0) return false;
     if (std.mem.startsWith(u8, ref, "refs/")) return false;
     if (std.mem.startsWith(u8, ref, "origin/")) return false;
+    if (std.mem.eql(u8, ref, "HEAD")) return false;
+    return isSafeLocalBranchName(ref);
+}
+
+fn isSafeLocalBranchName(ref: []const u8) bool {
+    if (ref.len == 0) return false;
     if (std.mem.startsWith(u8, ref, "-")) return false;
     if (std.mem.endsWith(u8, ref, ".lock")) return false;
     if (std.mem.indexOf(u8, ref, "..") != null) return false;
@@ -2548,6 +2594,7 @@ fn mergeMethodCommitPhrase(allocator: Allocator, count: ?usize) ![]u8 {
 pub fn renderPullForm(
     allocator: Allocator,
     repo: Repo,
+    csrf_token: []const u8,
     error_message: ?[]const u8,
     title_value: []const u8,
     body_value: []const u8,
@@ -2566,6 +2613,7 @@ pub fn renderPullForm(
     }
     try appendTemplate(&buf, allocator,
         \\  <form method="post" action="/pulls" class="issue-form">
+        \\    <input type="hidden" name="csrf_token" value="{csrf_token}">
         \\    <label>Title<input name="title" value="{title_value}" autofocus required></label>
         \\    <label>Body<textarea name="body" rows="8">{body_value}</textarea></label>
         \\    <div class="grid two">
@@ -2580,6 +2628,7 @@ pub fn renderPullForm(
         \\  </form>
         \\</section>
     , .{
+        .csrf_token = csrf_token,
         .title_value = title_value,
         .body_value = body_value,
         .base_value = base_value,
@@ -2590,7 +2639,14 @@ pub fn renderPullForm(
     return buf.toOwnedSlice(allocator);
 }
 
-pub fn handlePullPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
+pub fn handlePullPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, csrf_token: []const u8, form_body: []const u8) !void {
+    const submitted_token = try issues_page.formValueOwned(allocator, form_body, "csrf_token");
+    defer if (submitted_token) |value| allocator.free(value);
+    if (submitted_token == null or !std.mem.eql(u8, submitted_token.?, csrf_token)) {
+        try sendPlainResponse(allocator, stream, 403, "Forbidden", "Invalid CSRF token\n");
+        return;
+    }
+
     const title_owned = (try issues_page.formValueOwned(allocator, form_body, "title")) orelse try allocator.dupe(u8, "");
     defer allocator.free(title_owned);
     const body_owned = (try issues_page.formValueOwned(allocator, form_body, "body")) orelse try allocator.dupe(u8, "");
@@ -2610,6 +2666,7 @@ pub fn handlePullPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, 
         const body = try renderPullForm(
             allocator,
             repo,
+            csrf_token,
             "Title, base ref, and head ref are required.",
             title_owned,
             body_owned,
@@ -2626,6 +2683,7 @@ pub fn handlePullPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, 
         const body = try renderPullForm(
             allocator,
             repo,
+            csrf_token,
             "Could not create the pull request. Check that Gitomi is initialized and Git commit signing is configured.",
             title_owned,
             body_owned,
@@ -2717,7 +2775,15 @@ pub fn handlePullConflictPost(allocator: Allocator, repo: Repo, stream: std.net.
     try sendRedirect(allocator, stream, location);
 }
 
-pub fn handlePullMergePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
+pub fn handlePullMergePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, csrf_token: []const u8, form_body: []const u8) !void {
+    const fields = try parseFormFieldsOwned(allocator, form_body);
+    defer freeFormFields(allocator, fields);
+    const submitted_csrf = findFormField(fields, zwf.csrf.field_name) orelse "";
+    if (!zwf.csrf.verify(csrf_token, submitted_csrf)) {
+        try sendPlainResponse(allocator, stream, 403, "Forbidden", "Invalid CSRF token\n");
+        return;
+    }
+
     try index.ensureIndex(allocator, repo);
     const pull_id = index.resolvePullId(allocator, repo, raw_ref) catch {
         try sendPlainResponse(allocator, stream, 404, "Not Found", "Pull request not found\n");
@@ -2734,42 +2800,40 @@ pub fn handlePullMergePost(allocator: Allocator, repo: Repo, stream: std.net.Str
     defer detail.deinit(allocator);
 
     if (!std.mem.eql(u8, detail.state, "open")) {
-        try sendPullMergeError(allocator, repo, stream, raw_ref, 409, "Conflict", "Only open pull requests can be merged.");
+        try sendPullMergeError(allocator, repo, stream, raw_ref, csrf_token, 409, "Conflict", "Only open pull requests can be merged.");
         return;
     }
     if (detail.draft) {
-        try sendPullMergeError(allocator, repo, stream, raw_ref, 409, "Conflict", "Draft pull requests cannot be merged.");
+        try sendPullMergeError(allocator, repo, stream, raw_ref, csrf_token, 409, "Conflict", "Draft pull requests cannot be merged.");
         return;
     }
 
-    const fields = try parseFormFieldsOwned(allocator, form_body);
-    defer freeFormFields(allocator, fields);
     const method_value = std.mem.trim(u8, findFormField(fields, "method") orelse "merge", " \t\r\n");
     const method = pullMergeMethodFromValue(method_value) orelse {
-        try sendPullMergeError(allocator, repo, stream, raw_ref, 422, "Unprocessable Entity", "Unknown merge method.");
+        try sendPullMergeError(allocator, repo, stream, raw_ref, csrf_token, 422, "Unprocessable Entity", "Unknown merge method.");
         return;
     };
 
     const merge_status = try loadPullMergeStatus(allocator, repo, detail);
     defer merge_status.deinit(allocator);
     if (merge_status.hasConflicts()) {
-        try sendPullMergeError(allocator, repo, stream, raw_ref, 409, "Conflict", "Resolve merge conflicts before merging this pull request.");
+        try sendPullMergeError(allocator, repo, stream, raw_ref, csrf_token, 409, "Conflict", "Resolve merge conflicts before merging this pull request.");
         return;
     }
     if (merge_status.kind != .clean) {
-        try sendPullMergeError(allocator, repo, stream, raw_ref, 409, "Conflict", "The local repository could not verify that this pull request can be merged cleanly.");
+        try sendPullMergeError(allocator, repo, stream, raw_ref, csrf_token, 409, "Conflict", "The local repository could not verify that this pull request can be merged cleanly.");
         return;
     }
 
     const merge_result = mergePullIntoBase(allocator, repo, detail, raw_ref, method) catch |err| {
         const message = pullMergeErrorMessage(err) orelse return err;
-        try sendPullMergeError(allocator, repo, stream, raw_ref, 422, "Unprocessable Entity", message);
+        try sendPullMergeError(allocator, repo, stream, raw_ref, csrf_token, 422, "Unprocessable Entity", message);
         return;
     };
     defer merge_result.deinit(allocator);
 
     pull.createPullMergedEvent(allocator, pull_id, merge_result.merge_oid, merge_result.target_oid) catch {
-        try sendPullMergeError(allocator, repo, stream, raw_ref, 500, "Internal Server Error", "The base branch was updated, but Gitomi could not record the pull.merged event.");
+        try sendPullMergeError(allocator, repo, stream, raw_ref, csrf_token, 500, "Internal Server Error", "The base branch was updated, but Gitomi could not record the pull.merged event.");
         return;
     };
 
@@ -2842,13 +2906,14 @@ fn sendPullMergeError(
     repo: Repo,
     stream: std.net.Stream,
     raw_ref: []const u8,
+    csrf_token: []const u8,
     status: u16,
     reason: []const u8,
     message: []const u8,
 ) !void {
     const target = try std.fmt.allocPrint(allocator, "/pulls/{s}", .{raw_ref});
     defer allocator.free(target);
-    const body = try renderPullDetailPageWithMergeError(allocator, repo, raw_ref, target, message);
+    const body = try renderPullDetailPageWithMergeError(allocator, repo, raw_ref, target, csrf_token, message);
     defer allocator.free(body);
     try sendResponse(allocator, stream, status, reason, "text/html", body, null);
 }
@@ -3306,7 +3371,7 @@ fn commitPullConflictResolution(
     resolved_files: []const ResolvedConflictFile,
 ) ![]u8 {
     if (resolved_files.len == 0) return error.NoConflictResolutions;
-    const update_ref = try localHeadUpdateRef(allocator, repo, detail.head_ref);
+    const update_ref = try ensureLocalHeadUpdateRef(allocator, repo, detail.head_ref, git_refs.head);
     defer allocator.free(update_ref);
 
     const old_head_raw = try gitCheckedAt(allocator, repo.root, &.{ "rev-parse", "--verify", update_ref }, 1024 * 1024);
@@ -3341,6 +3406,8 @@ fn commitPullConflictResolution(
 
     for (resolved_files) |file| {
         if (!isSafeMergePath(file.path)) return error.UnsafeConflictPath;
+        const conflict_path_is_regular = try worktreeConflictPathIsRegularFile(allocator, tmp_worktree, file.path);
+        if (!conflict_path_is_regular) return error.UnsafeConflictPath;
         const absolute_path = try std.fs.path.join(allocator, &.{ tmp_worktree, file.path });
         defer allocator.free(absolute_path);
         try writeFileBytes(absolute_path, file.content);
@@ -3368,15 +3435,64 @@ fn commitPullConflictResolution(
     return commit_oid;
 }
 
+fn worktreeConflictPathIsRegularFile(allocator: Allocator, worktree: []const u8, path: []const u8) !bool {
+    const raw = try gitCheckedAt(allocator, worktree, &.{ "ls-files", "-s", "-z", "--", path }, git.max_git_output);
+    defer allocator.free(raw);
+    return lsFilesStagesAreRegularFile(raw, path);
+}
+
+fn lsFilesStagesAreRegularFile(raw: []const u8, path: []const u8) bool {
+    var found = false;
+    var records = std.mem.splitScalar(u8, raw, 0);
+    while (records.next()) |record| {
+        if (record.len == 0) continue;
+        const tab = std.mem.indexOfScalar(u8, record, '\t') orelse return false;
+        if (!std.mem.eql(u8, record[tab + 1 ..], path)) return false;
+        const space = std.mem.indexOfScalar(u8, record[0..tab], ' ') orelse return false;
+        if (!isRegularGitMode(record[0..space])) return false;
+        found = true;
+    }
+    return found;
+}
+
+fn ensureLocalHeadUpdateRef(allocator: Allocator, repo: Repo, head_ref: []const u8, expected_head: []const u8) ![]u8 {
+    return localHeadUpdateRef(allocator, repo, head_ref) catch |err| switch (err) {
+        error.NoLocalHeadBranch => {
+            const update_ref = (try localHeadRefName(allocator, head_ref)) orelse return error.NoLocalHeadBranch;
+            errdefer allocator.free(update_ref);
+            const create_output = gitCheckedAt(allocator, repo.root, &.{ "update-ref", update_ref, expected_head, zero_oid }, git.max_git_output) catch |create_err| switch (create_err) {
+                error.GitFailed => return error.NoLocalHeadBranch,
+                else => return create_err,
+            };
+            allocator.free(create_output);
+            return update_ref;
+        },
+        else => return err,
+    };
+}
+
 fn localHeadUpdateRef(allocator: Allocator, repo: Repo, head_ref: []const u8) ![]u8 {
-    const symbolic_raw = gitCheckedAt(allocator, repo.root, &.{ "rev-parse", "--symbolic-full-name", "--verify", head_ref }, 1024 * 1024) catch |err| switch (err) {
+    const update_ref = (try localHeadRefName(allocator, head_ref)) orelse return error.NoLocalHeadBranch;
+    errdefer allocator.free(update_ref);
+    const commit_ref = try std.fmt.allocPrint(allocator, "{s}^{{commit}}", .{update_ref});
+    defer allocator.free(commit_ref);
+    const raw = gitCheckedAt(allocator, repo.root, &.{ "rev-parse", "--verify", "--quiet", commit_ref }, 1024 * 1024) catch |err| switch (err) {
         error.GitFailed => return error.NoLocalHeadBranch,
         else => return err,
     };
-    defer allocator.free(symbolic_raw);
-    const symbolic = std.mem.trim(u8, symbolic_raw, " \t\r\n");
-    if (!std.mem.startsWith(u8, symbolic, "refs/heads/")) return error.NoLocalHeadBranch;
-    return allocator.dupe(u8, symbolic);
+    defer allocator.free(raw);
+    return update_ref;
+}
+
+fn localHeadRefName(allocator: Allocator, head_ref: []const u8) !?[]u8 {
+    const heads_prefix = "refs/heads/";
+    if (std.mem.startsWith(u8, head_ref, heads_prefix)) {
+        const branch_name = head_ref[heads_prefix.len..];
+        if (!isSafeLocalBranchName(branch_name)) return null;
+        return try allocator.dupe(u8, head_ref);
+    }
+    if (!isBranchShorthand(head_ref)) return null;
+    return try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{head_ref});
 }
 
 fn mergeCommitErrorMessage(err: anyerror) ?[]const u8 {
@@ -3485,6 +3601,16 @@ test "pull merge method parser" {
     try std.testing.expect(pullMergeMethodFromValue("fast-forward") == null);
 }
 
+test "pull merge form includes csrf token" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendPullReadyToMergeTimeline(&buf, std.testing.allocator, "1", 1, "token-123", null);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "name=\"_csrf\" value=\"token-123\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "action=\"/pulls/1/merge\"") != null);
+}
+
 test "merge editor counts conflict groups" {
     try std.testing.expectEqual(@as(usize, 2), countConflictGroups(
         \\<<<<<<< ours
@@ -3558,4 +3684,44 @@ test "merge editor path safety" {
     try std.testing.expect(!isSafeMergePath("../main.zig"));
     try std.testing.expect(!isSafeMergePath("/tmp/main.zig"));
     try std.testing.expect(!isSafeMergePath("src/.git/config"));
+}
+
+test "merge editor accepts only regular git modes" {
+    try std.testing.expect(isRegularGitMode("100644"));
+    try std.testing.expect(isRegularGitMode("100755"));
+    try std.testing.expect(!isRegularGitMode("120000"));
+    try std.testing.expect(!isRegularGitMode("040000"));
+}
+
+test "merge editor rejects symlink tree entries" {
+    try std.testing.expect(lsTreeRecordIsRegularFile("100644 blob abcdef\tconflict.txt\x00", "conflict.txt"));
+    try std.testing.expect(!lsTreeRecordIsRegularFile("120000 blob abcdef\tconflict.txt\x00", "conflict.txt"));
+    try std.testing.expect(!lsTreeRecordIsRegularFile("100644 blob abcdef\tother.txt\x00", "conflict.txt"));
+}
+
+test "merge editor rejects symlink conflict index stages" {
+    try std.testing.expect(lsFilesStagesAreRegularFile(
+        "100644 abcdef 1\tconflict.txt\x00100755 abcdef 2\tconflict.txt\x00100644 abcdef 3\tconflict.txt\x00",
+        "conflict.txt",
+    ));
+    try std.testing.expect(!lsFilesStagesAreRegularFile(
+        "100644 abcdef 1\tconflict.txt\x00120000 abcdef 2\tconflict.txt\x00100644 abcdef 3\tconflict.txt\x00",
+        "conflict.txt",
+    ));
+    try std.testing.expect(!lsFilesStagesAreRegularFile("", "conflict.txt"));
+}
+
+test "merge resolver derives local head refs only from safe branch names" {
+    const shorthand = (try localHeadRefName(std.testing.allocator, "feature/conflict-fix")).?;
+    defer std.testing.allocator.free(shorthand);
+    try std.testing.expectEqualStrings("refs/heads/feature/conflict-fix", shorthand);
+
+    const full = (try localHeadRefName(std.testing.allocator, "refs/heads/origin/feature")).?;
+    defer std.testing.allocator.free(full);
+    try std.testing.expectEqualStrings("refs/heads/origin/feature", full);
+
+    try std.testing.expect((try localHeadRefName(std.testing.allocator, "origin/feature")) == null);
+    try std.testing.expect((try localHeadRefName(std.testing.allocator, "refs/remotes/origin/feature")) == null);
+    try std.testing.expect((try localHeadRefName(std.testing.allocator, "HEAD")) == null);
+    try std.testing.expect((try localHeadRefName(std.testing.allocator, "feature^{commit}")) == null);
 }

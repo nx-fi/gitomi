@@ -8,7 +8,6 @@ const Repo = repo_mod.Repo;
 const appendEmptyState = shared.appendEmptyState;
 const appendHtml = shared.appendHtml;
 const appendHref = shared.appendHref;
-const appendIssueLinkedText = shared.appendIssueLinkedText;
 const appendOptionalAttr = shared.appendOptionalAttr;
 const appendRepoHeaderShared = shared.appendRepoHeader;
 const appendShellEnd = shared.appendShellEnd;
@@ -92,10 +91,7 @@ pub fn renderCommitsPage(allocator: Allocator, repo: Repo, target: []const u8) !
 
     const default_ref = try defaultRef(allocator, repo);
     defer allocator.free(default_ref);
-    const ref = if (query_ref) |value| blk: {
-        const trimmed = std.mem.trim(u8, value, " \t\r\n");
-        break :blk if (trimmed.len == 0) default_ref else trimmed;
-    } else default_ref;
+    const ref = if (query_ref) |value| safeRevisionOrDefault(value, default_ref) else default_ref;
 
     const path = if (query_path) |value|
         normalizedPathOwned(allocator, value) catch try allocator.dupe(u8, "")
@@ -113,6 +109,8 @@ pub fn renderCommitsPage(allocator: Allocator, repo: Repo, target: []const u8) !
     defer freeCommitList(allocator, commits);
     const branches = try loadBranchRefs(allocator, repo);
     defer freeBranchRefs(allocator, branches);
+    var reference_resolver = shared.InternalReferenceResolver.init(allocator, repo);
+    defer reference_resolver.deinit();
 
     try appendCommitsHeader(&buf, allocator, ref, path, branches);
 
@@ -128,7 +126,7 @@ pub fn renderCommitsPage(allocator: Allocator, repo: Repo, target: []const u8) !
         try buf.appendSlice(allocator, "</section>");
         if (pagination.page > 1) try appendCommitsPagination(&buf, allocator, ref, path, pagination, shown_commits, false);
     } else {
-        try appendCommitTimeline(&buf, allocator, commits[0..shown_commits]);
+        try appendCommitTimeline(&buf, allocator, &reference_resolver, commits[0..shown_commits]);
         try appendCommitsPagination(&buf, allocator, ref, path, pagination, shown_commits, has_next_page);
     }
 
@@ -141,10 +139,7 @@ pub fn renderCommitPage(allocator: Allocator, repo: Repo, target: []const u8) ![
     defer if (query_sha) |value| allocator.free(value);
     const query_context = try queryValueOwned(allocator, target, "context");
     defer if (query_context) |value| allocator.free(value);
-    const sha = if (query_sha) |value| blk: {
-        const trimmed = std.mem.trim(u8, value, " \t\r\n");
-        break :blk if (trimmed.len == 0) "HEAD" else trimmed;
-    } else "HEAD";
+    const sha = if (query_sha) |value| safeRevisionOrDefault(value, "HEAD") else "HEAD";
     const diff_context = diffContext(query_context);
 
     const detail_opt = try loadCommitDetail(allocator, repo, sha);
@@ -157,6 +152,8 @@ pub fn renderCommitPage(allocator: Allocator, repo: Repo, target: []const u8) ![
 
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
+    var reference_resolver = shared.InternalReferenceResolver.init(allocator, repo);
+    defer reference_resolver.deinit();
 
     try appendShellStart(&buf, allocator, repo, "Commit", "commits");
     try shared.appendDetailBackButton(&buf, allocator, shared.literalHref("/commits"), "Back to commits");
@@ -168,7 +165,7 @@ pub fn renderCommitPage(allocator: Allocator, repo: Repo, target: []const u8) ![
         \\      <p class="eyebrow">Commit</p>
         \\      <h1>
     , .{});
-    try appendIssueLinkedText(&buf, allocator, detail.subject);
+    try shared.appendInternalReferenceLinkedText(&buf, allocator, &reference_resolver, detail.subject);
     try appendTemplate(&buf, allocator,
         \\</h1>
         \\      <p class="commit-full-hash">{full_hash}</p>
@@ -275,7 +272,12 @@ fn appendCommitsHeader(
     , .{});
 }
 
-fn appendCommitTimeline(buf: *std.ArrayList(u8), allocator: Allocator, commits: []const CommitListEntry) !void {
+fn appendCommitTimeline(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    reference_resolver: *shared.InternalReferenceResolver,
+    commits: []const CommitListEntry,
+) !void {
     try buf.appendSlice(allocator, "<div class=\"commits-timeline\">");
     var active_date: ?[]const u8 = null;
     var group_open = false;
@@ -295,7 +297,7 @@ fn appendCommitTimeline(buf: *std.ArrayList(u8), allocator: Allocator, commits: 
                 \\  <div class="panel commit-day-list">
             , .{});
         }
-        try appendCommitRow(buf, allocator, commit);
+        try appendCommitRow(buf, allocator, reference_resolver, commit);
     }
     if (group_open) try buf.appendSlice(allocator, "</div></section>");
     try buf.appendSlice(allocator, "</div>");
@@ -330,17 +332,22 @@ fn appendCommitsPagination(
     try shared.appendPaginationNav(buf, allocator, "Commit pages", summary, previous_href, next_href);
 }
 
-fn appendCommitRow(buf: *std.ArrayList(u8), allocator: Allocator, commit: CommitListEntry) !void {
+fn appendCommitRow(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    reference_resolver: *shared.InternalReferenceResolver,
+    commit: CommitListEntry,
+) !void {
     const commit_href = commitHref(commit.full_hash);
     const code_href = codeHref(commit.full_hash, "");
     try appendTemplate(buf, allocator,
         \\<article class="commit-row commit-list-row">
         \\  <div class="commit-main">
-        \\    <div class="commit-title-line"><a class="commit-title" href="{commit_href}">
+        \\    <div class="commit-title-line"><span class="commit-title">
     , .{ .commit_href = commit_href });
-    try appendHtml(buf, allocator, commit.subject);
+    try shared.appendInternalReferenceLinkedTextWithDefaultHref(buf, allocator, reference_resolver, commit.subject, commit_href);
     try appendTemplate(buf, allocator,
-        \\</a></div>
+        \\</span></div>
         \\    <p class="commit-meta-line">
     , .{});
     try shared.appendAvatar(buf, allocator, commit.author, "commit-avatar");
@@ -382,11 +389,11 @@ fn loadCommits(allocator: Allocator, repo: Repo, ref: []const u8, path: []const 
     const skip = try std.fmt.allocPrint(allocator, "--skip={d}", .{pagination.offset()});
     defer allocator.free(skip);
     const raw_opt = if (path.len == 0)
-        try gitMaybe(allocator, repo, &.{ "log", max_count, skip, "--date=short", format, ref }, git.max_git_output)
+        try gitMaybe(allocator, repo, &.{ "log", max_count, skip, "--date=short", format, "--end-of-options", ref }, git.max_git_output)
     else blk: {
         const pathspec = try std.fmt.allocPrint(allocator, ":(top){s}", .{path});
         defer allocator.free(pathspec);
-        break :blk try gitMaybe(allocator, repo, &.{ "log", max_count, skip, "--date=short", format, ref, "--", pathspec }, git.max_git_output);
+        break :blk try gitMaybe(allocator, repo, &.{ "log", max_count, skip, "--date=short", format, "--end-of-options", ref, "--", pathspec }, git.max_git_output);
     };
     const raw = raw_opt orelse try allocator.dupe(u8, "");
     defer allocator.free(raw);
@@ -518,7 +525,7 @@ fn monthName(month: u8) []const u8 {
 }
 
 fn loadCommitDetail(allocator: Allocator, repo: Repo, sha: []const u8) !?CommitDetail {
-    const raw = try gitMaybe(allocator, repo, &.{ "show", "-s", "--format=%H%x00%h%x00%an%x00%ae%x00%cr%x00%s%x00%b", sha }, 1024 * 1024) orelse return null;
+    const raw = try gitMaybe(allocator, repo, &.{ "show", "-s", "--format=%H%x00%h%x00%an%x00%ae%x00%cr%x00%s%x00%b", "--end-of-options", sha }, 1024 * 1024) orelse return null;
     defer allocator.free(raw);
     const record = std.mem.trimRight(u8, raw, "\r\n");
     if (record.len == 0) return null;
@@ -547,6 +554,7 @@ fn loadCommitDiff(allocator: Allocator, repo: Repo, sha: []const u8, context: us
         "--find-renames",
         "--patch",
         unified,
+        "--end-of-options",
         first_parent,
         sha,
     }, max_commit_diff_bytes)) |diff| {
@@ -560,6 +568,7 @@ fn loadCommitDiff(allocator: Allocator, repo: Repo, sha: []const u8, context: us
         "--find-renames",
         "--patch",
         unified,
+        "--end-of-options",
         sha,
     }, max_commit_diff_bytes);
 }
@@ -734,6 +743,12 @@ fn diffFileTitle(line: []const u8) []const u8 {
     return line;
 }
 
+fn safeRevisionOrDefault(raw: []const u8, default: []const u8) []const u8 {
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (trimmed.len == 0 or trimmed[0] == '-') return default;
+    return trimmed;
+}
+
 fn defaultRef(allocator: Allocator, repo: Repo) ![]u8 {
     const branch_raw = try gitMaybe(allocator, repo, &.{ "branch", "--show-current" }, 512 * 1024);
     if (branch_raw) |raw| {
@@ -840,6 +855,12 @@ fn hexValue(c: u8) ?u8 {
         'A'...'F' => c - 'A' + 10,
         else => null,
     };
+}
+
+test "web commits rejects option-like revisions" {
+    try std.testing.expectEqualStrings("main", safeRevisionOrDefault("  main\n", "HEAD"));
+    try std.testing.expectEqualStrings("HEAD", safeRevisionOrDefault("", "HEAD"));
+    try std.testing.expectEqualStrings("HEAD", safeRevisionOrDefault(" --output=/tmp/gitomi-poc", "HEAD"));
 }
 
 test "web commits renders diff line classes" {
