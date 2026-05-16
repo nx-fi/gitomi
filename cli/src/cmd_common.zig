@@ -1,6 +1,7 @@
 const std = @import("std");
 const errors = @import("errors.zig");
 const index = @import("index.zig");
+const index_query = @import("index/query.zig");
 const io = @import("io.zig");
 const json_writer = @import("json_writer.zig");
 const repo_mod = @import("repo.zig");
@@ -10,81 +11,159 @@ const work_items = @import("work_items.zig");
 const Allocator = std.mem.Allocator;
 const CliError = errors.CliError;
 
+pub const CommandRepo = struct {
+    allocator: Allocator,
+    repo_cache: ?repo_mod.Repo = null,
+    index_ready: bool = false,
+
+    pub fn init(allocator: Allocator) CommandRepo {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *CommandRepo) void {
+        if (self.repo_cache) |*cached_repo| {
+            cached_repo.deinit();
+        }
+        self.repo_cache = null;
+        self.index_ready = false;
+    }
+
+    pub fn repo(self: *CommandRepo) !repo_mod.Repo {
+        if (self.repo_cache == null) {
+            self.repo_cache = try repo_mod.discoverRepo(self.allocator);
+        }
+        return self.repo_cache.?;
+    }
+
+    pub fn indexedRepo(self: *CommandRepo) !repo_mod.Repo {
+        const cached_repo = try self.repo();
+        if (!self.index_ready) {
+            try index.ensureIndex(self.allocator, cached_repo);
+            self.index_ready = true;
+        }
+        return cached_repo;
+    }
+
+    pub fn resolveIssueId(self: *CommandRepo, raw_ref: []const u8) ![]u8 {
+        const cached_repo = try self.indexedRepo();
+        return try index_query.resolveIssueId(self.allocator, cached_repo, raw_ref);
+    }
+
+    pub fn resolveProjectId(self: *CommandRepo, raw_ref: []const u8) ![]u8 {
+        const cached_repo = try self.indexedRepo();
+        return try index.resolveProjectId(self.allocator, cached_repo, raw_ref);
+    }
+
+    pub fn resolveMilestoneId(self: *CommandRepo, raw_ref: []const u8) ![]u8 {
+        const cached_repo = try self.indexedRepo();
+        return try index.resolveMilestoneId(self.allocator, cached_repo, raw_ref);
+    }
+
+    pub fn projectName(self: *CommandRepo, project_id: []const u8) ![]u8 {
+        const cached_repo = try self.indexedRepo();
+        return try index.projectNameForId(self.allocator, cached_repo, project_id);
+    }
+
+    pub fn resolveProjectColumn(self: *CommandRepo, project_id: []const u8, raw_ref: []const u8) !index.ProjectColumnRef {
+        const cached_repo = try self.indexedRepo();
+        return try index.resolveProjectColumnRef(self.allocator, cached_repo, project_id, raw_ref);
+    }
+
+    pub fn resolveProjectFieldId(self: *CommandRepo, project_id: []const u8, raw_ref: []const u8) ![]u8 {
+        const cached_repo = try self.indexedRepo();
+        return try index.resolveProjectFieldId(self.allocator, cached_repo, project_id, raw_ref);
+    }
+
+    pub fn resolveProjectFieldOptionId(self: *CommandRepo, project_id: []const u8, field_id: []const u8, raw_ref: []const u8) ![]u8 {
+        const cached_repo = try self.indexedRepo();
+        return try index.resolveProjectFieldOptionId(self.allocator, cached_repo, project_id, field_id, raw_ref);
+    }
+
+    pub fn resolveProjectViewId(self: *CommandRepo, project_id: []const u8, raw_ref: []const u8) ![]u8 {
+        const cached_repo = try self.indexedRepo();
+        return try index.resolveProjectViewId(self.allocator, cached_repo, project_id, raw_ref);
+    }
+
+    pub fn resolvePullId(self: *CommandRepo, raw_ref: []const u8) ![]u8 {
+        const cached_repo = try self.indexedRepo();
+        return try index_query.resolvePullId(self.allocator, cached_repo, raw_ref);
+    }
+
+    pub fn resolveCommentId(self: *CommandRepo, raw_ref: []const u8) ![]u8 {
+        const cached_repo = try self.indexedRepo();
+        return try index_query.resolveCommentId(self.allocator, cached_repo, raw_ref);
+    }
+
+    pub fn commentParent(self: *CommandRepo, comment_id: []const u8) !index.CommentParentInfo {
+        const cached_repo = try self.indexedRepo();
+        return try index_query.commentParentInfo(self.allocator, cached_repo, comment_id);
+    }
+};
+
 pub fn resolveIssueIdForCommand(allocator: Allocator, raw_ref: []const u8) ![]u8 {
-    var repo = try repo_mod.discoverRepo(allocator);
-    defer repo.deinit();
-    try index.ensureIndex(allocator, repo);
-    return try index.resolveIssueId(allocator, repo, raw_ref);
+    var command_repo = CommandRepo.init(allocator);
+    defer command_repo.deinit();
+    return try command_repo.resolveIssueId(raw_ref);
 }
 
 pub fn resolveProjectIdForCommand(allocator: Allocator, raw_ref: []const u8) ![]u8 {
-    var repo = try repo_mod.discoverRepo(allocator);
-    defer repo.deinit();
-    try index.ensureIndex(allocator, repo);
-    return try index.resolveProjectId(allocator, repo, raw_ref);
+    var command_repo = CommandRepo.init(allocator);
+    defer command_repo.deinit();
+    return try command_repo.resolveProjectId(raw_ref);
 }
 
 pub fn resolveMilestoneIdForCommand(allocator: Allocator, raw_ref: []const u8) ![]u8 {
-    var repo = try repo_mod.discoverRepo(allocator);
-    defer repo.deinit();
-    try index.ensureIndex(allocator, repo);
-    return try index.resolveMilestoneId(allocator, repo, raw_ref);
+    var command_repo = CommandRepo.init(allocator);
+    defer command_repo.deinit();
+    return try command_repo.resolveMilestoneId(raw_ref);
 }
 
 pub fn projectNameForCommand(allocator: Allocator, project_id: []const u8) ![]u8 {
-    var repo = try repo_mod.discoverRepo(allocator);
-    defer repo.deinit();
-    try index.ensureIndex(allocator, repo);
-    return try index.projectNameForId(allocator, repo, project_id);
+    var command_repo = CommandRepo.init(allocator);
+    defer command_repo.deinit();
+    return try command_repo.projectName(project_id);
 }
 
 pub fn resolveProjectColumnForCommand(allocator: Allocator, project_id: []const u8, raw_ref: []const u8) !index.ProjectColumnRef {
-    var repo = try repo_mod.discoverRepo(allocator);
-    defer repo.deinit();
-    try index.ensureIndex(allocator, repo);
-    return try index.resolveProjectColumnRef(allocator, repo, project_id, raw_ref);
+    var command_repo = CommandRepo.init(allocator);
+    defer command_repo.deinit();
+    return try command_repo.resolveProjectColumn(project_id, raw_ref);
 }
 
 pub fn resolveProjectFieldIdForCommand(allocator: Allocator, project_id: []const u8, raw_ref: []const u8) ![]u8 {
-    var repo = try repo_mod.discoverRepo(allocator);
-    defer repo.deinit();
-    try index.ensureIndex(allocator, repo);
-    return try index.resolveProjectFieldId(allocator, repo, project_id, raw_ref);
+    var command_repo = CommandRepo.init(allocator);
+    defer command_repo.deinit();
+    return try command_repo.resolveProjectFieldId(project_id, raw_ref);
 }
 
 pub fn resolveProjectFieldOptionIdForCommand(allocator: Allocator, project_id: []const u8, field_id: []const u8, raw_ref: []const u8) ![]u8 {
-    var repo = try repo_mod.discoverRepo(allocator);
-    defer repo.deinit();
-    try index.ensureIndex(allocator, repo);
-    return try index.resolveProjectFieldOptionId(allocator, repo, project_id, field_id, raw_ref);
+    var command_repo = CommandRepo.init(allocator);
+    defer command_repo.deinit();
+    return try command_repo.resolveProjectFieldOptionId(project_id, field_id, raw_ref);
 }
 
 pub fn resolveProjectViewIdForCommand(allocator: Allocator, project_id: []const u8, raw_ref: []const u8) ![]u8 {
-    var repo = try repo_mod.discoverRepo(allocator);
-    defer repo.deinit();
-    try index.ensureIndex(allocator, repo);
-    return try index.resolveProjectViewId(allocator, repo, project_id, raw_ref);
+    var command_repo = CommandRepo.init(allocator);
+    defer command_repo.deinit();
+    return try command_repo.resolveProjectViewId(project_id, raw_ref);
 }
 
 pub fn resolvePullIdForCommand(allocator: Allocator, raw_ref: []const u8) ![]u8 {
-    var repo = try repo_mod.discoverRepo(allocator);
-    defer repo.deinit();
-    try index.ensureIndex(allocator, repo);
-    return try index.resolvePullId(allocator, repo, raw_ref);
+    var command_repo = CommandRepo.init(allocator);
+    defer command_repo.deinit();
+    return try command_repo.resolvePullId(raw_ref);
 }
 
 pub fn resolveCommentIdForCommand(allocator: Allocator, raw_ref: []const u8) ![]u8 {
-    var repo = try repo_mod.discoverRepo(allocator);
-    defer repo.deinit();
-    try index.ensureIndex(allocator, repo);
-    return try index.resolveCommentId(allocator, repo, raw_ref);
+    var command_repo = CommandRepo.init(allocator);
+    defer command_repo.deinit();
+    return try command_repo.resolveCommentId(raw_ref);
 }
 
 pub fn commentParentForCommand(allocator: Allocator, comment_id: []const u8) !index.CommentParentInfo {
-    var repo = try repo_mod.discoverRepo(allocator);
-    defer repo.deinit();
-    try index.ensureIndex(allocator, repo);
-    return try index.commentParentInfo(allocator, repo, comment_id);
+    var command_repo = CommandRepo.init(allocator);
+    defer command_repo.deinit();
+    return try command_repo.commentParent(comment_id);
 }
 
 pub fn requireNonEmptyOption(context: []const u8, option: []const u8, value: []const u8) !void {
