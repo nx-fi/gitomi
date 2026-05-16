@@ -281,7 +281,79 @@ fn handleCodeRootComponent(ctx: WebContext) !void {
 }
 
 fn handleCodeSyncPost(ctx: WebContext) !void {
+    if (!isSameOriginPost(ctx.request)) {
+        try shared.sendPlainResponse(ctx.allocator, ctx.stream, 403, "Forbidden", "Forbidden\n");
+        return;
+    }
     try explorer.handleCodeSyncPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
+}
+
+fn isSameOriginPost(request: HttpRequest) bool {
+    const host_header = request.headerValue("host") orelse return false;
+    const request_authority = parseAuthority(host_header) orelse return false;
+    if (!isLoopbackHost(request_authority.host)) return false;
+
+    if (request.headerValue("origin")) |origin| {
+        if (sourceUrlMatchesAuthority(origin, request_authority)) return true;
+    }
+    if (request.headerValue("referer")) |referer| {
+        if (sourceUrlMatchesAuthority(referer, request_authority)) return true;
+    }
+    return false;
+}
+
+const Authority = struct {
+    host: []const u8,
+    port: ?u16,
+};
+
+fn sourceUrlMatchesAuthority(value: []const u8, expected: Authority) bool {
+    const authority = parseSourceAuthority(value) orelse return false;
+    return authoritiesMatch(authority, expected);
+}
+
+fn authoritiesMatch(actual: Authority, expected: Authority) bool {
+    if (actual.port != expected.port) return false;
+    if (isLoopbackHost(expected.host)) return isLoopbackHost(actual.host);
+    return std.ascii.eqlIgnoreCase(actual.host, expected.host);
+}
+
+fn parseSourceAuthority(value: []const u8) ?Authority {
+    const scheme_end = std.mem.indexOf(u8, value, "://") orelse return null;
+    const scheme = value[0..scheme_end];
+    if (!std.ascii.eqlIgnoreCase(scheme, "http") and !std.ascii.eqlIgnoreCase(scheme, "https")) return null;
+    const rest = value[scheme_end + 3 ..];
+    const authority_end = std.mem.indexOfAny(u8, rest, "/?#") orelse rest.len;
+    return parseAuthority(rest[0..authority_end]);
+}
+
+fn parseAuthority(value: []const u8) ?Authority {
+    if (value.len == 0) return null;
+    if (value[0] == '[') {
+        const close = std.mem.indexOfScalar(u8, value, ']') orelse return null;
+        const host = value[1..close];
+        if (host.len == 0) return null;
+        if (close + 1 == value.len) return .{ .host = host, .port = null };
+        if (value[close + 1] != ':') return null;
+        const port_text = value[close + 2 ..];
+        if (port_text.len == 0) return null;
+        return .{
+            .host = host,
+            .port = std.fmt.parseUnsigned(u16, port_text, 10) catch return null,
+        };
+    }
+
+    const colon = std.mem.lastIndexOfScalar(u8, value, ':') orelse {
+        return .{ .host = value, .port = null };
+    };
+    const host = value[0..colon];
+    const port_text = value[colon + 1 ..];
+    if (host.len == 0 or port_text.len == 0) return null;
+    if (std.mem.indexOfScalar(u8, host, ':') != null) return null;
+    return .{
+        .host = host,
+        .port = std.fmt.parseUnsigned(u16, port_text, 10) catch return null,
+    };
 }
 
 fn handleBlamePage(ctx: WebContext) !void {
@@ -624,9 +696,9 @@ fn resolveByteRange(range: ByteRange, len: usize) ?ResolvedRange {
 }
 
 pub fn isLoopbackHost(host: []const u8) bool {
-    return std.mem.eql(u8, host, default_host) or
-        std.mem.eql(u8, host, "::1") or
-        std.mem.eql(u8, host, "localhost");
+    return std.ascii.eqlIgnoreCase(host, default_host) or
+        std.ascii.eqlIgnoreCase(host, "::1") or
+        std.ascii.eqlIgnoreCase(host, "localhost");
 }
 
 const web_css = @embedFile("web/style.css");
@@ -718,6 +790,48 @@ test "web request parser separates method path and body" {
     try std.testing.expectEqualStrings("/issues", request.path);
     try std.testing.expectEqualStrings("title=Smoke", request.body);
     try std.testing.expect(request.range == null);
+    try std.testing.expectEqualStrings("127.0.0.1", request.headerValue("host").?);
+}
+
+test "web code sync requires trusted same-origin post headers" {
+    const same_origin = try parseHttpRequest(
+        "POST /code/sync HTTP/1.1\r\n" ++
+            "Host: 127.0.0.1:12655\r\n" ++
+            "Origin: http://localhost:12655\r\n" ++
+            "Content-Length: 15\r\n" ++
+            "\r\n" ++
+            "action=exchange",
+    );
+    try std.testing.expect(isSameOriginPost(same_origin));
+
+    const same_referer = try parseHttpRequest(
+        "POST /code/sync HTTP/1.1\r\n" ++
+            "Host: localhost:12655\r\n" ++
+            "Referer: http://127.0.0.1:12655/code\r\n" ++
+            "Content-Length: 15\r\n" ++
+            "\r\n" ++
+            "action=exchange",
+    );
+    try std.testing.expect(isSameOriginPost(same_referer));
+
+    const rebinding_attempt = try parseHttpRequest(
+        "POST /code/sync HTTP/1.1\r\n" ++
+            "Host: attacker.test:12655\r\n" ++
+            "Origin: http://attacker.test:12655\r\n" ++
+            "Content-Length: 15\r\n" ++
+            "\r\n" ++
+            "action=exchange",
+    );
+    try std.testing.expect(!isSameOriginPost(rebinding_attempt));
+
+    const missing_origin = try parseHttpRequest(
+        "POST /code/sync HTTP/1.1\r\n" ++
+            "Host: 127.0.0.1:12655\r\n" ++
+            "Content-Length: 15\r\n" ++
+            "\r\n" ++
+            "action=exchange",
+    );
+    try std.testing.expect(!isSameOriginPost(missing_origin));
 }
 
 test "web request parser accepts byte ranges" {
