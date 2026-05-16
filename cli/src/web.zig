@@ -43,6 +43,9 @@ pub const HttpRequest = struct {
     path: []const u8,
     body: []const u8,
     range: ?ByteRange = null,
+    host: ?[]const u8 = null,
+    origin: ?[]const u8 = null,
+    referer: ?[]const u8 = null,
 };
 
 pub const ByteRange = struct {
@@ -508,7 +511,27 @@ fn handleCodePage(ctx: WebContext) !void {
 }
 
 fn handleCodeSyncPost(ctx: WebContext) !void {
+    if (!isSameOriginPost(ctx.request)) {
+        try shared.sendPlainResponse(ctx.allocator, ctx.stream, 403, "Forbidden", "Forbidden\n");
+        return;
+    }
     try explorer.handleCodeSyncPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
+}
+
+fn isSameOriginPost(request: HttpRequest) bool {
+    const host = request.host orelse return false;
+    if (request.origin) |origin| return headerUrlMatchesHost(origin, host);
+    if (request.referer) |referer| return headerUrlMatchesHost(referer, host);
+    return false;
+}
+
+fn headerUrlMatchesHost(value: []const u8, host: []const u8) bool {
+    const http_prefix = "http://";
+    if (!std.mem.startsWith(u8, value, http_prefix)) return false;
+    const rest = value[http_prefix.len..];
+    const end = std.mem.indexOfAny(u8, rest, "/?#") orelse rest.len;
+    const value_host = rest[0..end];
+    return value_host.len > 0 and std.ascii.eqlIgnoreCase(value_host, host);
 }
 
 fn handleBlamePage(ctx: WebContext) !void {
@@ -681,33 +704,32 @@ pub fn parseHttpRequest(raw: []const u8) !HttpRequest {
         .path = target[0..query_start],
         .body = raw[body_start .. body_start + content_len],
         .range = parseRangeHeader(headers),
+        .host = parseHeaderValue(headers, "host"),
+        .origin = parseHeaderValue(headers, "origin"),
+        .referer = parseHeaderValue(headers, "referer"),
     };
 }
 
 pub fn parseContentLength(headers: []const u8) !usize {
+    const value = parseHeaderValue(headers, "content-length") orelse return 0;
+    return std.fmt.parseUnsigned(usize, value, 10) catch error.BadRequest;
+}
+
+fn parseHeaderValue(headers: []const u8, wanted_name: []const u8) ?[]const u8 {
     var lines = std.mem.splitSequence(u8, headers, "\r\n");
     _ = lines.next();
     while (lines.next()) |line| {
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
         const name = std.mem.trim(u8, line[0..colon], " \t");
-        if (!std.ascii.eqlIgnoreCase(name, "content-length")) continue;
-        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
-        return std.fmt.parseUnsigned(usize, value, 10) catch error.BadRequest;
+        if (!std.ascii.eqlIgnoreCase(name, wanted_name)) continue;
+        return std.mem.trim(u8, line[colon + 1 ..], " \t");
     }
-    return 0;
+    return null;
 }
 
 fn parseRangeHeader(headers: []const u8) ?ByteRange {
-    var lines = std.mem.splitSequence(u8, headers, "\r\n");
-    _ = lines.next();
-    while (lines.next()) |line| {
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-        const name = std.mem.trim(u8, line[0..colon], " \t");
-        if (!std.ascii.eqlIgnoreCase(name, "range")) continue;
-        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
-        return parseByteRange(value);
-    }
-    return null;
+    const value = parseHeaderValue(headers, "range") orelse return null;
+    return parseByteRange(value);
 }
 
 fn parseByteRange(value: []const u8) ?ByteRange {
@@ -906,6 +928,48 @@ test "web request parser separates method path and body" {
     try std.testing.expectEqualStrings("/issues", request.path);
     try std.testing.expectEqualStrings("title=Smoke", request.body);
     try std.testing.expect(request.range == null);
+    try std.testing.expectEqualStrings("127.0.0.1", request.host.?);
+}
+
+test "web code sync requires same-origin post headers" {
+    const same_origin = HttpRequest{
+        .method = "POST",
+        .target = "/code/sync",
+        .path = "/code/sync",
+        .body = "action=exchange",
+        .host = "127.0.0.1:12655",
+        .origin = "http://127.0.0.1:12655",
+    };
+    try std.testing.expect(isSameOriginPost(same_origin));
+
+    const same_referer = HttpRequest{
+        .method = "POST",
+        .target = "/code/sync",
+        .path = "/code/sync",
+        .body = "action=exchange",
+        .host = "127.0.0.1:12655",
+        .referer = "http://127.0.0.1:12655/code",
+    };
+    try std.testing.expect(isSameOriginPost(same_referer));
+
+    const cross_origin = HttpRequest{
+        .method = "POST",
+        .target = "/code/sync",
+        .path = "/code/sync",
+        .body = "action=exchange",
+        .host = "127.0.0.1:12655",
+        .origin = "http://evil.example",
+    };
+    try std.testing.expect(!isSameOriginPost(cross_origin));
+
+    const missing_origin = HttpRequest{
+        .method = "POST",
+        .target = "/code/sync",
+        .path = "/code/sync",
+        .body = "action=exchange",
+        .host = "127.0.0.1:12655",
+    };
+    try std.testing.expect(!isSameOriginPost(missing_origin));
 }
 
 test "web request parser accepts byte ranges" {
