@@ -92,10 +92,7 @@ pub fn renderCommitsPage(allocator: Allocator, repo: Repo, target: []const u8) !
 
     const default_ref = try defaultRef(allocator, repo);
     defer allocator.free(default_ref);
-    const ref = if (query_ref) |value| blk: {
-        const trimmed = std.mem.trim(u8, value, " \t\r\n");
-        break :blk if (trimmed.len == 0) default_ref else trimmed;
-    } else default_ref;
+    const ref = if (query_ref) |value| safeRevisionOrDefault(value, default_ref) else default_ref;
 
     const path = if (query_path) |value|
         normalizedPathOwned(allocator, value) catch try allocator.dupe(u8, "")
@@ -141,10 +138,7 @@ pub fn renderCommitPage(allocator: Allocator, repo: Repo, target: []const u8) ![
     defer if (query_sha) |value| allocator.free(value);
     const query_context = try queryValueOwned(allocator, target, "context");
     defer if (query_context) |value| allocator.free(value);
-    const sha = if (query_sha) |value| blk: {
-        const trimmed = std.mem.trim(u8, value, " \t\r\n");
-        break :blk if (trimmed.len == 0) "HEAD" else trimmed;
-    } else "HEAD";
+    const sha = if (query_sha) |value| safeRevisionOrDefault(value, "HEAD") else "HEAD";
     const diff_context = diffContext(query_context);
 
     const detail_opt = try loadCommitDetail(allocator, repo, sha);
@@ -382,11 +376,11 @@ fn loadCommits(allocator: Allocator, repo: Repo, ref: []const u8, path: []const 
     const skip = try std.fmt.allocPrint(allocator, "--skip={d}", .{pagination.offset()});
     defer allocator.free(skip);
     const raw_opt = if (path.len == 0)
-        try gitMaybe(allocator, repo, &.{ "log", max_count, skip, "--date=short", format, ref }, git.max_git_output)
+        try gitMaybe(allocator, repo, &.{ "log", max_count, skip, "--date=short", format, "--end-of-options", ref }, git.max_git_output)
     else blk: {
         const pathspec = try std.fmt.allocPrint(allocator, ":(top){s}", .{path});
         defer allocator.free(pathspec);
-        break :blk try gitMaybe(allocator, repo, &.{ "log", max_count, skip, "--date=short", format, ref, "--", pathspec }, git.max_git_output);
+        break :blk try gitMaybe(allocator, repo, &.{ "log", max_count, skip, "--date=short", format, "--end-of-options", ref, "--", pathspec }, git.max_git_output);
     };
     const raw = raw_opt orelse try allocator.dupe(u8, "");
     defer allocator.free(raw);
@@ -518,7 +512,7 @@ fn monthName(month: u8) []const u8 {
 }
 
 fn loadCommitDetail(allocator: Allocator, repo: Repo, sha: []const u8) !?CommitDetail {
-    const raw = try gitMaybe(allocator, repo, &.{ "show", "-s", "--format=%H%x00%h%x00%an%x00%ae%x00%cr%x00%s%x00%b", sha }, 1024 * 1024) orelse return null;
+    const raw = try gitMaybe(allocator, repo, &.{ "show", "-s", "--format=%H%x00%h%x00%an%x00%ae%x00%cr%x00%s%x00%b", "--end-of-options", sha }, 1024 * 1024) orelse return null;
     defer allocator.free(raw);
     const record = std.mem.trimRight(u8, raw, "\r\n");
     if (record.len == 0) return null;
@@ -547,6 +541,7 @@ fn loadCommitDiff(allocator: Allocator, repo: Repo, sha: []const u8, context: us
         "--find-renames",
         "--patch",
         unified,
+        "--end-of-options",
         first_parent,
         sha,
     }, max_commit_diff_bytes)) |diff| {
@@ -560,6 +555,7 @@ fn loadCommitDiff(allocator: Allocator, repo: Repo, sha: []const u8, context: us
         "--find-renames",
         "--patch",
         unified,
+        "--end-of-options",
         sha,
     }, max_commit_diff_bytes);
 }
@@ -734,6 +730,12 @@ fn diffFileTitle(line: []const u8) []const u8 {
     return line;
 }
 
+fn safeRevisionOrDefault(raw: []const u8, default: []const u8) []const u8 {
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (trimmed.len == 0 or trimmed[0] == '-') return default;
+    return trimmed;
+}
+
 fn defaultRef(allocator: Allocator, repo: Repo) ![]u8 {
     const branch_raw = try gitMaybe(allocator, repo, &.{ "branch", "--show-current" }, 512 * 1024);
     if (branch_raw) |raw| {
@@ -840,6 +842,12 @@ fn hexValue(c: u8) ?u8 {
         'A'...'F' => c - 'A' + 10,
         else => null,
     };
+}
+
+test "web commits rejects option-like revisions" {
+    try std.testing.expectEqualStrings("main", safeRevisionOrDefault("  main\n", "HEAD"));
+    try std.testing.expectEqualStrings("HEAD", safeRevisionOrDefault("", "HEAD"));
+    try std.testing.expectEqualStrings("HEAD", safeRevisionOrDefault(" --output=/tmp/gitomi-poc", "HEAD"));
 }
 
 test "web commits renders diff line classes" {
