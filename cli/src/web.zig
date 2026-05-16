@@ -55,6 +55,7 @@ const WebContext = struct {
     repo: Repo,
     stream: std.net.Stream,
     request: HttpRequest,
+    csrf_token: []const u8,
 };
 
 const RouteHandler = *const fn (WebContext) anyerror!void;
@@ -124,6 +125,9 @@ const exact_routes = [_]Route{
 
 pub fn serve(allocator: Allocator, repo: Repo, options: Options) !void {
     const bind_host: []const u8 = if (std.mem.eql(u8, options.host, "localhost")) default_host else options.host;
+    const csrf_token = try generateCsrfToken(allocator);
+    defer allocator.free(csrf_token);
+
     var server = try listenWeb(bind_host, options);
     defer server.deinit();
 
@@ -136,7 +140,7 @@ pub fn serve(allocator: Allocator, repo: Repo, options: Options) !void {
     if (options.once) {
         const connection = try server.accept();
         defer connection.stream.close();
-        try handleWebConnectionLogged(allocator, repo, connection.stream);
+        try handleWebConnectionLogged(allocator, repo, connection.stream, csrf_token);
         return;
     }
 
@@ -154,12 +158,18 @@ pub fn serve(allocator: Allocator, repo: Repo, options: Options) !void {
             permits.post();
             return err;
         };
-        pool.spawn(handleWebConnectionTask, .{ allocator, repo, connection, &permits }) catch |err| {
+        pool.spawn(handleWebConnectionTask, .{ allocator, repo, connection, csrf_token, &permits }) catch |err| {
             connection.stream.close();
             permits.post();
             return err;
         };
     }
+}
+
+fn generateCsrfToken(allocator: Allocator) ![]u8 {
+    var bytes: [32]u8 = undefined;
+    std.crypto.random.bytes(&bytes);
+    return std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&bytes)});
 }
 
 fn listenWeb(bind_host: []const u8, options: Options) !std.net.Server {
@@ -190,14 +200,14 @@ fn listenWeb(bind_host: []const u8, options: Options) !std.net.Server {
     }
 }
 
-fn handleWebConnectionTask(allocator: Allocator, repo: Repo, connection: std.net.Server.Connection, permits: *std.Thread.Semaphore) void {
+fn handleWebConnectionTask(allocator: Allocator, repo: Repo, connection: std.net.Server.Connection, csrf_token: []const u8, permits: *std.Thread.Semaphore) void {
     defer permits.post();
     defer connection.stream.close();
-    handleWebConnectionLogged(allocator, repo, connection.stream) catch {};
+    handleWebConnectionLogged(allocator, repo, connection.stream, csrf_token) catch {};
 }
 
-fn handleWebConnectionLogged(allocator: Allocator, repo: Repo, stream: std.net.Stream) !void {
-    handleWebConnection(allocator, repo, stream) catch |err| {
+fn handleWebConnectionLogged(allocator: Allocator, repo: Repo, stream: std.net.Stream, csrf_token: []const u8) !void {
+    handleWebConnection(allocator, repo, stream, csrf_token) catch |err| {
         if (isClientDisconnect(err)) return;
         try eprint("gt web: request failed: {s}\n", .{@errorName(err)});
     };
@@ -209,7 +219,7 @@ fn isClientDisconnect(err: anyerror) bool {
         err == error.ConnectionTimedOut;
 }
 
-pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Stream) !void {
+pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Stream, csrf_token: []const u8) !void {
     const raw = readHttpRequest(allocator, stream) catch {
         try shared.sendPlainResponse(allocator, stream, 400, "Bad Request", "Bad request\n");
         return;
@@ -226,6 +236,7 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         .repo = repo,
         .stream = stream,
         .request = request,
+        .csrf_token = csrf_token,
     };
 
     if (try dispatchExactRoute(ctx)) return;
@@ -620,11 +631,11 @@ fn handleIssuePost(ctx: WebContext) !void {
 }
 
 fn handleNewPullPage(ctx: WebContext) !void {
-    try sendOwnedHtml(ctx, try pulls_page.renderPullForm(ctx.allocator, ctx.repo, null, "", "", "", "", false));
+    try sendOwnedHtml(ctx, try pulls_page.renderPullForm(ctx.allocator, ctx.repo, ctx.csrf_token, null, "", "", "", "", false));
 }
 
 fn handlePullPost(ctx: WebContext) !void {
-    try pulls_page.handlePullPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
+    try pulls_page.handlePullPost(ctx.allocator, ctx.repo, ctx.stream, ctx.csrf_token, ctx.request.body);
 }
 
 fn handleFavicon(ctx: WebContext) !void {
