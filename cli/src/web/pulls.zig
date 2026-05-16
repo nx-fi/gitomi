@@ -108,9 +108,11 @@ const PullMergeStatusKind = enum {
 const PullMergeStatus = struct {
     kind: PullMergeStatusKind = .unavailable,
     conflict_files: ?[][]u8 = null,
+    git_refs: ?PullGitRefs = null,
 
     fn deinit(self: PullMergeStatus, allocator: Allocator) void {
         if (self.conflict_files) |files| freeConflictFiles(allocator, files);
+        if (self.git_refs) |refs| refs.deinit(allocator);
     }
 
     fn hasConflicts(self: PullMergeStatus) bool {
@@ -2260,11 +2262,14 @@ fn loadPullMergeStatus(allocator: Allocator, repo: Repo, detail: PullDetail) !Pu
     if (!std.mem.eql(u8, detail.state, "open")) return .{ .kind = .unavailable };
 
     const git_refs = (try work_items.loadPullGitRefs(allocator, repo, detail)) orelse return .{ .kind = .unavailable };
-    defer git_refs.deinit(allocator);
+    errdefer git_refs.deinit(allocator);
 
     const merge_base = try work_items.loadMergeBase(allocator, repo, git_refs.base, git_refs.head);
     defer if (merge_base) |value| allocator.free(value);
-    if (merge_base == null) return .{ .kind = .unavailable };
+    if (merge_base == null) {
+        git_refs.deinit(allocator);
+        return .{ .kind = .unavailable };
+    }
 
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
@@ -2283,18 +2288,23 @@ fn loadPullMergeStatus(allocator: Allocator, repo: Repo, detail: PullDetail) !Pu
 
     var result = try runCommand(allocator, argv.items, null, max_pull_diff_bytes);
     defer result.deinit();
-    if (result.exitCode() == 0) return .{ .kind = .clean };
-    if (result.exitCode() != 1) return .{ .kind = .unavailable };
+    if (result.exitCode() == 0) return .{ .kind = .clean, .git_refs = git_refs };
+    if (result.exitCode() != 1) {
+        git_refs.deinit(allocator);
+        return .{ .kind = .unavailable };
+    }
 
     const conflict_files = try parseMergeTreeConflictFiles(allocator, result.stdout);
     errdefer freeConflictFiles(allocator, conflict_files);
     if (conflict_files.len == 0) {
         freeConflictFiles(allocator, conflict_files);
+        git_refs.deinit(allocator);
         return .{ .kind = .unavailable };
     }
     return .{
         .kind = .conflicts,
         .conflict_files = conflict_files,
+        .git_refs = git_refs,
     };
 }
 
@@ -2690,7 +2700,12 @@ pub fn handlePullConflictPost(allocator: Allocator, repo: Repo, stream: std.net.
         try resolved.append(allocator, .{ .path = path, .content = content });
     }
 
-    const merge_commit = commitPullConflictResolution(allocator, repo, detail, raw_ref, resolved.items) catch |err| {
+    const git_refs = merge_status.git_refs orelse {
+        try sendMergeEditorError(allocator, repo, stream, raw_ref, 409, "Conflict", "Git did not return the pull request refs.");
+        return;
+    };
+
+    const merge_commit = commitPullConflictResolution(allocator, repo, detail, git_refs, raw_ref, resolved.items) catch |err| {
         const message = mergeCommitErrorMessage(err) orelse return err;
         try sendMergeEditorError(allocator, repo, stream, raw_ref, 422, "Unprocessable Entity", message);
         return;
@@ -3286,6 +3301,7 @@ fn commitPullConflictResolution(
     allocator: Allocator,
     repo: Repo,
     detail: PullDetail,
+    git_refs: PullGitRefs,
     raw_ref: []const u8,
     resolved_files: []const ResolvedConflictFile,
 ) ![]u8 {
@@ -3298,6 +3314,7 @@ fn commitPullConflictResolution(
     const old_head = try allocator.dupe(u8, std.mem.trim(u8, old_head_raw, " \t\r\n"));
     defer allocator.free(old_head);
     if (old_head.len == 0) return error.NoLocalHeadBranch;
+    if (!std.mem.eql(u8, old_head, git_refs.head)) return error.PullHeadChanged;
 
     const tmp_worktree = try tempPath(allocator, "gitomi-merge-worktree");
     defer allocator.free(tmp_worktree);
@@ -3314,7 +3331,7 @@ fn commitPullConflictResolution(
     allocator.free(worktree_add_raw);
     worktree_created = true;
 
-    var merge_result = try gitRunAt(allocator, tmp_worktree, &.{ "merge", "--no-ff", "--no-commit", detail.base_ref }, git.max_git_output);
+    var merge_result = try gitRunAt(allocator, tmp_worktree, &.{ "merge", "--no-ff", "--no-commit", git_refs.base }, git.max_git_output);
     defer merge_result.deinit();
     if (merge_result.exitCode()) |code| {
         if (code != 0 and code != 1) return error.MergePreparationFailed;
@@ -3366,6 +3383,7 @@ fn mergeCommitErrorMessage(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.NoLocalHeadBranch => "The pull request head must be a local branch before the web resolver can update it.",
         error.NoConflictResolutions => "No conflict resolutions were submitted.",
+        error.PullHeadChanged => "The local pull request head no longer matches the conflicts shown by the web resolver. Refresh the page and try again.",
         error.UnsafeConflictPath => "A conflicting path is not safe to write from the web resolver.",
         error.MergePreparationFailed => "Git could not prepare a merge worktree for this pull request.",
         error.UnresolvedConflicts => "Git still reports unresolved conflicts after applying the submitted files.",
