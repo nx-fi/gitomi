@@ -7,6 +7,7 @@ const exporter = @import("exporter.zig");
 
 const CliError = errors.CliError;
 const default_api_url = common.default_api_url;
+const gh_current_repo = common.gh_current_repo;
 const GitHubClient = common.GitHubClient;
 const githubSizedString = common.githubSizedString;
 const githubSubject = common.githubSubject;
@@ -64,6 +65,17 @@ test "github repo slugs and API paths are validated" {
     const path = try client.repoPath(std.testing.allocator, "/issues");
     defer std.testing.allocator.free(path);
     try std.testing.expectEqualStrings("/repos/owner/repo/issues", path);
+
+    const gh_client = GitHubClient{
+        .allocator = std.testing.allocator,
+        .api_url = default_api_url,
+        .repo = gh_current_repo,
+        .token = null,
+        .use_gh = true,
+    };
+    const gh_path = try gh_client.repoPath(std.testing.allocator, "/issues");
+    defer std.testing.allocator.free(gh_path);
+    try std.testing.expectEqualStrings("/repos/{owner}/{repo}/issues", gh_path);
 }
 
 test "github import helpers extract labels authors milestones and counts" {

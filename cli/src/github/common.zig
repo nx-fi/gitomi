@@ -148,6 +148,9 @@ pub const GitHubClient = struct {
     }
 
     pub fn repoPath(self: GitHubClient, allocator: Allocator, suffix: []const u8) ![]u8 {
+        if (self.use_gh) {
+            return std.fmt.allocPrint(allocator, "/repos/{{owner}}/{{repo}}{s}", .{suffix});
+        }
         return std.fmt.allocPrint(allocator, "/repos/{s}{s}", .{ self.repo.slug, suffix });
     }
 };

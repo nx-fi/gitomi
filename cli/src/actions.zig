@@ -1198,6 +1198,56 @@ test "native workflow parser supports shell jobs and schedules" {
     try std.testing.expectEqualStrings("echo done", workflow.jobs[0].steps[1].run.?);
 }
 
+test "native workflow schedules retain timezone and slot identity context" {
+    const bytes =
+        \\name: Scheduled
+        \\on:
+        \\  schedule:
+        \\    - cron: "0 9 * * 1"
+        \\      timezone: "Europe/Zurich"
+        \\jobs:
+        \\  test:
+        \\    backend: shell
+        \\    steps:
+        \\      - run: echo scheduled
+    ;
+    var workflow = try parseWorkflow(std.testing.allocator, "workflow-source", ".gitomi/workflows/scheduled.yml", bytes);
+    defer workflow.deinit();
+    try std.testing.expectEqual(@as(usize, 1), workflow.schedules.len);
+    try std.testing.expectEqualStrings("0 9 * * 1", workflow.schedules[0].cron);
+    try std.testing.expectEqualStrings("Europe/Zurich", workflow.schedules[0].timezone);
+
+    const slot = try scheduleSlotKey(
+        std.testing.allocator,
+        "workflow-source",
+        workflow.path,
+        workflow.schedules[0].cron,
+        workflow.schedules[0].timezone,
+        "refs/heads/main",
+        "target-oid",
+        1_778_835_600,
+    );
+    defer std.testing.allocator.free(slot);
+    try std.testing.expect(std.mem.indexOf(u8, slot, "workflow_source=workflow-source") != null);
+    try std.testing.expect(std.mem.indexOf(u8, slot, "timezone=Europe/Zurich") != null);
+    try std.testing.expect(std.mem.indexOf(u8, slot, "target_oid=target-oid") != null);
+}
+
+test "native workflow name is required" {
+    const bytes =
+        \\on: workflow_dispatch
+        \\jobs:
+        \\  test:
+        \\    backend: shell
+        \\    steps:
+        \\      - run: echo unnamed
+    ;
+    var workflow = try parseWorkflow(std.testing.allocator, "test-source", ".gitomi/workflows/unnamed.yml", bytes);
+    defer workflow.deinit();
+    try std.testing.expectEqualStrings("", workflow.name);
+    try std.testing.expectError(CliError.UserError, workflows_mod.validateLoadedWorkflow(workflow));
+}
+
 test "workflow parser initializes optional policy fields" {
     const bytes =
         \\name: Defaults
