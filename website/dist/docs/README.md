@@ -171,4 +171,4 @@ The normative design lives in [spec/](spec/):
 
 ## License
 
-[MIT](LICENSE)
+[AGPL 2.0](LICENSE)
