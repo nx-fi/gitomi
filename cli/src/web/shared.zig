@@ -533,13 +533,13 @@ pub fn appendShellEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
         \\<script src="/tree.js"></script>
         \\<script src="/code.js"></script>
         \\<script src="/projects.js"></script>
-        \\<script src="/vendor/marked/marked.umd.js"></script>
+        \\<script src="/vendor/marked/marked.umd.min.js"></script>
         \\<script src="/vendor/dompurify/purify.min.js"></script>
         \\<script src="/vendor/katex/katex.min.js"></script>
         \\<script src="/vendor/katex/auto-render.min.js"></script>
         \\<script src="/vendor/mermaid/mermaid.min.js"></script>
         \\<script src="/markdown.js"></script>
-        \\<script src="/vendor/hljs/all-languages.js"></script>
+        \\<script src="/vendor/hljs/all-languages.min.js"></script>
         \\<script src="/highlight/zig.js"></script>
         \\<script src="/highlight/solidity.js"></script>
         \\<script src="/highlight/tla.js"></script>
