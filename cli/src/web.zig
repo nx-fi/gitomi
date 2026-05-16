@@ -613,6 +613,7 @@ const dompurify_js = @embedFile("web/vendor/dompurify/purify.min.js");
 const katex_js = @embedFile("web/vendor/katex/katex.min.js");
 const katex_auto_render_js = @embedFile("web/vendor/katex/auto-render.min.js");
 const katex_css = @embedFile("web/vendor/katex/katex.min.css");
+const devicon_css = @embedFile("web/vendor/devicon/devicon.min.css");
 const mermaid_js = @embedFile("web/vendor/mermaid/mermaid.min.js");
 const highlight_js = @embedFile("web/vendor/hljs/all-languages.min.js");
 const highlight_zig_js = @embedFile("web/highlight/zig.js");
@@ -645,6 +646,11 @@ const vendor_assets = [_]VendorAsset{
     textVendorAsset("/vendor/katex/katex.min.js", "application/javascript", katex_js),
     textVendorAsset("/vendor/katex/auto-render.min.js", "application/javascript", katex_auto_render_js),
     textVendorAsset("/vendor/katex/katex.min.css", "text/css", katex_css),
+    textVendorAsset("/vendor/devicon/devicon.min.css", "text/css", devicon_css),
+    vendorAsset("/vendor/devicon/fonts/devicon.eot", "application/vnd.ms-fontobject", @embedFile("web/vendor/devicon/fonts/devicon.eot"), true),
+    vendorAsset("/vendor/devicon/fonts/devicon.ttf", "font/ttf", @embedFile("web/vendor/devicon/fonts/devicon.ttf"), true),
+    vendorAsset("/vendor/devicon/fonts/devicon.woff", "font/woff", @embedFile("web/vendor/devicon/fonts/devicon.woff"), true),
+    vendorAsset("/vendor/devicon/fonts/devicon.svg", "image/svg+xml", @embedFile("web/vendor/devicon/fonts/devicon.svg"), true),
     textVendorAsset("/vendor/mermaid/mermaid.min.js", "application/javascript", mermaid_js),
     fontVendorAsset("/vendor/katex/fonts/KaTeX_AMS-Regular.woff2", @embedFile("web/vendor/katex/fonts/KaTeX_AMS-Regular.woff2")),
     fontVendorAsset("/vendor/katex/fonts/KaTeX_Caligraphic-Bold.woff2", @embedFile("web/vendor/katex/fonts/KaTeX_Caligraphic-Bold.woff2")),
