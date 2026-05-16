@@ -324,7 +324,7 @@ fn rebuildIndexUnlocked(allocator: Allocator, repo: Repo) !IndexStats {
     // cannot be trusted as authoritative projection state unless every covered event
     // has been replay-authenticated. Rebuild from signed event commits instead;
     // snapshots remain only a write-side cache until a verified loader exists.
-    const stats = try rebuildIndexFromScratch(allocator, repo, refs_raw, &admission, empty_tree, genesis_oid);
+    var stats = try rebuildIndexFromScratch(allocator, repo, refs_raw, &admission, empty_tree, genesis_oid);
 
     // For snapshot creation policy, read only the manifest JSON of the newest snapshot
     // (no SQLite data is loaded) to determine whether inbox coverage has advanced.
@@ -332,6 +332,9 @@ fn rebuildIndexUnlocked(allocator: Allocator, repo: Repo) !IndexStats {
     // new inbox events have arrived since the last snapshot.
     var maybe_snapshot_meta = loadNewestCoveringSnapshotMeta(allocator, refs_raw, limits) catch null;
     defer if (maybe_snapshot_meta) |*s| s.deinit();
+    if (maybe_snapshot_meta) |*snapshot_meta| {
+        stats.new_events = countEventsSinceSnapshot(allocator, snapshot_meta.covered_refs_raw, refs_raw) catch stats.events;
+    }
 
     if (shouldCreateSnapshot(if (maybe_snapshot_meta) |*m| m else null, stats, SnapshotPolicy{}, std.time.timestamp())) {
         createIndexSnapshot(allocator, repo, refs_raw, limits) catch {};
@@ -903,7 +906,13 @@ fn loadSnapshotRefs(allocator: Allocator) !std.ArrayList(SnapshotRef) {
         });
     }
 
+    std.mem.sort(SnapshotRef, refs.items, {}, snapshotRefNewerThan);
     return refs;
+}
+
+fn snapshotRefNewerThan(_: void, left: SnapshotRef, right: SnapshotRef) bool {
+    if (left.timestamp != right.timestamp) return left.timestamp > right.timestamp;
+    return std.mem.order(u8, left.ref, right.ref) == .gt;
 }
 
 fn freeSnapshotRefs(allocator: Allocator, refs: *std.ArrayList(SnapshotRef)) void {
@@ -1037,6 +1046,35 @@ fn snapshotCoverageValid(allocator: Allocator, covered_refs_raw: []const u8, cur
     }
 
     return true;
+}
+
+fn countEventsSinceSnapshot(allocator: Allocator, covered_refs_raw: []const u8, current_refs_raw: []const u8) !usize {
+    var covered_refs = try parseRefsRaw(allocator, covered_refs_raw);
+    defer freeRefHeads(allocator, &covered_refs);
+
+    var current_refs = try parseRefsRaw(allocator, current_refs_raw);
+    defer freeRefHeads(allocator, &current_refs);
+
+    const genesis_oid = findRefOid(current_refs.items, repo_mod.genesis_ref);
+    var count: usize = 0;
+    for (current_refs.items) |current| {
+        if (!std.mem.startsWith(u8, current.ref, "refs/gitomi/inbox/")) continue;
+
+        const covered_oid = findRefOid(covered_refs.items, current.ref);
+        const target = if (covered_oid) |old_oid|
+            try std.fmt.allocPrint(allocator, "{s}..{s}", .{ old_oid, current.oid })
+        else if (genesis_oid) |oid|
+            try std.fmt.allocPrint(allocator, "{s}..{s}", .{ oid, current.oid })
+        else
+            try allocator.dupe(u8, current.oid);
+        defer allocator.free(target);
+
+        const raw = try gitChecked(allocator, &.{ "rev-list", "--first-parent", "--count", target });
+        defer allocator.free(raw);
+        const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+        count += std.fmt.parseUnsigned(usize, trimmed, 10) catch 0;
+    }
+    return count;
 }
 
 /// Reads only the manifest JSON of the newest snapshot ref (no SQLite data is loaded)

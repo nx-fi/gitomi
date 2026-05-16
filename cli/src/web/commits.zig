@@ -1,6 +1,7 @@
 const std = @import("std");
 const git = @import("../git.zig");
 const repo_mod = @import("../repo.zig");
+const diff_render = @import("diff_render.zig");
 const shared = @import("shared.zig");
 
 const Allocator = std.mem.Allocator;
@@ -8,7 +9,6 @@ const Repo = repo_mod.Repo;
 const appendEmptyState = shared.appendEmptyState;
 const appendHtml = shared.appendHtml;
 const appendHref = shared.appendHref;
-const appendOptionalAttr = shared.appendOptionalAttr;
 const appendRepoHeaderShared = shared.appendRepoHeader;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
@@ -21,11 +21,6 @@ const runCommand = git.runCommand;
 const max_commit_diff_bytes = 8 * 1024 * 1024;
 const commits_default_page_size = 50;
 const commits_max_page_size = 100;
-
-const DiffHunkRange = struct {
-    old_start: usize,
-    new_start: usize,
-};
 
 const CommitListEntry = struct {
     full_hash: []u8,
@@ -574,159 +569,10 @@ fn loadCommitDiff(allocator: Allocator, repo: Repo, sha: []const u8, context: us
 }
 
 fn appendDiff(buf: *std.ArrayList(u8), allocator: Allocator, sha: []const u8, context: usize, diff: []const u8) !void {
-    if (std.mem.trim(u8, diff, " \t\r\n").len == 0) {
-        try appendEmptyState(buf, allocator, "No file changes.", "This commit does not contain a patch to display.");
-        return;
-    }
-
-    var in_file = false;
-    var file_index: usize = 0;
-    var current_file_index: usize = 0;
-    var rendered_lines: usize = 0;
-    var old_line: ?usize = null;
-    var new_line: ?usize = null;
-    var lines = std.mem.splitScalar(u8, diff, '\n');
-    while (lines.next()) |raw_line| {
-        const line = std.mem.trimRight(u8, raw_line, "\r");
-        if (std.mem.startsWith(u8, line, "diff --git ")) {
-            if (in_file) try buf.appendSlice(allocator, "</div></section>");
-            in_file = true;
-            current_file_index = file_index;
-            file_index += 1;
-            rendered_lines = 0;
-            old_line = null;
-            new_line = null;
-            try appendDiffFileStart(buf, allocator, current_file_index, diffFileTitle(line));
-            continue;
-        } else if (!in_file) {
-            in_file = true;
-            current_file_index = file_index;
-            file_index += 1;
-            rendered_lines = 0;
-            old_line = null;
-            new_line = null;
-            try appendDiffFileStart(buf, allocator, current_file_index, "Patch");
-        }
-
-        if (parseHunkHeader(line)) |range| {
-            if (rendered_lines == 0) {
-                if (range.old_start > 1 or range.new_start > 1) {
-                    try appendDiffExpandRow(buf, allocator, sha, context, current_file_index, "Expand from file start");
-                }
-            } else {
-                try appendDiffExpandRow(buf, allocator, sha, context, current_file_index, "Expand hidden lines");
-            }
-            old_line = range.old_start;
-            new_line = range.new_start;
-            try appendDiffLine(buf, allocator, line, "hunk", null, null);
-            rendered_lines += 1;
-            continue;
-        }
-
-        const class = diffLineClass(line);
-        if (std.mem.eql(u8, class, "add")) {
-            try appendDiffLine(buf, allocator, line, class, null, new_line);
-            if (new_line) |value| new_line = value + 1;
-        } else if (std.mem.eql(u8, class, "del")) {
-            try appendDiffLine(buf, allocator, line, class, old_line, null);
-            if (old_line) |value| old_line = value + 1;
-        } else if (std.mem.eql(u8, class, "context")) {
-            try appendDiffLine(buf, allocator, line, class, old_line, new_line);
-            if (old_line) |value| old_line = value + 1;
-            if (new_line) |value| new_line = value + 1;
-        } else {
-            try appendDiffLine(buf, allocator, line, class, null, null);
-        }
-        rendered_lines += 1;
-    }
-
-    if (in_file) try buf.appendSlice(allocator, "</div></section>");
-}
-
-fn appendDiffFileStart(buf: *std.ArrayList(u8), allocator: Allocator, file_index: usize, title: []const u8) !void {
-    try appendTemplate(buf, allocator,
-        \\<section class="panel diff-file" id="diff-file-{file_index}" data-diff-file data-diff-file-index="{file_index}" data-diff-file-path="{title}"><div class="diff-file-head"><strong>{title}</strong></div><div class="diff-lines">
-    , .{
-        .file_index = file_index,
-        .title = title,
+    try diff_render.append(buf, allocator, diff, .{
+        .empty_message = "This commit does not contain a patch to display.",
+        .expand = .{ .commit_hash = sha, .context = context },
     });
-}
-
-fn appendDiffExpandRow(buf: *std.ArrayList(u8), allocator: Allocator, sha: []const u8, context: usize, file_index: usize, label: []const u8) !void {
-    try buf.appendSlice(allocator, "<div class=\"diff-row diff-expand\" data-diff-row data-diff-kind=\"expand\"><span></span><span></span>");
-    if (context < 200) {
-        try buf.appendSlice(allocator, "<a data-diff-expand href=\"");
-        try appendCommitHrefWithContext(buf, allocator, sha, @min(context * 4, @as(usize, 200)), file_index);
-        try appendTemplate(buf, allocator, "\">{label}</a>", .{ .label = label });
-    } else {
-        try buf.appendSlice(allocator, "<span>Maximum context shown</span>");
-    }
-    try buf.appendSlice(allocator, "</div>");
-}
-
-fn appendDiffLine(
-    buf: *std.ArrayList(u8),
-    allocator: Allocator,
-    line: []const u8,
-    class: []const u8,
-    old_line: ?usize,
-    new_line: ?usize,
-) !void {
-    try appendTemplate(buf, allocator,
-        \\<div class="diff-row {class}" data-diff-row data-diff-kind="{class}"
-    , .{ .class = class });
-    try appendOptionalAttr(buf, allocator, "data-diff-old", old_line);
-    try appendOptionalAttr(buf, allocator, "data-diff-new", new_line);
-    try buf.appendSlice(allocator, "><span class=\"diff-num old\">");
-    try appendLineNumber(buf, allocator, old_line);
-    try buf.appendSlice(allocator, "</span><span class=\"diff-num new\">");
-    try appendLineNumber(buf, allocator, new_line);
-    try appendTemplate(buf, allocator,
-        \\</span><code class="diff-code">{line}</code></div>
-    , .{ .line = line });
-}
-
-fn appendLineNumber(buf: *std.ArrayList(u8), allocator: Allocator, line_number: ?usize) !void {
-    if (line_number) |value| {
-        if (value != 0) try std.fmt.format(buf.writer(allocator), "{d}", .{value});
-    }
-}
-
-fn diffLineClass(line: []const u8) []const u8 {
-    if (std.mem.startsWith(u8, line, "@@")) return "hunk";
-    if (std.mem.startsWith(u8, line, "+") and !std.mem.startsWith(u8, line, "+++")) return "add";
-    if (std.mem.startsWith(u8, line, "-") and !std.mem.startsWith(u8, line, "---")) return "del";
-    if (std.mem.startsWith(u8, line, "diff --git ") or
-        std.mem.startsWith(u8, line, "index ") or
-        std.mem.startsWith(u8, line, "new file mode ") or
-        std.mem.startsWith(u8, line, "deleted file mode ") or
-        std.mem.startsWith(u8, line, "similarity index ") or
-        std.mem.startsWith(u8, line, "rename from ") or
-        std.mem.startsWith(u8, line, "rename to ") or
-        std.mem.startsWith(u8, line, "---") or
-        std.mem.startsWith(u8, line, "+++") or
-        std.mem.startsWith(u8, line, "Binary files "))
-    {
-        return "meta";
-    }
-    return "context";
-}
-
-fn parseHunkHeader(line: []const u8) ?DiffHunkRange {
-    if (!std.mem.startsWith(u8, line, "@@")) return null;
-    const minus = std.mem.indexOfScalar(u8, line, '-') orelse return null;
-    const plus = std.mem.indexOfScalarPos(u8, line, minus + 1, '+') orelse return null;
-    return .{
-        .old_start = parseHunkStart(line[minus + 1 .. plus]) orelse return null,
-        .new_start = parseHunkStart(line[plus + 1 ..]) orelse return null,
-    };
-}
-
-fn parseHunkStart(value: []const u8) ?usize {
-    var end: usize = 0;
-    while (end < value.len and std.ascii.isDigit(value[end])) : (end += 1) {}
-    if (end == 0) return null;
-    return std.fmt.parseUnsigned(usize, value[0..end], 10) catch null;
 }
 
 fn diffContext(query_context: ?[]u8) usize {
@@ -735,12 +581,6 @@ fn diffContext(query_context: ?[]u8) usize {
     if (trimmed.len == 0) return 3;
     const parsed = std.fmt.parseUnsigned(usize, trimmed, 10) catch return 3;
     return @min(@max(parsed, @as(usize, 3)), @as(usize, 200));
-}
-
-fn diffFileTitle(line: []const u8) []const u8 {
-    const marker = " b/";
-    if (std.mem.lastIndexOf(u8, line, marker)) |index| return line[index + marker.len ..];
-    return line;
 }
 
 fn safeRevisionOrDefault(raw: []const u8, default: []const u8) []const u8 {
@@ -809,14 +649,6 @@ fn percentDecode(allocator: Allocator, value: []const u8) ![]u8 {
     }
 
     return buf.toOwnedSlice(allocator);
-}
-
-fn appendCommitHrefWithContext(buf: *std.ArrayList(u8), allocator: Allocator, hash: []const u8, context: usize, file_index: usize) !void {
-    try appendHref(buf, allocator, commitHref(hash));
-    try buf.appendSlice(allocator, "&amp;context=");
-    try std.fmt.format(buf.writer(allocator), "{d}", .{context});
-    try buf.appendSlice(allocator, "#diff-file-");
-    try std.fmt.format(buf.writer(allocator), "{d}", .{file_index});
 }
 
 fn freeCommitList(allocator: Allocator, commits: []CommitListEntry) void {
