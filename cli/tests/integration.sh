@@ -476,15 +476,16 @@ case "$endpoint" in
     "body": "Imported through gh",
     "state": "open",
     "created_at": "2026-01-05T00:00:00Z",
+    "comments": 1,
     "labels": [],
     "assignees": []
   }
 ]
 JSON
     ;;
-  'repos/{owner}/{repo}/issues/43/comments?per_page=100')
-    if [[ "${GH_FAIL_COMMENTS:-}" == "1" ]]; then
-      echo "comments endpoint should be skipped for already imported issue" >&2
+  'repos/{owner}/{repo}/issues/43/comments?per_page=100&page=1')
+    if [[ "${GH_FAIL_COMMENTS:-}" == "1" || "${GH_FAIL_ISSUE_COMMENTS:-}" == "1" ]]; then
+      echo "issue comments endpoint failed" >&2
       exit 4
     fi
     cat <<'JSON'
@@ -518,9 +519,12 @@ JSON
   "number": 44,
   "title": "Current repo pull",
   "body": "Imported pull through gh",
-  "state": "open",
+  "state": "closed",
   "created_at": "2026-01-06T00:00:00Z",
+  "merged_at": "2026-01-06T02:00:00Z",
+  "merge_commit_sha": "abcdef0123456789abcdef0123456789abcdef01",
   "user": { "login": "pull-author" },
+  "comments": 1,
   "labels": [{ "name": "api" }],
   "assignees": [{ "login": "api-assignee" }],
   "requested_reviewers": [{ "login": "api-reviewer" }],
@@ -534,9 +538,9 @@ JSON
 }
 JSON
     ;;
-  'repos/{owner}/{repo}/issues/44/comments?per_page=100')
-    if [[ "${GH_FAIL_COMMENTS:-}" == "1" ]]; then
-      echo "comments endpoint should be skipped for already imported pull" >&2
+  'repos/{owner}/{repo}/issues/44/comments?per_page=100&page=1')
+    if [[ "${GH_FAIL_COMMENTS:-}" == "1" || "${GH_FAIL_PULL_COMMENTS:-}" == "1" ]]; then
+      echo "pull comments endpoint failed" >&2
       exit 4
     fi
     cat <<'JSON'
@@ -549,7 +553,8 @@ JSON
 JSON
     ;;
   'repos/{owner}/{repo}/projects?per_page=100')
-    printf '[]\n'
+    echo "gh: Not Found (HTTP 404)" >&2
+    exit 1
     ;;
   *)
     echo "unexpected endpoint: $endpoint" >&2
@@ -559,6 +564,28 @@ esac
 SH
   chmod +x "$fakebin/gh"
   export GH_CALL_LOG="$PWD/gh-calls.log"
+  set +e
+  GH_FAIL_ISSUE_COMMENTS=1 PATH="$fakebin:$PATH" gt github import >/tmp/github-import-issue-comment-failure.log 2>&1
+  failed_status=$?
+  set -e
+  [[ "$failed_status" -ne 0 ]] || fail "expected github import to fail when issue comments fail"
+  issues="$(gt issue list --json)"
+  assert_not_contains "$issues" "Current repo issue"
+  pulls="$(gt pr list --json)"
+  assert_not_contains "$pulls" "Current repo pull"
+  : > "$GH_CALL_LOG"
+
+  set +e
+  GH_FAIL_PULL_COMMENTS=1 PATH="$fakebin:$PATH" gt github import >/tmp/github-import-pull-comment-failure.log 2>&1
+  failed_status=$?
+  set -e
+  [[ "$failed_status" -ne 0 ]] || fail "expected github import to fail when pull comments fail"
+  issues="$(gt issue list --json)"
+  assert_contains "$issues" '"title":"Current repo issue"'
+  pulls="$(gt pr list --json)"
+  assert_not_contains "$pulls" "Current repo pull"
+  : > "$GH_CALL_LOG"
+
   PATH="$fakebin:$PATH" gt github import >/dev/null
   gh_calls="$(cat "$GH_CALL_LOG")"
   assert_contains "$gh_calls" "api --method GET"
@@ -569,6 +596,7 @@ SH
   assert_contains "$issues" '"legacy_github_issue_number":43'
   pulls="$(gt pr list --json)"
   assert_contains "$pulls" '"title":"Current repo pull"'
+  assert_contains "$pulls" '"state":"merged"'
   assert_not_contains "$pulls" "Summary payload should not be imported"
   assert_contains "$pulls" '"source_author":"pull-author"'
   assert_contains "$pulls" '"labels":["api"]'
@@ -587,8 +615,8 @@ SH
   assert_contains "$gh_calls" 'repos/{owner}/{repo}/issues?state=all&per_page=100&page=1'
   assert_contains "$gh_calls" 'repos/{owner}/{repo}/pulls?state=all&per_page=100&page=1'
   assert_not_contains "$gh_calls" 'repos/{owner}/{repo}/pulls/44'
-  assert_not_contains "$gh_calls" 'repos/{owner}/{repo}/issues/43/comments?per_page=100'
-  assert_not_contains "$gh_calls" 'repos/{owner}/{repo}/issues/44/comments?per_page=100'
+  assert_not_contains "$gh_calls" 'repos/{owner}/{repo}/issues/43/comments?per_page=100&page=1'
+  assert_not_contains "$gh_calls" 'repos/{owner}/{repo}/issues/44/comments?per_page=100&page=1'
   gt fsck >/dev/null
 )
 
@@ -875,6 +903,21 @@ YAML
   git commit -m "Change workflow on head" >/dev/null
   head_oid="$(git rev-parse HEAD)"
 
+  git checkout -b attacker-base main >/dev/null
+  cat > .gitomi/workflows/review.yml <<'YAML'
+name: Pull Source Policy
+on:
+  pull.opened:
+jobs:
+  review:
+    backend: shell
+    steps:
+      - run: exit 42
+YAML
+  git add .gitomi/workflows/review.yml
+  git commit -m "Add attacker base workflow" >/dev/null
+  attacker_base_oid="$(git rev-parse HEAD)"
+
   git checkout main >/dev/null
   gt pr create --title "Source split" -B main -H feature >/dev/null
   pull_json="$(gt pr list --json)"
@@ -887,6 +930,13 @@ YAML
   assert_contains "$inbox_log" '"source_code_from":"head"'
   assert_contains "$inbox_log" '"workflow_source_oid":"'"$base_oid"'"'
   assert_contains "$inbox_log" '"target_oid":"'"$head_oid"'"'
+  assert_contains "$inbox_log" '"conclusion":"success"'
+
+  gt pr base "$pull_id" --base attacker-base >/dev/null
+  gt actions run --event pull.opened --object-id "$pull_id" >/dev/null
+  inbox_log="$(git log --format=%B refs/gitomi/inbox/alice/laptop)"
+  assert_contains "$inbox_log" '"workflow_source_oid":"'"$base_oid"'"'
+  assert_not_contains "$inbox_log" '"workflow_source_oid":"'"$attacker_base_oid"'"'
   assert_contains "$inbox_log" '"conclusion":"success"'
 
   run_ref="$(git for-each-ref --format='%(refname)' refs/gitomi/runs | head -n 1)"
