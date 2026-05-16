@@ -32,19 +32,18 @@ pub const Options = zwf.ServerOptions;
 
 pub const HttpRequest = zwf.Request;
 pub const ByteRange = zwf.ByteRange;
-const csrf_token_byte_len = 32;
-const csrf_token_len = csrf_token_byte_len * 2;
-const CsrfToken = [csrf_token_len]u8;
-
-var web_csrf_token: CsrfToken = undefined;
-var web_csrf_token_ready = false;
 
 const WebContext = struct {
     allocator: Allocator,
     repo: Repo,
+    csrf_token: []const u8,
     stream: std.net.Stream,
     request: zwf.Request,
     response: zwf.Response,
+};
+
+const WebAppContext = struct {
+    repo: Repo,
     csrf_token: []const u8,
 };
 
@@ -145,39 +144,33 @@ pub fn serve(allocator: Allocator, repo: Repo, options: Options) !void {
         try out("Press Ctrl-C to stop.\n", .{});
     }
 
-    web_csrf_token = generateCsrfToken();
-    web_csrf_token_ready = true;
-    try zwf.server.serveConnections(Repo, allocator, repo, &server, options, handleWebConnectionLogged);
+    const csrf_token = try zwf.csrf.generateTokenOwned(allocator);
+    defer allocator.free(csrf_token);
+
+    const app_context = WebAppContext{
+        .repo = repo,
+        .csrf_token = csrf_token,
+    };
+    try zwf.server.serveConnections(WebAppContext, allocator, app_context, &server, options, handleWebConnectionLogged);
 }
 
-fn generateCsrfToken() CsrfToken {
-    var random_bytes: [csrf_token_byte_len]u8 = undefined;
-    std.crypto.random.bytes(&random_bytes);
-
-    var token: CsrfToken = undefined;
-    const hex = "0123456789abcdef";
-    for (random_bytes, 0..) |byte, i| {
-        const hi: usize = @intCast(byte >> 4);
-        const lo: usize = @intCast(byte & 0x0f);
-        token[i * 2] = hex[hi];
-        token[i * 2 + 1] = hex[lo];
-    }
-    return token;
-}
-
-fn handleWebConnectionLogged(allocator: Allocator, repo: Repo, stream: std.net.Stream) !void {
-    handleWebConnection(allocator, repo, stream) catch |err| {
+fn handleWebConnectionLogged(allocator: Allocator, app_context: WebAppContext, stream: std.net.Stream) !void {
+    handleWebConnectionWithContext(allocator, app_context, stream) catch |err| {
         if (zwf.server.isClientDisconnect(err)) return;
         try eprint("gt web: request failed: {s}\n", .{@errorName(err)});
     };
 }
 
 pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Stream) !void {
-    if (!web_csrf_token_ready) {
-        web_csrf_token = generateCsrfToken();
-        web_csrf_token_ready = true;
-    }
+    const csrf_token = try zwf.csrf.generateTokenOwned(allocator);
+    defer allocator.free(csrf_token);
+    try handleWebConnectionWithContext(allocator, .{
+        .repo = repo,
+        .csrf_token = csrf_token,
+    }, stream);
+}
 
+fn handleWebConnectionWithContext(allocator: Allocator, app_context: WebAppContext, stream: std.net.Stream) !void {
     const raw = readHttpRequest(allocator, stream) catch |err| {
         if (err == error.EndOfStream) return;
         try shared.sendPlainResponse(allocator, stream, 400, "Bad Request", "Bad request\n");
@@ -193,11 +186,11 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
 
     var ctx = WebContext{
         .allocator = allocator,
-        .repo = repo,
+        .repo = app_context.repo,
+        .csrf_token = app_context.csrf_token,
         .stream = stream,
         .request = request,
         .response = zwf.Response.initWithRequest(allocator, stream, request),
-        .csrf_token = web_csrf_token[0..],
     };
 
     if (try zwf.middleware.sendStaticAssets(ctx.response, ctx.request, &vendor_assets)) return;
@@ -213,6 +206,38 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
     }
 
     try sendNotFound(ctx);
+}
+
+fn requestHasTrustedOrigin(request: zwf.Request) bool {
+    if (request.headerValue("origin")) |origin| {
+        return httpUrlHasRequestHost(request, origin);
+    }
+    if (request.headerValue("referer")) |referer| {
+        return httpUrlHasRequestHost(request, referer);
+    }
+    return false;
+}
+
+fn httpUrlHasRequestHost(request: zwf.Request, value: []const u8) bool {
+    const host = request.headerValue("host") orelse return false;
+    const rest = stripPrefixIgnoreCase(value, "http://") orelse return false;
+    const authority_end = firstUrlAuthorityTerminator(rest);
+    const authority = rest[0..authority_end];
+    if (authority.len == 0) return false;
+    return std.ascii.eqlIgnoreCase(authority, host);
+}
+
+fn stripPrefixIgnoreCase(value: []const u8, prefix: []const u8) ?[]const u8 {
+    if (value.len < prefix.len) return null;
+    if (!std.ascii.eqlIgnoreCase(value[0..prefix.len], prefix)) return null;
+    return value[prefix.len..];
+}
+
+fn firstUrlAuthorityTerminator(value: []const u8) usize {
+    for (value, 0..) |c, i| {
+        if (c == '/' or c == '?' or c == '#') return i;
+    }
+    return value.len;
 }
 
 fn sendOwnedHtml(ctx: WebContext, body: []u8) !void {
@@ -432,7 +457,7 @@ fn handlePullDetailPage(ctx: WebContext) !void {
         try sendPlainNotFound(ctx);
         return;
     };
-    try sendOwnedHtml(ctx, try pulls_page.renderPullDetailPage(ctx.allocator, ctx.repo, pull_ref, ctx.request.target));
+    try sendOwnedHtml(ctx, try pulls_page.renderPullDetailPage(ctx.allocator, ctx.repo, pull_ref, ctx.request.target, ctx.csrf_token));
 }
 
 fn handlePullActionPost(ctx: WebContext) !void {
@@ -448,7 +473,11 @@ fn handlePullActionPost(ctx: WebContext) !void {
     if (std.mem.eql(u8, action, "conflicts")) {
         try pulls_page.handlePullConflictPost(ctx.allocator, ctx.repo, ctx.stream, pull_ref, ctx.request.body);
     } else if (std.mem.eql(u8, action, "merge")) {
-        try pulls_page.handlePullMergePost(ctx.allocator, ctx.repo, ctx.stream, pull_ref, ctx.request.body);
+        if (!requestHasTrustedOrigin(ctx.request)) {
+            try shared.sendPlainResponse(ctx.allocator, ctx.stream, 403, "Forbidden", "Forbidden\n");
+            return;
+        }
+        try pulls_page.handlePullMergePost(ctx.allocator, ctx.repo, ctx.stream, pull_ref, ctx.csrf_token, ctx.request.body);
     } else if (std.mem.eql(u8, action, "checklist")) {
         try pulls_page.handlePullChecklistPost(ctx.allocator, ctx.repo, ctx.stream, pull_ref, ctx.request.body);
     } else if (std.mem.eql(u8, action, "comments")) {
@@ -511,10 +540,14 @@ fn handleSettingsPage(ctx: WebContext) !void {
 }
 
 fn handleLabelsPage(ctx: WebContext) !void {
-    try sendOwnedHtml(ctx, try labels_page.renderLabelsPage(ctx.allocator, ctx.repo));
+    try sendOwnedHtml(ctx, try labels_page.renderLabelsPage(ctx.allocator, ctx.repo, ctx.csrf_token));
 }
 
 fn handleLabelsPost(ctx: WebContext) !void {
+    if (!(try zwf.csrf.verifyRequest(ctx.allocator, ctx.request, ctx.csrf_token))) {
+        try ctx.response.plain(403, "Forbidden", "Invalid CSRF token\n");
+        return;
+    }
     try labels_page.handleLabelsPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
 }
 
@@ -619,6 +652,60 @@ pub fn parseHttpRequestOwned(allocator: Allocator, raw: []const u8) !HttpRequest
 
 pub fn parseContentLength(headers: []const u8) !usize {
     return zwf.request.parseContentLength(headers);
+}
+
+test "merge origin guard accepts same-origin posts" {
+    const request = try zwf.Request.parse(
+        "POST /pulls/1/merge HTTP/1.1\r\n" ++
+            "Host: 127.0.0.1:8080\r\n" ++
+            "Origin: http://127.0.0.1:8080\r\n" ++
+            "Content-Length: 0\r\n" ++
+            "\r\n",
+    );
+    try std.testing.expect(requestHasTrustedOrigin(request));
+}
+
+test "merge origin guard accepts same-origin referers" {
+    const request = try zwf.Request.parse(
+        "POST /pulls/1/merge HTTP/1.1\r\n" ++
+            "Host: localhost:8080\r\n" ++
+            "Referer: http://localhost:8080/pulls/1\r\n" ++
+            "Content-Length: 0\r\n" ++
+            "\r\n",
+    );
+    try std.testing.expect(requestHasTrustedOrigin(request));
+}
+
+test "merge origin guard rejects cross-origin posts" {
+    const request = try zwf.Request.parse(
+        "POST /pulls/1/merge HTTP/1.1\r\n" ++
+            "Host: 127.0.0.1:8080\r\n" ++
+            "Origin: http://attacker.example\r\n" ++
+            "Content-Length: 0\r\n" ++
+            "\r\n",
+    );
+    try std.testing.expect(!requestHasTrustedOrigin(request));
+}
+
+test "merge origin guard rejects cross-origin referers" {
+    const request = try zwf.Request.parse(
+        "POST /pulls/1/merge HTTP/1.1\r\n" ++
+            "Host: localhost:8080\r\n" ++
+            "Referer: http://evil.example/form.html\r\n" ++
+            "Content-Length: 0\r\n" ++
+            "\r\n",
+    );
+    try std.testing.expect(!requestHasTrustedOrigin(request));
+}
+
+test "merge origin guard rejects missing provenance headers" {
+    const request = try zwf.Request.parse(
+        "POST /pulls/1/merge HTTP/1.1\r\n" ++
+            "Host: 127.0.0.1:8080\r\n" ++
+            "Content-Length: 0\r\n" ++
+            "\r\n",
+    );
+    try std.testing.expect(!requestHasTrustedOrigin(request));
 }
 
 fn renderNotFoundPage(allocator: Allocator, repo: Repo) ![]u8 {
@@ -857,6 +944,35 @@ test "web request parser accepts cache validators" {
     try std.testing.expectEqual(zwf.Method.GET, request.method);
     try std.testing.expect(request.headerValue("if-none-match") != null);
     try std.testing.expectEqualStrings("\"asset-etag\"", request.headerValue("if-none-match").?);
+}
+
+test "label posts require matching csrf form token" {
+    const body = "_csrf=local-token&action=create&new_label=bug";
+    const raw =
+        "POST /labels HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1\r\n" ++
+        "Content-Type: application/x-www-form-urlencoded\r\n" ++
+        "Content-Length: " ++ std.fmt.comptimePrint("{d}", .{body.len}) ++ "\r\n" ++
+        "\r\n" ++
+        body;
+    const request = try parseHttpRequest(raw);
+
+    try std.testing.expect(try zwf.csrf.verifyRequest(std.testing.allocator, request, "local-token"));
+    try std.testing.expect(!try zwf.csrf.verifyRequest(std.testing.allocator, request, "other-token"));
+}
+
+test "label csrf rejects form post without token" {
+    const body = "action=create&new_label=bug";
+    const raw =
+        "POST /labels HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1\r\n" ++
+        "Content-Type: application/x-www-form-urlencoded\r\n" ++
+        "Content-Length: " ++ std.fmt.comptimePrint("{d}", .{body.len}) ++ "\r\n" ++
+        "\r\n" ++
+        body;
+    const request = try parseHttpRequest(raw);
+
+    try std.testing.expect(!try zwf.csrf.verifyRequest(std.testing.allocator, request, "local-token"));
 }
 
 test "web vendor javascript assets use minified filenames" {

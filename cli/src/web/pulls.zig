@@ -11,6 +11,7 @@ const shared = @import("shared.zig");
 const source_stats = @import("source_stats.zig");
 const util = @import("../util.zig");
 const work_items = @import("../work_items.zig");
+const zwf = @import("../zwf.zig");
 
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
@@ -549,11 +550,11 @@ fn appendPullRowCollection(
     if (shown) try buf.appendSlice(allocator, "</span>");
 }
 
-pub fn renderPullDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u8, target: []const u8) ![]u8 {
-    return renderPullDetailPageWithMergeError(allocator, repo, raw_ref, target, null);
+pub fn renderPullDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u8, target: []const u8, csrf_token: []const u8) ![]u8 {
+    return renderPullDetailPageWithMergeError(allocator, repo, raw_ref, target, csrf_token, null);
 }
 
-fn renderPullDetailPageWithMergeError(allocator: Allocator, repo: Repo, raw_ref: []const u8, target: []const u8, merge_error: ?[]const u8) ![]u8 {
+fn renderPullDetailPageWithMergeError(allocator: Allocator, repo: Repo, raw_ref: []const u8, target: []const u8, csrf_token: []const u8, merge_error: ?[]const u8) ![]u8 {
     if (try shared.renderIndexingPageIfStale(allocator, repo, "Pull Request", "pulls", target)) |body| return body;
     try index.ensureIndex(allocator, repo);
     const pull_id = index.resolvePullId(allocator, repo, raw_ref) catch {
@@ -592,7 +593,7 @@ fn renderPullDetailPageWithMergeError(allocator: Allocator, repo: Repo, raw_ref:
     defer if (current_role) |role| allocator.free(role);
     const can_edit_pull = currentActorCanEditAuthor(current_actor, current_role, detail.author_principal);
     switch (tab) {
-        .conversation => try appendPullConversation(&buf, allocator, &db, detail, raw_ref, tab_counts, current_actor, can_edit_pull, merge_status, merge_error),
+        .conversation => try appendPullConversation(&buf, allocator, &db, detail, raw_ref, tab_counts, current_actor, can_edit_pull, merge_status, csrf_token, merge_error),
         .commits => try appendPullCommits(&buf, allocator, repo, detail),
         .files => try appendPullFiles(&buf, allocator, repo, detail, raw_ref),
     }
@@ -1662,6 +1663,7 @@ fn appendPullConversation(
     current_actor: ?[]const u8,
     can_edit_pull: bool,
     merge_status: PullMergeStatus,
+    csrf_token: []const u8,
     merge_error: ?[]const u8,
 ) !void {
     try appendTemplate(buf, allocator,
@@ -1700,7 +1702,7 @@ fn appendPullConversation(
     try appendPullReactionBar(buf, allocator, db, "pull", detail.id, raw_ref, "", current_actor);
     try buf.appendSlice(allocator, "</article></div>");
     try appendPullComments(buf, allocator, db, raw_ref, detail.id, current_actor);
-    try appendPullMergeabilityTimeline(buf, allocator, detail, raw_ref, counts.commits, merge_status, merge_error);
+    try appendPullMergeabilityTimeline(buf, allocator, detail, raw_ref, counts.commits, merge_status, csrf_token, merge_error);
     try appendPullResolutionTimeline(buf, allocator, detail);
     try appendPullCommentForm(buf, allocator, raw_ref, current_actor);
     try buf.appendSlice(allocator, "</div>");
@@ -1819,12 +1821,13 @@ fn appendPullMergeabilityTimeline(
     raw_ref: []const u8,
     commit_count: ?usize,
     merge_status: PullMergeStatus,
+    csrf_token: []const u8,
     merge_error: ?[]const u8,
 ) !void {
     if (!std.mem.eql(u8, detail.state, "open")) return;
     if (detail.draft) return;
     if (merge_status.kind == .clean) {
-        try appendPullReadyToMergeTimeline(buf, allocator, raw_ref, commit_count, merge_error);
+        try appendPullReadyToMergeTimeline(buf, allocator, raw_ref, commit_count, csrf_token, merge_error);
         return;
     }
     if (!merge_status.hasConflicts()) return;
@@ -1867,6 +1870,7 @@ fn appendPullReadyToMergeTimeline(
     allocator: Allocator,
     raw_ref: []const u8,
     commit_count: ?usize,
+    csrf_token: []const u8,
     merge_error: ?[]const u8,
 ) !void {
     const commit_phrase = try mergeMethodCommitPhrase(allocator, commit_count);
@@ -1892,6 +1896,7 @@ fn appendPullReadyToMergeTimeline(
     try shared.appendUrlEncoded(buf, allocator, raw_ref);
     try appendTemplate(buf, allocator,
         \\/merge">
+        \\      <input type="hidden" name="{csrf_field}" value="{csrf}">
         \\      <div class="pull-merge-actions">
         \\        <div class="pull-merge-button-group">
         \\          <button class="button primary pull-merge-submit" type="submit" name="method" value="merge"><span class="button-icon icon-pull-request" aria-hidden="true"></span><span data-merge-submit-label>Merge pull request</span></button>
@@ -1911,6 +1916,8 @@ fn appendPullReadyToMergeTimeline(
         \\</div>
     , .{
         .commit_phrase = commit_phrase,
+        .csrf_field = zwf.csrf.field_name,
+        .csrf = csrf_token,
         .pull_ref = raw_ref,
     });
 }
@@ -2717,7 +2724,15 @@ pub fn handlePullConflictPost(allocator: Allocator, repo: Repo, stream: std.net.
     try sendRedirect(allocator, stream, location);
 }
 
-pub fn handlePullMergePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
+pub fn handlePullMergePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, csrf_token: []const u8, form_body: []const u8) !void {
+    const fields = try parseFormFieldsOwned(allocator, form_body);
+    defer freeFormFields(allocator, fields);
+    const submitted_csrf = findFormField(fields, zwf.csrf.field_name) orelse "";
+    if (!zwf.csrf.verify(csrf_token, submitted_csrf)) {
+        try sendPlainResponse(allocator, stream, 403, "Forbidden", "Invalid CSRF token\n");
+        return;
+    }
+
     try index.ensureIndex(allocator, repo);
     const pull_id = index.resolvePullId(allocator, repo, raw_ref) catch {
         try sendPlainResponse(allocator, stream, 404, "Not Found", "Pull request not found\n");
@@ -2734,42 +2749,40 @@ pub fn handlePullMergePost(allocator: Allocator, repo: Repo, stream: std.net.Str
     defer detail.deinit(allocator);
 
     if (!std.mem.eql(u8, detail.state, "open")) {
-        try sendPullMergeError(allocator, repo, stream, raw_ref, 409, "Conflict", "Only open pull requests can be merged.");
+        try sendPullMergeError(allocator, repo, stream, raw_ref, csrf_token, 409, "Conflict", "Only open pull requests can be merged.");
         return;
     }
     if (detail.draft) {
-        try sendPullMergeError(allocator, repo, stream, raw_ref, 409, "Conflict", "Draft pull requests cannot be merged.");
+        try sendPullMergeError(allocator, repo, stream, raw_ref, csrf_token, 409, "Conflict", "Draft pull requests cannot be merged.");
         return;
     }
 
-    const fields = try parseFormFieldsOwned(allocator, form_body);
-    defer freeFormFields(allocator, fields);
     const method_value = std.mem.trim(u8, findFormField(fields, "method") orelse "merge", " \t\r\n");
     const method = pullMergeMethodFromValue(method_value) orelse {
-        try sendPullMergeError(allocator, repo, stream, raw_ref, 422, "Unprocessable Entity", "Unknown merge method.");
+        try sendPullMergeError(allocator, repo, stream, raw_ref, csrf_token, 422, "Unprocessable Entity", "Unknown merge method.");
         return;
     };
 
     const merge_status = try loadPullMergeStatus(allocator, repo, detail);
     defer merge_status.deinit(allocator);
     if (merge_status.hasConflicts()) {
-        try sendPullMergeError(allocator, repo, stream, raw_ref, 409, "Conflict", "Resolve merge conflicts before merging this pull request.");
+        try sendPullMergeError(allocator, repo, stream, raw_ref, csrf_token, 409, "Conflict", "Resolve merge conflicts before merging this pull request.");
         return;
     }
     if (merge_status.kind != .clean) {
-        try sendPullMergeError(allocator, repo, stream, raw_ref, 409, "Conflict", "The local repository could not verify that this pull request can be merged cleanly.");
+        try sendPullMergeError(allocator, repo, stream, raw_ref, csrf_token, 409, "Conflict", "The local repository could not verify that this pull request can be merged cleanly.");
         return;
     }
 
     const merge_result = mergePullIntoBase(allocator, repo, detail, raw_ref, method) catch |err| {
         const message = pullMergeErrorMessage(err) orelse return err;
-        try sendPullMergeError(allocator, repo, stream, raw_ref, 422, "Unprocessable Entity", message);
+        try sendPullMergeError(allocator, repo, stream, raw_ref, csrf_token, 422, "Unprocessable Entity", message);
         return;
     };
     defer merge_result.deinit(allocator);
 
     pull.createPullMergedEvent(allocator, pull_id, merge_result.merge_oid, merge_result.target_oid) catch {
-        try sendPullMergeError(allocator, repo, stream, raw_ref, 500, "Internal Server Error", "The base branch was updated, but Gitomi could not record the pull.merged event.");
+        try sendPullMergeError(allocator, repo, stream, raw_ref, csrf_token, 500, "Internal Server Error", "The base branch was updated, but Gitomi could not record the pull.merged event.");
         return;
     };
 
@@ -2842,13 +2855,14 @@ fn sendPullMergeError(
     repo: Repo,
     stream: std.net.Stream,
     raw_ref: []const u8,
+    csrf_token: []const u8,
     status: u16,
     reason: []const u8,
     message: []const u8,
 ) !void {
     const target = try std.fmt.allocPrint(allocator, "/pulls/{s}", .{raw_ref});
     defer allocator.free(target);
-    const body = try renderPullDetailPageWithMergeError(allocator, repo, raw_ref, target, message);
+    const body = try renderPullDetailPageWithMergeError(allocator, repo, raw_ref, target, csrf_token, message);
     defer allocator.free(body);
     try sendResponse(allocator, stream, status, reason, "text/html", body, null);
 }
@@ -3483,6 +3497,16 @@ test "pull merge method parser" {
     try std.testing.expectEqual(PullMergeMethod.squash, pullMergeMethodFromValue("squash").?);
     try std.testing.expectEqual(PullMergeMethod.rebase, pullMergeMethodFromValue("rebase").?);
     try std.testing.expect(pullMergeMethodFromValue("fast-forward") == null);
+}
+
+test "pull merge form includes csrf token" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendPullReadyToMergeTimeline(&buf, std.testing.allocator, "1", 1, "token-123", null);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "name=\"_csrf\" value=\"token-123\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "action=\"/pulls/1/merge\"") != null);
 }
 
 test "merge editor counts conflict groups" {
