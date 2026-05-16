@@ -42,6 +42,10 @@ pub const HttpRequest = struct {
     target: []const u8,
     path: []const u8,
     body: []const u8,
+    host: ?[]const u8 = null,
+    origin: ?[]const u8 = null,
+    referer: ?[]const u8 = null,
+    sec_fetch_site: ?[]const u8 = null,
     range: ?ByteRange = null,
 };
 
@@ -227,6 +231,11 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         .stream = stream,
         .request = request,
     };
+
+    if (isForbiddenCrossOriginWrite(request)) {
+        try shared.sendPlainResponse(allocator, stream, 403, "Forbidden", "Forbidden\n");
+        return;
+    }
 
     if (try dispatchExactRoute(ctx)) return;
     if (try sendVendorAsset(allocator, stream, request.method, request.path)) return;
@@ -680,8 +689,74 @@ pub fn parseHttpRequest(raw: []const u8) !HttpRequest {
         .target = target,
         .path = target[0..query_start],
         .body = raw[body_start .. body_start + content_len],
+        .host = headerValue(headers, "host"),
+        .origin = headerValue(headers, "origin"),
+        .referer = headerValue(headers, "referer"),
+        .sec_fetch_site = headerValue(headers, "sec-fetch-site"),
         .range = parseRangeHeader(headers),
     };
+}
+
+fn isForbiddenCrossOriginWrite(request: HttpRequest) bool {
+    if (!isWriteMethod(request.method)) return false;
+
+    if (request.sec_fetch_site) |site| {
+        if (std.ascii.eqlIgnoreCase(site, "cross-site")) return true;
+    }
+
+    if (request.origin) |origin| {
+        return !originMatchesHost(origin, request.host);
+    }
+
+    if (request.referer) |referer| {
+        return !refererMatchesHost(referer, request.host);
+    }
+
+    return false;
+}
+
+fn isWriteMethod(method: []const u8) bool {
+    return std.mem.eql(u8, method, "POST") or
+        std.mem.eql(u8, method, "PUT") or
+        std.mem.eql(u8, method, "PATCH") or
+        std.mem.eql(u8, method, "DELETE");
+}
+
+fn originMatchesHost(origin: []const u8, host_opt: ?[]const u8) bool {
+    const host = host_opt orelse return false;
+    const origin_host = originHost(origin) orelse return false;
+    return std.ascii.eqlIgnoreCase(origin_host, host);
+}
+
+fn refererMatchesHost(referer: []const u8, host_opt: ?[]const u8) bool {
+    const host = host_opt orelse return false;
+    const referer_host = originHost(referer) orelse return false;
+    return std.ascii.eqlIgnoreCase(referer_host, host);
+}
+
+fn originHost(url: []const u8) ?[]const u8 {
+    const after_scheme = if (std.mem.startsWith(u8, url, "http://"))
+        url["http://".len..]
+    else if (std.mem.startsWith(u8, url, "https://"))
+        url["https://".len..]
+    else
+        return null;
+
+    const host_end = std.mem.indexOfAny(u8, after_scheme, "/?#") orelse after_scheme.len;
+    if (host_end == 0) return null;
+    return after_scheme[0..host_end];
+}
+
+fn headerValue(headers: []const u8, header_name: []const u8) ?[]const u8 {
+    var lines = std.mem.splitSequence(u8, headers, "\r\n");
+    _ = lines.next();
+    while (lines.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const name = std.mem.trim(u8, line[0..colon], " \t");
+        if (!std.ascii.eqlIgnoreCase(name, header_name)) continue;
+        return std.mem.trim(u8, line[colon + 1 ..], " \t");
+    }
+    return null;
 }
 
 pub fn parseContentLength(headers: []const u8) !usize {
@@ -906,6 +981,33 @@ test "web request parser separates method path and body" {
     try std.testing.expectEqualStrings("/issues", request.path);
     try std.testing.expectEqualStrings("title=Smoke", request.body);
     try std.testing.expect(request.range == null);
+    try std.testing.expectEqualStrings("127.0.0.1", request.host.?);
+}
+
+test "web request rejects cross-origin writes" {
+    const raw =
+        "POST /projects HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1:12655\r\n" ++
+        "Origin: http://evil.example\r\n" ++
+        "Sec-Fetch-Site: cross-site\r\n" ++
+        "Content-Length: 9\r\n" ++
+        "\r\n" ++
+        "name=evil";
+    const request = try parseHttpRequest(raw);
+    try std.testing.expect(isForbiddenCrossOriginWrite(request));
+}
+
+test "web request accepts same-origin writes" {
+    const raw =
+        "POST /projects HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1:12655\r\n" ++
+        "Origin: http://127.0.0.1:12655\r\n" ++
+        "Sec-Fetch-Site: same-origin\r\n" ++
+        "Content-Length: 8\r\n" ++
+        "\r\n" ++
+        "name=ok!";
+    const request = try parseHttpRequest(raw);
+    try std.testing.expect(!isForbiddenCrossOriginWrite(request));
 }
 
 test "web request parser accepts byte ranges" {
