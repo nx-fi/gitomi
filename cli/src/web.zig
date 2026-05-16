@@ -532,7 +532,7 @@ fn handleMilestoneRefPost(ctx: WebContext) !void {
 }
 
 fn handleAccessPage(ctx: WebContext) !void {
-    try sendOwnedHtml(ctx, try access_page.renderAccessPage(ctx.allocator, ctx.repo));
+    try sendOwnedHtml(ctx, try access_page.renderAccessPage(ctx.allocator, ctx.repo, ctx.csrf_token[0..]));
 }
 
 fn handleSettingsPage(ctx: WebContext) !void {
@@ -552,11 +552,11 @@ fn handleLabelsPost(ctx: WebContext) !void {
 }
 
 fn handleAccessRolePost(ctx: WebContext) !void {
-    try access_page.handleAccessRolePost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
+    try access_page.handleAccessRolePost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body, ctx.csrf_token[0..]);
 }
 
 fn handleAccessDevicePost(ctx: WebContext) !void {
-    try access_page.handleAccessDevicePost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
+    try access_page.handleAccessDevicePost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body, ctx.csrf_token[0..]);
 }
 
 fn handleActionsPage(ctx: WebContext) !void {
