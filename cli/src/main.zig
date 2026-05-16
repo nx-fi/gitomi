@@ -9,6 +9,7 @@ test {
     _ = @import("util.zig");
     _ = @import("repo.zig");
     _ = @import("event.zig");
+    _ = @import("inbox_commit.zig");
     _ = @import("event_writer.zig");
     _ = @import("index.zig");
     _ = @import("comment.zig");
