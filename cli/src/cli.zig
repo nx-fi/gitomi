@@ -25,6 +25,46 @@ const web = @import("web.zig");
 const Allocator = std.mem.Allocator;
 const CliError = errors.CliError;
 
+const CommandHandler = *const fn (Allocator, []const []const u8, []const u8) anyerror!void;
+
+const Command = struct {
+    handler: CommandHandler,
+    command_name: []const u8,
+};
+
+const command_dispatch = std.StaticStringMap(Command).initComptime(.{
+    .{ "-h", Command{ .handler = runHelp, .command_name = "gt -h" } },
+    .{ "--help", Command{ .handler = runHelp, .command_name = "gt --help" } },
+    .{ "help", Command{ .handler = runHelp, .command_name = "gt help" } },
+    .{ "--version", Command{ .handler = runVersion, .command_name = "gt --version" } },
+    .{ "version", Command{ .handler = runVersion, .command_name = "gt version" } },
+    .{ "init", Command{ .handler = runInit, .command_name = "gt init" } },
+    .{ "status", Command{ .handler = runStatus, .command_name = "gt status" } },
+    .{ "doctor", Command{ .handler = runStatus, .command_name = "gt doctor" } },
+    .{ "fsck", Command{ .handler = runFsck, .command_name = "gt fsck" } },
+    .{ "index", Command{ .handler = runIndex, .command_name = "gt index" } },
+    .{ "refs", Command{ .handler = runRefs, .command_name = "gt refs" } },
+    .{ "clear", Command{ .handler = runClearOrReset, .command_name = "gt clear" } },
+    .{ "reset", Command{ .handler = runClearOrReset, .command_name = "gt reset" } },
+    .{ "events", Command{ .handler = runEvents, .command_name = "gt events" } },
+    .{ "issue", Command{ .handler = runIssue, .command_name = "gt issue" } },
+    .{ "project", Command{ .handler = runProject, .command_name = "gt project" } },
+    .{ "projects", Command{ .handler = runProject, .command_name = "gt projects" } },
+    .{ "milestone", Command{ .handler = runMilestone, .command_name = "gt milestone" } },
+    .{ "milestones", Command{ .handler = runMilestone, .command_name = "gt milestones" } },
+    .{ "pr", Command{ .handler = runPr, .command_name = "gt pr" } },
+    .{ "pull", Command{ .handler = runPr, .command_name = "gt pull" } },
+    .{ "comment", Command{ .handler = runComment, .command_name = "gt comment" } },
+    .{ "acl", Command{ .handler = runAcl, .command_name = "gt acl" } },
+    .{ "identity", Command{ .handler = runIdentity, .command_name = "gt identity" } },
+    .{ "actions", Command{ .handler = runActions, .command_name = "gt actions" } },
+    .{ "action", Command{ .handler = runActions, .command_name = "gt action" } },
+    .{ "runs", Command{ .handler = runRuns, .command_name = "gt runs" } },
+    .{ "sync", Command{ .handler = runSync, .command_name = "gt sync" } },
+    .{ "github", Command{ .handler = runGithub, .command_name = "gt github" } },
+    .{ "web", Command{ .handler = runWeb, .command_name = "gt web" } },
+});
+
 pub fn main() void {
     realMain() catch |err| {
         if (!errors.isReported(err)) {
@@ -48,53 +88,97 @@ fn realMain() !void {
     }
 
     const cmd = args[1];
-    if (std.mem.eql(u8, cmd, "-h") or std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "help")) {
-        try printUsage();
-    } else if (std.mem.eql(u8, cmd, "--version") or std.mem.eql(u8, cmd, "version")) {
-        try io.out("gt {s}\n", .{build_options.version});
-    } else if (std.mem.eql(u8, cmd, "init")) {
-        try cmdInit(allocator, args[2..]);
-    } else if (std.mem.eql(u8, cmd, "status") or std.mem.eql(u8, cmd, "doctor")) {
-        try cmdStatus(allocator);
-    } else if (std.mem.eql(u8, cmd, "fsck")) {
-        try cmdFsck(allocator, args[2..]);
-    } else if (std.mem.eql(u8, cmd, "index")) {
-        try cmdIndex(allocator, args[2..]);
-    } else if (std.mem.eql(u8, cmd, "refs")) {
-        try cmdRefs(allocator);
-    } else if (std.mem.eql(u8, cmd, "clear") or std.mem.eql(u8, cmd, "reset")) {
-        try reset.cmdClearOrReset(allocator, args[2..], if (std.mem.eql(u8, cmd, "clear")) "gt clear" else "gt reset");
-    } else if (std.mem.eql(u8, cmd, "events")) {
-        try cmdEvents(allocator, args[2..]);
-    } else if (std.mem.eql(u8, cmd, "issue")) {
-        try issue.cmdIssue(allocator, args[2..]);
-    } else if (std.mem.eql(u8, cmd, "project") or std.mem.eql(u8, cmd, "projects")) {
-        try project.cmdProject(allocator, args[2..]);
-    } else if (std.mem.eql(u8, cmd, "milestone") or std.mem.eql(u8, cmd, "milestones")) {
-        try milestone.cmdMilestone(allocator, args[2..]);
-    } else if (std.mem.eql(u8, cmd, "pr") or std.mem.eql(u8, cmd, "pull")) {
-        try pull_mod.cmdPr(allocator, args[2..], if (std.mem.eql(u8, cmd, "pull")) "gt pull" else "gt pr");
-    } else if (std.mem.eql(u8, cmd, "comment")) {
-        try comment.cmdComment(allocator, args[2..]);
-    } else if (std.mem.eql(u8, cmd, "acl")) {
-        try cmdAcl(allocator, args[2..]);
-    } else if (std.mem.eql(u8, cmd, "identity")) {
-        try cmdIdentity(allocator, args[2..]);
-    } else if (std.mem.eql(u8, cmd, "actions") or std.mem.eql(u8, cmd, "action")) {
-        try cmdActions(allocator, args[2..], if (std.mem.eql(u8, cmd, "action")) "gt action" else "gt actions");
-    } else if (std.mem.eql(u8, cmd, "runs")) {
-        try cmdRuns(allocator, args[2..]);
-    } else if (std.mem.eql(u8, cmd, "sync")) {
-        try cmdSync(allocator, args[2..]);
-    } else if (std.mem.eql(u8, cmd, "github")) {
-        try github.cmdGithub(allocator, args[2..]);
-    } else if (std.mem.eql(u8, cmd, "web")) {
-        try cmdWeb(allocator, args[2..]);
-    } else {
+    const command = command_dispatch.get(cmd) orelse {
         try io.eprint("gt: unknown command '{s}'\n\n", .{cmd});
         try printUsage();
         return CliError.InvalidArgument;
-    }
+    };
+
+    try command.handler(allocator, args[2..], command.command_name);
+}
+
+fn runHelp(_: Allocator, _: []const []const u8, _: []const u8) !void {
+    try printUsage();
+}
+
+fn runVersion(_: Allocator, _: []const []const u8, _: []const u8) !void {
+    try io.out("gt {s}\n", .{build_options.version});
+}
+
+fn runInit(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
+    try cmdInit(allocator, args);
+}
+
+fn runStatus(allocator: Allocator, _: []const []const u8, _: []const u8) !void {
+    try cmdStatus(allocator);
+}
+
+fn runFsck(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
+    try cmdFsck(allocator, args);
+}
+
+fn runIndex(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
+    try cmdIndex(allocator, args);
+}
+
+fn runRefs(allocator: Allocator, _: []const []const u8, _: []const u8) !void {
+    try cmdRefs(allocator);
+}
+
+fn runClearOrReset(allocator: Allocator, args: []const []const u8, command_name: []const u8) !void {
+    try reset.cmdClearOrReset(allocator, args, command_name);
+}
+
+fn runEvents(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
+    try cmdEvents(allocator, args);
+}
+
+fn runIssue(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
+    try issue.cmdIssue(allocator, args);
+}
+
+fn runProject(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
+    try project.cmdProject(allocator, args);
+}
+
+fn runMilestone(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
+    try milestone.cmdMilestone(allocator, args);
+}
+
+fn runPr(allocator: Allocator, args: []const []const u8, command_name: []const u8) !void {
+    try pull_mod.cmdPr(allocator, args, command_name);
+}
+
+fn runComment(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
+    try comment.cmdComment(allocator, args);
+}
+
+fn runAcl(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
+    try cmdAcl(allocator, args);
+}
+
+fn runIdentity(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
+    try cmdIdentity(allocator, args);
+}
+
+fn runActions(allocator: Allocator, args: []const []const u8, command_name: []const u8) !void {
+    try cmdActions(allocator, args, command_name);
+}
+
+fn runRuns(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
+    try cmdRuns(allocator, args);
+}
+
+fn runSync(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
+    try cmdSync(allocator, args);
+}
+
+fn runGithub(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
+    try github.cmdGithub(allocator, args);
+}
+
+fn runWeb(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
+    try cmdWeb(allocator, args);
 }
 
 fn printUsage() !void {

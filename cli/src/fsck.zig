@@ -17,8 +17,7 @@ pub const State = struct {
     allocator: Allocator,
     config_repo_id: ?[]const u8,
     observed_repo_id: ?[]u8 = null,
-    actor_seqs: std.BufSet,
-    actor_last_seq: std.StringHashMap(u64),
+    actor_seqs: event_mod.ActorSeqAdmissionTracker,
     refs: usize = 0,
     commits: usize = 0,
     errors: usize = 0,
@@ -27,17 +26,13 @@ pub const State = struct {
         return .{
             .allocator = allocator,
             .config_repo_id = config_repo_id,
-            .actor_seqs = std.BufSet.init(allocator),
-            .actor_last_seq = std.StringHashMap(u64).init(allocator),
+            .actor_seqs = event_mod.ActorSeqAdmissionTracker.init(allocator),
         };
     }
 
     pub fn deinit(self: *State) void {
         if (self.observed_repo_id) |repo_id| self.allocator.free(repo_id);
         self.actor_seqs.deinit();
-        var keys = self.actor_last_seq.keyIterator();
-        while (keys.next()) |key| self.allocator.free(key.*);
-        self.actor_last_seq.deinit();
     }
 
     pub fn fail(self: *State, comptime fmt: []const u8, args: anytype) !void {
@@ -62,29 +57,12 @@ pub const State = struct {
         }
     }
 
-    fn checkActorSeq(self: *State, commit: []const u8, principal: []const u8, device: []const u8, seq: u64) !void {
-        const key = try std.fmt.allocPrint(self.allocator, "{d}:{s}\x1f{d}:{s}\x1f{d}", .{ principal.len, principal, device.len, device, seq });
-        defer self.allocator.free(key);
-
-        if (self.actor_seqs.contains(key)) {
-            try self.fail("{s}: duplicate actor sequence ({s}, {s}, {d})", .{ commit, principal, device, seq });
-            return;
+    fn checkActorSeq(self: *State, commit: []const u8, principal: []const u8, device: []const u8, seq: i64) !void {
+        switch (try self.actor_seqs.accept(principal, device, seq)) {
+            .accepted => {},
+            .duplicate => try self.fail("{s}: duplicate actor sequence ({s}, {s}, {d})", .{ commit, principal, device, seq }),
+            .stale => |previous| try self.fail("{s}: actor sequence ({s}, {s}, {d}) is not strictly greater than previous sequence {d}", .{ commit, principal, device, seq, previous }),
         }
-        try self.actor_seqs.insert(key);
-
-        const actor_key = try std.fmt.allocPrint(self.allocator, "{d}:{s}\x1f{d}:{s}", .{ principal.len, principal, device.len, device });
-        errdefer self.allocator.free(actor_key);
-        const entry = try self.actor_last_seq.getOrPut(actor_key);
-        if (entry.found_existing) {
-            self.allocator.free(actor_key);
-            if (seq <= entry.value_ptr.*) {
-                try self.fail("{s}: actor sequence ({s}, {s}, {d}) is not strictly greater than previous sequence {d}", .{ commit, principal, device, seq, entry.value_ptr.* });
-                return;
-            }
-        } else {
-            entry.key_ptr.* = actor_key;
-        }
-        entry.value_ptr.* = seq;
     }
 };
 
@@ -173,7 +151,7 @@ fn checkInboxCommit(
     if (envelope) |parsed| {
         defer parsed.deinit();
         try fsck.checkRepoId(commit, parsed.repo_id);
-        try fsck.checkActorSeq(commit, parsed.actor_principal, parsed.actor_device, @intCast(parsed.seq));
+        try fsck.checkActorSeq(commit, parsed.actor_principal, parsed.actor_device, parsed.seq);
         if (auth_verifier) |verifier| {
             if (try verifier.checkExisting(commit, parsed)) |reason| {
                 try fsck.fail("{s}: {s}: signing key is not authorized for actor {s}/{s}: {s}", .{ ref, commit, parsed.actor_principal, parsed.actor_device, reason });
