@@ -1061,15 +1061,10 @@ pub const WorktreePathKind = enum {
 
 pub fn worktreePathKind(root: []const u8, path: []const u8) !?WorktreePathKind {
     if (path.len == 0) return .tree;
-    const absolute_path = try absoluteWorktreePath(std.heap.page_allocator, root, path);
-    defer std.heap.page_allocator.free(absolute_path);
-    const stat = std.fs.cwd().statFile(absolute_path) catch |err| switch (err) {
-        error.FileNotFound, error.NotDir => return null,
-        else => return err,
-    };
+    const stat = try safeWorktreePathStat(std.heap.page_allocator, root, path) orelse return null;
     return switch (stat.kind) {
         .directory => .tree,
-        .file, .sym_link => .blob,
+        .file => .blob,
         else => null,
     };
 }
@@ -1083,23 +1078,50 @@ pub fn worktreeObjectType(allocator: Allocator, root: []const u8, path: []const 
 }
 
 pub fn worktreeBlobSize(root: []const u8, path: []const u8) !?usize {
-    const absolute_path = try absoluteWorktreePath(std.heap.page_allocator, root, path);
-    defer std.heap.page_allocator.free(absolute_path);
-    const stat = std.fs.cwd().statFile(absolute_path) catch |err| switch (err) {
-        error.FileNotFound, error.NotDir => return null,
-        else => return err,
-    };
-    if (stat.kind != .file and stat.kind != .sym_link) return null;
+    const stat = try safeWorktreePathStat(std.heap.page_allocator, root, path) orelse return null;
+    if (stat.kind != .file) return null;
     return stat.size;
 }
 
 pub fn readWorktreeFile(allocator: Allocator, root: []const u8, path: []const u8, max_bytes: usize) !?[]u8 {
-    const absolute_path = try absoluteWorktreePath(allocator, root, path);
+    const absolute_path = try safeWorktreeFilePath(allocator, root, path) orelse return null;
     defer allocator.free(absolute_path);
     return std.fs.cwd().readFileAlloc(allocator, absolute_path, max_bytes) catch |err| switch (err) {
         error.FileNotFound, error.NotDir, error.IsDir => return null,
         else => return err,
     };
+}
+
+fn safeWorktreeFilePath(allocator: Allocator, root: []const u8, path: []const u8) !?[]u8 {
+    const stat = try safeWorktreePathStat(allocator, root, path) orelse return null;
+    if (stat.kind != .file) return null;
+    return absoluteWorktreePath(allocator, root, path);
+}
+
+fn safeWorktreePathStat(allocator: Allocator, root: []const u8, path: []const u8) !?std.fs.File.Stat {
+    if (path.len == 0) return std.fs.cwd().statFile(root) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return null,
+        else => return err,
+    };
+
+    var cursor: usize = 0;
+    while (cursor < path.len) {
+        const slash = std.mem.indexOfScalarPos(u8, path, cursor, '/');
+        const end = slash orelse path.len;
+        const prefix = path[0..end];
+        const absolute_path = try absoluteWorktreePath(allocator, root, prefix);
+        defer allocator.free(absolute_path);
+
+        const stat = std.fs.cwd().statFile(absolute_path) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => return null,
+            else => return err,
+        };
+        if (stat.kind == .sym_link) return null;
+        if (slash == null) return stat;
+        if (stat.kind != .directory) return null;
+        cursor = end + 1;
+    }
+    return null;
 }
 
 pub fn absoluteWorktreePath(allocator: Allocator, root: []const u8, path: []const u8) ![]u8 {
