@@ -68,6 +68,90 @@ pub const Button = struct {
     kind: []const u8 = "secondary",
 };
 
+const WorkItemReferenceKind = enum {
+    issue,
+    pull,
+};
+
+pub const InternalReferenceResolver = struct {
+    allocator: Allocator,
+    db: ?index.SqliteDb = null,
+
+    pub fn init(allocator: Allocator, repo: Repo) InternalReferenceResolver {
+        if (!(index.isIndexFresh(allocator, repo) catch false)) {
+            return .{ .allocator = allocator };
+        }
+
+        const db = index.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, true) catch {
+            return .{ .allocator = allocator };
+        };
+        return .{ .allocator = allocator, .db = db };
+    }
+
+    pub fn deinit(self: *InternalReferenceResolver) void {
+        if (self.db) |*db| db.deinit();
+        self.db = null;
+    }
+
+    pub fn hrefForHashReference(self: *InternalReferenceResolver, token: []const u8) Href {
+        if (self.matchesWorkItem(.issue, token)) return issueHref(token);
+        if (self.matchesWorkItem(.pull, token)) return pullHref(token);
+        if (util.isObjectRefPrefix(token)) return commitHref(token);
+        return issueHref(token);
+    }
+
+    fn matchesWorkItem(self: *InternalReferenceResolver, kind: WorkItemReferenceKind, token: []const u8) bool {
+        if (self.db == null) return false;
+        if (util.isObjectRefPrefix(token) and (self.matchesObjectHashRef(kind, token) catch false)) return true;
+        if (positiveDecimalReferenceNumber(token)) |number| {
+            if (self.matchesLegacyNumber(kind, number) catch false) return true;
+        }
+        return false;
+    }
+
+    fn matchesObjectHashRef(self: *InternalReferenceResolver, kind: WorkItemReferenceKind, token: []const u8) !bool {
+        const sql_text: []const u8 = switch (kind) {
+            .issue => "SELECT id FROM issues ORDER BY id",
+            .pull => "SELECT id FROM pulls ORDER BY id",
+        };
+        const db = if (self.db) |*value| value else return false;
+        var stmt = try db.prepare(sql_text);
+        defer stmt.deinit();
+
+        while (try stmt.step()) {
+            const id = try stmt.columnTextDup(self.allocator, 0);
+            defer self.allocator.free(id);
+            var ref_buf: [util.max_object_ref_len]u8 = undefined;
+            const candidate_ref = util.objectRefPrefix(ref_buf[0..token.len], id);
+            if (asciiEqlIgnoreCase(candidate_ref, token)) return true;
+        }
+        return false;
+    }
+
+    fn matchesLegacyNumber(self: *InternalReferenceResolver, kind: WorkItemReferenceKind, number: i64) !bool {
+        const db = if (self.db) |*value| value else return false;
+        var stmt = try db.prepare(
+            \\SELECT 1
+            \\FROM legacy_aliases
+            \\WHERE provider = 'github'
+            \\  AND object_kind = ?
+            \\  AND number = ?
+            \\LIMIT 1
+        );
+        defer stmt.deinit();
+        try stmt.bindText(1, workItemReferenceKindName(kind));
+        try stmt.bindInt64(2, number);
+        return try stmt.step();
+    }
+};
+
+fn workItemReferenceKindName(kind: WorkItemReferenceKind) []const u8 {
+    return switch (kind) {
+        .issue => "issue",
+        .pull => "pull",
+    };
+}
+
 pub const Pagination = struct {
     page: usize = 1,
     per_page: usize,
@@ -153,6 +237,67 @@ pub fn appendIssueLinkedText(buf: *std.ArrayList(u8), allocator: Allocator, valu
         i += 1;
     }
     if (plain_start < value.len) try appendHtml(buf, allocator, value[plain_start..]);
+}
+
+pub fn appendInternalReferenceLinkedText(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    resolver: *InternalReferenceResolver,
+    value: []const u8,
+) !void {
+    try appendInternalReferenceLinkedTextWithDefaultHref(buf, allocator, resolver, value, null);
+}
+
+pub fn appendInternalReferenceLinkedTextWithDefaultHref(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    resolver: *InternalReferenceResolver,
+    value: []const u8,
+    default_href: ?Href,
+) !void {
+    var plain_start: usize = 0;
+    var i: usize = 0;
+    while (i < value.len) {
+        if (issueReferenceEnd(value, i)) |end| {
+            if (plain_start < i) try appendLinkedTextPlainSegment(buf, allocator, value[plain_start..i], default_href);
+            try appendInternalReferenceLink(buf, allocator, resolver, value[i + 1 .. end]);
+            i = end;
+            plain_start = i;
+            continue;
+        }
+        i += 1;
+    }
+    if (plain_start < value.len) try appendLinkedTextPlainSegment(buf, allocator, value[plain_start..], default_href);
+}
+
+fn appendLinkedTextPlainSegment(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    value: []const u8,
+    default_href: ?Href,
+) !void {
+    const href = default_href orelse {
+        try appendHtml(buf, allocator, value);
+        return;
+    };
+    try buf.appendSlice(allocator, "<a href=\"");
+    try appendHref(buf, allocator, href);
+    try buf.appendSlice(allocator, "\">");
+    try appendHtml(buf, allocator, value);
+    try buf.appendSlice(allocator, "</a>");
+}
+
+fn appendInternalReferenceLink(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    resolver: *InternalReferenceResolver,
+    token: []const u8,
+) !void {
+    try buf.appendSlice(allocator, "<a href=\"");
+    try appendHref(buf, allocator, resolver.hrefForHashReference(token));
+    try buf.appendSlice(allocator, "\">#");
+    try appendHtml(buf, allocator, token);
+    try buf.appendSlice(allocator, "</a>");
 }
 
 pub fn appendRelativeTime(buf: *std.ArrayList(u8), allocator: Allocator, timestamp: []const u8) !void {
@@ -272,8 +417,21 @@ fn isPositiveDecimalReference(value: []const u8) bool {
     return has_non_zero;
 }
 
+fn positiveDecimalReferenceNumber(value: []const u8) ?i64 {
+    if (!isPositiveDecimalReference(value)) return null;
+    return std.fmt.parseInt(i64, value, 10) catch null;
+}
+
 fn isReferenceTrailingIdentifier(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '-' or c == '_';
+}
+
+fn asciiEqlIgnoreCase(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |left, right| {
+        if (std.ascii.toLower(left) != std.ascii.toLower(right)) return false;
+    }
+    return true;
 }
 
 pub fn class(name: []const u8, enabled: bool) Class {
@@ -1683,4 +1841,48 @@ test "web issue linked text autolinks legacy and hash references" {
     try appendIssueLinkedText(&buf, std.testing.allocator, "Refs #42, #A1B2C3D, not #abc, #abcdef0g, or #018f0000-uuid.");
 
     try std.testing.expectEqualStrings("Refs <a href=\"/issues/42\">#42</a>, <a href=\"/issues/A1B2C3D\">#A1B2C3D</a>, not #abc, #abcdef0g, or #018f0000-uuid.", buf.items);
+}
+
+test "web internal reference linked text prefers work items before commits" {
+    const allocator = std.testing.allocator;
+    var db = try index.SqliteDb.openWithOptions(allocator, ":memory:", index.sqlite.SQLITE_OPEN_READWRITE | index.sqlite.SQLITE_OPEN_CREATE, true, .{ .enable_wal = false });
+    var close_db = true;
+    defer if (close_db) db.deinit();
+
+    try db.exec(
+        \\CREATE TABLE issues(id TEXT NOT NULL);
+        \\CREATE TABLE pulls(id TEXT NOT NULL);
+        \\CREATE TABLE legacy_aliases(provider TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL, number INTEGER NOT NULL);
+        \\INSERT INTO issues(id) VALUES ('issue-object-1');
+        \\INSERT INTO pulls(id) VALUES ('pull-object-1');
+        \\INSERT INTO legacy_aliases(provider, object_kind, object_id, number) VALUES ('github', 'issue', 'issue-object-1', 42);
+        \\INSERT INTO legacy_aliases(provider, object_kind, object_id, number) VALUES ('github', 'pull', 'pull-object-1', 42);
+    );
+
+    var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const issue_ref = util.shortObjectRef(&issue_ref_buf, "issue-object-1");
+    var pull_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const pull_ref = util.shortObjectRef(&pull_ref_buf, "pull-object-1");
+
+    var resolver = InternalReferenceResolver{ .allocator = allocator, .db = db };
+    close_db = false;
+    defer resolver.deinit();
+
+    const input = try std.fmt.allocPrint(allocator, "Issue #{s}, pull #{s}, fallback #abcdef0, legacy #42.", .{ issue_ref, pull_ref });
+    defer allocator.free(input);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try appendInternalReferenceLinkedText(&buf, allocator, &resolver, input);
+
+    const issue_href = try std.fmt.allocPrint(allocator, "href=\"/issues/{s}\"", .{issue_ref});
+    defer allocator.free(issue_href);
+    const pull_href = try std.fmt.allocPrint(allocator, "href=\"/pulls/{s}\"", .{pull_ref});
+    defer allocator.free(pull_href);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, issue_href) != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, pull_href) != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/commit?sha=abcdef0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues/42\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/pulls/42\"") == null);
 }
