@@ -20,6 +20,8 @@ html {
   --site-violet: #b59cff;
   --site-shadow: 0 30px 90px rgba(0, 0, 0, 0.44);
   --site-shadow-hard: 0 22px 0 rgba(112, 255, 166, 0.08);
+  --site-sans: "Google Sans Flex", "Google Sans", "Avenir Next", "Inter", "SF Pro Text", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --site-display: "Google Sans Flex", "Google Sans", "Avenir Next", "Inter", "SF Pro Display", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
 }
 
 :root[data-theme="light"] {
@@ -48,6 +50,7 @@ body.site-shell {
   background:
     linear-gradient(180deg, var(--site-bg) 0, var(--site-bg-2) 54%, var(--site-bg) 100%);
   color: var(--site-ink);
+  font-family: var(--site-sans);
 }
 
 .site-shell *,
@@ -109,14 +112,26 @@ body.site-shell::after {
   overflow: visible;
 }
 
-.flow-line path {
+.flow-path {
   fill: none;
-  stroke: url("#flow-line-gradient");
-  stroke-width: 2.5;
+  stroke: url("#flow-line-green");
+  stroke-width: 1.4;
   stroke-linecap: round;
-  opacity: 0.72;
-  filter: drop-shadow(0 0 14px rgba(112, 255, 166, 0.2));
+  opacity: 0.39;
+  filter: drop-shadow(0 0 13px rgba(112, 255, 166, 0.16));
   vector-effect: non-scaling-stroke;
+}
+
+.flow-cyan {
+  stroke: url("#flow-line-cyan");
+}
+
+.flow-amber {
+  stroke: url("#flow-line-amber");
+}
+
+.flow-violet {
+  stroke: url("#flow-line-violet");
 }
 
 .corner-actions {
@@ -230,7 +245,7 @@ body.site-shell::after {
 }
 
 .brand-slot {
-  min-height: 64px;
+  min-height: 126px;
 }
 
 .hero-brand {
@@ -247,10 +262,11 @@ body.site-shell::after {
   background: transparent;
   border: 0;
   border-radius: 0;
+  font-family: var(--site-display);
   font-size: 16px;
-  font-weight: 900;
+  font-weight: 800;
   box-shadow: none;
-  transform: scale(var(--brand-scale, 1.15));
+  transform: scale(var(--brand-scale, 2.3));
   transform-origin: left top;
   will-change: top, left, transform;
 }
@@ -273,7 +289,7 @@ body.site-shell::after {
   margin: 0;
   color: var(--site-amber);
   font-size: 13px;
-  font-weight: 850;
+  font-weight: 780;
   text-transform: uppercase;
 }
 
@@ -292,13 +308,14 @@ body.site-shell::after {
 .docs-panel h2 {
   margin: 0;
   color: var(--site-ink);
-  font-weight: 900;
+  font-family: var(--site-display);
+  font-weight: 700;
 }
 
 .hero-copy h1 {
   max-width: 760px;
-  font-size: 58px;
-  line-height: 1.02;
+  font-size: 62px;
+  line-height: 1;
 }
 
 .hero-title-line {
@@ -839,8 +856,8 @@ body.site-shell::after {
 
 .section-copy h2,
 .docs-panel h2 {
-  font-size: 42px;
-  line-height: 1.08;
+  font-size: 46px;
+  line-height: 1.04;
 }
 
 .section-copy p:not(.eyebrow),
