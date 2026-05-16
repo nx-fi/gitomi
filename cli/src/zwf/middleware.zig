@@ -97,13 +97,39 @@ pub fn Chain(comptime Context: type) type {
     return struct {
         const Self = @This();
 
-        pub const Next = *const fn (Context) anyerror!void;
-        pub const Handler = *const fn (Context, Next) anyerror!void;
+        pub const Terminal = *const fn (Context) anyerror!void;
+        pub const Handler = *const fn (Context, *Next) anyerror!void;
+
+        pub const Next = struct {
+            context: Context,
+            handlers: []const Handler,
+            terminal: Terminal,
+            index: usize = 0,
+
+            pub fn run(self: *Next) anyerror!void {
+                if (self.index >= self.handlers.len) {
+                    try self.terminal(self.context);
+                    return;
+                }
+                const handler = self.handlers[self.index];
+                self.index += 1;
+                try handler(self.context, self);
+            }
+        };
 
         handlers: []const Handler,
 
         pub fn init(handlers: []const Handler) Self {
             return .{ .handlers = handlers };
+        }
+
+        pub fn run(self: Self, context: Context, terminal: Terminal) !void {
+            var next = Next{
+                .context = context,
+                .handlers = self.handlers,
+                .terminal = terminal,
+            };
+            try next.run();
         }
     };
 }
@@ -113,4 +139,35 @@ test "static asset etag matcher handles lists and weak tags" {
     try std.testing.expect(etagMatches("W/\"asset-etag\"", "\"asset-etag\""));
     try std.testing.expect(etagMatches("*", "\"asset-etag\""));
     try std.testing.expect(!etagMatches("\"different\"", "\"asset-etag\""));
+}
+
+test "middleware chain executes in order" {
+    const Context = struct {
+        value: *usize,
+    };
+    const TestChain = Chain(Context);
+    const first = struct {
+        fn run(ctx: Context, next: *TestChain.Next) !void {
+            ctx.value.* += 1;
+            try next.run();
+            ctx.value.* += 10;
+        }
+    }.run;
+    const second = struct {
+        fn run(ctx: Context, next: *TestChain.Next) !void {
+            ctx.value.* += 2;
+            try next.run();
+            ctx.value.* += 20;
+        }
+    }.run;
+    const terminal = struct {
+        fn run(ctx: Context) !void {
+            ctx.value.* += 3;
+        }
+    }.run;
+
+    var value: usize = 0;
+    const handlers = [_]TestChain.Handler{ first, second };
+    try TestChain.init(&handlers).run(.{ .value = &value }, terminal);
+    try std.testing.expectEqual(@as(usize, 36), value);
 }

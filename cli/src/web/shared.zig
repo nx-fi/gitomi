@@ -5,6 +5,7 @@ const index = @import("../index.zig");
 const json_writer = @import("../json_writer.zig");
 const repo_mod = @import("../repo.zig");
 const util = @import("../util.zig");
+const zwf_response = @import("../zwf/response.zig");
 const nouns_assets = @import("vendor/nouns-assets/image_data.zig");
 
 const Allocator = std.mem.Allocator;
@@ -1452,6 +1453,7 @@ pub fn percentDecodeForm(allocator: Allocator, value: []const u8) ![]u8 {
 }
 
 pub fn sendRedirect(allocator: Allocator, stream: std.net.Stream, location: []const u8) !void {
+    try zwf_response.validateHeaderValue(location);
     const extra = try std.fmt.allocPrint(allocator, "Location: {s}\r\n", .{location});
     defer allocator.free(extra);
     try sendResponse(allocator, stream, 303, "See Other", "text/plain", "See Other\n", extra);
@@ -1476,6 +1478,7 @@ pub fn sendResponse(
     body: []const u8,
     extra_headers: ?[]const u8,
 ) !void {
+    try validateRawExtraHeaders(extra_headers orelse "");
     const headers = try std.fmt.allocPrint(
         allocator,
         "HTTP/1.1 {d} {s}\r\nContent-Type: {s}; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\n{s}\r\n",
@@ -1495,6 +1498,7 @@ pub fn sendBinaryResponse(
     body: []const u8,
     extra_headers: ?[]const u8,
 ) !void {
+    try validateRawExtraHeaders(extra_headers orelse "");
     const headers = try std.fmt.allocPrint(
         allocator,
         "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\n{s}\r\n",
@@ -1503,6 +1507,21 @@ pub fn sendBinaryResponse(
     defer allocator.free(headers);
     try stream.writeAll(headers);
     try stream.writeAll(body);
+}
+
+fn validateRawExtraHeaders(raw: []const u8) !void {
+    if (raw.len == 0) return;
+    if (!std.mem.endsWith(u8, raw, "\r\n")) return error.BadHeaderValue;
+    var rest = raw;
+    while (rest.len > 0) {
+        const end = std.mem.indexOf(u8, rest, "\r\n") orelse return error.BadHeaderValue;
+        const line = rest[0..end];
+        rest = rest[end + 2 ..];
+        if (line.len == 0) continue;
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.BadHeaderValue;
+        try zwf_response.validateHeaderName(std.mem.trim(u8, line[0..colon], " \t"));
+        try zwf_response.validateHeaderValue(std.mem.trim(u8, line[colon + 1 ..], " \t"));
+    }
 }
 
 fn loadWebStats(allocator: Allocator, repo: Repo) !WebStats {

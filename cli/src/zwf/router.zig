@@ -26,6 +26,22 @@ pub fn Router(comptime Context: type) type {
                 return .{ .method = .POST, .path = path, .action = .{ .handler = handler } };
             }
 
+            pub fn put(comptime path: []const u8, handler: Handler) Route {
+                return .{ .method = .PUT, .path = path, .action = .{ .handler = handler } };
+            }
+
+            pub fn patch(comptime path: []const u8, handler: Handler) Route {
+                return .{ .method = .PATCH, .path = path, .action = .{ .handler = handler } };
+            }
+
+            pub fn delete(comptime path: []const u8, handler: Handler) Route {
+                return .{ .method = .DELETE, .path = path, .action = .{ .handler = handler } };
+            }
+
+            pub fn options(comptime path: []const u8, handler: Handler) Route {
+                return .{ .method = .OPTIONS, .path = path, .action = .{ .handler = handler } };
+            }
+
             pub fn static(comptime path: []const u8, comptime content_type: []const u8, comptime body: []const u8) Route {
                 return .{
                     .method = .GET,
@@ -48,6 +64,24 @@ pub fn Router(comptime Context: type) type {
             params: request.ParamMap,
         };
 
+        pub const AllowedMethods = struct {
+            items: [8]request.Method = undefined,
+            len: usize = 0,
+
+            pub fn contains(self: AllowedMethods, method: request.Method) bool {
+                for (self.items[0..self.len]) |item| {
+                    if (item == method) return true;
+                }
+                return false;
+            }
+
+            fn put(self: *AllowedMethods, method: request.Method) void {
+                if (self.contains(method) or self.len >= self.items.len) return;
+                self.items[self.len] = method;
+                self.len += 1;
+            }
+        };
+
         routes: []const Route,
 
         pub fn init(routes: []const Route) Self {
@@ -63,6 +97,15 @@ pub fn Router(comptime Context: type) type {
                 }
             }
             return null;
+        }
+
+        pub fn allowedMethods(self: Self, path: []const u8) !AllowedMethods {
+            var allowed = AllowedMethods{};
+            for (self.routes) |route| {
+                var params = request.ParamMap.empty();
+                if (try matchPath(route.path, path, &params)) allowed.put(route.method);
+            }
+            return allowed;
         }
     };
 }
@@ -93,6 +136,11 @@ fn matchPath(pattern: []const u8, path: []const u8, params: *request.ParamMap) !
         if (pattern_segment[0] == ':') {
             if (pattern_segment.len == 1) return error.InvalidRoutePattern;
             try params.put(pattern_segment[1..], path_segment);
+        } else if (pattern_segment[0] == '*') {
+            if (pattern_segment.len == 1) return error.InvalidRoutePattern;
+            if (pattern_i != pattern.len) return error.InvalidRoutePattern;
+            try params.put(pattern_segment[1..], path[path_start..]);
+            return true;
         } else if (!std.mem.eql(u8, pattern_segment, path_segment)) {
             return false;
         }
@@ -127,4 +175,20 @@ test "router rejects partial segment matches" {
 
     try std.testing.expect((try router.match(.GET, "/pulls/abc123")) != null);
     try std.testing.expect((try router.match(.GET, "/pulls/abc123/conflicts")) == null);
+}
+
+test "router supports wildcard tails and allowed methods" {
+    const routes = [_]TestRouter.Route{
+        TestRouter.Route.get("/files/*path", noop),
+        TestRouter.Route.post("/files/*path", noop),
+    };
+    const router = TestRouter.init(&routes);
+
+    const route_match = (try router.match(.GET, "/files/src/main.zig")).?;
+    try std.testing.expectEqualStrings("src/main.zig", route_match.params.get("path").?);
+
+    const allowed = try router.allowedMethods("/files/src/main.zig");
+    try std.testing.expect(allowed.contains(.GET));
+    try std.testing.expect(allowed.contains(.POST));
+    try std.testing.expect(!allowed.contains(.DELETE));
 }
