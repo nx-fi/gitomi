@@ -241,7 +241,7 @@ same GitHub repository that was imported.
 `gt web` starts a local-only GitHub-like web UI for the current repository. It
 binds to loopback on port 12655 by default, retrying nearby random ports if that
 port is occupied. It opens on a committed-tree code explorer, also serves
-overview/issues/projects/actions/events/refs pages, and can create signed issue
+overview/issues/projects/workflows/events/refs pages, and can create signed issue
 events and workflow run requests through the same storage path as the CLI. The
 projects page renders kanban boards from signed project and issue placement
 events and can create new project boards.

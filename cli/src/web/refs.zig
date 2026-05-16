@@ -24,6 +24,9 @@ const Flash = struct {
     message: []const u8,
 };
 
+const refs_default_page_size = 50;
+const refs_max_page_size = 200;
+
 const RefKindFilter = enum {
     all,
     branches,
@@ -47,7 +50,8 @@ pub fn renderRefsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]u
         .{ .kind = .success, .message = "Sync completed against origin." }
     else
         null;
-    return renderRefsPageWithFlash(allocator, repo, flash, refKindFilterFromTarget(target));
+    const pagination = try shared.paginationFromTarget(allocator, target, refs_default_page_size, refs_max_page_size);
+    return renderRefsPageWithFlash(allocator, repo, flash, refKindFilterFromTarget(target), pagination);
 }
 
 pub fn handleRefsSyncPost(allocator: Allocator, repo: Repo, stream: std.net.Stream) !void {
@@ -65,12 +69,12 @@ pub fn handleRefsSyncPost(allocator: Allocator, repo: Repo, stream: std.net.Stre
 fn sendSyncFailure(allocator: Allocator, repo: Repo, stream: std.net.Stream, err: anyerror) !void {
     const message = try std.fmt.allocPrint(allocator, "Sync failed: {s}. Check that origin is reachable and the Gitomi refs are valid.", .{@errorName(err)});
     defer allocator.free(message);
-    const body = try renderRefsPageWithFlash(allocator, repo, .{ .kind = .failure, .message = message }, .all);
+    const body = try renderRefsPageWithFlash(allocator, repo, .{ .kind = .failure, .message = message }, .all, .{ .per_page = refs_default_page_size });
     defer allocator.free(body);
     try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", body, null);
 }
 
-fn renderRefsPageWithFlash(allocator: Allocator, repo: Repo, flash: ?Flash, filter: RefKindFilter) ![]u8 {
+fn renderRefsPageWithFlash(allocator: Allocator, repo: Repo, flash: ?Flash, filter: RefKindFilter, pagination: shared.Pagination) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
@@ -110,6 +114,8 @@ fn renderRefsPageWithFlash(allocator: Allocator, repo: Repo, flash: ?Flash, filt
         \\      <tbody>
     );
 
+    const total_matching_refs = refCountForFilter(counts, filter);
+    var matched: usize = 0;
     var shown: usize = 0;
     var lines = std.mem.splitScalar(u8, refs, '\n');
     while (lines.next()) |line_raw| {
@@ -118,6 +124,9 @@ fn renderRefsPageWithFlash(allocator: Allocator, repo: Repo, flash: ?Flash, filt
         var cols = std.mem.splitScalar(u8, line, '\t');
         const ref = cols.next() orelse "";
         if (!refMatchesKindFilter(ref, filter)) continue;
+        matched += 1;
+        if (matched <= pagination.offset()) continue;
+        if (shown >= pagination.per_page) break;
         const oid = cols.next() orelse "";
         const updated = cols.next() orelse "";
         const scope = classifyRef(ref);
@@ -135,17 +144,28 @@ fn renderRefsPageWithFlash(allocator: Allocator, repo: Repo, flash: ?Flash, filt
     }
 
     if (shown == 0) {
-        try appendEmptyCell(&buf, allocator, 4, if (filter == .all) "No refs found." else "No matching refs found.");
+        try appendEmptyCell(&buf, allocator, 4, if (pagination.page > 1) "No refs on this page." else if (filter == .all) "No refs found." else "No matching refs found.");
     }
 
     try buf.appendSlice(allocator,
         \\      </tbody>
         \\    </table>
         \\  </div>
-        \\</section>
     );
+    if (shown != 0 or pagination.page > 1) {
+        try appendRefsPagination(&buf, allocator, filter, pagination, shown, total_matching_refs);
+    }
+    try buf.appendSlice(allocator, "</section>");
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
+}
+
+fn refCountForFilter(counts: RefCounts, filter: RefKindFilter) usize {
+    return switch (filter) {
+        .all => counts.all,
+        .branches => counts.branches,
+        .tags => counts.tags,
+    };
 }
 
 fn appendRefsFilters(buf: *std.ArrayList(u8), allocator: Allocator, active: RefKindFilter, counts: RefCounts) !void {
@@ -202,6 +222,38 @@ fn refsFilterHref(filter: RefKindFilter) []const u8 {
         .branches => "/refs?type=branches",
         .tags => "/refs?type=tags",
     };
+}
+
+fn refsHrefOwned(allocator: Allocator, filter: RefKindFilter, pagination: shared.Pagination, page: usize) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.appendSlice(allocator, "/refs");
+    var first = true;
+    switch (filter) {
+        .all => {},
+        .branches => try shared.appendQueryParam(&buf, allocator, &first, "type", "branches"),
+        .tags => try shared.appendQueryParam(&buf, allocator, &first, "type", "tags"),
+    }
+    try shared.appendPaginationQueryParams(&buf, allocator, &first, pagination, page, refs_default_page_size);
+    return buf.toOwnedSlice(allocator);
+}
+
+fn appendRefsPagination(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    filter: RefKindFilter,
+    pagination: shared.Pagination,
+    shown: usize,
+    total_matching_refs: usize,
+) !void {
+    const has_next_page = pagination.offset() + shown < total_matching_refs;
+    const previous_href = if (pagination.page > 1) try refsHrefOwned(allocator, filter, pagination, pagination.page - 1) else null;
+    defer if (previous_href) |href| allocator.free(href);
+    const next_href = if (has_next_page) try refsHrefOwned(allocator, filter, pagination, pagination.page + 1) else null;
+    defer if (next_href) |href| allocator.free(href);
+    const summary = try shared.paginationSummaryOwned(allocator, pagination, shown, total_matching_refs);
+    defer allocator.free(summary);
+    try shared.appendPaginationNav(buf, allocator, "Reference pages", summary, previous_href, next_href);
 }
 
 fn refKindFilterFromTarget(target: []const u8) RefKindFilter {

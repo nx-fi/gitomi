@@ -36,6 +36,9 @@ pub const ActionRunRequestedMetadata = struct {
 pub const ActionRunCompletedMetadata = struct {
     attempt_id: ?[]const u8 = null,
     runner_id: ?[]const u8 = null,
+    workflow_source_oid: ?[]const u8 = null,
+    outputs_json: ?[]const u8 = null,
+    published_events_json: ?[]const u8 = null,
 };
 
 pub const IssueProjectPlacement = struct {

@@ -16,6 +16,7 @@ pub const Workflow = model.Workflow;
 pub const WorkflowDialect = model.WorkflowDialect;
 pub const WorkflowSourcePolicy = model.WorkflowSourcePolicy;
 pub const WorkflowTrigger = model.WorkflowTrigger;
+pub const WorkflowSchedule = model.WorkflowSchedule;
 pub const KeyValuePair = model.KeyValuePair;
 pub const WorkflowJob = model.WorkflowJob;
 pub const WorkflowStep = model.WorkflowStep;
@@ -159,6 +160,10 @@ pub fn validateLoadedWorkflow(workflow: Workflow) !void {
         return CliError.UserError;
     }
     if (workflow.dialect != .gitomi) return;
+    if (workflow.name.len == 0) {
+        try io.eprint("gt actions: native workflow {s} must declare name\n", .{workflow.path});
+        return CliError.UserError;
+    }
     if (workflow.jobs.len == 0) {
         try io.eprint("gt actions: native workflow {s} must declare jobs\n", .{workflow.path});
         return CliError.UserError;
@@ -205,9 +210,9 @@ pub fn parseWorkflow(allocator: Allocator, source_oid: []const u8, path: []const
         for (trigger_defs) |*trigger| trigger.deinit();
         allocator.free(trigger_defs);
     }
-    var schedules: std.ArrayList([]u8) = .empty;
+    var schedules: std.ArrayList(WorkflowSchedule) = .empty;
     errdefer {
-        for (schedules.items) |schedule| allocator.free(schedule);
+        for (schedules.items) |*schedule| schedule.deinit();
         schedules.deinit(allocator);
     }
     var jobs: std.ArrayList(WorkflowJob) = .empty;
@@ -232,6 +237,7 @@ pub fn parseWorkflow(allocator: Allocator, source_oid: []const u8, path: []const
     var in_steps_block = false;
     var steps_indent: ?usize = null;
     var current_step: ?usize = null;
+    var current_schedule: ?usize = null;
     var lines = std.mem.splitScalar(u8, bytes, '\n');
     while (lines.next()) |line_raw| {
         const clean = std.mem.trim(u8, stripYamlComment(line_raw), " \t\r\n");
@@ -255,6 +261,7 @@ pub fn parseWorkflow(allocator: Allocator, source_oid: []const u8, path: []const
             in_steps_block = false;
             steps_indent = null;
             current_step = null;
+            current_schedule = null;
             if (parseYamlKeyValue(clean)) |kv| {
                 if (std.mem.eql(u8, kv.key, "name")) {
                     if (name) |old| allocator.free(old);
@@ -306,12 +313,13 @@ pub fn parseWorkflow(allocator: Allocator, source_oid: []const u8, path: []const
         if (in_on_block) {
             if (on_child_indent == null) on_child_indent = indent;
             if (in_schedule_block and schedule_indent != null and indent > schedule_indent.?) {
-                try addScheduleLine(allocator, &schedules, clean);
+                try addScheduleLine(allocator, &schedules, &current_schedule, clean);
                 continue;
             }
             if (indent == on_child_indent.?) {
                 in_schedule_block = false;
                 schedule_indent = null;
+                current_schedule = null;
                 if (triggerNameFromBlockLine(clean)) |trigger_name| {
                     if (std.mem.eql(u8, trigger_name, "schedule")) {
                         in_schedule_block = true;
@@ -361,7 +369,7 @@ pub fn parseWorkflow(allocator: Allocator, source_oid: []const u8, path: []const
         }
     }
 
-    const display_name = name orelse try allocator.dupe(u8, std.fs.path.basename(path));
+    const display_name = name orelse try allocator.dupe(u8, if (dialect == .gitomi) "" else std.fs.path.basename(path));
     name = null;
     for (schedules.items) |schedule| {
         _ = schedule;
@@ -561,8 +569,8 @@ pub fn eventFamily(event_type: []const u8) []const u8 {
 }
 
 pub fn workflowScheduleDue(workflow: Workflow, timestamp_seconds: i64) bool {
-    for (workflow.schedules) |cron| {
-        if (cronMatches(cron, timestamp_seconds)) return true;
+    for (workflow.schedules) |schedule| {
+        if (cronMatches(schedule.cron, timestamp_seconds)) return true;
     }
     return false;
 }
@@ -760,15 +768,81 @@ pub fn triggerNameFromBlockLine(line: []const u8) ?[]const u8 {
     return unquoteScalar(line);
 }
 
-pub fn addScheduleLine(allocator: Allocator, schedules: *std.ArrayList([]u8), line: []const u8) !void {
+pub fn addScheduleLine(
+    allocator: Allocator,
+    schedules: *std.ArrayList(WorkflowSchedule),
+    current_schedule: *?usize,
+    line: []const u8,
+) !void {
     var clean = line;
-    if (std.mem.startsWith(u8, clean, "-")) clean = std.mem.trim(u8, clean[1..], " \t\r\n");
+    const starts_item = std.mem.startsWith(u8, clean, "-");
+    if (starts_item) {
+        clean = std.mem.trim(u8, clean[1..], " \t\r\n");
+        current_schedule.* = null;
+    }
+    if (clean.len >= 2 and clean[0] == '{' and clean[clean.len - 1] == '}') {
+        var entries: []KeyValuePair = &.{};
+        defer freeKeyValuePairs(allocator, entries);
+        try parseInlineMappingIntoSlice(allocator, &entries, clean);
+        const idx = try appendWorkflowSchedule(allocator, schedules, "");
+        current_schedule.* = idx;
+        for (entries) |entry| {
+            if (std.mem.eql(u8, entry.key, "cron")) {
+                try setScheduleCron(allocator, &schedules.items[idx], entry.value);
+            } else if (std.mem.eql(u8, entry.key, "timezone")) {
+                try setScheduleTimezone(allocator, &schedules.items[idx], entry.value);
+            }
+        }
+        if (schedules.items[idx].cron.len == 0) {
+            _ = schedules.pop();
+            current_schedule.* = null;
+        }
+        return;
+    }
     if (parseYamlKeyValue(clean)) |kv| {
         if (std.mem.eql(u8, kv.key, "cron")) {
             const cron = unquoteScalar(kv.value);
-            if (cron.len != 0) try schedules.append(allocator, try allocator.dupe(u8, cron));
+            if (cron.len != 0) {
+                const idx = if (starts_item or current_schedule.* == null)
+                    try appendWorkflowSchedule(allocator, schedules, cron)
+                else blk: {
+                    const existing = current_schedule.*.?;
+                    try setScheduleCron(allocator, &schedules.items[existing], cron);
+                    break :blk existing;
+                };
+                current_schedule.* = idx;
+            }
+        } else if (std.mem.eql(u8, kv.key, "timezone")) {
+            const timezone = unquoteScalar(kv.value);
+            if (timezone.len != 0) {
+                const idx = current_schedule.* orelse try appendWorkflowSchedule(allocator, schedules, "");
+                try setScheduleTimezone(allocator, &schedules.items[idx], timezone);
+                current_schedule.* = idx;
+            }
         }
     }
+}
+
+pub fn appendWorkflowSchedule(allocator: Allocator, schedules: *std.ArrayList(WorkflowSchedule), cron: []const u8) !usize {
+    const idx = schedules.items.len;
+    try schedules.append(allocator, .{
+        .allocator = allocator,
+        .cron = try allocator.dupe(u8, cron),
+        .timezone = try allocator.dupe(u8, "UTC"),
+    });
+    return idx;
+}
+
+pub fn setScheduleCron(allocator: Allocator, schedule: *WorkflowSchedule, cron: []const u8) !void {
+    const owned = try allocator.dupe(u8, cron);
+    allocator.free(schedule.cron);
+    schedule.cron = owned;
+}
+
+pub fn setScheduleTimezone(allocator: Allocator, schedule: *WorkflowSchedule, timezone: []const u8) !void {
+    const owned = try allocator.dupe(u8, timezone);
+    allocator.free(schedule.timezone);
+    schedule.timezone = owned;
 }
 
 pub fn appendWorkflowJob(allocator: Allocator, jobs: *std.ArrayList(WorkflowJob), line: []const u8) !?usize {
