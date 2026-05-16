@@ -336,7 +336,31 @@
         "target",
         "type",
       ],
-      FORBID_TAGS: ["embed", "iframe", "object", "script", "style"],
+      FORBID_TAGS: [
+        "button",
+        "embed",
+        "fieldset",
+        "form",
+        "iframe",
+        "object",
+        "optgroup",
+        "option",
+        "script",
+        "select",
+        "style",
+        "textarea",
+      ],
+      FORBID_ATTR: [
+        "action",
+        "form",
+        "formaction",
+        "formenctype",
+        "formmethod",
+        "formnovalidate",
+        "formtarget",
+        "method",
+        "style",
+      ],
     });
   }
 
