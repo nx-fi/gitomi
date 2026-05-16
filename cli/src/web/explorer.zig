@@ -39,6 +39,7 @@ const root_partial_timeout_git_ms = 12_000;
 const root_partial_timeout_stats_ms = 20_000;
 const root_readme_candidates = [_][]const u8{ "README.md", "README", "Readme.md", "readme.md" };
 const root_license_candidates = [_][]const u8{ "LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING", "COPYING.md", "COPYING.txt" };
+const root_agents_candidates = [_][]const u8{"AGENTS.md"};
 
 const explorer_model = @import("explorer/model.zig");
 const explorer_data = @import("explorer/data.zig");
@@ -126,6 +127,7 @@ const deviconClassForPath = file_info.deviconClassForPath;
 const fileIconClass = file_info.fileIconClass;
 const findReadme = file_info.findReadme;
 const findLicense = file_info.findLicense;
+const findAgents = file_info.findAgents;
 const licenseLabel = file_info.licenseLabel;
 const isMarkdownPath = file_info.isMarkdownPath;
 const mediaKindForPath = file_info.mediaKindForPath;
@@ -1488,8 +1490,10 @@ fn appendReadmePreview(
 
         const license_doc_opt = try loadRootLicenseDoc(allocator, repo, ref, entries);
         defer if (license_doc_opt) |doc| doc.deinit(allocator);
+        const agents_doc_opt = try loadRootAgentsDoc(allocator, repo, ref, entries);
+        defer if (agents_doc_opt) |doc| doc.deinit(allocator);
 
-        try appendRootDocsPreview(buf, allocator, ref, readme_doc, license_doc_opt);
+        try appendRootDocsPreview(buf, allocator, ref, readme_doc, license_doc_opt, agents_doc_opt);
         return;
     }
 
@@ -1509,6 +1513,7 @@ fn appendRootDocsPreview(
     ref: []const u8,
     readme_doc: RootMarkdownDoc,
     license_doc_opt: ?RootMarkdownDoc,
+    agents_doc_opt: ?RootMarkdownDoc,
 ) !void {
     try appendTemplate(buf, allocator,
         \\<section class="panel readme-panel root-docs-panel" data-root-docs>
@@ -1520,6 +1525,11 @@ fn appendRootDocsPreview(
         try appendTemplate(buf, allocator,
             \\      <button class="root-doc-tab" type="button" data-root-doc-tab="license" aria-selected="false"><span class="button-icon icon-scale" aria-hidden="true"></span><span>{label}</span></button>
         , .{ .label = license_doc.label });
+    }
+    if (agents_doc_opt) |agents_doc| {
+        try appendTemplate(buf, allocator,
+            \\      <button class="root-doc-tab" type="button" data-root-doc-tab="agents" aria-selected="false"><span class="button-icon icon-users" aria-hidden="true"></span><span>{label}</span></button>
+        , .{ .label = agents_doc.label });
     }
     try appendTemplate(buf, allocator,
         \\    </nav>
@@ -1539,6 +1549,13 @@ fn appendRootDocsPreview(
         try appendRepositoryMarkdown(buf, allocator, ref, license_doc.path, license_doc.content);
         try appendTemplate(buf, allocator, "</div>", .{});
     }
+    if (agents_doc_opt) |agents_doc| {
+        try appendTemplate(buf, allocator,
+            \\  <div class="root-doc-panel readme-body markdown-body" data-root-doc-panel="agents" data-markdown-document data-markdown-outline="menu" hidden>
+        , .{});
+        try appendRepositoryMarkdown(buf, allocator, ref, agents_doc.path, agents_doc.content);
+        try appendTemplate(buf, allocator, "</div>", .{});
+    }
     try appendTemplate(buf, allocator, "</section>", .{});
 }
 
@@ -1555,6 +1572,22 @@ fn loadRootLicenseDoc(allocator: Allocator, repo: Repo, ref: []const u8, entries
         .id = "license",
         .label = label,
         .path = try allocator.dupe(u8, license),
+        .content = content,
+    };
+}
+
+fn loadRootAgentsDoc(allocator: Allocator, repo: Repo, ref: []const u8, entries: []const TreeEntry) !?RootMarkdownDoc {
+    const agents = findAgents(entries) orelse return null;
+    const content = try loadBlobBytes(allocator, repo, ref, agents, max_blob_display_bytes + 1) orelse return null;
+    errdefer allocator.free(content);
+    if (containsNul(content)) {
+        allocator.free(content);
+        return null;
+    }
+    return .{
+        .id = "agents",
+        .label = "AGENTS.md",
+        .path = try allocator.dupe(u8, agents),
         .content = content,
     };
 }
@@ -1580,6 +1613,20 @@ fn loadRootLicenseDocFast(allocator: Allocator, repo: Repo, ref: []const u8) !?R
         return .{
             .id = "license",
             .label = licenseLabel(content),
+            .path = try allocator.dupe(u8, path),
+            .content = content,
+        };
+    }
+    return null;
+}
+
+fn loadRootAgentsDocFast(allocator: Allocator, repo: Repo, ref: []const u8) !?RootMarkdownDoc {
+    for (root_agents_candidates) |path| {
+        const content = try loadRootDocumentContent(allocator, repo, ref, path, max_blob_display_bytes + 1) orelse continue;
+        errdefer allocator.free(content);
+        return .{
+            .id = "agents",
+            .label = "AGENTS.md",
             .path = try allocator.dupe(u8, path),
             .content = content,
         };
@@ -1728,7 +1775,9 @@ fn appendRootDocsComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: 
     defer readme_doc.deinit(allocator);
     const license_doc_opt = try loadRootLicenseDocFast(allocator, repo, ref);
     defer if (license_doc_opt) |doc| doc.deinit(allocator);
-    try appendRootDocsPreview(buf, allocator, ref, readme_doc, license_doc_opt);
+    const agents_doc_opt = try loadRootAgentsDocFast(allocator, repo, ref);
+    defer if (agents_doc_opt) |doc| doc.deinit(allocator);
+    try appendRootDocsPreview(buf, allocator, ref, readme_doc, license_doc_opt, agents_doc_opt);
 }
 
 fn appendRootSearchComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8) !void {
@@ -1987,6 +2036,32 @@ test "web explorer encodes code links" {
     defer buf.deinit(std.testing.allocator);
     try appendHref(&buf, std.testing.allocator, codeHref("feature/test", "src/a b.zig"));
     try std.testing.expectEqualStrings("/code?ref=feature/test&amp;path=src/a%20b.zig", buf.items);
+}
+
+test "web explorer renders AGENTS markdown root doc tab" {
+    const allocator = std.testing.allocator;
+    const readme_doc = RootMarkdownDoc{
+        .id = "readme",
+        .label = "README",
+        .path = try allocator.dupe(u8, "README.md"),
+        .content = try allocator.dupe(u8, "# Repo\n"),
+    };
+    defer readme_doc.deinit(allocator);
+    const agents_doc = RootMarkdownDoc{
+        .id = "agents",
+        .label = "AGENTS.md",
+        .path = try allocator.dupe(u8, "AGENTS.md"),
+        .content = try allocator.dupe(u8, "# Agent instructions\n"),
+    };
+    defer agents_doc.deinit(allocator);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try appendRootDocsPreview(&buf, allocator, "HEAD", readme_doc, null, agents_doc);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-root-doc-tab=\"agents\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-root-doc-panel=\"agents\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-markdown-path=\"AGENTS.md\"") != null);
 }
 
 test "web explorer maps file paths to highlight languages" {

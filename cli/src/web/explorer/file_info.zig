@@ -449,6 +449,13 @@ pub fn findLicense(entries: []const TreeEntry) ?[]const u8 {
     return null;
 }
 
+pub fn findAgents(entries: []const TreeEntry) ?[]const u8 {
+    for (entries) |entry| {
+        if (std.mem.eql(u8, entry.kind, "blob") and std.mem.eql(u8, entry.name, "AGENTS.md")) return entry.name;
+    }
+    return null;
+}
+
 pub fn licenseLabel(content: []const u8) []const u8 {
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |raw_line| {
