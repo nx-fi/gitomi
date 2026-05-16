@@ -1,4 +1,5 @@
 const std = @import("std");
+const cmd_common = @import("../cmd_common.zig");
 const event_mod = @import("../event.zig");
 const index = @import("../index.zig");
 const issue_mod = @import("../issue.zig");
@@ -21,6 +22,8 @@ const appendShellStart = shared.appendShellStart;
 const appendStatePill = shared.appendStatePill;
 const appendTemplate = shared.appendTemplate;
 const createIssueOpenedWithMetadataEvent = issue_mod.createIssueOpenedWithMetadataEvent;
+const createIssueProjectFieldClearedEvent = issue_mod.createIssueProjectFieldClearedEvent;
+const createIssueProjectFieldSetEvent = issue_mod.createIssueProjectFieldSetEvent;
 const createIssueProjectEvent = issue_mod.createIssueProjectEvent;
 const createIssueStringEvent = issue_mod.createIssueStringEvent;
 const createProjectCreatedEvent = project_mod.createProjectCreatedEvent;
@@ -33,6 +36,7 @@ const literalHref = shared.literalHref;
 const sendRedirect = shared.sendRedirect;
 const sendPlainResponse = shared.sendPlainResponse;
 const sendResponse = shared.sendResponse;
+const jsonStringArgument = cmd_common.jsonStringArgument;
 const splitCommaFields = util.splitCommaFields;
 const sqlite = index.sqlite;
 
@@ -75,6 +79,86 @@ const ActiveProjectView = struct {
         allocator.free(self.config_json);
     }
 };
+
+const ProjectIssueFilter = struct {
+    require_assignee: bool = false,
+    assignee: []const u8 = "",
+    bug_label: bool = false,
+    current_iteration: bool = false,
+};
+
+const ProjectViewDefaults = struct {
+    status: []const u8 = default_project_status,
+    status_explicit: bool = false,
+    priority: []const u8 = default_project_priority,
+    priority_explicit: bool = false,
+};
+
+const max_project_table_fields = 6;
+
+const ProjectTableField = struct {
+    key: []u8,
+    name: []u8,
+    field_type: []u8,
+
+    fn deinit(self: *ProjectTableField, allocator: Allocator) void {
+        allocator.free(self.key);
+        allocator.free(self.name);
+        allocator.free(self.field_type);
+    }
+};
+
+const ProjectTableFields = struct {
+    items: [max_project_table_fields]ProjectTableField = undefined,
+    len: usize = 0,
+
+    fn deinit(self: *ProjectTableFields, allocator: Allocator) void {
+        for (self.items[0..self.len]) |*field| field.deinit(allocator);
+    }
+};
+
+const ProjectRenderContext = struct {
+    filter: ProjectIssueFilter,
+    defaults: ProjectViewDefaults,
+    table_fields: ?*const ProjectTableFields = null,
+    view_ref: []const u8,
+
+    fn tableFieldCount(self: ProjectRenderContext) usize {
+        return if (self.table_fields) |fields| fields.len else 0;
+    }
+
+    fn tableColspan(self: ProjectRenderContext) usize {
+        return 9 + self.tableFieldCount();
+    }
+};
+
+const project_issue_filter_sql =
+    \\
+    \\  AND (? = 0 OR EXISTS (
+    \\    SELECT 1
+    \\    FROM issue_assignees ia
+    \\    WHERE ia.issue_id = i.id AND ia.assignee = ?
+    \\  ))
+    \\  AND (? = 0 OR EXISTS (
+    \\    SELECT 1
+    \\    FROM issue_labels il
+    \\    WHERE il.issue_id = i.id AND lower(il.label) = 'bug'
+    \\  ))
+    \\  AND (? = 0 OR EXISTS (
+    \\    SELECT 1
+    \\    FROM projects filter_project
+    \\    JOIN project_fields filter_field
+    \\      ON filter_field.project_id = filter_project.id
+    \\     AND filter_field.key = 'iteration'
+    \\     AND filter_field.state != 'removed'
+    \\    JOIN project_field_values filter_value
+    \\      ON filter_value.project_id = filter_project.id
+    \\     AND filter_value.issue_id = i.id
+    \\     AND filter_value.field_id = filter_field.id
+    \\    WHERE filter_project.name = ?
+    \\      AND COALESCE(json_extract(filter_value.value_json, '$'), '') = 'current'
+    \\  ))
+;
 
 const default_project_template_id = "kanban";
 const default_project_priority = "P3";
@@ -296,11 +380,13 @@ fn renderProjectWorkspace(
 
     var active_view = try resolveActiveProjectView(allocator, db, project, view_ref);
     defer active_view.deinit(allocator);
+    const current_principal = (try shared.currentPrincipalOwned(allocator, repo)) orelse try allocator.dupe(u8, "");
+    defer allocator.free(current_principal);
 
     switch (active_view.layout) {
-        .table => try appendProjectTable(&buf, allocator, db, project, &active_view),
-        .board => try appendProjectBoard(&buf, allocator, db, project, &active_view),
-        .roadmap => try appendProjectRoadmap(&buf, allocator, db, project, &active_view),
+        .table => try appendProjectTable(&buf, allocator, db, project, &active_view, current_principal),
+        .board => try appendProjectBoard(&buf, allocator, db, project, &active_view, current_principal),
+        .roadmap => try appendProjectRoadmap(&buf, allocator, db, project, &active_view, current_principal),
     }
 
     try appendShellEnd(&buf, allocator);
@@ -358,13 +444,21 @@ fn appendProjectIndexCard(
     try buf.appendSlice(allocator, "</div></article>");
 }
 
-fn appendProjectBoard(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, project: []const u8, active_view: *const ActiveProjectView) !void {
-    const issue_count = try projectIssueCount(db, project);
+fn appendProjectBoard(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    project: []const u8,
+    active_view: *const ActiveProjectView,
+    current_principal: []const u8,
+) !void {
+    const context = projectRenderContextFromView(allocator, active_view, current_principal);
+    const issue_count = try projectIssueCount(db, project, context.filter);
     try appendProjectWorkspaceChromeStart(buf, allocator, db, project, issue_count, active_view);
     try buf.appendSlice(allocator,
         \\  <div class="kanban-board">
     );
-    try appendProjectColumns(buf, allocator, db, project, appendProjectColumn);
+    try appendProjectColumns(buf, allocator, db, project, &context, appendProjectColumn);
     try buf.appendSlice(allocator,
         \\  </div>
         \\</section>
@@ -418,10 +512,11 @@ fn appendProjectColumns(
     allocator: Allocator,
     db: *SqliteDb,
     project: []const u8,
-    comptime appendColumnFn: fn (*std.ArrayList(u8), Allocator, *SqliteDb, []const u8, []const u8) anyerror!void,
+    context: *const ProjectRenderContext,
+    comptime appendColumnFn: fn (*std.ArrayList(u8), Allocator, *SqliteDb, []const u8, []const u8, *const ProjectRenderContext) anyerror!void,
 ) !void {
     for (project_status_values) |status| {
-        try appendColumnFn(buf, allocator, db, project, status);
+        try appendColumnFn(buf, allocator, db, project, status, context);
     }
 
     var columns = try db.prepare(
@@ -461,7 +556,7 @@ fn appendProjectColumns(
         const column = try columns.columnTextDup(allocator, 0);
         defer allocator.free(column);
         if (isProjectStatusValue(column)) continue;
-        try appendColumnFn(buf, allocator, db, project, column);
+        try appendColumnFn(buf, allocator, db, project, column, context);
     }
 }
 
@@ -470,12 +565,13 @@ fn appendProjectPriorityGroups(
     allocator: Allocator,
     db: *SqliteDb,
     project: []const u8,
-    comptime appendGroupFn: fn (*std.ArrayList(u8), Allocator, *SqliteDb, []const u8, []const u8) anyerror!void,
+    context: *const ProjectRenderContext,
+    comptime appendGroupFn: fn (*std.ArrayList(u8), Allocator, *SqliteDb, []const u8, []const u8, *const ProjectRenderContext) anyerror!void,
 ) !void {
     for (project_priority_values) |priority| {
-        try appendGroupFn(buf, allocator, db, project, priority);
+        try appendGroupFn(buf, allocator, db, project, priority, context);
     }
-    try appendGroupFn(buf, allocator, db, project, "");
+    try appendGroupFn(buf, allocator, db, project, "", context);
 }
 
 fn appendProjectColumnOptions(
@@ -513,21 +609,121 @@ fn appendProjectPriorityOptions(buf: *std.ArrayList(u8), allocator: Allocator, s
     }
 }
 
-fn appendProjectTable(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, project: []const u8, active_view: *const ActiveProjectView) !void {
-    const issue_count = try projectIssueCount(db, project);
+fn appendProjectTableFieldHeaders(buf: *std.ArrayList(u8), allocator: Allocator, fields: *const ProjectTableFields) !void {
+    for (fields.items[0..fields.len]) |field| {
+        try appendTemplate(buf, allocator, "<th>{name}</th>", .{ .name = field.name });
+    }
+}
+
+fn appendProjectTableFieldCells(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    project: []const u8,
+    issue_id: []const u8,
+    context: *const ProjectRenderContext,
+) !void {
+    const fields = context.table_fields orelse return;
+    for (fields.items[0..fields.len]) |field| {
+        const value = try projectFieldStringValue(allocator, db, project, issue_id, field.key);
+        defer allocator.free(value);
+        try appendProjectTableFieldCell(buf, allocator, project, issue_id, context.view_ref, field, value);
+    }
+}
+
+fn appendProjectTableFieldCell(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    project: []const u8,
+    issue_id: []const u8,
+    view_ref: []const u8,
+    field: ProjectTableField,
+    value: []const u8,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<td>
+        \\  <form class="project-table-field-form" method="post" action="/projects/items">
+        \\    <input type="hidden" name="action" value="set-project-field">
+        \\    <input type="hidden" name="project" value="{project}">
+        \\    <input type="hidden" name="issue" value="{issue}">
+        \\    <input type="hidden" name="field" value="{field_key}">
+        \\    <input type="hidden" name="view" value="{view}">
+    , .{
+        .project = project,
+        .issue = issue_id,
+        .field_key = field.key,
+        .view = view_ref,
+    });
+    if (std.mem.eql(u8, field.field_type, "boolean")) {
+        try appendProjectBooleanFieldSelect(buf, allocator, field.name, value);
+    } else {
+        try appendTemplate(buf, allocator,
+            \\    <input type="{input_type}" name="value" value="{value}" aria-label="{name}">
+        , .{
+            .input_type = projectFieldInputType(field.field_type),
+            .value = value,
+            .name = field.name,
+        });
+    }
+    try buf.appendSlice(allocator,
+        \\    <button type="submit" aria-label="Save field value">Save</button>
+        \\  </form>
+        \\</td>
+    );
+}
+
+fn appendProjectBooleanFieldSelect(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8, value: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\    <select name="value" aria-label="{name}">
+        \\      <option value=""{empty_selected}>Unset</option>
+        \\      <option value="true"{true_selected}>True</option>
+        \\      <option value="false"{false_selected}>False</option>
+        \\    </select>
+    , .{
+        .name = name,
+        .empty_selected = shared.trustedHtml(if (value.len == 0) " selected" else ""),
+        .true_selected = shared.trustedHtml(if (std.mem.eql(u8, value, "true")) " selected" else ""),
+        .false_selected = shared.trustedHtml(if (std.mem.eql(u8, value, "false")) " selected" else ""),
+    });
+}
+
+fn projectFieldInputType(field_type: []const u8) []const u8 {
+    if (std.mem.eql(u8, field_type, "number")) return "number";
+    if (std.mem.eql(u8, field_type, "date")) return "date";
+    return "text";
+}
+
+fn appendProjectTable(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    project: []const u8,
+    active_view: *const ActiveProjectView,
+    current_principal: []const u8,
+) !void {
+    const context = projectRenderContextFromView(allocator, active_view, current_principal);
+    const issue_count = try projectIssueCount(db, project, context.filter);
     const group_field = projectGroupFieldFromConfig(allocator, active_view.config_json);
+    var table_fields = try projectTableFieldsFromConfig(allocator, db, project, active_view.config_json);
+    defer table_fields.deinit(allocator);
+    var table_context = context;
+    table_context.table_fields = &table_fields;
     try appendProjectWorkspaceChromeStart(buf, allocator, db, project, issue_count, active_view);
     try buf.appendSlice(allocator,
         \\  <div class="project-table-view">
         \\    <table class="project-data-table">
         \\      <thead>
-        \\        <tr><th>Title</th><th>Priority</th><th>Status</th><th>Issue state</th><th>Assignees</th><th>Labels</th><th>Milestone</th><th>Comments</th><th>Opened</th></tr>
+        \\        <tr><th>Title</th><th>Priority</th><th>Status</th>
+    );
+    try appendProjectTableFieldHeaders(buf, allocator, &table_fields);
+    try buf.appendSlice(allocator,
+        \\<th>Issue state</th><th>Assignees</th><th>Labels</th><th>Milestone</th><th>Comments</th><th>Opened</th></tr>
         \\      </thead>
         \\      <tbody>
     );
     switch (group_field) {
-        .status => try appendProjectColumns(buf, allocator, db, project, appendProjectTableGroup),
-        .priority => try appendProjectPriorityGroups(buf, allocator, db, project, appendProjectPriorityTableGroup),
+        .status => try appendProjectColumns(buf, allocator, db, project, &table_context, appendProjectTableGroup),
+        .priority => try appendProjectPriorityGroups(buf, allocator, db, project, &table_context, appendProjectPriorityTableGroup),
     }
     try buf.appendSlice(allocator,
         \\      </tbody>
@@ -537,8 +733,16 @@ fn appendProjectTable(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlite
     );
 }
 
-fn appendProjectRoadmap(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, project: []const u8, active_view: *const ActiveProjectView) !void {
-    const issue_count = try projectIssueCount(db, project);
+fn appendProjectRoadmap(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    project: []const u8,
+    active_view: *const ActiveProjectView,
+    current_principal: []const u8,
+) !void {
+    const context = projectRenderContextFromView(allocator, active_view, current_principal);
+    const issue_count = try projectIssueCount(db, project, context.filter);
     const group_field = projectGroupFieldFromConfig(allocator, active_view.config_json);
     try appendProjectWorkspaceChromeStart(buf, allocator, db, project, issue_count, active_view);
     try buf.appendSlice(allocator,
@@ -546,8 +750,8 @@ fn appendProjectRoadmap(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqli
         \\    <div class="project-roadmap-scale" aria-hidden="true"><span>Unscheduled</span><span>Now</span><span>Next</span><span>Later</span></div>
     );
     switch (group_field) {
-        .status => try appendProjectColumns(buf, allocator, db, project, appendProjectRoadmapLane),
-        .priority => try appendProjectPriorityGroups(buf, allocator, db, project, appendProjectPriorityRoadmapLane),
+        .status => try appendProjectColumns(buf, allocator, db, project, &context, appendProjectRoadmapLane),
+        .priority => try appendProjectPriorityGroups(buf, allocator, db, project, &context, appendProjectPriorityRoadmapLane),
     }
     try buf.appendSlice(allocator,
         \\  </div>
@@ -555,12 +759,20 @@ fn appendProjectRoadmap(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqli
     );
 }
 
-fn appendProjectTableGroup(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, project: []const u8, column: []const u8) !void {
-    const count = try projectColumnIssueCount(db, project, column);
+fn appendProjectTableGroup(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    project: []const u8,
+    column: []const u8,
+    context: *const ProjectRenderContext,
+) !void {
+    const count = try projectColumnIssueCount(db, project, column, context.filter);
     const title = if (column.len == 0) "No status" else column;
     try appendTemplate(buf, allocator,
-        \\<tr class="project-table-group-row"><th colspan="9"><span class="kanban-status-dot" aria-hidden="true"></span>{title}<span>{count}</span></th></tr>
+        \\<tr class="project-table-group-row"><th colspan="{colspan}"><span class="kanban-status-dot" aria-hidden="true"></span>{title}<span>{count}</span></th></tr>
     , .{
+        .colspan = context.tableColspan(),
         .title = title,
         .count = count,
     });
@@ -598,12 +810,14 @@ fn appendProjectTableGroup(buf: *std.ArrayList(u8), allocator: Allocator, db: *S
         \\LEFT JOIN legacy_aliases a
         \\  ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
         \\WHERE p.effective_status = ?
+    ++ project_issue_filter_sql ++
         \\ORDER BY i.opened_at DESC, i.id DESC
     );
     defer rows.deinit();
     try rows.bindText(1, project);
     try rows.bindText(2, project);
     try rows.bindText(3, column);
+    try bindProjectIssueFilter(&rows, 4, project, context.filter);
 
     var shown = false;
     while (try rows.step()) {
@@ -625,22 +839,30 @@ fn appendProjectTableGroup(buf: *std.ArrayList(u8), allocator: Allocator, db: *S
         defer allocator.free(status);
         const legacy_number = rows.columnInt64(8);
         const comment_count = @as(usize, @intCast(rows.columnInt64(9)));
-        try appendProjectTableIssueRow(buf, allocator, db, id, title_text, state, author, opened_at, milestone, priority, effectiveStatusLabel(status, column), legacy_number, comment_count);
+        try appendProjectTableIssueRow(buf, allocator, db, project, context, id, title_text, state, author, opened_at, milestone, priority, effectiveStatusLabel(status, column), legacy_number, comment_count);
         shown = true;
     }
     if (!shown) {
         try appendTemplate(buf, allocator,
-            \\<tr class="project-table-empty-row"><td colspan="9">No issues</td></tr>
-        , .{});
+            \\<tr class="project-table-empty-row"><td colspan="{colspan}">No issues</td></tr>
+        , .{ .colspan = context.tableColspan() });
     }
 }
 
-fn appendProjectPriorityTableGroup(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, project: []const u8, priority_group: []const u8) !void {
-    const count = try projectPriorityIssueCount(db, project, priority_group);
+fn appendProjectPriorityTableGroup(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    project: []const u8,
+    priority_group: []const u8,
+    context: *const ProjectRenderContext,
+) !void {
+    const count = try projectPriorityIssueCount(db, project, priority_group, context.filter);
     const title = if (priority_group.len == 0) "No priority" else priority_group;
     try appendTemplate(buf, allocator,
-        \\<tr class="project-table-group-row"><th colspan="9"><span class="project-priority-chip tone-{tone}">{title}</span><span>{count}</span></th></tr>
+        \\<tr class="project-table-group-row"><th colspan="{colspan}"><span class="project-priority-chip tone-{tone}">{title}</span><span>{count}</span></th></tr>
     , .{
+        .colspan = context.tableColspan(),
         .tone = priorityTone(priority_group),
         .title = title,
         .count = count,
@@ -671,6 +893,7 @@ fn appendProjectPriorityTableGroup(buf: *std.ArrayList(u8), allocator: Allocator
         \\LEFT JOIN legacy_aliases a
         \\  ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
         \\WHERE COALESCE(m.priority, '') = ?
+    ++ project_issue_filter_sql ++
         \\ORDER BY
         \\  CASE COALESCE(NULLIF(m.status, ''), p.legacy_column, '')
         \\    WHEN 'Draft' THEN 10
@@ -687,6 +910,7 @@ fn appendProjectPriorityTableGroup(buf: *std.ArrayList(u8), allocator: Allocator
     try rows.bindText(1, project);
     try rows.bindText(2, project);
     try rows.bindText(3, priority_group);
+    try bindProjectIssueFilter(&rows, 4, project, context.filter);
 
     var shown = false;
     while (try rows.step()) {
@@ -708,13 +932,13 @@ fn appendProjectPriorityTableGroup(buf: *std.ArrayList(u8), allocator: Allocator
         defer allocator.free(status);
         const legacy_number = rows.columnInt64(8);
         const comment_count = @as(usize, @intCast(rows.columnInt64(9)));
-        try appendProjectTableIssueRow(buf, allocator, db, id, title_text, state, author, opened_at, milestone, priority, status, legacy_number, comment_count);
+        try appendProjectTableIssueRow(buf, allocator, db, project, context, id, title_text, state, author, opened_at, milestone, priority, status, legacy_number, comment_count);
         shown = true;
     }
     if (!shown) {
         try appendTemplate(buf, allocator,
-            \\<tr class="project-table-empty-row"><td colspan="9">No issues</td></tr>
-        , .{});
+            \\<tr class="project-table-empty-row"><td colspan="{colspan}">No issues</td></tr>
+        , .{ .colspan = context.tableColspan() });
     }
 }
 
@@ -722,6 +946,8 @@ fn appendProjectTableIssueRow(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
     db: *SqliteDb,
+    project: []const u8,
+    context: *const ProjectRenderContext,
     id: []const u8,
     title: []const u8,
     state: []const u8,
@@ -752,8 +978,6 @@ fn appendProjectTableIssueRow(
         \\</small></div></td>
         \\  <td><span class="project-priority-chip tone-{priority_tone}">{priority}</span></td>
         \\  <td><span class="project-status-chip tone-{tone}">{status}</span></td>
-        \\  <td>{state}</td>
-        \\  <td>
     , .{
         .priority_tone = priorityTone(priority),
         .priority = if (priority.len == 0) "None" else priority,
@@ -761,6 +985,8 @@ fn appendProjectTableIssueRow(
         .status = if (status.len == 0) "No status" else status,
         .state = state,
     });
+    try appendProjectTableFieldCells(buf, allocator, db, project, id, context);
+    try appendTemplate(buf, allocator, "<td>{state}</td><td>", .{ .state = state });
     _ = author;
     try appendProjectIssueAssignees(buf, allocator, db, id);
     try buf.appendSlice(allocator, "</td><td>");
@@ -775,8 +1001,15 @@ fn appendProjectTableIssueRow(
     try buf.appendSlice(allocator, "</td></tr>");
 }
 
-fn appendProjectRoadmapLane(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, project: []const u8, column: []const u8) !void {
-    const count = try projectColumnIssueCount(db, project, column);
+fn appendProjectRoadmapLane(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    project: []const u8,
+    column: []const u8,
+    context: *const ProjectRenderContext,
+) !void {
+    const count = try projectColumnIssueCount(db, project, column, context.filter);
     const title = if (column.len == 0) "No status" else column;
     try appendTemplate(buf, allocator,
         \\<section class="project-roadmap-lane tone-{tone}">
@@ -817,12 +1050,14 @@ fn appendProjectRoadmapLane(buf: *std.ArrayList(u8), allocator: Allocator, db: *
         \\LEFT JOIN legacy_aliases a
         \\  ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
         \\WHERE p.effective_status = ?
+    ++ project_issue_filter_sql ++
         \\ORDER BY i.opened_at DESC, i.id DESC
     );
     defer rows.deinit();
     try rows.bindText(1, project);
     try rows.bindText(2, project);
     try rows.bindText(3, column);
+    try bindProjectIssueFilter(&rows, 4, project, context.filter);
 
     var shown = false;
     while (try rows.step()) {
@@ -837,15 +1072,22 @@ fn appendProjectRoadmapLane(buf: *std.ArrayList(u8), allocator: Allocator, db: *
         const opened_at = try rows.columnTextDup(allocator, 4);
         defer allocator.free(opened_at);
         const legacy_number = rows.columnInt64(5);
-        try appendProjectRoadmapItem(buf, allocator, id, title_text, state, author, opened_at, legacy_number);
+        try appendProjectRoadmapItem(buf, allocator, db, project, id, title_text, state, author, opened_at, legacy_number);
         shown = true;
     }
     if (!shown) try buf.appendSlice(allocator, "<div class=\"kanban-empty-drop\">No issues</div>");
     try buf.appendSlice(allocator, "</div></section>");
 }
 
-fn appendProjectPriorityRoadmapLane(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, project: []const u8, priority_group: []const u8) !void {
-    const count = try projectPriorityIssueCount(db, project, priority_group);
+fn appendProjectPriorityRoadmapLane(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    project: []const u8,
+    priority_group: []const u8,
+    context: *const ProjectRenderContext,
+) !void {
+    const count = try projectPriorityIssueCount(db, project, priority_group, context.filter);
     const title = if (priority_group.len == 0) "No priority" else priority_group;
     try appendTemplate(buf, allocator,
         \\<section class="project-roadmap-lane tone-{tone}">
@@ -878,12 +1120,14 @@ fn appendProjectPriorityRoadmapLane(buf: *std.ArrayList(u8), allocator: Allocato
         \\LEFT JOIN legacy_aliases a
         \\  ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
         \\WHERE COALESCE(m.priority, '') = ?
+    ++ project_issue_filter_sql ++
         \\ORDER BY i.opened_at DESC, i.id DESC
     );
     defer rows.deinit();
     try rows.bindText(1, project);
     try rows.bindText(2, project);
     try rows.bindText(3, priority_group);
+    try bindProjectIssueFilter(&rows, 4, project, context.filter);
 
     var shown = false;
     while (try rows.step()) {
@@ -898,7 +1142,7 @@ fn appendProjectPriorityRoadmapLane(buf: *std.ArrayList(u8), allocator: Allocato
         const opened_at = try rows.columnTextDup(allocator, 4);
         defer allocator.free(opened_at);
         const legacy_number = rows.columnInt64(5);
-        try appendProjectRoadmapItem(buf, allocator, id, title_text, state, author, opened_at, legacy_number);
+        try appendProjectRoadmapItem(buf, allocator, db, project, id, title_text, state, author, opened_at, legacy_number);
         shown = true;
     }
     if (!shown) try buf.appendSlice(allocator, "<div class=\"kanban-empty-drop\">No issues</div>");
@@ -908,6 +1152,8 @@ fn appendProjectPriorityRoadmapLane(buf: *std.ArrayList(u8), allocator: Allocato
 fn appendProjectRoadmapItem(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
+    db: *SqliteDb,
+    project: []const u8,
     id: []const u8,
     title: []const u8,
     state: []const u8,
@@ -915,6 +1161,13 @@ fn appendProjectRoadmapItem(
     opened_at: []const u8,
     legacy_number: i64,
 ) !void {
+    const has_start_field = try projectFieldKeyExists(db, project, "start_at");
+    const has_target_field = try projectFieldKeyExists(db, project, "target_at");
+    const start_at = if (has_start_field) try projectFieldStringValue(allocator, db, project, id, "start_at") else try allocator.dupe(u8, "");
+    defer allocator.free(start_at);
+    const target_at = if (has_target_field) try projectFieldStringValue(allocator, db, project, id, "target_at") else try allocator.dupe(u8, "");
+    defer allocator.free(target_at);
+
     var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
     const issue_ref = util.shortObjectRef(&issue_ref_buf, id);
     try appendTemplate(buf, allocator,
@@ -933,7 +1186,34 @@ fn appendProjectRoadmapItem(
     }
     try appendTemplate(buf, allocator, " by {author} opened ", .{ .author = author });
     try appendRelativeTime(buf, allocator, opened_at);
-    try buf.appendSlice(allocator, "</small></div></article>");
+    try buf.appendSlice(allocator, "</small>");
+    if (has_start_field or has_target_field) {
+        try appendTemplate(buf, allocator,
+            \\<form class="project-roadmap-date-form" method="post" action="/projects/items">
+            \\  <input type="hidden" name="action" value="set-roadmap-dates">
+            \\  <input type="hidden" name="project" value="{project}">
+            \\  <input type="hidden" name="issue" value="{issue}">
+            \\  <input type="hidden" name="view" value="roadmap">
+        , .{
+            .project = project,
+            .issue = id,
+        });
+        if (has_start_field) {
+            try appendTemplate(buf, allocator,
+                \\  <label>Start<input type="date" name="start_at" value="{start_at}"></label>
+            , .{ .start_at = start_at });
+        }
+        if (has_target_field) {
+            try appendTemplate(buf, allocator,
+                \\  <label>Target<input type="date" name="target_at" value="{target_at}"></label>
+            , .{ .target_at = target_at });
+        }
+        try buf.appendSlice(allocator,
+            \\  <button class="button secondary" type="submit">Save</button>
+            \\</form>
+        );
+    }
+    try buf.appendSlice(allocator, "</div></article>");
 }
 
 fn appendProjectViewTabs(
@@ -965,6 +1245,7 @@ fn appendProjectItemActions(
     project: []const u8,
     active_view: *const ActiveProjectView,
 ) !void {
+    const defaults = projectViewDefaultsFromConfig(allocator, active_view.config_json);
     try buf.appendSlice(allocator,
         \\<div class="project-item-actions">
     );
@@ -984,12 +1265,12 @@ fn appendProjectItemActions(
         .project = project,
         .view = active_view.ref,
     });
-    try appendProjectPriorityOptions(buf, allocator, default_project_priority);
+    try appendProjectPriorityOptions(buf, allocator, defaults.priority);
     try buf.appendSlice(allocator,
         \\          </select></label>
         \\          <label>Status<select name="column">
     );
-    try appendProjectColumnOptions(buf, allocator, db, project, null);
+    try appendProjectColumnOptions(buf, allocator, db, project, defaults.status);
     try appendTemplate(buf, allocator,
         \\          </select></label>
         \\        </div>
@@ -1012,12 +1293,12 @@ fn appendProjectItemActions(
         .project = project,
         .view = active_view.ref,
     });
-    try appendProjectPriorityOptions(buf, allocator, "");
+    try appendProjectPriorityOptions(buf, allocator, if (defaults.priority_explicit) defaults.priority else "");
     try buf.appendSlice(allocator,
         \\        </select></label>
         \\        <label>Status<select name="column">
     );
-    try appendProjectColumnOptions(buf, allocator, db, project, null);
+    try appendProjectColumnOptions(buf, allocator, db, project, if (defaults.status_explicit) defaults.status else null);
     try buf.appendSlice(allocator,
         \\        </select></label>
         \\        <div class="form-actions"><button class="button primary" type="submit">Add issue</button></div>
@@ -1194,8 +1475,15 @@ fn appendProjectSummary(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqli
     try buf.appendSlice(allocator, "</div>");
 }
 
-fn appendProjectColumn(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, project: []const u8, column: []const u8) !void {
-    const count = try projectColumnIssueCount(db, project, column);
+fn appendProjectColumn(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    project: []const u8,
+    column: []const u8,
+    context: *const ProjectRenderContext,
+) !void {
+    const count = try projectColumnIssueCount(db, project, column, context.filter);
     const title = if (column.len == 0) "No column" else column;
     const tone = columnTone(column);
     const note = columnDescription(column);
@@ -1216,7 +1504,7 @@ fn appendProjectColumn(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
         \\            <input type="hidden" name="project" value="{project}">
         \\            <input type="hidden" name="column" value="{column}">
         \\            <input type="hidden" name="priority" value="{default_priority}">
-        \\            <input type="hidden" name="view" value="board">
+        \\            <input type="hidden" name="view" value="{view}">
         \\            <input name="title" placeholder="New issue title" aria-label="New issue title" required>
         \\            <button class="button primary" type="submit">Create</button>
         \\          </form>
@@ -1224,8 +1512,8 @@ fn appendProjectColumn(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
         \\            <input type="hidden" name="action" value="add-existing">
         \\            <input type="hidden" name="project" value="{project}">
         \\            <input type="hidden" name="column" value="{column}">
-        \\            <input type="hidden" name="priority" value="">
-        \\            <input type="hidden" name="view" value="board">
+        \\            <input type="hidden" name="priority" value="{existing_priority}">
+        \\            <input type="hidden" name="view" value="{view}">
         \\            <input name="issue" placeholder="#123 or issue:abcdef0" aria-label="Issue" required>
         \\            <button class="button secondary" type="submit">Add</button>
         \\          </form>
@@ -1239,7 +1527,9 @@ fn appendProjectColumn(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
         .tone = tone,
         .project = project,
         .column = column,
-        .default_priority = default_project_priority,
+        .default_priority = context.defaults.priority,
+        .existing_priority = if (context.defaults.priority_explicit) context.defaults.priority else "",
+        .view = context.view_ref,
         .title = title,
         .count = count,
         .note = note,
@@ -1277,12 +1567,14 @@ fn appendProjectColumn(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
         \\LEFT JOIN legacy_aliases a
         \\  ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
         \\WHERE p.effective_status = ?
+    ++ project_issue_filter_sql ++
         \\ORDER BY i.opened_at DESC, i.id DESC
     );
     defer cards.deinit();
     try cards.bindText(1, project);
     try cards.bindText(2, project);
     try cards.bindText(3, column);
+    try bindProjectIssueFilter(&cards, 4, project, context.filter);
     var shown = false;
     while (try cards.step()) {
         const id = try cards.columnTextDup(allocator, 0);
@@ -1357,9 +1649,9 @@ fn appendProjectColumn(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
     try buf.appendSlice(allocator, "</div></section>");
 }
 
-fn projectIssueCount(db: *SqliteDb, project: []const u8) !usize {
+fn projectIssueCount(db: *SqliteDb, project: []const u8, filter: ProjectIssueFilter) !usize {
     var stmt = try db.prepare(
-        \\SELECT COUNT(DISTINCT issue_id) FROM (
+        \\WITH project_items AS (
         \\  SELECT issue_id
         \\  FROM issue_projects
         \\  WHERE project = ?
@@ -1369,18 +1661,22 @@ fn projectIssueCount(db: *SqliteDb, project: []const u8) !usize {
         \\  JOIN projects p ON p.id = pm.project_id
         \\  WHERE p.name = ?
         \\)
-    );
+        \\SELECT COUNT(DISTINCT i.id)
+        \\FROM project_items p
+        \\JOIN issues i ON i.id = p.issue_id
+        \\WHERE 1 = 1
+    ++ project_issue_filter_sql);
     defer stmt.deinit();
     try stmt.bindText(1, project);
     try stmt.bindText(2, project);
+    try bindProjectIssueFilter(&stmt, 3, project, filter);
     if (!(try stmt.step())) return 0;
     return @intCast(stmt.columnInt64(0));
 }
 
-fn projectColumnIssueCount(db: *SqliteDb, project: []const u8, column: []const u8) !usize {
+fn projectColumnIssueCount(db: *SqliteDb, project: []const u8, column: []const u8, filter: ProjectIssueFilter) !usize {
     var stmt = try db.prepare(
-        \\SELECT COUNT(DISTINCT issue_id)
-        \\FROM (
+        \\WITH project_items AS (
         \\  SELECT pi.issue_id,
         \\         CASE
         \\           WHEN COALESCE(m.status, '') <> '' THEN m.status
@@ -1398,17 +1694,21 @@ fn projectColumnIssueCount(db: *SqliteDb, project: []const u8, column: []const u
         \\  ) pi
         \\  LEFT JOIN issue_metadata m ON m.issue_id = pi.issue_id
         \\)
-        \\WHERE effective_status = ?
-    );
+        \\SELECT COUNT(DISTINCT i.id)
+        \\FROM project_items p
+        \\JOIN issues i ON i.id = p.issue_id
+        \\WHERE p.effective_status = ?
+    ++ project_issue_filter_sql);
     defer stmt.deinit();
     try stmt.bindText(1, project);
     try stmt.bindText(2, project);
     try stmt.bindText(3, column);
+    try bindProjectIssueFilter(&stmt, 4, project, filter);
     if (!(try stmt.step())) return 0;
     return @intCast(stmt.columnInt64(0));
 }
 
-fn projectPriorityIssueCount(db: *SqliteDb, project: []const u8, priority: []const u8) !usize {
+fn projectPriorityIssueCount(db: *SqliteDb, project: []const u8, priority: []const u8, filter: ProjectIssueFilter) !usize {
     var stmt = try db.prepare(
         \\WITH project_items AS (
         \\  SELECT issue_id
@@ -1422,15 +1722,51 @@ fn projectPriorityIssueCount(db: *SqliteDb, project: []const u8, priority: []con
         \\)
         \\SELECT COUNT(DISTINCT p.issue_id)
         \\FROM project_items p
+        \\JOIN issues i ON i.id = p.issue_id
         \\LEFT JOIN issue_metadata m ON m.issue_id = p.issue_id
         \\WHERE COALESCE(m.priority, '') = ?
-    );
+    ++ project_issue_filter_sql);
     defer stmt.deinit();
     try stmt.bindText(1, project);
     try stmt.bindText(2, project);
     try stmt.bindText(3, priority);
+    try bindProjectIssueFilter(&stmt, 4, project, filter);
     if (!(try stmt.step())) return 0;
     return @intCast(stmt.columnInt64(0));
+}
+
+fn projectFieldKeyExists(db: *SqliteDb, project: []const u8, field_key: []const u8) !bool {
+    var stmt = try db.prepare(
+        \\SELECT 1
+        \\FROM project_fields pf
+        \\JOIN projects p ON p.id = pf.project_id
+        \\WHERE p.name = ? AND pf.key = ? AND pf.state != 'removed'
+        \\LIMIT 1
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, project);
+    try stmt.bindText(2, field_key);
+    return try stmt.step();
+}
+
+fn projectFieldStringValue(allocator: Allocator, db: *SqliteDb, project: []const u8, issue_id: []const u8, field_key: []const u8) ![]u8 {
+    var stmt = try db.prepare(
+        \\SELECT COALESCE(json_extract(pfv.value_json, '$'), '')
+        \\FROM project_field_values pfv
+        \\JOIN project_fields pf ON pf.id = pfv.field_id AND pf.project_id = pfv.project_id
+        \\JOIN projects p ON p.id = pfv.project_id
+        \\WHERE p.name = ?
+        \\  AND pfv.issue_id = ?
+        \\  AND pf.key = ?
+        \\  AND pf.state != 'removed'
+        \\LIMIT 1
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, project);
+    try stmt.bindText(2, issue_id);
+    try stmt.bindText(3, field_key);
+    if (!(try stmt.step())) return try allocator.dupe(u8, "");
+    return try stmt.columnTextDup(allocator, 0);
 }
 
 pub fn renderProjectForm(
@@ -1777,6 +2113,73 @@ pub fn handleProjectItemPost(allocator: Allocator, repo: Repo, stream: std.net.S
             try sendProjectItemError(allocator, stream, wants_async, 500, "Internal Server Error", "Could not create issue\n");
             return;
         };
+    } else if (std.mem.eql(u8, action_owned, "set-roadmap-dates")) {
+        const issue_ref_owned = try formTrimmedOwned(allocator, form_body, "issue");
+        defer allocator.free(issue_ref_owned);
+        if (issue_ref_owned.len == 0) {
+            try sendProjectItemError(allocator, stream, wants_async, 422, "Unprocessable Entity", "Issue is required\n");
+            return;
+        }
+        const start_at_owned = try formTrimmedOwned(allocator, form_body, "start_at");
+        defer allocator.free(start_at_owned);
+        const target_at_owned = try formTrimmedOwned(allocator, form_body, "target_at");
+        defer allocator.free(target_at_owned);
+        if (!isProjectDateValue(start_at_owned) or !isProjectDateValue(target_at_owned)) {
+            try sendProjectItemError(allocator, stream, wants_async, 422, "Unprocessable Entity", "Dates must use YYYY-MM-DD\n");
+            return;
+        }
+        try index.ensureIndex(allocator, repo);
+        const issue_id = index.resolveIssueId(allocator, repo, issue_ref_owned) catch {
+            try sendProjectItemError(allocator, stream, wants_async, 404, "Not Found", "Issue not found\n");
+            return;
+        };
+        defer allocator.free(issue_id);
+        const project_id = index.resolveProjectId(allocator, repo, project_owned) catch {
+            try sendProjectItemError(allocator, stream, wants_async, 404, "Not Found", "Project not found\n");
+            return;
+        };
+        defer allocator.free(project_id);
+        setProjectDateField(allocator, repo, issue_id, project_id, project_owned, "start_at", start_at_owned) catch {
+            try sendProjectItemError(allocator, stream, wants_async, 500, "Internal Server Error", "Could not update roadmap start date\n");
+            return;
+        };
+        setProjectDateField(allocator, repo, issue_id, project_id, project_owned, "target_at", target_at_owned) catch {
+            try sendProjectItemError(allocator, stream, wants_async, 500, "Internal Server Error", "Could not update roadmap target date\n");
+            return;
+        };
+    } else if (std.mem.eql(u8, action_owned, "set-project-field")) {
+        const issue_ref_owned = try formTrimmedOwned(allocator, form_body, "issue");
+        defer allocator.free(issue_ref_owned);
+        if (issue_ref_owned.len == 0) {
+            try sendProjectItemError(allocator, stream, wants_async, 422, "Unprocessable Entity", "Issue is required\n");
+            return;
+        }
+        const field_key_owned = try formTrimmedOwned(allocator, form_body, "field");
+        defer allocator.free(field_key_owned);
+        if (field_key_owned.len == 0) {
+            try sendProjectItemError(allocator, stream, wants_async, 422, "Unprocessable Entity", "Project field is required\n");
+            return;
+        }
+        const value_owned = try formTrimmedOwned(allocator, form_body, "value");
+        defer allocator.free(value_owned);
+        try index.ensureIndex(allocator, repo);
+        const issue_id = index.resolveIssueId(allocator, repo, issue_ref_owned) catch {
+            try sendProjectItemError(allocator, stream, wants_async, 404, "Not Found", "Issue not found\n");
+            return;
+        };
+        defer allocator.free(issue_id);
+        const project_id = index.resolveProjectId(allocator, repo, project_owned) catch {
+            try sendProjectItemError(allocator, stream, wants_async, 404, "Not Found", "Project not found\n");
+            return;
+        };
+        defer allocator.free(project_id);
+        setProjectFieldValue(allocator, repo, issue_id, project_id, project_owned, field_key_owned, value_owned) catch |err| {
+            switch (err) {
+                error.InvalidProjectFieldValue => try sendProjectItemError(allocator, stream, wants_async, 422, "Unprocessable Entity", "Project field value is invalid\n"),
+                else => try sendProjectItemError(allocator, stream, wants_async, 500, "Internal Server Error", "Could not update project field\n"),
+            }
+            return;
+        };
     } else if (std.mem.eql(u8, action_owned, "add-existing") or std.mem.eql(u8, action_owned, "move")) {
         const issue_ref_owned = try formTrimmedOwned(allocator, form_body, "issue");
         defer allocator.free(issue_ref_owned);
@@ -1823,6 +2226,98 @@ pub fn handleProjectItemPost(allocator: Allocator, repo: Repo, stream: std.net.S
     const location = try projectWorkspaceLocationOwned(allocator, project_owned, view_owned);
     defer allocator.free(location);
     try sendRedirect(allocator, stream, location);
+}
+
+fn setProjectDateField(
+    allocator: Allocator,
+    repo: Repo,
+    issue_id: []const u8,
+    project_id: []const u8,
+    project_ref: []const u8,
+    field_key: []const u8,
+    value: []const u8,
+) !void {
+    const field_id = index.resolveProjectFieldId(allocator, repo, project_id, field_key) catch |err| {
+        if (value.len == 0) return;
+        return err;
+    };
+    defer allocator.free(field_id);
+    if (value.len == 0) {
+        try createIssueProjectFieldClearedEvent(allocator, issue_id, project_id, project_ref, field_id, null);
+        return;
+    }
+    const value_json = try jsonStringArgument(allocator, value);
+    defer allocator.free(value_json);
+    try createIssueProjectFieldSetEvent(allocator, issue_id, project_id, project_ref, field_id, null, value_json);
+}
+
+fn setProjectFieldValue(
+    allocator: Allocator,
+    repo: Repo,
+    issue_id: []const u8,
+    project_id: []const u8,
+    project_ref: []const u8,
+    field_key: []const u8,
+    value: []const u8,
+) !void {
+    const field_id = try index.resolveProjectFieldId(allocator, repo, project_id, field_key);
+    defer allocator.free(field_id);
+    if (value.len == 0) {
+        try createIssueProjectFieldClearedEvent(allocator, issue_id, project_id, project_ref, field_id, null);
+        return;
+    }
+    const field_type = try projectFieldTypeOwned(allocator, repo, project_id, field_id);
+    defer allocator.free(field_type);
+    const value_json = try projectFieldValueJson(allocator, field_type, value);
+    defer allocator.free(value_json);
+    try createIssueProjectFieldSetEvent(allocator, issue_id, project_id, project_ref, field_id, null, value_json);
+}
+
+fn projectFieldTypeOwned(allocator: Allocator, repo: Repo, project_id: []const u8, field_id: []const u8) ![]u8 {
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    var stmt = try db.prepare(
+        \\SELECT field_type
+        \\FROM project_fields
+        \\WHERE project_id = ? AND id = ? AND state != 'removed'
+        \\LIMIT 1
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    try stmt.bindText(2, field_id);
+    if (!(try stmt.step())) return error.ProjectFieldNotFound;
+    return try stmt.columnTextDup(allocator, 0);
+}
+
+fn projectFieldValueJson(allocator: Allocator, field_type: []const u8, value: []const u8) ![]u8 {
+    if (std.mem.eql(u8, field_type, "number")) {
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, value, .{}) catch return error.InvalidProjectFieldValue;
+        defer parsed.deinit();
+        switch (parsed.value) {
+            .integer, .float => {},
+            else => return error.InvalidProjectFieldValue,
+        }
+        return try allocator.dupe(u8, value);
+    }
+    if (std.mem.eql(u8, field_type, "boolean")) {
+        if (!std.mem.eql(u8, value, "true") and !std.mem.eql(u8, value, "false")) return error.InvalidProjectFieldValue;
+        return try allocator.dupe(u8, value);
+    }
+    if (std.mem.eql(u8, field_type, "date") and !isProjectDateValue(value)) return error.InvalidProjectFieldValue;
+    return try jsonStringArgument(allocator, value);
+}
+
+fn isProjectDateValue(value: []const u8) bool {
+    if (value.len == 0) return true;
+    if (value.len != 10) return false;
+    for (value, 0..) |char, index_value| {
+        if (index_value == 4 or index_value == 7) {
+            if (char != '-') return false;
+        } else if (!std.ascii.isDigit(char)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 fn appendProjectTemplateSidebar(buf: *std.ArrayList(u8), allocator: Allocator, selected_id: []const u8) !void {
@@ -2121,7 +2616,7 @@ fn loadSavedProjectViewByRef(allocator: Allocator, db: *SqliteDb, project: []con
     try stmt.bindText(5, view_ref);
     try stmt.bindText(6, view_ref);
     if (!(try stmt.step())) return null;
-    return activeSavedProjectViewFromStmt(allocator, &stmt);
+    return try activeSavedProjectViewFromStmt(allocator, &stmt);
 }
 
 fn loadFirstSavedProjectView(allocator: Allocator, db: *SqliteDb, project: []const u8, layout: ?ProjectView) !?ActiveProjectView {
@@ -2141,7 +2636,7 @@ fn loadFirstSavedProjectView(allocator: Allocator, db: *SqliteDb, project: []con
     try stmt.bindText(2, layout_value);
     try stmt.bindText(3, layout_value);
     if (!(try stmt.step())) return null;
-    return activeSavedProjectViewFromStmt(allocator, &stmt);
+    return try activeSavedProjectViewFromStmt(allocator, &stmt);
 }
 
 fn activeSavedProjectViewFromStmt(allocator: Allocator, stmt: *index.SqliteStmt) !ActiveProjectView {
@@ -2172,6 +2667,195 @@ fn projectGroupFieldFromConfig(allocator: Allocator, config_json: []const u8) Pr
     const group_by = event_mod.jsonString(root.get("group_by")) orelse return .status;
     if (std.mem.eql(u8, group_by, "issue.priority") or std.mem.eql(u8, group_by, "priority")) return .priority;
     return .status;
+}
+
+fn projectRenderContextFromView(allocator: Allocator, active_view: *const ActiveProjectView, current_principal: []const u8) ProjectRenderContext {
+    return .{
+        .filter = projectIssueFilterFromConfig(allocator, active_view.config_json, current_principal),
+        .defaults = projectViewDefaultsFromConfig(allocator, active_view.config_json),
+        .view_ref = active_view.ref,
+    };
+}
+
+fn projectTableFieldsFromConfig(allocator: Allocator, db: *SqliteDb, project: []const u8, config_json: []const u8) !ProjectTableFields {
+    var result: ProjectTableFields = .{};
+    errdefer result.deinit(allocator);
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, config_json, .{}) catch return result;
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return result,
+    };
+    const fields_value = root.get("fields") orelse return result;
+    const fields_array = switch (fields_value) {
+        .array => |array| array,
+        else => return result,
+    };
+    for (fields_array.items) |field_value| {
+        if (result.len == max_project_table_fields) break;
+        const field_ref = event_mod.jsonString(field_value) orelse continue;
+        const field_key = projectFieldKeyFromViewRef(field_ref) orelse continue;
+        if (projectTableFieldsContains(&result, field_key)) continue;
+        if (try loadProjectTableField(allocator, db, project, field_key)) |field| {
+            result.items[result.len] = field;
+            result.len += 1;
+        }
+    }
+    return result;
+}
+
+fn projectTableFieldsContains(fields: *const ProjectTableFields, key: []const u8) bool {
+    for (fields.items[0..fields.len]) |field| {
+        if (std.mem.eql(u8, field.key, key)) return true;
+    }
+    return false;
+}
+
+fn projectFieldKeyFromViewRef(field_ref: []const u8) ?[]const u8 {
+    if (std.mem.startsWith(u8, field_ref, "project.")) {
+        const key = field_ref["project.".len..];
+        return if (key.len == 0) null else key;
+    }
+    if (std.mem.startsWith(u8, field_ref, "issue.")) return null;
+    if (isBuiltInIssueFieldRef(field_ref)) return null;
+    return if (field_ref.len == 0) null else field_ref;
+}
+
+fn isBuiltInIssueFieldRef(field_ref: []const u8) bool {
+    return std.mem.eql(u8, field_ref, "state") or
+        std.mem.eql(u8, field_ref, "status") or
+        std.mem.eql(u8, field_ref, "priority") or
+        std.mem.eql(u8, field_ref, "type") or
+        std.mem.eql(u8, field_ref, "milestone") or
+        std.mem.eql(u8, field_ref, "labels") or
+        std.mem.eql(u8, field_ref, "assignees") or
+        std.mem.eql(u8, field_ref, "projects");
+}
+
+fn loadProjectTableField(allocator: Allocator, db: *SqliteDb, project: []const u8, field_key: []const u8) !?ProjectTableField {
+    var stmt = try db.prepare(
+        \\SELECT pf.key, pf.name, pf.field_type
+        \\FROM project_fields pf
+        \\JOIN projects p ON p.id = pf.project_id
+        \\WHERE p.name = ?
+        \\  AND pf.key = ?
+        \\  AND pf.state != 'removed'
+        \\LIMIT 1
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, project);
+    try stmt.bindText(2, field_key);
+    if (!(try stmt.step())) return null;
+    const key = try stmt.columnTextDup(allocator, 0);
+    errdefer allocator.free(key);
+    const name = try stmt.columnTextDup(allocator, 1);
+    errdefer allocator.free(name);
+    const field_type = try stmt.columnTextDup(allocator, 2);
+    errdefer allocator.free(field_type);
+    return .{
+        .key = key,
+        .name = name,
+        .field_type = field_type,
+    };
+}
+
+fn projectViewDefaultsFromConfig(allocator: Allocator, config_json: []const u8) ProjectViewDefaults {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, config_json, .{}) catch return .{};
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return .{},
+    };
+    const defaults_value = root.get("defaults") orelse return .{};
+    const defaults_object = switch (defaults_value) {
+        .object => |object| object,
+        else => return .{},
+    };
+
+    var defaults: ProjectViewDefaults = .{};
+    if (event_mod.jsonString(defaults_object.get("issue.status")) orelse event_mod.jsonString(defaults_object.get("status"))) |status| {
+        if (canonicalProjectStatus(status)) |canonical| {
+            defaults.status = canonical;
+            defaults.status_explicit = true;
+        }
+    }
+    if (event_mod.jsonString(defaults_object.get("issue.priority")) orelse event_mod.jsonString(defaults_object.get("priority"))) |priority| {
+        if (canonicalProjectPriority(priority)) |canonical| {
+            defaults.priority = canonical;
+            defaults.priority_explicit = true;
+        }
+    }
+    return defaults;
+}
+
+fn projectIssueFilterFromConfig(allocator: Allocator, config_json: []const u8, current_principal: []const u8) ProjectIssueFilter {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, config_json, .{}) catch return .{};
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return .{},
+    };
+    const filter_value = root.get("filter") orelse return .{};
+    var filter: ProjectIssueFilter = .{};
+    applyProjectIssueFilterValue(&filter, filter_value, current_principal);
+    return filter;
+}
+
+fn applyProjectIssueFilterValue(filter: *ProjectIssueFilter, value: std.json.Value, current_principal: []const u8) void {
+    switch (value) {
+        .object => |object| {
+            if (event_mod.jsonString(object.get("assignee"))) |assignee| {
+                if (std.mem.eql(u8, assignee, "@me")) {
+                    filter.require_assignee = true;
+                    filter.assignee = current_principal;
+                }
+            }
+            if (event_mod.jsonString(object.get("label"))) |label| {
+                if (asciiEqlIgnoreCase(label, "bug")) filter.bug_label = true;
+            }
+            if (event_mod.jsonString(object.get("issue.type"))) |issue_type| {
+                if (asciiEqlIgnoreCase(issue_type, "bug")) filter.bug_label = true;
+            }
+            if (event_mod.jsonString(object.get("project.iteration"))) |iteration| {
+                if (asciiEqlIgnoreCase(iteration, "current")) filter.current_iteration = true;
+            }
+            if (object.get("any")) |any_value| {
+                switch (any_value) {
+                    .array => |items| for (items.items) |item| applyProjectIssueFilterValue(filter, item, current_principal),
+                    else => {},
+                }
+            }
+        },
+        else => {},
+    }
+}
+
+fn bindProjectIssueFilter(stmt: *index.SqliteStmt, start_index: c_int, project: []const u8, filter: ProjectIssueFilter) !void {
+    var idx = start_index;
+    try stmt.bindInt(idx, if (filter.require_assignee) 1 else 0);
+    idx += 1;
+    try stmt.bindText(idx, filter.assignee);
+    idx += 1;
+    try stmt.bindInt(idx, if (filter.bug_label) 1 else 0);
+    idx += 1;
+    try stmt.bindInt(idx, if (filter.current_iteration) 1 else 0);
+    idx += 1;
+    try stmt.bindText(idx, project);
+}
+
+fn canonicalProjectStatus(value: []const u8) ?[]const u8 {
+    for (project_status_values) |status| {
+        if (std.mem.eql(u8, value, status)) return status;
+    }
+    return null;
+}
+
+fn canonicalProjectPriority(value: []const u8) ?[]const u8 {
+    for (project_priority_values) |priority| {
+        if (std.mem.eql(u8, value, priority)) return priority;
+    }
+    return null;
 }
 
 fn projectWorkspaceLocationOwned(allocator: Allocator, project: []const u8, view_ref: []const u8) ![]u8 {
@@ -2473,6 +3157,82 @@ test "project workspace title does not prepend at sign" {
 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<h1>Release &amp; Plan</h1>") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<h1>@Release") == null);
+}
+
+test "project view config parses saved filters" {
+    const my_items = projectIssueFilterFromConfig(std.testing.allocator, my_items_view_config, "alice");
+    try std.testing.expect(my_items.require_assignee);
+    try std.testing.expectEqualStrings("alice", my_items.assignee);
+    try std.testing.expect(!my_items.bug_label);
+    try std.testing.expect(!my_items.current_iteration);
+
+    const bugs = projectIssueFilterFromConfig(std.testing.allocator, bugs_view_config, "alice");
+    try std.testing.expect(!bugs.require_assignee);
+    try std.testing.expect(bugs.bug_label);
+    try std.testing.expect(!bugs.current_iteration);
+
+    const current_iteration = projectIssueFilterFromConfig(std.testing.allocator, current_iteration_view_config, "alice");
+    try std.testing.expect(!current_iteration.require_assignee);
+    try std.testing.expect(!current_iteration.bug_label);
+    try std.testing.expect(current_iteration.current_iteration);
+}
+
+test "project view config parses creation defaults" {
+    const kanban_defaults = projectViewDefaultsFromConfig(std.testing.allocator, kanban_board_view_config);
+    try std.testing.expect(kanban_defaults.status_explicit);
+    try std.testing.expectEqualStrings("Draft", kanban_defaults.status);
+    try std.testing.expect(kanban_defaults.priority_explicit);
+    try std.testing.expectEqualStrings("P3", kanban_defaults.priority);
+
+    const no_defaults = projectViewDefaultsFromConfig(std.testing.allocator, my_items_view_config);
+    try std.testing.expect(!no_defaults.status_explicit);
+    try std.testing.expectEqualStrings(default_project_status, no_defaults.status);
+    try std.testing.expect(!no_defaults.priority_explicit);
+    try std.testing.expectEqualStrings(default_project_priority, no_defaults.priority);
+}
+
+test "project view config loads project table fields" {
+    var db = try SqliteDb.openWithOptions(
+        std.testing.allocator,
+        ":memory:",
+        sqlite.SQLITE_OPEN_READWRITE | sqlite.SQLITE_OPEN_CREATE,
+        true,
+        .{ .enable_wal = false },
+    );
+    defer db.deinit();
+    try db.exec("CREATE TABLE projects (id TEXT, name TEXT)");
+    try db.exec("CREATE TABLE project_fields (id TEXT, project_id TEXT, key TEXT, name TEXT, field_type TEXT, state TEXT)");
+    try db.exec("INSERT INTO projects (id, name) VALUES ('p1', 'Plan')");
+    try db.exec("INSERT INTO project_fields (id, project_id, key, name, field_type, state) VALUES ('f1', 'p1', 'iteration', 'Iteration', 'text', 'active')");
+    try db.exec("INSERT INTO project_fields (id, project_id, key, name, field_type, state) VALUES ('f2', 'p1', 'estimate', 'Estimate', 'number', 'active')");
+    try db.exec("INSERT INTO project_fields (id, project_id, key, name, field_type, state) VALUES ('f3', 'p1', 'track', 'Track', 'text', 'removed')");
+
+    var fields = try projectTableFieldsFromConfig(std.testing.allocator, &db, "Plan", current_iteration_view_config);
+    defer fields.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), fields.len);
+    try std.testing.expectEqualStrings("iteration", fields.items[0].key);
+    try std.testing.expectEqualStrings("Iteration", fields.items[0].name);
+    try std.testing.expectEqualStrings("text", fields.items[0].field_type);
+    try std.testing.expectEqualStrings("estimate", fields.items[1].key);
+    try std.testing.expectEqualStrings("number", fields.items[1].field_type);
+}
+
+test "project field value json validates typed values" {
+    const number_json = try projectFieldValueJson(std.testing.allocator, "number", "3.5");
+    defer std.testing.allocator.free(number_json);
+    try std.testing.expectEqualStrings("3.5", number_json);
+    try std.testing.expectError(error.InvalidProjectFieldValue, projectFieldValueJson(std.testing.allocator, "number", "soon"));
+
+    const bool_json = try projectFieldValueJson(std.testing.allocator, "boolean", "true");
+    defer std.testing.allocator.free(bool_json);
+    try std.testing.expectEqualStrings("true", bool_json);
+    try std.testing.expectError(error.InvalidProjectFieldValue, projectFieldValueJson(std.testing.allocator, "boolean", "yes"));
+
+    const date_json = try projectFieldValueJson(std.testing.allocator, "date", "2026-05-16");
+    defer std.testing.allocator.free(date_json);
+    try std.testing.expectEqualStrings("\"2026-05-16\"", date_json);
+    try std.testing.expectError(error.InvalidProjectFieldValue, projectFieldValueJson(std.testing.allocator, "date", "2026/05/16"));
 }
 
 test "project index and not found names do not prepend at sign" {

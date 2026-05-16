@@ -69,6 +69,12 @@ diagnostics, and keyboard shortcuts for fast navigation. The web server is
 intended for local use only; Zig does not yet provide HTTP/2 server support, so
 Gitomi does not treat this endpoint as production-facing infrastructure.
 
+To run the web UI and GitHub live sync together:
+
+```sh
+gt web --live --repo OWNER/REPO --webhook-url https://example.test/github/webhook --secret "$WEBHOOK_SECRET"
+```
+
 ## Sync With a Remote
 
 Gitomi state is published as Git refs. After a repository is initialized, use:
@@ -118,6 +124,12 @@ GitHub:
 gt github export --repo OWNER/REPO --dry-run
 ```
 
+Run a two-way live bridge through the GitHub CLI and a local webhook receiver:
+
+```sh
+gt github live --repo OWNER/REPO --webhook-url https://example.test/github/webhook --secret "$WEBHOOK_SECRET"
+```
+
 Imports preserve GitHub issue and pull request numbers as secondary aliases, so
 references such as `#123`, `gh#123`, and `github:123` continue to work.
 
@@ -141,7 +153,7 @@ cache and can be rebuilt from Git refs.
 - Git commit signing configured for the actor device
 - Optional: [`nektos/act`](https://github.com/nektos/act) for local execution
   of GitHub Actions-compatible workflows
-- Optional: GitHub CLI credentials for GitHub import/export without a fixture
+- Optional: GitHub CLI credentials for GitHub import/export and live sync
 
 ## CLI Reference
 
@@ -151,7 +163,7 @@ The implemented command set includes:
 - `gt issue ...`, `gt pr ...`, `gt comment ...`
 - `gt project ...`, `gt milestone ...`
 - `gt actions ...`, `gt runs prune`
-- `gt github import`, `gt github export`
+- `gt github import`, `gt github export`, `gt github live`
 - `gt web`
 
 See [cli/README.md](cli/README.md) for build instructions, command syntax, and

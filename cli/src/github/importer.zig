@@ -141,12 +141,82 @@ pub fn cmdImport(allocator: Allocator, args: []const []const u8) !void {
     });
 }
 
-const ImportStats = struct {
+pub const ImportStats = struct {
     issues: usize = 0,
     pulls: usize = 0,
     comments: usize = 0,
     project_cards: usize = 0,
 };
+
+pub const WebhookImportOptions = struct {
+    bot_principal: []const u8 = import_bot_principal,
+    bot_device: []const u8 = import_bot_device,
+};
+
+pub fn importWebhookPayload(allocator: Allocator, event_name: []const u8, payload_bytes: []const u8, options: WebhookImportOptions) !ImportStats {
+    try ensureImportDelegation(allocator, options.bot_principal, options.bot_device);
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload_bytes, .{}) catch {
+        try eprint("gt github live: webhook payload must contain JSON\n", .{});
+        return CliError.InvalidArgument;
+    };
+    defer parsed.deinit();
+
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => {
+            try eprint("gt github live: webhook payload must contain a JSON object\n", .{});
+            return CliError.InvalidArgument;
+        },
+    };
+
+    var stats = ImportStats{};
+    if (std.mem.eql(u8, event_name, "ping")) return stats;
+
+    if (std.mem.eql(u8, event_name, "issues")) {
+        const issue = switch (root.get("issue") orelse return stats) {
+            .object => |object| object,
+            else => return stats,
+        };
+        if (issue.get("pull_request") != null) return stats;
+        var writer = try EventWriter.initForActor(allocator, "gt github live", options.bot_principal, options.bot_device);
+        defer writer.deinit();
+        const result = try importIssueObject(allocator, &writer, issue, &.{}, &stats);
+        defer if (result) |value| allocator.free(value.id);
+        if (result != null) try writer.commitStaged();
+        return stats;
+    }
+
+    if (std.mem.eql(u8, event_name, "pull_request")) {
+        const pull = switch (root.get("pull_request") orelse return stats) {
+            .object => |object| object,
+            else => return stats,
+        };
+        var writer = try EventWriter.initForActor(allocator, "gt github live", options.bot_principal, options.bot_device);
+        defer writer.deinit();
+        const result = try importPullObject(allocator, &writer, pull, &stats);
+        defer if (result) |value| allocator.free(value.id);
+        if (result != null) try writer.commitStaged();
+        return stats;
+    }
+
+    if (std.mem.eql(u8, event_name, "issue_comment")) {
+        const action = event_mod.jsonString(root.get("action")) orelse "";
+        if (!std.mem.eql(u8, action, "created")) return stats;
+        const issue = switch (root.get("issue") orelse return stats) {
+            .object => |object| object,
+            else => return stats,
+        };
+        const comment = switch (root.get("comment") orelse return stats) {
+            .object => |object| object,
+            else => return stats,
+        };
+        try importWebhookIssueComment(allocator, issue, comment, options, &stats);
+        return stats;
+    }
+
+    return stats;
+}
 
 const ImportedObject = struct {
     id: []u8,
@@ -461,6 +531,41 @@ fn importApiComments(
     try eprint("gt github import: {s} #{d}: {d} comment{s}\n", .{ parent_kind, number, total, if (total == 1) "" else "s" });
 }
 
+fn importWebhookIssueComment(
+    allocator: Allocator,
+    issue: std.json.ObjectMap,
+    comment: std.json.ObjectMap,
+    options: WebhookImportOptions,
+    stats: *ImportStats,
+) !void {
+    const number = jsonInteger(issue.get("number")) orelse return;
+    const parent_kind: []const u8 = if (issue.get("pull_request") == null) "issue" else "pull";
+
+    var repo = try repo_mod.discoverRepo(allocator);
+    defer repo.deinit();
+    try index.ensureIndex(allocator, repo);
+
+    var parent_id_owned: ?[]u8 = try index.lookupLegacyGithubObjectId(allocator, repo, parent_kind, number);
+    defer if (parent_id_owned) |value| allocator.free(value);
+
+    var writer = try EventWriter.initForActor(allocator, "gt github live", options.bot_principal, options.bot_device);
+    defer writer.deinit();
+
+    var imported_parent: ?ImportedObject = null;
+    defer if (imported_parent) |value| allocator.free(value.id);
+    if (parent_id_owned == null and std.mem.eql(u8, parent_kind, "issue")) {
+        imported_parent = try importIssueObject(allocator, &writer, issue, &.{}, stats);
+        if (imported_parent) |value| parent_id_owned = try allocator.dupe(u8, value.id);
+    }
+
+    const parent_id = parent_id_owned orelse return;
+    var comments = std.json.Array.init(allocator);
+    defer comments.deinit();
+    try comments.append(.{ .object = comment });
+    try importCommentsArray(allocator, &writer, parent_kind, parent_id, comments, stats);
+    try writer.commitStaged();
+}
+
 fn importClassicProjects(allocator: Allocator, client: GitHubClient, options: ImportOptions, stats: *ImportStats) !void {
     try eprint("gt github import: fetching classic project boards\n", .{});
     const path = try client.repoPath(allocator, "/projects?per_page=100");
@@ -594,7 +699,8 @@ fn importIssueObject(
     var repo = try repo_mod.discoverRepo(allocator);
     defer repo.deinit();
     if (try index.lookupLegacyGithubObjectId(allocator, repo, "issue", number)) |existing| {
-        try eprint("gt github import: issue #{d} already imported; skipping\n", .{number});
+        try eprint("gt github import: issue #{d} already imported; syncing current fields\n", .{number});
+        try syncExistingIssueObject(allocator, writer, repo, existing, issue);
         return .{ .id = existing, .is_new = false };
     }
 
@@ -637,7 +743,8 @@ fn importPullObject(allocator: Allocator, writer: *EventWriter, pull: std.json.O
     var repo = try repo_mod.discoverRepo(allocator);
     defer repo.deinit();
     if (try index.lookupLegacyGithubObjectId(allocator, repo, "pull", number)) |existing| {
-        try eprint("gt github import: pull #{d} already imported; skipping\n", .{number});
+        try eprint("gt github import: pull #{d} already imported; syncing current fields\n", .{number});
+        try syncExistingPullObject(allocator, writer, repo, existing, pull);
         return .{ .id = existing, .is_new = false };
     }
 
@@ -704,6 +811,295 @@ fn importPullObject(allocator: Allocator, writer: *EventWriter, pull: std.json.O
     }
 
     return .{ .id = pull_id, .is_new = true, .comment_count = comment_count };
+}
+
+const LocalIssueSnapshot = struct {
+    allocator: Allocator,
+    title: []u8,
+    body: []u8,
+    state: []u8,
+    milestone: []u8,
+    labels: [][]u8,
+    assignees: [][]u8,
+
+    fn deinit(self: *LocalIssueSnapshot) void {
+        self.allocator.free(self.title);
+        self.allocator.free(self.body);
+        self.allocator.free(self.state);
+        self.allocator.free(self.milestone);
+        git.freeStringList(self.allocator, self.labels);
+        git.freeStringList(self.allocator, self.assignees);
+    }
+};
+
+const LocalPullSnapshot = struct {
+    allocator: Allocator,
+    title: []u8,
+    body: []u8,
+    state: []u8,
+    base_ref: []u8,
+    head_ref: []u8,
+    merge_oid: []u8,
+    labels: [][]u8,
+    assignees: [][]u8,
+    reviewers: [][]u8,
+
+    fn deinit(self: *LocalPullSnapshot) void {
+        self.allocator.free(self.title);
+        self.allocator.free(self.body);
+        self.allocator.free(self.state);
+        self.allocator.free(self.base_ref);
+        self.allocator.free(self.head_ref);
+        self.allocator.free(self.merge_oid);
+        git.freeStringList(self.allocator, self.labels);
+        git.freeStringList(self.allocator, self.assignees);
+        git.freeStringList(self.allocator, self.reviewers);
+    }
+};
+
+const StringListDiff = struct {
+    allocator: Allocator,
+    added: [][]u8,
+    removed: [][]u8,
+
+    fn deinit(self: *StringListDiff) void {
+        git.freeStringList(self.allocator, self.added);
+        git.freeStringList(self.allocator, self.removed);
+    }
+};
+
+fn syncExistingIssueObject(
+    allocator: Allocator,
+    writer: *EventWriter,
+    repo: repo_mod.Repo,
+    issue_id: []const u8,
+    issue: std.json.ObjectMap,
+) !void {
+    try index.ensureIndex(allocator, repo);
+    var db = try index.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    var current = (try localIssueSnapshot(allocator, &db, issue_id)) orelse return;
+    defer current.deinit();
+
+    const title = try githubSizedString(allocator, event_mod.jsonString(issue.get("title")), "(untitled)", git.max_payload_title_bytes);
+    defer allocator.free(title);
+    const body = try githubSizedString(allocator, event_mod.jsonString(issue.get("body")), "", git.max_payload_text_bytes);
+    defer allocator.free(body);
+    const state = event_mod.jsonString(issue.get("state")) orelse "open";
+    const milestone = try githubSizedString(allocator, githubMilestoneTitle(issue), "", git.max_payload_atom_bytes);
+    defer allocator.free(milestone);
+    const labels = try githubIssueLabels(allocator, issue);
+    defer git.freeStringList(allocator, labels);
+    const assignees = try githubNamedArray(allocator, issue.get("assignees"), "login");
+    defer git.freeStringList(allocator, assignees);
+    var label_diff = try diffStringLists(allocator, labels, current.labels);
+    defer label_diff.deinit();
+    var assignee_diff = try diffStringLists(allocator, assignees, current.assignees);
+    defer assignee_diff.deinit();
+
+    const update = event_mod.IssueUpdate{
+        .title = if (!std.mem.eql(u8, title, current.title)) title else null,
+        .body = if (!std.mem.eql(u8, body, current.body)) body else null,
+        .state = if (!std.mem.eql(u8, state, current.state)) state else null,
+        .milestone = if (!std.mem.eql(u8, milestone, current.milestone)) milestone else null,
+        .labels_added = label_diff.added,
+        .labels_removed = label_diff.removed,
+        .assignees_added = assignee_diff.added,
+        .assignees_removed = assignee_diff.removed,
+    };
+    if (!update.hasChanges()) return;
+
+    const occurred_at = try githubTimestampOrNow(allocator, firstJsonValue(issue.get("updated_at"), issue.get("created_at")));
+    defer allocator.free(occurred_at);
+    try writeImportedIssueUpdated(allocator, writer, issue_id, occurred_at, update);
+}
+
+fn syncExistingPullObject(
+    allocator: Allocator,
+    writer: *EventWriter,
+    repo: repo_mod.Repo,
+    pull_id: []const u8,
+    pull: std.json.ObjectMap,
+) !void {
+    try index.ensureIndex(allocator, repo);
+    var db = try index.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    var current = (try localPullSnapshot(allocator, &db, pull_id)) orelse return;
+    defer current.deinit();
+
+    const title = try githubSizedString(allocator, event_mod.jsonString(pull.get("title")), "(untitled)", git.max_payload_title_bytes);
+    defer allocator.free(title);
+    const body = try githubSizedString(allocator, event_mod.jsonString(pull.get("body")), "", git.max_payload_text_bytes);
+    defer allocator.free(body);
+    const base_ref = try githubSizedString(allocator, nestedString(pull, "base", "ref"), "main", git.max_payload_ref_bytes);
+    defer allocator.free(base_ref);
+    const head_ref = try githubSizedString(allocator, nestedString(pull, "head", "ref"), "unknown", git.max_payload_ref_bytes);
+    defer allocator.free(head_ref);
+    const labels = try githubIssueLabels(allocator, pull);
+    defer git.freeStringList(allocator, labels);
+    const assignees = try githubNamedArray(allocator, pull.get("assignees"), "login");
+    defer git.freeStringList(allocator, assignees);
+    const reviewers = try githubPullReviewers(allocator, pull);
+    defer git.freeStringList(allocator, reviewers);
+    var label_diff = try diffStringLists(allocator, labels, current.labels);
+    defer label_diff.deinit();
+    var assignee_diff = try diffStringLists(allocator, assignees, current.assignees);
+    defer assignee_diff.deinit();
+    var reviewer_diff = try diffStringLists(allocator, reviewers, current.reviewers);
+    defer reviewer_diff.deinit();
+
+    const github_state = event_mod.jsonString(pull.get("state")) orelse "open";
+    const merged_at = event_mod.jsonString(pull.get("merged_at")) orelse "";
+    const merge_oid = event_mod.jsonString(pull.get("merge_commit_sha")) orelse "";
+    if (std.mem.eql(u8, github_state, "closed") and merged_at.len != 0 and
+        (!std.mem.eql(u8, current.state, "merged") or (merge_oid.len != 0 and !std.mem.eql(u8, current.merge_oid, merge_oid))))
+    {
+        try writeImportedPullMerged(allocator, writer, pull_id, merged_at, merge_oid, null);
+    }
+
+    const desired_state: ?[]const u8 = if (std.mem.eql(u8, github_state, "closed") and merged_at.len == 0)
+        "closed"
+    else if (std.mem.eql(u8, github_state, "open"))
+        "open"
+    else
+        null;
+
+    const update = event_mod.PullUpdate{
+        .title = if (!std.mem.eql(u8, title, current.title)) title else null,
+        .body = if (!std.mem.eql(u8, body, current.body)) body else null,
+        .state = if (desired_state) |state| if (!std.mem.eql(u8, state, current.state)) state else null else null,
+        .base_ref = if (!std.mem.eql(u8, base_ref, current.base_ref)) base_ref else null,
+        .head_ref = if (!std.mem.eql(u8, head_ref, current.head_ref)) head_ref else null,
+        .labels_added = label_diff.added,
+        .labels_removed = label_diff.removed,
+        .assignees_added = assignee_diff.added,
+        .assignees_removed = assignee_diff.removed,
+        .reviewers_added = reviewer_diff.added,
+        .reviewers_removed = reviewer_diff.removed,
+    };
+    if (!update.hasChanges()) return;
+
+    const occurred_at = try githubTimestampOrNow(allocator, firstJsonValue(pull.get("updated_at"), pull.get("created_at")));
+    defer allocator.free(occurred_at);
+    try writeImportedPullUpdated(allocator, writer, pull_id, occurred_at, update);
+}
+
+fn localIssueSnapshot(allocator: Allocator, db: *index.SqliteDb, issue_id: []const u8) !?LocalIssueSnapshot {
+    var stmt = try db.prepare(
+        \\SELECT i.title, i.body, i.state, COALESCE(m.milestone, '')
+        \\FROM issues i
+        \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
+        \\WHERE i.id = ?
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    if (!(try stmt.step())) return null;
+    const title = try stmt.columnTextDup(allocator, 0);
+    errdefer allocator.free(title);
+    const body = try stmt.columnTextDup(allocator, 1);
+    errdefer allocator.free(body);
+    const state = try stmt.columnTextDup(allocator, 2);
+    errdefer allocator.free(state);
+    const milestone = try stmt.columnTextDup(allocator, 3);
+    errdefer allocator.free(milestone);
+    const labels = try queryStringList(allocator, db, "SELECT DISTINCT label FROM issue_labels WHERE issue_id = ? ORDER BY label", issue_id);
+    errdefer git.freeStringList(allocator, labels);
+    const assignees = try queryStringList(allocator, db, "SELECT DISTINCT assignee FROM issue_assignees WHERE issue_id = ? ORDER BY assignee", issue_id);
+    errdefer git.freeStringList(allocator, assignees);
+    return .{
+        .allocator = allocator,
+        .title = title,
+        .body = body,
+        .state = state,
+        .milestone = milestone,
+        .labels = labels,
+        .assignees = assignees,
+    };
+}
+
+fn localPullSnapshot(allocator: Allocator, db: *index.SqliteDb, pull_id: []const u8) !?LocalPullSnapshot {
+    var stmt = try db.prepare(
+        \\SELECT title, body, state, base_ref, head_ref, merge_oid
+        \\FROM pulls
+        \\WHERE id = ?
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, pull_id);
+    if (!(try stmt.step())) return null;
+    const title = try stmt.columnTextDup(allocator, 0);
+    errdefer allocator.free(title);
+    const body = try stmt.columnTextDup(allocator, 1);
+    errdefer allocator.free(body);
+    const state = try stmt.columnTextDup(allocator, 2);
+    errdefer allocator.free(state);
+    const base_ref = try stmt.columnTextDup(allocator, 3);
+    errdefer allocator.free(base_ref);
+    const head_ref = try stmt.columnTextDup(allocator, 4);
+    errdefer allocator.free(head_ref);
+    const merge_oid = try stmt.columnTextDup(allocator, 5);
+    errdefer allocator.free(merge_oid);
+    const labels = try queryStringList(allocator, db, "SELECT DISTINCT label FROM pull_labels WHERE pull_id = ? ORDER BY label", pull_id);
+    errdefer git.freeStringList(allocator, labels);
+    const assignees = try queryStringList(allocator, db, "SELECT DISTINCT assignee FROM pull_assignees WHERE pull_id = ? ORDER BY assignee", pull_id);
+    errdefer git.freeStringList(allocator, assignees);
+    const reviewers = try queryStringList(allocator, db, "SELECT DISTINCT reviewer FROM pull_reviewers WHERE pull_id = ? ORDER BY reviewer", pull_id);
+    errdefer git.freeStringList(allocator, reviewers);
+    return .{
+        .allocator = allocator,
+        .title = title,
+        .body = body,
+        .state = state,
+        .base_ref = base_ref,
+        .head_ref = head_ref,
+        .merge_oid = merge_oid,
+        .labels = labels,
+        .assignees = assignees,
+        .reviewers = reviewers,
+    };
+}
+
+fn queryStringList(allocator: Allocator, db: *index.SqliteDb, comptime sql_text: []const u8, object_id: []const u8) ![][]u8 {
+    var stmt = try db.prepare(sql_text);
+    defer stmt.deinit();
+    try stmt.bindText(1, object_id);
+    var list: std.ArrayList([]u8) = .empty;
+    errdefer git.freeStringList(allocator, list.items);
+    while (try stmt.step()) {
+        try list.append(allocator, try stmt.columnTextDup(allocator, 0));
+    }
+    return try list.toOwnedSlice(allocator);
+}
+
+fn diffStringLists(allocator: Allocator, desired: []const []const u8, current: []const []const u8) !StringListDiff {
+    var added: std.ArrayList([]u8) = .empty;
+    errdefer git.freeStringList(allocator, added.items);
+    var removed: std.ArrayList([]u8) = .empty;
+    errdefer git.freeStringList(allocator, removed.items);
+
+    for (desired) |value| {
+        if (value.len == 0) continue;
+        if (!containsString(current, value)) {
+            try added.append(allocator, try allocator.dupe(u8, value));
+        }
+    }
+    for (current) |value| {
+        if (value.len == 0) continue;
+        if (!containsString(desired, value)) {
+            try removed.append(allocator, try allocator.dupe(u8, value));
+        }
+    }
+    return .{
+        .allocator = allocator,
+        .added = try added.toOwnedSlice(allocator),
+        .removed = try removed.toOwnedSlice(allocator),
+    };
+}
+
+fn containsString(values: []const []const u8, needle: []const u8) bool {
+    for (values) |value| {
+        if (std.mem.eql(u8, value, needle)) return true;
+    }
+    return false;
 }
 
 fn shouldFetchApiComments(comment_count: ?u64) bool {
@@ -949,6 +1345,48 @@ fn writeImportedStringEvent(
     var object_ref_buf: [util.short_object_ref_len]u8 = undefined;
     const object_ref = util.shortObjectRef(&object_ref_buf, object_id);
     const subject = try std.fmt.allocPrint(allocator, "{s} #{s}", .{ event_type, object_ref });
+    defer allocator.free(subject);
+    const commit = try writer.stage("gt github import", subject, body);
+    allocator.free(commit);
+}
+
+fn writeImportedIssueUpdated(
+    allocator: Allocator,
+    writer: *EventWriter,
+    issue_id: []const u8,
+    occurred_at: []const u8,
+    update: event_mod.IssueUpdate,
+) !void {
+    const event_uuid = try util.newUuidV7(allocator);
+    defer allocator.free(event_uuid);
+    const idem = try util.newUuidV7(allocator);
+    defer allocator.free(idem);
+    const body = try event_mod.buildIssueUpdatedJson(allocator, writer.cfg, writer.nextSeq(), issue_id, event_uuid, idem, occurred_at, writer.stagedEventParents(), update);
+    defer allocator.free(body);
+    var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const issue_ref = util.shortObjectRef(&issue_ref_buf, issue_id);
+    const subject = try std.fmt.allocPrint(allocator, "issue.updated #{s} GitHub sync", .{issue_ref});
+    defer allocator.free(subject);
+    const commit = try writer.stage("gt github import", subject, body);
+    allocator.free(commit);
+}
+
+fn writeImportedPullUpdated(
+    allocator: Allocator,
+    writer: *EventWriter,
+    pull_id: []const u8,
+    occurred_at: []const u8,
+    update: event_mod.PullUpdate,
+) !void {
+    const event_uuid = try util.newUuidV7(allocator);
+    defer allocator.free(event_uuid);
+    const idem = try util.newUuidV7(allocator);
+    defer allocator.free(idem);
+    const body = try event_mod.buildPullUpdatedJson(allocator, writer.cfg, writer.nextSeq(), pull_id, event_uuid, idem, occurred_at, writer.stagedEventParents(), update);
+    defer allocator.free(body);
+    var pull_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const pull_ref = util.shortObjectRef(&pull_ref_buf, pull_id);
+    const subject = try std.fmt.allocPrint(allocator, "pull.updated #{s} GitHub sync", .{pull_ref});
     defer allocator.free(subject);
     const commit = try writer.stage("gt github import", subject, body);
     allocator.free(commit);

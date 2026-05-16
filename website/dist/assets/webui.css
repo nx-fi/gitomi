@@ -4372,6 +4372,33 @@ main.page-projects:has(.project-detail-panel) {
   margin-top: 2px;
   color: var(--muted);
 }
+.project-roadmap-date-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: end;
+  margin-top: 8px;
+}
+.project-roadmap-date-form label {
+  display: grid;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+.project-roadmap-date-form input {
+  min-width: 128px;
+  min-height: 30px;
+  padding: 4px 7px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.project-roadmap-date-form .button {
+  min-height: 30px;
+  padding: 4px 10px;
+}
 .kanban-board {
   display: grid;
   grid-auto-columns: minmax(288px, 1fr);

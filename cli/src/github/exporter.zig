@@ -32,13 +32,24 @@ const singleArrayBody = common.singleArrayBody;
 const parseResponseNumber = common.parseResponseNumber;
 const legacyNumber = common.legacyNumber;
 
-const ExportOptions = struct {
+pub const ExportOptions = struct {
     repo: RepoSlug,
     api_url: []const u8 = default_api_url,
     token_arg: ?[]const u8 = null,
     dry_run: bool = false,
     map_file: ?[]const u8 = null,
     reuse_legacy: bool = false,
+    use_gh: bool = false,
+    after_ordinal: i64 = 0,
+    skip_actor_principal: ?[]const u8 = null,
+    skip_actor_device: ?[]const u8 = null,
+    quiet: bool = false,
+};
+
+pub const ExportResult = struct {
+    scanned: usize = 0,
+    exported: usize = 0,
+    max_ordinal: i64 = 0,
 };
 
 pub fn cmdExport(allocator: Allocator, args: []const []const u8) !void {
@@ -48,6 +59,7 @@ pub fn cmdExport(allocator: Allocator, args: []const []const u8) !void {
     var dry_run = false;
     var map_file_arg: ?[]const u8 = null;
     var reuse_legacy = false;
+    var use_gh = false;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -64,6 +76,8 @@ pub fn cmdExport(allocator: Allocator, args: []const []const u8) !void {
             map_file_arg = try util.requireValue(args, &i, "--map-file");
         } else if (std.mem.eql(u8, arg, "--reuse-legacy")) {
             reuse_legacy = true;
+        } else if (std.mem.eql(u8, arg, "--use-gh")) {
+            use_gh = true;
         } else {
             try eprint("gt github export: unknown option '{s}'\n", .{arg});
             return CliError.UserError;
@@ -81,8 +95,8 @@ pub fn cmdExport(allocator: Allocator, args: []const []const u8) !void {
         token_owned = githubTokenFromEnv(allocator) catch null;
         break :blk token_owned;
     };
-    if (!dry_run and token == null) {
-        try eprint("gt github export: --token or GITHUB_TOKEN is required unless --dry-run is used\n", .{});
+    if (!dry_run and token == null and !use_gh) {
+        try eprint("gt github export: --token, GITHUB_TOKEN, or --use-gh is required unless --dry-run is used\n", .{});
         return CliError.MissingArgument;
     }
 
@@ -93,8 +107,9 @@ pub fn cmdExport(allocator: Allocator, args: []const []const u8) !void {
         .dry_run = dry_run,
         .map_file = map_file_arg,
         .reuse_legacy = reuse_legacy,
+        .use_gh = use_gh,
     };
-    try exportToGithub(allocator, options);
+    _ = try exportToGithub(allocator, options);
 }
 
 const MappingStore = struct {
@@ -207,7 +222,7 @@ fn mapKey(allocator: Allocator, kind: []const u8, id: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}\x1f{s}", .{ kind, id });
 }
 
-fn exportToGithub(allocator: Allocator, options: ExportOptions) !void {
+pub fn exportToGithub(allocator: Allocator, options: ExportOptions) !ExportResult {
     var repo = try repo_mod.discoverRepo(allocator);
     defer repo.deinit();
     try index.ensureIndex(allocator, repo);
@@ -222,35 +237,58 @@ fn exportToGithub(allocator: Allocator, options: ExportOptions) !void {
         .repo = options.repo,
         .token = options.token_arg,
         .dry_run = options.dry_run,
+        .use_gh = options.use_gh,
     };
 
     var db = try index.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
     var stmt = try db.prepare(
-        \\SELECT event_type, object_kind, object_id, body
+        \\SELECT ordinal, event_type, object_kind, object_id, actor_principal, actor_device, body
         \\FROM events
         \\WHERE domain_status = 'accepted'
         \\  AND (event_type LIKE 'issue.%' OR event_type LIKE 'pull.%' OR event_type LIKE 'comment.%')
+        \\  AND ordinal > ?
         \\ORDER BY ordinal
     );
     defer stmt.deinit();
+    try stmt.bindInt64(1, options.after_ordinal);
 
-    var exported: usize = 0;
+    var result = ExportResult{};
     while (try stmt.step()) {
-        const event_type = try stmt.columnTextDup(allocator, 0);
+        const ordinal = stmt.columnInt64(0);
+        if (ordinal > result.max_ordinal) result.max_ordinal = ordinal;
+        result.scanned += 1;
+
+        const event_type = try stmt.columnTextDup(allocator, 1);
         defer allocator.free(event_type);
-        const object_kind = try stmt.columnTextDup(allocator, 1);
+        const object_kind = try stmt.columnTextDup(allocator, 2);
         defer allocator.free(object_kind);
-        const object_id = try stmt.columnTextDup(allocator, 2);
+        const object_id = try stmt.columnTextDup(allocator, 3);
         defer allocator.free(object_id);
-        const body = try stmt.columnTextDup(allocator, 3);
+        const actor_principal = try stmt.columnTextDup(allocator, 4);
+        defer allocator.free(actor_principal);
+        const actor_device = try stmt.columnTextDup(allocator, 5);
+        defer allocator.free(actor_device);
+        const body = try stmt.columnTextDup(allocator, 6);
         defer allocator.free(body);
+
+        if (options.skip_actor_principal) |principal| {
+            if (std.mem.eql(u8, actor_principal, principal)) {
+                if (options.skip_actor_device == null or std.mem.eql(u8, actor_device, options.skip_actor_device.?)) {
+                    continue;
+                }
+            }
+        }
+
         if (try exportEvent(allocator, client, &mappings, options, event_type, object_kind, object_id, body)) {
-            exported += 1;
+            result.exported += 1;
         }
     }
 
-    try out("github export: replayed {d} event{s}\n", .{ exported, if (exported == 1) "" else "s" });
+    if (!options.quiet) {
+        try out("github export: replayed {d} event{s}\n", .{ result.exported, if (result.exported == 1) "" else "s" });
+    }
+    return result;
 }
 
 fn exportEvent(

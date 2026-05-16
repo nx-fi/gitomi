@@ -30,12 +30,26 @@
   </div>
 
   <main id="top" class="site-main">
+    <svg class="flow-line" viewBox="0 0 1440 4300" preserveAspectRatio="none" aria-hidden="true">
+      <defs>
+        <linearGradient id="flow-line-gradient" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#70ffa6" stop-opacity="0"></stop>
+          <stop offset="0.12" stop-color="#70ffa6" stop-opacity="0.44"></stop>
+          <stop offset="0.5" stop-color="#64d7ff" stop-opacity="0.34"></stop>
+          <stop offset="0.78" stop-color="#ffd166" stop-opacity="0.36"></stop>
+          <stop offset="1" stop-color="#70ffa6" stop-opacity="0"></stop>
+        </linearGradient>
+      </defs>
+      <path d="M 720 650 C 620 770 530 880 505 1060 C 475 1200 500 1360 515 1525 C 535 1715 520 1885 505 2025 C 490 2225 650 2365 840 2495 C 975 2595 930 2820 835 3045 C 755 3235 805 3395 895 3555 C 975 3705 820 3900 610 4110"></path>
+    </svg>
     <section class="hero-section" aria-labelledby="hero-title">
       <div class="hero-copy">
-        <a class="hero-brand" href="#top" aria-label="Gitomi home">
-          <img src="./assets/logo.svg" alt="" width="47" height="32">
-          <span>Gitomi</span>
-        </a>
+        <div class="brand-slot" data-brand-slot>
+          <a class="hero-brand" href="#top" aria-label="Gitomi home" data-floating-brand>
+            <img src="./assets/logo.svg" alt="" width="54" height="37">
+            <span>Gitomi</span>
+          </a>
+        </div>
         <p class="pain-line">Open source, free forever.</p>
         <h1 id="hero-title">
           <span class="hero-title-line"><span class="hero-title-prefix">Own your </span><span class="hero-word-frame"><span class="hero-rotator" data-typewriter data-words="project|tasks|workflows|collaboration">project</span><span class="hero-title-caret" aria-hidden="true"></span><span class="hero-comma">,</span></span></span>
@@ -56,13 +70,13 @@
       </div>
 
       <div class="hero-stage" aria-hidden="true">
-        <div class="repo-card parallax-layer" data-parallax data-depth="-8">
+        <div class="repo-card">
           <span class="button-icon icon-branch" aria-hidden="true"></span>
           <strong>refs/gitomi/*</strong>
           <small>signed project history</small>
         </div>
         
-    <div class="browser-shot parallax-layer" data-parallax data-depth="16">
+    <div class="browser-shot">
       <div class="shot-chrome">
         <span class="window-dot red"></span>
         <span class="window-dot amber"></span>
@@ -127,7 +141,7 @@
       <div class="click-cursor" aria-hidden="true"><span></span></div>
     </div>
   
-        <div class="terminal-shot parallax-layer" data-parallax data-depth="22">
+        <div class="terminal-shot">
           <div class="terminal-head">
             <span></span>
             <strong>alice@repo</strong>
@@ -145,7 +159,7 @@
         <h2>All project data lives in Git.</h2>
         <p>Issues, pull requests, comments, milestones, project Kanban, workflow runs, and agent activity are stored as Git-backed project history. Your repo becomes the source of truth for both code and collaboration.</p>
       </div>
-      <div class="repo-proof parallax-layer" data-parallax data-depth="10" aria-label="Repository ref layout">
+      <div class="repo-proof" aria-label="Repository ref layout">
         <div class="repo-window">
           <div class="repo-window-head">
             <span class="window-dot red"></span>
@@ -194,7 +208,7 @@
         <h2>Use any Git host, or host it yourself.</h2>
         <p>Gitomi syncs through ordinary Git. Use an existing Git service, a private remote, a mirror, or a fully local setup. If Git can fetch and push, your project workflow can move with it.</p>
       </div>
-      <div class="sync-map parallax-layer" data-parallax data-depth="7" aria-hidden="true">
+      <div class="sync-map" aria-hidden="true">
         <div class="sync-terminal">
           <div class="terminal-head">
             <span></span>
@@ -249,7 +263,7 @@
         <p>Open issues, review pull requests, move cards, inspect workflow results, and continue working from your local clone. Reconnect when you are ready. Gitomi syncs project state through Git.</p>
       </div>
       <div class="offline-lab" aria-hidden="true">
-        <article class="device-panel parallax-layer" data-parallax data-depth="14">
+        <article class="device-panel">
           <div class="device-head">
             <span></span>
             <strong>offline laptop</strong>
@@ -261,7 +275,7 @@
             <li><b>RUN</b><span>Inspect workflow result</span><small>local</small></li>
           </ul>
         </article>
-        <article class="device-panel is-online parallax-layer" data-parallax data-depth="-10">
+        <article class="device-panel is-online">
           <div class="device-head">
             <span></span>
             <strong>team catches up</strong>
@@ -284,7 +298,7 @@
         <h2>Built for agents, not just humans.</h2>
         <p>Agent work should be reviewable, traceable, and part of the project record. Gitomi gives agents a native workflow: tasks, permissions, traces, outputs, and durable results tied to your repository.</p>
       </div>
-      <div class="agent-console parallax-layer" data-parallax data-depth="12" aria-hidden="true">
+      <div class="agent-console" aria-hidden="true">
         <div class="console-title">
           <span class="button-icon icon-workflow"></span>
           <strong>agent-run/issue-128</strong>
@@ -305,7 +319,7 @@
         <h2>Replace the platform. Keep the workflow.</h2>
         <p>Use the familiar model: issues, pull requests, comments, labels, milestones, boards, workflows, and a local web UI. The difference is that your team owns the data, the workflow, and the history.</p>
       </div>
-      <div class="workflow-grid parallax-layer" data-parallax data-depth="9">
+      <div class="workflow-grid">
         <article>
           <span class="button-icon icon-issues" aria-hidden="true"></span>
           <strong>Issues and comments</strong>
