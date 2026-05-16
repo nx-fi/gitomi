@@ -976,7 +976,10 @@ fn loadSnapshotCandidate(
         }
     }
 
-    index_sqlite.deleteSidecarFiles(allocator, repo.index_path);
+    if (!(try prepareIndexPathForReplacement(allocator, repo.index_path))) {
+        allocator.free(covered_refs_raw);
+        return null;
+    }
     try std.fs.cwd().rename(tmp_path, repo.index_path);
     index_sqlite.deleteSidecarFiles(allocator, repo.index_path);
     return .{
@@ -1063,6 +1066,22 @@ fn writeFileBytes(path: []const u8, bytes: []const u8) !void {
     var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
     defer file.close();
     try file.writeAll(bytes);
+}
+
+fn prepareIndexPathForReplacement(allocator: Allocator, path: []const u8) !bool {
+    if (!fileExists(path)) {
+        index_sqlite.deleteSidecarFiles(allocator, path);
+        return true;
+    }
+
+    {
+        var db = SqliteDb.openWithOptions(allocator, path, sqlite.SQLITE_OPEN_READWRITE, true, .{ .enable_wal = false }) catch return false;
+        defer db.deinit();
+        db.checkpointWal() catch return false;
+        db.exec("PRAGMA journal_mode=DELETE") catch return false;
+    }
+    index_sqlite.deleteSidecarFiles(allocator, path);
+    return true;
 }
 
 fn standaloneIndexBytes(allocator: Allocator, repo: Repo, limits: SnapshotLimits) ![]u8 {

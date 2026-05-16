@@ -76,7 +76,7 @@ const exact_routes = [_]Route{
     .{ .method = "GET", .path = "/code.js", .handler = handleCodeJs },
     .{ .method = "GET", .path = "/projects.js", .handler = handleProjectsJs },
     .{ .method = "GET", .path = "/markdown.js", .handler = handleMarkdownJs },
-    .{ .method = "GET", .path = "/vendor/hljs/all-languages.js", .handler = handleHighlightAllJs },
+    .{ .method = "GET", .path = "/vendor/hljs/all-languages.min.js", .handler = handleHighlightAllJs },
     .{ .method = "GET", .path = "/highlight/zig.js", .handler = handleHighlightZigJs },
     .{ .method = "GET", .path = "/highlight/solidity.js", .handler = handleHighlightSolidityJs },
     .{ .method = "GET", .path = "/highlight/tla.js", .handler = handleHighlightTlaJs },
@@ -895,13 +895,13 @@ const tree_js = @embedFile("web/tree.js");
 const code_js = @embedFile("web/code.js");
 const projects_js = @embedFile("web/projects.js");
 const markdown_js = @embedFile("web/markdown.js");
-const marked_js = @embedFile("web/vendor/marked/marked.umd.js");
+const marked_js = @embedFile("web/vendor/marked/marked.umd.min.js");
 const dompurify_js = @embedFile("web/vendor/dompurify/purify.min.js");
 const katex_js = @embedFile("web/vendor/katex/katex.min.js");
 const katex_auto_render_js = @embedFile("web/vendor/katex/auto-render.min.js");
 const katex_css = @embedFile("web/vendor/katex/katex.min.css");
 const mermaid_js = @embedFile("web/vendor/mermaid/mermaid.min.js");
-const highlight_js = @embedFile("web/vendor/hljs/all-languages.js");
+const highlight_js = @embedFile("web/vendor/hljs/all-languages.min.js");
 const highlight_zig_js = @embedFile("web/highlight/zig.js");
 const solidity_js = @embedFile("web/highlight/solidity.js");
 const tla_js = @embedFile("web/highlight/tla.js");
@@ -933,7 +933,7 @@ fn vendorAsset(
 }
 
 const vendor_assets = [_]VendorAsset{
-    textVendorAsset("/vendor/marked/marked.umd.js", "application/javascript", marked_js),
+    textVendorAsset("/vendor/marked/marked.umd.min.js", "application/javascript", marked_js),
     textVendorAsset("/vendor/dompurify/purify.min.js", "application/javascript", dompurify_js),
     textVendorAsset("/vendor/katex/katex.min.js", "application/javascript", katex_js),
     textVendorAsset("/vendor/katex/auto-render.min.js", "application/javascript", katex_auto_render_js),
@@ -991,7 +991,7 @@ test "web request parser accepts byte ranges" {
 
 test "web request parser accepts cache validators" {
     const raw =
-        "GET /vendor/marked/marked.umd.js HTTP/1.1\r\n" ++
+        "GET /vendor/marked/marked.umd.min.js HTTP/1.1\r\n" ++
         "Host: 127.0.0.1\r\n" ++
         "If-None-Match: \"asset-etag\"\r\n" ++
         "\r\n";
@@ -999,6 +999,20 @@ test "web request parser accepts cache validators" {
     try std.testing.expectEqualStrings("GET", request.method);
     try std.testing.expect(request.if_none_match != null);
     try std.testing.expectEqualStrings("\"asset-etag\"", request.if_none_match.?);
+}
+
+test "web vendor javascript assets use minified filenames" {
+    for (vendor_assets) |asset| {
+        if (std.mem.eql(u8, asset.content_type, "application/javascript")) {
+            try expectVendorJavascriptMinifiedPath(asset.path);
+        }
+    }
+    try expectVendorJavascriptMinifiedPath("/vendor/hljs/all-languages.min.js");
+}
+
+fn expectVendorJavascriptMinifiedPath(path: []const u8) !void {
+    try std.testing.expect(std.mem.startsWith(u8, path, "/vendor/"));
+    try std.testing.expect(std.mem.endsWith(u8, path, ".min.js"));
 }
 
 test "web static asset etag matcher handles lists and weak tags" {
