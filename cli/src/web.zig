@@ -26,6 +26,8 @@ const eprint = io.eprint;
 const max_http_request = 10 * 1024 * 1024;
 const default_worker_count = 8;
 const default_port_attempt_limit = 128;
+const csrf_token_bytes = 32;
+
 pub const default_host = "127.0.0.1";
 pub const default_port = 12655;
 
@@ -55,6 +57,7 @@ const WebContext = struct {
     repo: Repo,
     stream: std.net.Stream,
     request: HttpRequest,
+    csrf_token: *const [csrf_token_bytes * 2]u8,
 };
 
 const RouteHandler = *const fn (WebContext) anyerror!void;
@@ -133,10 +136,12 @@ pub fn serve(allocator: Allocator, repo: Repo, options: Options) !void {
         try out("Press Ctrl-C to stop.\n", .{});
     }
 
+    const csrf_token = makeCsrfToken();
+
     if (options.once) {
         const connection = try server.accept();
         defer connection.stream.close();
-        try handleWebConnectionLogged(allocator, repo, connection.stream);
+        try handleWebConnectionLogged(allocator, repo, connection.stream, &csrf_token);
         return;
     }
 
@@ -154,12 +159,18 @@ pub fn serve(allocator: Allocator, repo: Repo, options: Options) !void {
             permits.post();
             return err;
         };
-        pool.spawn(handleWebConnectionTask, .{ allocator, repo, connection, &permits }) catch |err| {
+        pool.spawn(handleWebConnectionTask, .{ allocator, repo, connection, &permits, &csrf_token }) catch |err| {
             connection.stream.close();
             permits.post();
             return err;
         };
     }
+}
+
+fn makeCsrfToken() [csrf_token_bytes * 2]u8 {
+    var bytes: [csrf_token_bytes]u8 = undefined;
+    std.crypto.random.bytes(&bytes);
+    return std.fmt.bytesToHex(bytes, .lower);
 }
 
 fn listenWeb(bind_host: []const u8, options: Options) !std.net.Server {
@@ -190,14 +201,14 @@ fn listenWeb(bind_host: []const u8, options: Options) !std.net.Server {
     }
 }
 
-fn handleWebConnectionTask(allocator: Allocator, repo: Repo, connection: std.net.Server.Connection, permits: *std.Thread.Semaphore) void {
+fn handleWebConnectionTask(allocator: Allocator, repo: Repo, connection: std.net.Server.Connection, permits: *std.Thread.Semaphore, csrf_token: *const [csrf_token_bytes * 2]u8) void {
     defer permits.post();
     defer connection.stream.close();
-    handleWebConnectionLogged(allocator, repo, connection.stream) catch {};
+    handleWebConnectionLogged(allocator, repo, connection.stream, csrf_token) catch {};
 }
 
-fn handleWebConnectionLogged(allocator: Allocator, repo: Repo, stream: std.net.Stream) !void {
-    handleWebConnection(allocator, repo, stream) catch |err| {
+fn handleWebConnectionLogged(allocator: Allocator, repo: Repo, stream: std.net.Stream, csrf_token: *const [csrf_token_bytes * 2]u8) !void {
+    handleWebConnection(allocator, repo, stream, csrf_token) catch |err| {
         if (isClientDisconnect(err)) return;
         try eprint("gt web: request failed: {s}\n", .{@errorName(err)});
     };
@@ -209,7 +220,7 @@ fn isClientDisconnect(err: anyerror) bool {
         err == error.ConnectionTimedOut;
 }
 
-pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Stream) !void {
+pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Stream, csrf_token: *const [csrf_token_bytes * 2]u8) !void {
     const raw = readHttpRequest(allocator, stream) catch {
         try shared.sendPlainResponse(allocator, stream, 400, "Bad Request", "Bad request\n");
         return;
@@ -226,6 +237,7 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         .repo = repo,
         .stream = stream,
         .request = request,
+        .csrf_token = csrf_token,
     };
 
     if (try dispatchExactRoute(ctx)) return;
@@ -564,7 +576,7 @@ fn handleMilestonePost(ctx: WebContext) !void {
 }
 
 fn handleAccessPage(ctx: WebContext) !void {
-    try sendOwnedHtml(ctx, try access_page.renderAccessPage(ctx.allocator, ctx.repo));
+    try sendOwnedHtml(ctx, try access_page.renderAccessPage(ctx.allocator, ctx.repo, ctx.csrf_token[0..]));
 }
 
 fn handleSettingsPage(ctx: WebContext) !void {
@@ -580,11 +592,11 @@ fn handleLabelsPost(ctx: WebContext) !void {
 }
 
 fn handleAccessRolePost(ctx: WebContext) !void {
-    try access_page.handleAccessRolePost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
+    try access_page.handleAccessRolePost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body, ctx.csrf_token[0..]);
 }
 
 fn handleAccessDevicePost(ctx: WebContext) !void {
-    try access_page.handleAccessDevicePost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
+    try access_page.handleAccessDevicePost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body, ctx.csrf_token[0..]);
 }
 
 fn handleActionsPage(ctx: WebContext) !void {
