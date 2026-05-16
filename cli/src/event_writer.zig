@@ -18,6 +18,7 @@ pub const EventWriter = struct {
     inbox_ref: []u8,
     prepared_parents: git.PreparedEventParents,
     related_heads: [][]u8,
+    staged_head: ?[]u8 = null,
     persist_config: bool,
 
     pub fn init(allocator: Allocator, command_context: []const u8) !EventWriter {
@@ -103,6 +104,7 @@ pub const EventWriter = struct {
     }
 
     pub fn deinit(self: *EventWriter) void {
+        if (self.staged_head) |head| self.allocator.free(head);
         git.freeStringList(self.allocator, self.related_heads);
         self.prepared_parents.deinit();
         self.allocator.free(self.inbox_ref);
@@ -121,6 +123,18 @@ pub const EventWriter = struct {
             .causal = self.prepared_parents.causal_heads,
             .related = self.related_heads,
         };
+    }
+
+    pub fn stagedEventParents(self: *const EventWriter) event_mod.EventParents {
+        if (self.staged_head) |head| {
+            return .{
+                .log = head,
+                .anchor = null,
+                .causal = &.{},
+                .related = self.related_heads,
+            };
+        }
+        return self.eventParents();
     }
 
     pub fn write(self: *EventWriter, command_context: []const u8, subject: []const u8, event_body: []const u8) ![]u8 {
@@ -143,6 +157,40 @@ pub const EventWriter = struct {
             try repo_mod.writeConfig(self.repo.config_path, self.cfg);
         }
         return commit_oid;
+    }
+
+    pub fn stage(self: *EventWriter, command_context: []const u8, subject: []const u8, event_body: []const u8) ![]u8 {
+        const committed_seq = self.nextSeq();
+        try index.requireAuthorizedWrite(self.allocator, self.repo, event_body);
+
+        const parent_head = self.staged_head orelse self.prepared_parents.old_head;
+        const anchor = if (self.staged_head == null) self.prepared_parents.anchor else null;
+        const causal_heads = if (self.staged_head == null) self.prepared_parents.causal_heads else &.{};
+        const commit_oid = try createSignedEventCommit(
+            self.allocator,
+            command_context,
+            subject,
+            event_body,
+            parent_head,
+            anchor,
+            causal_heads,
+        );
+        errdefer self.allocator.free(commit_oid);
+
+        const returned_oid = try self.allocator.dupe(u8, commit_oid);
+        errdefer self.allocator.free(returned_oid);
+
+        if (self.staged_head) |old_staged_head| self.allocator.free(old_staged_head);
+        self.staged_head = commit_oid;
+        self.cfg.seq = committed_seq;
+        return returned_oid;
+    }
+
+    pub fn commitStaged(self: *EventWriter) !void {
+        const commit_oid = self.staged_head orelse return;
+        try updateEventRef(self.allocator, self.inbox_ref, commit_oid, self.prepared_parents.old_head);
+        self.allocator.free(commit_oid);
+        self.staged_head = null;
     }
 };
 
@@ -188,6 +236,30 @@ pub fn writeSignedEvent(
     anchor: ?[]const u8,
     causal_heads: []const []const u8,
 ) ![]u8 {
+    const commit_oid = try createSignedEventCommit(
+        allocator,
+        command_context,
+        subject,
+        event_body,
+        old_head,
+        anchor,
+        causal_heads,
+    );
+    errdefer allocator.free(commit_oid);
+
+    try updateEventRef(allocator, inbox_ref, commit_oid, old_head);
+    return commit_oid;
+}
+
+fn createSignedEventCommit(
+    allocator: Allocator,
+    command_context: []const u8,
+    subject: []const u8,
+    event_body: []const u8,
+    old_head: ?[]const u8,
+    anchor: ?[]const u8,
+    causal_heads: []const []const u8,
+) ![]u8 {
     const empty_tree = try git.emptyTreeOid(allocator);
     defer allocator.free(empty_tree);
 
@@ -218,8 +290,10 @@ pub fn writeSignedEvent(
         return err;
     };
     const commit_oid = try util.trimOwned(allocator, commit_raw);
-    errdefer allocator.free(commit_oid);
+    return commit_oid;
+}
 
+fn updateEventRef(allocator: Allocator, inbox_ref: []const u8, commit_oid: []const u8, old_head: ?[]const u8) !void {
     if (old_head) |head| {
         const updated = try git.gitChecked(allocator, &.{ "update-ref", inbox_ref, commit_oid, head });
         defer allocator.free(updated);
@@ -227,6 +301,4 @@ pub fn writeSignedEvent(
         const updated = try git.gitChecked(allocator, &.{ "update-ref", inbox_ref, commit_oid, "" });
         defer allocator.free(updated);
     }
-
-    return commit_oid;
 }
