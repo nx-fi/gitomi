@@ -47,7 +47,6 @@ pub fn loadRootGitStatus(allocator: Allocator, repo: Repo) !RootGitStatus {
     try loadRootDiffStats(allocator, repo, &status);
     status.worktree_count = loadWorktreeCount(allocator, repo) catch 1;
     if (status.worktree_count == 0) status.worktree_count = 1;
-    status.disk_size_bytes = loadDiskSizeBytes(allocator, repo) catch null;
     status.operation_state = loadRepositoryOperationState(allocator, repo) catch .clean;
 
     return status;
@@ -277,6 +276,58 @@ pub fn rootEntryCounts(entries: []const TreeEntry) RootEntryCounts {
             counts.directories += 1;
         } else {
             counts.files += 1;
+        }
+    }
+    return counts;
+}
+
+pub fn loadRootEntryCounts(allocator: Allocator, repo: Repo, ref: []const u8) !?RootEntryCounts {
+    if (isFilesystemRef(ref)) return loadWorktreeRootEntryCounts(allocator, repo, ref);
+
+    const spec = try objectSpec(allocator, ref, "");
+    defer allocator.free(spec);
+    const raw = try gitMaybe(allocator, repo, &.{ "ls-tree", "-z", spec }, git.max_git_output) orelse return null;
+    defer allocator.free(raw);
+
+    var counts = RootEntryCounts{};
+    var records = std.mem.splitScalar(u8, raw, 0);
+    while (records.next()) |record| {
+        if (record.len == 0) continue;
+        const tab = std.mem.indexOfScalar(u8, record, '\t') orelse continue;
+        const meta = record[0..tab];
+        var fields = std.mem.tokenizeScalar(u8, meta, ' ');
+        _ = fields.next() orelse continue;
+        const kind = fields.next() orelse continue;
+        if (std.mem.eql(u8, kind, "tree")) {
+            counts.directories += 1;
+        } else {
+            counts.files += 1;
+        }
+    }
+    return counts;
+}
+
+fn loadWorktreeRootEntryCounts(allocator: Allocator, repo: Repo, ref: []const u8) !?RootEntryCounts {
+    const root = try worktreeRootOwned(allocator, repo, ref) orelse return null;
+    defer allocator.free(root);
+    const raw = try listWorktreePaths(allocator, root) orelse return null;
+    defer allocator.free(raw);
+
+    var seen = std.StringHashMap(void).init(allocator);
+    defer seen.deinit();
+
+    var counts = RootEntryCounts{};
+    var records = std.mem.splitScalar(u8, raw, 0);
+    while (records.next()) |record| {
+        if (record.len == 0) continue;
+        const child_name = directChildName("", record) orelse continue;
+        if (seen.contains(child_name)) continue;
+        try seen.put(child_name, {});
+
+        const kind = worktreePathKind(root, child_name) catch null orelse continue;
+        switch (kind) {
+            .tree => counts.directories += 1,
+            .blob => counts.files += 1,
         }
     }
     return counts;

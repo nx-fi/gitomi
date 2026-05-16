@@ -1692,8 +1692,8 @@ main.page-projects:has(.project-detail-panel) {
 .pull-merge-method-popover {
   position: absolute;
   top: calc(100% + 6px);
-  left: 0;
-  right: auto;
+  left: auto;
+  right: 0;
   z-index: 30;
   display: grid;
   width: min(480px, calc(100vw - 48px));
@@ -8130,6 +8130,9 @@ a.root-file-commit:hover {
   font-size: 18px;
   line-height: 1;
 }
+.file-icon.devicon-icon::before {
+  color: var(--muted);
+}
 .tree-link .file-icon.devicon-icon {
   width: 16px;
   height: 16px;
@@ -8140,60 +8143,12 @@ a.root-file-commit:hover {
   place-items: center;
   width: 18px;
   height: 18px;
-  border: 0;
-  border-radius: 5px;
-  color: #ffffff;
-  font: 800 9px/1 var(--mono);
-}
-.file-icon[class*="lang-"]::before {
-  content: none;
-}
-.file-icon[class*="lang-"]::after {
-  content: "";
-}
-.file-icon.lang-zig { background: #f7a41d; }
-.file-icon.lang-zig::after { content: "Z"; }
-.file-icon.lang-js { background: #c99a00; }
-.file-icon.lang-js::after { content: "JS"; }
-.file-icon.lang-ts { background: #3178c6; }
-.file-icon.lang-ts::after { content: "TS"; }
-.file-icon.lang-sh { background: #476582; }
-.file-icon.lang-sh::after { content: "$"; }
-.file-icon.lang-json { background: #8250df; }
-.file-icon.lang-json::after { content: "{}"; }
-.file-icon.lang-toml { background: #9a6700; }
-.file-icon.lang-toml::after { content: "T"; }
-.file-icon.lang-yaml { background: #cf222e; }
-.file-icon.lang-yaml::after { content: "Y"; }
-.file-icon.lang-css { background: #0969da; }
-.file-icon.lang-css::after { content: "CSS"; font-size: 7px; }
-.file-icon.lang-html { background: #e34c26; }
-.file-icon.lang-html::after { content: "<>"; }
-.file-icon.lang-xml { background: #6e7781; }
-.file-icon.lang-xml::after { content: "XML"; font-size: 7px; }
-.file-icon.lang-sql { background: #0a7f8f; }
-.file-icon.lang-sql::after { content: "DB"; }
-.file-icon.lang-sol { background: #363636; }
-.file-icon.lang-sol::after { content: "SOL"; font-size: 7px; }
-.file-icon.lang-tla { background: #4c4f69; }
-.file-icon.lang-tla::after { content: "TLA"; font-size: 7px; }
-.file-icon.lang-rs { background: #dea584; color: #1f2328; }
-.file-icon.lang-rs::after { content: "RS"; }
-.file-icon.lang-py { background: #3776ab; }
-.file-icon.lang-py::after { content: "PY"; }
-.file-icon.lang-md { background: #57606a; }
-.file-icon.lang-md::after { content: "MD"; }
-.file-icon.lang-img { background: #1a7f37; }
-.file-icon.lang-img::after { content: "IMG"; font-size: 7px; }
-.file-icon.lang-video { background: #bf3989; }
-.file-icon.lang-video::after { content: "VID"; font-size: 7px; }
-.tree-link .file-icon[class*="lang-"] {
   color: var(--muted);
   background: transparent;
+  border: 0;
   border-radius: 0;
-  font: inherit;
 }
-.tree-link .file-icon[class*="lang-"]::before {
+.file-icon[class*="lang-"]::before {
   content: "";
   position: absolute;
   inset: 0;
@@ -8201,7 +8156,7 @@ a.root-file-commit:hover {
   -webkit-mask: var(--file-icon-mask) center / contain no-repeat;
   mask: var(--file-icon-mask) center / contain no-repeat;
 }
-.tree-link .file-icon[class*="lang-"]::after {
+.file-icon[class*="lang-"]::after {
   content: none;
 }
 .file-size {

@@ -29,13 +29,14 @@ const sendResponse = shared.sendResponse;
 
 const max_blob_display_bytes = 512 * 1024;
 const max_raw_blob_bytes = git.max_git_output;
-const root_partial_priority_docs = 10;
-const root_partial_priority_about = 20;
 const root_partial_priority_repository = 30;
 const root_partial_priority_branch = 30;
 const root_partial_priority_commit_count = 35;
 const root_partial_priority_stats = 40;
 const root_partial_priority_search = 50;
+const root_partial_timeout_fast_ms = 10_000;
+const root_partial_timeout_git_ms = 12_000;
+const root_partial_timeout_stats_ms = 20_000;
 const root_readme_candidates = [_][]const u8{ "README.md", "README", "Readme.md", "readme.md" };
 const root_license_candidates = [_][]const u8{ "LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING", "COPYING.md", "COPYING.txt" };
 
@@ -74,7 +75,7 @@ const loadBranchSyncStatus = explorer_data.loadBranchSyncStatus;
 const parseRootGitStatusV2 = explorer_data.parseRootGitStatusV2;
 const parseRootDiffNumstat = explorer_data.parseRootDiffNumstat;
 const countNonEmptyLines = explorer_data.countNonEmptyLines;
-const rootEntryCounts = explorer_data.rootEntryCounts;
+const loadRootEntryCounts = explorer_data.loadRootEntryCounts;
 const markdownSummaryOwned = explorer_data.markdownSummaryOwned;
 const appendRepositoryMarkdown = explorer_data.appendRepositoryMarkdown;
 const physicalLineCount = explorer_data.physicalLineCount;
@@ -438,9 +439,9 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
         }
 
         if (is_root) {
-            try appendRootDocsSlot(&buf, allocator, ref);
+            try appendRootDocsComponent(&buf, allocator, repo, ref);
             try appendRootPageMainEnd(&buf, allocator);
-            try appendRootSidebar(&buf, allocator, ref);
+            try appendRootSidebar(&buf, allocator, repo, ref);
             try appendRootPageGridEnd(&buf, allocator);
         } else {
             try appendReadmePreview(&buf, allocator, repo, ref, path, entries);
@@ -1057,12 +1058,12 @@ fn appendCodeSyncFlash(buf: *std.ArrayList(u8), allocator: Allocator, flash: Cod
 
 fn appendRootSearchIndexSlot(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8) !void {
     try appendTemplate(buf, allocator,
-        \\      <div hidden
+        \\      <div hidden data-root-partial-deferred="/code/root/search?ref=
     , .{});
-    try appendRootPartialAttrs(buf, allocator, ref, "search", "File search index", root_partial_priority_search);
+    try shared.appendUrlEncoded(buf, allocator, ref);
     try appendTemplate(buf, allocator,
-        \\ data-root-partial-silent></div>
-    , .{});
+        \\" data-root-partial-label="File search index" data-root-partial-priority="{priority}" data-root-partial-timeout-ms="{timeout_ms}" data-root-partial-silent></div>
+    , .{ .priority = root_partial_priority_search, .timeout_ms = root_partial_timeout_stats_ms });
 }
 
 fn appendRootSearchIndex(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, entries: []const TreeNavEntry) !void {
@@ -1128,7 +1129,7 @@ fn appendRootCommitCountSlot(buf: *std.ArrayList(u8), allocator: Allocator, ref:
     try appendTemplate(buf, allocator,
         \\<span class="root-partial-slot root-commit-count-slot"
     , .{});
-    try appendRootPartialAttrs(buf, allocator, ref, "commit-count", "Commit count", root_partial_priority_commit_count);
+    try appendRootPartialAttrs(buf, allocator, ref, "commit-count", "Commit count", root_partial_priority_commit_count, root_partial_timeout_fast_ms);
     try appendTemplate(buf, allocator,
         \\ data-root-partial-silent></span>
     , .{});
@@ -1495,21 +1496,6 @@ fn appendRootDocsPreview(
     try appendTemplate(buf, allocator, "</section>", .{});
 }
 
-fn appendRootDocsSlot(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8) !void {
-    try appendTemplate(buf, allocator,
-        \\<div class="root-partial-slot"
-    , .{});
-    try appendRootPartialAttrs(buf, allocator, ref, "docs", "Repository documents", root_partial_priority_docs);
-    try appendTemplate(buf, allocator,
-        \\>
-        \\  <section class="panel readme-panel root-docs-panel root-docs-loading" aria-busy="true">
-        \\    <div class="section-head readme-head"><h2>Documents</h2></div>
-        \\    <div class="readme-body"><p class="root-sidebar-empty">Loading repository documents...</p></div>
-        \\  </section>
-        \\</div>
-    , .{});
-}
-
 fn loadRootLicenseDoc(allocator: Allocator, repo: Repo, ref: []const u8, entries: []const TreeEntry) !?RootMarkdownDoc {
     const license = findLicense(entries) orelse return null;
     const content = try loadBlobBytes(allocator, repo, ref, license, max_blob_display_bytes + 1) orelse return null;
@@ -1585,15 +1571,16 @@ fn appendRootPageGridEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
 fn appendRootSidebar(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
+    repo: Repo,
     ref: []const u8,
 ) !void {
     try appendTemplate(buf, allocator,
         \\<aside class="root-sidebar" aria-label="Repository details">
         \\  <section class="panel root-sidebar-panel">
     , .{});
-    try appendRootSidebarSlot(buf, allocator, ref, "about", "About", "Loading repository summary...", root_partial_priority_about);
-    try appendRootSidebarSlot(buf, allocator, ref, "repository", "Repository", "Loading repository details...", root_partial_priority_repository);
-    try appendRootSidebarSlot(buf, allocator, ref, "branch", "Branch", "Loading branch details...", root_partial_priority_branch);
+    try appendRootAboutComponent(buf, allocator, repo, ref);
+    try appendRootSidebarSlot(buf, allocator, ref, "repository", "Repository", "Loading repository details...", root_partial_priority_repository, root_partial_timeout_git_ms);
+    try appendRootSidebarSlot(buf, allocator, ref, "branch", "Branch", "Loading branch details...", root_partial_priority_branch, root_partial_timeout_git_ms);
     try appendRootStatsSlot(buf, allocator, ref);
     try appendTemplate(buf, allocator, "</section></aside>", .{});
 }
@@ -1606,11 +1593,12 @@ fn appendRootSidebarSlot(
     label: []const u8,
     loading_text: []const u8,
     priority: usize,
+    timeout_ms: usize,
 ) !void {
     try appendTemplate(buf, allocator,
         \\<div class="root-partial-slot"
     , .{});
-    try appendRootPartialAttrs(buf, allocator, ref, component, label, priority);
+    try appendRootPartialAttrs(buf, allocator, ref, component, label, priority, timeout_ms);
     try appendTemplate(buf, allocator,
         \\>
         \\  <div class="root-sidebar-section root-sidebar-loading" aria-busy="true">
@@ -1628,7 +1616,7 @@ fn appendRootStatsSlot(buf: *std.ArrayList(u8), allocator: Allocator, ref: []con
     try appendTemplate(buf, allocator,
         \\<div class="root-partial-slot"
     , .{});
-    try appendRootPartialAttrs(buf, allocator, ref, "stats", "Source stats", root_partial_priority_stats);
+    try appendRootPartialAttrs(buf, allocator, ref, "stats", "Source stats", root_partial_priority_stats, root_partial_timeout_stats_ms);
     try appendTemplate(buf, allocator,
         \\>
         \\  <div class="root-sidebar-section root-sidebar-loading" aria-busy="true">
@@ -1650,14 +1638,15 @@ fn appendRootPartialAttrs(
     component: []const u8,
     label: []const u8,
     priority: usize,
+    timeout_ms: usize,
 ) !void {
     try appendTemplate(buf, allocator,
         \\ data-root-partial="/code/root/{component}?ref=
     , .{ .component = component });
     try shared.appendUrlEncoded(buf, allocator, ref);
     try appendTemplate(buf, allocator,
-        \\" data-root-partial-label="{label}" data-root-partial-priority="{priority}" aria-live="polite"
-    , .{ .label = label, .priority = priority });
+        \\" data-root-partial-label="{label}" data-root-partial-priority="{priority}" data-root-partial-timeout-ms="{timeout_ms}" aria-live="polite"
+    , .{ .label = label, .priority = priority, .timeout_ms = timeout_ms });
 }
 
 fn appendRootAboutComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8) !void {
@@ -1674,9 +1663,7 @@ fn appendRootRepositoryComponent(buf: *std.ArrayList(u8), allocator: Allocator, 
 }
 
 fn appendRootBranchComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8) !void {
-    const entries_opt = try loadTreeEntries(allocator, repo, ref, "");
-    defer if (entries_opt) |entries| freeTreeEntries(allocator, entries);
-    const counts = if (entries_opt) |entries| rootEntryCounts(entries) else RootEntryCounts{};
+    const counts = (try loadRootEntryCounts(allocator, repo, ref)) orelse RootEntryCounts{};
     const git_status = loadRootGitStatus(allocator, repo) catch null;
     const branch_sync_status = loadBranchSyncStatus(allocator, repo, ref) catch null;
     defer if (branch_sync_status) |status| status.deinit(allocator);

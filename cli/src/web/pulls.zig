@@ -590,7 +590,7 @@ fn renderPullDetailPageWithMergeError(allocator: Allocator, repo: Repo, raw_ref:
     defer if (current_role) |role| allocator.free(role);
     const can_edit_pull = currentActorCanEditAuthor(current_actor, current_role, detail.author_principal);
     switch (tab) {
-        .conversation => try appendPullConversation(&buf, allocator, &db, detail, raw_ref, current_actor, can_edit_pull, merge_status, merge_error),
+        .conversation => try appendPullConversation(&buf, allocator, &db, detail, raw_ref, tab_counts, current_actor, can_edit_pull, merge_status, merge_error),
         .commits => try appendPullCommits(&buf, allocator, repo, detail),
         .files => try appendPullFiles(&buf, allocator, repo, detail, raw_ref),
     }
@@ -1656,6 +1656,7 @@ fn appendPullConversation(
     db: *SqliteDb,
     detail: PullDetail,
     raw_ref: []const u8,
+    counts: PullTabCounts,
     current_actor: ?[]const u8,
     can_edit_pull: bool,
     merge_status: PullMergeStatus,
@@ -1697,7 +1698,7 @@ fn appendPullConversation(
     try appendPullReactionBar(buf, allocator, db, "pull", detail.id, raw_ref, "", current_actor);
     try buf.appendSlice(allocator, "</article></div>");
     try appendPullComments(buf, allocator, db, raw_ref, detail.id, current_actor);
-    try appendPullMergeabilityTimeline(buf, allocator, detail, raw_ref, merge_status, merge_error);
+    try appendPullMergeabilityTimeline(buf, allocator, detail, raw_ref, counts.commits, merge_status, merge_error);
     try appendPullResolutionTimeline(buf, allocator, detail);
     try appendPullCommentForm(buf, allocator, raw_ref, current_actor);
     try buf.appendSlice(allocator, "</div>");
@@ -1814,13 +1815,14 @@ fn appendPullMergeabilityTimeline(
     allocator: Allocator,
     detail: PullDetail,
     raw_ref: []const u8,
+    commit_count: ?usize,
     merge_status: PullMergeStatus,
     merge_error: ?[]const u8,
 ) !void {
     if (!std.mem.eql(u8, detail.state, "open")) return;
     if (detail.draft) return;
     if (merge_status.kind == .clean) {
-        try appendPullReadyToMergeTimeline(buf, allocator, detail, raw_ref, merge_error);
+        try appendPullReadyToMergeTimeline(buf, allocator, raw_ref, commit_count, merge_error);
         return;
     }
     if (!merge_status.hasConflicts()) return;
@@ -1861,17 +1863,20 @@ fn appendPullMergeabilityTimeline(
 fn appendPullReadyToMergeTimeline(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
-    detail: PullDetail,
     raw_ref: []const u8,
+    commit_count: ?usize,
     merge_error: ?[]const u8,
 ) !void {
+    const commit_phrase = try mergeMethodCommitPhrase(allocator, commit_count);
+    defer allocator.free(commit_phrase);
+
     try buf.appendSlice(allocator,
         \\<div class="issue-timeline-item pull-mergeability-item" id="pull-mergeability">
         \\  <div class="issue-timeline-avatar"><span class="pull-mergeability-icon is-clean" aria-hidden="true"></span></div>
         \\  <div class="pull-mergeability-box is-clean">
         \\    <div class="pull-mergeability-head">
         \\      <div>
-        \\        <h2>This branch has no conflicts with the base branch</h2>
+        \\        <h2>No conflicts with base branch</h2>
         \\        <p>Merging can be performed automatically.</p>
         \\      </div>
         \\    </div>
@@ -1891,9 +1896,9 @@ fn appendPullReadyToMergeTimeline(
         \\          <details class="pull-merge-method-menu" data-popover-menu>
         \\            <summary class="button primary pull-merge-method-toggle" aria-label="Choose merge method" title="Choose merge method"><span class="button-icon icon-chevron-down" aria-hidden="true"></span></summary>
         \\            <div class="pull-merge-method-popover" role="menu" aria-label="Merge methods">
-        \\              <button class="pull-merge-method-option is-selected" type="submit" name="method" value="merge" role="menuitemradio" aria-checked="true" data-merge-button-label="Merge pull request"><span class="pull-merge-method-check" aria-hidden="true"></span><span><strong>Create a merge commit</strong><em>All commits from <code>{head_ref}</code> will be added to <code>{base_ref}</code> via a merge commit.</em></span></button>
-        \\              <button class="pull-merge-method-option" type="submit" name="method" value="squash" role="menuitemradio" aria-checked="false" data-merge-button-label="Squash and merge"><span class="pull-merge-method-check" aria-hidden="true"></span><span><strong>Squash and merge</strong><em>The commits from <code>{head_ref}</code> will be combined into one commit on <code>{base_ref}</code>.</em></span></button>
-        \\              <button class="pull-merge-method-option" type="submit" name="method" value="rebase" role="menuitemradio" aria-checked="false" data-merge-button-label="Rebase and merge"><span class="pull-merge-method-check" aria-hidden="true"></span><span><strong>Rebase and merge</strong><em>The commits from <code>{head_ref}</code> will be rebased onto <code>{base_ref}</code>.</em></span></button>
+        \\              <button class="pull-merge-method-option is-selected" type="submit" name="method" value="merge" role="menuitemradio" aria-checked="true" data-merge-button-label="Merge pull request"><span class="pull-merge-method-check" aria-hidden="true"></span><span><strong>Create a merge commit</strong><em>{commit_phrase} from this branch will be added to the base branch via a merge commit.</em></span></button>
+        \\              <button class="pull-merge-method-option" type="submit" name="method" value="squash" role="menuitemradio" aria-checked="false" data-merge-button-label="Squash and merge"><span class="pull-merge-method-check" aria-hidden="true"></span><span><strong>Squash and merge</strong><em>{commit_phrase} from this branch will be added to the base branch.</em></span></button>
+        \\              <button class="pull-merge-method-option" type="submit" name="method" value="rebase" role="menuitemradio" aria-checked="false" data-merge-button-label="Rebase and merge"><span class="pull-merge-method-check" aria-hidden="true"></span><span><strong>Rebase and merge</strong><em>{commit_phrase} from this branch will be rebased and added to the base branch.</em></span></button>
         \\            </div>
         \\          </details>
         \\        </div>
@@ -1903,8 +1908,7 @@ fn appendPullReadyToMergeTimeline(
         \\  </div>
         \\</div>
     , .{
-        .head_ref = detail.head_ref,
-        .base_ref = detail.base_ref,
+        .commit_phrase = commit_phrase,
         .pull_ref = raw_ref,
     });
 }
@@ -2522,6 +2526,13 @@ fn asciiEqlIgnoreCase(a: []const u8, b: []const u8) bool {
 
 fn commitWord(count: usize) []const u8 {
     return if (count == 1) "commit" else "commits";
+}
+
+fn mergeMethodCommitPhrase(allocator: Allocator, count: ?usize) ![]u8 {
+    if (count) |value| {
+        return std.fmt.allocPrint(allocator, "The {d} {s}", .{ value, commitWord(value) });
+    }
+    return allocator.dupe(u8, "The commits");
 }
 
 pub fn renderPullForm(
