@@ -912,6 +912,16 @@ fn loadMergeConflictFile(
         };
     };
 
+    const current_is_regular = try treePathIsRegularFile(allocator, repo, head_commit, path);
+    const ancestor_is_regular = try treePathIsRegularFile(allocator, repo, base_oid, path);
+    const incoming_is_regular = try treePathIsRegularFile(allocator, repo, base_commit, path);
+    if (!current_is_regular or !ancestor_is_regular or !incoming_is_regular) {
+        return .{
+            .path = owned_path,
+            .message = try allocator.dupe(u8, "Only regular-file conflicts are editable in the web resolver."),
+        };
+    }
+
     const current = try loadBlobAtRef(allocator, repo, head_commit, path);
     defer if (current) |value| allocator.free(value);
     const ancestor = try loadBlobAtRef(allocator, repo, base_oid, path);
@@ -955,6 +965,29 @@ fn loadBlobAtRef(allocator: Allocator, repo: Repo, ref: []const u8, path: []cons
     const object = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ ref, path });
     defer allocator.free(object);
     return work_items.gitMaybe(allocator, repo, &.{ "show", object }, max_merge_blob_bytes);
+}
+
+fn treePathIsRegularFile(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !bool {
+    const raw = try work_items.gitMaybe(allocator, repo, &.{ "ls-tree", "-z", ref, "--", path }, 1024 * 1024) orelse return false;
+    defer allocator.free(raw);
+    return lsTreeRecordIsRegularFile(raw, path);
+}
+
+fn lsTreeRecordIsRegularFile(raw: []const u8, path: []const u8) bool {
+    var records = std.mem.splitScalar(u8, raw, 0);
+    while (records.next()) |record| {
+        if (record.len == 0) continue;
+        const tab = std.mem.indexOfScalar(u8, record, '\t') orelse continue;
+        if (!std.mem.eql(u8, record[tab + 1 ..], path)) continue;
+        const space = std.mem.indexOfScalar(u8, record[0..tab], ' ') orelse return false;
+        return isRegularGitMode(record[0..space]);
+    }
+    return false;
+}
+
+fn isRegularGitMode(mode: []const u8) bool {
+    return std.mem.eql(u8, mode, "100644") or
+        std.mem.eql(u8, mode, "100755");
 }
 
 fn mergeFileConflictContent(
@@ -2843,6 +2876,8 @@ fn commitPullConflictResolution(
 
     for (resolved_files) |file| {
         if (!isSafeMergePath(file.path)) return error.UnsafeConflictPath;
+        const conflict_path_is_regular = try worktreeConflictPathIsRegularFile(allocator, tmp_worktree, file.path);
+        if (!conflict_path_is_regular) return error.UnsafeConflictPath;
         const absolute_path = try std.fs.path.join(allocator, &.{ tmp_worktree, file.path });
         defer allocator.free(absolute_path);
         try writeFileBytes(absolute_path, file.content);
@@ -2868,6 +2903,26 @@ fn commitPullConflictResolution(
     const update_output = try gitCheckedAt(allocator, repo.root, &.{ "update-ref", update_ref, commit_oid, old_head }, git.max_git_output);
     allocator.free(update_output);
     return commit_oid;
+}
+
+fn worktreeConflictPathIsRegularFile(allocator: Allocator, worktree: []const u8, path: []const u8) !bool {
+    const raw = try gitCheckedAt(allocator, worktree, &.{ "ls-files", "-s", "-z", "--", path }, git.max_git_output);
+    defer allocator.free(raw);
+    return lsFilesStagesAreRegularFile(raw, path);
+}
+
+fn lsFilesStagesAreRegularFile(raw: []const u8, path: []const u8) bool {
+    var found = false;
+    var records = std.mem.splitScalar(u8, raw, 0);
+    while (records.next()) |record| {
+        if (record.len == 0) continue;
+        const tab = std.mem.indexOfScalar(u8, record, '\t') orelse return false;
+        if (!std.mem.eql(u8, record[tab + 1 ..], path)) return false;
+        const space = std.mem.indexOfScalar(u8, record[0..tab], ' ') orelse return false;
+        if (!isRegularGitMode(record[0..space])) return false;
+        found = true;
+    }
+    return found;
 }
 
 fn localHeadUpdateRef(allocator: Allocator, repo: Repo, head_ref: []const u8) ![]u8 {
@@ -3051,4 +3106,29 @@ test "merge editor path safety" {
     try std.testing.expect(!isSafeMergePath("../main.zig"));
     try std.testing.expect(!isSafeMergePath("/tmp/main.zig"));
     try std.testing.expect(!isSafeMergePath("src/.git/config"));
+}
+
+test "merge editor accepts only regular git modes" {
+    try std.testing.expect(isRegularGitMode("100644"));
+    try std.testing.expect(isRegularGitMode("100755"));
+    try std.testing.expect(!isRegularGitMode("120000"));
+    try std.testing.expect(!isRegularGitMode("040000"));
+}
+
+test "merge editor rejects symlink tree entries" {
+    try std.testing.expect(lsTreeRecordIsRegularFile("100644 blob abcdef\tconflict.txt\x00", "conflict.txt"));
+    try std.testing.expect(!lsTreeRecordIsRegularFile("120000 blob abcdef\tconflict.txt\x00", "conflict.txt"));
+    try std.testing.expect(!lsTreeRecordIsRegularFile("100644 blob abcdef\tother.txt\x00", "conflict.txt"));
+}
+
+test "merge editor rejects symlink conflict index stages" {
+    try std.testing.expect(lsFilesStagesAreRegularFile(
+        "100644 abcdef 1\tconflict.txt\x00100755 abcdef 2\tconflict.txt\x00100644 abcdef 3\tconflict.txt\x00",
+        "conflict.txt",
+    ));
+    try std.testing.expect(!lsFilesStagesAreRegularFile(
+        "100644 abcdef 1\tconflict.txt\x00120000 abcdef 2\tconflict.txt\x00100644 abcdef 3\tconflict.txt\x00",
+        "conflict.txt",
+    ));
+    try std.testing.expect(!lsFilesStagesAreRegularFile("", "conflict.txt"));
 }
