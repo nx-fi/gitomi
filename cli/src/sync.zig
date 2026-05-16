@@ -209,7 +209,6 @@ pub fn admitStagedGenesisRef(allocator: Allocator, staging_prefix: []const u8) !
 
     var manifest = try repo_mod.loadGenesisManifest(allocator, staged_oid);
     defer manifest.deinit();
-    _ = try repo_mod.importOpenPgpPublicKey(allocator, manifest.public_key);
     try verifyGenesisCommitSignature(allocator, staged_oid, manifest.fingerprint);
     const updated = try gitChecked(allocator, &.{ "update-ref", repo_mod.genesis_ref, staged_oid, "" });
     defer allocator.free(updated);
