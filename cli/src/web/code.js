@@ -565,6 +565,188 @@
     document.querySelectorAll("[data-symbols-sidebar]").forEach(initSymbolsResize);
   }
 
+  function syncRootSidebarScroll(sidebar) {
+    const rect = sidebar.getBoundingClientRect();
+    const height = Math.max(sidebar.scrollHeight || 0, rect.height || 0);
+    sidebar.style.setProperty("--root-sidebar-height", `${Math.ceil(height)}px`);
+  }
+
+  function syncRootSidebars(root) {
+    const scope = root || document;
+    scope.querySelectorAll(".root-sidebar").forEach(function (sidebar) {
+      syncRootSidebarScroll(sidebar);
+    });
+  }
+
+  function initRootSidebarScroll(root) {
+    const scope = root || document;
+    scope.querySelectorAll(".root-sidebar").forEach(function (sidebar) {
+      syncRootSidebarScroll(sidebar);
+      if (sidebar.dataset.rootSidebarScrollReady === "yes") return;
+      sidebar.dataset.rootSidebarScrollReady = "yes";
+
+      if ("ResizeObserver" in window) {
+        const observer = new ResizeObserver(function () {
+          syncRootSidebarScroll(sidebar);
+        });
+        observer.observe(sidebar);
+        sidebar.gitomiRootSidebarObserver = observer;
+      }
+    });
+  }
+
+  function notifyPartialRefresh(root) {
+    document.dispatchEvent(new CustomEvent("gitomi:partial-refresh", {
+      detail: { root: root || document },
+    }));
+  }
+
+  function partialErrorNode(slot) {
+    const section = document.createElement("div");
+    section.className = "root-sidebar-section root-sidebar-error";
+
+    const heading = document.createElement("h2");
+    heading.textContent = slot.dataset.rootPartialLabel || "Section";
+    section.appendChild(heading);
+
+    const message = document.createElement("p");
+    message.className = "root-sidebar-empty";
+    message.textContent = "Could not load this section.";
+    section.appendChild(message);
+
+    const retry = document.createElement("button");
+    retry.className = "button secondary root-partial-retry";
+    retry.type = "button";
+    retry.textContent = "Retry";
+    retry.addEventListener("click", function () {
+      scheduleRootPartial(slot, true);
+    });
+    section.appendChild(retry);
+
+    return section;
+  }
+
+  const rootPartialMaxConcurrent = 2;
+  const rootPartialDefaultTimeoutMs = 15000;
+  let rootPartialActive = 0;
+  let rootPartialSequence = 0;
+  let rootPartialDrainScheduled = false;
+  const rootPartialQueue = [];
+
+  function rootPartialPriority(slot) {
+    const priority = Number(slot.dataset.rootPartialPriority);
+    return Number.isFinite(priority) ? priority : 100;
+  }
+
+  function sortRootPartialQueue() {
+    rootPartialQueue.sort(function (a, b) {
+      if (a.priority !== b.priority) return a.priority - b.priority;
+      return a.sequence - b.sequence;
+    });
+  }
+
+  function rootPartialTimeout(slot) {
+    const timeout = Number(slot.dataset.rootPartialTimeoutMs);
+    return Number.isFinite(timeout) && timeout > 0 ? timeout : rootPartialDefaultTimeoutMs;
+  }
+
+  function scheduleRootPartialDrain() {
+    if (rootPartialDrainScheduled) return;
+    rootPartialDrainScheduled = true;
+    window.setTimeout(function () {
+      rootPartialDrainScheduled = false;
+      drainRootPartialQueue();
+    }, 0);
+  }
+
+  function scheduleRootPartial(slot, retrying) {
+    const url = slot.dataset.rootPartial;
+    if (!url) return;
+    if (slot.dataset.rootPartialState === "queued" || slot.dataset.rootPartialState === "loading") return;
+    if (!retrying && slot.dataset.rootPartialReady === "yes") return;
+    slot.dataset.rootPartialReady = "yes";
+    slot.dataset.rootPartialState = "queued";
+    rootPartialQueue.push({
+      slot,
+      priority: rootPartialPriority(slot),
+      sequence: rootPartialSequence++,
+    });
+    sortRootPartialQueue();
+    scheduleRootPartialDrain();
+  }
+
+  function promoteDeferredRootPartial(slot) {
+    const url = slot.dataset.rootPartialDeferred;
+    if (!url || slot.dataset.rootPartial) return;
+    slot.dataset.rootPartial = url;
+    delete slot.dataset.rootPartialDeferred;
+    scheduleRootPartial(slot, false);
+  }
+
+  function drainRootPartialQueue() {
+    while (rootPartialActive < rootPartialMaxConcurrent && rootPartialQueue.length !== 0) {
+      const item = rootPartialQueue.shift();
+      if (!item.slot.isConnected) {
+        delete item.slot.dataset.rootPartialState;
+        continue;
+      }
+
+      rootPartialActive += 1;
+      item.slot.dataset.rootPartialState = "loading";
+      loadRootPartial(item.slot).finally(function () {
+        rootPartialActive -= 1;
+        drainRootPartialQueue();
+      });
+    }
+  }
+
+  async function loadRootPartial(slot) {
+    const url = slot.dataset.rootPartial;
+    if (!url) return;
+    slot.setAttribute("aria-busy", "true");
+    const controller = "AbortController" in window ? new AbortController() : null;
+    const timeout = window.setTimeout(function () {
+      if (controller) controller.abort();
+    }, rootPartialTimeout(slot));
+
+    try {
+      const response = await fetch(url, {
+        cache: "no-store",
+        headers: { Accept: "text/html" },
+        signal: controller ? controller.signal : undefined,
+      });
+      if (!response.ok) throw new Error("partial load failed");
+      const html = (await response.text()).trim();
+      if (!slot.isConnected) return;
+      const parent = slot.parentElement;
+      if (!html) {
+        slot.remove();
+        notifyPartialRefresh(parent);
+        return;
+      }
+
+      const template = document.createElement("template");
+      template.innerHTML = html;
+      slot.replaceWith(template.content);
+      notifyPartialRefresh(parent);
+    } catch (_) {
+      if (!slot.isConnected) return;
+      slot.dataset.rootPartialState = "error";
+      slot.removeAttribute("aria-busy");
+      if (slot.hasAttribute("data-root-partial-silent")) return;
+      slot.replaceChildren(partialErrorNode(slot));
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }
+
+  function initRootPartials(root) {
+    const scope = root || document;
+    scope.querySelectorAll("[data-root-partial]").forEach(function (slot) {
+      scheduleRootPartial(slot, false);
+    });
+  }
+
   function initCodeControls() {
     initRightPanelOffsets();
     initCopyButtons();
@@ -572,7 +754,28 @@
     initTextCopyButtons();
     initCodeLineActionControls();
     initSymbolsToggles();
+    initRootSidebarScroll(document);
+    initRootPartials(document);
   }
+
+  document.addEventListener("gitomi:partial-refresh", function (event) {
+    const detail = event.detail || {};
+    initRootSidebarScroll(document);
+    window.requestAnimationFrame(function () {
+      syncRootSidebars(document);
+    });
+    initRootPartials(detail.root || document);
+  });
+
+  document.addEventListener("gitomi:root-partial-load", function (event) {
+    const detail = event.detail || {};
+    const scope = detail.root || document;
+    scope.querySelectorAll("[data-root-partial-deferred]").forEach(promoteDeferredRootPartial);
+  });
+
+  window.addEventListener("resize", function () {
+    syncRootSidebars(document);
+  });
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", initCodeControls);
