@@ -183,6 +183,10 @@ pub fn validateLoadedWorkflow(workflow: Workflow) !void {
             try io.eprint("gt actions: native agent job {s} in {s} must declare uses\n", .{ job.id, workflow.path });
             return CliError.UserError;
         }
+        if (std.mem.eql(u8, job.backend, "github-actions") and job.uses == null) {
+            try io.eprint("gt actions: native github-actions job {s} in {s} must declare uses\n", .{ job.id, workflow.path });
+            return CliError.UserError;
+        }
     }
 }
 
