@@ -11,7 +11,6 @@ pub const Compression = enum {
 };
 
 pub const Options = struct {
-    keep_alive: bool = false,
     head: bool = false,
     compression: Compression = .none,
 };
@@ -43,7 +42,6 @@ pub const SentInfo = struct {
     status: u16 = 0,
     bytes: usize = 0,
     compressed: bool = false,
-    keep_alive: bool = false,
 };
 
 pub const Response = struct {
@@ -62,9 +60,7 @@ pub const Response = struct {
 
     pub fn initWithRequest(allocator: Allocator, stream: std.net.Stream, request: request_mod.Request) Response {
         return initWithOptions(allocator, stream, .{
-            .keep_alive = request.keepAlive(),
             .head = request.method == .HEAD,
-            .compression = if (request.acceptsGzip()) .gzip else .none,
         });
     }
 
@@ -155,9 +151,11 @@ pub const Response = struct {
         var compressed_body: ?[]u8 = null;
         defer if (compressed_body) |compressed| self.allocator.free(compressed);
         const response_body = if (may_compress) blk: {
-            const encoded = try gzipStoreOwned(self.allocator, body);
-            compressed_body = encoded;
-            break :blk encoded;
+            if (try gzipIfSmallerOwned(self.allocator, body)) |encoded| {
+                compressed_body = encoded;
+                break :blk encoded;
+            }
+            break :blk body;
         } else body;
 
         const content_type_value = try contentTypeValueOwned(self.allocator, content_type, send_options.charset);
@@ -167,7 +165,7 @@ pub const Response = struct {
         defer headers.deinit(self.allocator);
         try appendStatusLine(&headers, self.allocator, status, reason);
         try appendHeader(&headers, self.allocator, "Content-Type", content_type_value);
-        try appendCommonHeaders(&headers, self.allocator, self.options.keep_alive);
+        try appendCommonHeaders(&headers, self.allocator);
         if (compressed_body != null) {
             try appendHeader(&headers, self.allocator, "Content-Encoding", "gzip");
             try appendHeader(&headers, self.allocator, "Vary", "Accept-Encoding");
@@ -222,7 +220,11 @@ pub const Response = struct {
     pub fn notModified(self: Response, extra_headers: []const u8) !void {
         const headers = try parseRawHeaders(self.allocator, extra_headers);
         defer self.allocator.free(headers);
-        try self.sendWithHeaders(304, "Not Modified", "text/plain", "", headers, .{ .charset = false });
+        try self.notModifiedHeaders(headers);
+    }
+
+    pub fn notModifiedHeaders(self: Response, extra_headers: []const Header) !void {
+        try self.sendWithHeaders(304, "Not Modified", "text/plain", "", extra_headers, .{ .charset = false });
     }
 
     pub fn streamChunked(
@@ -243,7 +245,7 @@ pub const Response = struct {
         const content_type_value = try contentTypeValueOwned(self.allocator, content_type, send_options.charset);
         defer self.allocator.free(content_type_value);
         try appendHeader(&headers, self.allocator, "Content-Type", content_type_value);
-        try appendCommonHeaders(&headers, self.allocator, self.options.keep_alive);
+        try appendCommonHeaders(&headers, self.allocator);
         try appendHeader(&headers, self.allocator, "Transfer-Encoding", "chunked");
         for (extra_headers) |header| try appendHeader(&headers, self.allocator, header.name, header.value);
         try headers.appendSlice(self.allocator, "\r\n");
@@ -286,7 +288,6 @@ pub const Response = struct {
                 .status = status,
                 .bytes = bytes,
                 .compressed = compressed,
-                .keep_alive = self.options.keep_alive,
             };
         }
     }
@@ -327,8 +328,8 @@ fn appendStatusLine(buf: *std.ArrayList(u8), allocator: Allocator, status: u16, 
     try std.fmt.format(buf.writer(allocator), "HTTP/1.1 {d} {s}\r\n", .{ status, reason });
 }
 
-fn appendCommonHeaders(buf: *std.ArrayList(u8), allocator: Allocator, keep_alive: bool) !void {
-    try appendHeader(buf, allocator, "Connection", if (keep_alive) "keep-alive" else "close");
+fn appendCommonHeaders(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try appendHeader(buf, allocator, "Connection", "close");
     try appendHeader(buf, allocator, "X-Content-Type-Options", "nosniff");
 }
 
@@ -435,6 +436,15 @@ pub fn gzipStoreOwned(allocator: Allocator, body: []const u8) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
+fn gzipIfSmallerOwned(allocator: Allocator, body: []const u8) !?[]u8 {
+    const encoded = try gzipStoreOwned(allocator, body);
+    if (encoded.len >= body.len) {
+        allocator.free(encoded);
+        return null;
+    }
+    return encoded;
+}
+
 fn validateCookieName(name: []const u8) !void {
     try validateHeaderName(name);
 }
@@ -455,4 +465,18 @@ test "gzip store emits gzip envelope" {
     try std.testing.expect(encoded.len > "hello".len);
     try std.testing.expectEqual(@as(u8, 0x1f), encoded[0]);
     try std.testing.expectEqual(@as(u8, 0x8b), encoded[1]);
+}
+
+test "stored gzip is skipped when it would expand the response" {
+    const encoded = try gzipIfSmallerOwned(std.testing.allocator, "hello");
+    defer if (encoded) |bytes| std.testing.allocator.free(bytes);
+    try std.testing.expect(encoded == null);
+}
+
+test "common response headers close the connection" {
+    var headers: std.ArrayList(u8) = .empty;
+    defer headers.deinit(std.testing.allocator);
+    try appendCommonHeaders(&headers, std.testing.allocator);
+    try std.testing.expect(std.mem.indexOf(u8, headers.items, "Connection: close\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, headers.items, "keep-alive") == null);
 }

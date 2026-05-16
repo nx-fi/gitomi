@@ -6,7 +6,6 @@ pub const StaticAsset = struct {
     path: []const u8,
     content_type: []const u8,
     body: []const u8,
-    etag: []const u8,
     binary: bool = false,
 };
 
@@ -32,7 +31,6 @@ pub fn asset(
         .path = path,
         .content_type = content_type,
         .body = body,
-        .etag = staticAssetEtag(body),
         .binary = binary,
     };
 }
@@ -56,27 +54,39 @@ pub fn sendCachedAsset(
     request: request_mod.Request,
     item: StaticAsset,
 ) !void {
-    const extra = try std.fmt.allocPrint(
-        response.allocator,
-        "Cache-Control: public, max-age=86400\r\nETag: {s}\r\n",
-        .{item.etag},
-    );
-    defer response.allocator.free(extra);
+    const etag = try staticAssetEtagOwned(response.allocator, item.body);
+    defer response.allocator.free(etag);
 
-    if (etagMatches(request.headerValue("if-none-match"), item.etag)) {
-        try response.notModified(extra);
+    const extra = [_]response_mod.Header{
+        .{ .name = "Cache-Control", .value = "public, max-age=86400" },
+        .{ .name = "ETag", .value = etag },
+    };
+    var asset_response = response;
+    asset_response.options.compression = .none;
+
+    if (etagMatches(request.headerValue("if-none-match"), etag)) {
+        try asset_response.notModifiedHeaders(&extra);
         return;
     }
 
     if (item.binary) {
-        try response.binary(200, "OK", item.content_type, item.body, extra);
+        try asset_response.binaryHeaders(200, "OK", item.content_type, item.body, &extra);
     } else {
-        try response.send(200, "OK", item.content_type, item.body, extra);
+        try asset_response.sendWithHeaders(200, "OK", item.content_type, item.body, &extra, .{ .charset = true });
     }
 }
 
-pub fn staticAssetEtag(comptime body: []const u8) []const u8 {
-    return std.fmt.comptimePrint("\"{x}\"", .{body.len});
+pub fn staticAssetEtagOwned(allocator: std.mem.Allocator, body: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "\"{x}-{x}\"", .{ body.len, staticAssetHash(body) });
+}
+
+fn staticAssetHash(body: []const u8) u64 {
+    var hash: u64 = 14695981039346656037;
+    for (body) |byte| {
+        hash ^= byte;
+        hash *%= 1099511628211;
+    }
+    return hash;
 }
 
 pub fn etagMatches(if_none_match: ?[]const u8, etag: []const u8) bool {
@@ -139,6 +149,14 @@ test "static asset etag matcher handles lists and weak tags" {
     try std.testing.expect(etagMatches("W/\"asset-etag\"", "\"asset-etag\""));
     try std.testing.expect(etagMatches("*", "\"asset-etag\""));
     try std.testing.expect(!etagMatches("\"different\"", "\"asset-etag\""));
+}
+
+test "static asset etags include a content hash" {
+    const first = try staticAssetEtagOwned(std.testing.allocator, "abcd");
+    defer std.testing.allocator.free(first);
+    const second = try staticAssetEtagOwned(std.testing.allocator, "wxyz");
+    defer std.testing.allocator.free(second);
+    try std.testing.expect(!std.mem.eql(u8, first, second));
 }
 
 test "middleware chain executes in order" {
