@@ -1,0 +1,10 @@
+{
+  "name": "gitomi-website",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun src/build.js",
+    "dev": "bun --hot src/server.js",
+    "serve": "bun src/server.js"
+  }
+}

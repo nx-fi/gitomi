@@ -1095,7 +1095,7 @@ pub fn readWorktreeFile(allocator: Allocator, root: []const u8, path: []const u8
 fn safeWorktreeFilePath(allocator: Allocator, root: []const u8, path: []const u8) !?[]u8 {
     const stat = try safeWorktreePathStat(allocator, root, path) orelse return null;
     if (stat.kind != .file) return null;
-    return absoluteWorktreePath(allocator, root, path);
+    return try absoluteWorktreePath(allocator, root, path);
 }
 
 fn safeWorktreePathStat(allocator: Allocator, root: []const u8, path: []const u8) !?std.fs.File.Stat {

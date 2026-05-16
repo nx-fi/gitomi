@@ -332,6 +332,8 @@ pub fn renderBlamePage(allocator: Allocator, repo: Repo, target: []const u8) ![]
 
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
+    var reference_resolver = shared.InternalReferenceResolver.init(allocator, repo);
+    defer reference_resolver.deinit();
 
     try appendShellStart(&buf, allocator, repo, "Blame", "code");
     try appendRepoHeader(&buf, allocator, repo, ref);
@@ -342,7 +344,7 @@ pub fn renderBlamePage(allocator: Allocator, repo: Repo, target: []const u8) ![]
     try appendFileActionsSpacer(&buf, allocator);
     try appendCodeActionLink(&buf, allocator, "History", commitsHref(ref, path), "icon-history");
     try appendCodePanelToolbarEnd(&buf, allocator);
-    try appendCommitBar(&buf, allocator, summary_opt);
+    try appendCommitBar(&buf, allocator, &reference_resolver, summary_opt);
     try appendCodePanelHeadEnd(&buf, allocator);
 
     if (blame_opt) |lines| {
@@ -397,6 +399,8 @@ pub fn loadRawBlob(allocator: Allocator, repo: Repo, target: []const u8) !?RawBl
 fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8, sync_flash: ?CodeSyncFlash) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
+    var reference_resolver = shared.InternalReferenceResolver.init(allocator, repo);
+    defer reference_resolver.deinit();
 
     try appendShellStart(&buf, allocator, repo, "Code", "code");
     try appendRepoHeader(&buf, allocator, repo, ref);
@@ -425,16 +429,16 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
             try appendRootCodeToolbar(&buf, allocator, ref, branches, worktrees, branch_count, tag_count, worktree_count);
             if (sync_flash) |flash| try appendCodeSyncFlash(&buf, allocator, flash);
             try appendRootCodePanelStart(&buf, allocator);
-            try appendRootCommitBar(&buf, allocator, ref, summary_opt, null);
-            try appendRootTreeListing(&buf, allocator, ref, entries);
+            try appendRootCommitBar(&buf, allocator, &reference_resolver, ref, summary_opt, null);
+            try appendRootTreeListing(&buf, allocator, &reference_resolver, ref, entries);
             try appendCodePanelEnd(&buf, allocator);
         } else {
             try appendCodePanelStart(&buf, allocator, repo, ref, path);
             try appendCodeActionLink(&buf, allocator, "History", commitsHref(ref, path), "icon-history");
             try appendCodePanelToolbarEnd(&buf, allocator);
-            try appendCommitBar(&buf, allocator, summary_opt);
+            try appendCommitBar(&buf, allocator, &reference_resolver, summary_opt);
             try appendCodePanelHeadEnd(&buf, allocator);
-            try appendTreeListing(&buf, allocator, ref, path, entries);
+            try appendTreeListing(&buf, allocator, &reference_resolver, ref, path, entries);
             try appendCodePanelEnd(&buf, allocator);
         }
 
@@ -458,6 +462,8 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
 fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8, view: []const u8) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
+    var reference_resolver = shared.InternalReferenceResolver.init(allocator, repo);
+    defer reference_resolver.deinit();
 
     try appendShellStart(&buf, allocator, repo, "Code", "code");
     try appendRepoHeader(&buf, allocator, repo, ref);
@@ -500,7 +506,7 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     try appendCodeActionLink(&buf, allocator, "History", commitsHref(ref, path), "icon-history");
     try appendCodePanelToolbarEnd(&buf, allocator);
 
-    try appendCommitBar(&buf, allocator, summary_opt);
+    try appendCommitBar(&buf, allocator, &reference_resolver, summary_opt);
     try appendCodePanelHeadEnd(&buf, allocator);
     const permalink_ref = if (summary_opt) |summary| summary.full_hash else ref;
     try appendBlobContent(&buf, allocator, ref, permalink_ref, path, media_kind, can_preview_media, content, render_markdown);
@@ -961,6 +967,7 @@ fn appendTreeToggle(buf: *std.ArrayList(u8), allocator: Allocator, is_tree: bool
 fn appendTreeListing(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
+    reference_resolver: *shared.InternalReferenceResolver,
     ref: []const u8,
     path: []const u8,
     entries: []const TreeEntry,
@@ -975,7 +982,7 @@ fn appendTreeListing(
     }
 
     for (entries) |entry| {
-        try appendTreeEntryRow(buf, allocator, ref, path, entry);
+        try appendTreeEntryRow(buf, allocator, reference_resolver, ref, path, entry);
     }
 
     if (entries.len == 0) {
@@ -1094,6 +1101,7 @@ fn appendRootCodePanelStart(buf: *std.ArrayList(u8), allocator: Allocator) !void
 fn appendRootCommitBar(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
+    reference_resolver: *shared.InternalReferenceResolver,
     ref: []const u8,
     summary_opt: ?CommitSummary,
     commit_count: ?usize,
@@ -1101,13 +1109,19 @@ fn appendRootCommitBar(
     try appendTemplate(buf, allocator, "<div class=\"root-commit-row\">", .{});
     if (summary_opt) |summary| {
         try shared.appendAvatar(buf, allocator, summary.author, "root-commit-avatar");
+        const commit_href = commitHref(summary.full_hash);
         try appendTemplate(buf, allocator,
-            \\<div class="root-commit-main"><span class="root-commit-author">{author}</span><a class="root-commit-message" href="{href}" title="{subject}">{subject}</a></div>
-            \\<div class="root-commit-meta"><a class="root-commit-hash" href="{href}">{hash}</a><span>{relative}</span></div>
+            \\<div class="root-commit-main"><span class="root-commit-author">{author}</span><span class="root-commit-message" title="{subject}">
         , .{
             .author = summary.author,
-            .href = commitHref(summary.full_hash),
             .subject = summary.subject,
+        });
+        try shared.appendInternalReferenceLinkedTextWithDefaultHref(buf, allocator, reference_resolver, summary.subject, commit_href);
+        try appendTemplate(buf, allocator,
+            \\</span></div>
+            \\<div class="root-commit-meta"><a class="root-commit-hash" href="{href}">{hash}</a><span>{relative}</span></div>
+        , .{
+            .href = commit_href,
             .hash = summary.hash,
             .relative = summary.relative,
         });
@@ -1148,12 +1162,13 @@ fn appendRootCommitCountLink(buf: *std.ArrayList(u8), allocator: Allocator, ref:
 fn appendRootTreeListing(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
+    reference_resolver: *shared.InternalReferenceResolver,
     ref: []const u8,
     entries: []const TreeEntry,
 ) !void {
     try appendTemplate(buf, allocator, "<div class=\"root-file-list\" data-root-file-list>", .{});
     for (entries) |entry| {
-        try appendRootTreeEntryRow(buf, allocator, ref, entry);
+        try appendRootTreeEntryRow(buf, allocator, reference_resolver, ref, entry);
     }
 
     if (entries.len == 0) {
@@ -1162,7 +1177,13 @@ fn appendRootTreeListing(
     try appendTemplate(buf, allocator, "</div>", .{});
 }
 
-fn appendRootTreeEntryRow(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, entry: TreeEntry) !void {
+fn appendRootTreeEntryRow(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    reference_resolver: *shared.InternalReferenceResolver,
+    ref: []const u8,
+    entry: TreeEntry,
+) !void {
     const child_path = try childPath(allocator, "", entry.name);
     defer allocator.free(child_path);
 
@@ -1194,13 +1215,16 @@ fn appendRootTreeEntryRow(buf: *std.ArrayList(u8), allocator: Allocator, ref: []
                 \\</span><span class="root-file-time">{relative}</span>
             , .{ .relative = commit.relative });
         } else {
+            const commit_href = commitHref(commit.full_hash);
             try appendTemplate(buf, allocator,
-                \\<a class="root-file-commit" href="{href}" title="{subject}">{subject}</a><span class="root-file-time">{relative}</span>
+                \\<span class="root-file-commit" title="{subject}">
             , .{
-                .href = commitHref(commit.full_hash),
                 .subject = commit.subject,
-                .relative = commit.relative,
             });
+            try shared.appendInternalReferenceLinkedTextWithDefaultHref(buf, allocator, reference_resolver, commit.subject, commit_href);
+            try appendTemplate(buf, allocator,
+                \\</span><span class="root-file-time">{relative}</span>
+            , .{ .relative = commit.relative });
         }
     } else {
         try appendTemplate(buf, allocator,
@@ -1219,7 +1243,14 @@ fn appendParentDirectoryRow(buf: *std.ArrayList(u8), allocator: Allocator, ref: 
     try appendTemplate(buf, allocator, "..</a><span></span><span></span><span></span></div>", .{});
 }
 
-fn appendTreeEntryRow(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, parent: []const u8, entry: TreeEntry) !void {
+fn appendTreeEntryRow(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    reference_resolver: *shared.InternalReferenceResolver,
+    ref: []const u8,
+    parent: []const u8,
+    entry: TreeEntry,
+) !void {
     const child_path = try childPath(allocator, parent, entry.name);
     defer allocator.free(child_path);
 
@@ -1232,7 +1263,7 @@ fn appendTreeEntryRow(buf: *std.ArrayList(u8), allocator: Allocator, ref: []cons
     , .{
         .name = entry.name,
     });
-    try appendTreeEntryCommit(buf, allocator, entry.last_commit);
+    try appendTreeEntryCommit(buf, allocator, reference_resolver, entry.last_commit);
     try appendTemplate(buf, allocator,
         \\<span><code>{mode}</code></span><span class="file-size">
     , .{ .mode = entry.mode });
@@ -1242,7 +1273,12 @@ fn appendTreeEntryRow(buf: *std.ArrayList(u8), allocator: Allocator, ref: []cons
     try appendTemplate(buf, allocator, "</span></div>", .{});
 }
 
-fn appendTreeEntryCommit(buf: *std.ArrayList(u8), allocator: Allocator, commit_opt: ?TreeEntryCommit) !void {
+fn appendTreeEntryCommit(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    reference_resolver: *shared.InternalReferenceResolver,
+    commit_opt: ?TreeEntryCommit,
+) !void {
     if (commit_opt) |commit| {
         if (commit.synthetic) {
             const change_class = changeStateClass(commit.change_state);
@@ -1255,12 +1291,12 @@ fn appendTreeEntryCommit(buf: *std.ArrayList(u8), allocator: Allocator, commit_o
             try appendWorktreeChangeLabel(buf, allocator, commit.change_state);
             try appendTemplate(buf, allocator, "</span>", .{});
         } else {
+            const commit_href = commitHref(commit.full_hash);
             try appendTemplate(buf, allocator,
-                \\<span class="file-commit" title="{subject}"><a href="{href}">{subject}</a></span>
-            , .{
-                .href = commitHref(commit.full_hash),
-                .subject = commit.subject,
-            });
+                \\<span class="file-commit" title="{subject}">
+            , .{ .subject = commit.subject });
+            try shared.appendInternalReferenceLinkedTextWithDefaultHref(buf, allocator, reference_resolver, commit.subject, commit_href);
+            try appendTemplate(buf, allocator, "</span>", .{});
         }
     } else {
         try appendTemplate(buf, allocator, "<span class=\"file-commit empty\">No commit</span>", .{});
@@ -1276,15 +1312,25 @@ fn appendWorktreeChangeLabel(buf: *std.ArrayList(u8), allocator: Allocator, stat
     }
 }
 
-fn appendCommitBar(buf: *std.ArrayList(u8), allocator: Allocator, summary_opt: ?CommitSummary) !void {
+fn appendCommitBar(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    reference_resolver: *shared.InternalReferenceResolver,
+    summary_opt: ?CommitSummary,
+) !void {
     try appendTemplate(buf, allocator, "<div class=\"commit-bar\">", .{});
     if (summary_opt) |summary| {
         try appendTemplate(buf, allocator,
-            \\<a class="commit-hash" href="{href}"><code>{hash}</code></a><strong><a href="{href}" title="{subject}">{subject}</a></strong><span>{relative}</span>
+            \\<a class="commit-hash" href="{href}"><code>{hash}</code></a><strong><span class="commit-bar-subject" title="{subject}">
         , .{
             .href = commitHref(summary.full_hash),
             .hash = summary.hash,
             .subject = summary.subject,
+        });
+        try shared.appendInternalReferenceLinkedTextWithDefaultHref(buf, allocator, reference_resolver, summary.subject, commitHref(summary.full_hash));
+        try appendTemplate(buf, allocator,
+            \\</span></strong><span>{relative}</span>
+        , .{
             .relative = summary.relative,
         });
     } else {
