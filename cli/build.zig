@@ -13,14 +13,7 @@ pub fn build(b: *std.Build) void {
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", package_version);
 
-    const mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    mod.addOptions("build_options", build_options);
-    addSqlite(mod, sqlite_dep);
-    addTreeSitter(mod, tree_sitter_dep, tree_sitter_zig_dep);
+    const mod = createMainModule(b, target, optimize, build_options, sqlite_dep, tree_sitter_dep, tree_sitter_zig_dep);
 
     const exe = b.addExecutable(.{
         .name = "gt",
@@ -37,14 +30,7 @@ pub fn build(b: *std.Build) void {
     }
     b.step("run", "Run gt").dependOn(&run_cmd.step);
 
-    const test_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    test_mod.addOptions("build_options", build_options);
-    addSqlite(test_mod, sqlite_dep);
-    addTreeSitter(test_mod, tree_sitter_dep, tree_sitter_zig_dep);
+    const test_mod = createMainModule(b, target, optimize, build_options, sqlite_dep, tree_sitter_dep, tree_sitter_zig_dep);
     const tests = b.addTest(.{ .root_module = test_mod });
     tests.linkLibC();
     const run_tests = b.addRunArtifact(tests);
@@ -61,6 +47,26 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit and integration tests");
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(&integration.step);
+}
+
+fn createMainModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    build_options: *std.Build.Step.Options,
+    sqlite_dep: *std.Build.Dependency,
+    tree_sitter_dep: *std.Build.Dependency,
+    tree_sitter_zig_dep: *std.Build.Dependency,
+) *std.Build.Module {
+    const mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    mod.addOptions("build_options", build_options);
+    addSqlite(mod, sqlite_dep);
+    addTreeSitter(mod, tree_sitter_dep, tree_sitter_zig_dep);
+    return mod;
 }
 
 fn addSqlite(module: *std.Build.Module, sqlite_dep: *std.Build.Dependency) void {
