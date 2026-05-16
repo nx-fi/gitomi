@@ -1,17 +1,33 @@
 const std = @import("std");
 
+const BufferedStream = struct {
+    mutex: std.Thread.Mutex = .{},
+    buffer: [4096]u8 = undefined,
+    writer: std.fs.File.Writer = undefined,
+    initialized: bool = false,
+
+    fn print(self: *BufferedStream, file: std.fs.File, comptime fmt: []const u8, args: anytype) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (!self.initialized) {
+            self.writer = file.writerStreaming(&self.buffer);
+            self.initialized = true;
+        }
+
+        const stream = &self.writer.interface;
+        try stream.print(fmt, args);
+        try stream.flush();
+    }
+};
+
+var stdout_stream: BufferedStream = .{};
+var stderr_stream: BufferedStream = .{};
+
 pub fn out(comptime fmt: []const u8, args: anytype) !void {
-    var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-    const stdout = &stdout_writer.interface;
-    try stdout.print(fmt, args);
-    try stdout.flush();
+    try stdout_stream.print(std.fs.File.stdout(), fmt, args);
 }
 
 pub fn eprint(comptime fmt: []const u8, args: anytype) !void {
-    var stderr_buffer: [4096]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
-    const stderr = &stderr_writer.interface;
-    try stderr.print(fmt, args);
-    try stderr.flush();
+    try stderr_stream.print(std.fs.File.stderr(), fmt, args);
 }

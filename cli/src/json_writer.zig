@@ -56,9 +56,9 @@ pub fn appendJsonString(buf: *std.ArrayList(u8), allocator: Allocator, value: []
             0x08 => try buf.appendSlice(allocator, "\\b"),
             0x0c => try buf.appendSlice(allocator, "\\f"),
             0x00...0x07, 0x0b, 0x0e...0x1f => {
-                const escaped = try std.fmt.allocPrint(allocator, "\\u{x:0>4}", .{c});
-                defer allocator.free(escaped);
-                try buf.appendSlice(allocator, escaped);
+                var escape_buf: [6]u8 = undefined;
+                _ = std.fmt.bufPrint(&escape_buf, "\\u{x:0>4}", .{c}) catch unreachable;
+                try buf.appendSlice(allocator, &escape_buf);
             },
             else => try buf.append(allocator, c),
         }
