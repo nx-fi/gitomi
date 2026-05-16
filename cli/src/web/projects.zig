@@ -163,9 +163,9 @@ const project_issue_filter_sql =
 const default_project_template_id = "kanban";
 const default_project_priority = "P3";
 const default_project_status = "Draft";
-const project_status_values = [_][]const u8{ "Draft", "Pending", "WIP", "Review", "Done", "Failed" };
+const project_status_values = [_][]const u8{ "Draft", "Todo", "WIP", "Review", "Done", "Failed" };
 const project_priority_values = [_][]const u8{ "P0", "P1", "P2", "P3" };
-const default_project_status_columns = "Draft, Pending, WIP, Review, Done, Failed";
+const default_project_status_columns = "Draft, Todo, WIP, Review, Done, Failed";
 
 const project_templates = [_]ProjectTemplate{
     .{
@@ -455,9 +455,9 @@ fn appendProjectBoard(
     const context = projectRenderContextFromView(allocator, active_view, current_principal);
     const issue_count = try projectIssueCount(db, project, context.filter);
     try appendProjectWorkspaceChromeStart(buf, allocator, db, project, issue_count, active_view);
-    try buf.appendSlice(allocator,
-        \\  <div class="kanban-board">
-    );
+    try appendTemplate(buf, allocator,
+        \\  <div class="kanban-board" data-project="{project}">
+    , .{ .project = project });
     try appendProjectColumns(buf, allocator, db, project, &context, appendProjectColumn);
     try buf.appendSlice(allocator,
         \\  </div>
@@ -493,6 +493,7 @@ fn appendProjectWorkspaceChromeStart(
     try buf.appendSlice(allocator, "\">Open issues</a></div>");
     try appendProjectViewTabs(buf, allocator, db, project, active_view, issue_count);
     try appendProjectItemActions(buf, allocator, db, project, active_view);
+    try appendProjectIssueSearchIndex(buf, allocator, db);
     try appendTemplate(buf, allocator,
         \\  <form class="project-filter-bar" method="get" action="/issues">
         \\    <span class="project-filter-icon" aria-hidden="true"></span>
@@ -897,7 +898,7 @@ fn appendProjectPriorityTableGroup(
         \\ORDER BY
         \\  CASE COALESCE(NULLIF(m.status, ''), p.legacy_column, '')
         \\    WHEN 'Draft' THEN 10
-        \\    WHEN 'Pending' THEN 20
+        \\    WHEN 'Todo' THEN 20
         \\    WHEN 'WIP' THEN 30
         \\    WHEN 'Review' THEN 40
         \\    WHEN 'Done' THEN 50
@@ -1287,7 +1288,9 @@ fn appendProjectItemActions(
         \\        <input type="hidden" name="action" value="add-existing">
         \\        <input type="hidden" name="project" value="{project}">
         \\        <input type="hidden" name="view" value="{view}">
-        \\        <label>Issue<input name="issue" placeholder="#123 or issue:abcdef0" required></label>
+        \\        <div class="project-issue-search-wrap tree-search-wrap">
+        \\          <label class="tree-search-label project-issue-search-label"><span>Issue</span><input class="tree-search-input" name="issue" placeholder="Search issues or paste a ref" autocomplete="off" spellcheck="false" data-project-issue-search required></label>
+        \\        </div>
         \\        <label>Priority<select name="priority">
     , .{
         .project = project,
@@ -1488,7 +1491,7 @@ fn appendProjectColumn(
     const tone = columnTone(column);
     const note = columnDescription(column);
     try appendTemplate(buf, allocator,
-        \\<section class="kanban-column tone-{tone}" data-project-column data-column="{column}">
+        \\<section class="kanban-column tone-{tone}" data-project-column data-project="{project}" data-column="{column}">
         \\  <header>
         \\    <div class="kanban-column-title">
         \\      <span class="kanban-status-dot" aria-hidden="true"></span>
@@ -1499,23 +1502,46 @@ fn appendProjectColumn(
         \\      <details class="kanban-column-add-menu" data-popover-menu>
         \\        <summary aria-label="Add issue to {title}" title="Add issue"><span class="kanban-column-add" aria-hidden="true"></span></summary>
         \\        <div class="kanban-column-popover">
-        \\          <form class="project-column-mini-form" method="post" action="/projects/items">
+        \\          <form class="project-item-form project-column-issue-form" method="post" action="/projects/items">
         \\            <input type="hidden" name="action" value="create-issue">
         \\            <input type="hidden" name="project" value="{project}">
-        \\            <input type="hidden" name="column" value="{column}">
-        \\            <input type="hidden" name="priority" value="{default_priority}">
         \\            <input type="hidden" name="view" value="{view}">
-        \\            <input name="title" placeholder="New issue title" aria-label="New issue title" required>
-        \\            <button class="button primary" type="submit">Create</button>
+        \\            <label>Title<input name="title" required></label>
+        \\            <label>Body<textarea name="body" rows="4"></textarea></label>
+        \\            <div class="grid two">
+        \\              <label>Priority<select name="priority">
+    , .{
+        .tone = tone,
+        .project = project,
+        .column = column,
+        .view = context.view_ref,
+        .title = title,
+        .count = count,
+        .note = note,
+    });
+    try appendProjectPriorityOptions(buf, allocator, context.defaults.priority);
+    try buf.appendSlice(allocator,
+        \\              </select></label>
+        \\              <label>Status<select name="column">
+    );
+    try appendProjectColumnOptions(buf, allocator, db, project, column);
+    try appendTemplate(buf, allocator,
+        \\              </select></label>
+        \\            </div>
+        \\            <label>Labels<input name="labels" placeholder="bug, docs"></label>
+        \\            <label>Assignees<input name="assignees" placeholder="alice, bob"></label>
+        \\            <div class="form-actions"><button class="button primary" type="submit">Create issue</button></div>
         \\          </form>
-        \\          <form class="project-column-mini-form" method="post" action="/projects/items">
+        \\          <form class="project-item-form project-column-existing-form" method="post" action="/projects/items">
         \\            <input type="hidden" name="action" value="add-existing">
         \\            <input type="hidden" name="project" value="{project}">
         \\            <input type="hidden" name="column" value="{column}">
         \\            <input type="hidden" name="priority" value="{existing_priority}">
         \\            <input type="hidden" name="view" value="{view}">
-        \\            <input name="issue" placeholder="#123 or issue:abcdef0" aria-label="Issue" required>
-        \\            <button class="button secondary" type="submit">Add</button>
+        \\            <div class="project-issue-search-wrap tree-search-wrap">
+        \\              <label class="tree-search-label project-issue-search-label"><span>Issue</span><input class="tree-search-input" name="issue" placeholder="Search issues or paste a ref" aria-label="Issue" autocomplete="off" spellcheck="false" data-project-issue-search required></label>
+        \\            </div>
+        \\            <div class="form-actions"><button class="button secondary" type="submit">Add issue</button></div>
         \\          </form>
         \\        </div>
         \\      </details>
@@ -1524,14 +1550,10 @@ fn appendProjectColumn(
         \\  <p class="kanban-column-note">{note}</p>
         \\  <div class="kanban-cards" data-project-dropzone>
     , .{
-        .tone = tone,
         .project = project,
         .column = column,
-        .default_priority = context.defaults.priority,
         .existing_priority = if (context.defaults.priority_explicit) context.defaults.priority else "",
         .view = context.view_ref,
-        .title = title,
-        .count = count,
         .note = note,
     });
 
@@ -1954,10 +1976,10 @@ const table_status_view_config =
     \\{"group_by":"issue.status","fields":["issue.priority","issue.status","issue.state","issue.assignees","issue.labels","issue.milestone"]}
 ;
 const board_status_view_config =
-    \\{"group_by":"issue.status","columns":["Draft","Pending","WIP","Review","Done","Failed"],"card_fields":["issue.priority","issue.state","issue.assignees","issue.labels"]}
+    \\{"group_by":"issue.status","columns":["Draft","Todo","WIP","Review","Done","Failed"],"card_fields":["issue.priority","issue.state","issue.assignees","issue.labels"]}
 ;
 const kanban_board_view_config =
-    \\{"group_by":"issue.status","columns":["Draft","Pending","WIP","Review","Done","Failed"],"defaults":{"issue.status":"Draft","issue.priority":"P3"},"card_fields":["issue.priority","issue.state","issue.assignees","issue.labels"]}
+    \\{"group_by":"issue.status","columns":["Draft","Todo","WIP","Review","Done","Failed"],"defaults":{"issue.status":"Draft","issue.priority":"P3"},"card_fields":["issue.priority","issue.state","issue.assignees","issue.labels"]}
 ;
 const priority_table_view_config =
     \\{"group_by":"issue.priority","fields":["issue.priority","issue.status","issue.state","issue.assignees","issue.labels","issue.milestone"],"defaults":{"issue.priority":"P3","issue.status":"Draft"}}
@@ -1975,7 +1997,7 @@ const bugs_priority_view_config =
     \\{"filter":{"any":[{"issue.type":"bug"},{"label":"bug"}]},"group_by":"issue.priority","fields":["issue.priority","issue.status","issue.state","issue.assignees","issue.labels"],"defaults":{"issue.priority":"P3","issue.status":"Draft"}}
 ;
 const bug_triage_view_config =
-    \\{"filter":{"any":[{"issue.type":"bug"},{"label":"bug"}]},"group_by":"issue.status","columns":["Draft","Pending","WIP","Review","Done","Failed"],"defaults":{"issue.status":"Pending","issue.priority":"P3"},"card_fields":["issue.priority","issue.state","issue.assignees","issue.labels"]}
+    \\{"filter":{"any":[{"issue.type":"bug"},{"label":"bug"}]},"group_by":"issue.status","columns":["Draft","Todo","WIP","Review","Done","Failed"],"defaults":{"issue.status":"Todo","issue.priority":"P3"},"card_fields":["issue.priority","issue.state","issue.assignees","issue.labels"]}
 ;
 const current_iteration_view_config =
     \\{"filter":{"project.iteration":"current"},"group_by":"issue.status","fields":["project.iteration","project.estimate","issue.priority","issue.status","issue.assignees"]}
@@ -2004,7 +2026,7 @@ pub fn handleProjectPost(allocator: Allocator, repo: Repo, stream: std.net.Strea
     defer columns.deinit(allocator);
     for (columns.items) |column| {
         if (!isProjectStatusValue(column)) {
-            const body = try renderProjectForm(allocator, repo, "Status values must be Draft, Pending, WIP, Review, Done, or Failed.", name_owned, description_owned, effective_columns, template_owned);
+            const body = try renderProjectForm(allocator, repo, "Status values must be Draft, Todo, WIP, Review, Done, or Failed.", name_owned, description_owned, effective_columns, template_owned);
             defer allocator.free(body);
             try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", body, null);
             return;
@@ -2069,7 +2091,7 @@ pub fn handleProjectItemPost(allocator: Allocator, repo: Repo, stream: std.net.S
         column_owned = try allocator.dupe(u8, default_project_status);
     }
     if (!isProjectStatusValue(column_owned)) {
-        try sendProjectItemError(allocator, stream, wants_async, 422, "Unprocessable Entity", "Status must be Draft, Pending, WIP, Review, Done, or Failed\n");
+        try sendProjectItemError(allocator, stream, wants_async, 422, "Unprocessable Entity", "Status must be Draft, Todo, WIP, Review, Done, or Failed\n");
         return;
     }
     if (priority_owned.len != 0 and !isProjectPriorityValue(priority_owned)) {
@@ -2425,7 +2447,7 @@ fn appendProjectConfigForm(
         \\    <input type="hidden" name="template" value="{template_id}">
         \\    <label>Name<input name="name" value="{name_value}" autofocus required></label>
         \\    <label>Description<textarea name="description" rows="4">{description_value}</textarea></label>
-        \\    <label>Status values<input name="columns" value="{columns_value}" placeholder="Draft, Pending, WIP, Review, Done, Failed"></label>
+        \\    <label>Status values<input name="columns" value="{columns_value}" placeholder="Draft, Todo, WIP, Review, Done, Failed"></label>
         \\    <div class="project-column-chips" aria-label="Template status values">
     , .{
         .title = selected_template.title,
@@ -2458,7 +2480,7 @@ fn appendColumnChips(buf: *std.ArrayList(u8), allocator: Allocator, columns_valu
         , .{ .column = column });
         shown = true;
     }
-    if (!shown) try buf.appendSlice(allocator, "<span>Draft</span><span>Pending</span><span>WIP</span><span>Review</span><span>Done</span><span>Failed</span>");
+    if (!shown) try buf.appendSlice(allocator, "<span>Draft</span><span>Todo</span><span>WIP</span><span>Review</span><span>Done</span><span>Failed</span>");
 }
 
 fn appendProjectTemplateSearchScript(buf: *std.ArrayList(u8), allocator: Allocator) !void {
@@ -3059,7 +3081,7 @@ fn issueLabelKind(label: []const u8) []const u8 {
 fn columnTone(column: []const u8) []const u8 {
     if (column.len == 0) return "neutral";
     if (asciiEqlIgnoreCase(column, "Draft")) return "draft";
-    if (asciiEqlIgnoreCase(column, "Pending")) return "pending";
+    if (asciiEqlIgnoreCase(column, "Todo")) return "todo";
     if (asciiEqlIgnoreCase(column, "WIP")) return "progress";
     if (asciiEqlIgnoreCase(column, "Failed")) return "failed";
     if (asciiContainsIgnoreCase(column, "done") or asciiContainsIgnoreCase(column, "complete") or asciiContainsIgnoreCase(column, "closed")) return "done";
@@ -3073,7 +3095,7 @@ fn columnTone(column: []const u8) []const u8 {
 fn columnDescription(column: []const u8) []const u8 {
     if (column.len == 0) return "Issues without a project column";
     if (asciiEqlIgnoreCase(column, "Draft")) return "Scoped but not ready";
-    if (asciiEqlIgnoreCase(column, "Pending")) return "Waiting to start";
+    if (asciiEqlIgnoreCase(column, "Todo")) return "Not started yet";
     if (asciiEqlIgnoreCase(column, "WIP")) return "Actively being worked on";
     if (asciiEqlIgnoreCase(column, "Review")) return "Waiting for review";
     if (asciiEqlIgnoreCase(column, "Failed")) return "Needs recovery before moving on";
