@@ -619,18 +619,66 @@
     retry.type = "button";
     retry.textContent = "Retry";
     retry.addEventListener("click", function () {
-      loadRootPartial(slot, true);
+      scheduleRootPartial(slot, true);
     });
     section.appendChild(retry);
 
     return section;
   }
 
-  async function loadRootPartial(slot, retrying) {
+  const rootPartialMaxConcurrent = 1;
+  let rootPartialActive = 0;
+  let rootPartialSequence = 0;
+  const rootPartialQueue = [];
+
+  function rootPartialPriority(slot) {
+    const priority = Number(slot.dataset.rootPartialPriority);
+    return Number.isFinite(priority) ? priority : 100;
+  }
+
+  function sortRootPartialQueue() {
+    rootPartialQueue.sort(function (a, b) {
+      if (a.priority !== b.priority) return a.priority - b.priority;
+      return a.sequence - b.sequence;
+    });
+  }
+
+  function scheduleRootPartial(slot, retrying) {
     const url = slot.dataset.rootPartial;
     if (!url) return;
+    if (slot.dataset.rootPartialState === "queued" || slot.dataset.rootPartialState === "loading") return;
     if (!retrying && slot.dataset.rootPartialReady === "yes") return;
     slot.dataset.rootPartialReady = "yes";
+    slot.dataset.rootPartialState = "queued";
+    rootPartialQueue.push({
+      slot,
+      priority: rootPartialPriority(slot),
+      sequence: rootPartialSequence++,
+    });
+    sortRootPartialQueue();
+    drainRootPartialQueue();
+  }
+
+  function drainRootPartialQueue() {
+    while (rootPartialActive < rootPartialMaxConcurrent && rootPartialQueue.length !== 0) {
+      const item = rootPartialQueue.shift();
+      if (!item.slot.isConnected) {
+        delete item.slot.dataset.rootPartialState;
+        continue;
+      }
+
+      rootPartialActive += 1;
+      item.slot.dataset.rootPartialState = "loading";
+      loadRootPartial(item.slot).finally(function () {
+        rootPartialActive -= 1;
+        drainRootPartialQueue();
+      });
+    }
+  }
+
+  async function loadRootPartial(slot) {
+    const url = slot.dataset.rootPartial;
+    if (!url) return;
     slot.setAttribute("aria-busy", "true");
 
     try {
@@ -640,6 +688,7 @@
       });
       if (!response.ok) throw new Error("partial load failed");
       const html = (await response.text()).trim();
+      if (!slot.isConnected) return;
       const parent = slot.parentElement;
       if (!html) {
         slot.remove();
@@ -652,6 +701,8 @@
       slot.replaceWith(template.content);
       notifyPartialRefresh(parent);
     } catch (_) {
+      if (!slot.isConnected) return;
+      slot.dataset.rootPartialState = "error";
       slot.removeAttribute("aria-busy");
       if (slot.hasAttribute("data-root-partial-silent")) return;
       slot.replaceChildren(partialErrorNode(slot));
@@ -661,7 +712,7 @@
   function initRootPartials(root) {
     const scope = root || document;
     scope.querySelectorAll("[data-root-partial]").forEach(function (slot) {
-      loadRootPartial(slot, false);
+      scheduleRootPartial(slot, false);
     });
   }
 

@@ -1541,8 +1541,6 @@ main.page-projects:has(.project-detail-panel) {
 }
 .pull-mergeability-item {
   align-items: start;
-}
-.pull-mergeability-item:has(.pull-merge-method-menu[open]) {
   z-index: 8;
 }
 .pull-mergeability-icon {
@@ -1593,13 +1591,10 @@ main.page-projects:has(.project-detail-panel) {
 }
 .pull-mergeability-box {
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 6px;
-}
-.pull-mergeability-box:has(.pull-merge-method-menu[open]) {
-  overflow: visible;
 }
 .pull-mergeability-box.is-conflicts {
   background: var(--panel);
@@ -1659,6 +1654,8 @@ main.page-projects:has(.project-detail-panel) {
 .pull-merge-button-group {
   position: relative;
   display: inline-flex;
+  align-items: stretch;
+  flex-wrap: nowrap;
   flex: 0 0 auto;
   min-width: 0;
 }
@@ -1666,16 +1663,19 @@ main.page-projects:has(.project-detail-panel) {
   gap: 8px;
   position: relative;
   z-index: 1;
+  white-space: nowrap;
   border-top-right-radius: 0;
   border-bottom-right-radius: 0;
 }
 .pull-merge-method-menu {
-  display: inline-flex;
+  position: relative;
+  display: block;
   flex: 0 0 auto;
   margin-left: -1px;
 }
 .pull-merge-method-menu > summary {
   width: 42px;
+  height: 100%;
   padding: 0;
   border-top-left-radius: 0;
   border-bottom-left-radius: 0;
@@ -1692,9 +1692,11 @@ main.page-projects:has(.project-detail-panel) {
 .pull-merge-method-popover {
   position: absolute;
   top: calc(100% + 6px);
-  right: 0;
+  left: 0;
+  right: auto;
   z-index: 30;
-  width: min(420px, calc(100vw - 48px));
+  display: grid;
+  width: min(480px, calc(100vw - 48px));
   overflow: hidden;
   background: var(--panel-strong);
   border: 1px solid var(--border-strong);
@@ -1702,6 +1704,7 @@ main.page-projects:has(.project-detail-panel) {
   box-shadow: 0 18px 42px rgb(0 0 0 / 26%);
 }
 .pull-merge-method-option {
+  appearance: none;
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr);
   gap: 10px;
@@ -1711,6 +1714,7 @@ main.page-projects:has(.project-detail-panel) {
   background: transparent;
   border: 0;
   border-bottom: 1px solid var(--border);
+  border-radius: 0;
   font: inherit;
   text-align: left;
   cursor: pointer;
@@ -9981,8 +9985,8 @@ textarea {
     margin-left: 0;
   }
   .pull-merge-method-popover {
-    left: auto;
-    right: 0;
+    left: 0;
+    right: auto;
   }
   .merge-editor {
     margin: -12px;
