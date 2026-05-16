@@ -193,6 +193,11 @@ fn handleWebConnectionWithContext(allocator: Allocator, app_context: WebAppConte
         .response = zwf.Response.initWithRequest(allocator, stream, request),
     };
 
+    if (isForbiddenCrossOriginWrite(request)) {
+        try shared.sendPlainResponse(allocator, stream, 403, "Forbidden", "Forbidden\n");
+        return;
+    }
+
     if (try zwf.middleware.sendStaticAssets(ctx.response, ctx.request, &vendor_assets)) return;
 
     const router = WebRouter.init(&routes);
@@ -703,6 +708,37 @@ fn hostnameFromHeader(host_header: []const u8) []const u8 {
     return host_header;
 }
 
+fn isForbiddenCrossOriginWrite(request: HttpRequest) bool {
+    if (!isWriteMethod(request.method)) return false;
+
+    if (request.headerValue("sec-fetch-site")) |site| {
+        if (std.ascii.eqlIgnoreCase(site, "cross-site")) return true;
+    }
+
+    if (request.headerValue("origin")) |origin| {
+        return !sourceUrlMatchesRequestHost(origin, request);
+    }
+
+    if (request.headerValue("referer")) |referer| {
+        return !sourceUrlMatchesRequestHost(referer, request);
+    }
+
+    return false;
+}
+
+fn isWriteMethod(method: zwf.Method) bool {
+    return switch (method) {
+        .POST, .PUT, .PATCH, .DELETE => true,
+        else => false,
+    };
+}
+
+fn sourceUrlMatchesRequestHost(source: []const u8, request: HttpRequest) bool {
+    const host_header = request.headerValue("host") orelse return false;
+    const request_authority = parseAuthority(host_header) orelse return false;
+    return sourceUrlMatchesAuthority(source, request_authority);
+}
+
 pub fn parseContentLength(headers: []const u8) !usize {
     return zwf.request.parseContentLength(headers);
 }
@@ -934,6 +970,32 @@ test "web request parser separates method path and body" {
     try std.testing.expect(request.headerValue("referer") == null);
     try std.testing.expect(request.range == null);
     try std.testing.expectEqualStrings("127.0.0.1", request.headerValue("host").?);
+}
+
+test "web request rejects cross-origin writes" {
+    const raw =
+        "POST /projects HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1:12655\r\n" ++
+        "Origin: http://evil.example\r\n" ++
+        "Sec-Fetch-Site: cross-site\r\n" ++
+        "Content-Length: 9\r\n" ++
+        "\r\n" ++
+        "name=evil";
+    const request = try parseHttpRequest(raw);
+    try std.testing.expect(isForbiddenCrossOriginWrite(request));
+}
+
+test "web request accepts same-origin writes" {
+    const raw =
+        "POST /projects HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1:12655\r\n" ++
+        "Origin: http://127.0.0.1:12655\r\n" ++
+        "Sec-Fetch-Site: same-origin\r\n" ++
+        "Content-Length: 8\r\n" ++
+        "\r\n" ++
+        "name=ok!";
+    const request = try parseHttpRequest(raw);
+    try std.testing.expect(!isForbiddenCrossOriginWrite(request));
 }
 
 test "web code sync requires trusted same-origin post headers" {
