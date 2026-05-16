@@ -701,14 +701,12 @@ fn defaultWorkflowTargetForEvent(
     event_type: []const u8,
     explicit_target: bool,
 ) !ResolvedTarget {
-    if (!explicit_target and isPullEvent(event_type)) {
-        if (pull_refs) |refs| {
-            return resolveTarget(allocator, refs.base_ref, null) catch |err| {
-                if (errors.isUserError(err)) return duplicateTarget(allocator, selected);
-                return err;
-            };
-        }
-    }
+    _ = pull_refs;
+    _ = event_type;
+    _ = explicit_target;
+
+    // Pull base/head refs come from PR metadata that the pull author can edit.
+    // Workflow discovery must stay anchored to the runner-selected target.
     return duplicateTarget(allocator, selected);
 }
 
@@ -732,12 +730,8 @@ fn resolvePolicyTarget(
 ) !ResolvedTarget {
     if (std.mem.eql(u8, policy, "target")) return duplicateTarget(allocator, selected);
     if (std.mem.eql(u8, policy, "base")) {
-        if (pull_refs) |refs| {
-            return resolveTarget(allocator, refs.base_ref, null) catch |err| {
-                if (errors.isUserError(err)) return duplicateTarget(allocator, selected);
-                return err;
-            };
-        }
+        // Treat trusted base as the runner-selected target, not the mutable PR
+        // base_ref. PR authors may choose base_ref on their own pull records.
         return duplicateTarget(allocator, selected);
     }
     if (std.mem.eql(u8, policy, "head")) {
@@ -1277,6 +1271,31 @@ test "pull events default workflow source to base and code source to head" {
     try applyEventDefaultSourcePolicy(&workflow, "pull.updated");
     try std.testing.expectEqualStrings("base", workflow.source.workflow_from);
     try std.testing.expectEqualStrings("head", workflow.source.code_from);
+}
+
+test "pull base policy stays on selected target instead of mutable pull base ref" {
+    var selected = ResolvedTarget{
+        .allocator = std.testing.allocator,
+        .target_ref = try std.testing.allocator.dupe(u8, "refs/heads/main"),
+        .target_oid = try std.testing.allocator.dupe(u8, "trusted-base-oid"),
+    };
+    defer selected.deinit();
+    var refs = PullRefs{
+        .allocator = std.testing.allocator,
+        .base_ref = try std.testing.allocator.dupe(u8, "refs/heads/attacker-base"),
+        .head_ref = try std.testing.allocator.dupe(u8, "refs/heads/attacker-head"),
+    };
+    defer refs.deinit();
+
+    var workflow_target = try defaultWorkflowTargetForEvent(std.testing.allocator, selected, refs, "pull.opened", false);
+    defer workflow_target.deinit();
+    try std.testing.expectEqualStrings("refs/heads/main", workflow_target.target_ref.?);
+    try std.testing.expectEqualStrings("trusted-base-oid", workflow_target.target_oid);
+
+    var base_target = try resolvePolicyTarget(std.testing.allocator, selected, refs, "base");
+    defer base_target.deinit();
+    try std.testing.expectEqualStrings("refs/heads/main", base_target.target_ref.?);
+    try std.testing.expectEqualStrings("trusted-base-oid", base_target.target_oid);
 }
 
 test "native workflow parser supports source permissions and job metadata" {
