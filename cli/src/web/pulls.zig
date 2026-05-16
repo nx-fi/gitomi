@@ -2594,6 +2594,7 @@ fn mergeMethodCommitPhrase(allocator: Allocator, count: ?usize) ![]u8 {
 pub fn renderPullForm(
     allocator: Allocator,
     repo: Repo,
+    csrf_token: []const u8,
     error_message: ?[]const u8,
     title_value: []const u8,
     body_value: []const u8,
@@ -2612,6 +2613,7 @@ pub fn renderPullForm(
     }
     try appendTemplate(&buf, allocator,
         \\  <form method="post" action="/pulls" class="issue-form">
+        \\    <input type="hidden" name="csrf_token" value="{csrf_token}">
         \\    <label>Title<input name="title" value="{title_value}" autofocus required></label>
         \\    <label>Body<textarea name="body" rows="8">{body_value}</textarea></label>
         \\    <div class="grid two">
@@ -2626,6 +2628,7 @@ pub fn renderPullForm(
         \\  </form>
         \\</section>
     , .{
+        .csrf_token = csrf_token,
         .title_value = title_value,
         .body_value = body_value,
         .base_value = base_value,
@@ -2636,7 +2639,14 @@ pub fn renderPullForm(
     return buf.toOwnedSlice(allocator);
 }
 
-pub fn handlePullPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
+pub fn handlePullPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, csrf_token: []const u8, form_body: []const u8) !void {
+    const submitted_token = try issues_page.formValueOwned(allocator, form_body, "csrf_token");
+    defer if (submitted_token) |value| allocator.free(value);
+    if (submitted_token == null or !std.mem.eql(u8, submitted_token.?, csrf_token)) {
+        try sendPlainResponse(allocator, stream, 403, "Forbidden", "Invalid CSRF token\n");
+        return;
+    }
+
     const title_owned = (try issues_page.formValueOwned(allocator, form_body, "title")) orelse try allocator.dupe(u8, "");
     defer allocator.free(title_owned);
     const body_owned = (try issues_page.formValueOwned(allocator, form_body, "body")) orelse try allocator.dupe(u8, "");
@@ -2656,6 +2666,7 @@ pub fn handlePullPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, 
         const body = try renderPullForm(
             allocator,
             repo,
+            csrf_token,
             "Title, base ref, and head ref are required.",
             title_owned,
             body_owned,
@@ -2672,6 +2683,7 @@ pub fn handlePullPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, 
         const body = try renderPullForm(
             allocator,
             repo,
+            csrf_token,
             "Could not create the pull request. Check that Gitomi is initialized and Git commit signing is configured.",
             title_owned,
             body_owned,
