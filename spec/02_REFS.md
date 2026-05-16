@@ -174,6 +174,20 @@ individual artifact size, total bytes per run, and total retained run bytes. The
 v1 default maximum retained run bytes SHOULD be no more than 256 MiB unless the
 operator explicitly configures a larger value.
 
+### 2.9. Data Plane Branch Refs
+
+Source branches and tags remain ordinary Git refs outside `refs/gitomi/`, such
+as `refs/heads/<branch>`, `refs/remotes/<remote>/<branch>`, and `refs/tags/*`.
+Gitomi control-plane events MAY reference those refs but MUST NOT treat them as
+owned control-plane storage.
+
+Removing a source branch after a pull request merge is deletion of the relevant
+Git branch ref. On a remote, that means `refs/heads/<branch>` no longer exists
+there. A local clone may still have `refs/remotes/<remote>/<branch>` until a
+fetch with pruning removes the stale tracking ref. Implementations SHOULD expose
+remote-tracking pruning as an explicit operation and MUST NOT silently delete
+local `refs/heads/*` branches as a side effect of accepting `pull.merged`.
+
 ## 3. Ref-Safe Segments
 
 ### 3.1. Character Set

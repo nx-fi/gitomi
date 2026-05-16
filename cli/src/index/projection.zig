@@ -658,7 +658,11 @@ fn eventAuthorizationRejection(
     }
 
     if (std.mem.eql(u8, envelope.event_type, "pull.opened")) {
-        return if (roleAtLeast(role, "contributor")) null else "insufficient_role";
+        if (!roleAtLeast(role, "contributor")) return "insufficient_role";
+        if (payloadContainsNonEmptyArray(payload, "labels") and !roleAtLeast(role, "maintainer")) return "insufficient_role";
+        if (payloadContainsNonEmptyArray(payload, "assignees") and !roleAtLeast(role, "maintainer")) return "insufficient_role";
+        if (payloadContainsNonEmptyArray(payload, "reviewers") and !roleAtLeast(role, "maintainer")) return "insufficient_role";
+        return null;
     }
     if (std.mem.eql(u8, envelope.event_type, "pull.updated")) {
         if (payloadHasAny(payload, &.{ "title", "body", "state", "base_ref", "head_ref" }) and !(try canEditObject(allocator, db, role, envelope.actor_principal, "pull", envelope.object_id))) return "insufficient_role";
@@ -1637,6 +1641,73 @@ pub fn insertIndexedEvent(
         try stmt.bindText(17, "invalid_event_envelope");
     }
     try stmt.stepDone();
+}
+
+fn testEnvelopeForEventType(allocator: Allocator, event_type: []const u8) !ValidatedEnvelope {
+    return ValidatedEnvelope{
+        .allocator = allocator,
+        .repo_id = try allocator.dupe(u8, "repo"),
+        .event_uuid = try allocator.dupe(u8, "018f0000-0000-7000-8000-000000000000"),
+        .event_type = try allocator.dupe(u8, event_type),
+        .object_kind = try allocator.dupe(u8, "pull"),
+        .object_id = try allocator.dupe(u8, "pull-1"),
+        .idempotency_key = try allocator.dupe(u8, "idem"),
+        .actor_principal = try allocator.dupe(u8, "alice"),
+        .actor_device = try allocator.dupe(u8, "laptop"),
+        .seq = 1,
+        .occurred_at = try allocator.dupe(u8, "2026-05-16T00:00:00Z"),
+    };
+}
+
+test "pull opened metadata collections require maintainer role" {
+    const allocator = std.testing.allocator;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator,
+        \\{
+        \\  "title": "PR",
+        \\  "base_ref": "main",
+        \\  "head_ref": "feature",
+        \\  "labels": ["security"],
+        \\  "assignees": ["maintainer-user"],
+        \\  "reviewers": ["owner-user"]
+        \\}
+    , .{});
+    defer parsed.deinit();
+    const payload = switch (parsed.value) {
+        .object => |object| object,
+        else => unreachable,
+    };
+    const envelope = try testEnvelopeForEventType(allocator, "pull.opened");
+    defer envelope.deinit();
+    var db = try SqliteDb.open(allocator, ":memory:", sqlite_db.sqlite.SQLITE_OPEN_READWRITE | sqlite_db.sqlite.SQLITE_OPEN_CREATE, true);
+    defer db.deinit();
+
+    try std.testing.expectEqualStrings("insufficient_role", (try eventAuthorizationRejection(allocator, &db, "contributor", envelope, payload)).?);
+    try std.testing.expect((try eventAuthorizationRejection(allocator, &db, "maintainer", envelope, payload)) == null);
+}
+
+test "pull opened without metadata collections remains contributor allowed" {
+    const allocator = std.testing.allocator;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator,
+        \\{
+        \\  "title": "PR",
+        \\  "base_ref": "main",
+        \\  "head_ref": "feature",
+        \\  "labels": [],
+        \\  "assignees": [],
+        \\  "reviewers": []
+        \\}
+    , .{});
+    defer parsed.deinit();
+    const payload = switch (parsed.value) {
+        .object => |object| object,
+        else => unreachable,
+    };
+    const envelope = try testEnvelopeForEventType(allocator, "pull.opened");
+    defer envelope.deinit();
+    var db = try SqliteDb.open(allocator, ":memory:", sqlite_db.sqlite.SQLITE_OPEN_READWRITE | sqlite_db.sqlite.SQLITE_OPEN_CREATE, true);
+    defer db.deinit();
+
+    try std.testing.expect((try eventAuthorizationRejection(allocator, &db, "contributor", envelope, payload)) == null);
 }
 
 test "data commit reference parser extracts unique typed hash and legacy refs" {
