@@ -6,9 +6,147 @@
   const minTreeWidth = 220;
   const maxTreeWidth = 520;
   const maxTreeSearchResults = 30;
+  const rootFileNameColumnMin = 118;
+  const treeFileNameColumnMin = 150;
+  let measureContext = null;
+  let fileListLayoutBound = false;
+  let fileListLayoutScheduled = false;
 
   function clamp(value, min, max) {
     return Math.min(max, Math.max(min, value));
+  }
+
+  function inlineMeasureContext() {
+    if (measureContext) return measureContext;
+    const canvas = document.createElement("canvas");
+    measureContext = canvas.getContext("2d");
+    return measureContext;
+  }
+
+  function naturalFileNameWidth(name) {
+    const context = inlineMeasureContext();
+    if (!context) return Math.ceil(name.getBoundingClientRect().width || name.scrollWidth);
+
+    const style = window.getComputedStyle(name);
+    context.font = style.font || `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+
+    const icon = name.querySelector(".file-icon");
+    const iconWidth = icon ? (icon.getBoundingClientRect().width || 18) : 0;
+    const gap = icon ? (parseFloat(style.columnGap || style.gap || "0") || 0) : 0;
+    return Math.ceil(context.measureText((name.textContent || "").trim()).width + iconWidth + gap);
+  }
+
+  function measureNameColumn(list, rowSelector, nameSelector, property, minWidth, maxShare) {
+    const rows = Array.from(list.querySelectorAll(rowSelector));
+    if (rows.length === 0) return;
+
+    let measured = minWidth;
+    rows.forEach((row) => {
+      if (row.hidden) return;
+      const name = row.querySelector(nameSelector);
+      if (!name) return;
+      measured = Math.max(measured, naturalFileNameWidth(name));
+    });
+
+    const listWidth = list.getBoundingClientRect().width || list.clientWidth;
+    if (!listWidth) return;
+
+    const maxWidth = Math.max(minWidth, Math.floor(listWidth * maxShare));
+    list.style.setProperty(property, `${clamp(measured + 2, minWidth, maxWidth)}px`);
+  }
+
+  function syncMeasuredFileColumns() {
+    document.querySelectorAll(".root-file-list").forEach((list) => {
+      measureNameColumn(
+        list,
+        ".root-file-row",
+        ".root-file-name",
+        "--root-file-name-width",
+        rootFileNameColumnMin,
+        0.42,
+      );
+    });
+    document.querySelectorAll(".file-list").forEach((list) => {
+      measureNameColumn(
+        list,
+        ".file-row",
+        ".file-name",
+        "--file-list-name-width",
+        treeFileNameColumnMin,
+        0.46,
+      );
+    });
+  }
+
+  function commitTextWidth(element) {
+    const bounds = element.getBoundingClientRect();
+    if (bounds.width > 0) return Math.floor(bounds.width);
+    const parent = element.closest(".file-commit");
+    if (!parent) return 0;
+    return Math.floor(parent.getBoundingClientRect().width);
+  }
+
+  function fullCommitText(element) {
+    if (!element.dataset.fullCommitText) {
+      element.dataset.fullCommitText = element.textContent || "";
+    }
+    return element.dataset.fullCommitText;
+  }
+
+  function truncateCommitText(element) {
+    const full = fullCommitText(element);
+    if (full.length === 0) return;
+
+    element.textContent = full;
+    const maxWidth = commitTextWidth(element);
+    if (maxWidth <= 0 || element.scrollWidth <= maxWidth + 1) return;
+
+    const suffix = "...";
+    let low = 0;
+    let high = full.length;
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      element.textContent = full.slice(0, mid).trimEnd() + suffix;
+      if (element.scrollWidth <= maxWidth + 1) {
+        low = mid;
+      } else {
+        high = mid - 1;
+      }
+    }
+
+    const prefix = full.slice(0, low).trimEnd();
+    element.textContent = prefix.length === 0 ? suffix : prefix + suffix;
+  }
+
+  function syncCommitTruncation() {
+    document
+      .querySelectorAll(".root-commit-message, a.root-file-commit, .file-commit:not(.worktree-change) a, .commit-bar strong a")
+      .forEach(truncateCommitText);
+  }
+
+  function syncFileListLayout() {
+    syncMeasuredFileColumns();
+    syncCommitTruncation();
+  }
+
+  function scheduleFileListLayout() {
+    if (fileListLayoutScheduled) return;
+    fileListLayoutScheduled = true;
+    window.requestAnimationFrame(() => {
+      fileListLayoutScheduled = false;
+      syncFileListLayout();
+    });
+  }
+
+  function initFileListLayout() {
+    syncFileListLayout();
+    if (fileListLayoutBound) return;
+    fileListLayoutBound = true;
+    window.addEventListener("resize", scheduleFileListLayout);
+    window.addEventListener("load", scheduleFileListLayout);
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(scheduleFileListLayout).catch(() => {});
+    }
   }
 
   function setTreeWidth(layout, width) {
@@ -20,9 +158,11 @@
   }
 
   function initTreeResize(sidebar) {
+    if (sidebar.dataset.treeResizeReady === "yes") return;
     const handle = sidebar.querySelector("[data-tree-resizer]");
     const layout = sidebar.closest(".code-layout");
     if (!handle || !layout) return;
+    sidebar.dataset.treeResizeReady = "yes";
 
     try {
       const stored = Number(window.localStorage.getItem(treeWidthKey));
@@ -69,8 +209,10 @@
   }
 
   function initTreeCollapse(sidebar) {
+    if (sidebar.dataset.treeCollapseReady === "yes") return;
     const button = sidebar.querySelector("[data-tree-collapse]");
     if (!button) return;
+    sidebar.dataset.treeCollapseReady = "yes";
     let collapsed = false;
     try {
       collapsed = window.localStorage.getItem(treeCollapsedKey) === "true";
@@ -82,6 +224,8 @@
   }
 
   function initBranchSwitcher(select) {
+    if (select.dataset.branchSwitcherReady === "yes") return;
+    select.dataset.branchSwitcherReady = "yes";
     select.addEventListener("change", () => {
       const ref = select.value;
       if (!ref) return;
@@ -146,8 +290,9 @@
   }
 
   function rankedSearchItems(items, tokens, limit) {
+    const currentItems = typeof items === "function" ? items() : items;
     if (tokens.length === 0) return [];
-    return items
+    return currentItems
       .map((item) => ({ item, score: item.path === "" ? null : scoreSearchItem(item, tokens) }))
       .filter((result) => result.score !== null)
       .sort((a, b) => (
@@ -190,6 +335,8 @@
   }
 
   function initTree(nav) {
+    if (nav.dataset.treeReady === "yes") return;
+    nav.dataset.treeReady = "yes";
     const nodes = Array.from(nav.querySelectorAll("[data-tree-path]"));
     const byPath = new Map();
     const items = nodes.map((node) => {
@@ -398,12 +545,11 @@
     });
   }
 
-  function initRootFileSearch(input) {
-    const panel = input.closest(".root-page-main") || document;
+  function rootFileSearchItems(panel) {
     const index = panel.querySelector("[data-root-file-search-index]");
     const nodes = index ? Array.from(index.querySelectorAll("[data-root-file-search-item]")) : [];
     const rows = nodes.length === 0 ? Array.from(panel.querySelectorAll("[data-root-file-row]")) : [];
-    const items = nodes.length !== 0
+    return nodes.length !== 0
       ? nodes.map((node) => {
         const path = node.dataset.rootFilePath || "";
         const slash = path.lastIndexOf("/");
@@ -432,10 +578,18 @@
           kind: row.dataset.rootFileKind || "blob",
         };
       });
-    initTreeSearchMenu(input, items);
+  }
+
+  function initRootFileSearch(input) {
+    if (input.dataset.rootFileSearchReady === "yes") return;
+    input.dataset.rootFileSearchReady = "yes";
+    const panel = input.closest(".root-page-main") || document;
+    initTreeSearchMenu(input, () => rootFileSearchItems(panel));
   }
 
   function initRootFileSearchShortcut(input) {
+    if (input.dataset.rootFileSearchShortcutReady === "yes") return;
+    input.dataset.rootFileSearchShortcutReady = "yes";
     document.addEventListener("keydown", (event) => {
       if (event.defaultPrevented || event.key.toLowerCase() !== "t") return;
       const target = event.target;
@@ -452,21 +606,31 @@
     });
   }
 
-  function initTrees() {
-    document.querySelectorAll("[data-tree-nav]").forEach(initTree);
-    document.querySelectorAll("[data-tree-sidebar]").forEach((sidebar) => {
+  function initTrees(root) {
+    const scope = root || document;
+    scope.querySelectorAll("[data-tree-nav]").forEach(initTree);
+    scope.querySelectorAll("[data-tree-sidebar]").forEach((sidebar) => {
       initTreeCollapse(sidebar);
       initTreeResize(sidebar);
     });
-    document.querySelectorAll("[data-branch-switcher]").forEach(initBranchSwitcher);
-    document.querySelectorAll("[data-root-file-search]").forEach((input) => {
+    scope.querySelectorAll("[data-branch-switcher]").forEach(initBranchSwitcher);
+    scope.querySelectorAll("[data-root-file-search]").forEach((input) => {
       initRootFileSearch(input);
       initRootFileSearchShortcut(input);
     });
+    initFileListLayout();
   }
 
+  document.addEventListener("gitomi:partial-refresh", function (event) {
+    const detail = event.detail || {};
+    initTrees(detail.root || document);
+    document.querySelectorAll("[data-root-file-search]").forEach((input) => {
+      if (input.value) input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  });
+
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", initTrees);
+    document.addEventListener("DOMContentLoaded", () => initTrees());
   } else {
     initTrees();
   }

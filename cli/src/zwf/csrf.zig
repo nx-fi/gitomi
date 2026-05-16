@@ -17,12 +17,13 @@ pub fn generateTokenOwned(allocator: Allocator) ![]u8 {
 }
 
 pub fn tokenFromRequestOwned(allocator: Allocator, request: request_mod.Request) !?[]u8 {
-    if (request.headerValue(header_name)) |value| return allocator.dupe(u8, value);
+    if (request.headerValue(header_name)) |value| return try allocator.dupe(u8, value);
     if (request.body.len == 0) return null;
+    if (!request.isFormUrlEncoded()) return null;
     var form = try request.formValues(allocator);
     defer form.deinit();
     const value = form.value(field_name) orelse return null;
-    return allocator.dupe(u8, value);
+    return try allocator.dupe(u8, value);
 }
 
 pub fn verify(expected: []const u8, submitted: []const u8) bool {
@@ -43,4 +44,31 @@ test "csrf tokens verify with constant-time helper" {
     defer std.testing.allocator.free(token);
     try std.testing.expect(verify(token, token));
     try std.testing.expect(!verify(token, "different"));
+}
+
+test "csrf token extraction only parses url encoded forms" {
+    const form_body = "_csrf=abc";
+    const form_raw =
+        "POST / HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1\r\n" ++
+        "Content-Type: application/x-www-form-urlencoded\r\n" ++
+        "Content-Length: " ++ std.fmt.comptimePrint("{d}", .{form_body.len}) ++ "\r\n" ++
+        "\r\n" ++
+        form_body;
+    const form_request = try request_mod.Request.parse(form_raw);
+    const token = try tokenFromRequestOwned(std.testing.allocator, form_request);
+    defer if (token) |value| std.testing.allocator.free(value);
+    try std.testing.expectEqualStrings("abc", token.?);
+
+    const json_body = "{\"_csrf\":\"abc\"}";
+    const json_raw =
+        "POST / HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1\r\n" ++
+        "Content-Type: application/json\r\n" ++
+        "Content-Length: " ++ std.fmt.comptimePrint("{d}", .{json_body.len}) ++ "\r\n" ++
+        "\r\n" ++
+        json_body;
+    const json_request = try request_mod.Request.parse(json_raw);
+    const skipped = try tokenFromRequestOwned(std.testing.allocator, json_request);
+    try std.testing.expect(skipped == null);
 }

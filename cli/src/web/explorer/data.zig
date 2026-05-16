@@ -1,5 +1,6 @@
 const std = @import("std");
 const git = @import("../../git.zig");
+const index = @import("../../index.zig");
 const repo_mod = @import("../../repo.zig");
 const shared = @import("../shared.zig");
 const model = @import("model.zig");
@@ -7,6 +8,8 @@ const file_info = @import("file_info.zig");
 
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
+const SqliteDb = index.SqliteDb;
+const sqlite = index.sqlite;
 const runCommand = git.runCommand;
 
 pub const unstaged_ref = "working tree";
@@ -1076,6 +1079,14 @@ pub fn loadBranchRefs(allocator: Allocator, repo: Repo) ![]BranchRef {
     };
     defer allocator.free(raw);
 
+    var pull_branch_activity = try loadPullBranchActivity(allocator, repo);
+    defer pull_branch_activity.deinit();
+    const current_branch = currentBranchNameOwned(allocator, repo) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => null,
+    };
+    defer if (current_branch) |branch| allocator.free(branch);
+
     var branches: std.ArrayList(BranchRef) = .empty;
     errdefer {
         for (branches.items) |branch| branch.deinit(allocator);
@@ -1091,6 +1102,7 @@ pub fn loadBranchRefs(allocator: Allocator, repo: Repo) ![]BranchRef {
         const name = cols.next() orelse continue;
         if (std.mem.endsWith(u8, full_ref, "/HEAD")) continue;
         const scope = branchScopeForFullRef(full_ref) orelse continue;
+        if (pull_branch_activity.branchIsInactive(full_ref, name, current_branch)) continue;
         try branches.append(allocator, .{
             .name = try allocator.dupe(u8, name),
             .scope = scope,
@@ -1107,6 +1119,140 @@ pub fn loadBranchRefs(allocator: Allocator, repo: Repo) ![]BranchRef {
         .scope = .unstaged,
     });
     return branches.toOwnedSlice(allocator);
+}
+
+const PullBranchActivity = struct {
+    allocator: Allocator,
+    open: std.StringHashMap(void),
+    inactive: std.StringHashMap(void),
+
+    fn init(allocator: Allocator) PullBranchActivity {
+        return .{
+            .allocator = allocator,
+            .open = std.StringHashMap(void).init(allocator),
+            .inactive = std.StringHashMap(void).init(allocator),
+        };
+    }
+
+    fn deinit(self: *PullBranchActivity) void {
+        freeStringSet(self.allocator, &self.open);
+        freeStringSet(self.allocator, &self.inactive);
+    }
+
+    fn addOpenHeadRef(self: *PullBranchActivity, head_ref: []const u8) !void {
+        try self.addHeadRef(&self.open, head_ref);
+    }
+
+    fn addInactiveHeadRef(self: *PullBranchActivity, head_ref: []const u8) !void {
+        try self.addHeadRef(&self.inactive, head_ref);
+    }
+
+    fn addHeadRef(self: *PullBranchActivity, set: *std.StringHashMap(void), head_ref: []const u8) !void {
+        const trimmed = std.mem.trim(u8, head_ref, " \t\r\n");
+        if (trimmed.len == 0) return;
+        try putStringSetValue(self.allocator, set, trimmed);
+
+        if (std.mem.startsWith(u8, trimmed, "refs/heads/")) {
+            try putStringSetValue(self.allocator, set, trimmed["refs/heads/".len..]);
+            return;
+        }
+
+        if (remoteTrackingBranchName(trimmed)) |branch_name| {
+            try putStringSetValue(self.allocator, set, branch_name);
+            return;
+        }
+
+        if (remoteShortBranchName(trimmed)) |branch_name| {
+            try putStringSetValue(self.allocator, set, branch_name);
+        }
+    }
+
+    fn branchIsInactive(self: PullBranchActivity, full_ref: []const u8, short_name: []const u8, current_branch: ?[]const u8) bool {
+        if (branchMatchesName(full_ref, short_name, current_branch)) return false;
+        const branch_name = branchNameFromFullRef(full_ref) orelse short_name;
+        if (branchNameInSet(&self.open, full_ref, short_name, branch_name)) return false;
+        return branchNameInSet(&self.inactive, full_ref, short_name, branch_name);
+    }
+};
+
+fn loadPullBranchActivity(allocator: Allocator, repo: Repo) !PullBranchActivity {
+    var activity = PullBranchActivity.init(allocator);
+    errdefer activity.deinit();
+
+    var db = SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, true) catch return activity;
+    defer db.deinit();
+
+    var stmt = db.prepare(
+        \\SELECT head_ref, state
+        \\FROM pulls
+        \\WHERE state IN ('open', 'merged', 'closed')
+    ) catch return activity;
+    defer stmt.deinit();
+
+    while (stmt.step() catch return activity) {
+        const head_ref = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(head_ref);
+        const state = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(state);
+        if (std.mem.eql(u8, state, "open")) {
+            try activity.addOpenHeadRef(head_ref);
+        } else {
+            try activity.addInactiveHeadRef(head_ref);
+        }
+    }
+
+    return activity;
+}
+
+fn currentBranchNameOwned(allocator: Allocator, repo: Repo) !?[]u8 {
+    const raw = try gitMaybe(allocator, repo, &.{ "branch", "--show-current" }, 512 * 1024) orelse return null;
+    defer allocator.free(raw);
+    const branch = std.mem.trim(u8, raw, " \t\r\n");
+    if (branch.len == 0) return null;
+    return try allocator.dupe(u8, branch);
+}
+
+fn putStringSetValue(allocator: Allocator, set: *std.StringHashMap(void), value: []const u8) !void {
+    if (value.len == 0 or set.contains(value)) return;
+    const key = try allocator.dupe(u8, value);
+    errdefer allocator.free(key);
+    const entry = try set.getOrPut(key);
+    if (entry.found_existing) {
+        allocator.free(key);
+    }
+    entry.value_ptr.* = {};
+}
+
+fn freeStringSet(allocator: Allocator, set: *std.StringHashMap(void)) void {
+    var keys = set.keyIterator();
+    while (keys.next()) |key| allocator.free(key.*);
+    set.deinit();
+}
+
+fn branchNameInSet(set: *const std.StringHashMap(void), full_ref: []const u8, short_name: []const u8, branch_name: []const u8) bool {
+    return set.contains(full_ref) or set.contains(short_name) or set.contains(branch_name);
+}
+
+fn branchMatchesName(full_ref: []const u8, short_name: []const u8, candidate_opt: ?[]const u8) bool {
+    const candidate = candidate_opt orelse return false;
+    const branch_name = branchNameFromFullRef(full_ref) orelse short_name;
+    return std.mem.eql(u8, candidate, full_ref) or
+        std.mem.eql(u8, candidate, short_name) or
+        std.mem.eql(u8, candidate, branch_name);
+}
+
+fn branchNameFromFullRef(full_ref: []const u8) ?[]const u8 {
+    if (std.mem.startsWith(u8, full_ref, "refs/heads/")) return full_ref["refs/heads/".len..];
+    return remoteTrackingBranchName(full_ref);
+}
+
+fn remoteShortBranchName(ref: []const u8) ?[]const u8 {
+    if (std.mem.startsWith(u8, ref, "refs/")) return null;
+    const slash = std.mem.indexOfScalar(u8, ref, '/') orelse return null;
+    if (slash + 1 >= ref.len) return null;
+    const remote = ref[0..slash];
+    if (std.mem.eql(u8, remote, "origin") or std.mem.eql(u8, remote, "upstream")) return ref[slash + 1 ..];
+    return null;
 }
 
 pub fn branchScopeForFullRef(ref: []const u8) ?BranchScope {
@@ -1467,6 +1613,32 @@ pub fn freeWorktreeRefs(allocator: Allocator, worktrees: []WorktreeRef) void {
 pub fn freeBlameLines(allocator: Allocator, lines: []BlameLine) void {
     for (lines) |line| line.deinit(allocator);
     allocator.free(lines);
+}
+
+test "web explorer hides inactive pull request branches from picker data" {
+    var activity = PullBranchActivity.init(std.testing.allocator);
+    defer activity.deinit();
+
+    try activity.addInactiveHeadRef("feature/merged");
+    try std.testing.expect(activity.branchIsInactive("refs/heads/feature/merged", "feature/merged", null));
+    try std.testing.expect(activity.branchIsInactive("refs/remotes/origin/feature/merged", "origin/feature/merged", null));
+    try std.testing.expect(!activity.branchIsInactive("refs/heads/merged", "merged", null));
+    try std.testing.expect(!activity.branchIsInactive("refs/heads/feature/merged", "feature/merged", "feature/merged"));
+
+    try activity.addOpenHeadRef("feature/merged");
+    try std.testing.expect(!activity.branchIsInactive("refs/heads/feature/merged", "feature/merged", null));
+    try std.testing.expect(!activity.branchIsInactive("refs/remotes/origin/feature/merged", "origin/feature/merged", null));
+}
+
+test "web explorer normalizes pull head refs for branch activity" {
+    var activity = PullBranchActivity.init(std.testing.allocator);
+    defer activity.deinit();
+
+    try activity.addInactiveHeadRef("refs/remotes/upstream/topic/stale");
+    try std.testing.expect(activity.branchIsInactive("refs/remotes/origin/topic/stale", "origin/topic/stale", null));
+
+    try activity.addInactiveHeadRef("origin/topic/closed");
+    try std.testing.expect(activity.branchIsInactive("refs/heads/topic/closed", "topic/closed", null));
 }
 
 pub fn gitMaybe(allocator: Allocator, repo: Repo, git_args: []const []const u8, max_output_bytes: usize) !?[]u8 {

@@ -5,14 +5,8 @@ const Allocator = std.mem.Allocator;
 
 pub const Header = request_mod.Header;
 
-pub const Compression = enum {
-    none,
-    gzip,
-};
-
 pub const Options = struct {
     head: bool = false,
-    compression: Compression = .none,
 };
 
 pub const CookieSameSite = enum {
@@ -41,7 +35,6 @@ pub const CookieOptions = struct {
 pub const SentInfo = struct {
     status: u16 = 0,
     bytes: usize = 0,
-    compressed: bool = false,
 };
 
 pub const Response = struct {
@@ -142,22 +135,6 @@ pub const Response = struct {
         try validateHeaderValue(content_type);
         try validateExtraHeaders(extra_headers);
 
-        const may_compress = self.options.compression == .gzip and
-            statusAllowsBody(status) and
-            body.len >= 1024 and
-            !hasHeader(extra_headers, "content-encoding") and
-            isCompressibleContentType(content_type);
-
-        var compressed_body: ?[]u8 = null;
-        defer if (compressed_body) |compressed| self.allocator.free(compressed);
-        const response_body = if (may_compress) blk: {
-            if (try gzipIfSmallerOwned(self.allocator, body)) |encoded| {
-                compressed_body = encoded;
-                break :blk encoded;
-            }
-            break :blk body;
-        } else body;
-
         const content_type_value = try contentTypeValueOwned(self.allocator, content_type, send_options.charset);
         defer self.allocator.free(content_type_value);
 
@@ -166,19 +143,15 @@ pub const Response = struct {
         try appendStatusLine(&headers, self.allocator, status, reason);
         try appendHeader(&headers, self.allocator, "Content-Type", content_type_value);
         try appendCommonHeaders(&headers, self.allocator);
-        if (compressed_body != null) {
-            try appendHeader(&headers, self.allocator, "Content-Encoding", "gzip");
-            try appendHeader(&headers, self.allocator, "Vary", "Accept-Encoding");
-        }
-        try appendContentLengthIfAllowed(&headers, self.allocator, status, response_body.len);
+        try appendContentLengthIfAllowed(&headers, self.allocator, status, body.len);
         for (extra_headers) |header| try appendHeader(&headers, self.allocator, header.name, header.value);
         try headers.appendSlice(self.allocator, "\r\n");
 
         try self.stream.writeAll(headers.items);
-        if (!self.options.head and statusAllowsBody(status) and response_body.len > 0) {
-            try self.stream.writeAll(response_body);
+        if (!self.options.head and statusAllowsBody(status) and body.len > 0) {
+            try self.stream.writeAll(body);
         }
-        self.record(status, response_body.len, compressed_body != null);
+        self.record(status, body.len);
     }
 
     pub fn owned(
@@ -236,6 +209,7 @@ pub const Response = struct {
         send_options: SendOptions,
     ) !ChunkedResponse {
         try validateStatus(status, reason);
+        if (!statusAllowsBody(status)) return error.BodylessChunkedResponse;
         try validateHeaderValue(content_type);
         try validateExtraHeaders(extra_headers);
 
@@ -250,7 +224,7 @@ pub const Response = struct {
         for (extra_headers) |header| try appendHeader(&headers, self.allocator, header.name, header.value);
         try headers.appendSlice(self.allocator, "\r\n");
         try self.stream.writeAll(headers.items);
-        self.record(status, 0, false);
+        self.record(status, 0);
         return .{ .response = self, .ended = false };
     }
 
@@ -282,12 +256,11 @@ pub const Response = struct {
         return .{ .name = "Set-Cookie", .value = try buf.toOwnedSlice(self.allocator) };
     }
 
-    fn record(self: Response, status: u16, bytes: usize, compressed: bool) void {
+    fn record(self: Response, status: u16, bytes: usize) void {
         if (self.sent) |sent| {
             sent.* = .{
                 .status = status,
                 .bytes = bytes,
-                .compressed = compressed,
             };
         }
     }
@@ -315,6 +288,7 @@ pub const ChunkedResponse = struct {
     pub fn end(self: *ChunkedResponse) !void {
         if (self.ended) return;
         self.ended = true;
+        if (self.response.options.head) return;
         try self.response.stream.writeAll("0\r\n\r\n");
     }
 };
@@ -397,13 +371,6 @@ fn validateStatus(status: u16, reason: []const u8) !void {
     try validateHeaderValue(reason);
 }
 
-fn hasHeader(headers: []const Header, wanted: []const u8) bool {
-    for (headers) |header| {
-        if (std.ascii.eqlIgnoreCase(header.name, wanted)) return true;
-    }
-    return false;
-}
-
 fn isManagedExtraHeaderName(name: []const u8) bool {
     return std.ascii.eqlIgnoreCase(name, "content-length") or
         std.ascii.eqlIgnoreCase(name, "transfer-encoding") or
@@ -421,52 +388,6 @@ fn statusAllowsBody(status: u16) bool {
     return status != 204 and status != 304 and status >= 200;
 }
 
-fn isCompressibleContentType(content_type: []const u8) bool {
-    return std.mem.startsWith(u8, content_type, "text/") or
-        std.ascii.eqlIgnoreCase(content_type, "application/json") or
-        std.ascii.eqlIgnoreCase(content_type, "application/javascript") or
-        std.ascii.eqlIgnoreCase(content_type, "image/svg+xml");
-}
-
-pub fn gzipStoreOwned(allocator: Allocator, body: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, &[_]u8{ 0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03 });
-
-    var offset: usize = 0;
-    while (offset < body.len or (body.len == 0 and offset == 0)) {
-        const remaining = body.len - offset;
-        const chunk_len = @min(remaining, 65535);
-        const final = offset + chunk_len >= body.len;
-        try out.append(allocator, if (final) 0x01 else 0x00);
-        var len_bytes: [2]u8 = undefined;
-        std.mem.writeInt(u16, &len_bytes, @intCast(chunk_len), .little);
-        try out.appendSlice(allocator, &len_bytes);
-        std.mem.writeInt(u16, &len_bytes, ~@as(u16, @intCast(chunk_len)), .little);
-        try out.appendSlice(allocator, &len_bytes);
-        try out.appendSlice(allocator, body[offset .. offset + chunk_len]);
-        offset += chunk_len;
-        if (body.len == 0) break;
-    }
-
-    var crc = std.hash.Crc32.init();
-    crc.update(body);
-    var footer: [8]u8 = undefined;
-    std.mem.writeInt(u32, footer[0..4], crc.final(), .little);
-    std.mem.writeInt(u32, footer[4..8], @truncate(body.len), .little);
-    try out.appendSlice(allocator, &footer);
-    return out.toOwnedSlice(allocator);
-}
-
-fn gzipIfSmallerOwned(allocator: Allocator, body: []const u8) !?[]u8 {
-    const encoded = try gzipStoreOwned(allocator, body);
-    if (encoded.len >= body.len) {
-        allocator.free(encoded);
-        return null;
-    }
-    return encoded;
-}
-
 fn validateCookieName(name: []const u8) !void {
     try validateHeaderName(name);
 }
@@ -479,20 +400,6 @@ fn validateCookieValue(value: []const u8) !void {
 
 test "response rejects redirect header injection" {
     try std.testing.expectError(error.BadHeaderValue, validateHeaderValue("/ok\r\nX-Bad: yes"));
-}
-
-test "gzip store emits gzip envelope" {
-    const encoded = try gzipStoreOwned(std.testing.allocator, "hello");
-    defer std.testing.allocator.free(encoded);
-    try std.testing.expect(encoded.len > "hello".len);
-    try std.testing.expectEqual(@as(u8, 0x1f), encoded[0]);
-    try std.testing.expectEqual(@as(u8, 0x8b), encoded[1]);
-}
-
-test "stored gzip is skipped when it would expand the response" {
-    const encoded = try gzipIfSmallerOwned(std.testing.allocator, "hello");
-    defer if (encoded) |bytes| std.testing.allocator.free(bytes);
-    try std.testing.expect(encoded == null);
 }
 
 test "common response headers close the connection" {
@@ -527,4 +434,29 @@ test "extra response headers reject managed and hop by hop names" {
     try std.testing.expectError(error.ManagedResponseHeader, validateExtraHeaders(&[_]Header{
         .{ .name = "Content-Type", .value = "text/plain" },
     }));
+}
+
+test "chunked streaming rejects bodyless statuses" {
+    const response = Response.init(std.testing.allocator, undefined);
+    try std.testing.expectError(
+        error.BodylessChunkedResponse,
+        response.streamChunked(204, "No Content", "text/plain", &.{}, .{}),
+    );
+    try std.testing.expectError(
+        error.BodylessChunkedResponse,
+        response.streamChunked(304, "Not Modified", "text/plain", &.{}, .{}),
+    );
+    try std.testing.expectError(
+        error.BodylessChunkedResponse,
+        response.streamChunked(101, "Switching Protocols", "text/plain", &.{}, .{}),
+    );
+}
+
+test "chunked head end does not write final chunk" {
+    var chunked = ChunkedResponse{
+        .response = Response.initWithOptions(std.testing.allocator, undefined, .{ .head = true }),
+        .ended = false,
+    };
+    try chunked.end();
+    try std.testing.expect(chunked.ended);
 }

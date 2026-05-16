@@ -22,6 +22,7 @@ const commitHref = shared.commitHref;
 const commitsHref = shared.commitsHref;
 const rawHref = shared.rawHref;
 const runCommand = git.runCommand;
+const gitChecked = git.gitChecked;
 const sendPlainResponse = shared.sendPlainResponse;
 const sendRedirect = shared.sendRedirect;
 const sendResponse = shared.sendResponse;
@@ -57,6 +58,7 @@ const CodeSyncFlashKind = explorer_model.CodeSyncFlashKind;
 const CodeSyncFlash = explorer_model.CodeSyncFlash;
 const unstaged_ref = explorer_data.unstaged_ref;
 const worktree_ref_prefix = explorer_data.worktree_ref_prefix;
+const root_about_fallback = "Browse this repository's files, documentation, and Gitomi records from the local checkout.";
 
 const loadRootGitStatus = explorer_data.loadRootGitStatus;
 const loadBranchSyncStatus = explorer_data.loadBranchSyncStatus;
@@ -162,6 +164,34 @@ pub fn renderCodePage(allocator: Allocator, repo: Repo, target: []const u8) ![]u
     return renderMissingPathPage(allocator, repo, ref, path);
 }
 
+pub fn renderCodeRootComponent(allocator: Allocator, repo: Repo, target: []const u8, component: []const u8) !?[]u8 {
+    const ref = try targetRefOwned(allocator, repo, target);
+    defer allocator.free(ref);
+
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    if (std.mem.eql(u8, component, "about")) {
+        try appendRootAboutComponent(&buf, allocator, repo, ref);
+    } else if (std.mem.eql(u8, component, "repository")) {
+        try appendRootRepositoryComponent(&buf, allocator, repo);
+    } else if (std.mem.eql(u8, component, "branch")) {
+        try appendRootBranchComponent(&buf, allocator, repo, ref);
+    } else if (std.mem.eql(u8, component, "stats")) {
+        try appendRootStatsComponent(&buf, allocator, repo);
+    } else if (std.mem.eql(u8, component, "docs")) {
+        try appendRootDocsComponent(&buf, allocator, repo, ref);
+    } else if (std.mem.eql(u8, component, "search")) {
+        try appendRootSearchComponent(&buf, allocator, repo, ref);
+    } else if (std.mem.eql(u8, component, "commit-count")) {
+        try appendRootCommitCountComponent(&buf, allocator, repo, ref);
+    } else {
+        return null;
+    }
+
+    return try buf.toOwnedSlice(allocator);
+}
+
 pub fn handleCodeSyncPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
     const action_owned = (try formValueOwned(allocator, form_body, "action")) orelse try allocator.dupe(u8, "exchange");
     defer allocator.free(action_owned);
@@ -175,7 +205,7 @@ pub fn handleCodeSyncPost(allocator: Allocator, repo: Repo, stream: std.net.Stre
     };
 
     runCodeSync(allocator, mode) catch |err| {
-        try sendCodeSyncFailure(allocator, repo, stream, ref_owned, err);
+        try sendCodeSyncFailure(allocator, repo, stream, ref_owned, mode, err);
         return;
     };
 
@@ -192,6 +222,10 @@ fn runCodeSync(allocator: Allocator, mode: CodeSyncMode) !void {
         },
         .import => try sync.syncPull(allocator, "origin"),
         .publish => try sync.syncPush(allocator, "origin"),
+        .prune_remote => {
+            const pruned = try gitChecked(allocator, &.{ "fetch", "--prune", "origin" });
+            allocator.free(pruned);
+        },
     }
 }
 
@@ -200,9 +234,10 @@ fn sendCodeSyncFailure(
     repo: Repo,
     stream: std.net.Stream,
     ref: []const u8,
+    mode: CodeSyncMode,
     err: anyerror,
 ) !void {
-    const message = try std.fmt.allocPrint(allocator, "Sync failed: {s}. Check that origin is reachable and the Gitomi refs are valid.", .{@errorName(err)});
+    const message = try std.fmt.allocPrint(allocator, "{s}: {s}.", .{ codeSyncFailurePrefix(mode), @errorName(err) });
     defer allocator.free(message);
     const body = try renderTreePage(allocator, repo, ref, "", .{ .kind = .failure, .message = message });
     defer allocator.free(body);
@@ -232,6 +267,7 @@ fn parseCodeSyncMode(value: []const u8) ?CodeSyncMode {
     if (std.mem.eql(u8, value, "exchange") or std.mem.eql(u8, value, "both") or std.mem.eql(u8, value, "sync") or std.mem.eql(u8, value, "ok")) return .exchange;
     if (std.mem.eql(u8, value, "import") or std.mem.eql(u8, value, "receive") or std.mem.eql(u8, value, "pull")) return .import;
     if (std.mem.eql(u8, value, "publish") or std.mem.eql(u8, value, "export") or std.mem.eql(u8, value, "push")) return .publish;
+    if (std.mem.eql(u8, value, "prune") or std.mem.eql(u8, value, "prune-remote") or std.mem.eql(u8, value, "prune_remote")) return .prune_remote;
     return null;
 }
 
@@ -240,6 +276,7 @@ fn codeSyncModeQueryValue(mode: CodeSyncMode) []const u8 {
         .exchange => "exchange",
         .import => "import",
         .publish => "publish",
+        .prune_remote => "prune",
     };
 }
 
@@ -248,6 +285,16 @@ fn codeSyncSuccessMessage(mode: CodeSyncMode) []const u8 {
         .exchange => "Gitomi refs exchanged with origin.",
         .import => "Remote Gitomi refs imported from origin.",
         .publish => "Local Gitomi refs published to origin.",
+        .prune_remote => "Deleted remote-tracking branches pruned from origin.",
+    };
+}
+
+fn codeSyncFailurePrefix(mode: CodeSyncMode) []const u8 {
+    return switch (mode) {
+        .exchange => "Sync failed",
+        .import => "Import failed",
+        .publish => "Publish failed",
+        .prune_remote => "Remote branch prune failed",
     };
 }
 
@@ -364,18 +411,12 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
                 else => 0,
             };
             const worktree_count = worktrees.len;
-            const commit_count = loadCommitCount(allocator, repo, ref) catch |err| switch (err) {
-                error.OutOfMemory => return err,
-                else => null,
-            };
-            const search_entries_opt = try loadTreeNavEntries(allocator, repo, ref);
-            defer if (search_entries_opt) |search_entries| freeTreeNavEntries(allocator, search_entries);
 
             try appendRootPageGridStart(&buf, allocator);
-            try appendRootCodeToolbar(&buf, allocator, ref, branches, worktrees, branch_count, tag_count, worktree_count, search_entries_opt);
+            try appendRootCodeToolbar(&buf, allocator, ref, branches, worktrees, branch_count, tag_count, worktree_count);
             if (sync_flash) |flash| try appendCodeSyncFlash(&buf, allocator, flash);
             try appendRootCodePanelStart(&buf, allocator);
-            try appendRootCommitBar(&buf, allocator, ref, summary_opt, commit_count);
+            try appendRootCommitBar(&buf, allocator, ref, summary_opt, null);
             try appendRootTreeListing(&buf, allocator, ref, entries);
             try appendCodePanelEnd(&buf, allocator);
         } else {
@@ -388,11 +429,13 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
             try appendCodePanelEnd(&buf, allocator);
         }
 
-        try appendReadmePreview(&buf, allocator, repo, ref, path, entries);
         if (is_root) {
+            try appendRootDocsSlot(&buf, allocator, ref);
             try appendRootPageMainEnd(&buf, allocator);
-            try appendRootSidebar(&buf, allocator, repo, ref, entries);
+            try appendRootSidebar(&buf, allocator, ref);
             try appendRootPageGridEnd(&buf, allocator);
+        } else {
+            try appendReadmePreview(&buf, allocator, repo, ref, path, entries);
         }
     } else {
         try appendEmptyState(&buf, allocator, "No committed files found.", "The selected ref does not point at a readable tree yet.");
@@ -942,7 +985,6 @@ fn appendRootCodeToolbar(
     branch_count: usize,
     tag_count: usize,
     worktree_count: usize,
-    search_entries_opt: ?[]const TreeNavEntry,
 ) !void {
     try appendTemplate(buf, allocator,
         \\<div class="root-code-toolbar">
@@ -956,9 +998,9 @@ fn appendRootCodeToolbar(
         \\      </select>
         \\      <span class="root-caret" aria-hidden="true"></span>
         \\    </label>
-        \\    <a class="root-ref-link" href="/refs"><span class="button-icon icon-branch" aria-hidden="true"></span><strong>{branch_count}</strong> {branch_label}</a>
-        \\    <a class="root-ref-link" href="/refs"><span class="button-icon icon-tag" aria-hidden="true"></span><strong>{tag_count}</strong> {tag_label}</a>
-        \\    <span class="root-ref-link"><span class="button-icon icon-worktree" aria-hidden="true"></span><strong>{worktree_count}</strong> {worktree_label}</span>
+        \\    <a class="root-ref-link" href="/refs?type=branches"><span class="button-icon icon-branch" aria-hidden="true"></span><strong>{branch_count}</strong> {branch_label}</a>
+        \\    <a class="root-ref-link" href="/refs?type=tags"><span class="button-icon icon-tag" aria-hidden="true"></span><strong>{tag_count}</strong> {tag_label}</a>
+        \\    <a class="root-ref-link" href="/worktrees"><span class="button-icon icon-worktree" aria-hidden="true"></span><strong>{worktree_count}</strong> {worktree_label}</a>
         \\  </div>
         \\  <div class="root-code-toolbar-right">
         \\    <div class="root-file-search-wrap">
@@ -969,15 +1011,13 @@ fn appendRootCodeToolbar(
         \\      </label>
     , .{
         .branch_count = shared.groupedUnsigned(@intCast(branch_count)),
-        .branch_label = if (branch_count == 1) "Branch" else "Branches",
+        .branch_label = if (branch_count == 1) "Active Branch" else "Active Branches",
         .tag_count = shared.groupedUnsigned(@intCast(tag_count)),
         .tag_label = if (tag_count == 1) "Tag" else "Tags",
         .worktree_count = shared.groupedUnsigned(@intCast(worktree_count)),
         .worktree_label = if (worktree_count == 1) "Worktree" else "Worktrees",
     });
-    if (search_entries_opt) |search_entries| {
-        try appendRootSearchIndex(buf, allocator, ref, search_entries);
-    }
+    try appendRootSearchIndexSlot(buf, allocator, ref);
     try appendTemplate(buf, allocator,
         \\    </div>
         \\    <details class="root-action-menu root-sync-menu" data-popover-menu>
@@ -987,6 +1027,7 @@ fn appendRootCodeToolbar(
         \\        <button type="submit" name="action" value="exchange" role="menuitem">Exchange Gitomi refs</button>
         \\        <button type="submit" name="action" value="import" role="menuitem">Import remote Gitomi refs</button>
         \\        <button type="submit" name="action" value="publish" role="menuitem">Publish local Gitomi refs</button>
+        \\        <button type="submit" name="action" value="prune" role="menuitem">Prune deleted remote branches</button>
         \\      </form>
         \\    </details>
         \\  </div>
@@ -1004,6 +1045,16 @@ fn appendCodeSyncFlash(buf: *std.ArrayList(u8), allocator: Allocator, flash: Cod
         },
         .message = flash.message,
     });
+}
+
+fn appendRootSearchIndexSlot(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\      <div hidden
+    , .{});
+    try appendRootPartialAttrs(buf, allocator, ref, "search", "File search index");
+    try appendTemplate(buf, allocator,
+        \\ data-root-partial-silent></div>
+    , .{});
 }
 
 fn appendRootSearchIndex(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, entries: []const TreeNavEntry) !void {
@@ -1042,7 +1093,7 @@ fn appendRootCommitBar(
     if (summary_opt) |summary| {
         try shared.appendAvatar(buf, allocator, summary.author, "root-commit-avatar");
         try appendTemplate(buf, allocator,
-            \\<div class="root-commit-main"><span class="root-commit-author">{author}</span><a class="root-commit-message" href="{href}">{subject}</a></div>
+            \\<div class="root-commit-main"><span class="root-commit-author">{author}</span><a class="root-commit-message" href="{href}" title="{subject}">{subject}</a></div>
             \\<div class="root-commit-meta"><a class="root-commit-hash" href="{href}">{hash}</a><span>{relative}</span></div>
         , .{
             .author = summary.author,
@@ -1058,15 +1109,31 @@ fn appendRootCommitBar(
         , .{});
     }
     if (commit_count) |count| {
-        try appendTemplate(buf, allocator,
-            \\<a class="root-commit-count" href="{href}"><span class="button-icon icon-history" aria-hidden="true"></span><strong>{count}</strong> {label}</a>
-        , .{
-            .href = commitsHref(ref, ""),
-            .count = shared.groupedUnsigned(@intCast(count)),
-            .label = if (count == 1) "Commit" else "Commits",
-        });
+        try appendRootCommitCountLink(buf, allocator, ref, count);
+    } else {
+        try appendRootCommitCountSlot(buf, allocator, ref);
     }
     try appendTemplate(buf, allocator, "</div>", .{});
+}
+
+fn appendRootCommitCountSlot(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<span class="root-partial-slot root-commit-count-slot"
+    , .{});
+    try appendRootPartialAttrs(buf, allocator, ref, "commit-count", "Commit count");
+    try appendTemplate(buf, allocator,
+        \\ data-root-partial-silent></span>
+    , .{});
+}
+
+fn appendRootCommitCountLink(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, count: usize) !void {
+    try appendTemplate(buf, allocator,
+        \\<a class="root-commit-count" href="{href}"><span class="button-icon icon-history" aria-hidden="true"></span><strong>{count}</strong> {label}</a>
+    , .{
+        .href = commitsHref(ref, ""),
+        .count = shared.groupedUnsigned(@intCast(count)),
+        .label = if (count == 1) "Commit" else "Commits",
+    });
 }
 
 fn appendRootTreeListing(
@@ -1204,7 +1271,7 @@ fn appendCommitBar(buf: *std.ArrayList(u8), allocator: Allocator, summary_opt: ?
     try appendTemplate(buf, allocator, "<div class=\"commit-bar\">", .{});
     if (summary_opt) |summary| {
         try appendTemplate(buf, allocator,
-            \\<a class="commit-hash" href="{href}"><code>{hash}</code></a><strong><a href="{href}">{subject}</a></strong><span>{relative}</span>
+            \\<a class="commit-hash" href="{href}"><code>{hash}</code></a><strong><a href="{href}" title="{subject}">{subject}</a></strong><span>{relative}</span>
         , .{
             .href = commitHref(summary.full_hash),
             .hash = summary.hash,
@@ -1420,6 +1487,21 @@ fn appendRootDocsPreview(
     try appendTemplate(buf, allocator, "</section>", .{});
 }
 
+fn appendRootDocsSlot(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="root-partial-slot"
+    , .{});
+    try appendRootPartialAttrs(buf, allocator, ref, "docs", "Repository documents");
+    try appendTemplate(buf, allocator,
+        \\>
+        \\  <section class="panel readme-panel root-docs-panel root-docs-loading" aria-busy="true">
+        \\    <div class="section-head readme-head"><h2>Documents</h2></div>
+        \\    <div class="readme-body"><p class="root-sidebar-empty">Loading repository documents...</p></div>
+        \\  </section>
+        \\</div>
+    , .{});
+}
+
 fn loadRootLicenseDoc(allocator: Allocator, repo: Repo, ref: []const u8, entries: []const TreeEntry) !?RootMarkdownDoc {
     const license = findLicense(entries) orelse return null;
     const content = try loadBlobBytes(allocator, repo, ref, license, max_blob_display_bytes + 1) orelse return null;
@@ -1454,49 +1536,175 @@ fn appendRootPageGridEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
 fn appendRootSidebar(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
-    repo: Repo,
     ref: []const u8,
-    entries: []const TreeEntry,
 ) !void {
-    const counts = rootEntryCounts(entries);
-    const git_status = loadRootGitStatus(allocator, repo) catch null;
-    const branch_sync_status = loadBranchSyncStatus(allocator, repo, ref) catch null;
-    defer if (branch_sync_status) |status| status.deinit(allocator);
-    const about_summary = loadReadmeSummaryOwned(allocator, repo, ref, entries) catch null;
-    defer if (about_summary) |summary| allocator.free(summary);
-    var languages_opt = source_stats.loadRepositoryStats(allocator, repo) catch null;
-    defer if (languages_opt) |*stats| stats.deinit(allocator);
-    const about_text = about_summary orelse "Browse this repository's files, documentation, and Gitomi records from the local checkout.";
-
     try appendTemplate(buf, allocator,
         \\<aside class="root-sidebar" aria-label="Repository details">
         \\  <section class="panel root-sidebar-panel">
-        \\    <div class="root-sidebar-section">
-        \\      <h2>About</h2>
-        \\      <p class="root-about-text">{about}</p>
-    , .{ .about = about_text });
+    , .{});
+    try appendRootSidebarSlot(buf, allocator, ref, "about", "About", "Loading repository summary...");
+    try appendRootSidebarSlot(buf, allocator, ref, "repository", "Repository", "Loading repository details...");
+    try appendRootSidebarSlot(buf, allocator, ref, "branch", "Branch", "Loading branch details...");
+    try appendRootStatsSlot(buf, allocator, ref);
+    try appendTemplate(buf, allocator, "</section></aside>", .{});
+}
 
+fn appendRootSidebarSlot(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    ref: []const u8,
+    component: []const u8,
+    label: []const u8,
+    loading_text: []const u8,
+) !void {
     try appendTemplate(buf, allocator,
-        \\    </div>
-        \\    <div class="root-sidebar-section">
-        \\      <h2>Repository</h2>
-        \\      <dl class="root-meta-list">
+        \\<div class="root-partial-slot"
+    , .{});
+    try appendRootPartialAttrs(buf, allocator, ref, component, label);
+    try appendTemplate(buf, allocator,
+        \\>
+        \\  <div class="root-sidebar-section root-sidebar-loading" aria-busy="true">
+        \\    <h2>{label}</h2>
+        \\    <p class="root-sidebar-empty">{loading_text}</p>
+        \\  </div>
+        \\</div>
+    , .{
+        .label = label,
+        .loading_text = loading_text,
+    });
+}
+
+fn appendRootStatsSlot(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="root-partial-slot"
+    , .{});
+    try appendRootPartialAttrs(buf, allocator, ref, "stats", "Source stats");
+    try appendTemplate(buf, allocator,
+        \\>
+        \\  <div class="root-sidebar-section root-sidebar-loading" aria-busy="true">
+        \\    <h2>Languages</h2>
+        \\    <p class="root-sidebar-empty">Loading language stats...</p>
+        \\  </div>
+        \\  <div class="root-sidebar-section root-sidebar-loading" aria-busy="true">
+        \\    <h2>SLOC</h2>
+        \\    <p class="root-sidebar-empty">Loading source line counts...</p>
+        \\  </div>
+        \\</div>
+    , .{});
+}
+
+fn appendRootPartialAttrs(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    ref: []const u8,
+    component: []const u8,
+    label: []const u8,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\ data-root-partial="/code/root/{component}?ref=
+    , .{ .component = component });
+    try shared.appendUrlEncoded(buf, allocator, ref);
+    try appendTemplate(buf, allocator,
+        \\" data-root-partial-label="{label}" aria-live="polite"
+    , .{ .label = label });
+}
+
+fn appendRootAboutComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8) !void {
+    const entries_opt = try loadTreeEntries(allocator, repo, ref, "");
+    defer if (entries_opt) |entries| freeTreeEntries(allocator, entries);
+    const about_summary = if (entries_opt) |entries| loadReadmeSummaryOwned(allocator, repo, ref, entries) catch null else null;
+    defer if (about_summary) |summary| allocator.free(summary);
+    try appendRootAboutSection(buf, allocator, about_summary orelse root_about_fallback);
+}
+
+fn appendRootRepositoryComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo) !void {
+    const git_status = loadRootGitStatus(allocator, repo) catch null;
+    try appendRootRepositorySection(buf, allocator, git_status);
+}
+
+fn appendRootBranchComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8) !void {
+    const entries_opt = try loadTreeEntries(allocator, repo, ref, "");
+    defer if (entries_opt) |entries| freeTreeEntries(allocator, entries);
+    const counts = if (entries_opt) |entries| rootEntryCounts(entries) else RootEntryCounts{};
+    const git_status = loadRootGitStatus(allocator, repo) catch null;
+    const branch_sync_status = loadBranchSyncStatus(allocator, repo, ref) catch null;
+    defer if (branch_sync_status) |status| status.deinit(allocator);
+    try appendRootBranchSection(buf, allocator, ref, counts, branch_sync_status, git_status);
+}
+
+fn appendRootStatsComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo) !void {
+    var languages_opt = source_stats.loadRepositoryStats(allocator, repo) catch null;
+    defer if (languages_opt) |*stats| stats.deinit(allocator);
+    try appendRootLanguages(buf, allocator, languages_opt);
+    try appendRootSloc(buf, allocator, languages_opt);
+}
+
+fn appendRootDocsComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8) !void {
+    const entries_opt = try loadTreeEntries(allocator, repo, ref, "");
+    if (entries_opt) |entries| {
+        defer freeTreeEntries(allocator, entries);
+        try appendReadmePreview(buf, allocator, repo, ref, "", entries);
+    }
+}
+
+fn appendRootSearchComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8) !void {
+    const search_entries_opt = try loadTreeNavEntries(allocator, repo, ref);
+    if (search_entries_opt) |search_entries| {
+        defer freeTreeNavEntries(allocator, search_entries);
+        try appendRootSearchIndex(buf, allocator, ref, search_entries);
+    }
+}
+
+fn appendRootCommitCountComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8) !void {
+    const commit_count = loadCommitCount(allocator, repo, ref) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => null,
+    };
+    if (commit_count) |count| try appendRootCommitCountLink(buf, allocator, ref, count);
+}
+
+fn appendRootAboutSection(buf: *std.ArrayList(u8), allocator: Allocator, about_text: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="root-sidebar-section">
+        \\  <h2>About</h2>
+        \\  <p class="root-about-text">{about}</p>
+        \\</div>
+    , .{ .about = about_text });
+}
+
+fn appendRootRepositorySection(buf: *std.ArrayList(u8), allocator: Allocator, git_status: ?RootGitStatus) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="root-sidebar-section">
+        \\  <h2>Repository</h2>
+        \\  <dl class="root-meta-list">
     , .{});
     if (git_status) |status| {
         try appendRootRepositoryStats(buf, allocator, status);
     } else {
         try appendTemplate(buf, allocator,
-            \\        <div><dt>Repository</dt><dd>Unavailable</dd></div>
+            \\    <div><dt>Repository</dt><dd>Unavailable</dd></div>
         , .{});
     }
     try appendTemplate(buf, allocator,
-        \\      </dl>
-        \\    </div>
-        \\    <div class="root-sidebar-section">
-        \\      <h2>Branch</h2>
-        \\      <dl class="root-meta-list">
-        \\        <div><dt>Ref</dt><dd><code>{ref}</code></dd></div>
-        \\        <div><dt>Root</dt><dd>{files} {files_label}, {directories} {directories_label}</dd></div>
+        \\  </dl>
+        \\</div>
+    , .{});
+}
+
+fn appendRootBranchSection(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    ref: []const u8,
+    counts: RootEntryCounts,
+    branch_sync_status: ?BranchSyncStatus,
+    git_status: ?RootGitStatus,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="root-sidebar-section">
+        \\  <h2>Branch</h2>
+        \\  <dl class="root-meta-list">
+        \\    <div><dt>Ref</dt><dd><code>{ref}</code></dd></div>
+        \\    <div><dt>Root</dt><dd>{files} {files_label}, {directories} {directories_label}</dd></div>
     , .{
         .ref = ref,
         .files = counts.files,
@@ -1508,24 +1716,20 @@ fn appendRootSidebar(
         try appendRootBranchSyncStatus(buf, allocator, status);
     } else {
         try appendTemplate(buf, allocator,
-            \\        <div><dt>Sync</dt><dd>No upstream</dd></div>
+            \\    <div><dt>Sync</dt><dd>No upstream</dd></div>
         , .{});
     }
     if (git_status) |status| {
         try appendRootBranchStats(buf, allocator, status);
     } else {
         try appendTemplate(buf, allocator,
-            \\        <div><dt>Checkout</dt><dd>Unavailable</dd></div>
+            \\    <div><dt>Checkout</dt><dd>Unavailable</dd></div>
         , .{});
     }
     try appendTemplate(buf, allocator,
-        \\      </dl>
-        \\    </div>
+        \\  </dl>
+        \\</div>
     , .{});
-
-    try appendRootLanguages(buf, allocator, languages_opt);
-    try appendRootSloc(buf, allocator, languages_opt);
-    try appendTemplate(buf, allocator, "</section></aside>", .{});
 }
 
 fn appendRootRepositoryStats(buf: *std.ArrayList(u8), allocator: Allocator, status: RootGitStatus) !void {
@@ -1820,6 +2024,8 @@ test "web explorer parses code sync modes" {
     try std.testing.expectEqual(CodeSyncMode.import, parseCodeSyncMode("pull").?);
     try std.testing.expectEqual(CodeSyncMode.publish, parseCodeSyncMode("publish").?);
     try std.testing.expectEqual(CodeSyncMode.publish, parseCodeSyncMode("push").?);
+    try std.testing.expectEqual(CodeSyncMode.prune_remote, parseCodeSyncMode("prune").?);
+    try std.testing.expectEqual(CodeSyncMode.prune_remote, parseCodeSyncMode("prune-remote").?);
     try std.testing.expect(parseCodeSyncMode("clone") == null);
 }
 

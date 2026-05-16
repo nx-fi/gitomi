@@ -77,7 +77,6 @@ pub fn sendCachedAsset(
 
 fn responseForAssetRequest(response: response_mod.Response, request: request_mod.Request) response_mod.Response {
     var asset_response = response;
-    asset_response.options.compression = .none;
     asset_response.options.head = request.method == .HEAD;
     return asset_response;
 }
@@ -174,7 +173,6 @@ test "static assets enforce head requests" {
     const response = response_mod.Response.init(std.testing.allocator, undefined);
     const asset_response = responseForAssetRequest(response, request);
     try std.testing.expect(asset_response.options.head);
-    try std.testing.expectEqual(response_mod.Compression.none, asset_response.options.compression);
 }
 
 test "middleware chain executes in order" {

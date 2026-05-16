@@ -19,6 +19,10 @@ pub const Session = struct {
     }
 };
 
+/// CookieSession transports an opaque session id only. It validates the generated
+/// id shape, but it does not sign cookies, consult a backing store, or prove that
+/// an existing id is trusted. Callers must look ids up in server-side state and
+/// rotate them when authentication or privilege level changes.
 pub const CookieSession = struct {
     name: []const u8 = default_cookie_name,
     cookie: response_mod.CookieOptions = .{},
