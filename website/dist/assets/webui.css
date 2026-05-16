@@ -4264,10 +4264,10 @@ main.page-projects:has(.project-detail-panel) {
 .project-priority-chip.tone-p3,
 .project-priority-chip.tone-none { background: color-mix(in srgb, var(--muted) 12%, var(--panel)); }
 .project-status-chip.tone-draft { background: color-mix(in srgb, var(--muted) 10%, var(--panel)); }
-.project-status-chip.tone-pending { background: color-mix(in srgb, var(--green) 10%, var(--panel)); }
-.project-status-chip.tone-progress { background: color-mix(in srgb, #bf8700 14%, var(--panel)); }
-.project-status-chip.tone-review { background: color-mix(in srgb, var(--blue) 12%, var(--panel)); }
-.project-status-chip.tone-done { background: color-mix(in srgb, #8250df 12%, var(--panel)); }
+.project-status-chip.tone-todo { background: color-mix(in srgb, var(--blue) 12%, var(--panel)); border-color: color-mix(in srgb, var(--blue) 28%, var(--border)); }
+.project-status-chip.tone-progress { background: color-mix(in srgb, #bf8700 14%, var(--panel)); border-color: color-mix(in srgb, #bf8700 30%, var(--border)); }
+.project-status-chip.tone-review { background: color-mix(in srgb, #8250df 12%, var(--panel)); border-color: color-mix(in srgb, #8250df 30%, var(--border)); }
+.project-status-chip.tone-done { background: color-mix(in srgb, var(--green) 13%, var(--panel)); border-color: color-mix(in srgb, var(--green) 34%, var(--border)); }
 .project-status-chip.tone-failed { background: color-mix(in srgb, var(--danger) 14%, var(--panel)); border-color: color-mix(in srgb, var(--danger) 36%, var(--border)); }
 .project-status-chip.tone-backlog { background: color-mix(in srgb, var(--muted) 12%, var(--panel)); }
 .project-table-avatar {
@@ -4354,12 +4354,11 @@ main.page-projects:has(.project-detail-panel) {
   font-size: 12px;
   font-weight: 800;
 }
-.project-roadmap-lane.tone-todo .kanban-status-dot { color: var(--green); }
+.project-roadmap-lane.tone-todo .kanban-status-dot { color: var(--blue); }
 .project-roadmap-lane.tone-draft .kanban-status-dot { color: #6e7781; }
-.project-roadmap-lane.tone-pending .kanban-status-dot { color: var(--green); }
 .project-roadmap-lane.tone-progress .kanban-status-dot { color: #bf8700; }
-.project-roadmap-lane.tone-review .kanban-status-dot { color: var(--blue); }
-.project-roadmap-lane.tone-done .kanban-status-dot { color: #8250df; }
+.project-roadmap-lane.tone-review .kanban-status-dot { color: #8250df; }
+.project-roadmap-lane.tone-done .kanban-status-dot { color: var(--green); }
 .project-roadmap-lane.tone-failed .kanban-status-dot { color: var(--danger); }
 .project-roadmap-lane.tone-backlog .kanban-status-dot { color: #6e7781; }
 .project-roadmap-items {
@@ -4494,12 +4493,11 @@ main.page-projects:has(.project-detail-panel) {
   border: 3px solid currentColor;
   border-radius: 50%;
 }
-.kanban-column.tone-todo .kanban-status-dot { color: var(--green); }
+.kanban-column.tone-todo .kanban-status-dot { color: var(--blue); }
 .kanban-column.tone-draft .kanban-status-dot { color: #6e7781; }
-.kanban-column.tone-pending .kanban-status-dot { color: var(--green); }
 .kanban-column.tone-progress .kanban-status-dot { color: #bf8700; }
-.kanban-column.tone-review .kanban-status-dot { color: var(--blue); }
-.kanban-column.tone-done .kanban-status-dot { color: #8250df; }
+.kanban-column.tone-review .kanban-status-dot { color: #8250df; }
+.kanban-column.tone-done .kanban-status-dot { color: var(--green); }
 .kanban-column.tone-failed .kanban-status-dot { color: var(--danger); }
 .kanban-column.tone-backlog .kanban-status-dot { color: #6e7781; }
 .kanban-count {
@@ -4545,13 +4543,35 @@ main.page-projects:has(.project-detail-panel) {
   position: absolute;
   top: calc(100% + 8px);
   right: 0;
-  z-index: 18;
-  width: 300px;
-  overflow: hidden;
+  z-index: 30;
+  width: min(420px, calc(100vw - 32px));
+  overflow: visible;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 8px;
   box-shadow: 0 16px 42px rgb(0 0 0 / 18%);
+}
+.project-column-issue-form {
+  padding: 12px;
+}
+.project-column-existing-form {
+  padding: 12px;
+  border-top: 1px solid var(--border);
+}
+.project-issue-search-wrap {
+  position: relative;
+  z-index: 35;
+}
+.project-issue-search-menu {
+  min-width: min(380px, calc(100vw - 48px));
+}
+.project-issue-search-result {
+  width: 100%;
+  background: transparent;
+  border: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 .project-column-mini-form {
   display: grid;

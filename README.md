@@ -180,6 +180,7 @@ The normative design lives in [spec/](spec/):
 | [03_RBAC.md](spec/03_RBAC.md) | Roles, permissions, bootstrap trust, ACLs, and identity reducers |
 | [04_WORKFLOWS.md](spec/04_WORKFLOWS.md) | Native workflows, backend pipelines, scheduling, run refs, and agent execution |
 | [05_PROJECTS_WEBUI.md](spec/05_PROJECTS_WEBUI.md) | Projects web UI, issue-centered project fields, saved views, and templates |
+| [06_PULL_REQUEST_MERGE_SEMANTICS.md](spec/06_PULL_REQUEST_MERGE_SEMANTICS.md) | Remote-first pull request merges, leases, and conflict resolution |
 
 ## License
 

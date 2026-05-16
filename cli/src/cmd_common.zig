@@ -382,7 +382,7 @@ pub fn isIssuePriority(value: []const u8) bool {
 
 pub fn isIssueStatus(value: []const u8) bool {
     return std.mem.eql(u8, value, "Draft") or
-        std.mem.eql(u8, value, "Pending") or
+        std.mem.eql(u8, value, "Todo") or
         std.mem.eql(u8, value, "WIP") or
         std.mem.eql(u8, value, "Review") or
         std.mem.eql(u8, value, "Done") or

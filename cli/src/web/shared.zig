@@ -5,8 +5,10 @@ const index = @import("../index.zig");
 const json_writer = @import("../json_writer.zig");
 const repo_mod = @import("../repo.zig");
 const util = @import("../util.zig");
-const zwf_response = @import("../zwf/response.zig");
-const nouns_assets = @import("vendor/nouns-assets/image_data.zig");
+const avatars = @import("avatars.zig");
+const html = @import("html.zig");
+const response = @import("response.zig");
+const time = @import("time.zig");
 
 const Allocator = std.mem.Allocator;
 const CliError = errors.CliError;
@@ -21,7 +23,7 @@ const loadConfig = repo_mod.loadConfig;
 const default_web_shortcut_leader = "Space";
 const default_web_shortcut_keys = "A S D F J K L E R U I O W Q P Z X C V B N M G H Y T";
 const default_web_shortcut_timeout_ms: u64 = 900;
-const asset_version = "20260516";
+const asset_version = "20260516-projects";
 
 const WebStats = struct {
     inbox_refs: usize = 0,
@@ -31,36 +33,45 @@ const WebStats = struct {
     pulls: usize = 0,
 };
 
-pub const Href = union(enum) {
-    literal: []const u8,
-    code: PathHref,
-    raw: PathHref,
-    commits: PathHref,
-    blame: PathHref,
-    commit: []const u8,
-    issue: []const u8,
-    pull: []const u8,
-};
+pub const Href = html.Href;
+pub const PathHref = html.PathHref;
+pub const Class = html.Class;
+pub const ClassList = html.ClassList;
+pub const ClassAttr = html.ClassAttr;
+pub const TrustedHtml = html.TrustedHtml;
+pub const JsonString = html.JsonString;
+pub const GroupedUnsigned = html.GroupedUnsigned;
+pub const Percent = html.Percent;
 
-pub const PathHref = struct {
-    ref: []const u8,
-    path: []const u8 = "",
-    view: ?[]const u8 = null,
-};
-
-pub const Class = struct {
-    name: []const u8,
-    enabled: bool = true,
-};
-
-pub const ClassList = struct {
-    base: []const u8,
-    extra: []const Class = &.{},
-};
-
-pub const ClassAttr = struct {
-    value: ClassList,
-};
+pub const literalHref = html.literalHref;
+pub const codeHref = html.codeHref;
+pub const codeHrefWithView = html.codeHrefWithView;
+pub const rawHref = html.rawHref;
+pub const commitsHref = html.commitsHref;
+pub const blameHref = html.blameHref;
+pub const commitHref = html.commitHref;
+pub const issueHref = html.issueHref;
+pub const pullHref = html.pullHref;
+pub const class = html.class;
+pub const classes = html.classes;
+pub const classAttr = html.classAttr;
+pub const appendHtml = html.appendHtml;
+pub const trustedHtml = html.trustedHtml;
+pub const jsonString = html.jsonString;
+pub const groupedUnsigned = html.groupedUnsigned;
+pub const percent = html.percent;
+pub const appendTemplate = html.appendTemplate;
+pub const appendHref = html.appendHref;
+pub const appendOptionalAttr = html.appendOptionalAttr;
+pub const appendUrlEncoded = html.appendUrlEncoded;
+pub const appendFmt = html.appendFmt;
+pub const appendRelativeTime = time.appendRelativeTime;
+pub const appendAvatar = avatars.appendAvatar;
+pub const sendRedirect = response.sendRedirect;
+pub const sendPlainResponse = response.sendPlainResponse;
+pub const sendResponse = response.sendResponse;
+pub const sendBinaryResponse = response.sendBinaryResponse;
+const appendUserAvatar = avatars.appendUserAvatar;
 
 pub const Button = struct {
     label: []const u8,
@@ -165,42 +176,6 @@ pub const Pagination = struct {
     }
 };
 
-pub fn literalHref(value: []const u8) Href {
-    return .{ .literal = value };
-}
-
-pub fn codeHref(ref: []const u8, path: []const u8) Href {
-    return .{ .code = .{ .ref = ref, .path = path } };
-}
-
-pub fn codeHrefWithView(ref: []const u8, path: []const u8, view: []const u8) Href {
-    return .{ .code = .{ .ref = ref, .path = path, .view = view } };
-}
-
-pub fn rawHref(ref: []const u8, path: []const u8) Href {
-    return .{ .raw = .{ .ref = ref, .path = path } };
-}
-
-pub fn commitsHref(ref: []const u8, path: []const u8) Href {
-    return .{ .commits = .{ .ref = ref, .path = path } };
-}
-
-pub fn blameHref(ref: []const u8, path: []const u8) Href {
-    return .{ .blame = .{ .ref = ref, .path = path } };
-}
-
-pub fn commitHref(hash: []const u8) Href {
-    return .{ .commit = hash };
-}
-
-pub fn issueHref(issue_ref: []const u8) Href {
-    return .{ .issue = issue_ref };
-}
-
-pub fn pullHref(pull_ref: []const u8) Href {
-    return .{ .pull = pull_ref };
-}
-
 pub fn issueReferenceEnd(value: []const u8, start: usize) ?usize {
     if (start >= value.len or value[start] != '#') return null;
     const token_start = start + 1;
@@ -300,113 +275,6 @@ fn appendInternalReferenceLink(
     try buf.appendSlice(allocator, "</a>");
 }
 
-pub fn appendRelativeTime(buf: *std.ArrayList(u8), allocator: Allocator, timestamp: []const u8) !void {
-    const label = try relativeTimeLabelOwned(allocator, timestamp);
-    defer allocator.free(label);
-    try appendTemplate(buf, allocator,
-        \\<time datetime="{timestamp}" data-relative-time>{label}</time>
-    , .{
-        .timestamp = timestamp,
-        .label = label,
-    });
-}
-
-fn relativeTimeLabelOwned(allocator: Allocator, timestamp: []const u8) ![]u8 {
-    const parsed = parseRfc3339Timestamp(timestamp) orelse return allocator.dupe(u8, timestamp);
-    return relativeDurationOwned(allocator, std.time.timestamp() - parsed);
-}
-
-fn relativeDurationOwned(allocator: Allocator, delta_seconds: i64) ![]u8 {
-    const future = delta_seconds < -30;
-    const seconds = if (delta_seconds < 0) -delta_seconds else delta_seconds;
-    if (seconds < 60) return allocator.dupe(u8, if (future) "in less than a minute" else "just now");
-
-    const minute = 60;
-    const hour = 60 * minute;
-    const day = 24 * hour;
-    const week = 7 * day;
-    const month = 30 * day;
-    const year = 365 * day;
-
-    if (seconds >= year) return relativeUnitOwned(allocator, future, @divFloor(seconds, year), "year");
-    if (seconds >= month) return relativeUnitOwned(allocator, future, @divFloor(seconds, month), "month");
-    if (seconds >= week) return relativeUnitOwned(allocator, future, @divFloor(seconds, week), "week");
-    if (seconds >= day) return relativeUnitOwned(allocator, future, @divFloor(seconds, day), "day");
-    if (seconds >= hour) return relativeUnitOwned(allocator, future, @divFloor(seconds, hour), "hour");
-    return relativeUnitOwned(allocator, future, @divFloor(seconds, minute), "minute");
-}
-
-fn relativeUnitOwned(allocator: Allocator, future: bool, value: i64, unit: []const u8) ![]u8 {
-    if (future) {
-        return std.fmt.allocPrint(allocator, "in {d} {s}{s}", .{ value, unit, if (value == 1) "" else "s" });
-    }
-    return std.fmt.allocPrint(allocator, "{d} {s}{s} ago", .{ value, unit, if (value == 1) "" else "s" });
-}
-
-fn parseRfc3339Timestamp(value: []const u8) ?i64 {
-    if (value.len < "0000-00-00T00:00:00Z".len) return null;
-    if (value[4] != '-' or value[7] != '-' or value[10] != 'T' or value[13] != ':' or value[16] != ':') return null;
-
-    const year = parseFixedInt(value[0..4]) orelse return null;
-    const month = parseFixedInt(value[5..7]) orelse return null;
-    const day = parseFixedInt(value[8..10]) orelse return null;
-    const hour = parseFixedInt(value[11..13]) orelse return null;
-    const minute = parseFixedInt(value[14..16]) orelse return null;
-    const second = parseFixedInt(value[17..19]) orelse return null;
-
-    if (year < 1970 or year > 9999) return null;
-    if (month < 1 or month > 12) return null;
-    const epoch_month: std.time.epoch.Month = @enumFromInt(@as(u4, @intCast(month)));
-    const days_in_month: i64 = std.time.epoch.getDaysInMonth(@as(std.time.epoch.Year, @intCast(year)), epoch_month);
-    if (day < 1 or day > days_in_month) return null;
-    if (hour > 23 or minute > 59 or second > 59) return null;
-
-    var cursor: usize = 19;
-    if (cursor < value.len and value[cursor] == '.') {
-        cursor += 1;
-        const fraction_start = cursor;
-        while (cursor < value.len and std.ascii.isDigit(value[cursor])) cursor += 1;
-        if (cursor == fraction_start) return null;
-    }
-
-    const offset_seconds = parseRfc3339Offset(value[cursor..]) orelse return null;
-    const local_seconds = daysFromCivil(year, month, day) * @as(i64, std.time.epoch.secs_per_day) + hour * 3600 + minute * 60 + second;
-    return local_seconds - offset_seconds;
-}
-
-fn parseFixedInt(value: []const u8) ?i64 {
-    if (value.len == 0) return null;
-    for (value) |c| {
-        if (!std.ascii.isDigit(c)) return null;
-    }
-    return std.fmt.parseInt(i64, value, 10) catch null;
-}
-
-fn parseRfc3339Offset(value: []const u8) ?i64 {
-    if (std.mem.eql(u8, value, "Z")) return 0;
-    if (value.len != 6 or value[3] != ':') return null;
-    const sign: i64 = switch (value[0]) {
-        '+' => 1,
-        '-' => -1,
-        else => return null,
-    };
-    const hours = parseFixedInt(value[1..3]) orelse return null;
-    const minutes = parseFixedInt(value[4..6]) orelse return null;
-    if (hours > 23 or minutes > 59) return null;
-    return sign * (hours * 3600 + minutes * 60);
-}
-
-fn daysFromCivil(year: i64, month: i64, day: i64) i64 {
-    var adjusted_year = year;
-    if (month <= 2) adjusted_year -= 1;
-    const era = @divFloor(adjusted_year, 400);
-    const year_of_era = adjusted_year - era * 400;
-    const month_prime = month + if (month > 2) @as(i64, -3) else @as(i64, 9);
-    const day_of_year = @divFloor(153 * month_prime + 2, 5) + day - 1;
-    const day_of_era = year_of_era * 365 + @divFloor(year_of_era, 4) - @divFloor(year_of_era, 100) + day_of_year;
-    return era * 146097 + day_of_era - 719468;
-}
-
 fn isPositiveDecimalReference(value: []const u8) bool {
     if (value.len == 0) return false;
     var has_non_zero = false;
@@ -432,18 +300,6 @@ fn asciiEqlIgnoreCase(a: []const u8, b: []const u8) bool {
         if (std.ascii.toLower(left) != std.ascii.toLower(right)) return false;
     }
     return true;
-}
-
-pub fn class(name: []const u8, enabled: bool) Class {
-    return .{ .name = name, .enabled = enabled };
-}
-
-pub fn classes(base: []const u8, extra: []const Class) ClassList {
-    return .{ .base = base, .extra = extra };
-}
-
-pub fn classAttr(base: []const u8, extra: []const Class) ClassAttr {
-    return .{ .value = classes(base, extra) };
 }
 
 pub fn currentPrincipalOwned(allocator: Allocator, repo: Repo) !?[]u8 {
@@ -565,117 +421,6 @@ fn appendUserMenu(buf: *std.ArrayList(u8), allocator: Allocator, cfg: Config) !v
         .device = cfg.device,
         .repo_id = cfg.repo_id,
     });
-}
-
-pub fn appendAvatar(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8, extra_class: []const u8) !void {
-    try appendAvatarContainer(buf, allocator, "issue-avatar", extra_class, name);
-}
-
-fn appendUserAvatar(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8) !void {
-    try appendAvatarContainer(buf, allocator, "user-avatar", "", name);
-}
-
-fn appendAvatarContainer(
-    buf: *std.ArrayList(u8),
-    allocator: Allocator,
-    base_class: []const u8,
-    extra_class: []const u8,
-    name: []const u8,
-) !void {
-    try appendTemplate(buf, allocator,
-        \\<span class="{base_class} nouns-avatar {extra_class}" title="{name}" aria-label="{name}">
-    , .{
-        .base_class = base_class,
-        .extra_class = extra_class,
-        .name = name,
-    });
-    try appendNounsAvatarSvg(buf, allocator, nounsAvatarSeed(name));
-    try buf.appendSlice(allocator, "</span>");
-}
-
-const NounsAvatarSeed = struct {
-    background: usize,
-    body: usize,
-    accessory: usize,
-    head: usize,
-    glasses: usize,
-};
-
-fn nounsAvatarSeed(name: []const u8) NounsAvatarSeed {
-    const hash = fnv1a64(name);
-    return .{
-        .background = @intCast(hash % nouns_assets.bgcolors.len),
-        .body = @intCast((hash >> 8) % nouns_assets.bodies.len),
-        .accessory = @intCast((hash >> 20) % nouns_assets.accessories.len),
-        .head = @intCast((hash >> 32) % nouns_assets.heads.len),
-        .glasses = @intCast((hash >> 48) % nouns_assets.glasses.len),
-    };
-}
-
-fn fnv1a64(value: []const u8) u64 {
-    var hash: u64 = 14695981039346656037;
-    for (value) |byte| {
-        hash ^= byte;
-        hash *%= 1099511628211;
-    }
-    return hash;
-}
-
-fn appendNounsAvatarSvg(buf: *std.ArrayList(u8), allocator: Allocator, seed: NounsAvatarSeed) !void {
-    try appendTemplate(buf, allocator,
-        \\<svg class="nouns-avatar-svg" width="320" height="320" viewBox="0 0 320 320" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
-        \\<rect width="100%" height="100%" fill="#{background}" />
-    , .{ .background = nouns_assets.bgcolors[seed.background] });
-    try appendNounsAvatarPartSvg(buf, allocator, nouns_assets.bodies[seed.body]);
-    try appendNounsAvatarPartSvg(buf, allocator, nouns_assets.accessories[seed.accessory]);
-    try appendNounsAvatarPartSvg(buf, allocator, nouns_assets.heads[seed.head]);
-    try appendNounsAvatarPartSvg(buf, allocator, nouns_assets.glasses[seed.glasses]);
-    try buf.appendSlice(allocator,
-        \\</svg>
-    );
-}
-
-fn appendNounsAvatarPartSvg(buf: *std.ArrayList(u8), allocator: Allocator, data: []const u8) !void {
-    if (!std.mem.startsWith(u8, data, "0x") or data.len < 12) return error.InvalidNounsAsset;
-
-    const top: u16 = try hexByteAt(data, 4);
-    const right: u16 = try hexByteAt(data, 6);
-    const left: u16 = try hexByteAt(data, 10);
-    if (right <= left) return;
-
-    var current_x: u16 = left;
-    var current_y: u16 = top;
-    var cursor: usize = 12;
-    while (cursor + 4 <= data.len) : (cursor += 4) {
-        var draw_length: u16 = try hexByteAt(data, cursor);
-        const color_index: usize = try hexByteAt(data, cursor + 2);
-        while (draw_length > 0) {
-            const length = @min(draw_length, right - current_x);
-            if (length == 0) return error.InvalidNounsAsset;
-            if (color_index != 0) {
-                if (color_index >= nouns_assets.palette.len) return error.InvalidNounsAsset;
-                try appendTemplate(buf, allocator,
-                    \\<rect width="{width}" height="10" x="{x}" y="{y}" fill="#{color}" />
-                , .{
-                    .width = length * 10,
-                    .x = current_x * 10,
-                    .y = current_y * 10,
-                    .color = nouns_assets.palette[color_index],
-                });
-            }
-            current_x += length;
-            if (current_x == right) {
-                current_x = left;
-                current_y += 1;
-            }
-            draw_length -= length;
-        }
-    }
-}
-
-fn hexByteAt(data: []const u8, offset: usize) !u8 {
-    if (offset + 2 > data.len) return error.InvalidNounsAsset;
-    return std.fmt.parseInt(u8, data[offset .. offset + 2], 16) catch error.InvalidNounsAsset;
 }
 
 fn appendShortcutConfigScript(buf: *std.ArrayList(u8), allocator: Allocator, cfg_opt: ?Config) !void {
@@ -1126,16 +871,6 @@ pub fn appendFact(buf: *std.ArrayList(u8), allocator: Allocator, label: []const 
     });
 }
 
-pub fn appendOptionalAttr(buf: *std.ArrayList(u8), allocator: Allocator, comptime name: []const u8, value: anytype) !void {
-    if (value) |payload| {
-        try buf.append(allocator, ' ');
-        try buf.appendSlice(allocator, name);
-        try buf.appendSlice(allocator, "=\"");
-        try appendTemplateValue(buf, allocator, payload);
-        try buf.append(allocator, '"');
-    }
-}
-
 pub fn renderIndexingPageIfStale(
     allocator: Allocator,
     repo: Repo,
@@ -1217,262 +952,6 @@ fn renderIndexingPage(
     );
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
-}
-
-pub fn appendHtml(buf: *std.ArrayList(u8), allocator: Allocator, value: []const u8) !void {
-    for (value) |c| {
-        switch (c) {
-            '&' => try buf.appendSlice(allocator, "&amp;"),
-            '<' => try buf.appendSlice(allocator, "&lt;"),
-            '>' => try buf.appendSlice(allocator, "&gt;"),
-            '"' => try buf.appendSlice(allocator, "&quot;"),
-            '\'' => try buf.appendSlice(allocator, "&#39;"),
-            else => try buf.append(allocator, c),
-        }
-    }
-}
-
-pub const TrustedHtml = struct {
-    value: []const u8,
-};
-
-pub fn trustedHtml(value: []const u8) TrustedHtml {
-    return .{ .value = value };
-}
-
-pub const JsonString = struct {
-    value: []const u8,
-};
-
-pub fn jsonString(value: []const u8) JsonString {
-    return .{ .value = value };
-}
-
-pub const GroupedUnsigned = struct {
-    value: u64,
-};
-
-pub fn groupedUnsigned(value: u64) GroupedUnsigned {
-    return .{ .value = value };
-}
-
-pub const Percent = struct {
-    value: u64,
-    total: u64,
-};
-
-pub fn percent(value: u64, total: u64) Percent {
-    return .{ .value = value, .total = total };
-}
-
-pub fn appendTemplate(
-    buf: *std.ArrayList(u8),
-    allocator: Allocator,
-    comptime template: []const u8,
-    values: anytype,
-) !void {
-    @setEvalBranchQuota(10_000);
-    comptime var cursor: usize = 0;
-    inline while (cursor < template.len) {
-        comptime var token = cursor;
-        inline while (token < template.len and template[token] != '{' and template[token] != '}') : (token += 1) {}
-
-        if (token > cursor) try buf.appendSlice(allocator, template[cursor..token]);
-        if (token == template.len) {
-            cursor = token;
-            continue;
-        }
-
-        if (template[token] == '{') {
-            if (token + 1 < template.len and template[token + 1] == '{') {
-                try buf.append(allocator, '{');
-                cursor = token + 2;
-                continue;
-            }
-
-            comptime var end = token + 1;
-            inline while (end < template.len and template[end] != '}') : (end += 1) {
-                if (template[end] == '{') @compileError("nested HTML template placeholder");
-            }
-            if (end == template.len) @compileError("unclosed HTML template placeholder");
-            if (end == token + 1) @compileError("empty HTML template placeholder");
-
-            try appendTemplateValue(buf, allocator, @field(values, template[token + 1 .. end]));
-            cursor = end + 1;
-            continue;
-        }
-
-        if (token + 1 < template.len and template[token + 1] == '}') {
-            try buf.append(allocator, '}');
-            cursor = token + 2;
-            continue;
-        }
-        @compileError("unescaped closing brace in HTML template");
-    }
-}
-
-fn appendTemplateValue(buf: *std.ArrayList(u8), allocator: Allocator, value: anytype) !void {
-    const T = @TypeOf(value);
-    if (T == TrustedHtml) {
-        try buf.appendSlice(allocator, value.value);
-        return;
-    }
-    if (T == Href) {
-        try appendHref(buf, allocator, value);
-        return;
-    }
-    if (T == ClassList) {
-        try appendClassValue(buf, allocator, value);
-        return;
-    }
-    if (T == ClassAttr) {
-        try appendClassAttrValue(buf, allocator, value);
-        return;
-    }
-    if (T == JsonString) {
-        try appendJsonString(buf, allocator, value.value);
-        return;
-    }
-    if (T == GroupedUnsigned) {
-        try appendGroupedUnsigned(buf, allocator, value.value);
-        return;
-    }
-    if (T == Percent) {
-        try appendPercent(buf, allocator, value.value, value.total);
-        return;
-    }
-
-    switch (@typeInfo(T)) {
-        .pointer => |info| switch (info.size) {
-            .one, .slice => {
-                const slice: []const u8 = value;
-                try appendHtml(buf, allocator, slice);
-            },
-            .many, .c => {
-                const slice: [:0]const u8 = std.mem.span(value);
-                try appendHtml(buf, allocator, slice);
-            },
-        },
-        .array => {
-            const slice: []const u8 = &value;
-            try appendHtml(buf, allocator, slice);
-        },
-        .bool => try buf.appendSlice(allocator, if (value) "true" else "false"),
-        .int, .comptime_int => try std.fmt.format(buf.writer(allocator), "{d}", .{value}),
-        .float, .comptime_float => try std.fmt.format(buf.writer(allocator), "{d}", .{value}),
-        .@"enum", .enum_literal => try appendHtml(buf, allocator, @tagName(value)),
-        .optional => if (value) |payload| try appendTemplateValue(buf, allocator, payload),
-        else => @compileError("unsupported HTML template value type: " ++ @typeName(T)),
-    }
-}
-
-pub fn appendHref(buf: *std.ArrayList(u8), allocator: Allocator, href: Href) !void {
-    switch (href) {
-        .literal => |value| try appendHtml(buf, allocator, value),
-        .code => |value| try appendPathHref(buf, allocator, "/code", value),
-        .raw => |value| try appendPathHref(buf, allocator, "/raw", value),
-        .commits => |value| try appendPathHref(buf, allocator, "/commits", value),
-        .blame => |value| try appendPathHref(buf, allocator, "/blame", value),
-        .commit => |hash| {
-            try buf.appendSlice(allocator, "/commit?sha=");
-            try appendUrlEncoded(buf, allocator, hash);
-        },
-        .issue => |issue_ref| {
-            try buf.appendSlice(allocator, "/issues/");
-            try appendUrlEncoded(buf, allocator, issue_ref);
-        },
-        .pull => |pull_ref| {
-            try buf.appendSlice(allocator, "/pulls/");
-            try appendUrlEncoded(buf, allocator, pull_ref);
-        },
-    }
-}
-
-fn appendPathHref(buf: *std.ArrayList(u8), allocator: Allocator, route: []const u8, href: PathHref) !void {
-    try buf.appendSlice(allocator, route);
-    try buf.appendSlice(allocator, "?ref=");
-    try appendUrlEncoded(buf, allocator, href.ref);
-    if (href.path.len != 0) {
-        try buf.appendSlice(allocator, "&amp;path=");
-        try appendUrlEncoded(buf, allocator, href.path);
-    }
-    if (href.view) |view| {
-        try buf.appendSlice(allocator, "&amp;view=");
-        try appendUrlEncoded(buf, allocator, view);
-    }
-}
-
-pub fn appendUrlEncoded(buf: *std.ArrayList(u8), allocator: Allocator, value: []const u8) !void {
-    const hex = "0123456789ABCDEF";
-    for (value) |c| {
-        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~' or c == '/') {
-            try buf.append(allocator, c);
-        } else {
-            try buf.append(allocator, '%');
-            try buf.append(allocator, hex[c >> 4]);
-            try buf.append(allocator, hex[c & 0x0f]);
-        }
-    }
-}
-
-fn appendClassValue(buf: *std.ArrayList(u8), allocator: Allocator, value: ClassList) !void {
-    var wrote = false;
-    if (value.base.len != 0) {
-        try appendHtml(buf, allocator, value.base);
-        wrote = true;
-    }
-    for (value.extra) |item| {
-        if (!item.enabled) continue;
-        if (wrote) try buf.append(allocator, ' ');
-        try appendHtml(buf, allocator, item.name);
-        wrote = true;
-    }
-}
-
-fn appendClassAttrValue(buf: *std.ArrayList(u8), allocator: Allocator, attr: ClassAttr) !void {
-    if (!classListHasValue(attr.value)) return;
-    try buf.appendSlice(allocator, " class=\"");
-    try appendClassValue(buf, allocator, attr.value);
-    try buf.append(allocator, '"');
-}
-
-fn classListHasValue(value: ClassList) bool {
-    if (value.base.len != 0) return true;
-    for (value.extra) |item| {
-        if (item.enabled) return true;
-    }
-    return false;
-}
-
-fn appendGroupedUnsigned(buf: *std.ArrayList(u8), allocator: Allocator, value: u64) !void {
-    var digits: [20]u8 = undefined;
-    const text = try std.fmt.bufPrint(&digits, "{d}", .{value});
-    for (text, 0..) |c, i| {
-        if (i != 0 and (text.len - i) % 3 == 0) try buf.append(allocator, ',');
-        try buf.append(allocator, c);
-    }
-}
-
-fn appendPercent(buf: *std.ArrayList(u8), allocator: Allocator, value: u64, total: u64) !void {
-    const tenths = percentTenths(value, total);
-    try std.fmt.format(buf.writer(allocator), "{d}.{d}%", .{ tenths / 10, tenths % 10 });
-}
-
-fn percentTenths(value: u64, total: u64) u64 {
-    if (total == 0) return 0;
-    const scaled = (@as(u128, value) * 1000 + @as(u128, total) / 2) / @as(u128, total);
-    return @intCast(@min(scaled, 1000));
-}
-
-pub fn appendFmt(
-    buf: *std.ArrayList(u8),
-    allocator: Allocator,
-    comptime fmt: []const u8,
-    args: anytype,
-) !void {
-    const text = try std.fmt.allocPrint(allocator, fmt, args);
-    defer allocator.free(text);
-    try buf.appendSlice(allocator, text);
 }
 
 pub fn paginationFromTarget(allocator: Allocator, target: []const u8, default_per_page: usize, max_per_page: usize) !Pagination {
@@ -1609,114 +1088,6 @@ pub fn percentDecodeForm(allocator: Allocator, value: []const u8) ![]u8 {
         }
     }
     return out.toOwnedSlice(allocator);
-}
-
-pub fn sendRedirect(allocator: Allocator, stream: std.net.Stream, location: []const u8) !void {
-    try zwf_response.validateHeaderValue(location);
-    const extra = try std.fmt.allocPrint(allocator, "Location: {s}\r\n", .{location});
-    defer allocator.free(extra);
-    try sendResponse(allocator, stream, 303, "See Other", "text/plain", "See Other\n", extra);
-}
-
-pub fn sendPlainResponse(
-    allocator: Allocator,
-    stream: std.net.Stream,
-    status: u16,
-    reason: []const u8,
-    body: []const u8,
-) !void {
-    try sendResponse(allocator, stream, status, reason, "text/plain", body, null);
-}
-
-pub fn sendResponse(
-    allocator: Allocator,
-    stream: std.net.Stream,
-    status: u16,
-    reason: []const u8,
-    content_type: []const u8,
-    body: []const u8,
-    extra_headers: ?[]const u8,
-) !void {
-    try validateRawExtraHeaders(extra_headers orelse "");
-    var headers: std.ArrayList(u8) = .empty;
-    defer headers.deinit(allocator);
-    try std.fmt.format(
-        headers.writer(allocator),
-        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}; charset=utf-8\r\n",
-        .{ status, reason, content_type },
-    );
-    try appendContentLengthIfAllowed(&headers, allocator, status, body.len);
-    try headers.appendSlice(allocator, "Connection: close\r\nX-Content-Type-Options: nosniff\r\n");
-    try headers.appendSlice(allocator, extra_headers orelse "");
-    try headers.appendSlice(allocator, "\r\n");
-    try stream.writeAll(headers.items);
-    if (statusAllowsBody(status) and body.len > 0) try stream.writeAll(body);
-}
-
-pub fn sendBinaryResponse(
-    allocator: Allocator,
-    stream: std.net.Stream,
-    status: u16,
-    reason: []const u8,
-    content_type: []const u8,
-    body: []const u8,
-    extra_headers: ?[]const u8,
-) !void {
-    try validateRawExtraHeaders(extra_headers orelse "");
-    var headers: std.ArrayList(u8) = .empty;
-    defer headers.deinit(allocator);
-    try std.fmt.format(
-        headers.writer(allocator),
-        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\n",
-        .{ status, reason, content_type },
-    );
-    try appendContentLengthIfAllowed(&headers, allocator, status, body.len);
-    try headers.appendSlice(allocator, "Connection: close\r\nX-Content-Type-Options: nosniff\r\n");
-    try headers.appendSlice(allocator, extra_headers orelse "");
-    try headers.appendSlice(allocator, "\r\n");
-    try stream.writeAll(headers.items);
-    if (statusAllowsBody(status) and body.len > 0) try stream.writeAll(body);
-}
-
-fn statusAllowsBody(status: u16) bool {
-    return status != 204 and status != 304 and status >= 200;
-}
-
-fn appendContentLengthIfAllowed(buf: *std.ArrayList(u8), allocator: Allocator, status: u16, body_len: usize) !void {
-    if (statusAllowsBody(status)) try std.fmt.format(buf.writer(allocator), "Content-Length: {d}\r\n", .{body_len});
-}
-
-fn validateRawExtraHeaders(raw: []const u8) !void {
-    if (raw.len == 0) return;
-    if (!std.mem.endsWith(u8, raw, "\r\n")) return error.BadHeaderValue;
-    var rest = raw;
-    while (rest.len > 0) {
-        const end = std.mem.indexOf(u8, rest, "\r\n") orelse return error.BadHeaderValue;
-        const line = rest[0..end];
-        rest = rest[end + 2 ..];
-        if (line.len == 0) continue;
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.BadHeaderValue;
-        try zwf_response.validateExtraHeaderName(std.mem.trim(u8, line[0..colon], " \t"));
-        try zwf_response.validateHeaderValue(std.mem.trim(u8, line[colon + 1 ..], " \t"));
-    }
-}
-
-test "legacy response helpers omit content length for 204" {
-    var headers: std.ArrayList(u8) = .empty;
-    defer headers.deinit(std.testing.allocator);
-    try appendContentLengthIfAllowed(&headers, std.testing.allocator, 204, 10);
-    try appendContentLengthIfAllowed(&headers, std.testing.allocator, 304, 10);
-    try std.testing.expectEqual(@as(usize, 0), headers.items.len);
-
-    try appendContentLengthIfAllowed(&headers, std.testing.allocator, 200, 10);
-    try std.testing.expectEqualStrings("Content-Length: 10\r\n", headers.items);
-}
-
-test "legacy raw extra headers reject managed names" {
-    try std.testing.expectError(error.ManagedResponseHeader, validateRawExtraHeaders("Content-Length: 1\r\n"));
-    try std.testing.expectError(error.ManagedResponseHeader, validateRawExtraHeaders("Transfer-Encoding: chunked\r\n"));
-    try std.testing.expectError(error.ManagedResponseHeader, validateRawExtraHeaders("Connection: keep-alive\r\n"));
-    try std.testing.expectError(error.ManagedResponseHeader, validateRawExtraHeaders("Content-Type: text/plain\r\n"));
 }
 
 fn loadWebStats(allocator: Allocator, repo: Repo) !WebStats {

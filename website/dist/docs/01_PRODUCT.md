@@ -202,7 +202,7 @@ preserve them without admitting malformed history.
 
 Compliant implementations MUST understand the following event families:
 
-*   `issue.opened`, `issue.updated`, `issue.title_set`, `issue.body_set`, `issue.state_set`, `issue.label_added`, `issue.label_removed`, `issue.assignee_added`, `issue.assignee_removed`, `issue.milestone_set`, `issue.project_added`, `issue.project_removed`
+*   `issue.opened`, `issue.updated`, `issue.title_set`, `issue.body_set`, `issue.state_set`, `issue.priority_set`, `issue.status_set`, `issue.label_added`, `issue.label_removed`, `issue.assignee_added`, `issue.assignee_removed`, `issue.milestone_set`, `issue.project_added`, `issue.project_removed`
 *   `issue.reaction_added`, `issue.reaction_removed`
 *   `pull.opened`, `pull.updated`, `pull.title_set`, `pull.body_set`, `pull.state_set`, `pull.base_set`, `pull.head_set`, `pull.label_added`, `pull.label_removed`, `pull.assignee_added`, `pull.assignee_removed`, `pull.reviewer_added`, `pull.reviewer_removed`, `pull.merged`
 *   `pull.reaction_added`, `pull.reaction_removed`
@@ -219,11 +219,13 @@ Implementations MAY support additional event types. Unknown event types MUST be 
 
 The following payload members are REQUIRED for interoperable v1 implementations:
 
-*   `issue.opened`: `title`; OPTIONAL `body`, `labels`, `assignees`, `milestone`, `projects`
-*   `issue.updated`: OPTIONAL `title`, `body`, `state`, `labels_added`, `labels_removed`, `assignees_added`, `assignees_removed`; at least one field MUST be present
+*   `issue.opened`: `title`; OPTIONAL `body`, `labels`, `assignees`, `milestone`, `priority`, `status`, `projects`
+*   `issue.updated`: OPTIONAL `title`, `body`, `state`, `milestone`, `priority`, `status`, `projects`, `labels_added`, `labels_removed`, `assignees_added`, `assignees_removed`; at least one field MUST be present
 *   `issue.title_set`: `title`
 *   `issue.body_set`: `body`
 *   `issue.state_set`: `state`
+*   `issue.priority_set`: `priority`
+*   `issue.status_set`: `status`
 *   `issue.label_added` / `issue.label_removed`: `label`
 *   `issue.assignee_added` / `issue.assignee_removed`: `assignee`
 *   `issue.milestone_set`: `milestone`; OPTIONAL `milestone_ref`. An empty `milestone` clears the assignment.
@@ -476,8 +478,8 @@ The following issue fields MUST be modeled as causal scalar registers:
 *   `title`
 *   `body`
 *   `state` (`open` or `closed`)
-*   `pipeline` (work pipeline stage, such as `Todo`, `Pending`, `In Review`,
-    or `Done`)
+*   `pipeline` (work pipeline stage, such as `Todo`, `WIP`, `Review`, or
+    `Done`)
 *   `priority` (planning priority, such as `P0`, `P1`, `P2`, or `P3`)
 *   `type` (issue kind, such as `bug`, `feature`, or `task`)
 *   `milestone`
@@ -650,8 +652,8 @@ remove payload.
 
 The `columns` array in `project.created` is reduced as if each column had been
 added at the same event hash. Implementations SHOULD create new projects with
-a small default column set such as `Todo`, `In Progress`, and `Done` when the
-user did not provide columns.
+a small default column set such as `Draft`, `Todo`, `WIP`, `Review`, `Done`,
+and `Failed` when the user did not provide columns.
 
 Issue membership in a project is expressed with `issue.project_added` and
 `issue.project_removed`, not by mutating the project object. This keeps project
