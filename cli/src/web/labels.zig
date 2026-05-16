@@ -8,6 +8,7 @@ const pull_mod = @import("../pull.zig");
 const repo_mod = @import("../repo.zig");
 const shared = @import("shared.zig");
 const util = @import("../util.zig");
+const zwf = @import("../zwf.zig");
 
 const Allocator = std.mem.Allocator;
 const EventWriter = event_writer_mod.EventWriter;
@@ -25,7 +26,7 @@ const sqlite = index.sqlite;
 const newUuidV7 = util.newUuidV7;
 const rfc3339Now = util.rfc3339Now;
 
-pub fn renderLabelsPage(allocator: Allocator, repo: Repo) ![]u8 {
+pub fn renderLabelsPage(allocator: Allocator, repo: Repo, csrf_token: []const u8) ![]u8 {
     if (try shared.renderIndexingPageIfStale(allocator, repo, "Labels", "labels", "/labels")) |body| return body;
     try index.ensureIndex(allocator, repo);
 
@@ -40,7 +41,7 @@ pub fn renderLabelsPage(allocator: Allocator, repo: Repo) ![]u8 {
     try shared.appendSettingsLayoutStart(&buf, allocator, "labels");
     try appendLabelsHeader(&buf, allocator);
     try appendLabelsToolbar(&buf, allocator);
-    try appendLabelDialog(&buf, allocator);
+    try appendLabelDialog(&buf, allocator, csrf_token);
     try appendLabelsListStart(&buf, allocator, label_count);
 
     var stmt = try db.prepare(
@@ -89,7 +90,7 @@ pub fn renderLabelsPage(allocator: Allocator, repo: Repo) ![]u8 {
         defer allocator.free(color);
         const issue_count = @as(usize, @intCast(stmt.columnInt64(4)));
         const pull_count = @as(usize, @intCast(stmt.columnInt64(5)));
-        try appendLabelRow(&buf, allocator, label, label_id, description, color, issue_count, pull_count);
+        try appendLabelRow(&buf, allocator, label, label_id, description, color, issue_count, pull_count, csrf_token);
         shown += 1;
     }
 
@@ -483,8 +484,8 @@ fn appendLabelsHeader(buf: *std.ArrayList(u8), allocator: Allocator) !void {
     );
 }
 
-fn appendLabelDialog(buf: *std.ArrayList(u8), allocator: Allocator) !void {
-    try buf.appendSlice(allocator,
+fn appendLabelDialog(buf: *std.ArrayList(u8), allocator: Allocator, csrf_token: []const u8) !void {
+    try appendTemplate(buf, allocator,
         \\  <div class="labels-dialog-backdrop" data-label-dialog hidden>
         \\    <div class="labels-dialog" role="dialog" aria-modal="true" aria-labelledby="label-dialog-title">
         \\      <form method="post" action="/labels" data-label-dialog-form>
@@ -494,11 +495,12 @@ fn appendLabelDialog(buf: *std.ArrayList(u8), allocator: Allocator) !void {
         \\        </header>
         \\        <div class="labels-dialog-body">
         \\          <div class="labels-dialog-preview"><span class="issue-label label-custom" style="--label-color: #0075ca" data-label-dialog-preview>label</span></div>
+        \\          <input type="hidden" name="{csrf_field}" value="{csrf}">
         \\          <input type="hidden" name="action" value="create" data-label-dialog-action>
         \\          <input type="hidden" name="label" value="" data-label-dialog-original>
         \\          <label class="labels-dialog-field">Name<input class="labels-dialog-input" type="text" name="new_label" required data-label-dialog-name></label>
         \\          <label class="labels-dialog-field">Description<textarea class="labels-dialog-textarea" name="description" rows="4" data-label-dialog-description></textarea></label>
-        \\          <label class="labels-dialog-field">Color<span class="labels-color-control"><button class="button secondary labels-color-random" type="button" aria-label="Choose another color" title="Choose another color" data-label-color-random><span class="button-icon icon-sync" aria-hidden="true"></span></button><input class="labels-dialog-input" type="text" name="color" value="#0075ca" pattern="#[0-9a-fA-F]{6}" data-label-dialog-color></span></label>
+        \\          <label class="labels-dialog-field">Color<span class="labels-color-control"><button class="button secondary labels-color-random" type="button" aria-label="Choose another color" title="Choose another color" data-label-color-random><span class="button-icon icon-sync" aria-hidden="true"></span></button><input class="labels-dialog-input" type="text" name="color" value="#0075ca" pattern="#[0-9a-fA-F]{{6}}" data-label-dialog-color></span></label>
         \\        </div>
         \\        <footer class="labels-dialog-actions">
         \\          <button class="button secondary" type="button" data-label-dialog-cancel>Cancel</button>
@@ -507,7 +509,7 @@ fn appendLabelDialog(buf: *std.ArrayList(u8), allocator: Allocator) !void {
         \\      </form>
         \\    </div>
         \\  </div>
-    );
+    , .{ .csrf_field = zwf.csrf.field_name, .csrf = csrf_token });
 }
 
 fn appendLabelsToolbar(buf: *std.ArrayList(u8), allocator: Allocator) !void {
@@ -547,6 +549,7 @@ fn appendLabelRow(
     color: []const u8,
     issue_count: usize,
     pull_count: usize,
+    csrf_token: []const u8,
 ) !void {
     const total_count = issue_count + pull_count;
     const summary = try labelUsageSummaryOwned(allocator, issue_count, pull_count);
@@ -578,7 +581,7 @@ fn appendLabelRow(
         .pull_count = groupedUnsigned(@intCast(pull_count)),
         .pull_label = if (pull_count == 1) "pull request" else "pull requests",
     });
-    try appendLabelActionMenu(buf, allocator, label);
+    try appendLabelActionMenu(buf, allocator, label, csrf_token);
     try buf.appendSlice(allocator, "</article>");
 }
 
@@ -611,16 +614,16 @@ fn appendIssueLink(buf: *std.ArrayList(u8), allocator: Allocator, label: []const
     });
 }
 
-fn appendLabelActionMenu(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8) !void {
+fn appendLabelActionMenu(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, csrf_token: []const u8) !void {
     try appendTemplate(buf, allocator,
         \\<details class="issue-action-menu labels-row-menu" data-popover-menu>
         \\  <summary class="issue-kebab-button" aria-label="Label actions" title="Label actions"></summary>
         \\  <div class="issue-action-popover labels-row-popover" role="menu">
         \\    <button type="button" role="menuitem" data-label-edit-toggle>Edit label</button>
-        \\    <form method="post" action="/labels"><input type="hidden" name="action" value="delete"><input type="hidden" name="label" value="{label}"><button type="submit" role="menuitem">Delete label</button></form>
+        \\    <form method="post" action="/labels"><input type="hidden" name="{csrf_field}" value="{csrf}"><input type="hidden" name="action" value="delete"><input type="hidden" name="label" value="{label}"><button type="submit" role="menuitem">Delete label</button></form>
         \\  </div>
         \\</details>
-    , .{ .label = label });
+    , .{ .csrf_field = zwf.csrf.field_name, .csrf = csrf_token, .label = label });
 }
 
 fn appendLabelChip(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, color: []const u8) !void {
@@ -684,4 +687,23 @@ fn asciiEqlIgnoreCase(a: []const u8, b: []const u8) bool {
         if (std.ascii.toLower(left) != std.ascii.toLower(right)) return false;
     }
     return true;
+}
+
+test "label dialog form includes csrf token" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendLabelDialog(&buf, std.testing.allocator, "token-123");
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "name=\"_csrf\" value=\"token-123\"") != null);
+}
+
+test "label delete form includes csrf token" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendLabelActionMenu(&buf, std.testing.allocator, "bug", "token-123");
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "name=\"_csrf\" value=\"token-123\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "name=\"label\" value=\"bug\"") != null);
 }
