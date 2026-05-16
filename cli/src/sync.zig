@@ -3,6 +3,7 @@ const auth_binding = @import("auth_binding.zig");
 const errors = @import("errors.zig");
 const event_mod = @import("event.zig");
 const git = @import("git.zig");
+const inbox_commit = @import("inbox_commit.zig");
 const io = @import("io.zig");
 const repo_mod = @import("repo.zig");
 const util = @import("util.zig");
@@ -21,6 +22,7 @@ const max_git_output = git.max_git_output;
 const sanitizeRefSegment = util.sanitizeRefSegment;
 const validateEventEnvelope = event_mod.validateEventEnvelope;
 const parseValidatedEnvelope = event_mod.parseValidatedEnvelope;
+const ActorSeqTracker = event_mod.ActorSeqLastTracker;
 
 pub fn syncPull(allocator: Allocator, remote: []const u8) !void {
     const remote_segment = try stagingRemoteSegment(allocator, remote);
@@ -421,8 +423,8 @@ pub fn validateInboxRange(
     defer auth_verifier.deinit();
     var records = std.mem.splitScalar(u8, log, 0x1e);
     while (records.next()) |record_raw| {
-        const record = parseInboxCommitRecord(record_raw) orelse {
-            if (std.mem.trim(u8, record_raw, " \t\r\n").len == 0) continue;
+        const record = inbox_commit.parseRecord(record_raw) orelse {
+            if (inbox_commit.isBlankRawRecord(record_raw)) continue;
             try eprint("gt sync: git log returned malformed inbox commit metadata\n", .{});
             return CliError.GitFailed;
         };
@@ -442,119 +444,36 @@ pub fn validateInboxRange(
             try eprint("gt sync: rejecting {s} on {s}: signing key is not authorized for actor {s}/{s}: {s}\n", .{ record.commit, ref, envelope.actor_principal, envelope.actor_device, reason });
             return CliError.UserError;
         }
-        try actor_seqs.remember(record.commit, ref, envelope.actor_principal, envelope.actor_device, envelope.seq);
+        try rememberActorSeq(&actor_seqs, record.commit, ref, envelope.actor_principal, envelope.actor_device, envelope.seq);
         expected_first_parent = record.commit;
         count += 1;
     }
     return count;
 }
 
-const inbox_commit_log_format = "--format=%H%x00%T%x00%P%x00%s%x00%b%x1e";
-
-const InboxCommitRecord = struct {
+fn rememberActorSeq(
+    actor_seqs: *ActorSeqTracker,
     commit: []const u8,
-    tree: []const u8,
-    parents: []const u8,
-    subject: []const u8,
-    body: []const u8,
-};
-
-const ActorSeqTracker = struct {
-    allocator: Allocator,
-    last_seq: std.StringHashMap(i64),
-
-    fn init(allocator: Allocator) ActorSeqTracker {
-        return .{
-            .allocator = allocator,
-            .last_seq = std.StringHashMap(i64).init(allocator),
-        };
+    ref: []const u8,
+    principal: []const u8,
+    device: []const u8,
+    seq: i64,
+) !void {
+    if (try actor_seqs.accept(principal, device, seq)) |previous| {
+        try eprint("gt sync: rejecting {s} on {s}: actor {s}/{s} seq {d} is not strictly greater than previous sequence {d}\n", .{ commit, ref, principal, device, seq, previous });
+        return CliError.UserError;
     }
-
-    fn deinit(self: *ActorSeqTracker) void {
-        var keys = self.last_seq.keyIterator();
-        while (keys.next()) |key| self.allocator.free(key.*);
-        self.last_seq.deinit();
-    }
-
-    fn seed(self: *ActorSeqTracker, principal: []const u8, device: []const u8, seq: i64) !void {
-        const key = try actorSeqKey(self.allocator, principal, device);
-        errdefer self.allocator.free(key);
-        const entry = try self.last_seq.getOrPut(key);
-        if (entry.found_existing) {
-            self.allocator.free(key);
-            if (seq > entry.value_ptr.*) entry.value_ptr.* = seq;
-            return;
-        }
-        entry.key_ptr.* = key;
-        entry.value_ptr.* = seq;
-    }
-
-    fn remember(
-        self: *ActorSeqTracker,
-        commit: []const u8,
-        ref: []const u8,
-        principal: []const u8,
-        device: []const u8,
-        seq: i64,
-    ) !void {
-        const key = try actorSeqKey(self.allocator, principal, device);
-        const entry = self.last_seq.getOrPut(key) catch |err| {
-            self.allocator.free(key);
-            return err;
-        };
-        if (entry.found_existing) {
-            if (seq <= entry.value_ptr.*) {
-                self.allocator.free(key);
-                try eprint("gt sync: rejecting {s} on {s}: actor {s}/{s} seq {d} is not strictly greater than previous sequence {d}\n", .{ commit, ref, principal, device, seq, entry.value_ptr.* });
-                return CliError.UserError;
-            }
-            self.allocator.free(key);
-        } else {
-            entry.key_ptr.* = key;
-        }
-        entry.value_ptr.* = seq;
-    }
-};
-
-fn actorSeqKey(allocator: Allocator, principal: []const u8, device: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{d}:{s}\x1f{d}:{s}", .{
-        principal.len,
-        principal,
-        device.len,
-        device,
-    });
 }
 
 fn inboxCommitLog(allocator: Allocator, ref: []const u8, local_base: ?[]const u8, genesis_oid: []const u8) ![]u8 {
     if (local_base) |base| {
         const range = try std.fmt.allocPrint(allocator, "{s}..{s}", .{ base, ref });
         defer allocator.free(range);
-        return gitChecked(allocator, &.{ "log", "--first-parent", "--reverse", inbox_commit_log_format, range });
+        return gitChecked(allocator, &.{ "log", "--first-parent", "--reverse", inbox_commit.log_format, range });
     }
     const range = try std.fmt.allocPrint(allocator, "{s}..{s}", .{ genesis_oid, ref });
     defer allocator.free(range);
-    return gitChecked(allocator, &.{ "log", "--first-parent", "--reverse", inbox_commit_log_format, range });
-}
-
-fn parseInboxCommitRecord(record_raw: []const u8) ?InboxCommitRecord {
-    const record = std.mem.trim(u8, record_raw, "\r\n");
-    if (record.len == 0) return null;
-
-    const first = std.mem.indexOfScalar(u8, record, 0) orelse return null;
-    const second_rel = std.mem.indexOfScalar(u8, record[first + 1 ..], 0) orelse return null;
-    const second = first + 1 + second_rel;
-    const third_rel = std.mem.indexOfScalar(u8, record[second + 1 ..], 0) orelse return null;
-    const third = second + 1 + third_rel;
-    const fourth_rel = std.mem.indexOfScalar(u8, record[third + 1 ..], 0) orelse return null;
-    const fourth = third + 1 + fourth_rel;
-
-    return .{
-        .commit = std.mem.trim(u8, record[0..first], " \t\r\n"),
-        .tree = std.mem.trim(u8, record[first + 1 .. second], " \t\r\n"),
-        .parents = std.mem.trim(u8, record[second + 1 .. third], " \t\r\n"),
-        .subject = std.mem.trim(u8, record[third + 1 .. fourth], " \t\r\n"),
-        .body = std.mem.trim(u8, record[fourth + 1 ..], " \t\r\n"),
-    };
+    return gitChecked(allocator, &.{ "log", "--first-parent", "--reverse", inbox_commit.log_format, range });
 }
 
 pub fn validateInboxCommit(
@@ -563,13 +482,13 @@ pub fn validateInboxCommit(
     expected_first_parent: ?[]const u8,
     empty_tree: []const u8,
 ) !event_mod.ValidatedEnvelope {
-    const log = try gitChecked(allocator, &.{ "log", "-1", inbox_commit_log_format, commit });
+    const log = try gitChecked(allocator, &.{ "log", "-1", inbox_commit.log_format, commit });
     defer allocator.free(log);
 
     var records = std.mem.splitScalar(u8, log, 0x1e);
     while (records.next()) |record_raw| {
-        const record = parseInboxCommitRecord(record_raw) orelse {
-            if (std.mem.trim(u8, record_raw, " \t\r\n").len == 0) continue;
+        const record = inbox_commit.parseRecord(record_raw) orelse {
+            if (inbox_commit.isBlankRawRecord(record_raw)) continue;
             try eprint("gt sync: git log returned malformed inbox commit metadata\n", .{});
             return CliError.GitFailed;
         };
@@ -582,7 +501,7 @@ pub fn validateInboxCommit(
 
 fn validateInboxRecord(
     allocator: Allocator,
-    record: InboxCommitRecord,
+    record: inbox_commit.Record,
     expected_first_parent: ?[]const u8,
     empty_tree: []const u8,
 ) !event_mod.ValidatedEnvelope {
@@ -619,7 +538,7 @@ fn seedActorSeqsThroughCommit(allocator: Allocator, actor_seqs: *ActorSeqTracker
         if (body.len == 0) continue;
         var envelope = parseValidatedEnvelope(allocator, body) catch continue;
         defer envelope.deinit();
-        try actor_seqs.seed(envelope.actor_principal, envelope.actor_device, envelope.seq);
+        try actor_seqs.rememberMax(envelope.actor_principal, envelope.actor_device, envelope.seq);
     }
 }
 
@@ -724,17 +643,6 @@ test "staged ref mapping rejects outside and non-inbox refs" {
     );
 }
 
-test "inbox commit records parse git log fields" {
-    const record = parseInboxCommitRecord(" commit \x00 tree \x00 parent1 parent2 \x00 subject \x00 body\n") orelse return error.TestExpectedEqual;
-    try std.testing.expectEqualStrings("commit", record.commit);
-    try std.testing.expectEqualStrings("tree", record.tree);
-    try std.testing.expectEqualStrings("parent1 parent2", record.parents);
-    try std.testing.expectEqualStrings("subject", record.subject);
-    try std.testing.expectEqualStrings("body", record.body);
-
-    try std.testing.expect(parseInboxCommitRecord("commit\x00tree\x00parents") == null);
-}
-
 test "first parent validation accepts expected history shapes" {
     try validateFirstParentList("root", "", null);
     try validateFirstParentList("child", "parent-a parent-b", "parent-a");
@@ -747,23 +655,23 @@ test "actor sequence tracker enforces strict per-actor monotonic order" {
     var tracker = ActorSeqTracker.init(std.testing.allocator);
     defer tracker.deinit();
 
-    try tracker.remember("commit-1", "refs/gitomi/inbox/ab/c", "ab", "c", 1);
-    try tracker.remember("commit-2", "refs/gitomi/inbox/a/bc", "a", "bc", 1);
-    try tracker.remember("commit-3", "refs/gitomi/inbox/ab/c", "ab", "c", 2);
+    try rememberActorSeq(&tracker, "commit-1", "refs/gitomi/inbox/ab/c", "ab", "c", 1);
+    try rememberActorSeq(&tracker, "commit-2", "refs/gitomi/inbox/a/bc", "a", "bc", 1);
+    try rememberActorSeq(&tracker, "commit-3", "refs/gitomi/inbox/ab/c", "ab", "c", 2);
 
     try std.testing.expectError(
         CliError.UserError,
-        tracker.remember("commit-4", "refs/gitomi/inbox/ab/c", "ab", "c", 2),
+        rememberActorSeq(&tracker, "commit-4", "refs/gitomi/inbox/ab/c", "ab", "c", 2),
     );
     try std.testing.expectError(
         CliError.UserError,
-        tracker.remember("commit-5", "refs/gitomi/inbox/ab/c", "ab", "c", 0),
+        rememberActorSeq(&tracker, "commit-5", "refs/gitomi/inbox/ab/c", "ab", "c", 0),
     );
 
-    try tracker.seed("ab", "c", 10);
+    try tracker.rememberMax("ab", "c", 10);
     try std.testing.expectError(
         CliError.UserError,
-        tracker.remember("commit-6", "refs/gitomi/inbox/ab/c", "ab", "c", 10),
+        rememberActorSeq(&tracker, "commit-6", "refs/gitomi/inbox/ab/c", "ab", "c", 10),
     );
-    try tracker.remember("commit-7", "refs/gitomi/inbox/ab/c", "ab", "c", 11);
+    try rememberActorSeq(&tracker, "commit-7", "refs/gitomi/inbox/ab/c", "ab", "c", 11);
 }

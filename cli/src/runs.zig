@@ -16,6 +16,7 @@ pub const PruneOptions = struct {
     max_age_days: u64 = default_max_age_days,
     max_count: usize = default_max_count,
     max_bytes: u64 = default_max_bytes,
+    quiet: bool = false,
 };
 
 const RunRef = struct {
@@ -40,7 +41,7 @@ pub fn prune(allocator: Allocator, options: PruneOptions) !void {
     }
 
     if (refs.items.len == 0) {
-        try io.out("no Gitomi run refs\n", .{});
+        if (!options.quiet) try io.out("no Gitomi run refs\n", .{});
         return;
     }
 
@@ -71,19 +72,21 @@ pub fn prune(allocator: Allocator, options: PruneOptions) !void {
         if (!ref.prune) continue;
         pruned += 1;
         if (options.dry_run) {
-            try io.out("would prune {s} ({d} bytes)\n", .{ ref.ref, ref.bytes });
+            if (!options.quiet) try io.out("would prune {s} ({d} bytes)\n", .{ ref.ref, ref.bytes });
         } else {
             const deleted = try git.gitChecked(allocator, &.{ "update-ref", "-d", ref.ref });
             defer allocator.free(deleted);
-            try io.out("pruned {s} ({d} bytes)\n", .{ ref.ref, ref.bytes });
+            if (!options.quiet) try io.out("pruned {s} ({d} bytes)\n", .{ ref.ref, ref.bytes });
         }
     }
 
-    try io.out("{s}: {d} pruned, {d} retained\n", .{
-        if (options.dry_run) "runs prune dry-run" else "runs prune",
-        pruned,
-        refs.items.len - pruned,
-    });
+    if (!options.quiet) {
+        try io.out("{s}: {d} pruned, {d} retained\n", .{
+            if (options.dry_run) "runs prune dry-run" else "runs prune",
+            pruned,
+            refs.items.len - pruned,
+        });
+    }
 }
 
 fn loadRunRefs(allocator: Allocator) !std.ArrayList(RunRef) {
