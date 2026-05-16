@@ -626,9 +626,11 @@
     return section;
   }
 
-  const rootPartialMaxConcurrent = 1;
+  const rootPartialMaxConcurrent = 2;
+  const rootPartialDefaultTimeoutMs = 15000;
   let rootPartialActive = 0;
   let rootPartialSequence = 0;
+  let rootPartialDrainScheduled = false;
   const rootPartialQueue = [];
 
   function rootPartialPriority(slot) {
@@ -641,6 +643,20 @@
       if (a.priority !== b.priority) return a.priority - b.priority;
       return a.sequence - b.sequence;
     });
+  }
+
+  function rootPartialTimeout(slot) {
+    const timeout = Number(slot.dataset.rootPartialTimeoutMs);
+    return Number.isFinite(timeout) && timeout > 0 ? timeout : rootPartialDefaultTimeoutMs;
+  }
+
+  function scheduleRootPartialDrain() {
+    if (rootPartialDrainScheduled) return;
+    rootPartialDrainScheduled = true;
+    window.setTimeout(function () {
+      rootPartialDrainScheduled = false;
+      drainRootPartialQueue();
+    }, 0);
   }
 
   function scheduleRootPartial(slot, retrying) {
@@ -656,7 +672,15 @@
       sequence: rootPartialSequence++,
     });
     sortRootPartialQueue();
-    drainRootPartialQueue();
+    scheduleRootPartialDrain();
+  }
+
+  function promoteDeferredRootPartial(slot) {
+    const url = slot.dataset.rootPartialDeferred;
+    if (!url || slot.dataset.rootPartial) return;
+    slot.dataset.rootPartial = url;
+    delete slot.dataset.rootPartialDeferred;
+    scheduleRootPartial(slot, false);
   }
 
   function drainRootPartialQueue() {
@@ -680,11 +704,16 @@
     const url = slot.dataset.rootPartial;
     if (!url) return;
     slot.setAttribute("aria-busy", "true");
+    const controller = "AbortController" in window ? new AbortController() : null;
+    const timeout = window.setTimeout(function () {
+      if (controller) controller.abort();
+    }, rootPartialTimeout(slot));
 
     try {
       const response = await fetch(url, {
         cache: "no-store",
         headers: { Accept: "text/html" },
+        signal: controller ? controller.signal : undefined,
       });
       if (!response.ok) throw new Error("partial load failed");
       const html = (await response.text()).trim();
@@ -706,6 +735,8 @@
       slot.removeAttribute("aria-busy");
       if (slot.hasAttribute("data-root-partial-silent")) return;
       slot.replaceChildren(partialErrorNode(slot));
+    } finally {
+      window.clearTimeout(timeout);
     }
   }
 
@@ -734,6 +765,12 @@
       syncRootSidebars(document);
     });
     initRootPartials(detail.root || document);
+  });
+
+  document.addEventListener("gitomi:root-partial-load", function (event) {
+    const detail = event.detail || {};
+    const scope = detail.root || document;
+    scope.querySelectorAll("[data-root-partial-deferred]").forEach(promoteDeferredRootPartial);
   });
 
   window.addEventListener("resize", function () {

@@ -416,6 +416,19 @@ pub fn fileIconClass(path: []const u8, kind: []const u8) []const u8 {
     return "file";
 }
 
+test "fallback file icons are monotone" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendFileIcon(&buf, std.testing.allocator, "sigid.example.toml", "blob");
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "class=\"file-icon file lang-toml\"") != null);
+
+    const css = @embedFile("../style.css");
+    try std.testing.expect(std.mem.indexOf(u8, css, ".file-icon.lang-") == null);
+    try std.testing.expect(std.mem.indexOf(u8, css, ".file-icon.devicon-icon::before") != null);
+    try std.testing.expect(std.mem.indexOf(u8, css, ".file-icon[class*=\"lang-\"]::before") != null);
+}
+
 pub fn findReadme(entries: []const TreeEntry) ?[]const u8 {
     const names = [_][]const u8{ "README.md", "README", "Readme.md", "readme.md" };
     for (names) |wanted| {

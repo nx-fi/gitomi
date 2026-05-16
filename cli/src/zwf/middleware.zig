@@ -58,7 +58,7 @@ pub fn sendCachedAsset(
     defer response.allocator.free(etag);
 
     const extra = [_]response_mod.Header{
-        .{ .name = "Cache-Control", .value = "public, max-age=86400" },
+        .{ .name = "Cache-Control", .value = "no-cache" },
         .{ .name = "ETag", .value = etag },
     };
     const asset_response = responseForAssetRequest(response, request);

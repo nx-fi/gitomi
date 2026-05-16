@@ -21,6 +21,7 @@ const loadConfig = repo_mod.loadConfig;
 const default_web_shortcut_leader = "Space";
 const default_web_shortcut_keys = "A S D F J K L E R U I O W Q P Z X C V B N M G H Y T";
 const default_web_shortcut_timeout_ms: u64 = 900;
+const asset_version = "20260516";
 
 const WebStats = struct {
     inbox_refs: usize = 0,
@@ -335,8 +336,8 @@ pub fn appendShellStart(
         \\  <link rel="icon" href="/logo.svg" type="image/svg+xml">
         \\  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/devicons/devicon@latest/devicon.min.css">
         \\  <link rel="stylesheet" href="/vendor/katex/katex.min.css">
-        \\  <link rel="stylesheet" href="/style.css">
-    , .{});
+        \\  <link rel="stylesheet" href="/style.css?v={asset_version}">
+    , .{ .asset_version = asset_version });
     try appendShortcutConfigScript(buf, allocator, cfg_opt);
     try appendTemplate(buf, allocator,
         \\</head>
@@ -539,30 +540,30 @@ fn appendShortcutConfigScript(buf: *std.ArrayList(u8), allocator: Allocator, cfg
 }
 
 pub fn appendShellEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
-    try buf.appendSlice(allocator,
+    try appendTemplate(buf, allocator,
         \\</main>
-        \\<script src="/theme.js"></script>
-        \\<script src="/ui.js"></script>
-        \\<script src="/shortcuts.js"></script>
-        \\<script src="/tree.js"></script>
-        \\<script src="/code.js"></script>
-        \\<script src="/projects.js"></script>
+        \\<script src="/theme.js?v={asset_version}"></script>
+        \\<script src="/ui.js?v={asset_version}"></script>
+        \\<script src="/shortcuts.js?v={asset_version}"></script>
+        \\<script src="/tree.js?v={asset_version}"></script>
+        \\<script src="/code.js?v={asset_version}"></script>
+        \\<script src="/projects.js?v={asset_version}"></script>
         \\<script src="/vendor/marked/marked.umd.min.js"></script>
         \\<script src="/vendor/dompurify/purify.min.js"></script>
         \\<script src="/vendor/katex/katex.min.js"></script>
         \\<script src="/vendor/katex/auto-render.min.js"></script>
         \\<script src="/vendor/mermaid/mermaid.min.js"></script>
-        \\<script src="/markdown.js"></script>
+        \\<script src="/markdown.js?v={asset_version}"></script>
         \\<script src="/vendor/hljs/all-languages.min.js"></script>
-        \\<script src="/highlight/zig.js"></script>
-        \\<script src="/highlight/solidity.js"></script>
-        \\<script src="/highlight/tla.js"></script>
-        \\<script src="/highlight/init.js"></script>
-        \\<script src="/diff.js"></script>
-        \\<script src="/merge.js"></script>
+        \\<script src="/highlight/zig.js?v={asset_version}"></script>
+        \\<script src="/highlight/solidity.js?v={asset_version}"></script>
+        \\<script src="/highlight/tla.js?v={asset_version}"></script>
+        \\<script src="/highlight/init.js?v={asset_version}"></script>
+        \\<script src="/diff.js?v={asset_version}"></script>
+        \\<script src="/merge.js?v={asset_version}"></script>
         \\</body>
         \\</html>
-    );
+    , .{ .asset_version = asset_version });
 }
 
 pub fn appendNavLink(

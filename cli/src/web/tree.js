@@ -580,10 +580,21 @@
       });
   }
 
+  function requestRootSearchIndex(panel) {
+    if (!panel.querySelector("[data-root-partial-deferred]")) return;
+    document.dispatchEvent(new CustomEvent("gitomi:root-partial-load", {
+      detail: { root: panel },
+    }));
+  }
+
   function initRootFileSearch(input) {
     if (input.dataset.rootFileSearchReady === "yes") return;
     input.dataset.rootFileSearchReady = "yes";
     const panel = input.closest(".root-page-main") || document;
+    input.addEventListener("focus", () => requestRootSearchIndex(panel), { once: true });
+    input.addEventListener("input", () => {
+      if (input.value) requestRootSearchIndex(panel);
+    }, { once: true });
     initTreeSearchMenu(input, () => rootFileSearchItems(panel));
   }
 
