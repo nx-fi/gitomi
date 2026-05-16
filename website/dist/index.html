@@ -22,11 +22,11 @@
 <body class="site-shell">
   <div class="ambient-grid" aria-hidden="true"></div>
   <div class="corner-actions" aria-label="Site actions">
-    <a class="github-link" href="https://github.com/nx-fi/gitomi" target="_blank" rel="noreferrer">GitHub</a>
     <button class="theme-toggle theme-float" type="button" data-theme-toggle aria-pressed="true" aria-label="Toggle dark mode" title="Toggle dark mode">
       <span class="theme-toggle-track" aria-hidden="true"><span class="theme-toggle-thumb"></span></span>
       <span class="theme-toggle-label" data-theme-label>Dark</span>
     </button>
+    <a class="github-link" href="https://github.com/nx-fi/gitomi" target="_blank" rel="noreferrer" aria-label="GitHub repository"></a>
   </div>
 
   <main id="top" class="site-main">
@@ -37,7 +37,10 @@
           <span>Gitomi</span>
         </a>
         <p class="pain-line">Open source, free forever.</p>
-        <h1 id="hero-title">Own your <span class="hero-rotator" data-typewriter data-words="project|tasks|workflows|collaboration">project</span>, not just your code.</h1>
+        <h1 id="hero-title">
+          <span class="hero-title-line"><span class="hero-title-prefix">Own your </span><span class="hero-word-frame"><span class="hero-rotator" data-typewriter data-words="project|tasks|workflows|collaboration">project</span><span class="hero-title-caret" aria-hidden="true"></span><span class="hero-comma">,</span></span></span>
+          <span class="hero-title-line">not just your code.</span>
+        </h1>
         <p class="hero-lede">Gitomi keeps issues, pull requests, Kanban boards, workflows, and agent activity inside your Git repository - so you can work offline, sync with any Git remote, or self-host without losing your collaboration history.</p>
         <div class="hero-install command-code">
           <pre><code>curl gitomi.com/install.sh</code></pre>
@@ -142,7 +145,7 @@
         <h2>All project data lives in Git.</h2>
         <p>Issues, pull requests, comments, milestones, project Kanban, workflow runs, and agent activity are stored as Git-backed project history. Your repo becomes the source of truth for both code and collaboration.</p>
       </div>
-      <div class="repo-visual parallax-layer" data-parallax data-depth="10" aria-label="Repository ref layout">
+      <div class="repo-proof parallax-layer" data-parallax data-depth="10" aria-label="Repository ref layout">
         <div class="repo-window">
           <div class="repo-window-head">
             <span class="window-dot red"></span>
@@ -191,8 +194,8 @@
         <h2>Use any Git host, or host it yourself.</h2>
         <p>Gitomi syncs through ordinary Git. Use an existing Git service, a private remote, a mirror, or a fully local setup. If Git can fetch and push, your project workflow can move with it.</p>
       </div>
-      <div class="sync-map" aria-hidden="true">
-        <div class="sync-terminal parallax-layer" data-parallax data-depth="8">
+      <div class="sync-map parallax-layer" data-parallax data-depth="7" aria-hidden="true">
+        <div class="sync-terminal">
           <div class="terminal-head">
             <span></span>
             <strong>git transport</strong>
@@ -202,6 +205,11 @@
 <span class="prompt">$</span> gt sync --admit
 <span class="ok">accepted</span> signatures, RBAC, chains
 <span class="muted">projection</span> issues + PRs + boards rebuilt</code></pre>
+          <div class="sync-feed">
+            <span><b>refs/gitomi/inbox/alice</b><em>fast-forward</em></span>
+            <span><b>refs/gitomi/inbox/agent-7</b><em>signed</em></span>
+            <span><b>refs/gitomi/projects/portable-v1</b><em>projected</em></span>
+          </div>
         </div>
         <div class="remote-stack">
           <article>
@@ -297,7 +305,7 @@
         <h2>Replace the platform. Keep the workflow.</h2>
         <p>Use the familiar model: issues, pull requests, comments, labels, milestones, boards, workflows, and a local web UI. The difference is that your team owns the data, the workflow, and the history.</p>
       </div>
-      <div class="workflow-grid">
+      <div class="workflow-grid parallax-layer" data-parallax data-depth="9">
         <article>
           <span class="button-icon icon-issues" aria-hidden="true"></span>
           <strong>Issues and comments</strong>

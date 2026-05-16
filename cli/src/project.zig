@@ -31,12 +31,12 @@ pub fn createProjectCreatedEvent(
     name: []const u8,
     description: []const u8,
     columns: []const []const u8,
-) !void {
+) ![]u8 {
     var writer = try EventWriter.init(allocator, "gt project create");
     defer writer.deinit();
 
     const project_id = try newUuidV7(allocator);
-    defer allocator.free(project_id);
+    errdefer allocator.free(project_id);
     const event_uuid = try newUuidV7(allocator);
     defer allocator.free(event_uuid);
     const idem = try newUuidV7(allocator);
@@ -73,6 +73,7 @@ pub fn createProjectCreatedEvent(
     try out("  id:     {s}\n", .{project_id});
     try out("  commit: {s}\n", .{commit_oid});
     try out("  ref:    {s}\n", .{writer.inbox_ref});
+    return project_id;
 }
 
 pub fn createProjectColumnEvent(
@@ -169,12 +170,12 @@ pub fn createProjectFieldCreatedEvent(
     position: ?i64,
     required: ?bool,
     default_value_json: ?[]const u8,
-) !void {
+) ![]u8 {
     var writer = try EventWriter.init(allocator, "gt project field create");
     defer writer.deinit();
 
     const field_id = try newUuidV7(allocator);
-    defer allocator.free(field_id);
+    errdefer allocator.free(field_id);
     const event_uuid = try newUuidV7(allocator);
     defer allocator.free(event_uuid);
     const idem = try newUuidV7(allocator);
@@ -210,6 +211,7 @@ pub fn createProjectFieldCreatedEvent(
     try out("  field:  {s}\n", .{field_id});
     try out("  commit: {s}\n", .{commit_oid});
     try out("  ref:    {s}\n", .{writer.inbox_ref});
+    return field_id;
 }
 
 pub fn createProjectFieldUpdatedEvent(
@@ -589,7 +591,8 @@ pub fn cmdProject(allocator: Allocator, args: []const []const u8) !void {
             try io.eprint("gt project create: --name is required\n", .{});
             return CliError.UserError;
         }
-        try project.createProjectCreatedEvent(allocator, name.?, description, columns.items);
+        const project_id = try project.createProjectCreatedEvent(allocator, name.?, description, columns.items);
+        defer allocator.free(project_id);
         return;
     }
 
@@ -701,7 +704,8 @@ pub fn cmdProject(allocator: Allocator, args: []const []const u8) !void {
                 try io.eprint("gt project field create: --type must be text, number, date, boolean, single_select, multi_select, user, or issue_ref\n", .{});
                 return CliError.UserError;
             }
-            try project.createProjectFieldCreatedEvent(allocator, project_id, key.?, name.?, field_type.?, position, required, default_value_json);
+            const field_id = try project.createProjectFieldCreatedEvent(allocator, project_id, key.?, name.?, field_type.?, position, required, default_value_json);
+            defer allocator.free(field_id);
             return;
         }
 
