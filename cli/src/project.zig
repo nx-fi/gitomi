@@ -6,7 +6,6 @@ const event_writer_mod = @import("event_writer.zig");
 const index = @import("index.zig");
 const io = @import("io.zig");
 const issue = @import("issue.zig");
-const repo_mod = @import("repo.zig");
 const util = @import("util.zig");
 
 const Allocator = std.mem.Allocator;
@@ -22,14 +21,7 @@ const isProjectState = cmd_common.isProjectState;
 const isProjectViewLayout = cmd_common.isProjectViewLayout;
 const parseBoolOption = cmd_common.parseBoolOption;
 const parseNonNegativeIntegerOption = cmd_common.parseNonNegativeIntegerOption;
-const projectNameForCommand = cmd_common.projectNameForCommand;
 const requireNonEmptyOption = cmd_common.requireNonEmptyOption;
-const resolveIssueIdForCommand = cmd_common.resolveIssueIdForCommand;
-const resolveProjectColumnForCommand = cmd_common.resolveProjectColumnForCommand;
-const resolveProjectFieldIdForCommand = cmd_common.resolveProjectFieldIdForCommand;
-const resolveProjectFieldOptionIdForCommand = cmd_common.resolveProjectFieldOptionIdForCommand;
-const resolveProjectIdForCommand = cmd_common.resolveProjectIdForCommand;
-const resolveProjectViewIdForCommand = cmd_common.resolveProjectViewIdForCommand;
 const validateJsonArgument = cmd_common.validateJsonArgument;
 
 const default_columns = [_][]const u8{ "Todo", "In Progress", "Done" };
@@ -554,6 +546,9 @@ pub fn cmdProject(allocator: Allocator, args: []const []const u8) !void {
         return CliError.UserError;
     }
 
+    var command_repo = cmd_common.CommandRepo.init(allocator);
+    defer command_repo.deinit();
+
     if (std.mem.eql(u8, args[0], "list")) {
         var json = false;
         var i: usize = 1;
@@ -565,9 +560,7 @@ pub fn cmdProject(allocator: Allocator, args: []const []const u8) !void {
                 return CliError.UserError;
             }
         }
-        var repo = try repo_mod.discoverRepo(allocator);
-        defer repo.deinit();
-        try index.ensureIndex(allocator, repo);
+        const repo = try command_repo.indexedRepo();
         try index.listProjectsFromIndex(allocator, repo, json);
         return;
     }
@@ -630,7 +623,7 @@ pub fn cmdProject(allocator: Allocator, args: []const []const u8) !void {
             return CliError.UserError;
         }
         if (update.name) |name| try requireNonEmptyOption("gt project edit", "--name", name);
-        const project_id = try resolveProjectIdForCommand(allocator, args[1]);
+        const project_id = try command_repo.resolveProjectId(args[1]);
         defer allocator.free(project_id);
         try project.createProjectUpdatedEvent(allocator, project_id, update);
         return;
@@ -647,10 +640,10 @@ pub fn cmdProject(allocator: Allocator, args: []const []const u8) !void {
             return CliError.UserError;
         }
         try requireNonEmptyOption("gt project column", "COLUMN", args[3]);
-        const project_id = try resolveProjectIdForCommand(allocator, args[1]);
+        const project_id = try command_repo.resolveProjectId(args[1]);
         defer allocator.free(project_id);
         if (std.mem.eql(u8, op, "remove")) {
-            var resolved_column = try resolveProjectColumnForCommand(allocator, project_id, args[3]);
+            var resolved_column = try command_repo.resolveProjectColumn(project_id, args[3]);
             defer resolved_column.deinit(allocator);
             try project.createProjectColumnEvent(allocator, project_id, resolved_column.column, resolved_column.column_ref, false);
         } else {
@@ -664,7 +657,7 @@ pub fn cmdProject(allocator: Allocator, args: []const []const u8) !void {
             try io.eprint("gt project field: expected PROJECT create|update|remove\n", .{});
             return CliError.UserError;
         }
-        const project_id = try resolveProjectIdForCommand(allocator, args[1]);
+        const project_id = try command_repo.resolveProjectId(args[1]);
         defer allocator.free(project_id);
         const op = args[2];
         if (std.mem.eql(u8, op, "create")) {
@@ -717,7 +710,7 @@ pub fn cmdProject(allocator: Allocator, args: []const []const u8) !void {
                 try io.eprint("gt project field update: FIELD is required\n", .{});
                 return CliError.UserError;
             }
-            const field_id = try resolveProjectFieldIdForCommand(allocator, project_id, args[3]);
+            const field_id = try command_repo.resolveProjectFieldId(project_id, args[3]);
             defer allocator.free(field_id);
             var update = event_mod.ProjectFieldUpdate{};
             var i: usize = 4;
@@ -769,7 +762,7 @@ pub fn cmdProject(allocator: Allocator, args: []const []const u8) !void {
                 try io.eprint("gt project field remove: expected FIELD\n", .{});
                 return CliError.UserError;
             }
-            const field_id = try resolveProjectFieldIdForCommand(allocator, project_id, args[3]);
+            const field_id = try command_repo.resolveProjectFieldId(project_id, args[3]);
             defer allocator.free(field_id);
             try project.createProjectFieldRemovedEvent(allocator, project_id, field_id);
             return;
@@ -784,9 +777,9 @@ pub fn cmdProject(allocator: Allocator, args: []const []const u8) !void {
             try io.eprint("gt project field-option: expected PROJECT FIELD add|update|remove\n", .{});
             return CliError.UserError;
         }
-        const project_id = try resolveProjectIdForCommand(allocator, args[1]);
+        const project_id = try command_repo.resolveProjectId(args[1]);
         defer allocator.free(project_id);
-        const field_id = try resolveProjectFieldIdForCommand(allocator, project_id, args[2]);
+        const field_id = try command_repo.resolveProjectFieldId(project_id, args[2]);
         defer allocator.free(field_id);
         const op = args[3];
         if (std.mem.eql(u8, op, "add")) {
@@ -821,7 +814,7 @@ pub fn cmdProject(allocator: Allocator, args: []const []const u8) !void {
                 try io.eprint("gt project field-option update: OPTION is required\n", .{});
                 return CliError.UserError;
             }
-            const option_id = try resolveProjectFieldOptionIdForCommand(allocator, project_id, field_id, args[4]);
+            const option_id = try command_repo.resolveProjectFieldOptionId(project_id, field_id, args[4]);
             defer allocator.free(option_id);
             var update = event_mod.ProjectFieldOptionUpdate{};
             var i: usize = 5;
@@ -859,7 +852,7 @@ pub fn cmdProject(allocator: Allocator, args: []const []const u8) !void {
                 try io.eprint("gt project field-option remove: expected OPTION\n", .{});
                 return CliError.UserError;
             }
-            const option_id = try resolveProjectFieldOptionIdForCommand(allocator, project_id, field_id, args[4]);
+            const option_id = try command_repo.resolveProjectFieldOptionId(project_id, field_id, args[4]);
             defer allocator.free(option_id);
             try project.createProjectFieldOptionRemovedEvent(allocator, project_id, field_id, option_id);
             return;
@@ -874,7 +867,7 @@ pub fn cmdProject(allocator: Allocator, args: []const []const u8) !void {
             try io.eprint("gt project view: expected PROJECT create|update|remove\n", .{});
             return CliError.UserError;
         }
-        const project_id = try resolveProjectIdForCommand(allocator, args[1]);
+        const project_id = try command_repo.resolveProjectId(args[1]);
         defer allocator.free(project_id);
         const op = args[2];
         if (std.mem.eql(u8, op, "create")) {
@@ -920,7 +913,7 @@ pub fn cmdProject(allocator: Allocator, args: []const []const u8) !void {
                 try io.eprint("gt project view update: VIEW is required\n", .{});
                 return CliError.UserError;
             }
-            const view_id = try resolveProjectViewIdForCommand(allocator, project_id, args[3]);
+            const view_id = try command_repo.resolveProjectViewId(project_id, args[3]);
             defer allocator.free(view_id);
             var update = event_mod.ProjectViewUpdate{};
             var i: usize = 4;
@@ -967,7 +960,7 @@ pub fn cmdProject(allocator: Allocator, args: []const []const u8) !void {
                 try io.eprint("gt project view remove: expected VIEW\n", .{});
                 return CliError.UserError;
             }
-            const view_id = try resolveProjectViewIdForCommand(allocator, project_id, args[3]);
+            const view_id = try command_repo.resolveProjectViewId(project_id, args[3]);
             defer allocator.free(view_id);
             try project.createProjectViewRemovedEvent(allocator, project_id, view_id);
             return;
@@ -997,13 +990,13 @@ pub fn cmdProject(allocator: Allocator, args: []const []const u8) !void {
             return CliError.UserError;
         }
 
-        const project_id = try resolveProjectIdForCommand(allocator, args[1]);
+        const project_id = try command_repo.resolveProjectId(args[1]);
         defer allocator.free(project_id);
-        const project_name = try projectNameForCommand(allocator, project_id);
+        const project_name = try command_repo.projectName(project_id);
         defer allocator.free(project_name);
-        const issue_id = try resolveIssueIdForCommand(allocator, args[2]);
+        const issue_id = try command_repo.resolveIssueId(args[2]);
         defer allocator.free(issue_id);
-        var resolved_column = try resolveProjectColumnForCommand(allocator, project_id, column.?);
+        var resolved_column = try command_repo.resolveProjectColumn(project_id, column.?);
         defer resolved_column.deinit(allocator);
         try issue.createIssueProjectEvent(allocator, issue_id, project_name, resolved_column.column, project_id, resolved_column.column_ref, std.mem.eql(u8, args[0], "add"));
         return;

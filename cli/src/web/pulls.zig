@@ -43,6 +43,15 @@ const merge_context_radius = 15;
 const PullStateFilter = work_items.PullStateFilter;
 const PullFilters = work_items.PullListOptions;
 
+const pulls_default_page_size = 25;
+const pulls_max_page_size = 100;
+
+const PullHrefOverride = struct {
+    state: ?PullStateFilter = null,
+    page: ?usize = null,
+    per_page: ?usize = null,
+};
+
 const PullDetailTab = enum {
     conversation,
     commits,
@@ -106,6 +115,22 @@ const PullMergeStatus = struct {
 
     fn hasConflicts(self: PullMergeStatus) bool {
         return self.kind == .conflicts;
+    }
+};
+
+const PullMergeMethod = enum {
+    merge_commit,
+    squash,
+    rebase,
+};
+
+const PullMergeResult = struct {
+    merge_oid: ?[]u8 = null,
+    target_oid: ?[]u8 = null,
+
+    fn deinit(self: PullMergeResult, allocator: Allocator) void {
+        if (self.merge_oid) |value| allocator.free(value);
+        if (self.target_oid) |value| allocator.free(value);
     }
 };
 
@@ -188,6 +213,9 @@ pub fn renderPullsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]
     const counts = try work_items.loadPullCounts(&db);
     var filters = try pullFiltersFromTarget(allocator, target, requested_filter orelse .open);
     defer pullFiltersDeinit(allocator, &filters);
+    const pagination = try shared.paginationFromTarget(allocator, target, pulls_default_page_size, pulls_max_page_size);
+    filters.limit = pagination.queryLimit();
+    filters.offset = pagination.offset();
 
     try appendShellStart(&buf, allocator, repo, "Pull Requests", "pulls");
     try appendPullsToolbar(&buf, allocator, filters);
@@ -198,7 +226,12 @@ pub fn renderPullsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]
     defer stmt.deinit();
 
     var shown: usize = 0;
+    var has_next_page = false;
     while (try stmt.step()) {
+        if (shown >= pagination.per_page) {
+            has_next_page = true;
+            break;
+        }
         const row = try work_items.pullListRowFromStmt(allocator, &stmt);
         defer row.deinit(allocator);
         const task_summary = shared.markdownTaskSummary(row.body);
@@ -207,7 +240,9 @@ pub fn renderPullsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]
     }
 
     if (shown == 0) {
-        if (work_items.hasRestrictivePullFilters(filters)) {
+        if (pagination.page > 1) {
+            try appendEmptyState(&buf, allocator, "No pull requests on this page.", "Use the previous page or change filters to return to matching pull requests.");
+        } else if (work_items.hasRestrictivePullFilters(filters)) {
             try appendEmptyState(&buf, allocator, "No matching pull requests.", "Change or clear filters to widen the pull request list.");
         } else switch (filters.state) {
             .open => try appendEmptyState(&buf, allocator, "No open pull requests.", "Create a pull request from a branch with proposed changes."),
@@ -215,6 +250,10 @@ pub fn renderPullsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]
             .closed => try appendEmptyState(&buf, allocator, "No closed pull requests.", "Closed pull requests are pull requests that were closed without being merged."),
             .all => try appendEmptyState(&buf, allocator, "No pull requests yet.", "Open the first pull request from the web UI or with gt pr create."),
         }
+    }
+
+    if (shown != 0 or pagination.page > 1) {
+        try appendPullsPagination(&buf, allocator, filters, pagination, shown, has_next_page);
     }
 
     try buf.appendSlice(allocator, "</section>");
@@ -237,21 +276,45 @@ fn pullFiltersFromTarget(allocator: Allocator, target: []const u8, default_state
     var filters = PullFilters{ .state = default_state };
     errdefer pullFiltersDeinit(allocator, &filters);
 
+    filters.author = try queryTextFilterOwned(allocator, target, "author");
+    filters.label = try queryTextFilterOwned(allocator, target, "label");
+    filters.assignee = try queryTextFilterOwned(allocator, target, "assignee");
+    filters.reviewer = try queryTextFilterOwned(allocator, target, "reviewer");
+    filters.base = try queryTextFilterOwned(allocator, target, "base");
+    filters.head = try queryTextFilterOwned(allocator, target, "head");
+
     if (try queryTextFilterOwned(allocator, target, "q")) |query| {
         defer allocator.free(query);
         var parsed = try work_items.parsePullSearchQuery(allocator, query);
         defer parsed.deinit(allocator);
         if (parsed.state) |state| filters.state = state;
-        if (parsed.q) |search| {
-            filters.q = search;
-            parsed.q = null;
-        }
+        takePullFilterValue(allocator, &filters.q, &parsed.q);
+        takePullFilterValue(allocator, &filters.author, &parsed.author);
+        takePullFilterValue(allocator, &filters.label, &parsed.label);
+        takePullFilterValue(allocator, &filters.assignee, &parsed.assignee);
+        takePullFilterValue(allocator, &filters.reviewer, &parsed.reviewer);
+        takePullFilterValue(allocator, &filters.base, &parsed.base);
+        takePullFilterValue(allocator, &filters.head, &parsed.head);
     }
     return filters;
 }
 
 fn pullFiltersDeinit(allocator: Allocator, filters: *PullFilters) void {
     if (filters.q) |query| allocator.free(query);
+    if (filters.author) |value| allocator.free(value);
+    if (filters.label) |value| allocator.free(value);
+    if (filters.assignee) |value| allocator.free(value);
+    if (filters.reviewer) |value| allocator.free(value);
+    if (filters.base) |value| allocator.free(value);
+    if (filters.head) |value| allocator.free(value);
+}
+
+fn takePullFilterValue(allocator: Allocator, slot: *?[]const u8, source: *?[]u8) void {
+    if (source.*) |value| {
+        if (slot.*) |previous| allocator.free(previous);
+        slot.* = value;
+        source.* = null;
+    }
 }
 
 fn pullDetailTabFromTarget(allocator: Allocator, target: []const u8) !PullDetailTab {
@@ -271,7 +334,6 @@ fn appendPullsToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filters: Pu
         \\  <form class="issues-search" action="/pulls" method="get">
         \\    <span class="issues-search-icon" aria-hidden="true"></span>
         \\    <input type="search" name="q" value="{query}" aria-label="Search pull requests">
-        \\    <input type="hidden" name="state" value="{state}">
         \\  </form>
         \\  <div class="issues-toolbar-actions">
         \\    <button class="button secondary issue-tool-button" type="button" disabled><span class="button-icon icon-labels" aria-hidden="true"></span><span>Labels</span></button>
@@ -281,14 +343,11 @@ fn appendPullsToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filters: Pu
         \\</div>
     , .{
         .query = query,
-        .state = work_items.pullStateValue(filters.state),
     });
 }
 
 fn pullSearchInputValue(allocator: Allocator, filters: PullFilters) ![]u8 {
-    const prefix = work_items.pullSearchQuery(filters.state);
-    if (filters.q) |query| return std.fmt.allocPrint(allocator, "{s} {s}", .{ prefix, query });
-    return std.fmt.allocPrint(allocator, "{s} ", .{prefix});
+    return work_items.pullFilterQueryOwned(allocator, filters);
 }
 
 fn appendPullsListHeader(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters, counts: PullCounts) !void {
@@ -327,7 +386,7 @@ fn appendPullStateTab(
     , .{
         .classes = shared.classes("issues-state-tab", &.{shared.class("active", tab_filter == filters.state)}),
     });
-    try appendPullsHref(buf, allocator, filters, tab_filter);
+    try appendPullsHref(buf, allocator, filters, .{ .state = tab_filter });
     try appendTemplate(buf, allocator,
         \\"><span class="issue-tab-icon {icon_class}" aria-hidden="true"></span><span>{label}</span><span class="issue-count-badge">{count}</span></a>
     , .{
@@ -337,13 +396,53 @@ fn appendPullStateTab(
     });
 }
 
-fn appendPullsHref(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters, state: PullStateFilter) !void {
-    try buf.appendSlice(allocator, "/pulls?state=");
-    try shared.appendUrlEncoded(buf, allocator, work_items.pullStateValue(state));
+fn appendPullsHref(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters, override: PullHrefOverride) !void {
+    try buf.appendSlice(allocator, "/pulls");
+    var first = true;
+    try shared.appendQueryParam(buf, allocator, &first, "state", work_items.pullStateValue(override.state orelse filters.state));
     if (filters.q) |query| {
-        try buf.appendSlice(allocator, "&amp;q=");
-        try shared.appendUrlEncoded(buf, allocator, query);
+        try shared.appendQueryParam(buf, allocator, &first, "q", query);
     }
+    if (filters.author) |value| try shared.appendQueryParam(buf, allocator, &first, "author", value);
+    if (filters.label) |value| try shared.appendQueryParam(buf, allocator, &first, "label", value);
+    if (filters.assignee) |value| try shared.appendQueryParam(buf, allocator, &first, "assignee", value);
+    if (filters.reviewer) |value| try shared.appendQueryParam(buf, allocator, &first, "reviewer", value);
+    if (filters.base) |value| try shared.appendQueryParam(buf, allocator, &first, "base", value);
+    if (filters.head) |value| try shared.appendQueryParam(buf, allocator, &first, "head", value);
+    if (override.page) |page| {
+        const pagination = shared.Pagination{
+            .page = page,
+            .per_page = override.per_page orelse pulls_default_page_size,
+        };
+        try shared.appendPaginationQueryParams(buf, allocator, &first, pagination, page, pulls_default_page_size);
+    }
+}
+
+fn pullsHrefOwned(allocator: Allocator, filters: PullFilters, pagination: shared.Pagination, page: usize) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try appendPullsHref(&buf, allocator, filters, .{
+        .page = page,
+        .per_page = pagination.per_page,
+    });
+    return buf.toOwnedSlice(allocator);
+}
+
+fn appendPullsPagination(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    filters: PullFilters,
+    pagination: shared.Pagination,
+    shown: usize,
+    has_next_page: bool,
+) !void {
+    const previous_href = if (pagination.page > 1) try pullsHrefOwned(allocator, filters, pagination, pagination.page - 1) else null;
+    defer if (previous_href) |href| allocator.free(href);
+    const next_href = if (has_next_page) try pullsHrefOwned(allocator, filters, pagination, pagination.page + 1) else null;
+    defer if (next_href) |href| allocator.free(href);
+    const summary = try shared.paginationSummaryOwned(allocator, pagination, shown, null);
+    defer allocator.free(summary);
+    try shared.appendPaginationNav(buf, allocator, "Pull request pages", summary, previous_href, next_href);
 }
 
 fn appendPullListRow(
@@ -449,6 +548,10 @@ fn appendPullRowCollection(
 }
 
 pub fn renderPullDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u8, target: []const u8) ![]u8 {
+    return renderPullDetailPageWithMergeError(allocator, repo, raw_ref, target, null);
+}
+
+fn renderPullDetailPageWithMergeError(allocator: Allocator, repo: Repo, raw_ref: []const u8, target: []const u8, merge_error: ?[]const u8) ![]u8 {
     if (try shared.renderIndexingPageIfStale(allocator, repo, "Pull Request", "pulls", target)) |body| return body;
     try index.ensureIndex(allocator, repo);
     const pull_id = index.resolvePullId(allocator, repo, raw_ref) catch {
@@ -473,6 +576,7 @@ pub fn renderPullDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u
     errdefer buf.deinit(allocator);
 
     try appendShellStart(&buf, allocator, repo, detail.title, "pulls");
+    try shared.appendDetailBackButton(&buf, allocator, shared.literalHref("/pulls"), "Back to pull requests");
     try buf.appendSlice(allocator, "<section class=\"pull-detail issue-page\">");
     try appendPullPageHeader(&buf, allocator, detail, pull_ref, tab_counts, merge_status);
     try appendPullTabs(&buf, allocator, pull_ref, tab, tab_counts);
@@ -486,7 +590,7 @@ pub fn renderPullDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u
     defer if (current_role) |role| allocator.free(role);
     const can_edit_pull = currentActorCanEditAuthor(current_actor, current_role, detail.author_principal);
     switch (tab) {
-        .conversation => try appendPullConversation(&buf, allocator, &db, detail, raw_ref, current_actor, can_edit_pull, merge_status),
+        .conversation => try appendPullConversation(&buf, allocator, &db, detail, raw_ref, tab_counts, current_actor, can_edit_pull, merge_status, merge_error),
         .commits => try appendPullCommits(&buf, allocator, repo, detail),
         .files => try appendPullFiles(&buf, allocator, repo, detail, raw_ref),
     }
@@ -501,6 +605,7 @@ fn renderPullNotFound(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     try appendShellStart(&buf, allocator, repo, "Pull Request Not Found", "pulls");
+    try shared.appendDetailBackButton(&buf, allocator, shared.literalHref("/pulls"), "Back to pull requests");
     const detail = try std.fmt.allocPrint(allocator, "No pull request matches {s}.", .{raw_ref});
     defer allocator.free(detail);
     try appendEmptyState(&buf, allocator, "Pull request not found.", detail);
@@ -532,6 +637,7 @@ pub fn renderPullMergeEditorPage(allocator: Allocator, repo: Repo, raw_ref: []co
     errdefer buf.deinit(allocator);
 
     try appendShellStart(&buf, allocator, repo, "Resolve Conflicts", "pulls");
+    try shared.appendDetailBackButton(&buf, allocator, pullHref(pull_ref), "Back to pull request");
     if (!merge_status.hasConflicts()) {
         try appendMergeEditorEmptyState(&buf, allocator, raw_ref, "No merge conflicts detected.", "This pull request is not currently reporting file conflicts in the local repository.");
         try appendShellEnd(&buf, allocator);
@@ -1099,7 +1205,11 @@ fn appendPullPageHeader(buf: *std.ArrayList(u8), allocator: Allocator, detail: P
         \\</span></h1>
         \\    <div class="issue-page-actions">
     , .{});
-    if (merge_status.hasConflicts()) {
+    if (std.mem.eql(u8, detail.state, "open") and !detail.draft and merge_status.kind == .clean) {
+        try buf.appendSlice(allocator,
+            \\      <a class="button secondary pull-ready-button" href="#pull-mergeability"><span class="button-icon icon-check" aria-hidden="true"></span><span>Ready to merge</span></a>
+        );
+    } else if (merge_status.hasConflicts()) {
         try appendTemplate(buf, allocator,
             \\      <a class="button secondary pull-conflicts-button" href="/pulls/{pull_ref}/conflicts"><span class="button-icon icon-conflict" aria-hidden="true"></span><span>Resolve conflicts</span></a>
         , .{ .pull_ref = pull_ref });
@@ -1546,9 +1656,11 @@ fn appendPullConversation(
     db: *SqliteDb,
     detail: PullDetail,
     raw_ref: []const u8,
+    counts: PullTabCounts,
     current_actor: ?[]const u8,
     can_edit_pull: bool,
     merge_status: PullMergeStatus,
+    merge_error: ?[]const u8,
 ) !void {
     try appendTemplate(buf, allocator,
         \\<div class="issue-conversation pull-conversation">
@@ -1586,7 +1698,7 @@ fn appendPullConversation(
     try appendPullReactionBar(buf, allocator, db, "pull", detail.id, raw_ref, "", current_actor);
     try buf.appendSlice(allocator, "</article></div>");
     try appendPullComments(buf, allocator, db, raw_ref, detail.id, current_actor);
-    try appendPullMergeabilityTimeline(buf, allocator, raw_ref, merge_status);
+    try appendPullMergeabilityTimeline(buf, allocator, detail, raw_ref, counts.commits, merge_status, merge_error);
     try appendPullResolutionTimeline(buf, allocator, detail);
     try appendPullCommentForm(buf, allocator, raw_ref, current_actor);
     try buf.appendSlice(allocator, "</div>");
@@ -1698,7 +1810,21 @@ fn appendPullResolutionTimeline(buf: *std.ArrayList(u8), allocator: Allocator, d
     });
 }
 
-fn appendPullMergeabilityTimeline(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8, merge_status: PullMergeStatus) !void {
+fn appendPullMergeabilityTimeline(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    detail: PullDetail,
+    raw_ref: []const u8,
+    commit_count: ?usize,
+    merge_status: PullMergeStatus,
+    merge_error: ?[]const u8,
+) !void {
+    if (!std.mem.eql(u8, detail.state, "open")) return;
+    if (detail.draft) return;
+    if (merge_status.kind == .clean) {
+        try appendPullReadyToMergeTimeline(buf, allocator, raw_ref, commit_count, merge_error);
+        return;
+    }
     if (!merge_status.hasConflicts()) return;
     try buf.appendSlice(allocator,
         \\<div class="issue-timeline-item pull-mergeability-item" id="pull-mergeability">
@@ -1732,6 +1858,59 @@ fn appendPullMergeabilityTimeline(buf: *std.ArrayList(u8), allocator: Allocator,
         try buf.appendSlice(allocator, "<p class=\"pull-mergeability-empty\">Git reported merge conflicts, but did not return file names.</p>");
     }
     try buf.appendSlice(allocator, "</div></div>");
+}
+
+fn appendPullReadyToMergeTimeline(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    raw_ref: []const u8,
+    commit_count: ?usize,
+    merge_error: ?[]const u8,
+) !void {
+    const commit_phrase = try mergeMethodCommitPhrase(allocator, commit_count);
+    defer allocator.free(commit_phrase);
+
+    try buf.appendSlice(allocator,
+        \\<div class="issue-timeline-item pull-mergeability-item" id="pull-mergeability">
+        \\  <div class="issue-timeline-avatar"><span class="pull-mergeability-icon is-clean" aria-hidden="true"></span></div>
+        \\  <div class="pull-mergeability-box is-clean">
+        \\    <div class="pull-mergeability-head">
+        \\      <div>
+        \\        <h2>No conflicts with base branch</h2>
+        \\        <p>Merging can be performed automatically.</p>
+        \\      </div>
+        \\    </div>
+    );
+    if (merge_error) |message| {
+        try appendTemplate(buf, allocator, "<div class=\"flash error pull-merge-error\">{message}</div>", .{ .message = message });
+    }
+    try buf.appendSlice(allocator,
+        \\    <form class="pull-merge-form" method="post" action="/pulls/
+    );
+    try shared.appendUrlEncoded(buf, allocator, raw_ref);
+    try appendTemplate(buf, allocator,
+        \\/merge">
+        \\      <div class="pull-merge-actions">
+        \\        <div class="pull-merge-button-group">
+        \\          <button class="button primary pull-merge-submit" type="submit" name="method" value="merge"><span class="button-icon icon-pull-request" aria-hidden="true"></span><span data-merge-submit-label>Merge pull request</span></button>
+        \\          <details class="pull-merge-method-menu" data-popover-menu>
+        \\            <summary class="button primary pull-merge-method-toggle" aria-label="Choose merge method" title="Choose merge method"><span class="button-icon icon-chevron-down" aria-hidden="true"></span></summary>
+        \\            <div class="pull-merge-method-popover" role="menu" aria-label="Merge methods">
+        \\              <button class="pull-merge-method-option is-selected" type="submit" name="method" value="merge" role="menuitemradio" aria-checked="true" data-merge-button-label="Merge pull request"><span class="pull-merge-method-check" aria-hidden="true"></span><span><strong>Create a merge commit</strong><em>{commit_phrase} from this branch will be added to the base branch via a merge commit.</em></span></button>
+        \\              <button class="pull-merge-method-option" type="submit" name="method" value="squash" role="menuitemradio" aria-checked="false" data-merge-button-label="Squash and merge"><span class="pull-merge-method-check" aria-hidden="true"></span><span><strong>Squash and merge</strong><em>{commit_phrase} from this branch will be added to the base branch.</em></span></button>
+        \\              <button class="pull-merge-method-option" type="submit" name="method" value="rebase" role="menuitemradio" aria-checked="false" data-merge-button-label="Rebase and merge"><span class="pull-merge-method-check" aria-hidden="true"></span><span><strong>Rebase and merge</strong><em>{commit_phrase} from this branch will be rebased and added to the base branch.</em></span></button>
+        \\            </div>
+        \\          </details>
+        \\        </div>
+        \\        <span class="pull-merge-command-hint">You can also merge this with <code>gt pr merge #{pull_ref}</code> after applying the target branch update.</span>
+        \\      </div>
+        \\    </form>
+        \\  </div>
+        \\</div>
+    , .{
+        .commit_phrase = commit_phrase,
+        .pull_ref = raw_ref,
+    });
 }
 
 fn appendPullReactionBar(
@@ -2349,6 +2528,13 @@ fn commitWord(count: usize) []const u8 {
     return if (count == 1) "commit" else "commits";
 }
 
+fn mergeMethodCommitPhrase(allocator: Allocator, count: ?usize) ![]u8 {
+    if (count) |value| {
+        return std.fmt.allocPrint(allocator, "The {d} {s}", .{ value, commitWord(value) });
+    }
+    return allocator.dupe(u8, "The commits");
+}
+
 pub fn renderPullForm(
     allocator: Allocator,
     repo: Repo,
@@ -2516,6 +2702,67 @@ pub fn handlePullConflictPost(allocator: Allocator, repo: Repo, stream: std.net.
     try sendRedirect(allocator, stream, location);
 }
 
+pub fn handlePullMergePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
+    try index.ensureIndex(allocator, repo);
+    const pull_id = index.resolvePullId(allocator, repo, raw_ref) catch {
+        try sendPlainResponse(allocator, stream, 404, "Not Found", "Pull request not found\n");
+        return;
+    };
+    defer allocator.free(pull_id);
+
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    const detail = (try work_items.loadPullDetail(allocator, &db, pull_id)) orelse {
+        try sendPlainResponse(allocator, stream, 404, "Not Found", "Pull request not found\n");
+        return;
+    };
+    defer detail.deinit(allocator);
+
+    if (!std.mem.eql(u8, detail.state, "open")) {
+        try sendPullMergeError(allocator, repo, stream, raw_ref, 409, "Conflict", "Only open pull requests can be merged.");
+        return;
+    }
+    if (detail.draft) {
+        try sendPullMergeError(allocator, repo, stream, raw_ref, 409, "Conflict", "Draft pull requests cannot be merged.");
+        return;
+    }
+
+    const fields = try parseFormFieldsOwned(allocator, form_body);
+    defer freeFormFields(allocator, fields);
+    const method_value = std.mem.trim(u8, findFormField(fields, "method") orelse "merge", " \t\r\n");
+    const method = pullMergeMethodFromValue(method_value) orelse {
+        try sendPullMergeError(allocator, repo, stream, raw_ref, 422, "Unprocessable Entity", "Unknown merge method.");
+        return;
+    };
+
+    const merge_status = try loadPullMergeStatus(allocator, repo, detail);
+    defer merge_status.deinit(allocator);
+    if (merge_status.hasConflicts()) {
+        try sendPullMergeError(allocator, repo, stream, raw_ref, 409, "Conflict", "Resolve merge conflicts before merging this pull request.");
+        return;
+    }
+    if (merge_status.kind != .clean) {
+        try sendPullMergeError(allocator, repo, stream, raw_ref, 409, "Conflict", "The local repository could not verify that this pull request can be merged cleanly.");
+        return;
+    }
+
+    const merge_result = mergePullIntoBase(allocator, repo, detail, raw_ref, method) catch |err| {
+        const message = pullMergeErrorMessage(err) orelse return err;
+        try sendPullMergeError(allocator, repo, stream, raw_ref, 422, "Unprocessable Entity", message);
+        return;
+    };
+    defer merge_result.deinit(allocator);
+
+    pull.createPullMergedEvent(allocator, pull_id, merge_result.merge_oid, merge_result.target_oid) catch {
+        try sendPullMergeError(allocator, repo, stream, raw_ref, 500, "Internal Server Error", "The base branch was updated, but Gitomi could not record the pull.merged event.");
+        return;
+    };
+
+    const location = try std.fmt.allocPrint(allocator, "/pulls/{s}", .{raw_ref});
+    defer allocator.free(location);
+    try sendRedirect(allocator, stream, location);
+}
+
 pub fn handlePullChecklistPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
     try index.ensureIndex(allocator, repo);
     const pull_id = index.resolvePullId(allocator, repo, raw_ref) catch {
@@ -2571,6 +2818,22 @@ fn sendMergeEditorError(
     const target = try std.fmt.allocPrint(allocator, "/pulls/{s}/conflicts", .{raw_ref});
     defer allocator.free(target);
     const body = try renderPullMergeEditorPage(allocator, repo, raw_ref, target, message);
+    defer allocator.free(body);
+    try sendResponse(allocator, stream, status, reason, "text/html", body, null);
+}
+
+fn sendPullMergeError(
+    allocator: Allocator,
+    repo: Repo,
+    stream: std.net.Stream,
+    raw_ref: []const u8,
+    status: u16,
+    reason: []const u8,
+    message: []const u8,
+) !void {
+    const target = try std.fmt.allocPrint(allocator, "/pulls/{s}", .{raw_ref});
+    defer allocator.free(target);
+    const body = try renderPullDetailPageWithMergeError(allocator, repo, raw_ref, target, message);
     defer allocator.free(body);
     try sendResponse(allocator, stream, status, reason, "text/html", body, null);
 }
@@ -2801,6 +3064,224 @@ fn contentHasConflictMarkers(content: []const u8) bool {
     return false;
 }
 
+fn pullMergeMethodFromValue(value: []const u8) ?PullMergeMethod {
+    if (std.mem.eql(u8, value, "merge") or std.mem.eql(u8, value, "merge_commit")) return .merge_commit;
+    if (std.mem.eql(u8, value, "squash")) return .squash;
+    if (std.mem.eql(u8, value, "rebase")) return .rebase;
+    return null;
+}
+
+fn mergePullIntoBase(
+    allocator: Allocator,
+    repo: Repo,
+    detail: PullDetail,
+    raw_ref: []const u8,
+    method: PullMergeMethod,
+) !PullMergeResult {
+    const update_ref = try localBaseUpdateRef(allocator, repo, detail.base_ref);
+    defer allocator.free(update_ref);
+
+    const old_base_raw = try gitCheckedAt(allocator, repo.root, &.{ "rev-parse", "--verify", update_ref }, 1024 * 1024);
+    defer allocator.free(old_base_raw);
+    const old_base = try allocator.dupe(u8, std.mem.trim(u8, old_base_raw, " \t\r\n"));
+    defer allocator.free(old_base);
+    if (old_base.len == 0) return error.NoLocalBaseBranch;
+
+    const head_commit = (try resolvePullHeadForMerge(allocator, repo, detail)) orelse return error.NoPullHeadCommit;
+    defer allocator.free(head_commit);
+
+    if (!(try mergeWouldBeClean(allocator, repo, old_base, head_commit))) return error.MergeConflicts;
+
+    const result = switch (method) {
+        .merge_commit => try createMergeCommitOnBase(allocator, repo, detail, raw_ref, old_base, head_commit),
+        .squash => try createSquashCommitOnBase(allocator, repo, detail, raw_ref, old_base, head_commit),
+        .rebase => try rebasePullOntoBase(allocator, repo, old_base, head_commit),
+    };
+    errdefer result.deinit(allocator);
+
+    const target = result.merge_oid orelse result.target_oid orelse return error.MergeCommitFailed;
+    const update_output = gitCheckedAt(allocator, repo.root, &.{ "update-ref", update_ref, target, old_base }, git.max_git_output) catch |err| switch (err) {
+        error.GitFailed => return error.BaseUpdateFailed,
+        else => return err,
+    };
+    allocator.free(update_output);
+    return result;
+}
+
+fn resolvePullHeadForMerge(allocator: Allocator, repo: Repo, detail: PullDetail) !?[]u8 {
+    const prefer_remote = detail.legacy_number > 0;
+    if (detail.legacy_number > 0) {
+        if (try resolveGithubPullHeadCommit(allocator, repo, detail.legacy_number)) |oid| return oid;
+    }
+    return try resolvePullGitCommit(allocator, repo, detail.head_ref, prefer_remote);
+}
+
+fn mergeWouldBeClean(allocator: Allocator, repo: Repo, base_commit: []const u8, head_commit: []const u8) !bool {
+    var result = try gitRunAt(allocator, repo.root, &.{ "merge-tree", "--write-tree", "--no-messages", base_commit, head_commit }, max_pull_diff_bytes);
+    defer result.deinit();
+    if (result.exitCode()) |code| {
+        if (code == 0) return true;
+        if (code == 1) return false;
+    }
+    return error.MergeStatusUnavailable;
+}
+
+fn createMergeCommitOnBase(
+    allocator: Allocator,
+    repo: Repo,
+    detail: PullDetail,
+    raw_ref: []const u8,
+    old_base: []const u8,
+    head_commit: []const u8,
+) !PullMergeResult {
+    const tmp_worktree = try tempPath(allocator, "gitomi-pr-merge");
+    defer allocator.free(tmp_worktree);
+    var worktree_created = false;
+    defer cleanupTempWorktree(allocator, repo.root, tmp_worktree, &worktree_created);
+
+    const worktree_add_raw = try gitCheckedAt(allocator, repo.root, &.{ "worktree", "add", "--detach", tmp_worktree, old_base }, git.max_git_output);
+    allocator.free(worktree_add_raw);
+    worktree_created = true;
+
+    const message = try std.fmt.allocPrint(allocator, "Merge pull request #{s} from {s}", .{ raw_ref, detail.head_ref });
+    defer allocator.free(message);
+    var merge_result = try gitRunAt(allocator, tmp_worktree, &.{ "merge", "--no-ff", "-m", message, head_commit }, git.max_git_output);
+    defer merge_result.deinit();
+    if (merge_result.exitCode()) |code| {
+        if (code != 0) return error.MergeFailed;
+    } else {
+        return error.MergeFailed;
+    }
+
+    const commit_oid = try tempWorktreeHead(allocator, tmp_worktree);
+    errdefer allocator.free(commit_oid);
+    if (std.mem.eql(u8, commit_oid, old_base)) {
+        return .{ .target_oid = commit_oid };
+    }
+    return .{ .merge_oid = commit_oid };
+}
+
+fn createSquashCommitOnBase(
+    allocator: Allocator,
+    repo: Repo,
+    detail: PullDetail,
+    raw_ref: []const u8,
+    old_base: []const u8,
+    head_commit: []const u8,
+) !PullMergeResult {
+    const tmp_worktree = try tempPath(allocator, "gitomi-pr-squash");
+    defer allocator.free(tmp_worktree);
+    var worktree_created = false;
+    defer cleanupTempWorktree(allocator, repo.root, tmp_worktree, &worktree_created);
+
+    const worktree_add_raw = try gitCheckedAt(allocator, repo.root, &.{ "worktree", "add", "--detach", tmp_worktree, old_base }, git.max_git_output);
+    allocator.free(worktree_add_raw);
+    worktree_created = true;
+
+    var merge_result = try gitRunAt(allocator, tmp_worktree, &.{ "merge", "--squash", "--no-commit", head_commit }, git.max_git_output);
+    defer merge_result.deinit();
+    if (merge_result.exitCode()) |code| {
+        if (code != 0) return error.MergeFailed;
+    } else {
+        return error.MergeFailed;
+    }
+
+    if (try worktreeHasStagedChanges(allocator, tmp_worktree)) {
+        const message = try std.fmt.allocPrint(allocator, "Squash merge pull request #{s} from {s}", .{ raw_ref, detail.head_ref });
+        defer allocator.free(message);
+        const commit_output = try gitCheckedAt(allocator, tmp_worktree, &.{ "commit", "-m", message }, git.max_git_output);
+        allocator.free(commit_output);
+    }
+
+    const commit_oid = try tempWorktreeHead(allocator, tmp_worktree);
+    errdefer allocator.free(commit_oid);
+    return .{ .target_oid = commit_oid };
+}
+
+fn rebasePullOntoBase(
+    allocator: Allocator,
+    repo: Repo,
+    old_base: []const u8,
+    head_commit: []const u8,
+) !PullMergeResult {
+    const merge_base = try work_items.loadMergeBase(allocator, repo, old_base, head_commit);
+    defer if (merge_base) |value| allocator.free(value);
+    const base = merge_base orelse return error.MergeStatusUnavailable;
+
+    const tmp_worktree = try tempPath(allocator, "gitomi-pr-rebase");
+    defer allocator.free(tmp_worktree);
+    var worktree_created = false;
+    defer cleanupTempWorktree(allocator, repo.root, tmp_worktree, &worktree_created);
+
+    const worktree_add_raw = try gitCheckedAt(allocator, repo.root, &.{ "worktree", "add", "--detach", tmp_worktree, head_commit }, git.max_git_output);
+    allocator.free(worktree_add_raw);
+    worktree_created = true;
+
+    var rebase_result = try gitRunAt(allocator, tmp_worktree, &.{ "rebase", "--onto", old_base, base }, git.max_git_output);
+    defer rebase_result.deinit();
+    if (rebase_result.exitCode()) |code| {
+        if (code != 0) return error.RebaseFailed;
+    } else {
+        return error.RebaseFailed;
+    }
+
+    const commit_oid = try tempWorktreeHead(allocator, tmp_worktree);
+    errdefer allocator.free(commit_oid);
+    return .{ .target_oid = commit_oid };
+}
+
+fn tempWorktreeHead(allocator: Allocator, tmp_worktree: []const u8) ![]u8 {
+    const raw = try gitCheckedAt(allocator, tmp_worktree, &.{ "rev-parse", "HEAD" }, 1024 * 1024);
+    defer allocator.free(raw);
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (trimmed.len == 0) return error.MergeCommitFailed;
+    return try allocator.dupe(u8, trimmed);
+}
+
+fn worktreeHasStagedChanges(allocator: Allocator, tmp_worktree: []const u8) !bool {
+    var diff_result = try gitRunAt(allocator, tmp_worktree, &.{ "diff", "--cached", "--quiet" }, 1024 * 1024);
+    defer diff_result.deinit();
+    if (diff_result.exitCode()) |code| {
+        if (code == 0) return false;
+        if (code == 1) return true;
+    }
+    return error.GitFailed;
+}
+
+fn cleanupTempWorktree(allocator: Allocator, repo_root: []const u8, tmp_worktree: []const u8, worktree_created: *bool) void {
+    if (worktree_created.*) {
+        var remove_result = gitRunAt(allocator, repo_root, &.{ "worktree", "remove", "--force", tmp_worktree }, 1024 * 1024) catch null;
+        if (remove_result) |*result| result.deinit();
+    }
+    std.fs.deleteTreeAbsolute(tmp_worktree) catch {};
+}
+
+fn localBaseUpdateRef(allocator: Allocator, repo: Repo, base_ref: []const u8) ![]u8 {
+    const symbolic_raw = gitCheckedAt(allocator, repo.root, &.{ "rev-parse", "--symbolic-full-name", "--verify", base_ref }, 1024 * 1024) catch |err| switch (err) {
+        error.GitFailed => return error.NoLocalBaseBranch,
+        else => return err,
+    };
+    defer allocator.free(symbolic_raw);
+    const symbolic = std.mem.trim(u8, symbolic_raw, " \t\r\n");
+    if (!std.mem.startsWith(u8, symbolic, "refs/heads/")) return error.NoLocalBaseBranch;
+    return allocator.dupe(u8, symbolic);
+}
+
+fn pullMergeErrorMessage(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.NoLocalBaseBranch => "The pull request base must be a local branch before the web UI can update it.",
+        error.NoPullHeadCommit => "The pull request head commit is not available in the local repository.",
+        error.MergeStatusUnavailable => "The local repository could not verify mergeability for this pull request.",
+        error.MergeConflicts => "This pull request has conflicts with the current base branch.",
+        error.MergeFailed => "Git could not merge this pull request into a temporary worktree.",
+        error.RebaseFailed => "Git could not rebase this pull request onto the base branch.",
+        error.MergeCommitFailed => "Git could not identify the merged target commit.",
+        error.BaseUpdateFailed => "Git could not update the base branch. It may have changed while the merge was running.",
+        error.GitFailed => "Git could not complete the merge. Check the repository state and commit signing configuration.",
+        else => null,
+    };
+}
+
 fn commitPullConflictResolution(
     allocator: Allocator,
     repo: Repo,
@@ -2976,6 +3457,14 @@ test "format diff comment body includes file and line range" {
 test "content conflict marker detection" {
     try std.testing.expect(contentHasConflictMarkers("a\n<<<<<<< head\nb\n=======\nc\n>>>>>>> main\n"));
     try std.testing.expect(!contentHasConflictMarkers("const divider = \"=======\";\n"));
+}
+
+test "pull merge method parser" {
+    try std.testing.expectEqual(PullMergeMethod.merge_commit, pullMergeMethodFromValue("merge").?);
+    try std.testing.expectEqual(PullMergeMethod.merge_commit, pullMergeMethodFromValue("merge_commit").?);
+    try std.testing.expectEqual(PullMergeMethod.squash, pullMergeMethodFromValue("squash").?);
+    try std.testing.expectEqual(PullMergeMethod.rebase, pullMergeMethodFromValue("rebase").?);
+    try std.testing.expect(pullMergeMethodFromValue("fast-forward") == null);
 }
 
 test "merge editor counts conflict groups" {

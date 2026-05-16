@@ -7,7 +7,6 @@ const event_writer_mod = @import("event_writer.zig");
 const index = @import("index.zig");
 const io = @import("io.zig");
 const reaction = @import("reaction.zig");
-const repo_mod = @import("repo.zig");
 const util = @import("util.zig");
 const work_items = @import("work_items.zig");
 
@@ -23,14 +22,13 @@ const shortObjectRef = util.shortObjectRef;
 const short_object_ref_len = util.short_object_ref_len;
 const PullDiffCommentOptions = cmd_common.PullDiffCommentOptions;
 const appendCollectionOptionValues = cmd_common.appendCollectionOptionValues;
-const createCommentForParentCommand = comment.createCommentForParentCommand;
+const createCommentForParentCommandWithRepo = comment.createCommentForParentCommandWithRepo;
 const formatPullDiffCommentBodyFromOptions = cmd_common.formatPullDiffCommentBodyFromOptions;
 const isIssueState = cmd_common.isIssueState;
 const parseCollectionMutation = cmd_common.parseCollectionMutation;
 const parsePositiveIntegerOption = cmd_common.parsePositiveIntegerOption;
 const parsePositiveLineOption = cmd_common.parsePositiveLineOption;
 const requireNonEmptyOption = cmd_common.requireNonEmptyOption;
-const resolvePullIdForCommand = cmd_common.resolvePullIdForCommand;
 
 pub fn createPullOpenedEvent(
     allocator: Allocator,
@@ -223,6 +221,9 @@ pub fn cmdPr(allocator: Allocator, args: []const []const u8, command_context: []
         return CliError.UserError;
     }
 
+    var command_repo = cmd_common.CommandRepo.init(allocator);
+    defer command_repo.deinit();
+
     if (std.mem.eql(u8, args[0], "list")) {
         var json = false;
         var agent_view = false;
@@ -261,9 +262,7 @@ pub fn cmdPr(allocator: Allocator, args: []const []const u8, command_context: []
             }
         }
 
-        var repo = try repo_mod.discoverRepo(allocator);
-        defer repo.deinit();
-        try index.ensureIndex(allocator, repo);
+        const repo = try command_repo.indexedRepo();
         if (agent_view or (filtered and json)) {
             var db = try work_items.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
             defer db.deinit();
@@ -334,10 +333,8 @@ pub fn cmdPr(allocator: Allocator, args: []const []const u8, command_context: []
             }
         }
 
-        var repo = try repo_mod.discoverRepo(allocator);
-        defer repo.deinit();
-        try index.ensureIndex(allocator, repo);
-        const pull_id = try index.resolvePullId(allocator, repo, args[1]);
+        const repo = try command_repo.indexedRepo();
+        const pull_id = try command_repo.resolvePullId(args[1]);
         defer allocator.free(pull_id);
         if (agent_view or include_diff) {
             var db = try work_items.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
@@ -433,7 +430,7 @@ pub fn cmdPr(allocator: Allocator, args: []const []const u8, command_context: []
         if (update.base_ref) |base_ref| try requireNonEmptyOption(command_context, "--base", base_ref);
         if (update.head_ref) |head_ref| try requireNonEmptyOption(command_context, "--head", head_ref);
 
-        const pull_id = try resolvePullIdForCommand(allocator, args[1]);
+        const pull_id = try command_repo.resolvePullId(args[1]);
         defer allocator.free(pull_id);
         try pull_mod.createPullUpdatedEvent(allocator, pull_id, update);
         return;
@@ -487,7 +484,7 @@ pub fn cmdPr(allocator: Allocator, args: []const []const u8, command_context: []
             try io.eprint("{s} {s}: {s} is required\n", .{ command_context, args[0], option_name });
             return CliError.UserError;
         }
-        const pull_id = try resolvePullIdForCommand(allocator, args[1]);
+        const pull_id = try command_repo.resolvePullId(args[1]);
         defer allocator.free(pull_id);
         try pull_mod.createPullStringEvent(allocator, pull_id, event_type, payload_key, value.?);
         return;
@@ -498,7 +495,7 @@ pub fn cmdPr(allocator: Allocator, args: []const []const u8, command_context: []
             try io.eprint("{s} {s}: expected PR\n", .{ command_context, args[0] });
             return CliError.UserError;
         }
-        const pull_id = try resolvePullIdForCommand(allocator, args[1]);
+        const pull_id = try command_repo.resolvePullId(args[1]);
         defer allocator.free(pull_id);
         const state: []const u8 = if (std.mem.eql(u8, args[0], "close")) "closed" else "open";
         try pull_mod.createPullStringEvent(allocator, pull_id, "pull.state_set", "state", state);
@@ -525,7 +522,7 @@ pub fn cmdPr(allocator: Allocator, args: []const []const u8, command_context: []
             try io.eprint("{s} {s}: value must not be empty\n", .{ command_context, collection });
             return CliError.UserError;
         }
-        const pull_id = try resolvePullIdForCommand(allocator, object_ref);
+        const pull_id = try command_repo.resolvePullId(object_ref);
         defer allocator.free(pull_id);
         const event_type = try std.fmt.allocPrint(allocator, "pull.{s}_{s}", .{ collection, if (std.mem.eql(u8, op, "add")) "added" else "removed" });
         defer allocator.free(event_type);
@@ -578,14 +575,14 @@ pub fn cmdPr(allocator: Allocator, args: []const []const u8, command_context: []
             return CliError.UserError;
         }
         const comment_body = body.?;
-        const pull_id = try resolvePullIdForCommand(allocator, args[1]);
+        const pull_id = try command_repo.resolvePullId(args[1]);
         defer allocator.free(pull_id);
         if (reply_ref) |_| {
             if (diff_options.hasAny()) {
                 try io.eprint("{s}: --reply cannot be combined with diff line options\n", .{comment_context});
                 return CliError.UserError;
             }
-            try createCommentForParentCommand(allocator, comment_context, "pull", "pull request", pull_id, comment_body, reply_ref);
+            try createCommentForParentCommandWithRepo(&command_repo, allocator, comment_context, "pull", "pull request", pull_id, comment_body, reply_ref);
         } else {
             const diff_comment_body = try formatPullDiffCommentBodyFromOptions(allocator, comment_context, comment_body, diff_options);
             defer if (diff_comment_body) |value| allocator.free(value);
@@ -599,7 +596,7 @@ pub fn cmdPr(allocator: Allocator, args: []const []const u8, command_context: []
             try io.eprint("{s} {s}: expected PR EMOJI\n", .{ command_context, args[0] });
             return CliError.UserError;
         }
-        const pull_id = try resolvePullIdForCommand(allocator, args[1]);
+        const pull_id = try command_repo.resolvePullId(args[1]);
         defer allocator.free(pull_id);
         try reaction.createReactionEvent(allocator, "pull", pull_id, args[2], std.mem.eql(u8, args[0], "react"));
         return;
@@ -630,7 +627,7 @@ pub fn cmdPr(allocator: Allocator, args: []const []const u8, command_context: []
             try io.eprint("{s} merge: --merge-oid or --target-oid is required\n", .{command_context});
             return CliError.UserError;
         }
-        const pull_id = try resolvePullIdForCommand(allocator, args[1]);
+        const pull_id = try command_repo.resolvePullId(args[1]);
         defer allocator.free(pull_id);
         try pull_mod.createPullMergedEvent(allocator, pull_id, merge_oid, target_oid);
         return;
