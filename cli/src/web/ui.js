@@ -97,9 +97,89 @@
       .catch(function () {});
   }
 
+  function labelRowName(row) {
+    return (row.dataset.labelName || "").toLocaleLowerCase();
+  }
+
+  function labelRowTotal(row) {
+    const value = Number(row.dataset.labelTotal || "0");
+    return Number.isFinite(value) ? value : 0;
+  }
+
+  function initLabelsPage() {
+    document.querySelectorAll("[data-labels-page]").forEach(function (page) {
+      if (page.dataset.labelsReady === "yes") return;
+      page.dataset.labelsReady = "yes";
+
+      const list = page.querySelector("[data-label-list]");
+      const search = page.querySelector("[data-label-search]");
+      const visibleCount = page.querySelector("[data-label-visible-count]");
+      const countWord = page.querySelector("[data-label-count-word]");
+      const empty = page.querySelector("[data-label-empty]");
+      const sortLabel = page.querySelector("[data-label-sort-label]");
+      const sortButtons = Array.from(page.querySelectorAll("[data-label-sort]"));
+      const rows = Array.from(page.querySelectorAll("[data-label-row]"));
+      let sortMode = "name";
+
+      function setSelectedSort() {
+        sortButtons.forEach(function (button) {
+          const selected = button.dataset.labelSort === sortMode;
+          button.classList.toggle("selected", selected);
+          button.setAttribute("aria-pressed", selected ? "true" : "false");
+          if (selected && sortLabel) sortLabel.textContent = button.textContent.trim();
+        });
+      }
+
+      function compareRows(left, right) {
+        if (sortMode === "usage") {
+          const usageDiff = labelRowTotal(right) - labelRowTotal(left);
+          if (usageDiff !== 0) return usageDiff;
+        }
+        return labelRowName(left).localeCompare(labelRowName(right));
+      }
+
+      function applyLabelsView() {
+        const query = search ? search.value.trim().toLocaleLowerCase() : "";
+        const visibleRows = [];
+        rows.forEach(function (row) {
+          const text = (row.dataset.labelSearchText || "").toLocaleLowerCase();
+          const hidden = query.length > 0 && !text.includes(query);
+          row.hidden = hidden;
+          if (!hidden) visibleRows.push(row);
+        });
+        visibleRows.sort(compareRows).forEach(function (row) {
+          list.appendChild(row);
+        });
+        if (visibleCount) visibleCount.textContent = String(visibleRows.length);
+        if (countWord) countWord.textContent = visibleRows.length === 1 ? "label" : "labels";
+        if (empty) empty.hidden = rows.length === 0 || visibleRows.length !== 0;
+      }
+
+      if (search) {
+        search.addEventListener("input", applyLabelsView);
+      }
+      sortButtons.forEach(function (button) {
+        button.addEventListener("click", function () {
+          sortMode = button.dataset.labelSort || "name";
+          setSelectedSort();
+          applyLabelsView();
+          const menu = button.closest("details");
+          if (menu) {
+            menu.open = false;
+            setExpanded(menu);
+          }
+        });
+      });
+
+      setSelectedSort();
+      applyLabelsView();
+    });
+  }
+
   function initUi() {
     initPopoverMenus();
     initNavStats();
+    initLabelsPage();
   }
 
   if (document.readyState === "loading") {

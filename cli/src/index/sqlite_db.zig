@@ -108,7 +108,7 @@ pub const SqliteStmt = struct {
     pub fn bindText(self: *SqliteStmt, index: c_int, value: []const u8) !void {
         if (value.len > std.math.maxInt(c_int)) return error.ValueTooLarge;
         const len: c_int = @intCast(value.len);
-        const rc = sqlite.sqlite3_bind_text(self.stmt, index, value.ptr, len, null);
+        const rc = sqlite.sqlite3_bind_text(self.stmt, index, value.ptr, len, sqlite.SQLITE_TRANSIENT);
         if (rc != sqlite.SQLITE_OK) return sqliteFail(self.db, self.quiet, "bind text");
     }
 
