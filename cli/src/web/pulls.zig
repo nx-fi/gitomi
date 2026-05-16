@@ -40,6 +40,7 @@ const sqlite = index.sqlite;
 const max_pull_diff_bytes = work_items.max_pull_diff_bytes;
 const max_merge_blob_bytes = 2 * 1024 * 1024;
 const merge_context_radius = 15;
+const zero_oid = "0000000000000000000000000000000000000000";
 
 const PullStateFilter = work_items.PullStateFilter;
 const PullFilters = work_items.PullListOptions;
@@ -2286,9 +2287,14 @@ fn resolveGitCommit(allocator: Allocator, repo: Repo, ref: []const u8) !?[]u8 {
 }
 
 fn isBranchShorthand(ref: []const u8) bool {
-    if (ref.len == 0) return false;
     if (std.mem.startsWith(u8, ref, "refs/")) return false;
     if (std.mem.startsWith(u8, ref, "origin/")) return false;
+    if (std.mem.eql(u8, ref, "HEAD")) return false;
+    return isSafeLocalBranchName(ref);
+}
+
+fn isSafeLocalBranchName(ref: []const u8) bool {
+    if (ref.len == 0) return false;
     if (std.mem.startsWith(u8, ref, "-")) return false;
     if (std.mem.endsWith(u8, ref, ".lock")) return false;
     if (std.mem.indexOf(u8, ref, "..") != null) return false;
@@ -3353,7 +3359,7 @@ fn commitPullConflictResolution(
     resolved_files: []const ResolvedConflictFile,
 ) ![]u8 {
     if (resolved_files.len == 0) return error.NoConflictResolutions;
-    const update_ref = try localHeadUpdateRef(allocator, repo, detail.head_ref);
+    const update_ref = try ensureLocalHeadUpdateRef(allocator, repo, detail.head_ref, git_refs.head);
     defer allocator.free(update_ref);
 
     const old_head_raw = try gitCheckedAt(allocator, repo.root, &.{ "rev-parse", "--verify", update_ref }, 1024 * 1024);
@@ -3437,15 +3443,44 @@ fn lsFilesStagesAreRegularFile(raw: []const u8, path: []const u8) bool {
     return found;
 }
 
+fn ensureLocalHeadUpdateRef(allocator: Allocator, repo: Repo, head_ref: []const u8, expected_head: []const u8) ![]u8 {
+    return localHeadUpdateRef(allocator, repo, head_ref) catch |err| switch (err) {
+        error.NoLocalHeadBranch => {
+            const update_ref = (try localHeadRefName(allocator, head_ref)) orelse return error.NoLocalHeadBranch;
+            errdefer allocator.free(update_ref);
+            const create_output = gitCheckedAt(allocator, repo.root, &.{ "update-ref", update_ref, expected_head, zero_oid }, git.max_git_output) catch |create_err| switch (create_err) {
+                error.GitFailed => return error.NoLocalHeadBranch,
+                else => return create_err,
+            };
+            allocator.free(create_output);
+            return update_ref;
+        },
+        else => return err,
+    };
+}
+
 fn localHeadUpdateRef(allocator: Allocator, repo: Repo, head_ref: []const u8) ![]u8 {
-    const symbolic_raw = gitCheckedAt(allocator, repo.root, &.{ "rev-parse", "--symbolic-full-name", "--verify", head_ref }, 1024 * 1024) catch |err| switch (err) {
+    const update_ref = (try localHeadRefName(allocator, head_ref)) orelse return error.NoLocalHeadBranch;
+    errdefer allocator.free(update_ref);
+    const commit_ref = try std.fmt.allocPrint(allocator, "{s}^{{commit}}", .{update_ref});
+    defer allocator.free(commit_ref);
+    const raw = gitCheckedAt(allocator, repo.root, &.{ "rev-parse", "--verify", "--quiet", commit_ref }, 1024 * 1024) catch |err| switch (err) {
         error.GitFailed => return error.NoLocalHeadBranch,
         else => return err,
     };
-    defer allocator.free(symbolic_raw);
-    const symbolic = std.mem.trim(u8, symbolic_raw, " \t\r\n");
-    if (!std.mem.startsWith(u8, symbolic, "refs/heads/")) return error.NoLocalHeadBranch;
-    return allocator.dupe(u8, symbolic);
+    defer allocator.free(raw);
+    return update_ref;
+}
+
+fn localHeadRefName(allocator: Allocator, head_ref: []const u8) !?[]u8 {
+    const heads_prefix = "refs/heads/";
+    if (std.mem.startsWith(u8, head_ref, heads_prefix)) {
+        const branch_name = head_ref[heads_prefix.len..];
+        if (!isSafeLocalBranchName(branch_name)) return null;
+        return try allocator.dupe(u8, head_ref);
+    }
+    if (!isBranchShorthand(head_ref)) return null;
+    return try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{head_ref});
 }
 
 fn mergeCommitErrorMessage(err: anyerror) ?[]const u8 {
@@ -3662,4 +3697,19 @@ test "merge editor rejects symlink conflict index stages" {
         "conflict.txt",
     ));
     try std.testing.expect(!lsFilesStagesAreRegularFile("", "conflict.txt"));
+}
+
+test "merge resolver derives local head refs only from safe branch names" {
+    const shorthand = (try localHeadRefName(std.testing.allocator, "feature/conflict-fix")).?;
+    defer std.testing.allocator.free(shorthand);
+    try std.testing.expectEqualStrings("refs/heads/feature/conflict-fix", shorthand);
+
+    const full = (try localHeadRefName(std.testing.allocator, "refs/heads/origin/feature")).?;
+    defer std.testing.allocator.free(full);
+    try std.testing.expectEqualStrings("refs/heads/origin/feature", full);
+
+    try std.testing.expect((try localHeadRefName(std.testing.allocator, "origin/feature")) == null);
+    try std.testing.expect((try localHeadRefName(std.testing.allocator, "refs/remotes/origin/feature")) == null);
+    try std.testing.expect((try localHeadRefName(std.testing.allocator, "HEAD")) == null);
+    try std.testing.expect((try localHeadRefName(std.testing.allocator, "feature^{commit}")) == null);
 }
