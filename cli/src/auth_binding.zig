@@ -35,10 +35,12 @@ pub const Verifier = struct {
         const temp_path = try std.fmt.allocPrint(allocator, "{s}/auth-binding-{s}.sqlite", .{ repo.gitomi_dir, temp_id });
         errdefer allocator.free(temp_path);
 
-        try std.fs.copyFileAbsolute(repo.index_path, temp_path, .{});
+        var source_db = try index.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
+        defer source_db.deinit();
+        try source_db.backupToFile(temp_path);
         errdefer std.fs.cwd().deleteFile(temp_path) catch {};
 
-        var db = try index.SqliteDb.open(allocator, temp_path, index.sqlite.SQLITE_OPEN_READWRITE, false);
+        var db = try index.SqliteDb.openWithOptions(allocator, temp_path, index.sqlite.SQLITE_OPEN_READWRITE, false, .{ .enable_wal = false });
         errdefer db.deinit();
 
         var insert_stmt = try db.prepare(
