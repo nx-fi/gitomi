@@ -43,6 +43,7 @@ pub const HttpRequest = struct {
     path: []const u8,
     body: []const u8,
     range: ?ByteRange = null,
+    if_none_match: ?[]const u8 = null,
 };
 
 pub const ByteRange = struct {
@@ -229,7 +230,7 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
     };
 
     if (try dispatchExactRoute(ctx)) return;
-    if (try sendVendorAsset(allocator, stream, request.method, request.path)) return;
+    if (try sendVendorAsset(allocator, stream, request.method, request.path, request.if_none_match)) return;
 
     if (std.mem.eql(u8, request.method, "POST") and std.mem.startsWith(u8, request.path, "/issues/") and std.mem.endsWith(u8, request.path, "/edit")) {
         const issue_ref = pathRefWithSuffix(request.path, "/issues/", "/edit") orelse {
@@ -450,7 +451,7 @@ fn handleMarkdownJs(ctx: WebContext) !void {
 }
 
 fn handleHighlightAllJs(ctx: WebContext) !void {
-    try sendTextAsset(ctx, "application/javascript", highlight_js);
+    try sendCachedAsset(ctx.allocator, ctx.stream, ctx.request.if_none_match, "application/javascript", highlight_js, staticAssetEtag(highlight_js), false);
 }
 
 fn handleHighlightZigJs(ctx: WebContext) !void {
@@ -681,33 +682,30 @@ pub fn parseHttpRequest(raw: []const u8) !HttpRequest {
         .path = target[0..query_start],
         .body = raw[body_start .. body_start + content_len],
         .range = parseRangeHeader(headers),
+        .if_none_match = findHeaderValue(headers, "if-none-match"),
     };
 }
 
 pub fn parseContentLength(headers: []const u8) !usize {
+    const value = findHeaderValue(headers, "content-length") orelse return 0;
+    return std.fmt.parseUnsigned(usize, value, 10) catch error.BadRequest;
+}
+
+fn findHeaderValue(headers: []const u8, header_name: []const u8) ?[]const u8 {
     var lines = std.mem.splitSequence(u8, headers, "\r\n");
     _ = lines.next();
     while (lines.next()) |line| {
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
         const name = std.mem.trim(u8, line[0..colon], " \t");
-        if (!std.ascii.eqlIgnoreCase(name, "content-length")) continue;
-        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
-        return std.fmt.parseUnsigned(usize, value, 10) catch error.BadRequest;
+        if (!std.ascii.eqlIgnoreCase(name, header_name)) continue;
+        return std.mem.trim(u8, line[colon + 1 ..], " \t");
     }
-    return 0;
+    return null;
 }
 
 fn parseRangeHeader(headers: []const u8) ?ByteRange {
-    var lines = std.mem.splitSequence(u8, headers, "\r\n");
-    _ = lines.next();
-    while (lines.next()) |line| {
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-        const name = std.mem.trim(u8, line[0..colon], " \t");
-        if (!std.ascii.eqlIgnoreCase(name, "range")) continue;
-        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
-        return parseByteRange(value);
-    }
-    return null;
+    const value = findHeaderValue(headers, "range") orelse return null;
+    return parseByteRange(value);
 }
 
 fn parseByteRange(value: []const u8) ?ByteRange {
@@ -734,10 +732,19 @@ fn renderNotFoundPage(allocator: Allocator, repo: Repo) ![]u8 {
 }
 
 const raw_blob_headers = "Accept-Ranges: bytes\r\nCache-Control: no-store\r\nContent-Security-Policy: sandbox\r\n";
+const static_asset_cache_control = "public, max-age=86400";
 
 const ResolvedRange = struct {
     start: usize,
     end: usize,
+};
+
+const VendorAsset = struct {
+    path: []const u8,
+    content_type: []const u8,
+    body: []const u8,
+    etag: []const u8,
+    binary: bool = false,
 };
 
 fn sendRawBlobResponse(
@@ -784,39 +791,76 @@ fn sendVendorAsset(
     stream: std.net.Stream,
     method: []const u8,
     path: []const u8,
+    if_none_match: ?[]const u8,
 ) !bool {
     if (!std.mem.eql(u8, method, "GET")) return false;
-    if (std.mem.eql(u8, path, "/vendor/marked/marked.umd.js")) {
-        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", marked_js, null);
-        return true;
-    }
-    if (std.mem.eql(u8, path, "/vendor/dompurify/purify.min.js")) {
-        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", dompurify_js, null);
-        return true;
-    }
-    if (std.mem.eql(u8, path, "/vendor/katex/katex.min.js")) {
-        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", katex_js, null);
-        return true;
-    }
-    if (std.mem.eql(u8, path, "/vendor/katex/auto-render.min.js")) {
-        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", katex_auto_render_js, null);
-        return true;
-    }
-    if (std.mem.eql(u8, path, "/vendor/katex/katex.min.css")) {
-        try shared.sendResponse(allocator, stream, 200, "OK", "text/css", katex_css, null);
-        return true;
-    }
-    if (std.mem.eql(u8, path, "/vendor/mermaid/mermaid.min.js")) {
-        try shared.sendResponse(allocator, stream, 200, "OK", "application/javascript", mermaid_js, null);
-        return true;
-    }
-    for (katex_fonts) |font| {
-        if (std.mem.eql(u8, path, font.path)) {
-            try shared.sendBinaryResponse(allocator, stream, 200, "OK", "font/woff2", font.body, null);
+    for (vendor_assets) |asset| {
+        if (std.mem.eql(u8, path, asset.path)) {
+            try sendCachedAsset(allocator, stream, if_none_match, asset.content_type, asset.body, asset.etag, asset.binary);
             return true;
         }
     }
     return false;
+}
+
+fn sendCachedTextAsset(ctx: WebContext, content_type: []const u8, comptime body: []const u8) !void {
+    try sendCachedAsset(ctx.allocator, ctx.stream, ctx.request.if_none_match, content_type, body, staticAssetEtag(body), false);
+}
+
+fn sendCachedAsset(
+    allocator: Allocator,
+    stream: std.net.Stream,
+    if_none_match: ?[]const u8,
+    content_type: []const u8,
+    body: []const u8,
+    etag: []const u8,
+    binary: bool,
+) !void {
+    const extra = try std.fmt.allocPrint(
+        allocator,
+        "Cache-Control: " ++ static_asset_cache_control ++ "\r\nETag: {s}\r\n",
+        .{etag},
+    );
+    defer allocator.free(extra);
+
+    if (etagMatches(if_none_match, etag)) {
+        try sendNotModified(allocator, stream, extra);
+        return;
+    }
+
+    if (binary) {
+        try shared.sendBinaryResponse(allocator, stream, 200, "OK", content_type, body, extra);
+    } else {
+        try shared.sendResponse(allocator, stream, 200, "OK", content_type, body, extra);
+    }
+}
+
+fn sendNotModified(allocator: Allocator, stream: std.net.Stream, extra_headers: []const u8) !void {
+    const headers = try std.fmt.allocPrint(
+        allocator,
+        "HTTP/1.1 304 Not Modified\r\nContent-Length: 0\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\n{s}\r\n",
+        .{extra_headers},
+    );
+    defer allocator.free(headers);
+    try stream.writeAll(headers);
+}
+
+fn etagMatches(if_none_match: ?[]const u8, etag: []const u8) bool {
+    const header = if_none_match orelse return false;
+    var values = std.mem.splitScalar(u8, header, ',');
+    while (values.next()) |raw_value| {
+        var value = std.mem.trim(u8, raw_value, " \t");
+        if (std.mem.eql(u8, value, "*")) return true;
+        if (value.len >= 2 and std.ascii.eqlIgnoreCase(value[0..2], "W/")) {
+            value = std.mem.trim(u8, value[2..], " \t");
+        }
+        if (std.mem.eql(u8, value, etag)) return true;
+    }
+    return false;
+}
+
+fn staticAssetEtag(comptime body: []const u8) []const u8 {
+    return std.fmt.comptimePrint("\"{x}\"", .{body.len});
 }
 
 fn resolveByteRange(range: ByteRange, len: usize) ?ResolvedRange {
@@ -865,32 +909,56 @@ const highlight_init_js = @embedFile("web/highlight/init.js");
 const diff_js = @embedFile("web/diff.js");
 const merge_js = @embedFile("web/merge.js");
 
-const FontAsset = struct {
-    path: []const u8,
-    body: []const u8,
-};
+fn textVendorAsset(comptime path: []const u8, comptime content_type: []const u8, comptime body: []const u8) VendorAsset {
+    return vendorAsset(path, content_type, body, false);
+}
 
-const katex_fonts = [_]FontAsset{
-    .{ .path = "/vendor/katex/fonts/KaTeX_AMS-Regular.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_AMS-Regular.woff2") },
-    .{ .path = "/vendor/katex/fonts/KaTeX_Caligraphic-Bold.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Caligraphic-Bold.woff2") },
-    .{ .path = "/vendor/katex/fonts/KaTeX_Caligraphic-Regular.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Caligraphic-Regular.woff2") },
-    .{ .path = "/vendor/katex/fonts/KaTeX_Fraktur-Bold.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Fraktur-Bold.woff2") },
-    .{ .path = "/vendor/katex/fonts/KaTeX_Fraktur-Regular.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Fraktur-Regular.woff2") },
-    .{ .path = "/vendor/katex/fonts/KaTeX_Main-Bold.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Main-Bold.woff2") },
-    .{ .path = "/vendor/katex/fonts/KaTeX_Main-BoldItalic.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Main-BoldItalic.woff2") },
-    .{ .path = "/vendor/katex/fonts/KaTeX_Main-Italic.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Main-Italic.woff2") },
-    .{ .path = "/vendor/katex/fonts/KaTeX_Main-Regular.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Main-Regular.woff2") },
-    .{ .path = "/vendor/katex/fonts/KaTeX_Math-BoldItalic.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Math-BoldItalic.woff2") },
-    .{ .path = "/vendor/katex/fonts/KaTeX_Math-Italic.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Math-Italic.woff2") },
-    .{ .path = "/vendor/katex/fonts/KaTeX_SansSerif-Bold.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_SansSerif-Bold.woff2") },
-    .{ .path = "/vendor/katex/fonts/KaTeX_SansSerif-Italic.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_SansSerif-Italic.woff2") },
-    .{ .path = "/vendor/katex/fonts/KaTeX_SansSerif-Regular.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_SansSerif-Regular.woff2") },
-    .{ .path = "/vendor/katex/fonts/KaTeX_Script-Regular.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Script-Regular.woff2") },
-    .{ .path = "/vendor/katex/fonts/KaTeX_Size1-Regular.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Size1-Regular.woff2") },
-    .{ .path = "/vendor/katex/fonts/KaTeX_Size2-Regular.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Size2-Regular.woff2") },
-    .{ .path = "/vendor/katex/fonts/KaTeX_Size3-Regular.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Size3-Regular.woff2") },
-    .{ .path = "/vendor/katex/fonts/KaTeX_Size4-Regular.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Size4-Regular.woff2") },
-    .{ .path = "/vendor/katex/fonts/KaTeX_Typewriter-Regular.woff2", .body = @embedFile("web/vendor/katex/fonts/KaTeX_Typewriter-Regular.woff2") },
+fn fontVendorAsset(comptime path: []const u8, comptime body: []const u8) VendorAsset {
+    return vendorAsset(path, "font/woff2", body, true);
+}
+
+fn vendorAsset(
+    comptime path: []const u8,
+    comptime content_type: []const u8,
+    comptime body: []const u8,
+    comptime binary: bool,
+) VendorAsset {
+    return .{
+        .path = path,
+        .content_type = content_type,
+        .body = body,
+        .etag = staticAssetEtag(body),
+        .binary = binary,
+    };
+}
+
+const vendor_assets = [_]VendorAsset{
+    textVendorAsset("/vendor/marked/marked.umd.js", "application/javascript", marked_js),
+    textVendorAsset("/vendor/dompurify/purify.min.js", "application/javascript", dompurify_js),
+    textVendorAsset("/vendor/katex/katex.min.js", "application/javascript", katex_js),
+    textVendorAsset("/vendor/katex/auto-render.min.js", "application/javascript", katex_auto_render_js),
+    textVendorAsset("/vendor/katex/katex.min.css", "text/css", katex_css),
+    textVendorAsset("/vendor/mermaid/mermaid.min.js", "application/javascript", mermaid_js),
+    fontVendorAsset("/vendor/katex/fonts/KaTeX_AMS-Regular.woff2", @embedFile("web/vendor/katex/fonts/KaTeX_AMS-Regular.woff2")),
+    fontVendorAsset("/vendor/katex/fonts/KaTeX_Caligraphic-Bold.woff2", @embedFile("web/vendor/katex/fonts/KaTeX_Caligraphic-Bold.woff2")),
+    fontVendorAsset("/vendor/katex/fonts/KaTeX_Caligraphic-Regular.woff2", @embedFile("web/vendor/katex/fonts/KaTeX_Caligraphic-Regular.woff2")),
+    fontVendorAsset("/vendor/katex/fonts/KaTeX_Fraktur-Bold.woff2", @embedFile("web/vendor/katex/fonts/KaTeX_Fraktur-Bold.woff2")),
+    fontVendorAsset("/vendor/katex/fonts/KaTeX_Fraktur-Regular.woff2", @embedFile("web/vendor/katex/fonts/KaTeX_Fraktur-Regular.woff2")),
+    fontVendorAsset("/vendor/katex/fonts/KaTeX_Main-Bold.woff2", @embedFile("web/vendor/katex/fonts/KaTeX_Main-Bold.woff2")),
+    fontVendorAsset("/vendor/katex/fonts/KaTeX_Main-BoldItalic.woff2", @embedFile("web/vendor/katex/fonts/KaTeX_Main-BoldItalic.woff2")),
+    fontVendorAsset("/vendor/katex/fonts/KaTeX_Main-Italic.woff2", @embedFile("web/vendor/katex/fonts/KaTeX_Main-Italic.woff2")),
+    fontVendorAsset("/vendor/katex/fonts/KaTeX_Main-Regular.woff2", @embedFile("web/vendor/katex/fonts/KaTeX_Main-Regular.woff2")),
+    fontVendorAsset("/vendor/katex/fonts/KaTeX_Math-BoldItalic.woff2", @embedFile("web/vendor/katex/fonts/KaTeX_Math-BoldItalic.woff2")),
+    fontVendorAsset("/vendor/katex/fonts/KaTeX_Math-Italic.woff2", @embedFile("web/vendor/katex/fonts/KaTeX_Math-Italic.woff2")),
+    fontVendorAsset("/vendor/katex/fonts/KaTeX_SansSerif-Bold.woff2", @embedFile("web/vendor/katex/fonts/KaTeX_SansSerif-Bold.woff2")),
+    fontVendorAsset("/vendor/katex/fonts/KaTeX_SansSerif-Italic.woff2", @embedFile("web/vendor/katex/fonts/KaTeX_SansSerif-Italic.woff2")),
+    fontVendorAsset("/vendor/katex/fonts/KaTeX_SansSerif-Regular.woff2", @embedFile("web/vendor/katex/fonts/KaTeX_SansSerif-Regular.woff2")),
+    fontVendorAsset("/vendor/katex/fonts/KaTeX_Script-Regular.woff2", @embedFile("web/vendor/katex/fonts/KaTeX_Script-Regular.woff2")),
+    fontVendorAsset("/vendor/katex/fonts/KaTeX_Size1-Regular.woff2", @embedFile("web/vendor/katex/fonts/KaTeX_Size1-Regular.woff2")),
+    fontVendorAsset("/vendor/katex/fonts/KaTeX_Size2-Regular.woff2", @embedFile("web/vendor/katex/fonts/KaTeX_Size2-Regular.woff2")),
+    fontVendorAsset("/vendor/katex/fonts/KaTeX_Size3-Regular.woff2", @embedFile("web/vendor/katex/fonts/KaTeX_Size3-Regular.woff2")),
+    fontVendorAsset("/vendor/katex/fonts/KaTeX_Size4-Regular.woff2", @embedFile("web/vendor/katex/fonts/KaTeX_Size4-Regular.woff2")),
+    fontVendorAsset("/vendor/katex/fonts/KaTeX_Typewriter-Regular.woff2", @embedFile("web/vendor/katex/fonts/KaTeX_Typewriter-Regular.woff2")),
 };
 
 test "web request parser separates method path and body" {
@@ -919,4 +987,23 @@ test "web request parser accepts byte ranges" {
     try std.testing.expect(request.range != null);
     try std.testing.expectEqual(@as(?usize, 10), request.range.?.start);
     try std.testing.expectEqual(@as(?usize, 99), request.range.?.end);
+}
+
+test "web request parser accepts cache validators" {
+    const raw =
+        "GET /vendor/marked/marked.umd.js HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1\r\n" ++
+        "If-None-Match: \"asset-etag\"\r\n" ++
+        "\r\n";
+    const request = try parseHttpRequest(raw);
+    try std.testing.expectEqualStrings("GET", request.method);
+    try std.testing.expect(request.if_none_match != null);
+    try std.testing.expectEqualStrings("\"asset-etag\"", request.if_none_match.?);
+}
+
+test "web static asset etag matcher handles lists and weak tags" {
+    try std.testing.expect(etagMatches("\"old\", \"asset-etag\"", "\"asset-etag\""));
+    try std.testing.expect(etagMatches("W/\"asset-etag\"", "\"asset-etag\""));
+    try std.testing.expect(etagMatches("*", "\"asset-etag\""));
+    try std.testing.expect(!etagMatches("\"different\"", "\"asset-etag\""));
 }

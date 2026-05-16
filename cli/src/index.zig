@@ -3,6 +3,7 @@ const std = @import("std");
 const errors = @import("errors.zig");
 const event_mod = @import("event.zig");
 const git = @import("git.zig");
+const inbox_commit = @import("inbox_commit.zig");
 const index_event_row = @import("index/event_row.zig");
 const index_projection = @import("index/projection.zig");
 const index_query = @import("index/query.zig");
@@ -145,17 +146,15 @@ const IndexAdmission = struct {
     allocator: Allocator,
     expected_repo_id: ?[]const u8,
     observed_repo_id: ?[]u8 = null,
-    actor_seqs: std.BufSet,
+    actor_seqs: event_mod.ActorSeqAdmissionTracker,
     idempotency_keys: std.BufSet,
-    actor_last_seq: std.StringHashMap(i64),
 
     fn init(allocator: Allocator, expected_repo_id: ?[]const u8) IndexAdmission {
         return .{
             .allocator = allocator,
             .expected_repo_id = expected_repo_id,
-            .actor_seqs = std.BufSet.init(allocator),
+            .actor_seqs = event_mod.ActorSeqAdmissionTracker.init(allocator),
             .idempotency_keys = std.BufSet.init(allocator),
-            .actor_last_seq = std.StringHashMap(i64).init(allocator),
         };
     }
 
@@ -163,9 +162,6 @@ const IndexAdmission = struct {
         if (self.observed_repo_id) |repo_id| self.allocator.free(repo_id);
         self.actor_seqs.deinit();
         self.idempotency_keys.deinit();
-        var keys = self.actor_last_seq.keyIterator();
-        while (keys.next()) |key| self.allocator.free(key.*);
-        self.actor_last_seq.deinit();
     }
 
     fn accept(self: *IndexAdmission, envelope: ValidatedEnvelope) !bool {
@@ -177,30 +173,10 @@ const IndexAdmission = struct {
             self.observed_repo_id = try self.allocator.dupe(u8, envelope.repo_id);
         }
 
-        const seq_key = try std.fmt.allocPrint(self.allocator, "{d}:{s}\x1f{d}:{s}\x1f{d}", .{
-            envelope.actor_principal.len,
-            envelope.actor_principal,
-            envelope.actor_device.len,
-            envelope.actor_device,
-            envelope.seq,
-        });
-        defer self.allocator.free(seq_key);
-        if (self.actor_seqs.contains(seq_key)) return false;
-        try self.actor_seqs.insert(seq_key);
-
-        const actor_key = try std.fmt.allocPrint(self.allocator, "{d}:{s}\x1f{d}:{s}", .{
-            envelope.actor_principal.len,
-            envelope.actor_principal,
-            envelope.actor_device.len,
-            envelope.actor_device,
-        });
-        errdefer self.allocator.free(actor_key);
-        const seq_entry = try self.actor_last_seq.getOrPut(actor_key);
-        if (seq_entry.found_existing) {
-            self.allocator.free(actor_key);
-            if (envelope.seq <= seq_entry.value_ptr.*) return false;
+        switch (try self.actor_seqs.accept(envelope.actor_principal, envelope.actor_device, envelope.seq)) {
+            .accepted => {},
+            .duplicate, .stale => return false,
         }
-        seq_entry.value_ptr.* = envelope.seq;
 
         const idem_key = try std.fmt.allocPrint(self.allocator, "{d}:{s}\x1f{d}:{s}", .{
             envelope.repo_id.len,
@@ -224,30 +200,7 @@ const IndexAdmission = struct {
             self.observed_repo_id = try self.allocator.dupe(u8, envelope.repo_id);
         }
 
-        const seq_key = try std.fmt.allocPrint(self.allocator, "{d}:{s}\x1f{d}:{s}\x1f{d}", .{
-            envelope.actor_principal.len,
-            envelope.actor_principal,
-            envelope.actor_device.len,
-            envelope.actor_device,
-            envelope.seq,
-        });
-        defer self.allocator.free(seq_key);
-        if (!self.actor_seqs.contains(seq_key)) try self.actor_seqs.insert(seq_key);
-
-        const actor_key = try std.fmt.allocPrint(self.allocator, "{d}:{s}\x1f{d}:{s}", .{
-            envelope.actor_principal.len,
-            envelope.actor_principal,
-            envelope.actor_device.len,
-            envelope.actor_device,
-        });
-        errdefer self.allocator.free(actor_key);
-        const seq_entry = try self.actor_last_seq.getOrPut(actor_key);
-        if (seq_entry.found_existing) {
-            self.allocator.free(actor_key);
-            if (envelope.seq > seq_entry.value_ptr.*) seq_entry.value_ptr.* = envelope.seq;
-        } else {
-            seq_entry.value_ptr.* = envelope.seq;
-        }
+        try self.actor_seqs.rememberMax(envelope.actor_principal, envelope.actor_device, envelope.seq);
 
         const idem_key = try std.fmt.allocPrint(self.allocator, "{d}:{s}\x1f{d}:{s}", .{
             envelope.repo_id.len,
@@ -995,7 +948,11 @@ fn loadSnapshotCandidate(
     const tmp_path = try std.fmt.allocPrint(allocator, "{s}.snapshot.{s}.tmp", .{ repo.index_path, ref.oid[0..@min(ref.oid.len, 12)] });
     defer allocator.free(tmp_path);
     std.fs.cwd().deleteFile(tmp_path) catch {};
-    errdefer std.fs.cwd().deleteFile(tmp_path) catch {};
+    index_sqlite.deleteSidecarFiles(allocator, tmp_path);
+    errdefer {
+        std.fs.cwd().deleteFile(tmp_path) catch {};
+        index_sqlite.deleteSidecarFiles(allocator, tmp_path);
+    }
     try writeFileBytes(tmp_path, index_bytes);
 
     {
@@ -1019,7 +976,9 @@ fn loadSnapshotCandidate(
         }
     }
 
+    index_sqlite.deleteSidecarFiles(allocator, repo.index_path);
     try std.fs.cwd().rename(tmp_path, repo.index_path);
+    index_sqlite.deleteSidecarFiles(allocator, repo.index_path);
     return .{
         .allocator = allocator,
         .ref = try allocator.dupe(u8, ref.ref),
@@ -1106,15 +1065,31 @@ fn writeFileBytes(path: []const u8, bytes: []const u8) !void {
     try file.writeAll(bytes);
 }
 
+fn standaloneIndexBytes(allocator: Allocator, repo: Repo, limits: SnapshotLimits) ![]u8 {
+    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.snapshot-copy.tmp", .{repo.index_path});
+    defer allocator.free(tmp_path);
+    std.fs.cwd().deleteFile(tmp_path) catch {};
+    index_sqlite.deleteSidecarFiles(allocator, tmp_path);
+    defer {
+        std.fs.cwd().deleteFile(tmp_path) catch {};
+        index_sqlite.deleteSidecarFiles(allocator, tmp_path);
+    }
+
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    try db.backupToFile(tmp_path);
+
+    const stat = std.fs.cwd().statFile(tmp_path) catch return error.FileNotFound;
+    if (stat.size == 0) return error.InvalidSnapshot;
+    if (limits.max_tree_bytes != 0 and stat.size > limits.max_tree_bytes) return error.FileTooBig;
+
+    return try std.fs.cwd().readFileAlloc(allocator, tmp_path, snapshotMaxOutputBytes(limits));
+}
+
 fn createIndexSnapshot(allocator: Allocator, repo: Repo, refs_raw: []const u8, limits: SnapshotLimits) !void {
     if (std.mem.trim(u8, refs_raw, " \t\r\n").len == 0) return;
 
-    const stat = std.fs.cwd().statFile(repo.index_path) catch return;
-    if (stat.size == 0) return;
-    if (limits.max_tree_bytes != 0 and stat.size > limits.max_tree_bytes) return;
-
-    const max_bytes = snapshotMaxOutputBytes(limits);
-    const index_bytes = std.fs.cwd().readFileAlloc(allocator, repo.index_path, max_bytes) catch return;
+    const index_bytes = standaloneIndexBytes(allocator, repo, limits) catch return;
     defer allocator.free(index_bytes);
 
     const manifest = try buildSnapshotManifest(allocator, refs_raw);
@@ -1281,7 +1256,7 @@ fn indexRefEvents(
         "log",
         "--first-parent",
         "--reverse",
-        "--format=%H%x00%T%x00%P%x00%s%x00%b%x1e",
+        inbox_commit.log_format,
         target,
     });
     defer allocator.free(log);
@@ -1290,39 +1265,24 @@ fn indexRefEvents(
     var expected_first_parent: ?[]const u8 = if (base) |base_oid| base_oid else genesis_oid;
     var records = std.mem.splitScalar(u8, log, 0x1e);
     while (records.next()) |record_raw| {
-        const record = std.mem.trim(u8, record_raw, "\r\n");
-        if (record.len == 0) continue;
+        const record = inbox_commit.parseRecord(record_raw) orelse continue;
 
-        const first = std.mem.indexOfScalar(u8, record, 0) orelse continue;
-        const second_rel = std.mem.indexOfScalar(u8, record[first + 1 ..], 0) orelse continue;
-        const second = first + 1 + second_rel;
-        const third_rel = std.mem.indexOfScalar(u8, record[second + 1 ..], 0) orelse continue;
-        const third = second + 1 + third_rel;
-        const fourth_rel = std.mem.indexOfScalar(u8, record[third + 1 ..], 0) orelse continue;
-        const fourth = third + 1 + fourth_rel;
+        if (record.commit.len == 0) continue;
+        defer expected_first_parent = record.commit;
 
-        const commit = std.mem.trim(u8, record[0..first], " \t\r\n");
-        const tree = std.mem.trim(u8, record[first + 1 .. second], " \t\r\n");
-        const parents = std.mem.trim(u8, record[second + 1 .. third], " \t\r\n");
-        const subject = record[third + 1 .. fourth];
-        const body = std.mem.trim(u8, record[fourth + 1 ..], " \t\r\n");
-
-        if (commit.len == 0) continue;
-        defer expected_first_parent = commit;
-
-        const empty_tree_ok = std.mem.eql(u8, tree, empty_tree);
+        const empty_tree_ok = std.mem.eql(u8, record.tree, empty_tree);
         if (!empty_tree_ok) continue;
-        if (subject.len > git.max_event_subject_bytes) continue;
-        if (body.len > git.max_event_body_bytes) continue;
-        if (!firstParentMatches(parents, expected_first_parent)) continue;
-        if (!(try eventParentHashesMatch(allocator, parents, body))) continue;
-        if (!(try verifyCommitSignatureQuiet(allocator, commit))) continue;
+        if (record.subject.len > git.max_event_subject_bytes) continue;
+        if (record.body.len > git.max_event_body_bytes) continue;
+        if (!firstParentMatches(record.parents, expected_first_parent)) continue;
+        if (!(try eventParentHashesMatch(allocator, record.parents, record.body))) continue;
+        if (!(try verifyCommitSignatureQuiet(allocator, record.commit))) continue;
 
-        var envelope = parseValidatedEnvelope(allocator, body) catch continue;
+        var envelope = parseValidatedEnvelope(allocator, record.body) catch continue;
         defer envelope.deinit();
         if (!(try admission.accept(envelope))) continue;
 
-        try insertValidatedIndexedEvent(event_stmt, ref, commit, tree, subject, body, envelope);
+        try insertValidatedIndexedEvent(event_stmt, ref, record.commit, record.tree, record.subject, record.body, envelope);
         count += 1;
     }
 
