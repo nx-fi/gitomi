@@ -879,10 +879,10 @@ pub fn renderIndexingPageIfStale(
     return_target: []const u8,
 ) !?[]u8 {
     if (index.isIndexFresh(allocator, repo) catch false) return null;
-    return try renderIndexingPage(allocator, repo, title, active, return_target);
+    return try renderIndexingPopoverPage(allocator, repo, title, active, return_target);
 }
 
-fn renderIndexingPage(
+fn renderIndexingPopoverPage(
     allocator: Allocator,
     repo: Repo,
     title: []const u8,
@@ -894,12 +894,12 @@ fn renderIndexingPage(
 
     try appendShellStart(&buf, allocator, repo, title, active);
     try buf.appendSlice(allocator,
-        \\<section class="panel indexing-panel">
+        \\<section class="indexing-popover" role="dialog" aria-modal="false" aria-labelledby="indexing-popover-title" data-index-popover>
         \\  <div class="indexing-cue">
         \\    <span class="index-spinner-wrap" aria-hidden="true"><span class="index-spinner"></span></span>
         \\    <div class="indexing-copy">
         \\      <p class="eyebrow">Index refresh</p>
-        \\      <h1>Updating Gitomi index</h1>
+        \\      <h2 id="indexing-popover-title">Updating Gitomi index</h2>
         \\      <p class="muted">Reading Gitomi events and refreshing local projections. This page will continue automatically.</p>
         \\      <p class="indexing-status" role="status" aria-live="polite" data-index-status>Starting index rebuild...</p>
         \\    </div>
