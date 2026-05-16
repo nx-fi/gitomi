@@ -10,15 +10,6 @@ pub const default_port = 12655;
 pub const default_read_timeout_ms = 30_000;
 pub const default_write_timeout_ms = 30_000;
 
-pub const TlsOptions = struct {
-    cert_path: []const u8,
-    key_path: []const u8,
-};
-
-pub const Observability = struct {
-    access_log: bool = true,
-};
-
 pub const Options = struct {
     host: []const u8 = default_host,
     port: u16 = default_port,
@@ -28,9 +19,6 @@ pub const Options = struct {
     port_attempt_limit: usize = default_port_attempt_limit,
     read_timeout_ms: ?u32 = default_read_timeout_ms,
     write_timeout_ms: ?u32 = default_write_timeout_ms,
-    keep_alive_max_requests: usize = 100,
-    tls: ?TlsOptions = null,
-    observability: Observability = .{},
 };
 
 pub fn ConnectionHandler(comptime Context: type) type {
@@ -42,7 +30,6 @@ pub fn bindHost(options: Options) []const u8 {
 }
 
 pub fn listen(bind_host: []const u8, options: Options) !std.net.Server {
-    if (options.tls != null) return error.TlsUnsupported;
     var port = options.port;
     var attempts: usize = 0;
     while (true) {
@@ -140,18 +127,18 @@ pub fn readHttpRequestLimit(allocator: Allocator, stream: std.net.Stream, max_le
         const header_end = header_end_seen orelse std.mem.indexOf(u8, raw.items, "\r\n\r\n");
         if (header_end) |end| {
             header_end_seen = end;
-            const body_start = end + 4;
+            const body_start = std.math.add(usize, end, 4) catch return error.RequestTooLarge;
+            if (body_start > max_len) return error.RequestTooLarge;
             switch (try request.readPlan(raw.items[0..end])) {
                 .none => expected_len = body_start,
                 .content_length => |content_len| {
+                    if (content_len > max_len - body_start) return error.RequestTooLarge;
                     expected_len = body_start + content_len;
-                    if (expected_len.? > max_len) return error.RequestTooLarge;
                 },
                 .chunked => {
-                    if (body_start > max_len) return error.RequestTooLarge;
                     if (try request.chunkedBodyFrameLength(raw.items[body_start..], max_len - body_start)) |frame| {
+                        if (frame.encoded_len > max_len - body_start) return error.RequestTooLarge;
                         expected_len = body_start + frame.encoded_len;
-                        if (expected_len.? > max_len) return error.RequestTooLarge;
                     }
                 },
             }

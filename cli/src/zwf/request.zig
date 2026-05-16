@@ -273,13 +273,18 @@ pub const Request = struct {
 
     pub fn acceptsGzip(self: Request) bool {
         const value = self.headerValue("accept-encoding") orelse return false;
+        var wildcard_allowed = false;
         var encodings = std.mem.splitScalar(u8, value, ',');
         while (encodings.next()) |raw_encoding| {
             const trimmed = std.mem.trim(u8, raw_encoding, " \t");
+            if (trimmed.len == 0) continue;
             const semicolon = std.mem.indexOfScalar(u8, trimmed, ';') orelse trimmed.len;
-            if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, trimmed[0..semicolon], " \t"), "gzip")) return true;
+            const token = std.mem.trim(u8, trimmed[0..semicolon], " \t");
+            const allowed = acceptEncodingAllows(trimmed[semicolon..]);
+            if (std.ascii.eqlIgnoreCase(token, "gzip")) return allowed;
+            if (std.mem.eql(u8, token, "*")) wildcard_allowed = allowed;
         }
-        return false;
+        return wildcard_allowed;
     }
 
     pub fn param(self: Request, name: []const u8) ?[]const u8 {
@@ -310,7 +315,7 @@ fn parseWithAllocator(allocator: ?Allocator, raw: []const u8) !Request {
     const request_line_info = try parseRequestLine(request_line);
     try validateHeaderBlock(headers.raw);
 
-    const body_start = header_end + 4;
+    const body_start = std.math.add(usize, header_end, 4) catch return error.BadRequest;
     const plan = try readPlanFromHeaders(headers);
     var body_owned: ?[]u8 = null;
     errdefer if (body_owned) |owned| if (allocator) |alloc| alloc.free(owned);
@@ -318,8 +323,9 @@ fn parseWithAllocator(allocator: ?Allocator, raw: []const u8) !Request {
     const body = switch (plan) {
         .none => raw[body_start..body_start],
         .content_length => |content_len| blk: {
-            if (raw.len < body_start + content_len) return error.BadRequest;
-            break :blk raw[body_start .. body_start + content_len];
+            const body_end = std.math.add(usize, body_start, content_len) catch return error.RequestTooLarge;
+            if (raw.len < body_end) return error.BadRequest;
+            break :blk raw[body_start..body_end];
         },
         .chunked => blk: {
             const alloc = allocator orelse return error.ChunkedBodyRequiresAllocator;
@@ -394,23 +400,25 @@ pub fn chunkedBodyFrameLength(body: []const u8, max_decoded_len: usize) !?Chunke
         const line_end = std.mem.indexOfPos(u8, body, encoded_i, "\r\n") orelse return null;
         const size_line = body[encoded_i..line_end];
         const chunk_size = try parseChunkSizeLine(size_line);
-        encoded_i = line_end + 2;
+        encoded_i = std.math.add(usize, line_end, 2) catch return error.RequestTooLarge;
 
         if (chunk_size == 0) {
             while (true) {
                 const trailer_end = std.mem.indexOfPos(u8, body, encoded_i, "\r\n") orelse return null;
                 const trailer = body[encoded_i..trailer_end];
-                encoded_i = trailer_end + 2;
+                encoded_i = std.math.add(usize, trailer_end, 2) catch return error.RequestTooLarge;
                 if (trailer.len == 0) return .{ .encoded_len = encoded_i, .decoded_len = decoded_len };
                 try validateHeaderLine(trailer);
             }
         }
 
-        if (decoded_len > max_decoded_len - chunk_size) return error.RequestTooLarge;
-        decoded_len += chunk_size;
-        if (body.len < encoded_i + chunk_size + 2) return null;
-        if (!std.mem.eql(u8, body[encoded_i + chunk_size .. encoded_i + chunk_size + 2], "\r\n")) return error.BadRequest;
-        encoded_i += chunk_size + 2;
+        if (decoded_len > max_decoded_len or chunk_size > max_decoded_len - decoded_len) return error.RequestTooLarge;
+        decoded_len = std.math.add(usize, decoded_len, chunk_size) catch return error.RequestTooLarge;
+        const chunk_end = std.math.add(usize, encoded_i, chunk_size) catch return error.RequestTooLarge;
+        const crlf_end = std.math.add(usize, chunk_end, 2) catch return error.RequestTooLarge;
+        if (body.len < crlf_end) return null;
+        if (!std.mem.eql(u8, body[chunk_end..crlf_end], "\r\n")) return error.BadRequest;
+        encoded_i = crlf_end;
     }
 }
 
@@ -424,12 +432,47 @@ pub fn decodeChunkedBodyOwned(allocator: Allocator, encoded: []const u8, max_dec
     while (true) {
         const line_end = std.mem.indexOfPos(u8, encoded, encoded_i, "\r\n").?;
         const chunk_size = try parseChunkSizeLine(encoded[encoded_i..line_end]);
-        encoded_i = line_end + 2;
+        encoded_i = std.math.add(usize, line_end, 2) catch return error.BadRequest;
         if (chunk_size == 0) break;
-        try out.appendSlice(allocator, encoded[encoded_i .. encoded_i + chunk_size]);
-        encoded_i += chunk_size + 2;
+        const chunk_end = std.math.add(usize, encoded_i, chunk_size) catch return error.BadRequest;
+        try out.appendSlice(allocator, encoded[encoded_i..chunk_end]);
+        encoded_i = std.math.add(usize, chunk_end, 2) catch return error.BadRequest;
     }
     return out.toOwnedSlice(allocator);
+}
+
+fn acceptEncodingAllows(parameters: []const u8) bool {
+    var parts = std.mem.splitScalar(u8, parameters, ';');
+    while (parts.next()) |raw_part| {
+        if (raw_part.len == 0) continue;
+        const equals = std.mem.indexOfScalar(u8, raw_part, '=') orelse continue;
+        const name = std.mem.trim(u8, raw_part[0..equals], " \t");
+        if (!std.ascii.eqlIgnoreCase(name, "q")) continue;
+        const value = std.mem.trim(u8, raw_part[equals + 1 ..], " \t");
+        return qValueAllows(value);
+    }
+    return true;
+}
+
+fn qValueAllows(value: []const u8) bool {
+    if (value.len == 0) return false;
+    if (std.mem.eql(u8, value, "0")) return false;
+    if (std.mem.startsWith(u8, value, "0.")) {
+        var has_nonzero = false;
+        for (value[2..]) |c| {
+            if (c < '0' or c > '9') return false;
+            if (c != '0') has_nonzero = true;
+        }
+        return has_nonzero;
+    }
+    if (std.mem.eql(u8, value, "1")) return true;
+    if (std.mem.startsWith(u8, value, "1.")) {
+        for (value[2..]) |c| {
+            if (c != '0') return false;
+        }
+        return true;
+    }
+    return false;
 }
 
 fn parseChunkSizeLine(line: []const u8) !usize {
@@ -523,13 +566,7 @@ fn isToken(value: []const u8) bool {
 fn isTokenChar(c: u8) bool {
     return switch (c) {
         '!' => true,
-        '#'...'\'',
-        '*'...'+',
-        '-'...'.',
-        '0'...'9',
-        'A'...'Z',
-        '^'...'z',
-        '|'...'~' => true,
+        '#'...'\'', '*'...'+', '-'...'.', '0'...'9', 'A'...'Z', '^'...'z', '|'...'~' => true,
         else => false,
     };
 }
@@ -720,6 +757,14 @@ test "request parser rejects malformed headers and duplicate content length" {
     ));
 }
 
+test "request parser rejects overflowing content length arithmetic" {
+    const raw =
+        "POST / HTTP/1.1\r\nContent-Length: " ++
+        std.fmt.comptimePrint("{d}", .{std.math.maxInt(usize)}) ++
+        "\r\n\r\n";
+    try std.testing.expectError(error.RequestTooLarge, Request.parse(raw));
+}
+
 test "request parser decodes chunked bodies in owned mode" {
     const raw =
         "POST /upload HTTP/1.1\r\n" ++
@@ -731,6 +776,10 @@ test "request parser decodes chunked bodies in owned mode" {
     defer parsed.deinit(std.testing.allocator);
     try std.testing.expectEqual(Method.POST, parsed.method);
     try std.testing.expectEqualStrings("hello world", parsed.body);
+}
+
+test "chunked body framing checks decoded length before arithmetic" {
+    try std.testing.expectError(error.RequestTooLarge, chunkedBodyFrameLength("5\r\nhello\r\n0\r\n\r\n", 4));
 }
 
 test "request helper parses cookies and keep alive tokens" {
@@ -745,6 +794,32 @@ test "request helper parses cookies and keep alive tokens" {
     const sid = try parsed.cookieValueOwned(std.testing.allocator, "sid");
     defer if (sid) |value| std.testing.allocator.free(value);
     try std.testing.expectEqualStrings("abc123", sid.?);
+}
+
+test "request helper honors accept encoding q zero" {
+    const refused =
+        "GET / HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1\r\n" ++
+        "Accept-Encoding: br, gzip;q=0\r\n" ++
+        "\r\n";
+    const refused_parsed = try Request.parse(refused);
+    try std.testing.expect(!refused_parsed.acceptsGzip());
+
+    const wildcard =
+        "GET / HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1\r\n" ++
+        "Accept-Encoding: br, *;q=0.5\r\n" ++
+        "\r\n";
+    const wildcard_parsed = try Request.parse(wildcard);
+    try std.testing.expect(wildcard_parsed.acceptsGzip());
+
+    const allowed =
+        "GET / HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1\r\n" ++
+        "Accept-Encoding: gzip; q=0.5\r\n" ++
+        "\r\n";
+    const allowed_parsed = try Request.parse(allowed);
+    try std.testing.expect(allowed_parsed.acceptsGzip());
 }
 
 test "form parser decodes url encoded values" {
