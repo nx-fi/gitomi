@@ -42,6 +42,9 @@ pub const HttpRequest = struct {
     target: []const u8,
     path: []const u8,
     body: []const u8,
+    host: ?[]const u8 = null,
+    origin: ?[]const u8 = null,
+    referer: ?[]const u8 = null,
     range: ?ByteRange = null,
 };
 
@@ -592,10 +595,12 @@ fn handleActionsPage(ctx: WebContext) !void {
 }
 
 fn handleActionsRequestPost(ctx: WebContext) !void {
+    if (!try requireSameOriginActionPost(ctx)) return;
     try actions_page.handleActionsRequestPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
 }
 
 fn handleRunRequestedPost(ctx: WebContext) !void {
+    if (!try requireSameOriginActionPost(ctx)) return;
     try actions_page.handleRunRequestedPost(ctx.allocator, ctx.stream, ctx.request.body);
 }
 
@@ -680,8 +685,56 @@ pub fn parseHttpRequest(raw: []const u8) !HttpRequest {
         .target = target,
         .path = target[0..query_start],
         .body = raw[body_start .. body_start + content_len],
+        .host = parseHeaderValue(headers, "host"),
+        .origin = parseHeaderValue(headers, "origin"),
+        .referer = parseHeaderValue(headers, "referer"),
         .range = parseRangeHeader(headers),
     };
+}
+
+fn requireSameOriginActionPost(ctx: WebContext) !bool {
+    if (isSameOriginBrowserRequest(ctx.request)) return true;
+    try shared.sendPlainResponse(ctx.allocator, ctx.stream, 403, "Forbidden", "Forbidden: same-origin request required\n");
+    return false;
+}
+
+fn isSameOriginBrowserRequest(request: HttpRequest) bool {
+    const host = request.host orelse return false;
+    if (request.origin) |origin| {
+        return sourceMatchesHost(origin, host);
+    }
+    if (request.referer) |referer| {
+        return sourceMatchesHost(referer, host);
+    }
+    return false;
+}
+
+fn sourceMatchesHost(source: []const u8, host: []const u8) bool {
+    const source_host = httpSourceHost(source) orelse return false;
+    return std.ascii.eqlIgnoreCase(source_host, std.mem.trim(u8, host, " \t"));
+}
+
+fn httpSourceHost(source: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, source, " \t");
+    const rest = if (std.mem.startsWith(u8, trimmed, "http://"))
+        trimmed["http://".len..]
+    else
+        return null;
+    const end = std.mem.indexOfAny(u8, rest, "/?#") orelse rest.len;
+    if (end == 0) return null;
+    return rest[0..end];
+}
+
+fn parseHeaderValue(headers: []const u8, header_name: []const u8) ?[]const u8 {
+    var lines = std.mem.splitSequence(u8, headers, "\r\n");
+    _ = lines.next();
+    while (lines.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const name = std.mem.trim(u8, line[0..colon], " \t");
+        if (!std.ascii.eqlIgnoreCase(name, header_name)) continue;
+        return std.mem.trim(u8, line[colon + 1 ..], " \t");
+    }
+    return null;
 }
 
 pub fn parseContentLength(headers: []const u8) !usize {
@@ -905,7 +958,41 @@ test "web request parser separates method path and body" {
     try std.testing.expectEqualStrings("/issues?x=1", request.target);
     try std.testing.expectEqualStrings("/issues", request.path);
     try std.testing.expectEqualStrings("title=Smoke", request.body);
+    try std.testing.expectEqualStrings("127.0.0.1", request.host.?);
+    try std.testing.expect(request.origin == null);
+    try std.testing.expect(request.referer == null);
     try std.testing.expect(request.range == null);
+}
+
+test "actions csrf guard accepts same-origin posts" {
+    const raw =
+        "POST /actions/request HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1:12655\r\n" ++
+        "Origin: http://127.0.0.1:12655\r\n" ++
+        "Content-Length: 0\r\n" ++
+        "\r\n";
+    const request = try parseHttpRequest(raw);
+    try std.testing.expect(isSameOriginBrowserRequest(request));
+}
+
+test "actions csrf guard rejects cross-origin and missing browser source" {
+    const cross_origin =
+        "POST /actions/request HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1:12655\r\n" ++
+        "Origin: http://evil.example\r\n" ++
+        "Referer: http://127.0.0.1:12655/actions\r\n" ++
+        "Content-Length: 0\r\n" ++
+        "\r\n";
+    const cross_origin_request = try parseHttpRequest(cross_origin);
+    try std.testing.expect(!isSameOriginBrowserRequest(cross_origin_request));
+
+    const missing_source =
+        "POST /actions/request HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1:12655\r\n" ++
+        "Content-Length: 0\r\n" ++
+        "\r\n";
+    const missing_source_request = try parseHttpRequest(missing_source);
+    try std.testing.expect(!isSameOriginBrowserRequest(missing_source_request));
 }
 
 test "web request parser accepts byte ranges" {
