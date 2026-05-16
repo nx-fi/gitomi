@@ -43,6 +43,15 @@ const merge_context_radius = 15;
 const PullStateFilter = work_items.PullStateFilter;
 const PullFilters = work_items.PullListOptions;
 
+const pulls_default_page_size = 25;
+const pulls_max_page_size = 100;
+
+const PullHrefOverride = struct {
+    state: ?PullStateFilter = null,
+    page: ?usize = null,
+    per_page: ?usize = null,
+};
+
 const PullDetailTab = enum {
     conversation,
     commits,
@@ -188,6 +197,9 @@ pub fn renderPullsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]
     const counts = try work_items.loadPullCounts(&db);
     var filters = try pullFiltersFromTarget(allocator, target, requested_filter orelse .open);
     defer pullFiltersDeinit(allocator, &filters);
+    const pagination = try shared.paginationFromTarget(allocator, target, pulls_default_page_size, pulls_max_page_size);
+    filters.limit = pagination.queryLimit();
+    filters.offset = pagination.offset();
 
     try appendShellStart(&buf, allocator, repo, "Pull Requests", "pulls");
     try appendPullsToolbar(&buf, allocator, filters);
@@ -198,7 +210,12 @@ pub fn renderPullsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]
     defer stmt.deinit();
 
     var shown: usize = 0;
+    var has_next_page = false;
     while (try stmt.step()) {
+        if (shown >= pagination.per_page) {
+            has_next_page = true;
+            break;
+        }
         const row = try work_items.pullListRowFromStmt(allocator, &stmt);
         defer row.deinit(allocator);
         const task_summary = shared.markdownTaskSummary(row.body);
@@ -207,7 +224,9 @@ pub fn renderPullsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]
     }
 
     if (shown == 0) {
-        if (work_items.hasRestrictivePullFilters(filters)) {
+        if (pagination.page > 1) {
+            try appendEmptyState(&buf, allocator, "No pull requests on this page.", "Use the previous page or change filters to return to matching pull requests.");
+        } else if (work_items.hasRestrictivePullFilters(filters)) {
             try appendEmptyState(&buf, allocator, "No matching pull requests.", "Change or clear filters to widen the pull request list.");
         } else switch (filters.state) {
             .open => try appendEmptyState(&buf, allocator, "No open pull requests.", "Create a pull request from a branch with proposed changes."),
@@ -215,6 +234,10 @@ pub fn renderPullsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]
             .closed => try appendEmptyState(&buf, allocator, "No closed pull requests.", "Closed pull requests are pull requests that were closed without being merged."),
             .all => try appendEmptyState(&buf, allocator, "No pull requests yet.", "Open the first pull request from the web UI or with gt pr create."),
         }
+    }
+
+    if (shown != 0 or pagination.page > 1) {
+        try appendPullsPagination(&buf, allocator, filters, pagination, shown, has_next_page);
     }
 
     try buf.appendSlice(allocator, "</section>");
@@ -237,21 +260,45 @@ fn pullFiltersFromTarget(allocator: Allocator, target: []const u8, default_state
     var filters = PullFilters{ .state = default_state };
     errdefer pullFiltersDeinit(allocator, &filters);
 
+    filters.author = try queryTextFilterOwned(allocator, target, "author");
+    filters.label = try queryTextFilterOwned(allocator, target, "label");
+    filters.assignee = try queryTextFilterOwned(allocator, target, "assignee");
+    filters.reviewer = try queryTextFilterOwned(allocator, target, "reviewer");
+    filters.base = try queryTextFilterOwned(allocator, target, "base");
+    filters.head = try queryTextFilterOwned(allocator, target, "head");
+
     if (try queryTextFilterOwned(allocator, target, "q")) |query| {
         defer allocator.free(query);
         var parsed = try work_items.parsePullSearchQuery(allocator, query);
         defer parsed.deinit(allocator);
         if (parsed.state) |state| filters.state = state;
-        if (parsed.q) |search| {
-            filters.q = search;
-            parsed.q = null;
-        }
+        takePullFilterValue(allocator, &filters.q, &parsed.q);
+        takePullFilterValue(allocator, &filters.author, &parsed.author);
+        takePullFilterValue(allocator, &filters.label, &parsed.label);
+        takePullFilterValue(allocator, &filters.assignee, &parsed.assignee);
+        takePullFilterValue(allocator, &filters.reviewer, &parsed.reviewer);
+        takePullFilterValue(allocator, &filters.base, &parsed.base);
+        takePullFilterValue(allocator, &filters.head, &parsed.head);
     }
     return filters;
 }
 
 fn pullFiltersDeinit(allocator: Allocator, filters: *PullFilters) void {
     if (filters.q) |query| allocator.free(query);
+    if (filters.author) |value| allocator.free(value);
+    if (filters.label) |value| allocator.free(value);
+    if (filters.assignee) |value| allocator.free(value);
+    if (filters.reviewer) |value| allocator.free(value);
+    if (filters.base) |value| allocator.free(value);
+    if (filters.head) |value| allocator.free(value);
+}
+
+fn takePullFilterValue(allocator: Allocator, slot: *?[]const u8, source: *?[]u8) void {
+    if (source.*) |value| {
+        if (slot.*) |previous| allocator.free(previous);
+        slot.* = value;
+        source.* = null;
+    }
 }
 
 fn pullDetailTabFromTarget(allocator: Allocator, target: []const u8) !PullDetailTab {
@@ -271,7 +318,6 @@ fn appendPullsToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filters: Pu
         \\  <form class="issues-search" action="/pulls" method="get">
         \\    <span class="issues-search-icon" aria-hidden="true"></span>
         \\    <input type="search" name="q" value="{query}" aria-label="Search pull requests">
-        \\    <input type="hidden" name="state" value="{state}">
         \\  </form>
         \\  <div class="issues-toolbar-actions">
         \\    <button class="button secondary issue-tool-button" type="button" disabled><span class="button-icon icon-labels" aria-hidden="true"></span><span>Labels</span></button>
@@ -281,14 +327,11 @@ fn appendPullsToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filters: Pu
         \\</div>
     , .{
         .query = query,
-        .state = work_items.pullStateValue(filters.state),
     });
 }
 
 fn pullSearchInputValue(allocator: Allocator, filters: PullFilters) ![]u8 {
-    const prefix = work_items.pullSearchQuery(filters.state);
-    if (filters.q) |query| return std.fmt.allocPrint(allocator, "{s} {s}", .{ prefix, query });
-    return std.fmt.allocPrint(allocator, "{s} ", .{prefix});
+    return work_items.pullFilterQueryOwned(allocator, filters);
 }
 
 fn appendPullsListHeader(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters, counts: PullCounts) !void {
@@ -327,7 +370,7 @@ fn appendPullStateTab(
     , .{
         .classes = shared.classes("issues-state-tab", &.{shared.class("active", tab_filter == filters.state)}),
     });
-    try appendPullsHref(buf, allocator, filters, tab_filter);
+    try appendPullsHref(buf, allocator, filters, .{ .state = tab_filter });
     try appendTemplate(buf, allocator,
         \\"><span class="issue-tab-icon {icon_class}" aria-hidden="true"></span><span>{label}</span><span class="issue-count-badge">{count}</span></a>
     , .{
@@ -337,13 +380,53 @@ fn appendPullStateTab(
     });
 }
 
-fn appendPullsHref(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters, state: PullStateFilter) !void {
-    try buf.appendSlice(allocator, "/pulls?state=");
-    try shared.appendUrlEncoded(buf, allocator, work_items.pullStateValue(state));
+fn appendPullsHref(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters, override: PullHrefOverride) !void {
+    try buf.appendSlice(allocator, "/pulls");
+    var first = true;
+    try shared.appendQueryParam(buf, allocator, &first, "state", work_items.pullStateValue(override.state orelse filters.state));
     if (filters.q) |query| {
-        try buf.appendSlice(allocator, "&amp;q=");
-        try shared.appendUrlEncoded(buf, allocator, query);
+        try shared.appendQueryParam(buf, allocator, &first, "q", query);
     }
+    if (filters.author) |value| try shared.appendQueryParam(buf, allocator, &first, "author", value);
+    if (filters.label) |value| try shared.appendQueryParam(buf, allocator, &first, "label", value);
+    if (filters.assignee) |value| try shared.appendQueryParam(buf, allocator, &first, "assignee", value);
+    if (filters.reviewer) |value| try shared.appendQueryParam(buf, allocator, &first, "reviewer", value);
+    if (filters.base) |value| try shared.appendQueryParam(buf, allocator, &first, "base", value);
+    if (filters.head) |value| try shared.appendQueryParam(buf, allocator, &first, "head", value);
+    if (override.page) |page| {
+        const pagination = shared.Pagination{
+            .page = page,
+            .per_page = override.per_page orelse pulls_default_page_size,
+        };
+        try shared.appendPaginationQueryParams(buf, allocator, &first, pagination, page, pulls_default_page_size);
+    }
+}
+
+fn pullsHrefOwned(allocator: Allocator, filters: PullFilters, pagination: shared.Pagination, page: usize) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try appendPullsHref(&buf, allocator, filters, .{
+        .page = page,
+        .per_page = pagination.per_page,
+    });
+    return buf.toOwnedSlice(allocator);
+}
+
+fn appendPullsPagination(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    filters: PullFilters,
+    pagination: shared.Pagination,
+    shown: usize,
+    has_next_page: bool,
+) !void {
+    const previous_href = if (pagination.page > 1) try pullsHrefOwned(allocator, filters, pagination, pagination.page - 1) else null;
+    defer if (previous_href) |href| allocator.free(href);
+    const next_href = if (has_next_page) try pullsHrefOwned(allocator, filters, pagination, pagination.page + 1) else null;
+    defer if (next_href) |href| allocator.free(href);
+    const summary = try shared.paginationSummaryOwned(allocator, pagination, shown, null);
+    defer allocator.free(summary);
+    try shared.appendPaginationNav(buf, allocator, "Pull request pages", summary, previous_href, next_href);
 }
 
 fn appendPullListRow(
@@ -473,6 +556,7 @@ pub fn renderPullDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u
     errdefer buf.deinit(allocator);
 
     try appendShellStart(&buf, allocator, repo, detail.title, "pulls");
+    try shared.appendDetailBackButton(&buf, allocator, shared.literalHref("/pulls"), "Back to pull requests");
     try buf.appendSlice(allocator, "<section class=\"pull-detail issue-page\">");
     try appendPullPageHeader(&buf, allocator, detail, pull_ref, tab_counts, merge_status);
     try appendPullTabs(&buf, allocator, pull_ref, tab, tab_counts);
@@ -501,6 +585,7 @@ fn renderPullNotFound(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     try appendShellStart(&buf, allocator, repo, "Pull Request Not Found", "pulls");
+    try shared.appendDetailBackButton(&buf, allocator, shared.literalHref("/pulls"), "Back to pull requests");
     const detail = try std.fmt.allocPrint(allocator, "No pull request matches {s}.", .{raw_ref});
     defer allocator.free(detail);
     try appendEmptyState(&buf, allocator, "Pull request not found.", detail);
@@ -532,6 +617,7 @@ pub fn renderPullMergeEditorPage(allocator: Allocator, repo: Repo, raw_ref: []co
     errdefer buf.deinit(allocator);
 
     try appendShellStart(&buf, allocator, repo, "Resolve Conflicts", "pulls");
+    try shared.appendDetailBackButton(&buf, allocator, pullHref(pull_ref), "Back to pull request");
     if (!merge_status.hasConflicts()) {
         try appendMergeEditorEmptyState(&buf, allocator, raw_ref, "No merge conflicts detected.", "This pull request is not currently reporting file conflicts in the local repository.");
         try appendShellEnd(&buf, allocator);

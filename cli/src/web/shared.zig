@@ -66,6 +66,19 @@ pub const Button = struct {
     kind: []const u8 = "secondary",
 };
 
+pub const Pagination = struct {
+    page: usize = 1,
+    per_page: usize,
+
+    pub fn offset(self: Pagination) usize {
+        return (self.page - 1) * self.per_page;
+    }
+
+    pub fn queryLimit(self: Pagination) usize {
+        return self.per_page + 1;
+    }
+};
+
 pub fn literalHref(value: []const u8) Href {
     return .{ .literal = value };
 }
@@ -334,7 +347,7 @@ pub fn appendShellStart(
     try appendNavLink(buf, allocator, active, "code", "/", "Code", "icon-code", null);
     try appendNavLink(buf, allocator, active, "issues", "/issues", "Issues", "icon-issues", stats.issues);
     try appendNavLink(buf, allocator, active, "pulls", "/pulls", "Pull Requests", "icon-pull-request", stats.pulls);
-    try appendNavLink(buf, allocator, active, "actions", "/actions", "Workflows", "icon-workflow", null);
+    try appendNavLink(buf, allocator, active, "actions", "/workflows", "Workflows", "icon-workflow", null);
     try appendNavLink(buf, allocator, active, "projects", "/projects", "Projects", "icon-projects", null);
     try appendSettingsNavLink(buf, allocator, active);
     try buf.appendSlice(allocator,
@@ -877,6 +890,15 @@ pub fn appendButtonLink(buf: *std.ArrayList(u8), allocator: Allocator, button: B
     });
 }
 
+pub fn appendDetailBackButton(buf: *std.ArrayList(u8), allocator: Allocator, href: Href, label: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<nav class="detail-back-nav" aria-label="Detail navigation"><a class="detail-back-button" href="{href}" aria-label="{label}" title="{label}"><span class="button-icon icon-arrow-left" aria-hidden="true"></span></a></nav>
+    , .{
+        .href = href,
+        .label = label,
+    });
+}
+
 pub fn appendSectionHead(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -979,11 +1001,12 @@ fn renderIndexingPage(
     try buf.appendSlice(allocator,
         \\<section class="panel indexing-panel">
         \\  <div class="indexing-cue">
-        \\    <span class="index-spinner" aria-hidden="true"></span>
-        \\    <div>
+        \\    <span class="index-spinner-wrap" aria-hidden="true"><span class="index-spinner"></span></span>
+        \\    <div class="indexing-copy">
         \\      <p class="eyebrow">Index refresh</p>
         \\      <h1>Updating Gitomi index</h1>
         \\      <p class="muted">Reading Gitomi events and refreshing local projections. This page will continue automatically.</p>
+        \\      <p class="indexing-status" role="status" aria-live="polite" data-index-status>Starting index rebuild...</p>
         \\    </div>
         \\  </div>
         \\  <div class="index-progress" aria-hidden="true"><span></span></div>
@@ -995,9 +1018,38 @@ fn renderIndexingPage(
     try appendJsonString(&buf, allocator, return_target);
     try buf.appendSlice(allocator,
         \\;
-        \\  fetch("/index/rebuild", { cache: "no-store" }).then(function () {
+        \\  var status = document.querySelector("[data-index-status]");
+        \\  var startedAt = Date.now();
+        \\  var messages = [
+        \\    [0, "Starting index rebuild..."],
+        \\    [1500, "Scanning Gitomi refs and snapshots..."],
+        \\    [5000, "Replaying imported events into the local projection..."],
+        \\    [15000, "Still indexing. Large imports can take a few minutes."],
+        \\    [45000, "Still working. The page will open automatically when the index is ready."]
+        \\  ];
+        \\  function statusText(base) {
+        \\    var seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+        \\    return base + " " + seconds + "s elapsed.";
+        \\  }
+        \\  function updateStatus() {
+        \\    if (!status) return;
+        \\    var elapsed = Date.now() - startedAt;
+        \\    var text = messages[0][1];
+        \\    for (var i = 0; i < messages.length; i += 1) {
+        \\      if (elapsed >= messages[i][0]) text = messages[i][1];
+        \\    }
+        \\    status.textContent = statusText(text);
+        \\  }
+        \\  updateStatus();
+        \\  var statusTimer = window.setInterval(updateStatus, 2500);
+        \\  fetch("/index/rebuild", { cache: "no-store" }).then(function (response) {
+        \\    if (!response.ok) throw new Error("index rebuild failed");
+        \\    window.clearInterval(statusTimer);
+        \\    if (status) status.textContent = "Index ready. Opening page...";
         \\    window.location.replace(next);
         \\  }).catch(function () {
+        \\    window.clearInterval(statusTimer);
+        \\    if (status) status.textContent = "Index update did not finish. Retrying...";
         \\    setTimeout(function () { window.location.reload(); }, 2500);
         \\  });
         \\}());
@@ -1263,6 +1315,142 @@ pub fn appendFmt(
     try buf.appendSlice(allocator, text);
 }
 
+pub fn paginationFromTarget(allocator: Allocator, target: []const u8, default_per_page: usize, max_per_page: usize) !Pagination {
+    const page_value = try queryValueOwned(allocator, target, "page");
+    defer if (page_value) |value| allocator.free(value);
+    const per_page_value = try queryValueOwned(allocator, target, "per_page");
+    defer if (per_page_value) |value| allocator.free(value);
+
+    const per_page = parsePositiveQueryUsize(per_page_value, default_per_page, max_per_page);
+    return .{
+        .page = parsePositiveQueryUsize(page_value, 1, 1_000_000),
+        .per_page = per_page,
+    };
+}
+
+fn parsePositiveQueryUsize(raw: ?[]const u8, fallback: usize, max_value: usize) usize {
+    const value = raw orelse return fallback;
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    if (trimmed.len == 0) return fallback;
+    const parsed = std.fmt.parseUnsigned(usize, trimmed, 10) catch return fallback;
+    if (parsed == 0) return fallback;
+    return @min(parsed, max_value);
+}
+
+pub fn appendPaginationQueryParams(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    first: *bool,
+    pagination: Pagination,
+    page: usize,
+    default_per_page: usize,
+) !void {
+    if (page > 1) {
+        var page_buf: [32]u8 = undefined;
+        const value = try std.fmt.bufPrint(&page_buf, "{d}", .{page});
+        try appendQueryParam(buf, allocator, first, "page", value);
+    }
+    if (pagination.per_page != default_per_page) {
+        var per_page_buf: [32]u8 = undefined;
+        const value = try std.fmt.bufPrint(&per_page_buf, "{d}", .{pagination.per_page});
+        try appendQueryParam(buf, allocator, first, "per_page", value);
+    }
+}
+
+pub fn appendQueryParam(buf: *std.ArrayList(u8), allocator: Allocator, first: *bool, name: []const u8, value: []const u8) !void {
+    try buf.appendSlice(allocator, if (first.*) "?" else "&amp;");
+    first.* = false;
+    try appendUrlEncoded(buf, allocator, name);
+    try buf.append(allocator, '=');
+    try appendUrlEncoded(buf, allocator, value);
+}
+
+pub fn appendPaginationNav(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    aria_label: []const u8,
+    summary: []const u8,
+    previous_href: ?[]const u8,
+    next_href: ?[]const u8,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<nav class="pagination" aria-label="{aria_label}">
+        \\  <span class="pagination-summary">{summary}</span>
+        \\  <span class="pagination-actions">
+    , .{
+        .aria_label = aria_label,
+        .summary = summary,
+    });
+    try appendPaginationAction(buf, allocator, "Previous", previous_href);
+    try appendPaginationAction(buf, allocator, "Next", next_href);
+    try buf.appendSlice(allocator,
+        \\  </span>
+        \\</nav>
+    );
+}
+
+fn appendPaginationAction(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, href: ?[]const u8) !void {
+    if (href) |value| {
+        try buf.appendSlice(allocator, "<a class=\"button secondary pagination-link\" href=\"");
+        try buf.appendSlice(allocator, value);
+        try appendTemplate(buf, allocator, "\">{label}</a>", .{ .label = label });
+    } else {
+        try appendTemplate(buf, allocator, "<span class=\"button secondary pagination-link disabled\" aria-disabled=\"true\">{label}</span>", .{ .label = label });
+    }
+}
+
+pub fn paginationSummaryOwned(allocator: Allocator, pagination: Pagination, shown: usize, total: ?usize) ![]u8 {
+    if (shown == 0) return std.fmt.allocPrint(allocator, "Page {d}", .{pagination.page});
+    const first = pagination.offset() + 1;
+    const last = pagination.offset() + shown;
+    if (total) |value| {
+        return std.fmt.allocPrint(allocator, "Showing {d}-{d} of {d}", .{ first, last, value });
+    }
+    return std.fmt.allocPrint(allocator, "Showing {d}-{d}", .{ first, last });
+}
+
+pub fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const u8) !?[]u8 {
+    const query_start = std.mem.indexOfScalar(u8, target, '?') orelse return null;
+    var fields = std.mem.splitScalar(u8, target[query_start + 1 ..], '&');
+    while (fields.next()) |field| {
+        if (field.len == 0) continue;
+        const equals = std.mem.indexOfScalar(u8, field, '=') orelse field.len;
+        const raw_key = field[0..equals];
+        const raw_value = if (equals < field.len) field[equals + 1 ..] else "";
+        const key = try percentDecodeForm(allocator, raw_key);
+        defer allocator.free(key);
+        if (!std.mem.eql(u8, key, wanted_key)) continue;
+        return try percentDecodeForm(allocator, raw_value);
+    }
+    return null;
+}
+
+pub fn percentDecodeForm(allocator: Allocator, value: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var i: usize = 0;
+    while (i < value.len) {
+        const c = value[i];
+        if (c == '+') {
+            try out.append(allocator, ' ');
+            i += 1;
+        } else if (c == '%' and i + 2 < value.len) {
+            const decoded = std.fmt.parseInt(u8, value[i + 1 .. i + 3], 16) catch null;
+            if (decoded) |byte| {
+                try out.append(allocator, byte);
+                i += 3;
+            } else {
+                try out.append(allocator, c);
+                i += 1;
+            }
+        } else {
+            try out.append(allocator, c);
+            i += 1;
+        }
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 pub fn sendRedirect(allocator: Allocator, stream: std.net.Stream, location: []const u8) !void {
     const extra = try std.fmt.allocPrint(allocator, "Location: {s}\r\n", .{location});
     defer allocator.free(extra);
@@ -1391,6 +1579,32 @@ test "web template supports typed href classes and formatters" {
     });
 
     try std.testing.expectEqualStrings("<a class=\"button active\" href=\"/code?ref=feature/test&amp;path=src/a%20b.zig&amp;view=preview\">12,345 83.3%</a>", buf.items);
+}
+
+test "web pagination query parsing and params clamp values" {
+    const pagination = try paginationFromTarget(std.testing.allocator, "/issues?page=3&per_page=250", 25, 100);
+    try std.testing.expectEqual(@as(usize, 3), pagination.page);
+    try std.testing.expectEqual(@as(usize, 100), pagination.per_page);
+    try std.testing.expectEqual(@as(usize, 200), pagination.offset());
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    var first = true;
+    try appendQueryParam(&buf, std.testing.allocator, &first, "state", "open");
+    try appendPaginationQueryParams(&buf, std.testing.allocator, &first, pagination, 4, 25);
+    try std.testing.expectEqualStrings("?state=open&amp;page=4&amp;per_page=100", buf.items);
+}
+
+test "web detail back button renders accessible icon link" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendDetailBackButton(&buf, std.testing.allocator, literalHref("/issues"), "Back to issues");
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "class=\"detail-back-button\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "aria-label=\"Back to issues\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "icon-arrow-left") != null);
 }
 
 test "web avatar renders vendored nouns asset svg" {

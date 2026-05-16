@@ -383,6 +383,43 @@ main.page-code {
 main.page-code:has(.root-page-grid) {
   width: min(1280px, calc(100vw - 32px));
 }
+main.page-projects:has(.project-detail-panel) {
+  width: calc(100vw - 32px);
+  max-width: none;
+  min-height: calc(100dvh - var(--sticky-top) - 20px);
+  margin-bottom: 0;
+}
+.detail-back-nav {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  margin: -6px 0 10px;
+}
+.detail-back-button {
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+}
+.detail-back-button:hover {
+  color: var(--text);
+  background: var(--button-secondary-bg);
+  border-color: var(--border);
+  text-decoration: none;
+}
+.detail-back-button:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+.detail-back-button .button-icon {
+  width: 18px;
+  height: 18px;
+}
 .init-banner {
   display: flex;
   align-items: center;
@@ -896,6 +933,37 @@ main.page-code:has(.root-page-grid) {
 }
 .issue-list-row:hover {
   background: var(--subtle);
+}
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  color: var(--muted);
+  background: var(--panel-strong);
+  border-top: 1px solid var(--border);
+}
+.pagination-summary {
+  font-size: 12px;
+  font-weight: 700;
+}
+.pagination-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.pagination-link {
+  min-height: 32px;
+}
+.pagination-link.disabled {
+  color: var(--muted);
+  cursor: default;
+  opacity: 0.62;
+}
+.pagination-link.disabled:hover {
+  background: var(--button-secondary-bg);
+  border-color: var(--border-strong);
 }
 .issue-select-cell,
 .issue-state-cell {
@@ -3322,6 +3390,13 @@ main.page-code:has(.root-page-grid) {
   overflow: hidden;
   margin-bottom: 18px;
 }
+.project-detail-panel {
+  display: flex;
+  flex-direction: column;
+  height: calc(100dvh - var(--sticky-top) - 20px);
+  min-height: calc(100dvh - var(--sticky-top) - 20px);
+  margin-bottom: 0;
+}
 .project-create-head,
 .project-board-top {
   display: flex;
@@ -4025,7 +4100,7 @@ main.page-code:has(.root-page-grid) {
 .project-roadmap-view {
   display: grid;
   gap: 0;
-  overflow-x: auto;
+  overflow: auto;
   background: var(--panel);
 }
 .project-roadmap-scale {
@@ -4123,6 +4198,18 @@ main.page-code:has(.root-page-grid) {
   padding: 16px;
   background: color-mix(in srgb, var(--subtle) 72%, var(--panel));
 }
+.project-detail-panel > .kanban-board,
+.project-detail-panel > .project-table-view,
+.project-detail-panel > .project-roadmap-view {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.project-detail-panel > .kanban-board {
+  align-items: stretch;
+}
+.project-detail-panel > .project-table-view {
+  overflow: auto;
+}
 .kanban-column {
   position: relative;
   min-width: 288px;
@@ -4130,6 +4217,11 @@ main.page-code:has(.root-page-grid) {
   background: color-mix(in srgb, var(--subtle) 78%, var(--panel));
   border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
   border-radius: 8px;
+}
+.project-detail-panel > .kanban-board .kanban-column {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 .kanban-column.is-drop-target {
   border-color: color-mix(in srgb, var(--blue) 72%, var(--border));
@@ -4267,6 +4359,12 @@ main.page-code:has(.root-page-grid) {
   display: grid;
   gap: 8px;
   padding: 0 10px 12px;
+}
+.project-detail-panel > .kanban-board .kanban-cards {
+  flex: 1 1 auto;
+  align-content: start;
+  min-height: 0;
+  overflow-y: auto;
 }
 .kanban-card {
   min-width: 0;
@@ -5913,8 +6011,22 @@ main.page-actions {
 }
 .indexing-cue {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 18px;
+}
+.index-spinner-wrap {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  background: color-mix(in srgb, var(--green) 9%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--green) 28%, var(--border));
+  border-radius: 14px;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--panel) 72%, transparent);
+}
+.indexing-copy {
+  min-width: 0;
 }
 .indexing-cue h1 {
   margin: 0;
@@ -5925,13 +6037,37 @@ main.page-actions {
   margin: 8px 0 0;
 }
 .index-spinner {
-  flex: 0 0 auto;
+  display: block;
   width: 42px;
   height: 42px;
-  border: 4px solid var(--border);
+  border: 4px solid color-mix(in srgb, var(--green) 18%, var(--border));
   border-top-color: var(--green);
   border-radius: 50%;
   animation: index-spin 900ms linear infinite;
+}
+.indexing-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  margin-top: 14px;
+  padding: 8px 10px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--subtle) 68%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+.indexing-status::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  background: var(--green);
+  border-radius: 50%;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--green) 18%, transparent);
 }
 .index-progress {
   height: 6px;
@@ -5955,6 +6091,12 @@ main.page-actions {
   0% { transform: translateX(-110%); }
   50% { transform: translateX(95%); }
   100% { transform: translateX(275%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .index-spinner,
+  .index-progress span {
+    animation-duration: 2400ms;
+  }
 }
 .repo-head {
   display: flex;
@@ -7263,6 +7405,9 @@ a.root-file-commit:hover {
 }
 .icon-conflict {
   --button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='m15 9-6 6M9 9l6 6'/%3E%3C/g%3E%3C/svg%3E");
+}
+.icon-arrow-left {
+  --button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Cpath d='m12 19-7-7 7-7'/%3E%3Cpath d='M19 12H5'/%3E%3C/g%3E%3C/svg%3E");
 }
 .icon-chevron-up {
   --button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m18 15-6-6-6 6'/%3E%3C/svg%3E");
@@ -8930,6 +9075,16 @@ textarea {
   main.page-actions {
     width: min(100vw - 24px, 1180px);
   }
+  .indexing-panel {
+    margin-top: 24px;
+    padding: 20px;
+  }
+  .indexing-cue {
+    flex-direction: column;
+  }
+  .indexing-status {
+    display: flex;
+  }
   .actions-layout {
     grid-template-columns: 1fr;
   }
@@ -9167,6 +9322,9 @@ textarea {
   main.page-code:has(.root-page-grid) {
     width: min(100vw - 24px, 1180px);
   }
+  main.page-projects:has(.project-detail-panel) {
+    width: calc(100vw - 24px);
+  }
   .access-form-row {
     grid-template-columns: 1fr;
   }
@@ -9217,6 +9375,15 @@ textarea {
   .project-board-top {
     align-items: flex-start;
     flex-direction: column;
+  }
+  .project-detail-panel {
+    height: auto;
+    min-height: 0;
+  }
+  .project-detail-panel > .project-table-view,
+  .project-detail-panel > .project-roadmap-view,
+  .project-detail-panel > .kanban-board .kanban-cards {
+    overflow-y: visible;
   }
   .grid.two,
   .hero {

@@ -43,7 +43,7 @@ pub const Workflow = struct {
     source: WorkflowSourcePolicy,
     permissions: []KeyValuePair,
     jobs: []WorkflowJob,
-    schedules: [][]u8,
+    schedules: []WorkflowSchedule,
 
     pub fn deinit(self: *Workflow) void {
         self.allocator.free(self.path);
@@ -57,7 +57,7 @@ pub const Workflow = struct {
         freeKeyValuePairs(self.allocator, self.permissions);
         for (self.jobs) |*job| job.deinit();
         self.allocator.free(self.jobs);
-        for (self.schedules) |schedule| self.allocator.free(schedule);
+        for (self.schedules) |*schedule| schedule.deinit();
         self.allocator.free(self.schedules);
     }
 };
@@ -141,6 +141,17 @@ pub const WorkflowTrigger = struct {
         git.freeStringList(self.allocator, self.types);
         git.freeStringList(self.allocator, self.actors);
         git.freeStringList(self.allocator, self.labels);
+    }
+};
+
+pub const WorkflowSchedule = struct {
+    allocator: Allocator,
+    cron: []u8,
+    timezone: []u8,
+
+    pub fn deinit(self: *WorkflowSchedule) void {
+        self.allocator.free(self.cron);
+        self.allocator.free(self.timezone);
     }
 };
 
@@ -266,12 +277,18 @@ pub const ExecuteResult = struct {
     diagnostics_oid: ?[]u8 = null,
     attempt_id: ?[]u8 = null,
     runner_id: ?[]u8 = null,
+    workflow_source_oid: ?[]u8 = null,
+    outputs_json: ?[]u8 = null,
+    published_events_json: ?[]u8 = null,
 
     pub fn deinit(self: *ExecuteResult) void {
         if (self.diagnostics_ref) |value| self.allocator.free(value);
         if (self.diagnostics_oid) |value| self.allocator.free(value);
         if (self.attempt_id) |value| self.allocator.free(value);
         if (self.runner_id) |value| self.allocator.free(value);
+        if (self.workflow_source_oid) |value| self.allocator.free(value);
+        if (self.outputs_json) |value| self.allocator.free(value);
+        if (self.published_events_json) |value| self.allocator.free(value);
     }
 };
 
@@ -361,6 +378,10 @@ pub const RunDiagnostics = struct {
     attempt_id: []u8,
     started_at: []u8,
     files: std.ArrayList(DiagnosticFile) = .empty,
+    job_outputs: std.ArrayList(JobJsonFragment) = .empty,
+    job_artifacts: std.ArrayList(JobJsonFragment) = .empty,
+    published_events: std.ArrayList([]u8) = .empty,
+    log_refs: std.ArrayList(LogRef) = .empty,
 
     pub fn init(allocator: Allocator) !RunDiagnostics {
         return .{
@@ -378,6 +399,24 @@ pub const RunDiagnostics = struct {
             self.allocator.free(file.bytes);
         }
         self.files.deinit(self.allocator);
+        for (self.job_outputs.items) |fragment| {
+            self.allocator.free(fragment.job_id);
+            self.allocator.free(fragment.json);
+        }
+        self.job_outputs.deinit(self.allocator);
+        for (self.job_artifacts.items) |fragment| {
+            self.allocator.free(fragment.job_id);
+            self.allocator.free(fragment.json);
+        }
+        self.job_artifacts.deinit(self.allocator);
+        for (self.published_events.items) |event_hash| self.allocator.free(event_hash);
+        self.published_events.deinit(self.allocator);
+        for (self.log_refs.items) |ref| {
+            self.allocator.free(ref.job_id);
+            self.allocator.free(ref.stream);
+            self.allocator.free(ref.path);
+        }
+        self.log_refs.deinit(self.allocator);
     }
 
     pub fn addCopy(self: *RunDiagnostics, path: []const u8, bytes: []const u8) !void {
@@ -386,6 +425,43 @@ pub const RunDiagnostics = struct {
             .bytes = try self.allocator.dupe(u8, bytes),
         });
     }
+
+    pub fn addJobOutputCopy(self: *RunDiagnostics, job_id: []const u8, json: []const u8) !void {
+        try self.job_outputs.append(self.allocator, .{
+            .job_id = try self.allocator.dupe(u8, job_id),
+            .json = try self.allocator.dupe(u8, json),
+        });
+    }
+
+    pub fn addJobArtifactsCopy(self: *RunDiagnostics, job_id: []const u8, json: []const u8) !void {
+        try self.job_artifacts.append(self.allocator, .{
+            .job_id = try self.allocator.dupe(u8, job_id),
+            .json = try self.allocator.dupe(u8, json),
+        });
+    }
+
+    pub fn addPublishedEventCopy(self: *RunDiagnostics, event_hash: []const u8) !void {
+        try self.published_events.append(self.allocator, try self.allocator.dupe(u8, event_hash));
+    }
+
+    pub fn addLogRefCopy(self: *RunDiagnostics, job_id: []const u8, stream: []const u8, path: []const u8) !void {
+        try self.log_refs.append(self.allocator, .{
+            .job_id = try self.allocator.dupe(u8, job_id),
+            .stream = try self.allocator.dupe(u8, stream),
+            .path = try self.allocator.dupe(u8, path),
+        });
+    }
+};
+
+pub const JobJsonFragment = struct {
+    job_id: []u8,
+    json: []u8,
+};
+
+pub const LogRef = struct {
+    job_id: []u8,
+    stream: []u8,
+    path: []u8,
 };
 
 pub const DiagnosticRef = struct {

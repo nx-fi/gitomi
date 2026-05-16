@@ -295,6 +295,9 @@ fn runRequestedWithRepo(allocator: Allocator, repo: repo_mod.Repo, run_filter: ?
             .{
                 .attempt_id = execution.attempt_id,
                 .runner_id = execution.runner_id,
+                .workflow_source_oid = execution.workflow_source_oid,
+                .outputs_json = execution.outputs_json,
+                .published_events_json = execution.published_events_json,
             },
             false,
         );
@@ -494,9 +497,9 @@ fn scheduleDueWorkflows(
     while (minute <= current_minute) : (minute += 1) {
         for (workflows) |*workflow| {
             try applyEventDefaultSourcePolicy(workflow, "workflow.schedule");
-            for (workflow.schedules) |cron| {
-                if (!cronMatches(cron, minute * 60)) continue;
-                const slot = try scheduleSlotKey(allocator, workflow.path, cron, minute);
+            for (workflow.schedules) |schedule| {
+                if (!cronMatches(schedule.cron, minute * 60)) continue;
+                const slot = try scheduleSlotKey(allocator, target.target_oid, workflow.path, schedule.cron, schedule.timezone, target.target_ref, target.target_oid, minute * 60);
                 defer allocator.free(slot);
                 if (options.dry_run) {
                     try io.out("would run scheduled {s} for minute {d}\n", .{ workflow.path, minute });
@@ -512,7 +515,7 @@ fn scheduleDueWorkflows(
                     repo,
                     workflow.*,
                     run_targets,
-                    "schedule",
+                    "workflow.schedule",
                     "workflow.schedule",
                     null,
                     .{ .schedule_slot = slot },
@@ -547,7 +550,7 @@ fn requestAndExecuteWorkflow(
     metadata_extra: RunMetadata,
     options: Options,
 ) !bool {
-    const permission_grant_json = try buildPermissionGrantJson(allocator, workflow);
+    const permission_grant_json = try buildPermissionGrantJson(allocator, repo, workflow);
     defer allocator.free(permission_grant_json);
     const metadata = RunMetadata{
         .workflow_name = workflow.name,
@@ -603,6 +606,9 @@ fn requestAndExecuteWorkflow(
         .{
             .attempt_id = execution.attempt_id,
             .runner_id = execution.runner_id,
+            .workflow_source_oid = execution.workflow_source_oid,
+            .outputs_json = execution.outputs_json,
+            .published_events_json = execution.published_events_json,
         },
         false,
     );
@@ -818,8 +824,21 @@ fn branchFromEventPayload(allocator: Allocator, body: []const u8) !?[]u8 {
     return null;
 }
 
-fn scheduleSlotKey(allocator: Allocator, workflow_path: []const u8, cron: []const u8, minute: i64) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{d}:{s}:{s}", .{ minute, workflow_path, cron });
+fn scheduleSlotKey(
+    allocator: Allocator,
+    workflow_source_oid: []const u8,
+    workflow_path: []const u8,
+    cron: []const u8,
+    timezone: []const u8,
+    target_ref: ?[]const u8,
+    target_oid: []const u8,
+    scheduled_instant: i64,
+) ![]u8 {
+    return std.fmt.allocPrint(
+        allocator,
+        "workflow_source={s}|path={s}|cron={s}|timezone={s}|target_ref={s}|target_oid={s}|instant={d}",
+        .{ workflow_source_oid, workflow_path, cron, timezone, target_ref orelse "", target_oid, scheduled_instant },
+    );
 }
 
 fn schedulerStatePath(allocator: Allocator, repo: repo_mod.Repo) ![]u8 {
@@ -1168,7 +1187,8 @@ test "native workflow parser supports shell jobs and schedules" {
     try std.testing.expect(workflowMatches(workflow, "push", "push"));
     try std.testing.expect(workflowMatches(workflow, "workflow.schedule", "schedule"));
     try std.testing.expectEqual(@as(usize, 1), workflow.schedules.len);
-    try std.testing.expectEqualStrings("*/5 * * * *", workflow.schedules[0]);
+    try std.testing.expectEqualStrings("*/5 * * * *", workflow.schedules[0].cron);
+    try std.testing.expectEqualStrings("UTC", workflow.schedules[0].timezone);
     try std.testing.expectEqual(@as(usize, 1), workflow.jobs.len);
     try std.testing.expectEqualStrings("test", workflow.jobs[0].id);
     try std.testing.expectEqualStrings("shell", workflow.jobs[0].backend);

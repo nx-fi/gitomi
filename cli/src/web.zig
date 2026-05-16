@@ -109,9 +109,12 @@ const exact_routes = [_]Route{
     .{ .method = "GET", .path = "/settings", .handler = handleSettingsPage },
     .{ .method = "GET", .path = "/labels", .handler = handleLabelsPage },
     .{ .method = "POST", .path = "/labels", .handler = handleLabelsPost },
-    .{ .method = "GET", .path = "/actions", .handler = handleActionsPage },
-    .{ .method = "POST", .path = "/actions/request", .handler = handleActionsRequestPost },
-    .{ .method = "POST", .path = "/actions/run-requested", .handler = handleRunRequestedPost },
+    .{ .method = "GET", .path = "/workflows", .handler = handleActionsPage },
+    .{ .method = "POST", .path = "/workflows/request", .handler = handleActionsRequestPost },
+    .{ .method = "POST", .path = "/workflows/run-requested", .handler = handleRunRequestedPost },
+    .{ .method = "GET", .path = "/actions", .handler = handleActionsRedirect },
+    .{ .method = "POST", .path = "/actions/request", .handler = handleActionsRequestRedirect },
+    .{ .method = "POST", .path = "/actions/run-requested", .handler = handleRunRequestedRedirect },
     .{ .method = "GET", .path = "/events", .handler = handleEventsPage },
     .{ .method = "GET", .path = "/refs", .handler = handleRefsPage },
     .{ .method = "POST", .path = "/refs/sync", .handler = handleRefsSyncPost },
@@ -592,6 +595,18 @@ fn handleActionsPage(ctx: WebContext) !void {
     try sendOwnedHtml(ctx, try actions_page.renderActionsPage(ctx.allocator, ctx.repo, ctx.request.target));
 }
 
+fn handleActionsRedirect(ctx: WebContext) !void {
+    try sendRedirectReplacingPath(ctx, "/actions", "/workflows", false);
+}
+
+fn handleActionsRequestRedirect(ctx: WebContext) !void {
+    try sendRedirectReplacingPath(ctx, "/actions/request", "/workflows/request", true);
+}
+
+fn handleRunRequestedRedirect(ctx: WebContext) !void {
+    try sendRedirectReplacingPath(ctx, "/actions/run-requested", "/workflows/run-requested", true);
+}
+
 fn handleActionsRequestPost(ctx: WebContext) !void {
     try actions_page.handleActionsRequestPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
 }
@@ -601,7 +616,7 @@ fn handleRunRequestedPost(ctx: WebContext) !void {
 }
 
 fn handleEventsPage(ctx: WebContext) !void {
-    try sendOwnedHtml(ctx, try events_page.renderEventsPage(ctx.allocator, ctx.repo));
+    try sendOwnedHtml(ctx, try events_page.renderEventsPage(ctx.allocator, ctx.repo, ctx.request.target));
 }
 
 fn handleRefsPage(ctx: WebContext) !void {
@@ -630,6 +645,27 @@ fn handlePullPost(ctx: WebContext) !void {
 
 fn handleFavicon(ctx: WebContext) !void {
     try shared.sendResponse(ctx.allocator, ctx.stream, 204, "No Content", "text/plain", "", null);
+}
+
+fn sendRedirectReplacingPath(ctx: WebContext, old_path: []const u8, new_path: []const u8, preserve_method: bool) !void {
+    const location = try redirectLocationReplacingPathOwned(ctx.allocator, ctx.request.target, old_path, new_path);
+    defer ctx.allocator.free(location);
+    if (preserve_method) {
+        try sendTemporaryRedirect(ctx, location);
+    } else {
+        try shared.sendRedirect(ctx.allocator, ctx.stream, location);
+    }
+}
+
+fn sendTemporaryRedirect(ctx: WebContext, location: []const u8) !void {
+    const extra = try std.fmt.allocPrint(ctx.allocator, "Location: {s}\r\n", .{location});
+    defer ctx.allocator.free(extra);
+    try shared.sendResponse(ctx.allocator, ctx.stream, 307, "Temporary Redirect", "text/plain", "Temporary Redirect\n", extra);
+}
+
+fn redirectLocationReplacingPathOwned(allocator: Allocator, target: []const u8, old_path: []const u8, new_path: []const u8) ![]u8 {
+    const tail = if (target.len > old_path.len) target[old_path.len..] else "";
+    return std.fmt.allocPrint(allocator, "{s}{s}", .{ new_path, tail });
 }
 
 pub fn readHttpRequest(allocator: Allocator, stream: std.net.Stream) ![]u8 {
@@ -1020,4 +1056,11 @@ test "web static asset etag matcher handles lists and weak tags" {
     try std.testing.expect(etagMatches("W/\"asset-etag\"", "\"asset-etag\""));
     try std.testing.expect(etagMatches("*", "\"asset-etag\""));
     try std.testing.expect(!etagMatches("\"different\"", "\"asset-etag\""));
+}
+
+test "web actions redirects preserve query on workflows route" {
+    const location = try redirectLocationReplacingPathOwned(std.testing.allocator, "/actions?workflow=ci&q=main", "/actions", "/workflows");
+    defer std.testing.allocator.free(location);
+
+    try std.testing.expectEqualStrings("/workflows?workflow=ci&q=main", location);
 }

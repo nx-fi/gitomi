@@ -1293,6 +1293,19 @@ pub fn buildActionRunCompletedJson(
     if (diagnostics_oid) |value| try appendJsonFieldString(&buf, allocator, "diagnostics_oid", value, true);
     if (metadata.attempt_id) |value| try appendJsonFieldString(&buf, allocator, "attempt_id", value, true);
     if (metadata.runner_id) |value| try appendJsonFieldString(&buf, allocator, "runner_id", value, true);
+    if (metadata.workflow_source_oid) |value| try appendJsonFieldString(&buf, allocator, "workflow_source_oid", value, true);
+    if (metadata.outputs_json) |value| {
+        try appendJsonString(&buf, allocator, "outputs");
+        try buf.append(allocator, ':');
+        try buf.appendSlice(allocator, value);
+        try buf.append(allocator, ',');
+    }
+    if (metadata.published_events_json) |value| {
+        try appendJsonString(&buf, allocator, "published_events");
+        try buf.append(allocator, ':');
+        try buf.appendSlice(allocator, value);
+        try buf.append(allocator, ',');
+    }
     if (buf.items[buf.items.len - 1] == ',') {
         buf.items.len -= 1;
     }
