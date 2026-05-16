@@ -42,6 +42,9 @@ pub const HttpRequest = struct {
     target: []const u8,
     path: []const u8,
     body: []const u8,
+    host: ?[]const u8 = null,
+    origin: ?[]const u8 = null,
+    referer: ?[]const u8 = null,
     range: ?ByteRange = null,
 };
 
@@ -227,6 +230,11 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         .stream = stream,
         .request = request,
     };
+
+    if (!isValidCsrfRequest(request)) {
+        try shared.sendPlainResponse(allocator, stream, 403, "Forbidden", "Forbidden\n");
+        return;
+    }
 
     if (try dispatchExactRoute(ctx)) return;
     if (try sendVendorAsset(allocator, stream, request.method, request.path)) return;
@@ -680,8 +688,64 @@ pub fn parseHttpRequest(raw: []const u8) !HttpRequest {
         .target = target,
         .path = target[0..query_start],
         .body = raw[body_start .. body_start + content_len],
+        .host = findHeader(headers, "host"),
+        .origin = findHeader(headers, "origin"),
+        .referer = findHeader(headers, "referer"),
         .range = parseRangeHeader(headers),
     };
+}
+
+fn isValidCsrfRequest(request: HttpRequest) bool {
+    if (!std.mem.eql(u8, request.method, "POST")) return true;
+
+    const host = request.host orelse return false;
+    if (host.len == 0) return false;
+
+    if (request.origin) |origin| {
+        return originMatchesHost(origin, host);
+    }
+
+    if (request.referer) |referer| {
+        return refererMatchesHost(referer, host);
+    }
+
+    return false;
+}
+
+fn originMatchesHost(origin: []const u8, host: []const u8) bool {
+    const authority_end = httpUrlHostMatches(origin, host) orelse return false;
+    return authority_end == origin.len;
+}
+
+fn refererMatchesHost(referer: []const u8, host: []const u8) bool {
+    const authority_end = httpUrlHostMatches(referer, host) orelse return false;
+    return authority_end == referer.len or
+        referer[authority_end] == '/' or
+        referer[authority_end] == '?' or
+        referer[authority_end] == '#';
+}
+
+fn httpUrlHostMatches(value: []const u8, host: []const u8) ?usize {
+    const scheme = "http://";
+    if (value.len < scheme.len or !std.ascii.eqlIgnoreCase(value[0..scheme.len], scheme)) return null;
+
+    const host_start = scheme.len;
+    const host_end = host_start + host.len;
+    if (value.len < host_end) return null;
+    if (!std.ascii.eqlIgnoreCase(value[host_start..host_end], host)) return null;
+    return host_end;
+}
+
+fn findHeader(headers: []const u8, wanted: []const u8) ?[]const u8 {
+    var lines = std.mem.splitSequence(u8, headers, "\r\n");
+    _ = lines.next();
+    while (lines.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const name = std.mem.trim(u8, line[0..colon], " \t");
+        if (!std.ascii.eqlIgnoreCase(name, wanted)) continue;
+        return std.mem.trim(u8, line[colon + 1 ..], " \t");
+    }
+    return null;
 }
 
 pub fn parseContentLength(headers: []const u8) !usize {
@@ -905,7 +969,48 @@ test "web request parser separates method path and body" {
     try std.testing.expectEqualStrings("/issues?x=1", request.target);
     try std.testing.expectEqualStrings("/issues", request.path);
     try std.testing.expectEqualStrings("title=Smoke", request.body);
+    try std.testing.expectEqualStrings("127.0.0.1", request.host.?);
+    try std.testing.expect(request.origin == null);
+    try std.testing.expect(request.referer == null);
     try std.testing.expect(request.range == null);
+}
+
+test "web CSRF validation requires same-origin POST metadata" {
+    const same_origin = try parseHttpRequest(
+        "POST /issues HTTP/1.1\r\n" ++
+            "Host: 127.0.0.1:12655\r\n" ++
+            "Origin: http://127.0.0.1:12655\r\n" ++
+            "Content-Length: 0\r\n" ++
+            "\r\n",
+    );
+    try std.testing.expect(isValidCsrfRequest(same_origin));
+
+    const same_referer = try parseHttpRequest(
+        "POST /issues HTTP/1.1\r\n" ++
+            "Host: localhost:12655\r\n" ++
+            "Referer: http://localhost:12655/new-issue\r\n" ++
+            "Content-Length: 0\r\n" ++
+            "\r\n",
+    );
+    try std.testing.expect(isValidCsrfRequest(same_referer));
+
+    const cross_origin = try parseHttpRequest(
+        "POST /issues HTTP/1.1\r\n" ++
+            "Host: 127.0.0.1:12655\r\n" ++
+            "Origin: https://attacker.example\r\n" ++
+            "Referer: http://127.0.0.1:12655/new-issue\r\n" ++
+            "Content-Length: 0\r\n" ++
+            "\r\n",
+    );
+    try std.testing.expect(!isValidCsrfRequest(cross_origin));
+
+    const missing_metadata = try parseHttpRequest(
+        "POST /issues HTTP/1.1\r\n" ++
+            "Host: 127.0.0.1:12655\r\n" ++
+            "Content-Length: 0\r\n" ++
+            "\r\n",
+    );
+    try std.testing.expect(!isValidCsrfRequest(missing_metadata));
 }
 
 test "web request parser accepts byte ranges" {
