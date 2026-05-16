@@ -17,7 +17,11 @@ const copiedFiles = [
   { from: "README.md", to: "docs/README.md" },
   { from: "cli/README.md", to: "docs/CLI.md" },
   { from: "spec/01_PRODUCT.md", to: "docs/01_PRODUCT.md" },
-  { from: "spec/02_REFS.md", to: "docs/02_REFS.md" }
+  { from: "spec/02_REFS.md", to: "docs/02_REFS.md" },
+  { from: "spec/03_RBAC.md", to: "docs/03_RBAC.md" },
+  { from: "spec/04_WORKFLOWS.md", to: "docs/04_WORKFLOWS.md" },
+  { from: "spec/05_PROJECTS_WEBUI.md", to: "docs/05_PROJECTS_WEBUI.md" },
+  { from: "spec/06_PULL_REQUEST_MERGE_SEMANTICS.md", to: "docs/06_PULL_REQUEST_MERGE_SEMANTICS.md" }
 ];
 
 async function build() {

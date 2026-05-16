@@ -508,6 +508,65 @@ fn appendProjectWorkspaceChromeStart(
     try appendProjectSummary(buf, allocator, db, project, issue_count);
 }
 
+fn appendProjectIssueSearchIndex(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb) !void {
+    var stmt = try db.prepare(
+        \\SELECT i.id, i.title, i.state,
+        \\       COALESCE(m.priority, ''),
+        \\       COALESCE(m.status, ''),
+        \\       COALESCE(a.number, 0)
+        \\FROM issues i
+        \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
+        \\LEFT JOIN legacy_aliases a
+        \\  ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
+        \\ORDER BY
+        \\  CASE i.state WHEN 'open' THEN 0 ELSE 1 END,
+        \\  i.opened_at DESC,
+        \\  i.id DESC
+        \\LIMIT 500
+    );
+    defer stmt.deinit();
+
+    try buf.appendSlice(allocator, "<div data-project-issue-search-index hidden>");
+    while (try stmt.step()) {
+        const id = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(id);
+        const title = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(title);
+        const state = try stmt.columnTextDup(allocator, 2);
+        defer allocator.free(state);
+        const priority = try stmt.columnTextDup(allocator, 3);
+        defer allocator.free(priority);
+        const status = try stmt.columnTextDup(allocator, 4);
+        defer allocator.free(status);
+        const legacy_number = stmt.columnInt64(5);
+
+        var ref_buf: [util.short_object_ref_len]u8 = undefined;
+        const short_ref = util.shortObjectRef(&ref_buf, id);
+        const issue_ref = if (legacy_number > 0)
+            try std.fmt.allocPrint(allocator, "#{d}", .{legacy_number})
+        else
+            try std.fmt.allocPrint(allocator, "#{s}", .{short_ref});
+        defer allocator.free(issue_ref);
+        const issue_display = if (legacy_number > 0)
+            try std.fmt.allocPrint(allocator, "GitHub #{d}", .{legacy_number})
+        else
+            try std.fmt.allocPrint(allocator, "#{s}", .{short_ref});
+        defer allocator.free(issue_display);
+
+        try appendTemplate(buf, allocator,
+            \\<span data-project-issue-search-item data-issue-ref="{issue_ref}" data-issue-display="{issue_display}" data-issue-title="{title}" data-issue-state="{state}" data-issue-priority="{priority}" data-issue-status="{status}"></span>
+        , .{
+            .issue_ref = issue_ref,
+            .issue_display = issue_display,
+            .title = title,
+            .state = state,
+            .priority = priority,
+            .status = status,
+        });
+    }
+    try buf.appendSlice(allocator, "</div>");
+}
+
 fn appendProjectColumns(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -3166,6 +3225,9 @@ test "project workspace title does not prepend at sign" {
     );
     defer db.deinit();
     try db.exec("CREATE TABLE projects (id TEXT, name TEXT, description TEXT, state TEXT, created_at TEXT)");
+    try db.exec("CREATE TABLE issues (id TEXT, title TEXT, state TEXT, opened_at TEXT)");
+    try db.exec("CREATE TABLE issue_metadata (issue_id TEXT, priority TEXT, status TEXT)");
+    try db.exec("CREATE TABLE legacy_aliases (provider TEXT, object_kind TEXT, object_id TEXT, number INTEGER)");
     try db.exec("CREATE TABLE project_columns (project_id TEXT, column_name TEXT)");
     try db.exec("CREATE TABLE issue_projects (project TEXT, column_name TEXT, issue_id TEXT)");
     try db.exec("CREATE TABLE project_views (id TEXT, project_id TEXT, name TEXT, layout TEXT, position INTEGER, config_json TEXT, state TEXT)");

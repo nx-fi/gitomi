@@ -461,13 +461,14 @@ export function renderSite() {
         <div>
           <p class="eyebrow">Reference</p>
           <h2>Inspect the model before trusting it.</h2>
-          <p>The repository includes the product, ref layout, and CLI references behind the implementation.</p>
+          <p>The repository includes the product, ref layout, merge semantics, and CLI references behind the implementation.</p>
         </div>
         <div class="docs-links" aria-label="Documentation links">
           <a href="./docs/README.md"><span class="button-icon icon-book" aria-hidden="true"></span> README</a>
           <a href="./docs/CLI.md"><span class="button-icon icon-code" aria-hidden="true"></span> CLI reference</a>
           <a href="./docs/01_PRODUCT.md"><span class="button-icon icon-file-code" aria-hidden="true"></span> Product spec</a>
           <a href="./docs/02_REFS.md"><span class="button-icon icon-branch" aria-hidden="true"></span> Ref spec</a>
+          <a href="./docs/06_PULL_REQUEST_MERGE_SEMANTICS.md"><span class="button-icon icon-pull-request" aria-hidden="true"></span> Merge semantics</a>
         </div>
       </div>
     </section>

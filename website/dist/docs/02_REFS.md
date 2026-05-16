@@ -263,6 +263,12 @@ or `title`) even when they also carry slug or UUID aliases. Reducers MUST treat
 the UUID in `object.id` as authoritative for created project and milestone
 objects.
 
+Issue planning payloads MUST use canonical v1 enum strings. `payload.priority`
+on `issue.opened`, `issue.updated`, and `issue.priority_set` MUST be one of
+`P0`, `P1`, `P2`, or `P3`. `payload.status` on `issue.opened`,
+`issue.updated`, and `issue.status_set` MUST be one of `Draft`, `Todo`, `WIP`,
+`Review`, `Done`, or `Failed`; writers MUST emit `Todo` for not-started work.
+
 ### 3.5. Reference Message Directives
 
 Gitomi text fields MAY contain line-oriented reference directives for derived

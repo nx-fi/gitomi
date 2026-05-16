@@ -109,7 +109,7 @@
     }
 
     function update() {
-      const scrollY = window.scrollY || window.pageYOffset || 0;
+      const scrollY = window.scrollY || 0;
       const progress = ease(clamp(scrollY / 320, 0, 1));
       const naturalTop = startTop - scrollY;
       const top = lerp(naturalTop, dockTop, progress);

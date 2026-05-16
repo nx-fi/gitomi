@@ -530,7 +530,7 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
             } else if (std.mem.eql(u8, arg, "--status")) {
                 const status = try util.requireValue(args, &i, "--status");
                 if (!isIssueStatus(status)) {
-                    try io.eprint("gt issue edit: --status must be Draft, Pending, WIP, Review, Done, or Failed\n", .{});
+                    try io.eprint("gt issue edit: --status must be Draft, Todo, WIP, Review, Done, or Failed\n", .{});
                     return CliError.UserError;
                 }
                 update.status = status;
@@ -621,7 +621,7 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
             return CliError.UserError;
         }
         if (std.mem.eql(u8, args[0], "status") and !isIssueStatus(value.?)) {
-            try io.eprint("gt issue status: --status must be Draft, Pending, WIP, Review, Done, or Failed\n", .{});
+            try io.eprint("gt issue status: --status must be Draft, Todo, WIP, Review, Done, or Failed\n", .{});
             return CliError.UserError;
         }
         const issue_id = try command_repo.resolveIssueId(args[1]);
@@ -863,7 +863,7 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
         } else if (std.mem.eql(u8, arg, "--status")) {
             const value = try util.requireValue(args, &i, "--status");
             if (!isIssueStatus(value)) {
-                try io.eprint("gt issue open: --status must be Draft, Pending, WIP, Review, Done, or Failed\n", .{});
+                try io.eprint("gt issue open: --status must be Draft, Todo, WIP, Review, Done, or Failed\n", .{});
                 return CliError.UserError;
             }
             status = value;

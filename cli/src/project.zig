@@ -24,7 +24,7 @@ const parseNonNegativeIntegerOption = cmd_common.parseNonNegativeIntegerOption;
 const requireNonEmptyOption = cmd_common.requireNonEmptyOption;
 const validateJsonArgument = cmd_common.validateJsonArgument;
 
-const default_columns = [_][]const u8{ "Draft", "Pending", "WIP", "Review", "Done", "Failed" };
+const default_columns = [_][]const u8{ "Draft", "Todo", "WIP", "Review", "Done", "Failed" };
 
 pub fn createProjectCreatedEvent(
     allocator: Allocator,
