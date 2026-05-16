@@ -12,7 +12,6 @@ const distDir = join(websiteRoot, "dist");
 const copiedFiles = [
   { from: "cli/src/web/style.css", to: "assets/webui.css" },
   { from: "cli/src/web/logo.svg", to: "assets/logo.svg" },
-  { from: "cli/src/web/theme.js", to: "assets/theme.js" },
   { from: "website/src/site.css", to: "assets/site.css" },
   { from: "website/src/site.js", to: "assets/site.js" },
   { from: "README.md", to: "docs/README.md" },

@@ -1,19 +1,10 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Gitomi keeps your entire development workflow - issues, PRs, projects, workflows, and agent activity - inside your Git repository.">
-  <script>
-    (function () {
-      try {
-        var stored = localStorage.getItem("gitomi.theme");
-        document.documentElement.dataset.theme = stored === "light" || stored === "dark" ? stored : "dark";
-      } catch (_) {
-        document.documentElement.dataset.theme = "dark";
-      }
-    }());
-  </script>
+  <meta name="theme-color" content="#10B8AA">
   <title>Gitomi - Own your project, not just your code</title>
   <link rel="icon" href="./assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="./assets/webui.css">
@@ -22,10 +13,6 @@
 <body class="site-shell">
   <div class="ambient-grid" aria-hidden="true"></div>
   <div class="corner-actions" aria-label="Site actions">
-    <button class="theme-toggle theme-float" type="button" data-theme-toggle aria-pressed="true" aria-label="Toggle dark mode" title="Toggle dark mode">
-      <span class="theme-toggle-track" aria-hidden="true"><span class="theme-toggle-thumb"></span></span>
-      <span class="theme-toggle-label" data-theme-label>Dark</span>
-    </button>
     <a class="github-link" href="https://github.com/nx-fi/gitomi" target="_blank" rel="noreferrer" aria-label="GitHub repository"></a>
   </div>
 
@@ -33,23 +20,23 @@
     <svg class="flow-line" viewBox="0 0 1440 4300" preserveAspectRatio="none" aria-hidden="true">
       <defs>
         <linearGradient id="flow-line-green" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stop-color="#70ffa6" stop-opacity="0"></stop>
-          <stop offset="0.18" stop-color="#70ffa6" stop-opacity="0.46"></stop>
+          <stop offset="0" stop-color="#10B8AA" stop-opacity="0"></stop>
+          <stop offset="0.18" stop-color="#10B8AA" stop-opacity="0.46"></stop>
           <stop offset="0.56" stop-color="#64d7ff" stop-opacity="0.34"></stop>
-          <stop offset="0.84" stop-color="#70ffa6" stop-opacity="0.36"></stop>
-          <stop offset="1" stop-color="#70ffa6" stop-opacity="0"></stop>
+          <stop offset="0.84" stop-color="#10B8AA" stop-opacity="0.36"></stop>
+          <stop offset="1" stop-color="#10B8AA" stop-opacity="0"></stop>
         </linearGradient>
         <linearGradient id="flow-line-cyan" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0" stop-color="#64d7ff" stop-opacity="0"></stop>
           <stop offset="0.2" stop-color="#64d7ff" stop-opacity="0.42"></stop>
           <stop offset="0.58" stop-color="#b59cff" stop-opacity="0.32"></stop>
-          <stop offset="0.86" stop-color="#70ffa6" stop-opacity="0.3"></stop>
+          <stop offset="0.86" stop-color="#10B8AA" stop-opacity="0.3"></stop>
           <stop offset="1" stop-color="#64d7ff" stop-opacity="0"></stop>
         </linearGradient>
         <linearGradient id="flow-line-amber" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0" stop-color="#ffd166" stop-opacity="0"></stop>
           <stop offset="0.18" stop-color="#ffd166" stop-opacity="0.38"></stop>
-          <stop offset="0.55" stop-color="#70ffa6" stop-opacity="0.28"></stop>
+          <stop offset="0.55" stop-color="#10B8AA" stop-opacity="0.28"></stop>
           <stop offset="0.84" stop-color="#64d7ff" stop-opacity="0.24"></stop>
           <stop offset="1" stop-color="#ffd166" stop-opacity="0"></stop>
         </linearGradient>
@@ -450,7 +437,6 @@ gt issue list</code></pre>
     <span>Gitomi keeps your entire development workflow inside your Git repository.</span>
   </footer>
 
-  <script src="./assets/theme.js"></script>
   <script src="./assets/site.js"></script>
 </body>
 </html>
