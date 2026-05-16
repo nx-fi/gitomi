@@ -3,20 +3,26 @@ pub const response = @import("zwf/response.zig");
 pub const router = @import("zwf/router.zig");
 pub const server = @import("zwf/server.zig");
 pub const middleware = @import("zwf/middleware.zig");
+pub const csrf = @import("zwf/csrf.zig");
+pub const session = @import("zwf/session.zig");
 pub const html = @import("zwf/html.zig");
 pub const layout = @import("zwf/layout.zig");
 
 pub const Request = request.Request;
 pub const Method = request.Method;
 pub const HeaderMap = request.HeaderMap;
+pub const Header = request.Header;
 pub const QueryMap = request.QueryMap;
 pub const ParamMap = request.ParamMap;
 pub const ByteRange = request.ByteRange;
 pub const FormData = request.FormData;
 pub const Response = response.Response;
+pub const ResponseHeader = response.Header;
 pub const Router = router.Router;
 pub const StaticAsset = middleware.StaticAsset;
 pub const ServerOptions = server.Options;
+pub const CookieSession = session.CookieSession;
+pub const Session = session.Session;
 
 pub const default_host = server.default_host;
 pub const default_port = server.default_port;

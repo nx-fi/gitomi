@@ -146,23 +146,25 @@ fn handleWebConnectionLogged(allocator: Allocator, repo: Repo, stream: std.net.S
 }
 
 pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Stream) !void {
-    const raw = readHttpRequest(allocator, stream) catch {
+    const raw = readHttpRequest(allocator, stream) catch |err| {
+        if (err == error.EndOfStream) return;
         try shared.sendPlainResponse(allocator, stream, 400, "Bad Request", "Bad request\n");
         return;
     };
     defer allocator.free(raw);
 
-    const request = parseHttpRequest(raw) catch {
+    var request = zwf.Request.parseOwned(allocator, raw) catch {
         try shared.sendPlainResponse(allocator, stream, 400, "Bad Request", "Bad request\n");
         return;
     };
+    defer request.deinit(allocator);
 
     var ctx = WebContext{
         .allocator = allocator,
         .repo = repo,
         .stream = stream,
         .request = request,
-        .response = zwf.Response.init(allocator, stream),
+        .response = zwf.Response.initWithRequest(allocator, stream, request),
     };
 
     if (try zwf.middleware.sendStaticAssets(ctx.response, ctx.request, &vendor_assets)) return;
@@ -472,9 +474,7 @@ fn sendRedirectReplacingPath(ctx: WebContext, old_path: []const u8, new_path: []
 }
 
 fn sendTemporaryRedirect(ctx: WebContext, location: []const u8) !void {
-    const extra = try std.fmt.allocPrint(ctx.allocator, "Location: {s}\r\n", .{location});
-    defer ctx.allocator.free(extra);
-    try shared.sendResponse(ctx.allocator, ctx.stream, 307, "Temporary Redirect", "text/plain", "Temporary Redirect\n", extra);
+    try ctx.response.temporaryRedirect(location);
 }
 
 fn redirectLocationReplacingPathOwned(allocator: Allocator, target: []const u8, old_path: []const u8, new_path: []const u8) ![]u8 {
@@ -488,6 +488,10 @@ pub fn readHttpRequest(allocator: Allocator, stream: std.net.Stream) ![]u8 {
 
 pub fn parseHttpRequest(raw: []const u8) !HttpRequest {
     return zwf.Request.parse(raw);
+}
+
+pub fn parseHttpRequestOwned(allocator: Allocator, raw: []const u8) !HttpRequest {
+    return zwf.Request.parseOwned(allocator, raw);
 }
 
 pub fn parseContentLength(headers: []const u8) !usize {
