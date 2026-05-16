@@ -82,8 +82,8 @@
     let startLeft = 0;
     let dockTop = 18;
     let dockLeft = 18;
-    let startScale = 1.16;
-    let dockScale = 0.78;
+    let startScale = 2.32;
+    let dockScale = 1.248;
     let ticking = false;
 
     function clamp(value, min, max) {
@@ -104,8 +104,8 @@
       startLeft = rect.left;
       dockTop = window.innerWidth <= 820 ? 12 : 18;
       dockLeft = window.innerWidth <= 820 ? 12 : 18;
-      startScale = window.innerWidth <= 520 ? 0.92 : 1.16;
-      dockScale = window.innerWidth <= 520 ? 0.68 : 0.78;
+      startScale = window.innerWidth <= 520 ? 1.84 : 2.32;
+      dockScale = window.innerWidth <= 520 ? 1.088 : 1.248;
     }
 
     function update() {

@@ -32,15 +32,46 @@
   <main id="top" class="site-main">
     <svg class="flow-line" viewBox="0 0 1440 4300" preserveAspectRatio="none" aria-hidden="true">
       <defs>
-        <linearGradient id="flow-line-gradient" x1="0" y1="0" x2="0" y2="1">
+        <linearGradient id="flow-line-green" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0" stop-color="#70ffa6" stop-opacity="0"></stop>
-          <stop offset="0.12" stop-color="#70ffa6" stop-opacity="0.44"></stop>
-          <stop offset="0.5" stop-color="#64d7ff" stop-opacity="0.34"></stop>
-          <stop offset="0.78" stop-color="#ffd166" stop-opacity="0.36"></stop>
+          <stop offset="0.18" stop-color="#70ffa6" stop-opacity="0.46"></stop>
+          <stop offset="0.56" stop-color="#64d7ff" stop-opacity="0.34"></stop>
+          <stop offset="0.84" stop-color="#70ffa6" stop-opacity="0.36"></stop>
           <stop offset="1" stop-color="#70ffa6" stop-opacity="0"></stop>
         </linearGradient>
+        <linearGradient id="flow-line-cyan" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#64d7ff" stop-opacity="0"></stop>
+          <stop offset="0.2" stop-color="#64d7ff" stop-opacity="0.42"></stop>
+          <stop offset="0.58" stop-color="#b59cff" stop-opacity="0.32"></stop>
+          <stop offset="0.86" stop-color="#70ffa6" stop-opacity="0.3"></stop>
+          <stop offset="1" stop-color="#64d7ff" stop-opacity="0"></stop>
+        </linearGradient>
+        <linearGradient id="flow-line-amber" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#ffd166" stop-opacity="0"></stop>
+          <stop offset="0.18" stop-color="#ffd166" stop-opacity="0.38"></stop>
+          <stop offset="0.55" stop-color="#70ffa6" stop-opacity="0.28"></stop>
+          <stop offset="0.84" stop-color="#64d7ff" stop-opacity="0.24"></stop>
+          <stop offset="1" stop-color="#ffd166" stop-opacity="0"></stop>
+        </linearGradient>
+        <linearGradient id="flow-line-violet" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#b59cff" stop-opacity="0"></stop>
+          <stop offset="0.2" stop-color="#b59cff" stop-opacity="0.38"></stop>
+          <stop offset="0.58" stop-color="#64d7ff" stop-opacity="0.3"></stop>
+          <stop offset="0.86" stop-color="#ff7f6e" stop-opacity="0.22"></stop>
+          <stop offset="1" stop-color="#b59cff" stop-opacity="0"></stop>
+        </linearGradient>
       </defs>
-      <path d="M 720 650 C 620 770 530 880 505 1060 C 475 1200 500 1360 515 1525 C 535 1715 520 1885 505 2025 C 490 2225 650 2365 840 2495 C 975 2595 930 2820 835 3045 C 755 3235 805 3395 895 3555 C 975 3705 820 3900 610 4110"></path>
+      <g class="flow-stream">
+        <path class="flow-path flow-green" d="M 720 650 C 598 735 390 850 318 1065 C 276 1190 315 1270 392 1372 C 530 1552 560 1742 392 1988 C 332 2074 318 2138 372 2205 C 462 2320 690 2415 812 2518 C 1008 2680 960 2910 868 3128 C 805 3280 782 3428 872 3545 C 990 3695 805 3905 610 4110"></path>
+        <path class="flow-path flow-cyan" d="M 690 660 C 540 760 350 890 304 1098 C 278 1212 320 1288 402 1390 C 548 1570 548 1755 382 1976 C 324 2050 322 2110 386 2188 C 492 2310 650 2405 792 2530 C 940 2660 838 2880 852 3138 C 860 3308 752 3432 842 3580 C 922 3740 760 3925 555 4100"></path>
+        <path class="flow-path flow-amber" d="M 750 650 C 640 782 450 930 348 1150 C 300 1258 318 1348 268 1508 C 220 1665 278 1815 390 1988 C 442 2072 424 2154 350 2238 C 258 2344 672 2390 862 2488 C 1010 2562 1032 2882 888 3095 C 770 3270 875 3380 945 3520 C 1035 3695 900 3908 690 4130"></path>
+        <path class="flow-path flow-violet" d="M 655 705 C 472 815 250 968 285 1148 C 318 1295 555 1362 608 1532 C 668 1722 486 1832 312 1998 C 232 2074 250 2162 402 2248 C 512 2310 608 2400 835 2538 C 1005 2640 994 2985 852 3188 C 738 3340 735 3420 820 3595 C 895 3750 720 3920 525 4090"></path>
+        <path class="flow-path flow-green" d="M 785 675 C 690 812 520 920 395 1125 C 326 1240 450 1395 690 1590 C 828 1700 628 1860 418 2008 C 328 2072 278 2162 334 2242 C 420 2360 760 2340 900 2495 C 1018 2625 1102 2920 895 3148 C 765 3292 902 3405 980 3565 C 1060 3725 912 3920 735 4150"></path>
+        <path class="flow-path flow-cyan" d="M 625 760 C 455 915 345 1020 328 1195 C 312 1355 198 1465 300 1652 C 382 1800 592 1900 430 2012 C 312 2094 250 2176 412 2265 C 520 2325 800 2415 1028 2670 C 1125 2780 1085 2960 878 3160 C 710 3320 905 3505 982 3650 C 1050 3785 870 3978 720 4140"></path>
+        <path class="flow-path flow-amber" d="M 735 720 C 590 835 405 945 335 1108 C 275 1250 395 1410 468 1590 C 548 1788 460 1915 340 2018 C 262 2084 258 2175 382 2248 C 528 2334 650 2385 850 2500 C 980 2578 748 2862 865 3155 C 942 3348 822 3408 910 3570 C 998 3735 835 3928 650 4120"></path>
+        <path class="flow-path flow-violet" d="M 595 810 C 430 950 315 1055 340 1205 C 368 1378 592 1440 452 1625 C 350 1760 260 1900 326 2028 C 365 2102 490 2164 650 2268 C 815 2375 912 2415 980 2618 C 1065 2875 1110 2988 850 3182 C 712 3285 842 3480 920 3648 C 990 3802 805 3985 585 4170"></path>
+        <path class="flow-path flow-green" d="M 805 725 C 660 870 485 965 362 1138 C 292 1235 590 1388 735 1580 C 858 1744 610 1886 400 2035 C 312 2098 328 2184 488 2268 C 702 2380 780 2358 930 2505 C 1100 2672 1085 2965 870 3170 C 748 3288 882 3370 1018 3580 C 1110 3720 930 3930 760 4160"></path>
+      </g>
     </svg>
     <section class="hero-section" aria-labelledby="hero-title">
       <div class="hero-copy">
