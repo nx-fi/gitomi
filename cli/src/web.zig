@@ -610,11 +610,11 @@ fn handleIssuePost(ctx: WebContext) !void {
 }
 
 fn handleNewPullPage(ctx: WebContext) !void {
-    try sendOwnedHtml(ctx, try pulls_page.renderPullForm(ctx.allocator, ctx.repo, null, "", "", "", "", false));
+    try sendOwnedHtml(ctx, try pulls_page.renderPullForm(ctx.allocator, ctx.repo, ctx.csrf_token, null, "", "", "", "", false));
 }
 
 fn handlePullPost(ctx: WebContext) !void {
-    try pulls_page.handlePullPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
+    try pulls_page.handlePullPost(ctx.allocator, ctx.repo, ctx.stream, ctx.csrf_token, ctx.request.body);
 }
 
 fn handleFavicon(ctx: WebContext) !void {
