@@ -49,6 +49,46 @@ const IssueFilterKind = enum {
     assignee,
 };
 
+const issue_sidebar_csrf_field = "csrf_token";
+const issue_sidebar_csrf_token_len = 64;
+
+var issue_sidebar_csrf_mutex: std.Thread.Mutex = .{};
+var issue_sidebar_csrf_ready = false;
+var issue_sidebar_csrf_token: [issue_sidebar_csrf_token_len]u8 = undefined;
+
+fn issueSidebarCsrfToken() []const u8 {
+    issue_sidebar_csrf_mutex.lock();
+    defer issue_sidebar_csrf_mutex.unlock();
+
+    if (!issue_sidebar_csrf_ready) {
+        var random_bytes: [issue_sidebar_csrf_token_len / 2]u8 = undefined;
+        std.crypto.random.bytes(&random_bytes);
+        const hex = "0123456789abcdef";
+        for (random_bytes, 0..) |byte, i| {
+            issue_sidebar_csrf_token[i * 2] = hex[@as(usize, byte >> 4)];
+            issue_sidebar_csrf_token[i * 2 + 1] = hex[@as(usize, byte & 0x0f)];
+        }
+        issue_sidebar_csrf_ready = true;
+    }
+
+    return issue_sidebar_csrf_token[0..];
+}
+
+fn validateIssueSidebarCsrf(allocator: Allocator, stream: std.net.Stream, form_body: []const u8) !bool {
+    const token_owned = (try formValueOwned(allocator, form_body, issue_sidebar_csrf_field)) orelse {
+        try sendPlainResponse(allocator, stream, 403, "Forbidden", "Invalid sidebar form token\n");
+        return false;
+    };
+    defer allocator.free(token_owned);
+
+    const token = std.mem.trim(u8, token_owned, " \t\r\n");
+    if (!std.mem.eql(u8, token, issueSidebarCsrfToken())) {
+        try sendPlainResponse(allocator, stream, 403, "Forbidden", "Invalid sidebar form token\n");
+        return false;
+    }
+    return true;
+}
+
 const IssueHrefOverride = struct {
     state: ?IssueStateFilter = null,
     sort: ?IssueSort = null,
@@ -2148,21 +2188,22 @@ fn appendIssueSidebarSingleInputForm(
     try buf.appendSlice(allocator, "<form class=\"issue-sidebar-add-form issue-sidebar-menu-form\" method=\"post\" action=\"");
     try appendIssueSidebarAction(buf, allocator, raw_ref);
     try appendTemplate(buf, allocator,
-        \\"><input type="hidden" name="action" value="{action}"><label class="issue-sidebar-menu-input"><span aria-hidden="true"></span><input name="{input_name}" placeholder="{placeholder}" aria-label="{placeholder}" autocomplete="off" data-issue-sidebar-filter></label><button type="submit">{button_label}</button></form>
+        \\"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="action" value="{action}"><label class="issue-sidebar-menu-input"><span aria-hidden="true"></span><input name="{input_name}" placeholder="{placeholder}" aria-label="{placeholder}" autocomplete="off" data-issue-sidebar-filter></label><button type="submit">{button_label}</button></form>
     , .{
         .action = action,
         .input_name = input_name,
         .placeholder = placeholder,
         .button_label = button_label,
+        .csrf_token = issueSidebarCsrfToken(),
     });
 }
 
 fn appendIssueSidebarProjectForm(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8) !void {
     try buf.appendSlice(allocator, "<form class=\"issue-sidebar-add-form issue-sidebar-project-form issue-sidebar-menu-form\" method=\"post\" action=\"");
     try appendIssueSidebarAction(buf, allocator, raw_ref);
-    try buf.appendSlice(allocator,
-        \\"><input type="hidden" name="action" value="add-project"><label class="issue-sidebar-menu-input"><span aria-hidden="true"></span><input name="project" placeholder="Filter projects" aria-label="Project" autocomplete="off" data-issue-sidebar-filter></label><input name="column" placeholder="Column" aria-label="Column" autocomplete="off"><button type="submit">Add project</button></form>
-    );
+    try appendTemplate(buf, allocator,
+        \\"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="action" value="add-project"><label class="issue-sidebar-menu-input"><span aria-hidden="true"></span><input name="project" placeholder="Filter projects" aria-label="Project" autocomplete="off" data-issue-sidebar-filter></label><input name="column" placeholder="Column" aria-label="Column" autocomplete="off"><button type="submit">Add project</button></form>
+    , .{ .csrf_token = issueSidebarCsrfToken() });
 }
 
 fn appendIssueSidebarMenuFilter(buf: *std.ArrayList(u8), allocator: Allocator, placeholder: []const u8) !void {
@@ -2226,16 +2267,22 @@ fn appendIssueSidebarMilestoneActionRow(
         try buf.appendSlice(allocator, "<form class=\"issue-sidebar-picker-form\" method=\"post\" action=\"");
         try appendIssueSidebarAction(buf, allocator, raw_ref);
         try appendTemplate(buf, allocator,
-            \\"><input type="hidden" name="action" value="clear-milestone"><button class="issue-sidebar-picker-row is-selected" type="submit" data-sidebar-filter-text="{milestone}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span><span class="issue-milestone-icon" aria-hidden="true"></span><span class="issue-sidebar-picker-primary">{milestone}</span></button></form>
-        , .{ .milestone = milestone });
+            \\"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="action" value="clear-milestone"><button class="issue-sidebar-picker-row is-selected" type="submit" data-sidebar-filter-text="{milestone}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span><span class="issue-milestone-icon" aria-hidden="true"></span><span class="issue-sidebar-picker-primary">{milestone}</span></button></form>
+        , .{
+            .milestone = milestone,
+            .csrf_token = issueSidebarCsrfToken(),
+        });
         return;
     }
 
     try buf.appendSlice(allocator, "<form class=\"issue-sidebar-picker-form\" method=\"post\" action=\"");
     try appendIssueSidebarAction(buf, allocator, raw_ref);
     try appendTemplate(buf, allocator,
-        \\"><input type="hidden" name="action" value="set-milestone"><input type="hidden" name="milestone" value="{milestone}"><button class="issue-sidebar-picker-row" type="submit" data-sidebar-filter-text="{milestone}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span><span class="issue-milestone-icon" aria-hidden="true"></span><span class="issue-sidebar-picker-primary">{milestone}</span></button></form>
-    , .{ .milestone = milestone });
+        \\"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="action" value="set-milestone"><input type="hidden" name="milestone" value="{milestone}"><button class="issue-sidebar-picker-row" type="submit" data-sidebar-filter-text="{milestone}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span><span class="issue-milestone-icon" aria-hidden="true"></span><span class="issue-sidebar-picker-primary">{milestone}</span></button></form>
+    , .{
+        .milestone = milestone,
+        .csrf_token = issueSidebarCsrfToken(),
+    });
 }
 
 fn appendIssueSidebarProjectActionRow(
@@ -2251,12 +2298,13 @@ fn appendIssueSidebarProjectActionRow(
     try buf.appendSlice(allocator, "<form class=\"issue-sidebar-picker-form\" method=\"post\" action=\"");
     try appendIssueSidebarAction(buf, allocator, raw_ref);
     try appendTemplate(buf, allocator,
-        \\"><input type="hidden" name="action" value="{action}"><input type="hidden" name="project" value="{project}"><input type="hidden" name="column" value="{column}"><button class="issue-sidebar-picker-row{state_class}" type="submit" data-sidebar-filter-text="{project} {column}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span><span class="issue-sidebar-project-icon" aria-hidden="true"></span><span class="issue-sidebar-picker-text"><span class="issue-sidebar-picker-primary">{project}</span><span class="issue-sidebar-picker-secondary">{column}</span></span></button></form>
+        \\"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="action" value="{action}"><input type="hidden" name="project" value="{project}"><input type="hidden" name="column" value="{column}"><button class="issue-sidebar-picker-row{state_class}" type="submit" data-sidebar-filter-text="{project} {column}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span><span class="issue-sidebar-project-icon" aria-hidden="true"></span><span class="issue-sidebar-picker-text"><span class="issue-sidebar-picker-primary">{project}</span><span class="issue-sidebar-picker-secondary">{column}</span></span></button></form>
     , .{
         .action = action,
         .project = project,
         .column = column,
         .state_class = state_class,
+        .csrf_token = issueSidebarCsrfToken(),
     });
 }
 
@@ -2274,13 +2322,14 @@ fn appendIssueSidebarValueActionFormStart(
     try buf.appendSlice(allocator, "<form class=\"issue-sidebar-picker-form\" method=\"post\" action=\"");
     try appendIssueSidebarAction(buf, allocator, raw_ref);
     try appendTemplate(buf, allocator,
-        \\"><input type="hidden" name="action" value="{action}"><input type="hidden" name="{input_name}" value="{value}"><button class="issue-sidebar-picker-row{state_class}" type="submit" data-sidebar-filter-text="{filter_text}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span>
+        \\"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="action" value="{action}"><input type="hidden" name="{input_name}" value="{value}"><button class="issue-sidebar-picker-row{state_class}" type="submit" data-sidebar-filter-text="{filter_text}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span>
     , .{
         .action = action,
         .input_name = input_name,
         .value = value,
         .filter_text = filter_text,
         .state_class = state_class,
+        .csrf_token = issueSidebarCsrfToken(),
     });
 }
 
@@ -2334,10 +2383,11 @@ fn appendIssueSidebarRemoveProjectForm(buf: *std.ArrayList(u8), allocator: Alloc
     try buf.appendSlice(allocator, "<form class=\"issue-sidebar-remove-form\" method=\"post\" action=\"");
     try appendIssueSidebarAction(buf, allocator, raw_ref);
     try appendTemplate(buf, allocator,
-        \\"><input type="hidden" name="action" value="remove-project"><input type="hidden" name="project" value="{project}"><input type="hidden" name="column" value="{column}"><button type="submit" aria-label="Remove project">x</button></form>
+        \\"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="action" value="remove-project"><input type="hidden" name="project" value="{project}"><input type="hidden" name="column" value="{column}"><button type="submit" aria-label="Remove project">x</button></form>
     , .{
         .project = project,
         .column = column,
+        .csrf_token = issueSidebarCsrfToken(),
     });
 }
 
@@ -2345,10 +2395,11 @@ fn appendIssueSidebarRemoveValueForm(buf: *std.ArrayList(u8), allocator: Allocat
     try buf.appendSlice(allocator, "<form class=\"issue-sidebar-remove-form\" method=\"post\" action=\"");
     try appendIssueSidebarAction(buf, allocator, raw_ref);
     try appendTemplate(buf, allocator,
-        \\"><input type="hidden" name="action" value="{action}"><button type="submit" aria-label="{label}">x</button></form>
+        \\"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="action" value="{action}"><button type="submit" aria-label="{label}">x</button></form>
     , .{
         .action = action,
         .label = label,
+        .csrf_token = issueSidebarCsrfToken(),
     });
 }
 
@@ -2364,12 +2415,13 @@ fn appendIssueSidebarRemoveNamedValueForm(
     try buf.appendSlice(allocator, "<form class=\"issue-sidebar-remove-form\" method=\"post\" action=\"");
     try appendIssueSidebarAction(buf, allocator, raw_ref);
     try appendTemplate(buf, allocator,
-        \\"><input type="hidden" name="action" value="{action}"><input type="hidden" name="{input_name}" value="{value}"><button type="submit" aria-label="{label}">x</button></form>
+        \\"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="action" value="{action}"><input type="hidden" name="{input_name}" value="{value}"><button type="submit" aria-label="{label}">x</button></form>
     , .{
         .action = action,
         .input_name = input_name,
         .value = value,
         .label = label,
+        .csrf_token = issueSidebarCsrfToken(),
     });
 }
 
@@ -2683,6 +2735,8 @@ fn parsePositiveDecimal(value: []const u8) ?i64 {
 }
 
 pub fn handleIssueSidebarPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
+    if (!(try validateIssueSidebarCsrf(allocator, stream, form_body))) return;
+
     try ensureIndex(allocator, repo);
     const issue_id = index.resolveIssueId(allocator, repo, raw_ref) catch {
         try sendPlainResponse(allocator, stream, 404, "Not Found", "Issue not found\n");
