@@ -471,6 +471,8 @@ pub fn projectStoredEvent(allocator: Allocator, db: *SqliteDb, event_hash: []con
         try projection_objects.applyProjectProjection(allocator, db, event_hash, envelope, body)
     else if (std.mem.startsWith(u8, envelope.event_type, "milestone."))
         try projection_objects.applyMilestoneProjection(allocator, db, event_hash, envelope, body)
+    else if (std.mem.startsWith(u8, envelope.event_type, "label."))
+        try projection_objects.applyLabelProjection(allocator, db, event_hash, envelope, body)
     else if (std.mem.startsWith(u8, envelope.event_type, "comment."))
         try projection_objects.applyCommentProjection(allocator, db, event_hash, envelope, body)
     else
@@ -694,6 +696,13 @@ fn eventAuthorizationRejection(
 
     if (std.mem.startsWith(u8, envelope.event_type, "project.") or
         std.mem.startsWith(u8, envelope.event_type, "milestone."))
+    {
+        return if (roleAtLeast(role, "maintainer")) null else "insufficient_role";
+    }
+
+    if (std.mem.eql(u8, envelope.event_type, "label.created") or
+        std.mem.eql(u8, envelope.event_type, "label.updated") or
+        std.mem.eql(u8, envelope.event_type, "label.deleted"))
     {
         return if (roleAtLeast(role, "maintainer")) null else "insufficient_role";
     }

@@ -176,6 +176,16 @@ pub const MilestoneUpdate = struct {
     }
 };
 
+pub const LabelUpdate = struct {
+    name: ?[]const u8 = null,
+    description: ?[]const u8 = null,
+    color: ?[]const u8 = null,
+
+    pub fn hasChanges(self: LabelUpdate) bool {
+        return self.name != null or self.description != null or self.color != null;
+    }
+};
+
 pub const PullUpdate = struct {
     title: ?[]const u8 = null,
     body: ?[]const u8 = null,
@@ -913,6 +923,73 @@ pub fn buildMilestoneStringPayloadJson(
     try buf.appendSlice(allocator, "\"payload\":{");
     try appendJsonFieldString(&buf, allocator, payload_key, payload_value, false);
     try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildLabelCreatedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    label_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    name: []const u8,
+    description: []const u8,
+    color: []const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, label_id, event_uuid, idem, occurred_at, parents, "label.created", "label");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "name", name, true);
+    try appendJsonFieldString(&buf, allocator, "description", description, true);
+    try appendJsonFieldString(&buf, allocator, "color", color, false);
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildLabelUpdatedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    label_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    update: LabelUpdate,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, label_id, event_uuid, idem, occurred_at, parents, "label.updated", "label");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    if (update.name) |value| try appendJsonFieldString(&buf, allocator, "name", value, true);
+    if (update.description) |value| try appendJsonFieldString(&buf, allocator, "description", value, true);
+    if (update.color) |value| try appendJsonFieldString(&buf, allocator, "color", value, true);
+    if (buf.items[buf.items.len - 1] == ',') buf.items.len -= 1;
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildLabelDeletedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    label_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, label_id, event_uuid, idem, occurred_at, parents, "label.deleted", "label");
+    try buf.appendSlice(allocator, "\"payload\":{}}");
     return try buf.toOwnedSlice(allocator);
 }
 
@@ -1893,6 +1970,7 @@ pub fn isKnownObjectKind(kind: []const u8) bool {
         std.mem.eql(u8, kind, "pull") or
         std.mem.eql(u8, kind, "project") or
         std.mem.eql(u8, kind, "milestone") or
+        std.mem.eql(u8, kind, "label") or
         std.mem.eql(u8, kind, "comment") or
         std.mem.eql(u8, kind, "acl") or
         std.mem.eql(u8, kind, "identity") or
@@ -1928,6 +2006,9 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
     }
     if (std.mem.startsWith(u8, event_type, "milestone.") and !std.mem.eql(u8, object_kind, "milestone")) {
         return "milestone event object.kind must be milestone";
+    }
+    if (std.mem.startsWith(u8, event_type, "label.") and !std.mem.eql(u8, object_kind, "label")) {
+        return "label event object.kind must be label";
     }
     if (std.mem.startsWith(u8, event_type, "comment.") and !std.mem.eql(u8, object_kind, "comment")) {
         return "comment event object.kind must be comment";
@@ -2161,6 +2242,25 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!hasState(payload, "state", &.{ "open", "closed" })) return "milestone.state_set payload.state must be open or closed";
         return null;
     }
+
+    if (std.mem.eql(u8, event_type, "label.created")) {
+        if (!hasString(payload, "name")) return "label.created payload.name must be a string";
+        if (!stringWithin(payload, "name", git.max_payload_atom_bytes)) return "label.created payload.name exceeds v1 field size limit";
+        if (!optionalString(payload, "description")) return "label.created payload.description must be a string";
+        if (!optionalStringWithin(payload, "description", git.max_payload_text_bytes)) return "label.created payload.description exceeds v1 text size limit";
+        if (!optionalLabelColor(payload, "color")) return "label.created payload.color must be a hex color";
+        return null;
+    }
+    if (std.mem.eql(u8, event_type, "label.updated")) {
+        if (!optionalString(payload, "name")) return "label.updated payload.name must be a string";
+        if (!optionalStringWithin(payload, "name", git.max_payload_atom_bytes)) return "label.updated payload.name exceeds v1 field size limit";
+        if (!optionalString(payload, "description")) return "label.updated payload.description must be a string";
+        if (!optionalStringWithin(payload, "description", git.max_payload_text_bytes)) return "label.updated payload.description exceeds v1 text size limit";
+        if (!optionalLabelColor(payload, "color")) return "label.updated payload.color must be a hex color";
+        if (!hasAnyKey(payload, &.{ "name", "description", "color" })) return "label.updated payload must contain at least one update field";
+        return null;
+    }
+    if (std.mem.eql(u8, event_type, "label.deleted")) return null;
 
     if (std.mem.eql(u8, event_type, "pull.opened")) {
         if (!hasString(payload, "title")) return "pull.opened payload.title must be a string";
@@ -2413,6 +2513,10 @@ pub fn objectIdRequirementError(event_type: []const u8, object_kind: []const u8,
         if (!looksLikeUuid(object_id)) return "milestone event object.id must be a UUID";
         return null;
     }
+    if (std.mem.startsWith(u8, event_type, "label.") and std.mem.eql(u8, object_kind, "label")) {
+        if (!looksLikeUuid(object_id)) return "label event object.id must be a UUID";
+        return null;
+    }
     if (std.mem.startsWith(u8, event_type, "comment.") and std.mem.eql(u8, object_kind, "comment")) {
         if (!looksLikeUuid(object_id)) return "comment event object.id must be a UUID";
         return null;
@@ -2514,6 +2618,23 @@ fn optionalStringWithin(object: std.json.ObjectMap, key: []const u8, max_bytes: 
         else => return false,
     };
     return string.len <= max_bytes;
+}
+
+fn optionalLabelColor(object: std.json.ObjectMap, key: []const u8) bool {
+    const value = object.get(key) orelse return true;
+    const string = switch (value) {
+        .string => |s| s,
+        else => return false,
+    };
+    return validLabelColor(string);
+}
+
+fn validLabelColor(value: []const u8) bool {
+    if (value.len != 7 or value[0] != '#') return false;
+    for (value[1..]) |c| {
+        if (!std.ascii.isHex(c)) return false;
+    }
+    return true;
 }
 
 fn isActionConclusion(value: []const u8) bool {

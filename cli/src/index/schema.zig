@@ -220,6 +220,26 @@ pub fn createIndexSchema(db: *SqliteDb) !void {
         \\  author_device TEXT NOT NULL
         \\);
         \\CREATE INDEX milestones_title_idx ON milestones(title, id);
+        \\CREATE TABLE label_definitions (
+        \\  id TEXT PRIMARY KEY,
+        \\  name TEXT NOT NULL,
+        \\  name_occurred_at TEXT NOT NULL,
+        \\  name_actor_principal TEXT NOT NULL,
+        \\  name_event_hash TEXT NOT NULL,
+        \\  description TEXT NOT NULL,
+        \\  description_occurred_at TEXT NOT NULL,
+        \\  description_actor_principal TEXT NOT NULL,
+        \\  description_event_hash TEXT NOT NULL,
+        \\  color TEXT NOT NULL,
+        \\  color_occurred_at TEXT NOT NULL,
+        \\  color_actor_principal TEXT NOT NULL,
+        \\  color_event_hash TEXT NOT NULL,
+        \\  created_at TEXT NOT NULL,
+        \\  author_principal TEXT NOT NULL,
+        \\  author_device TEXT NOT NULL,
+        \\  UNIQUE(name)
+        \\);
+        \\CREATE INDEX label_definitions_name_idx ON label_definitions(name, id);
         \\CREATE TABLE pulls (
         \\  id TEXT PRIMARY KEY,
         \\  title TEXT NOT NULL,

@@ -107,6 +107,7 @@ const exact_routes = [_]Route{
     .{ .method = "POST", .path = "/access/devices", .handler = handleAccessDevicePost },
     .{ .method = "GET", .path = "/settings", .handler = handleSettingsPage },
     .{ .method = "GET", .path = "/labels", .handler = handleLabelsPage },
+    .{ .method = "POST", .path = "/labels", .handler = handleLabelsPost },
     .{ .method = "GET", .path = "/actions", .handler = handleActionsPage },
     .{ .method = "POST", .path = "/actions/request", .handler = handleActionsRequestPost },
     .{ .method = "POST", .path = "/actions/run-requested", .handler = handleRunRequestedPost },
@@ -572,6 +573,10 @@ fn handleSettingsPage(ctx: WebContext) !void {
 
 fn handleLabelsPage(ctx: WebContext) !void {
     try sendOwnedHtml(ctx, try labels_page.renderLabelsPage(ctx.allocator, ctx.repo));
+}
+
+fn handleLabelsPost(ctx: WebContext) !void {
+    try labels_page.handleLabelsPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
 }
 
 fn handleAccessRolePost(ctx: WebContext) !void {
