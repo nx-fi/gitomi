@@ -140,7 +140,12 @@ state, and `gt milestone close` / `gt milestone reopen` change milestone state.
 `gt pull` remains accepted as a compatibility alias for `gt pr`. `gt pr view`
 also accepts `show`, and `gt pr create` also accepts `open` and `new`.
 `gt pr comment` can reply to an existing comment or add the same file/line
-review note produced from the pull request Files tab.
+review note produced from the pull request Files tab. Pull request merge and
+conflict-resolution semantics are specified in
+`../spec/06_PULL_REQUEST_MERGE_SEMANTICS.md`: web-initiated merges are
+remote-first, use detached temporary worktrees or equivalent object-level
+operations for computation, and must not update the active local worktree or
+local base/head branches by default.
 
 `gt sync` fetches remote genesis and inbox refs into `refs/gitomi/staging/*`,
 then admits only compatible genesis refs and new or fast-forward inbox refs into
