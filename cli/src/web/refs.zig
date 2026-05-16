@@ -1,5 +1,6 @@
 const std = @import("std");
 const git = @import("../git.zig");
+const issues_page = @import("issues.zig");
 const repo_mod = @import("../repo.zig");
 const shared = @import("shared.zig");
 const sync = @import("../sync.zig");
@@ -12,6 +13,7 @@ const appendShellStart = shared.appendShellStart;
 const appendTemplate = shared.appendTemplate;
 const gitChecked = git.gitChecked;
 const sendRedirect = shared.sendRedirect;
+const sendPlainResponse = shared.sendPlainResponse;
 const sendResponse = shared.sendResponse;
 
 const FlashKind = enum {
@@ -98,42 +100,51 @@ const RefRow = struct {
     scope: RefScope,
 };
 
-pub fn renderRefsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]u8 {
+pub fn renderRefsPage(allocator: Allocator, repo: Repo, target: []const u8, csrf_token: []const u8) ![]u8 {
     const flash: ?Flash = if (hasQueryToken(target, "sync=ok"))
         .{ .kind = .success, .message = "Sync completed against origin." }
     else
         null;
     const pagination = try shared.paginationFromTarget(allocator, target, refs_default_page_size, refs_max_page_size);
-    return renderRefsPageWithFlash(allocator, repo, flash, refQueryFromTarget(target), pagination);
+    return renderRefsPageWithFlash(allocator, repo, flash, refQueryFromTarget(target), pagination, csrf_token);
 }
 
-pub fn handleRefsSyncPost(allocator: Allocator, repo: Repo, stream: std.net.Stream) !void {
+pub fn handleRefsSyncPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8, csrf_token: []const u8) !void {
+    const csrf_ok = formValueEquals(allocator, form_body, "csrf_token", csrf_token) catch |err| switch (err) {
+        error.InvalidFormEncoding => false,
+        else => return err,
+    };
+    if (!csrf_ok) {
+        try sendPlainResponse(allocator, stream, 403, "Forbidden", "Forbidden\n");
+        return;
+    }
+
     sync.syncPull(allocator, "origin") catch |err| {
-        try sendSyncFailure(allocator, repo, stream, err);
+        try sendSyncFailure(allocator, repo, stream, err, csrf_token);
         return;
     };
     sync.syncPush(allocator, "origin") catch |err| {
-        try sendSyncFailure(allocator, repo, stream, err);
+        try sendSyncFailure(allocator, repo, stream, err, csrf_token);
         return;
     };
     try sendRedirect(allocator, stream, "/refs?sync=ok");
 }
 
-fn sendSyncFailure(allocator: Allocator, repo: Repo, stream: std.net.Stream, err: anyerror) !void {
+fn sendSyncFailure(allocator: Allocator, repo: Repo, stream: std.net.Stream, err: anyerror, csrf_token: []const u8) !void {
     const message = try std.fmt.allocPrint(allocator, "Sync failed: {s}. Check that origin is reachable and the Gitomi refs are valid.", .{@errorName(err)});
     defer allocator.free(message);
-    const body = try renderRefsPageWithFlash(allocator, repo, .{ .kind = .failure, .message = message }, .{}, .{ .per_page = refs_default_page_size });
+    const body = try renderRefsPageWithFlash(allocator, repo, .{ .kind = .failure, .message = message }, .{}, .{ .per_page = refs_default_page_size }, csrf_token);
     defer allocator.free(body);
     try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", body, null);
 }
 
-fn renderRefsPageWithFlash(allocator: Allocator, repo: Repo, flash: ?Flash, query: RefQuery, pagination: shared.Pagination) ![]u8 {
+fn renderRefsPageWithFlash(allocator: Allocator, repo: Repo, flash: ?Flash, query: RefQuery, pagination: shared.Pagination, csrf_token: []const u8) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
     try appendShellStart(&buf, allocator, repo, "Refs", "refs");
     try buf.appendSlice(allocator, "<section class=\"panel\">");
-    try appendRefsHeader(&buf, allocator);
+    try appendRefsHeader(&buf, allocator, csrf_token);
     if (flash) |item| {
         try appendTemplate(&buf, allocator,
             \\<div class="flash {kind}">{message}</div>
@@ -255,18 +266,36 @@ fn appendRefsFilterTab(
     });
 }
 
-fn appendRefsHeader(buf: *std.ArrayList(u8), allocator: Allocator) !void {
-    try buf.appendSlice(allocator,
+fn appendRefsHeader(buf: *std.ArrayList(u8), allocator: Allocator, csrf_token: []const u8) !void {
+    try appendTemplate(buf, allocator,
         \\<div class="section-head refs-head">
         \\  <div>
         \\    <p class="eyebrow">Git references</p>
         \\    <h1>Branches, Tags, Remote Tracking, and Gitomi Refs</h1>
         \\  </div>
         \\  <form method="post" action="/refs/sync" class="refs-sync-form">
+        \\    <input type="hidden" name="csrf_token" value="{csrf_token}">
         \\    <button class="button primary refs-sync-button" type="submit" title="Sync Gitomi refs with origin"><span class="button-icon icon-sync" aria-hidden="true"></span><span>Sync</span></button>
         \\  </form>
         \\</div>
-    );
+    , .{ .csrf_token = csrf_token });
+}
+
+fn formValueEquals(allocator: Allocator, body: []const u8, wanted_key: []const u8, wanted_value: []const u8) !bool {
+    var pairs = std.mem.splitScalar(u8, body, '&');
+    while (pairs.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
+        const raw_key = pair[0..eq];
+        const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
+        const key = try issues_page.percentDecodeForm(allocator, raw_key);
+        defer allocator.free(key);
+        if (!std.mem.eql(u8, key, wanted_key)) continue;
+
+        const value = try issues_page.percentDecodeForm(allocator, raw_value);
+        defer allocator.free(value);
+        return std.mem.eql(u8, value, wanted_value);
+    }
+    return false;
 }
 
 fn appendLocationHeader(buf: *std.ArrayList(u8), allocator: Allocator, query: RefQuery, counts: RefLocationCounts) !void {
@@ -755,4 +784,12 @@ test "web refs href preserves filters and sort" {
     }, .{ .page = 2 });
 
     try std.testing.expectEqualStrings("/refs?type=branches&amp;location=local-cache&amp;sort=updated&amp;page=2", buf.items);
+}
+
+test "refs sync csrf form validation" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(try formValueEquals(allocator, "csrf_token=abc123", "csrf_token", "abc123"));
+    try std.testing.expect(try formValueEquals(allocator, "other=1&csrf_token=abc%20123", "csrf_token", "abc 123"));
+    try std.testing.expect(!(try formValueEquals(allocator, "csrf_token=wrong", "csrf_token", "abc123")));
+    try std.testing.expect(!(try formValueEquals(allocator, "other=abc123", "csrf_token", "abc123")));
 }

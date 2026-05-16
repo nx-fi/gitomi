@@ -32,6 +32,12 @@ pub const Options = zwf.ServerOptions;
 
 pub const HttpRequest = zwf.Request;
 pub const ByteRange = zwf.ByteRange;
+const csrf_token_byte_len = 32;
+const csrf_token_len = csrf_token_byte_len * 2;
+const CsrfToken = [csrf_token_len]u8;
+
+var web_csrf_token: CsrfToken = undefined;
+var web_csrf_token_ready = false;
 
 const WebContext = struct {
     allocator: Allocator,
@@ -39,6 +45,7 @@ const WebContext = struct {
     stream: std.net.Stream,
     request: zwf.Request,
     response: zwf.Response,
+    csrf_token: []const u8,
 };
 
 const WebRouter = zwf.Router(WebContext);
@@ -138,7 +145,24 @@ pub fn serve(allocator: Allocator, repo: Repo, options: Options) !void {
         try out("Press Ctrl-C to stop.\n", .{});
     }
 
+    web_csrf_token = generateCsrfToken();
+    web_csrf_token_ready = true;
     try zwf.server.serveConnections(Repo, allocator, repo, &server, options, handleWebConnectionLogged);
+}
+
+fn generateCsrfToken() CsrfToken {
+    var random_bytes: [csrf_token_byte_len]u8 = undefined;
+    std.crypto.random.bytes(&random_bytes);
+
+    var token: CsrfToken = undefined;
+    const hex = "0123456789abcdef";
+    for (random_bytes, 0..) |byte, i| {
+        const hi: usize = @intCast(byte >> 4);
+        const lo: usize = @intCast(byte & 0x0f);
+        token[i * 2] = hex[hi];
+        token[i * 2 + 1] = hex[lo];
+    }
+    return token;
 }
 
 fn handleWebConnectionLogged(allocator: Allocator, repo: Repo, stream: std.net.Stream) !void {
@@ -149,6 +173,11 @@ fn handleWebConnectionLogged(allocator: Allocator, repo: Repo, stream: std.net.S
 }
 
 pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Stream) !void {
+    if (!web_csrf_token_ready) {
+        web_csrf_token = generateCsrfToken();
+        web_csrf_token_ready = true;
+    }
+
     const raw = readHttpRequest(allocator, stream) catch |err| {
         if (err == error.EndOfStream) return;
         try shared.sendPlainResponse(allocator, stream, 400, "Bad Request", "Bad request\n");
@@ -168,6 +197,7 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
         .stream = stream,
         .request = request,
         .response = zwf.Response.initWithRequest(allocator, stream, request),
+        .csrf_token = web_csrf_token[0..],
     };
 
     if (try zwf.middleware.sendStaticAssets(ctx.response, ctx.request, &vendor_assets)) return;
@@ -453,11 +483,11 @@ fn handleEventsPage(ctx: WebContext) !void {
 }
 
 fn handleRefsPage(ctx: WebContext) !void {
-    try sendOwnedHtml(ctx, try refs_page.renderRefsPage(ctx.allocator, ctx.repo, ctx.request.target));
+    try sendOwnedHtml(ctx, try refs_page.renderRefsPage(ctx.allocator, ctx.repo, ctx.request.target, ctx.csrf_token));
 }
 
 fn handleRefsSyncPost(ctx: WebContext) !void {
-    try refs_page.handleRefsSyncPost(ctx.allocator, ctx.repo, ctx.stream);
+    try refs_page.handleRefsSyncPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body, ctx.csrf_token);
 }
 
 fn handleWorktreesPage(ctx: WebContext) !void {
