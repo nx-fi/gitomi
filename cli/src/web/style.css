@@ -171,12 +171,12 @@
   --brand-bg: var(--primary-50);
   --brand-soft: var(--primary-100);
   --brand-line: color-mix(in oklch, var(--brand) 48%, var(--border));
-  --bg: var(--sg-color-bg-light);
   --panel: #ffffff;
-  --panel-strong: color-mix(in oklch, var(--neutral-50) 52%, #ffffff);
-  --subtle: color-mix(in oklch, var(--neutral-50) 72%, #ffffff);
-  --border: var(--sg-color-border-light);
-  --border-strong: var(--sg-color-border);
+  --bg: var(--panel);
+  --panel-strong: color-mix(in oklch, #f4f4f4 76%, #ffffff);
+  --subtle: color-mix(in oklch, #f4f4f4 55%, #ffffff);
+  --border: color-mix(in oklch, #d8d8d8 72%, #ffffff);
+  --border-strong: color-mix(in oklch, #b7b7b7 78%, #ffffff);
   --text: var(--sg-color-title);
   --muted: var(--sg-color-text-secondary);
   --blue: var(--info-700);
@@ -195,9 +195,22 @@
   --topbar-link: var(--sg-color-text-secondary);
   --topbar-active: var(--brand-strong);
   --nav-active-border: var(--brand);
-  --button-secondary-bg: var(--panel-strong);
-  --code-bg: var(--sg-color-code-bg);
-  --soft-row: var(--neutral-50);
+  --titlebar-bg:
+    linear-gradient(90deg, color-mix(in oklch, var(--orange) 5%, transparent), transparent 50%),
+    var(--panel-strong);
+  --table-row-highlight: color-mix(in oklch, var(--orange) 4%, var(--panel));
+  --markdown-table-head-bg: var(--titlebar-bg);
+  --dropdown-bg: var(--bg);
+  --dropdown-hover-bg: var(--table-row-highlight);
+  --dropdown-border: var(--border-strong);
+  --dropdown-shadow: 0 14px 34px color-mix(in oklch, #000000 14%, transparent);
+  --button-secondary-bg: color-mix(in oklch, #f2f2f2 82%, var(--panel));
+  --button-secondary-hover-bg: color-mix(in oklch, var(--button-secondary-bg) 92%, var(--text));
+  --button-secondary-active-bg: color-mix(in oklch, var(--button-secondary-bg) 86%, var(--text));
+  --button-secondary-hover-border: color-mix(in oklch, var(--border-strong) 88%, var(--text));
+  --button-primary-hover-bg: color-mix(in oklch, var(--brand) 88%, #ffffff);
+  --code-bg: color-mix(in oklch, #eeeeee 86%, #ffffff);
+  --soft-row: color-mix(in oklch, #f5f5f5 80%, #ffffff);
   --folder-bg: var(--warning-50);
   --folder-border: var(--sg-color-warning);
   --input-bg: #ffffff;
@@ -235,12 +248,12 @@
   --brand-bg: var(--primary-900);
   --brand-soft: var(--primary-950);
   --brand-line: color-mix(in oklch, var(--brand) 54%, var(--border));
-  --bg: var(--sg-color-bg-dark);
-  --panel: color-mix(in oklch, var(--neutral-900) 82%, var(--sg-color-bg-dark));
-  --panel-strong: var(--neutral-900);
-  --subtle: color-mix(in oklch, var(--neutral-800) 72%, var(--panel));
-  --border: color-mix(in oklch, var(--neutral-700) 74%, var(--panel));
-  --border-strong: var(--neutral-600);
+  --panel: color-mix(in oklch, #1f1f1f 92%, #000000);
+  --bg: var(--panel);
+  --panel-strong: color-mix(in oklch, #2a2a2a 80%, #000000);
+  --subtle: color-mix(in oklch, #282828 55%, #000000);
+  --border: color-mix(in oklch, #4a4a4a 65%, #000000);
+  --border-strong: color-mix(in oklch, #656565 62%, #000000);
   --text: var(--neutral-50);
   --muted: var(--neutral-300);
   --blue: var(--info-300);
@@ -259,9 +272,22 @@
   --topbar-link: var(--neutral-300);
   --topbar-active: var(--brand-strong);
   --nav-active-border: var(--brand);
-  --button-secondary-bg: var(--neutral-900);
-  --code-bg: var(--neutral-950);
-  --soft-row: color-mix(in oklch, var(--neutral-900) 78%, var(--panel));
+  --titlebar-bg:
+    linear-gradient(90deg, color-mix(in oklch, var(--orange) 5%, transparent), transparent 50%),
+    var(--panel-strong);
+  --table-row-highlight: color-mix(in oklch, var(--orange) 5%, var(--panel));
+  --markdown-table-head-bg: var(--titlebar-bg);
+  --dropdown-bg: var(--bg);
+  --dropdown-hover-bg: var(--table-row-highlight);
+  --dropdown-border: var(--border-strong);
+  --dropdown-shadow: 0 18px 42px color-mix(in oklch, #000000 42%, transparent);
+  --button-secondary-bg: color-mix(in oklch, #303030 70%, #000000);
+  --button-secondary-hover-bg: color-mix(in oklch, var(--button-secondary-bg) 92%, var(--text));
+  --button-secondary-active-bg: color-mix(in oklch, var(--button-secondary-bg) 86%, var(--text));
+  --button-secondary-hover-border: color-mix(in oklch, var(--border-strong) 88%, var(--text));
+  --button-primary-hover-bg: color-mix(in oklch, var(--brand) 88%, #ffffff);
+  --code-bg: color-mix(in oklch, #303030 84%, #000000);
+  --soft-row: color-mix(in oklch, #292929 45%, #000000);
   --folder-bg: var(--warning-950);
   --folder-border: var(--warning-400);
   --input-bg: var(--sg-color-bg-dark);
@@ -712,7 +738,7 @@ main.page-projects:has(.project-overview-page) {
 }
 .detail-back-button:hover {
   color: var(--text);
-  background: var(--button-secondary-bg);
+  background: var(--button-secondary-hover-bg);
   border-color: var(--border);
   text-decoration: none;
 }
@@ -778,9 +804,7 @@ main.page-projects:has(.project-overview-page) {
 .panel h2 { font-size: 18px; }
 .panel > h2 {
   padding: 16px 18px;
-  background:
-    linear-gradient(90deg, color-mix(in oklch, var(--orange) 5%, transparent), transparent 48%),
-    var(--panel-strong);
+  background: var(--titlebar-bg);
   border-bottom: 1px solid var(--border);
   border-radius: 8px 8px 0 0;
 }
@@ -913,9 +937,7 @@ main.page-projects:has(.project-overview-page) {
   gap: 16px;
   padding: 16px 18px;
   border-bottom: 1px solid var(--border);
-  background:
-    linear-gradient(90deg, color-mix(in oklch, var(--orange) 5%, transparent), transparent 50%),
-    var(--panel-strong);
+  background: var(--titlebar-bg);
   border-radius: 8px 8px 0 0;
 }
 .facts {
@@ -949,7 +971,7 @@ main.page-projects:has(.project-overview-page) {
 }
 .activity-list article:hover,
 .issue-row:hover {
-  background: var(--subtle);
+  background: var(--table-row-highlight);
 }
 .dot {
   width: 10px;
@@ -1041,12 +1063,15 @@ main.page-projects:has(.project-overview-page) {
 .issues-panel {
   overflow: hidden;
 }
+.issues-panel:has(.issues-filter-menu[open]) {
+  overflow: visible;
+}
 .issues-list-head {
   display: grid;
   grid-template-columns: 44px auto minmax(0, 1fr);
   align-items: center;
   min-height: 48px;
-  background: var(--panel-strong);
+  background: var(--titlebar-bg);
   border-bottom: 1px solid var(--border);
 }
 .issues-select-all {
@@ -1167,7 +1192,7 @@ main.page-projects:has(.project-overview-page) {
 .issues-filter-menu.active summary,
 .issues-filter-menu summary:hover {
   color: var(--text);
-  background: var(--button-secondary-bg);
+  background: var(--button-secondary-hover-bg);
 }
 .issues-filter-menus button::after,
 .issues-filter-menu summary::after {
@@ -1249,7 +1274,7 @@ main.page-projects:has(.project-overview-page) {
   border-bottom: 0;
 }
 .issue-list-row:hover {
-  background: var(--subtle);
+  background: var(--table-row-highlight);
 }
 .pagination {
   display: flex;
@@ -1618,6 +1643,9 @@ main.page-projects:has(.project-overview-page) {
 }
 .pulls-panel {
   overflow: hidden;
+}
+.pulls-panel:has(.issues-filter-menu[open]) {
+  overflow: visible;
 }
 .pull-branch-line {
   display: flex;
@@ -3066,7 +3094,7 @@ main.page-projects:has(.project-overview-page) {
 .issue-action-menu[open] .issue-kebab-button,
 .issue-kebab-button:hover {
   color: var(--text);
-  background: var(--button-secondary-bg);
+  background: var(--button-secondary-hover-bg);
 }
 .issue-action-popover {
   position: absolute;
@@ -3333,7 +3361,7 @@ main.page-projects:has(.project-overview-page) {
 .markdown-editor-toolbar button:hover,
 .markdown-editor-toolbar button:focus-visible {
   color: var(--text);
-  background: var(--button-secondary-bg);
+  background: var(--button-secondary-hover-bg);
 }
 .markdown-editor-divider {
   width: 1px;
@@ -3456,7 +3484,7 @@ main.page-projects:has(.project-overview-page) {
 .issue-sidebar-menu[open] summary,
 .issue-sidebar-menu summary:hover {
   color: var(--text);
-  background: var(--button-secondary-bg);
+  background: var(--button-secondary-hover-bg);
 }
 .issue-sidebar-menu-icon {
   display: block;
@@ -4175,7 +4203,7 @@ main.page-projects:has(.project-overview-page) {
   justify-content: space-between;
   gap: 16px;
   padding: 16px 18px;
-  background: var(--panel-strong);
+  background: var(--titlebar-bg);
   border-bottom: 1px solid var(--border);
 }
 .project-create-head h1,
@@ -4225,7 +4253,7 @@ main.page-projects:has(.project-overview-page) {
   display: grid;
   gap: 5px;
   padding: 14px;
-  background: var(--panel-strong);
+  background: var(--titlebar-bg);
   border-bottom: 1px solid var(--border);
 }
 .project-form {
@@ -4272,9 +4300,9 @@ main.page-projects:has(.project-overview-page) {
   min-height: 38px;
   min-width: 0;
   padding: 0 12px;
-  color: var(--muted);
+  color: var(--topbar-link);
   border-left: 3px solid transparent;
-  border-radius: 6px;
+  border-radius: 0;
   font-size: 15px;
   font-weight: 700;
 }
@@ -4286,13 +4314,12 @@ main.page-projects:has(.project-overview-page) {
   width: 17px;
   height: 17px;
 }
-.project-page-tab:hover,
 .project-page-tab.active,
 .project-page-layout:not(:has(.project-page-panel:target)) .project-page-tab[href="#projects"],
 .project-page-layout:has(#projects:target) .project-page-tab[href="#projects"],
 .project-page-layout:has(#milestones:target) .project-page-tab[href="#milestones"] {
-  color: var(--text);
-  background: var(--subtle);
+  color: var(--topbar-active);
+  background: transparent;
   text-decoration: none;
 }
 .project-page-tab.active,
@@ -4300,6 +4327,16 @@ main.page-projects:has(.project-overview-page) {
 .project-page-layout:has(#projects:target) .project-page-tab[href="#projects"],
 .project-page-layout:has(#milestones:target) .project-page-tab[href="#milestones"] {
   border-left-color: var(--nav-active-border);
+}
+.project-page-tab:hover {
+  color: var(--topbar-active);
+  background: color-mix(in oklch, var(--brand) 8%, transparent);
+  text-decoration: none;
+}
+.project-page-layout:not(:has(.project-page-panel:target)) .project-page-tab[href="#projects"]:hover,
+.project-page-layout:has(#projects:target) .project-page-tab[href="#projects"]:hover,
+.project-page-layout:has(#milestones:target) .project-page-tab[href="#milestones"]:hover {
+  background: color-mix(in oklch, var(--brand) 8%, transparent);
 }
 .project-page-content {
   min-width: 0;
@@ -4861,6 +4898,7 @@ main.page-projects:has(.project-overview-page) {
 .project-overview-side-panel-head {
   min-height: 42px;
   padding: 0 12px;
+  background: var(--titlebar-bg);
   border-bottom: 1px solid var(--border);
 }
 .project-overview-side-panel-head h2 {
@@ -5690,38 +5728,36 @@ main.page-projects:has(.project-overview-page) {
   font-weight: 700;
   cursor: pointer;
   box-shadow: none;
-  transition: background 120ms ease, border-color 120ms ease, color 120ms ease, transform 120ms ease, box-shadow 120ms ease;
+  transform: none;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease, opacity 120ms ease;
 }
 .button:hover {
   text-decoration: none;
+  transform: none;
 }
 .button.primary {
   color: var(--brand-ink);
-  background:
-    linear-gradient(180deg, color-mix(in oklch, var(--brand) 82%, #ffffff), var(--brand));
+  background: var(--brand);
   border-color: color-mix(in oklch, var(--brand) 72%, var(--brand-ink));
-  box-shadow:
-    0 1px 0 color-mix(in oklch, #ffffff 42%, transparent) inset,
-    0 0 0 3px color-mix(in oklch, var(--brand) 12%, transparent);
+  box-shadow: none;
 }
 .button.primary:hover {
-  background:
-    linear-gradient(180deg, color-mix(in oklch, var(--brand-hover) 78%, #ffffff), var(--brand-hover));
-  border-color: color-mix(in oklch, var(--brand-hover) 78%, var(--brand-ink));
-  transform: translateY(-1px);
-  box-shadow:
-    0 1px 0 color-mix(in oklch, #ffffff 50%, transparent) inset,
-    0 0 0 3px color-mix(in oklch, var(--brand) 18%, transparent);
+  background: var(--button-primary-hover-bg);
+  border-color: color-mix(in oklch, var(--brand) 72%, var(--brand-ink));
+  box-shadow: none;
 }
 .button.secondary {
   color: var(--text);
-  background:
-    linear-gradient(180deg, color-mix(in oklch, var(--panel) 44%, transparent), transparent),
-    var(--button-secondary-bg);
+  background: var(--button-secondary-bg);
+  box-shadow: none;
 }
 .button.secondary:hover {
-  background: var(--subtle);
-  border-color: var(--border-strong);
+  background: var(--button-secondary-hover-bg);
+  border-color: var(--button-secondary-hover-border);
+}
+.button.secondary:active {
+  background: var(--button-secondary-active-bg);
+  border-color: var(--button-secondary-hover-border);
 }
 .button:disabled {
   color: var(--muted);
@@ -6840,66 +6876,51 @@ thead th {
   font-size: 12px;
 }
 tbody tr:hover {
-  background: var(--subtle);
+  background: var(--table-row-highlight);
 }
 main.page-actions {
-  width: min(1440px, calc(100vw - 32px));
+  width: min(100vw - 32px, 1180px);
 }
 .actions-layout {
-  display: grid;
-  grid-template-columns: minmax(240px, 284px) minmax(0, 1fr);
   min-height: calc(100vh - 164px);
 }
 .actions-sidebar {
   min-width: 0;
-  padding: 20px 16px 24px 0;
-  border-right: 1px solid var(--border);
-}
-.actions-sidebar-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 14px;
-}
-.actions-sidebar h1,
-.actions-main-head h1 {
-  margin: 0;
-  font-size: 22px;
-  line-height: 1.25;
-}
-.actions-new-workflow {
-  flex: 0 0 auto;
 }
 .actions-workflow-nav {
   display: grid;
   gap: 4px;
-  padding-bottom: 16px;
-  border-bottom: 1px solid var(--border);
+  padding: 4px 0;
 }
 .actions-workflow-link {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: 17px minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
-  min-height: 36px;
-  padding: 0 10px 0 14px;
-  color: var(--muted);
+  min-height: 38px;
+  min-width: 0;
+  padding: 0 12px;
+  color: var(--topbar-link);
   border-left: 3px solid transparent;
-  border-radius: 6px;
+  border-radius: 0;
+  font-size: 15px;
   font-weight: 700;
 }
-.actions-workflow-link:hover {
-  color: var(--text);
-  background: var(--subtle);
-  text-decoration: none;
-}
 .actions-workflow-link.active {
-  color: var(--text);
-  background: var(--subtle);
+  color: var(--topbar-active);
+  background: transparent;
   border-left-color: var(--nav-active-border);
 }
-.actions-workflow-link span {
+.actions-workflow-link:hover {
+  color: var(--topbar-active);
+  background: color-mix(in oklch, var(--brand) 8%, transparent);
+  text-decoration: none;
+}
+.actions-workflow-link .button-icon {
+  width: 17px;
+  height: 17px;
+}
+.actions-workflow-label {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -6916,15 +6937,17 @@ main.page-actions {
   font-size: 12px;
 }
 .actions-manual-run {
-  padding: 15px 0;
-  border-bottom: 1px solid var(--border);
+  padding: 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
 }
 .actions-manual-run summary {
   display: flex;
   align-items: center;
   justify-content: space-between;
   min-height: 32px;
-  padding: 0 10px;
+  padding: 0 12px;
   color: var(--text);
   border-radius: 6px;
   font-weight: 700;
@@ -6944,13 +6967,13 @@ main.page-actions {
 }
 .actions-manual-run[open] summary,
 .actions-manual-run summary:hover {
-  background: var(--subtle);
+  background: color-mix(in oklch, var(--brand) 8%, transparent);
 }
 .actions-manual-run form {
   display: grid;
   gap: 10px;
   margin-top: 10px;
-  padding: 0 10px;
+  padding: 0 12px 12px;
 }
 .actions-manual-run form + form {
   margin-top: 12px;
@@ -6975,21 +6998,20 @@ main.page-actions {
 .actions-status {
   display: grid;
   gap: 10px;
-  padding: 15px 0;
-  border-bottom: 1px solid var(--border);
+  padding: 0;
 }
 .actions-status h2 {
   margin: 0;
-  padding: 0 10px;
+  padding: 0;
   color: var(--muted);
   font-size: 12px;
   font-weight: 800;
 }
 .actions-status-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 8px;
-  padding: 0 10px;
+  padding: 0;
 }
 .actions-status-grid span {
   display: grid;
@@ -7015,7 +7037,7 @@ main.page-actions {
 }
 .actions-workflow-overview,
 .actions-workflow-detail {
-  margin-bottom: 18px;
+  margin: 0;
   padding: 16px;
   background: var(--panel);
   border: 1px solid var(--border);
@@ -7243,20 +7265,27 @@ main.page-actions {
 }
 .actions-main {
   min-width: 0;
-  padding: 20px 0 24px 32px;
+  padding: 0;
 }
 .actions-main .flash {
   margin: 0 0 16px;
+}
+.actions-panel {
+  overflow: visible;
+}
+.actions-main-body {
+  display: grid;
+  gap: 18px;
+  padding: 18px;
 }
 .actions-main-head {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
   gap: 20px;
-  align-items: start;
-  margin-bottom: 26px;
+  align-items: center;
 }
 .actions-main-head p {
-  margin: 5px 0 0;
+  margin: 0;
   color: var(--muted);
   font-size: 15px;
 }
@@ -7303,7 +7332,7 @@ main.page-actions {
   align-items: center;
   min-height: 56px;
   padding: 0 16px;
-  background: var(--panel-strong);
+  background: var(--titlebar-bg);
   border-bottom: 1px solid var(--border);
 }
 .actions-runs-head strong {
@@ -7353,7 +7382,7 @@ main.page-actions {
 .actions-filter-menu.active summary,
 .actions-filter-menu summary:hover {
   color: var(--text);
-  background: var(--button-secondary-bg);
+  background: var(--button-secondary-hover-bg);
 }
 .actions-filter-menu summary::after {
   content: "";
@@ -7601,7 +7630,7 @@ main.page-actions {
 .actions-run-menu-wrap[open] .actions-run-menu,
 .actions-run-menu:hover {
   color: var(--text);
-  background: var(--button-secondary-bg);
+  background: var(--button-secondary-hover-bg);
 }
 .actions-run-popover {
   position: absolute;
@@ -7860,7 +7889,7 @@ main.page-actions {
 }
 .repo-head h1 {
   margin: 0;
-  color: var(--blue);
+  color: var(--brand);
   font-size: 20px;
   font-weight: 500;
   line-height: 1.35;
@@ -7978,6 +8007,141 @@ main.page-code:has(.root-code-toolbar) .repo-actions {
   flex: 0 1 220px;
   max-width: 320px;
   color: var(--text);
+  min-height: 40px;
+  background: var(--dropdown-bg);
+  border: 1px solid var(--dropdown-border);
+  border-radius: 10px;
+  transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+}
+.root-branch-select-wrap:hover,
+.root-branch-select-wrap:focus-within {
+  background: var(--button-secondary-hover-bg);
+  border-color: color-mix(in oklch, var(--dropdown-border) 72%, var(--text));
+}
+.root-branch-select-wrap:focus-within {
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--brand) 18%, transparent);
+}
+.root-branch-select-wrap.root-branch-menu {
+  display: block;
+}
+.root-branch-menu[open] {
+  z-index: 30;
+}
+.root-branch-summary {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 40px;
+  padding: 0 12px;
+  color: var(--text);
+  border-radius: 9px;
+  font: 600 14px/1.25 var(--mono);
+  cursor: pointer;
+  list-style: none;
+}
+.root-branch-summary::-webkit-details-marker {
+  display: none;
+}
+.root-branch-summary:focus {
+  outline: none;
+}
+.root-branch-summary > .button-icon {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+.root-branch-current,
+.root-branch-option-label {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+.root-branch-current {
+  flex: 1 1 auto;
+}
+.root-branch-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.root-branch-scope {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+.root-branch-summary > .root-caret {
+  margin-left: auto;
+  color: var(--muted);
+  transition: transform 120ms ease;
+}
+.root-branch-menu[open] .root-branch-summary > .root-caret {
+  transform: rotate(180deg);
+}
+.root-branch-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 32;
+  display: grid;
+  gap: 2px;
+  width: max-content;
+  min-width: 100%;
+  max-width: min(360px, calc(100vw - 32px));
+  max-height: min(420px, calc(100vh - 140px));
+  padding: 6px;
+  overflow: auto;
+  background: var(--dropdown-bg);
+  border: 1px solid var(--dropdown-border);
+  border-radius: 10px;
+  box-shadow: var(--dropdown-shadow);
+}
+.root-branch-option {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 0 10px;
+  color: var(--text);
+  border-radius: 7px;
+  font: 600 13px/1.25 var(--mono);
+  text-decoration: none;
+}
+.root-branch-option:hover,
+.root-branch-option.active {
+  color: var(--text);
+  background: var(--dropdown-hover-bg);
+  text-decoration: none;
+}
+.root-branch-check {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  color: var(--muted);
+}
+.root-branch-option.active .root-branch-check::before {
+  content: "";
+  position: absolute;
+  top: 4px;
+  left: 2px;
+  width: 8px;
+  height: 5px;
+  border-bottom: 2px solid currentColor;
+  border-left: 2px solid currentColor;
+  transform: rotate(-45deg);
+}
+.root-branch-group-label {
+  margin: 6px 4px 2px;
+  padding: 8px 6px 3px;
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.2;
+  text-transform: uppercase;
 }
 .root-branch-select-wrap > .button-icon,
 .root-file-search > .button-icon {
@@ -7992,11 +8156,16 @@ main.page-code:has(.root-code-toolbar) .repo-actions {
   min-height: 40px;
   padding: 0 34px 0 40px;
   color: var(--text);
-  background: var(--button-secondary-bg);
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  font: 500 14px/1.2 var(--mono);
+  background: transparent;
+  border: 0;
+  border-radius: 10px;
+  font: 600 14px/1.2 var(--mono);
+  box-shadow: none;
+  cursor: pointer;
   appearance: none;
+}
+.root-branch-select:focus {
+  outline: none;
 }
 .root-caret {
   width: 0;
@@ -8010,7 +8179,18 @@ main.page-code:has(.root-code-toolbar) .repo-actions {
 .root-branch-select-wrap > .root-caret {
   position: absolute;
   right: 13px;
+  color: var(--muted);
   pointer-events: none;
+}
+.root-branch-select-wrap:hover > .button-icon,
+.root-branch-select-wrap:hover > .root-caret,
+.root-branch-select-wrap:focus-within > .button-icon,
+.root-branch-select-wrap:focus-within > .root-caret,
+.root-branch-select-wrap:hover .root-branch-summary > .button-icon,
+.root-branch-select-wrap:hover .root-branch-summary > .root-caret,
+.root-branch-select-wrap:focus-within .root-branch-summary > .button-icon,
+.root-branch-select-wrap:focus-within .root-branch-summary > .root-caret {
+  color: var(--text);
 }
 .root-ref-link {
   display: inline-flex;
@@ -8149,7 +8329,7 @@ main.page-code:has(.root-code-toolbar) .repo-actions {
   align-items: center;
   min-height: 48px;
   padding: 8px 16px;
-  background: var(--panel-strong);
+  background: var(--titlebar-bg);
   border-bottom: 1px solid var(--border);
   border-radius: 6px 6px 0 0;
 }
@@ -8690,7 +8870,7 @@ a.root-file-commit:hover,
 }
 .markdown-outline-close:hover {
   color: var(--text);
-  background: var(--button-secondary-bg);
+  background: var(--button-secondary-hover-bg);
 }
 .tree-sidebar-title {
   min-width: 0;
@@ -8714,6 +8894,7 @@ a.root-file-commit:hover,
 }
 .tree-icon-button:hover {
   color: var(--text);
+  background: var(--button-secondary-hover-bg);
   border-color: var(--border-strong);
 }
 .tree-collapse-button::before {
@@ -8792,7 +8973,7 @@ a.root-file-commit:hover,
 }
 .tree-search-result:hover,
 .tree-search-result.active {
-  background: var(--subtle);
+  background: var(--table-row-highlight);
   text-decoration: none;
 }
 .tree-search-result-name,
@@ -8911,6 +9092,15 @@ a.root-file-commit:hover,
   border-color: var(--blue);
   outline: 2px solid color-mix(in oklch, var(--blue) 22%, transparent);
   outline-offset: -2px;
+}
+.issues-search input[type="search"],
+.project-filter-bar input[type="search"],
+.labels-search,
+.actions-filter input[type="search"],
+.root-file-search input,
+.tree-search-input,
+.markdown-outline-search input {
+  background: var(--bg);
 }
 .symbols-resizer,
 .markdown-outline-resizer {
@@ -9071,7 +9261,7 @@ a.root-file-commit:hover,
 }
 .tree-toggle:hover {
   color: var(--text);
-  background: var(--subtle);
+  background: var(--table-row-highlight);
 }
 .tree-link {
   display: flex;
@@ -9088,16 +9278,16 @@ a.root-file-commit:hover,
   line-height: 20px;
 }
 .tree-link:hover {
-  background: var(--subtle);
+  background: var(--table-row-highlight);
   text-decoration: none;
 }
 .tree-link.active {
   color: var(--topbar-active);
-  background: var(--info-bg);
+  background: var(--table-row-highlight);
   font-weight: 500;
 }
 .tree-node.search-match > .tree-link {
-  background: var(--accent-soft);
+  background: var(--table-row-highlight);
 }
 .tree-link.ancestor {
   font-weight: 500;
@@ -9175,7 +9365,7 @@ a.root-file-commit:hover,
 }
 .path-copy-button:hover {
   color: var(--text);
-  background: var(--button-secondary-bg);
+  background: var(--button-secondary-hover-bg);
   border-color: var(--border);
 }
 .breadcrumbs span,
@@ -9605,6 +9795,7 @@ a.root-file-commit:hover,
 .line-menu-button:hover,
 .line-menu-button[aria-expanded="true"] {
   color: var(--text);
+  background: var(--button-secondary-hover-bg);
   border-color: var(--border-strong);
 }
 .line-num {
@@ -9990,7 +10181,7 @@ a.root-file-commit:hover,
   gap: 9px;
   min-height: 48px;
   padding: 0 16px;
-  color: var(--muted);
+  color: var(--topbar-link);
   background: transparent;
   border: 0;
   border-bottom: 2px solid transparent;
@@ -9999,10 +10190,11 @@ a.root-file-commit:hover,
   cursor: pointer;
 }
 .root-doc-tab:hover {
-  color: var(--text);
+  color: var(--topbar-active);
+  background: color-mix(in oklch, var(--brand) 8%, transparent);
 }
 .root-doc-tab.active {
-  color: var(--text);
+  color: var(--topbar-active);
   border-bottom-color: var(--nav-active-border);
 }
 .root-doc-tab .button-icon {
@@ -10149,7 +10341,7 @@ a.root-file-commit:hover,
 .commits-filter-menu[open] summary,
 .commits-filter-menu summary:hover {
   color: var(--text);
-  background: var(--button-secondary-bg);
+  background: var(--button-secondary-hover-bg);
   text-decoration: none;
 }
 .commits-filter-popover {
@@ -10229,7 +10421,7 @@ a.root-file-commit:hover,
   border-top: 0;
 }
 .commit-row:hover {
-  background: var(--subtle);
+  background: var(--table-row-highlight);
 }
 .commit-title {
   color: var(--text);
@@ -10706,30 +10898,40 @@ a.root-file-commit:hover,
   max-height: 72vh;
 }
 .markdown-table-wrap {
-  overflow-x: auto;
+  overflow: auto;
+  border-radius: 6px;
 }
 .markdown-table {
   --markdown-table-row-odd: var(--panel);
-  --markdown-table-row-even: var(--subtle);
-  --markdown-table-row-highlight: #eaeef2;
+  --markdown-table-row-even: var(--code-bg);
+  --markdown-table-row-highlight: var(--table-row-highlight);
   width: max-content;
   min-width: min(100%, 520px);
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   font-size: 14px;
-}
-:root[data-theme="dark"] .markdown-table {
-  --markdown-table-row-highlight: #2b333d;
 }
 .markdown-table th,
 .markdown-table td {
   padding: 6px 10px;
-  border: 1px solid var(--border);
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-left: 1px solid var(--border);
   background: var(--markdown-table-row-odd);
   text-align: left;
   vertical-align: top;
 }
+.markdown-table tr > :last-child {
+  border-right: 1px solid var(--border);
+}
+.markdown-table tr:last-child > * {
+  border-bottom: 1px solid var(--border);
+}
+.markdown-table tr:first-child {
+  background: var(--markdown-table-head-bg);
+}
 .markdown-table th {
-  background: var(--panel-strong);
+  background: transparent;
   font-weight: 700;
 }
 .markdown-table tr:nth-child(even) td {
@@ -10737,6 +10939,18 @@ a.root-file-commit:hover,
 }
 .markdown-table tr:hover td {
   background: var(--markdown-table-row-highlight);
+}
+.markdown-table tr:first-child > :first-child {
+  border-top-left-radius: 6px;
+}
+.markdown-table tr:first-child > :last-child {
+  border-top-right-radius: 6px;
+}
+.markdown-table tr:last-child > :first-child {
+  border-bottom-left-radius: 6px;
+}
+.markdown-table tr:last-child > :last-child {
+  border-bottom-right-radius: 6px;
 }
 .math-inline,
 .math-block {
@@ -10876,6 +11090,7 @@ textarea:focus,
 .topbar-sync-button:focus-visible,
 .live-mode-switch:focus-visible,
 .user-menu summary:focus-visible,
+.root-branch-summary:focus-visible,
 .issue-sidebar-menu summary:focus-visible,
 .project-action-menu summary:focus-visible,
 .kanban-column-add-menu summary:focus-visible,
@@ -10889,6 +11104,107 @@ textarea:focus,
 textarea {
   resize: vertical;
   font-family: var(--mono);
+}
+select:not([multiple]) {
+  padding-right: 34px;
+  color: var(--text);
+  background-color: var(--dropdown-bg);
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 17px) 50%,
+    calc(100% - 12px) 50%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  border-color: var(--dropdown-border);
+  box-shadow: none;
+  appearance: none;
+}
+select:not([multiple]):hover {
+  border-color: color-mix(in oklch, var(--dropdown-border) 76%, var(--text));
+}
+select:not([multiple]):disabled {
+  color: var(--muted);
+  cursor: default;
+  opacity: 0.68;
+}
+button[class],
+summary[class],
+input[type="button"],
+input[type="submit"],
+input[type="reset"],
+.button,
+[role="button"] {
+  box-shadow: none;
+  transform: none;
+  transition-property: background, border-color, color, opacity;
+}
+button[class]:hover,
+summary[class]:hover,
+input[type="button"]:hover,
+input[type="submit"]:hover,
+input[type="reset"]:hover,
+.button:hover,
+[role="button"]:hover {
+  transform: none;
+}
+.root-branch-select {
+  background-image: none;
+}
+:is(
+  .topbar-sync-popover,
+  .user-menu-popover,
+  .issues-filter-popover,
+  .pull-merge-method-popover,
+  .issue-action-popover,
+  .reaction-popover,
+  .issue-sidebar-popover,
+  .project-property-popover,
+  .project-action-popover,
+  .kanban-column-popover,
+  .project-issue-search-menu,
+  .labels-row-popover,
+  .refs-filter-popover,
+  .actions-filter-popover,
+  .actions-run-popover,
+  .root-action-popover,
+  .root-sync-popover,
+  .tree-search-menu,
+  .markdown-toc-popover,
+  .commits-filter-popover,
+  .line-actions-menu
+) {
+  background: var(--dropdown-bg);
+  border-color: var(--dropdown-border);
+  border-radius: 10px;
+  box-shadow: var(--dropdown-shadow);
+}
+:is(
+  .issues-filter-option,
+  .refs-filter-option,
+  .actions-filter-option,
+  .commits-filter-option,
+  .tree-search-result,
+  .project-issue-search-result,
+  .issue-action-popover button,
+  .root-action-popover button,
+  .actions-run-popover a,
+  .actions-run-popover button,
+  .line-actions-menu button,
+  .project-action-popover button,
+  .labels-row-popover form button
+):hover,
+:is(
+  .issues-filter-option,
+  .refs-filter-option,
+  .actions-filter-option,
+  .commits-filter-option,
+  .tree-search-result,
+  .project-issue-search-result
+).selected,
+.tree-search-result.active {
+  background: var(--dropdown-hover-bg);
 }
 .form-actions {
   display: flex;
@@ -10912,14 +11228,11 @@ textarea {
   border: 1px solid color-mix(in oklch, var(--brand) 35%, transparent);
 }
 @media (max-width: 980px) {
-  .actions-layout {
-    grid-template-columns: minmax(220px, 250px) minmax(0, 1fr);
-  }
-  .actions-main {
-    padding-left: 20px;
-  }
   .actions-runs-filters {
     display: none;
+  }
+  .actions-status-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
   .actions-workflow-meta {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -11007,21 +11320,19 @@ textarea {
   .indexing-status {
     display: flex;
   }
-  .actions-layout {
-    grid-template-columns: 1fr;
-  }
   .actions-sidebar {
-    padding: 0 0 16px;
-    border-right: 0;
-    border-bottom: 1px solid var(--border);
-  }
-  .actions-main {
-    padding: 16px 0 0;
+    padding: 0;
+    border: 0;
   }
   .actions-main-head {
     grid-template-columns: 1fr;
     gap: 12px;
-    margin-bottom: 16px;
+  }
+  .actions-main-body {
+    padding: 14px;
+  }
+  .actions-status-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .actions-workflow-overview,
   .actions-workflow-detail {

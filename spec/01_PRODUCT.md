@@ -335,11 +335,12 @@ state alias, but canonical renderers MUST emit `state:<state>`.
 
 The canonical pull request predicate order is:
 
-`is:pr state:<state> author:<principal> label:<label> assignee:<principal> reviewer:<principal> base:<ref> head:<ref> <free-text>`
+`is:pr state:<state> author:<principal> label:<label> assignee:<principal> reviewer:<principal> base:<ref> head:<ref> sort:<sort> <free-text>`
 
-Pull request state values are `open`, `merged`, `closed`, and `all`. The
-`is:pull` and `is:pull-request` object aliases and `is:<state>` state aliases
-MAY be accepted, but canonical renderers MUST emit `is:pr state:<state>`.
+Pull request state values are `open`, `merged`, `closed`, and `all`. Pull
+request sort values are `newest`, `oldest`, and `updated`. The `is:pull` and
+`is:pull-request` object aliases and `is:<state>` state aliases MAY be
+accepted, but canonical renderers MUST emit `is:pr state:<state>`.
 
 ## 5. Identity, Signing, and Authorization
 

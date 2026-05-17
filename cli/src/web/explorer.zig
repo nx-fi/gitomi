@@ -963,6 +963,83 @@ fn appendBranchOptions(buf: *std.ArrayList(u8), allocator: Allocator, branches: 
     }
 }
 
+fn appendRootBranchMenu(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, branches: []const BranchRef, worktrees: []const WorktreeRef) !void {
+    try appendTemplate(buf, allocator,
+        \\    <details class="root-branch-select-wrap root-branch-menu" data-popover-menu>
+        \\      <summary class="root-branch-summary" aria-label="Branch">
+        \\        <span class="button-icon icon-branch" aria-hidden="true"></span>
+        \\        <span class="root-branch-current">
+    , .{});
+    try appendRootBranchMenuLabel(buf, allocator, ref, branches, worktrees);
+    try appendTemplate(buf, allocator,
+        \\        </span>
+        \\        <span class="root-caret" aria-hidden="true"></span>
+        \\      </summary>
+        \\      <div class="root-branch-popover" role="menu" aria-label="Branches">
+    , .{});
+
+    var found_selected = false;
+    for (branches) |branch| {
+        const selected = std.mem.eql(u8, branch.name, ref);
+        found_selected = found_selected or selected;
+        try appendRootBranchMenuItem(buf, allocator, branch.name, branch.name, if (branch.scope == .unstaged) null else branchScopeLabel(branch.scope), selected);
+    }
+    if (worktrees.len != 0) {
+        try appendTemplate(buf, allocator,
+            \\        <div class="root-branch-group-label">Worktrees</div>
+        , .{});
+        for (worktrees) |worktree| {
+            const selected = std.mem.eql(u8, worktree.value, ref);
+            found_selected = found_selected or selected;
+            try appendRootBranchMenuItem(buf, allocator, worktree.value, worktree.label, null, selected);
+        }
+    }
+    if (!found_selected) {
+        try appendRootBranchMenuItem(buf, allocator, ref, ref, "selected ref", true);
+    }
+    try appendTemplate(buf, allocator,
+        \\      </div>
+        \\    </details>
+    , .{});
+}
+
+fn appendRootBranchMenuLabel(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, branches: []const BranchRef, worktrees: []const WorktreeRef) !void {
+    for (branches) |branch| {
+        if (!std.mem.eql(u8, branch.name, ref)) continue;
+        try appendRootBranchLabelParts(buf, allocator, branch.name, if (branch.scope == .unstaged) null else branchScopeLabel(branch.scope));
+        return;
+    }
+    for (worktrees) |worktree| {
+        if (!std.mem.eql(u8, worktree.value, ref)) continue;
+        try appendRootBranchLabelParts(buf, allocator, worktree.label, null);
+        return;
+    }
+    try appendRootBranchLabelParts(buf, allocator, ref, "selected ref");
+}
+
+fn appendRootBranchMenuItem(buf: *std.ArrayList(u8), allocator: Allocator, value: []const u8, label: []const u8, scope: ?[]const u8, selected: bool) !void {
+    try appendTemplate(buf, allocator,
+        \\        <a class="{classes}" href="{href}" role="menuitem"{current_attr}><span class="root-branch-check" aria-hidden="true"></span><span class="root-branch-option-label">
+    , .{
+        .classes = shared.classes("root-branch-option", &.{shared.class("active", selected)}),
+        .href = codeHref(value, ""),
+        .current_attr = shared.trustedHtml(if (selected) " aria-current=\"page\"" else ""),
+    });
+    try appendRootBranchLabelParts(buf, allocator, label, scope);
+    try appendTemplate(buf, allocator, "</span></a>\n", .{});
+}
+
+fn appendRootBranchLabelParts(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, scope: ?[]const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<span class="root-branch-name">{label}</span>
+    , .{ .label = label });
+    if (scope) |value| {
+        try appendTemplate(buf, allocator,
+            \\<span class="root-branch-scope">{scope}</span>
+        , .{ .scope = value });
+    }
+}
+
 fn appendTreeRootNode(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8, active_path: []const u8) !void {
     try appendTemplate(buf, allocator,
         \\<div class="tree-node expanded" data-tree-path="" data-tree-depth="0" data-tree-kind="tree">
@@ -1072,15 +1149,9 @@ fn appendRootCodeToolbar(
     try appendTemplate(buf, allocator,
         \\<div class="root-code-toolbar">
         \\  <div class="root-code-toolbar-left">
-        \\    <label class="root-branch-select-wrap" aria-label="Branch">
-        \\      <span class="button-icon icon-branch" aria-hidden="true"></span>
-        \\      <select class="root-branch-select" data-branch-switcher data-active-path="">
     , .{});
-    try appendBranchOptions(buf, allocator, branches, worktrees, ref);
+    try appendRootBranchMenu(buf, allocator, ref, branches, worktrees);
     try appendTemplate(buf, allocator,
-        \\      </select>
-        \\      <span class="root-caret" aria-hidden="true"></span>
-        \\    </label>
         \\    <a class="root-ref-link" href="/refs?type=branches"><span class="button-icon icon-branch" aria-hidden="true"></span><strong>{branch_count}</strong> {branch_label}</a>
         \\    <a class="root-ref-link" href="/refs?type=tags"><span class="button-icon icon-tag" aria-hidden="true"></span><strong>{tag_count}</strong> {tag_label}</a>
         \\    <a class="root-ref-link" href="/worktrees"><span class="button-icon icon-worktree" aria-hidden="true"></span><strong>{worktree_count}</strong> {worktree_label}</a>

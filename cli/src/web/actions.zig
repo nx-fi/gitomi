@@ -9,11 +9,13 @@ const issues_page = @import("issues.zig");
 const zwf = @import("../zwf.zig");
 
 const Allocator = std.mem.Allocator;
+const Button = shared.Button;
 const CliError = errors.CliError;
 const Repo = repo_mod.Repo;
 const SqliteDb = index.SqliteDb;
 const appendEmptyState = shared.appendEmptyState;
 const appendRelativeTime = shared.appendRelativeTime;
+const appendSectionHead = shared.appendSectionHead;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
 const appendTemplate = shared.appendTemplate;
@@ -22,6 +24,7 @@ const class = shared.class;
 const classAttr = shared.classAttr;
 const ensureIndex = index.ensureIndex;
 const groupedUnsigned = shared.groupedUnsigned;
+const literalHref = shared.literalHref;
 const sendPlainResponse = shared.sendPlainResponse;
 const sendRedirect = shared.sendRedirect;
 const sendResponse = shared.sendResponse;
@@ -137,9 +140,9 @@ fn renderActionsPageWithMessage(allocator: Allocator, repo: Repo, target: []cons
     const stats = actionsStats(workflows.len, runs.items, pending);
 
     try appendShellStart(&buf, allocator, repo, "Workflows", "actions");
-    try buf.appendSlice(allocator, "<div class=\"actions-layout\">");
-    try appendActionsSidebar(&buf, allocator, workflows, runs.items, filters, stats, csrf_token);
-    try buf.appendSlice(allocator, "<section class=\"actions-main\">");
+    try buf.appendSlice(allocator, "<div class=\"project-page-layout actions-layout\">");
+    try appendActionsSidebar(&buf, allocator, workflows, runs.items, filters);
+    try buf.appendSlice(allocator, "<div class=\"project-page-content actions-main\">");
     if (message) |value| {
         try appendTemplate(&buf, allocator, "<div class=\"flash error\">{message}</div>", .{ .message = value });
     } else if (std.mem.indexOf(u8, target, "requested=1") != null) {
@@ -148,7 +151,7 @@ fn renderActionsPageWithMessage(allocator: Allocator, repo: Repo, target: []cons
         try buf.appendSlice(allocator, "<div class=\"flash success\">Pending action runs processed.</div>");
     }
     try appendActionsMain(&buf, allocator, workflows, runs.items, filters, stats, csrf_token);
-    try buf.appendSlice(allocator, "</section></div>");
+    try buf.appendSlice(allocator, "</div></div>");
 
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
@@ -173,16 +176,10 @@ fn appendActionsSidebar(
     workflows: []const actions.Workflow,
     runs: []const RunRow,
     filters: ActionsFilters,
-    stats: ActionsStats,
-    csrf_token: []const u8,
 ) !void {
     try buf.appendSlice(allocator,
-        \\<aside class="actions-sidebar">
-        \\  <div class="actions-sidebar-head">
-        \\    <h1>Workflows</h1>
-        \\    <a class="button primary actions-new-workflow" href="/code?ref=HEAD&amp;path=.github/workflows">New workflow</a>
-        \\  </div>
-        \\  <nav class="actions-workflow-nav" aria-label="Workflows">
+        \\<aside class="project-page-sidebar actions-sidebar">
+        \\  <nav class="project-page-tabs actions-workflow-nav" aria-label="Workflows">
     );
     try appendActionsSidebarLink(buf, allocator, filters, "All workflows", null, filters.workflow == null, runs.len);
     for (workflows) |workflow| {
@@ -201,8 +198,18 @@ fn appendActionsSidebar(
     }
     try appendTemplate(buf, allocator,
         \\  </nav>
+        \\</aside>
     , .{});
-    try appendActionsStatus(buf, allocator, stats);
+}
+
+fn appendActionsManualRun(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    workflows: []const actions.Workflow,
+    filters: ActionsFilters,
+    stats: ActionsStats,
+    csrf_token: []const u8,
+) !void {
     try buf.appendSlice(allocator, "  <details class=\"actions-manual-run\"");
     if (filters.workflow != null) try buf.appendSlice(allocator, " open");
     try appendTemplate(buf, allocator,
@@ -243,7 +250,6 @@ fn appendActionsSidebar(
         \\      <button class="button secondary" type="submit">Run pending ({pending})</button>
         \\    </form>
         \\  </details>
-        \\</aside>
     , .{ .csrf_field = zwf.csrf.field_name, .csrf_token = csrf_token, .pending = stats.pending });
 }
 
@@ -287,7 +293,7 @@ fn appendActionsSidebarLink(
         .param_value = workflow,
     });
     try appendTemplate(buf, allocator,
-        \\"><span>{label}</span><small>{count}</small></a>
+        \\"><span class="button-icon icon-workflow" aria-hidden="true"></span><span class="actions-workflow-label">{label}</span><small>{count}</small></a>
     , .{
         .label = label,
         .count = count,
@@ -307,15 +313,18 @@ fn appendActionsMain(
     const selected_title = if (filters.workflow) |selected| workflowDisplayName(workflows, selected) else "All workflows";
     const query = filters.query orelse "";
 
+    try buf.appendSlice(allocator, "<section class=\"panel actions-panel\">");
+    try appendSectionHead(buf, allocator, "Workflows", selected_title, Button{
+        .label = "New workflow",
+        .href = literalHref("/code?ref=HEAD&path=.github/workflows"),
+        .kind = "primary",
+    });
     try appendTemplate(buf, allocator,
+        \\<div class="actions-main-body">
         \\<div class="actions-main-head">
-        \\  <div>
-        \\    <h1>{title}</h1>
-        \\    <p>{subtitle}</p>
-        \\  </div>
+        \\  <p>{subtitle}</p>
         \\  <form class="actions-filter" method="get" action="/workflows">
     , .{
-        .title = selected_title,
         .subtitle = if (filters.workflow == null) "Showing runs from all workflows" else "Showing runs from the selected workflow",
     });
     try appendActionsFilterHiddenInputs(buf, allocator, filters);
@@ -328,6 +337,8 @@ fn appendActionsMain(
         .query = query,
     });
 
+    try appendActionsStatus(buf, allocator, stats);
+    try appendActionsManualRun(buf, allocator, workflows, filters, stats, csrf_token);
     try appendWorkflowOverview(buf, allocator, workflows, runs, filters, stats);
 
     try appendTemplate(buf, allocator,
@@ -362,7 +373,7 @@ fn appendActionsMain(
             try appendEmptyState(buf, allocator, "No workflow runs yet.", "Request a workflow run or start the actions daemon to populate this list.");
         }
     }
-    try buf.appendSlice(allocator, "</section>");
+    try buf.appendSlice(allocator, "</section></div></section>");
 }
 
 fn appendActionsFilterHiddenInputs(buf: *std.ArrayList(u8), allocator: Allocator, filters: ActionsFilters) !void {
