@@ -122,6 +122,7 @@ pub fn applyIssueProjection(allocator: Allocator, db: *SqliteDb, event_hash: []c
             envelope.object_id,
             event_mod.jsonString(payload.get("source_author")) orelse "",
             event_mod.jsonString(payload.get("milestone")) orelse "",
+            event_mod.jsonString(payload.get("type")) orelse "",
             event_mod.jsonString(payload.get("priority")) orelse "",
             event_mod.jsonString(payload.get("status")) orelse "",
             event_hash,
@@ -150,6 +151,9 @@ pub fn applyIssueProjection(allocator: Allocator, db: *SqliteDb, event_hash: []c
     } else if (std.mem.eql(u8, envelope.event_type, "issue.priority_set")) {
         const priority = event_mod.jsonString(payload.get("priority")) orelse return "invalid_event_envelope";
         try updateIssueMetadataScalar(allocator, db, envelope.object_id, priority, event_hash, envelope, "priority", "priority_occurred_at", "priority_actor_principal", "priority_event_hash");
+    } else if (std.mem.eql(u8, envelope.event_type, "issue.type_set")) {
+        const issue_type = event_mod.jsonString(payload.get("type")) orelse return "invalid_event_envelope";
+        try updateIssueMetadataScalar(allocator, db, envelope.object_id, issue_type, event_hash, envelope, "issue_type", "issue_type_occurred_at", "issue_type_actor_principal", "issue_type_event_hash");
     } else if (std.mem.eql(u8, envelope.event_type, "issue.status_set")) {
         const status = event_mod.jsonString(payload.get("status")) orelse return "invalid_event_envelope";
         try updateIssueMetadataScalar(allocator, db, envelope.object_id, status, event_hash, envelope, "status", "status_occurred_at", "status_actor_principal", "status_event_hash");
@@ -227,6 +231,9 @@ fn applyIssueUpdated(
     if (event_mod.jsonString(payload.get("milestone"))) |milestone| {
         try upsertIssueMilestone(db, envelope.object_id, milestone);
     }
+    if (event_mod.jsonString(payload.get("type"))) |issue_type| {
+        try updateIssueMetadataScalar(allocator, db, envelope.object_id, issue_type, event_hash, envelope, "issue_type", "issue_type_occurred_at", "issue_type_actor_principal", "issue_type_event_hash");
+    }
     if (event_mod.jsonString(payload.get("priority"))) |priority| {
         try updateIssueMetadataScalar(allocator, db, envelope.object_id, priority, event_hash, envelope, "priority", "priority_occurred_at", "priority_actor_principal", "priority_event_hash");
     }
@@ -276,6 +283,7 @@ fn upsertIssueMetadata(
     issue_id: []const u8,
     source_author: []const u8,
     milestone: []const u8,
+    issue_type: []const u8,
     priority: []const u8,
     status: []const u8,
     event_hash: []const u8,
@@ -284,10 +292,11 @@ fn upsertIssueMetadata(
     var stmt = try db.prepare(
         \\INSERT INTO issue_metadata(
         \\  issue_id, source_author, milestone,
+        \\  issue_type, issue_type_occurred_at, issue_type_actor_principal, issue_type_event_hash,
         \\  priority, priority_occurred_at, priority_actor_principal, priority_event_hash,
         \\  status, status_occurred_at, status_actor_principal, status_event_hash
         \\)
-        \\VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        \\VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         \\ON CONFLICT(issue_id) DO UPDATE SET
         \\  source_author = excluded.source_author,
         \\  milestone = excluded.milestone
@@ -296,14 +305,18 @@ fn upsertIssueMetadata(
     try stmt.bindText(1, issue_id);
     try stmt.bindText(2, source_author);
     try stmt.bindText(3, milestone);
-    try stmt.bindText(4, priority);
+    try stmt.bindText(4, issue_type);
     try stmt.bindText(5, envelope.occurred_at);
     try stmt.bindText(6, envelope.actor_principal);
     try stmt.bindText(7, event_hash);
-    try stmt.bindText(8, status);
+    try stmt.bindText(8, priority);
     try stmt.bindText(9, envelope.occurred_at);
     try stmt.bindText(10, envelope.actor_principal);
     try stmt.bindText(11, event_hash);
+    try stmt.bindText(12, status);
+    try stmt.bindText(13, envelope.occurred_at);
+    try stmt.bindText(14, envelope.actor_principal);
+    try stmt.bindText(15, event_hash);
     try stmt.stepDone();
 }
 
@@ -311,10 +324,11 @@ fn upsertIssueMilestone(db: *SqliteDb, issue_id: []const u8, milestone: []const 
     var stmt = try db.prepare(
         \\INSERT INTO issue_metadata(
         \\  issue_id, source_author, milestone,
+        \\  issue_type, issue_type_occurred_at, issue_type_actor_principal, issue_type_event_hash,
         \\  priority, priority_occurred_at, priority_actor_principal, priority_event_hash,
         \\  status, status_occurred_at, status_actor_principal, status_event_hash
         \\)
-        \\VALUES (?, '', ?, '', '', '', '', '', '', '', '')
+        \\VALUES (?, '', ?, '', '', '', '', '', '', '', '', '', '', '', '')
         \\ON CONFLICT(issue_id) DO UPDATE SET milestone = excluded.milestone
     );
     defer stmt.deinit();
@@ -435,10 +449,11 @@ fn updateIssueMetadataScalar(
     var ensure = try db.prepare(
         \\INSERT OR IGNORE INTO issue_metadata(
         \\  issue_id, source_author, milestone,
+        \\  issue_type, issue_type_occurred_at, issue_type_actor_principal, issue_type_event_hash,
         \\  priority, priority_occurred_at, priority_actor_principal, priority_event_hash,
         \\  status, status_occurred_at, status_actor_principal, status_event_hash
         \\)
-        \\VALUES (?, '', '', '', '', '', '', '', '', '', '')
+        \\VALUES (?, '', '', '', '', '', '', '', '', '', '', '', '', '', '')
     );
     defer ensure.deinit();
     try ensure.bindText(1, issue_id);

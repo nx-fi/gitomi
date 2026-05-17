@@ -44,10 +44,11 @@ gt reset remote [--remote REMOTE] [--yes]
 gt events list [--json] [--limit N] [--ref REF]
 gt issue list [--json] [--view agent] [--state open|closed|all] [--author PRINCIPAL] [--label LABEL] [--project PROJECT] [--milestone MILESTONE] [--assignee PRINCIPAL] [--sort newest|oldest|updated] [--limit N]
 gt issue show ISSUE [--json] [--view agent]
-gt issue open --title TITLE [--body BODY] [--priority P0|P1|P2|P3] [--status Draft|Todo|WIP|Review|Done|Failed] [--label LABEL] [--assignee PRINCIPAL]
-gt issue edit ISSUE [--title TITLE] [--body BODY] [--state open|closed] [--priority P0|P1|P2|P3] [--status Draft|Todo|WIP|Review|Done|Failed] [--label LABEL] [--unlabel LABEL] [--assignee PRINCIPAL] [--unassign PRINCIPAL]
+gt issue open --title TITLE [--body BODY] [--type bug|feature|task] [--priority P0|P1|P2|P3] [--status Draft|Todo|WIP|Review|Done|Failed] [--label LABEL] [--assignee PRINCIPAL]
+gt issue edit ISSUE [--title TITLE] [--body BODY] [--state open|closed] [--type bug|feature|task] [--priority P0|P1|P2|P3] [--status Draft|Todo|WIP|Review|Done|Failed] [--label LABEL] [--unlabel LABEL] [--assignee PRINCIPAL] [--unassign PRINCIPAL]
 gt issue title ISSUE --title TITLE
 gt issue body ISSUE --body BODY
+gt issue type ISSUE --type bug|feature|task
 gt issue priority ISSUE --priority P0|P1|P2|P3
 gt issue status ISSUE --status Draft|Todo|WIP|Review|Done|Failed
 gt issue comment ISSUE --body BODY [--reply COMMENT]
@@ -96,8 +97,9 @@ gt actions run-requested [RUN] [--dry-run] [--act PATH] [--agent-runner PATH] [-
 gt actions daemon [--once] [--replay] [--interval-ms N] [--dry-run] [--act PATH] [--agent-runner PATH] [-- ACT_ARGS...]
 gt runs prune [--dry-run] [--max-age-days N] [--max-count N] [--max-bytes N]
 gt sync [--remote REMOTE] [--pull-only|--push-only]
-gt github import [--repo OWNER/REPO] [--token-env NAME|--token-file PATH] [--from-file PATH] [--no-comments] [--no-projects]
+gt github import [--repo OWNER/REPO] [--token-env NAME|--token-file PATH] [--from-file PATH] [--no-comments] [--no-projects] [--rest|--graphql]
 gt github export --repo OWNER/REPO [--token-env NAME|--token-file PATH|--use-gh] [--dry-run] [--map-file PATH] [--reuse-legacy]
+gt github sync [--repo OWNER/REPO] [--token-env NAME|--token-file PATH|--use-gh] [--remote REMOTE] [--interval-ms N] [--max-pages N] [--dry-run] [--no-git-sync] [--rest|--graphql]
 gt github live [--repo OWNER/REPO] --webhook-url URL (--secret-env NAME|--secret-file PATH) [--host 127.0.0.1] [--port 12656] [--path /github/webhook] [--remote REMOTE] [--interval-ms N] [--once] [--no-subscribe] [--dry-run] [--no-git-sync]
 gt web [--local] [--host 127.0.0.1] [--port 12655] [--once]
 gt web --live [--host 127.0.0.1] [--port 12655] [--repo OWNER/REPO] [--webhook-url URL] (--secret-env NAME|--secret-file PATH) [--live-host 127.0.0.1] [--live-port 12656] [--live-path /github/webhook] [--remote REMOTE] [--interval-ms N] [--no-subscribe] [--dry-run] [--no-git-sync]
@@ -247,6 +249,14 @@ through the GitHub API. It stores the Gitomi UUID to GitHub number mapping in
 requests without network writes, `--use-gh` to route writes through the local
 GitHub CLI credentials, or `--reuse-legacy` when exporting back to the same
 GitHub repository that was imported.
+
+`gt github sync` performs a polling two-way API sync: optional Gitomi `gt sync`
+pull, GitHub import, GitHub export of local accepted events since the last sync,
+and optional Gitomi `gt sync` push. It defaults to `--graphql`, batching issue
+and pull pages with nested fields through GitHub's GraphQL API; pass `--rest` to
+use the older REST importer. State and mappings live under
+`.git/gitomi/github/<owner>/<repo>/`; pass `--no-git-sync` to skip surrounding
+Git transport steps.
 
 `gt github live` runs the normal local Gitomi workflow with a two-way GitHub
 bridge. It subscribes the current repository to a GitHub webhook through

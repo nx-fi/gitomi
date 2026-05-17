@@ -28,6 +28,10 @@ pub const project_issue_filter_sql =
     \\  ))
     \\  AND (? = 0 OR EXISTS (
     \\    SELECT 1
+    \\    FROM issue_metadata im
+    \\    WHERE im.issue_id = i.id AND lower(im.issue_type) = 'bug'
+    \\  ) OR EXISTS (
+    \\    SELECT 1
     \\    FROM issue_labels il
     \\    WHERE il.issue_id = i.id AND lower(il.label) = 'bug'
     \\  ))

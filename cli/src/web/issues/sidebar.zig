@@ -19,6 +19,7 @@ const createIssueStringEvent = issue.createIssueStringEvent;
 const ensureIndex = index.ensureIndex;
 const isIssuePriority = cmd_common.isIssuePriority;
 const isIssueStatus = cmd_common.isIssueStatus;
+const isIssueType = cmd_common.isIssueType;
 const commitHref = shared.commitHref;
 const pullHref = shared.pullHref;
 const sendRedirect = shared.sendRedirect;
@@ -74,6 +75,7 @@ pub fn append(
     issue_id: []const u8,
     author: []const u8,
     milestone: []const u8,
+    issue_type: []const u8,
     priority: []const u8,
     status: []const u8,
     body: []const u8,
@@ -82,7 +84,7 @@ pub fn append(
     try appendIssueSidebarLabels(buf, allocator, db, raw_ref, issue_id);
     try appendIssueSidebarPriority(buf, allocator, raw_ref, priority);
     try appendIssueSidebarStatus(buf, allocator, raw_ref, status);
-    try appendIssueSidebarType(buf, allocator);
+    try appendIssueSidebarType(buf, allocator, raw_ref, issue_type);
     try appendIssueSidebarProjects(buf, allocator, db, raw_ref, issue_id);
     try appendIssueSidebarMilestone(buf, allocator, db, raw_ref, milestone);
     try appendIssueSidebarRelationships(buf, allocator, db, issue_id, body);
@@ -158,16 +160,22 @@ fn appendIssueSidebarStatus(buf: *std.ArrayList(u8), allocator: Allocator, raw_r
     try appendIssueSidebarSectionEnd(buf, allocator);
 }
 
-fn appendIssueSidebarType(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+fn appendIssueSidebarType(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8, issue_type: []const u8) !void {
     try appendIssueSidebarEditableSectionStart(buf, allocator, "Type", "Select issue type");
     try appendIssueSidebarMenuFilter(buf, allocator, "Filter types");
     try appendIssueSidebarMenuGroupStart(buf, allocator, "Available types");
-    try appendIssueSidebarTypeOption(buf, allocator, "Bug", "An unexpected problem or behavior", "bug");
-    try appendIssueSidebarTypeOption(buf, allocator, "Feature", "A request, idea, or new functionality", "feature");
-    try appendIssueSidebarTypeOption(buf, allocator, "Task", "A specific piece of work", "task");
+    try appendIssueSidebarTypeActionRow(buf, allocator, raw_ref, "bug", issue_type);
+    try appendIssueSidebarTypeActionRow(buf, allocator, raw_ref, "feature", issue_type);
+    try appendIssueSidebarTypeActionRow(buf, allocator, raw_ref, "task", issue_type);
     try appendIssueSidebarMenuGroupEnd(buf, allocator);
     try appendIssueSidebarEditableSectionBodyStart(buf, allocator);
-    try buf.appendSlice(allocator, "<p class=\"issue-sidebar-empty\">No type</p>");
+    if (issue_type.len == 0) {
+        try buf.appendSlice(allocator, "<p class=\"issue-sidebar-empty\">No type</p>");
+    } else {
+        try buf.appendSlice(allocator, "<span class=\"issue-sidebar-token\">");
+        try appendIssueTypeChip(buf, allocator, issue_type);
+        try buf.appendSlice(allocator, "</span>");
+    }
     try appendIssueSidebarSectionEnd(buf, allocator);
 }
 
@@ -729,6 +737,25 @@ fn appendIssueSidebarStatusActionRow(
     try buf.appendSlice(allocator, "</button></form>");
 }
 
+fn appendIssueSidebarTypeActionRow(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    raw_ref: []const u8,
+    issue_type: []const u8,
+    selected_type: []const u8,
+) !void {
+    const filter_text = try std.fmt.allocPrint(allocator, "{s} {s}", .{ issueTypeLabel(issue_type), issueTypeDescription(issue_type) });
+    defer allocator.free(filter_text);
+    try appendIssueSidebarValueActionFormStart(buf, allocator, raw_ref, "set-type", "type", issue_type, filter_text, std.mem.eql(u8, selected_type, issue_type));
+    try appendIssueTypeDot(buf, allocator, issue_type);
+    try appendTemplate(buf, allocator,
+        \\<span class="issue-sidebar-picker-text"><span class="issue-sidebar-picker-primary">{title}</span><span class="issue-sidebar-picker-secondary">{description}</span></span></button></form>
+    , .{
+        .title = issueTypeLabel(issue_type),
+        .description = issueTypeDescription(issue_type),
+    });
+}
+
 fn appendIssueSidebarValueActionFormStart(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -772,14 +799,34 @@ fn appendIssueStatusChip(buf: *std.ArrayList(u8), allocator: Allocator, status: 
     });
 }
 
-fn appendIssueSidebarTypeOption(buf: *std.ArrayList(u8), allocator: Allocator, title: []const u8, description: []const u8, kind: []const u8) !void {
-    try appendTemplate(buf, allocator,
-        \\<div class="issue-sidebar-picker-row issue-sidebar-static-row" data-sidebar-filter-text="{title} {description}"><span class="issue-type-dot issue-type-{kind}" aria-hidden="true"></span><span class="issue-sidebar-picker-text"><span class="issue-sidebar-picker-primary">{title}</span><span class="issue-sidebar-picker-secondary">{description}</span></span></div>
-    , .{
-        .title = title,
-        .description = description,
-        .kind = kind,
+fn appendIssueTypeChip(buf: *std.ArrayList(u8), allocator: Allocator, issue_type: []const u8) !void {
+    try buf.appendSlice(allocator, "<span class=\"issue-sidebar-pill issue-type-chip\">");
+    try appendIssueTypeDot(buf, allocator, issue_type);
+    try appendTemplate(buf, allocator, "<span>{label}</span></span>", .{
+        .label = issueTypeLabel(issue_type),
     });
+}
+
+fn appendIssueTypeDot(buf: *std.ArrayList(u8), allocator: Allocator, issue_type: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<span class="issue-type-dot issue-type-{kind}" aria-hidden="true"></span>
+    , .{
+        .kind = issue_type,
+    });
+}
+
+fn issueTypeLabel(issue_type: []const u8) []const u8 {
+    if (std.mem.eql(u8, issue_type, "bug")) return "Bug";
+    if (std.mem.eql(u8, issue_type, "feature")) return "Feature";
+    if (std.mem.eql(u8, issue_type, "task")) return "Task";
+    return issue_type;
+}
+
+fn issueTypeDescription(issue_type: []const u8) []const u8 {
+    if (std.mem.eql(u8, issue_type, "bug")) return "An unexpected problem or behavior";
+    if (std.mem.eql(u8, issue_type, "feature")) return "A request, idea, or new functionality";
+    if (std.mem.eql(u8, issue_type, "task")) return "A specific piece of work";
+    return "";
 }
 
 fn appendIssueSidebarCommand(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, shortcut: []const u8) !void {
@@ -915,6 +962,15 @@ pub fn handleIssueSidebarPost(allocator: Allocator, repo: Repo, stream: std.net.
             return;
         }
         if (!(try writeSidebarStringEventOrFail(allocator, stream, issue_id, "issue.priority_set", "priority", priority))) return;
+    } else if (std.mem.eql(u8, action, "set-type")) {
+        const type_owned = try requiredSidebarValue(allocator, stream, form_body, "type", "Type is required.");
+        const issue_type = type_owned orelse return;
+        defer allocator.free(issue_type);
+        if (!isIssueType(issue_type)) {
+            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Type must be bug, feature, or task\n");
+            return;
+        }
+        if (!(try writeSidebarStringEventOrFail(allocator, stream, issue_id, "issue.type_set", "type", issue_type))) return;
     } else if (std.mem.eql(u8, action, "set-status")) {
         const status_owned = try requiredSidebarValue(allocator, stream, form_body, "status", "Status is required.");
         const status = status_owned orelse return;

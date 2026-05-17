@@ -5,6 +5,7 @@ const errors = @import("../../errors.zig");
 const git = @import("../../git.zig");
 const index = @import("../../index.zig");
 const io = @import("../../io.zig");
+const json_writer = @import("../../json_writer.zig");
 const repo_mod = @import("../../repo.zig");
 const util = @import("../../util.zig");
 const common = @import("common.zig");
@@ -17,6 +18,7 @@ const out = io.out;
 const eprint = io.eprint;
 const RepoSlug = common.RepoSlug;
 const GitHubClient = common.GitHubClient;
+const ApiMode = common.ApiMode;
 const default_api_url = common.default_api_url;
 const max_github_json = common.max_github_json;
 const gh_current_repo = common.gh_current_repo;
@@ -38,13 +40,15 @@ const nestedString = common.nestedString;
 const jsonArray = common.jsonArray;
 const jsonBool = common.jsonBool;
 const jsonInteger = common.jsonInteger;
+const firstJsonValue3 = common.firstJsonValue3;
+const githubStateEquals = common.githubStateEquals;
 
 const import_bot_principal = "import-bot";
 const import_bot_device = "github";
 const github_import_capability = "github.import";
 const github_import_scope = "github:*";
 
-const ImportOptions = struct {
+pub const ImportOptions = struct {
     repo: ?RepoSlug = null,
     api_url: []const u8 = default_api_url,
     token_arg: ?[]const u8 = null,
@@ -55,6 +59,8 @@ const ImportOptions = struct {
     bot_device: []const u8 = import_bot_device,
     max_pages: usize = 10,
     use_gh: bool = false,
+    mode: ApiMode = .rest,
+    map_file: ?[]const u8 = null,
 };
 
 pub fn cmdImport(allocator: Allocator, args: []const []const u8) !void {
@@ -100,6 +106,12 @@ pub fn cmdImport(allocator: Allocator, args: []const []const u8) !void {
                 try eprint("gt github import: --max-pages must be a positive integer\n", .{});
                 return CliError.InvalidArgument;
             };
+        } else if (std.mem.eql(u8, arg, "--rest")) {
+            options.mode = .rest;
+        } else if (std.mem.eql(u8, arg, "--graphql")) {
+            options.mode = .graphql;
+        } else if (std.mem.eql(u8, arg, "--map-file")) {
+            options.map_file = try util.requireValue(args, &i, "--map-file");
         } else {
             try eprint("gt github import: unknown option '{s}'\n", .{arg});
             return CliError.UserError;
@@ -400,7 +412,14 @@ fn importFixtureComments(
     try importCommentsArray(allocator, writer, parent_kind, parent_id, comments, null, stats);
 }
 
-fn importFromApi(allocator: Allocator, client: GitHubClient, options: ImportOptions, stats: *ImportStats) !void {
+pub fn importFromApi(allocator: Allocator, client: GitHubClient, options: ImportOptions, stats: *ImportStats) !void {
+    return switch (options.mode) {
+        .rest => importFromRestApi(allocator, client, options, stats),
+        .graphql => importFromGraphqlApi(allocator, client, options, stats),
+    };
+}
+
+fn importFromRestApi(allocator: Allocator, client: GitHubClient, options: ImportOptions, stats: *ImportStats) !void {
     var page: usize = 1;
     while (page <= options.max_pages) : (page += 1) {
         try eprint("gt github import: fetching issues page {d}\n", .{page});
@@ -424,7 +443,7 @@ fn importFromApi(allocator: Allocator, client: GitHubClient, options: ImportOpti
             const number = jsonInteger(item.object.get("number")) orelse continue;
             var writer = try EventWriter.initForActor(allocator, "gt github import", options.bot_principal, options.bot_device);
             defer writer.deinit();
-            const issue_result = try importIssueObject(allocator, &writer, item.object, &.{}, null, stats);
+            const issue_result = try importIssueObject(allocator, &writer, item.object, &.{}, options.map_file, stats);
             defer if (issue_result) |result| allocator.free(result.id);
             if (issue_result) |result| {
                 if (result.is_new and shouldFetchApiComments(result.comment_count)) try importApiComments(allocator, &writer, client, "issue", number, result.id, options, stats);
@@ -456,7 +475,7 @@ fn importFromApi(allocator: Allocator, client: GitHubClient, options: ImportOpti
             const number = jsonInteger(item.object.get("number")) orelse continue;
             var writer = try EventWriter.initForActor(allocator, "gt github import", options.bot_principal, options.bot_device);
             defer writer.deinit();
-            const pull_result = try importApiPullObject(allocator, &writer, client, item.object, stats);
+            const pull_result = try importApiPullObject(allocator, &writer, client, item.object, options, stats);
             defer if (pull_result) |result| allocator.free(result.id);
             if (pull_result) |result| {
                 if (result.is_new and shouldFetchApiComments(result.comment_count)) try importApiComments(allocator, &writer, client, "pull", number, result.id, options, stats);
@@ -474,11 +493,376 @@ fn importFromApi(allocator: Allocator, client: GitHubClient, options: ImportOpti
     }
 }
 
+const graphql_page_query =
+    \\query GitomiGithubSyncPage($owner: String!, $name: String!, $issueCursor: String, $pullCursor: String, $includeIssues: Boolean!, $includePulls: Boolean!, $includeComments: Boolean!) {
+    \\  repository(owner: $owner, name: $name) {
+    \\    issues(first: 100, after: $issueCursor, states: [OPEN, CLOSED], orderBy: {field: CREATED_AT, direction: ASC}) @include(if: $includeIssues) {
+    \\      nodes {
+    \\        number
+    \\        title
+    \\        body
+    \\        state
+    \\        createdAt
+    \\        updatedAt
+    \\        closedAt
+    \\        author { login }
+    \\        milestone { title }
+    \\        labels(first: 100) { nodes { name } }
+    \\        assignees(first: 100) { nodes { login } }
+    \\        comments(first: 100) @include(if: $includeComments) {
+    \\          totalCount
+    \\          nodes { databaseId body createdAt author { login } }
+    \\          pageInfo { hasNextPage endCursor }
+    \\        }
+    \\      }
+    \\      pageInfo { hasNextPage endCursor }
+    \\    }
+    \\    pullRequests(first: 100, after: $pullCursor, states: [OPEN, CLOSED, MERGED], orderBy: {field: CREATED_AT, direction: ASC}) @include(if: $includePulls) {
+    \\      nodes {
+    \\        number
+    \\        title
+    \\        body
+    \\        state
+    \\        isDraft
+    \\        createdAt
+    \\        updatedAt
+    \\        closedAt
+    \\        mergedAt
+    \\        mergeCommit { oid }
+    \\        baseRefName
+    \\        headRefName
+    \\        author { login }
+    \\        labels(first: 100) { nodes { name } }
+    \\        assignees(first: 100) { nodes { login } }
+    \\        reviewRequests(first: 100) {
+    \\          nodes {
+    \\            requestedReviewer {
+    \\              ... on User { login }
+    \\              ... on Team { slug name }
+    \\            }
+    \\          }
+    \\        }
+    \\        comments(first: 100) @include(if: $includeComments) {
+    \\          totalCount
+    \\          nodes { databaseId body createdAt author { login } }
+    \\          pageInfo { hasNextPage endCursor }
+    \\        }
+    \\        commits { totalCount }
+    \\        changedFiles
+    \\        additions
+    \\        deletions
+    \\      }
+    \\      pageInfo { hasNextPage endCursor }
+    \\    }
+    \\  }
+    \\}
+;
+
+const graphql_comments_query =
+    \\query GitomiGithubSyncComments($owner: String!, $name: String!, $number: Int!, $cursor: String, $isPull: Boolean!) {
+    \\  repository(owner: $owner, name: $name) {
+    \\    issue(number: $number) @skip(if: $isPull) {
+    \\      comments(first: 100, after: $cursor) {
+    \\        totalCount
+    \\        nodes { databaseId body createdAt author { login } }
+    \\        pageInfo { hasNextPage endCursor }
+    \\      }
+    \\    }
+    \\    pullRequest(number: $number) @include(if: $isPull) {
+    \\      comments(first: 100, after: $cursor) {
+    \\        totalCount
+    \\        nodes { databaseId body createdAt author { login } }
+    \\        pageInfo { hasNextPage endCursor }
+    \\      }
+    \\    }
+    \\  }
+    \\}
+;
+
+fn importFromGraphqlApi(allocator: Allocator, client: GitHubClient, options: ImportOptions, stats: *ImportStats) !void {
+    var issue_cursor: ?[]u8 = null;
+    defer if (issue_cursor) |value| allocator.free(value);
+    var pull_cursor: ?[]u8 = null;
+    defer if (pull_cursor) |value| allocator.free(value);
+    var issue_done = false;
+    var pull_done = false;
+
+    var page: usize = 1;
+    while (page <= options.max_pages and (!issue_done or !pull_done)) : (page += 1) {
+        try eprint("gt github import: fetching GraphQL batch page {d}\n", .{page});
+        const body = try githubGraphqlPageBody(allocator, client.repo, issue_cursor, pull_cursor, !issue_done, !pull_done, options.include_comments);
+        defer allocator.free(body);
+        const raw = try client.graphqlRequest(body);
+        defer allocator.free(raw);
+        var parsed = try parseGraphqlResponse(allocator, raw, "gt github import");
+        defer parsed.deinit();
+
+        const repository = graphqlRepository(parsed.value) orelse break;
+        if (!issue_done) {
+            if (jsonObject(repository.get("issues"))) |issues| {
+                const count = try importGraphqlIssues(allocator, client, options, issues, stats);
+                try eprint("gt github import: GraphQL issues page {d}: {d} record{s}\n", .{ page, count, if (count == 1) "" else "s" });
+                try replaceOptionalString(allocator, &issue_cursor, connectionEndCursor(issues));
+                issue_done = !connectionHasNextPage(issues);
+            } else {
+                issue_done = true;
+            }
+        }
+        if (!pull_done) {
+            if (jsonObject(repository.get("pullRequests"))) |pulls| {
+                const count = try importGraphqlPulls(allocator, client, options, pulls, stats);
+                try eprint("gt github import: GraphQL pulls page {d}: {d} record{s}\n", .{ page, count, if (count == 1) "" else "s" });
+                try replaceOptionalString(allocator, &pull_cursor, connectionEndCursor(pulls));
+                pull_done = !connectionHasNextPage(pulls);
+            } else {
+                pull_done = true;
+            }
+        }
+    }
+
+    if (options.include_projects) {
+        importClassicProjects(allocator, client, options, stats) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => try eprint("gt github import: project import skipped: {s}\n", .{@errorName(err)}),
+        };
+    }
+}
+
+fn importGraphqlIssues(
+    allocator: Allocator,
+    client: GitHubClient,
+    options: ImportOptions,
+    issues: std.json.ObjectMap,
+    stats: *ImportStats,
+) !usize {
+    const nodes = connectionNodes(issues) orelse return 0;
+    for (nodes.items) |item| {
+        if (item != .object) continue;
+        const number = jsonInteger(item.object.get("number")) orelse continue;
+        var writer = try EventWriter.initForActor(allocator, "gt github import", options.bot_principal, options.bot_device);
+        defer writer.deinit();
+        const issue_result = try importIssueObject(allocator, &writer, item.object, &.{}, options.map_file, stats);
+        defer if (issue_result) |result| allocator.free(result.id);
+        if (issue_result) |result| {
+            if (result.is_new and options.include_comments) {
+                try importGraphqlComments(allocator, &writer, client, "issue", number, result.id, item.object.get("comments"), options, stats);
+            }
+            try writer.commitStaged();
+        }
+    }
+    return nodes.items.len;
+}
+
+fn importGraphqlPulls(
+    allocator: Allocator,
+    client: GitHubClient,
+    options: ImportOptions,
+    pulls: std.json.ObjectMap,
+    stats: *ImportStats,
+) !usize {
+    const nodes = connectionNodes(pulls) orelse return 0;
+    for (nodes.items) |item| {
+        if (item != .object) continue;
+        const number = jsonInteger(item.object.get("number")) orelse continue;
+        var writer = try EventWriter.initForActor(allocator, "gt github import", options.bot_principal, options.bot_device);
+        defer writer.deinit();
+        const pull_result = try importPullObject(allocator, &writer, item.object, options.map_file, stats);
+        defer if (pull_result) |result| allocator.free(result.id);
+        if (pull_result) |result| {
+            if (result.is_new and options.include_comments) {
+                try importGraphqlComments(allocator, &writer, client, "pull", number, result.id, item.object.get("comments"), options, stats);
+            }
+            try writer.commitStaged();
+        }
+    }
+    return nodes.items.len;
+}
+
+fn importGraphqlComments(
+    allocator: Allocator,
+    writer: *EventWriter,
+    client: GitHubClient,
+    parent_kind: []const u8,
+    number: i64,
+    parent_id: []const u8,
+    initial_comments: ?std.json.Value,
+    options: ImportOptions,
+    stats: *ImportStats,
+) !void {
+    const first_connection = jsonObject(initial_comments) orelse return;
+
+    var repo = try repo_mod.discoverRepo(allocator);
+    defer repo.deinit();
+    try index.ensureIndex(allocator, repo);
+    var db = try index.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
+    var comment_refs = std.AutoHashMap(i64, ImportedCommentRef).init(allocator);
+    defer freeImportedCommentRefs(allocator, &comment_refs);
+
+    var total: usize = 0;
+    if (connectionNodes(first_connection)) |nodes| {
+        total += nodes.items.len;
+        try importCommentsArrayWithContext(allocator, &db, &comment_refs, writer, parent_kind, parent_id, nodes, options.map_file, stats);
+    }
+
+    var cursor: ?[]u8 = null;
+    defer if (cursor) |value| allocator.free(value);
+    try replaceOptionalString(allocator, &cursor, connectionEndCursor(first_connection));
+    var has_next = connectionHasNextPage(first_connection);
+    var page: usize = 2;
+    while (has_next and page <= options.max_pages) : (page += 1) {
+        try eprint("gt github import: fetching GraphQL comments for {s} #{d} page {d}\n", .{ parent_kind, number, page });
+        const body = try githubGraphqlCommentsBody(allocator, client.repo, parent_kind, number, cursor);
+        defer allocator.free(body);
+        const raw = try client.graphqlRequest(body);
+        defer allocator.free(raw);
+        var parsed = try parseGraphqlResponse(allocator, raw, "gt github import");
+        defer parsed.deinit();
+        const repository = graphqlRepository(parsed.value) orelse break;
+        const parent = if (std.mem.eql(u8, parent_kind, "pull"))
+            jsonObject(repository.get("pullRequest")) orelse break
+        else
+            jsonObject(repository.get("issue")) orelse break;
+        const comments = jsonObject(parent.get("comments")) orelse break;
+        if (connectionNodes(comments)) |nodes| {
+            total += nodes.items.len;
+            try importCommentsArrayWithContext(allocator, &db, &comment_refs, writer, parent_kind, parent_id, nodes, options.map_file, stats);
+        }
+        try replaceOptionalString(allocator, &cursor, connectionEndCursor(comments));
+        has_next = connectionHasNextPage(comments);
+    }
+    try eprint("gt github import: {s} #{d}: {d} GraphQL comment{s}\n", .{ parent_kind, number, total, if (total == 1) "" else "s" });
+}
+
+fn githubGraphqlPageBody(
+    allocator: Allocator,
+    repo: RepoSlug,
+    issue_cursor: ?[]const u8,
+    pull_cursor: ?[]const u8,
+    include_issues: bool,
+    include_pulls: bool,
+    include_comments: bool,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.append(allocator, '{');
+    try json_writer.appendJsonFieldString(&buf, allocator, "query", graphql_page_query, true);
+    try buf.appendSlice(allocator, "\"variables\":{");
+    try json_writer.appendJsonFieldString(&buf, allocator, "owner", repo.owner, true);
+    try json_writer.appendJsonFieldString(&buf, allocator, "name", repo.name, true);
+    try appendJsonNullableStringField(&buf, allocator, "issueCursor", issue_cursor, true);
+    try appendJsonNullableStringField(&buf, allocator, "pullCursor", pull_cursor, true);
+    try json_writer.appendJsonFieldBool(&buf, allocator, "includeIssues", include_issues, true);
+    try json_writer.appendJsonFieldBool(&buf, allocator, "includePulls", include_pulls, true);
+    try json_writer.appendJsonFieldBool(&buf, allocator, "includeComments", include_comments, false);
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn githubGraphqlCommentsBody(
+    allocator: Allocator,
+    repo: RepoSlug,
+    parent_kind: []const u8,
+    number: i64,
+    cursor: ?[]const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.append(allocator, '{');
+    try json_writer.appendJsonFieldString(&buf, allocator, "query", graphql_comments_query, true);
+    try buf.appendSlice(allocator, "\"variables\":{");
+    try json_writer.appendJsonFieldString(&buf, allocator, "owner", repo.owner, true);
+    try json_writer.appendJsonFieldString(&buf, allocator, "name", repo.name, true);
+    try json_writer.appendJsonFieldInteger(&buf, allocator, "number", number, true);
+    try appendJsonNullableStringField(&buf, allocator, "cursor", cursor, true);
+    try json_writer.appendJsonFieldBool(&buf, allocator, "isPull", std.mem.eql(u8, parent_kind, "pull"), false);
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn appendJsonNullableStringField(buf: *std.ArrayList(u8), allocator: Allocator, key: []const u8, value: ?[]const u8, comma: bool) !void {
+    try json_writer.appendJsonString(buf, allocator, key);
+    try buf.append(allocator, ':');
+    if (value) |actual| {
+        try json_writer.appendJsonString(buf, allocator, actual);
+    } else {
+        try buf.appendSlice(allocator, "null");
+    }
+    if (comma) try buf.append(allocator, ',');
+}
+
+fn parseGraphqlResponse(allocator: Allocator, raw: []const u8, command: []const u8) !std.json.Parsed(std.json.Value) {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch {
+        try eprint("{s}: GraphQL response must contain JSON\n", .{command});
+        return CliError.InvalidArgument;
+    };
+    errdefer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => {
+            try eprint("{s}: GraphQL response must contain a JSON object\n", .{command});
+            return CliError.InvalidArgument;
+        },
+    };
+    if (jsonArray(root.get("errors"))) |errors_array| {
+        if (errors_array.items.len != 0) {
+            if (errors_array.items[0] == .object) {
+                const message = event_mod.jsonString(errors_array.items[0].object.get("message")) orelse "unknown GraphQL error";
+                try eprint("{s}: GraphQL request failed: {s}\n", .{ command, message });
+            } else {
+                try eprint("{s}: GraphQL request failed\n", .{command});
+            }
+            return CliError.UserError;
+        }
+    }
+    return parsed;
+}
+
+fn graphqlRepository(value: std.json.Value) ?std.json.ObjectMap {
+    const root = switch (value) {
+        .object => |object| object,
+        else => return null,
+    };
+    const data = jsonObject(root.get("data")) orelse return null;
+    return jsonObject(data.get("repository"));
+}
+
+fn jsonObject(value: ?std.json.Value) ?std.json.ObjectMap {
+    return switch (value orelse return null) {
+        .object => |object| object,
+        else => null,
+    };
+}
+
+fn connectionNodes(connection: std.json.ObjectMap) ?std.json.Array {
+    return jsonArray(connection.get("nodes"));
+}
+
+fn connectionHasNextPage(connection: std.json.ObjectMap) bool {
+    const page_info = jsonObject(connection.get("pageInfo")) orelse return false;
+    return jsonBool(page_info.get("hasNextPage")) orelse false;
+}
+
+fn connectionEndCursor(connection: std.json.ObjectMap) ?[]const u8 {
+    const page_info = jsonObject(connection.get("pageInfo")) orelse return null;
+    return event_mod.jsonString(page_info.get("endCursor"));
+}
+
+fn replaceOptionalString(allocator: Allocator, target: *?[]u8, value: ?[]const u8) !void {
+    if (target.*) |old| allocator.free(old);
+    target.* = null;
+    if (value) |actual| {
+        if (actual.len != 0) target.* = try allocator.dupe(u8, actual);
+    }
+}
+
 fn importApiPullObject(
     allocator: Allocator,
     writer: *EventWriter,
     client: GitHubClient,
     summary: std.json.ObjectMap,
+    options: ImportOptions,
     stats: *ImportStats,
 ) !?ImportedObject {
     const number = jsonInteger(summary.get("number")) orelse return null;
@@ -506,7 +890,7 @@ fn importApiPullObject(
             return CliError.InvalidArgument;
         },
     };
-    return try importPullObject(allocator, writer, pull, null, stats);
+    return try importPullObject(allocator, writer, pull, options.map_file, stats);
 }
 
 fn importApiComments(
@@ -548,7 +932,7 @@ fn importApiComments(
         };
         if (comments.items.len == 0) break;
         total += comments.items.len;
-        try importCommentsArrayWithContext(allocator, &db, &comment_refs, writer, parent_kind, parent_id, comments, null, stats);
+        try importCommentsArrayWithContext(allocator, &db, &comment_refs, writer, parent_kind, parent_id, comments, options.map_file, stats);
         if (comments.items.len < 100) break;
     }
     try eprint("gt github import: {s} #{d}: {d} comment{s}\n", .{ parent_kind, number, total, if (total == 1) "" else "s" });
@@ -817,7 +1201,7 @@ fn importIssueObject(
     defer allocator.free(title);
     const body = try githubSizedString(allocator, event_mod.jsonString(issue.get("body")), "", git.max_payload_text_bytes);
     defer allocator.free(body);
-    const occurred_at = try githubTimestampOrNow(allocator, issue.get("created_at"));
+    const occurred_at = try githubTimestampOrNow(allocator, firstJsonValue(issue.get("created_at"), issue.get("createdAt")));
     defer allocator.free(occurred_at);
 
     const labels = try githubIssueLabels(allocator, issue);
@@ -828,7 +1212,7 @@ fn importIssueObject(
     defer allocator.free(source_author);
     const milestone = try githubSizedString(allocator, githubMilestoneTitle(issue), "", git.max_payload_atom_bytes);
     defer allocator.free(milestone);
-    const comment_count = githubOptionalUnsignedField(issue, &.{ "comments", "comment_count" });
+    const comment_count = githubOptionalUnsignedField(issue, &.{ "comments", "comment_count", "commentCount" });
 
     const issue_id = try util.newUuidV7(allocator);
     errdefer allocator.free(issue_id);
@@ -836,12 +1220,10 @@ fn importIssueObject(
     try writeImportedIssueOpened(allocator, writer, issue_id, @intCast(number), occurred_at, title, body, labels, assignees, source_author, milestone, projects);
     stats.issues += 1;
 
-    if (event_mod.jsonString(issue.get("state"))) |state| {
-        if (std.mem.eql(u8, state, "closed")) {
-            const closed_at = try githubTimestampOrNow(allocator, firstJsonValue(issue.get("closed_at"), issue.get("updated_at")));
-            defer allocator.free(closed_at);
-            try writeImportedStringEvent(allocator, writer, "issue", issue_id, "issue.state_set", "state", "closed", closed_at);
-        }
+    if (githubStateEquals(issue.get("state"), "closed")) {
+        const closed_at = try githubTimestampOrNow(allocator, firstJsonValue3(issue.get("closed_at"), issue.get("closedAt"), firstJsonValue(issue.get("updated_at"), issue.get("updatedAt"))));
+        defer allocator.free(closed_at);
+        try writeImportedStringEvent(allocator, writer, "issue", issue_id, "issue.state_set", "state", "closed", closed_at);
     }
 
     return .{ .id = issue_id, .is_new = true, .comment_count = comment_count };
@@ -861,12 +1243,12 @@ fn importPullObject(allocator: Allocator, writer: *EventWriter, pull: std.json.O
     defer allocator.free(title);
     const body = try githubSizedString(allocator, event_mod.jsonString(pull.get("body")), "", git.max_payload_text_bytes);
     defer allocator.free(body);
-    const base_ref = try githubSizedString(allocator, nestedString(pull, "base", "ref"), "main", git.max_payload_ref_bytes);
+    const base_ref = try githubSizedString(allocator, event_mod.jsonString(pull.get("baseRefName")) orelse nestedString(pull, "base", "ref"), "main", git.max_payload_ref_bytes);
     defer allocator.free(base_ref);
-    const head_ref = try githubSizedString(allocator, nestedString(pull, "head", "ref"), "unknown", git.max_payload_ref_bytes);
+    const head_ref = try githubSizedString(allocator, event_mod.jsonString(pull.get("headRefName")) orelse nestedString(pull, "head", "ref"), "unknown", git.max_payload_ref_bytes);
     defer allocator.free(head_ref);
-    const draft = jsonBool(pull.get("draft")) orelse false;
-    const occurred_at = try githubTimestampOrNow(allocator, pull.get("created_at"));
+    const draft = jsonBool(firstJsonValue(pull.get("draft"), pull.get("isDraft"))) orelse false;
+    const occurred_at = try githubTimestampOrNow(allocator, firstJsonValue(pull.get("created_at"), pull.get("createdAt")));
     defer allocator.free(occurred_at);
     const source_author = try githubSizedString(allocator, githubAuthorLogin(pull), "", git.max_payload_atom_bytes);
     defer allocator.free(source_author);
@@ -876,7 +1258,7 @@ fn importPullObject(allocator: Allocator, writer: *EventWriter, pull: std.json.O
     defer git.freeStringList(allocator, assignees);
     const reviewers = try githubPullReviewers(allocator, pull);
     defer git.freeStringList(allocator, reviewers);
-    const comment_count = githubOptionalUnsignedField(pull, &.{ "comments", "comment_count" });
+    const comment_count = githubOptionalUnsignedField(pull, &.{ "comments", "comment_count", "commentCount" });
 
     const pull_id = try util.newUuidV7(allocator);
     errdefer allocator.free(pull_id);
@@ -897,26 +1279,24 @@ fn importPullObject(allocator: Allocator, writer: *EventWriter, pull: std.json.O
             .labels = labels,
             .assignees = assignees,
             .reviewers = reviewers,
-            .commit_count = githubOptionalUnsignedField(pull, &.{ "commits", "commit_count" }),
-            .changed_files = githubOptionalUnsignedField(pull, &.{ "changed_files", "files_changed", "file_count" }),
+            .commit_count = githubOptionalUnsignedField(pull, &.{ "commits", "commit_count", "commitCount" }),
+            .changed_files = githubOptionalUnsignedField(pull, &.{ "changed_files", "changedFiles", "files_changed", "file_count" }),
             .additions = githubOptionalUnsignedField(pull, &.{"additions"}),
             .deletions = githubOptionalUnsignedField(pull, &.{"deletions"}),
         },
     );
     stats.pulls += 1;
 
-    if (event_mod.jsonString(pull.get("state"))) |state| {
-        if (std.mem.eql(u8, state, "closed")) {
-            if (event_mod.jsonString(pull.get("merged_at"))) |merged_at| {
-                if (merged_at.len != 0) {
-                    try writeImportedPullMerged(allocator, writer, pull_id, merged_at, event_mod.jsonString(pull.get("merge_commit_sha")) orelse "", null);
-                    return .{ .id = pull_id, .is_new = true, .comment_count = comment_count };
-                }
+    if (githubStateEquals(pull.get("state"), "closed") or githubStateEquals(pull.get("state"), "merged")) {
+        if (event_mod.jsonString(firstJsonValue(pull.get("merged_at"), pull.get("mergedAt")))) |merged_at| {
+            if (merged_at.len != 0) {
+                try writeImportedPullMerged(allocator, writer, pull_id, merged_at, event_mod.jsonString(pull.get("merge_commit_sha")) orelse nestedString(pull, "mergeCommit", "oid") orelse "", null);
+                return .{ .id = pull_id, .is_new = true, .comment_count = comment_count };
             }
-            const closed_at = try githubTimestampOrNow(allocator, firstJsonValue(pull.get("closed_at"), pull.get("updated_at")));
-            defer allocator.free(closed_at);
-            try writeImportedStringEvent(allocator, writer, "pull", pull_id, "pull.state_set", "state", "closed", closed_at);
         }
+        const closed_at = try githubTimestampOrNow(allocator, firstJsonValue3(pull.get("closed_at"), pull.get("closedAt"), firstJsonValue(pull.get("updated_at"), pull.get("updatedAt"))));
+        defer allocator.free(closed_at);
+        try writeImportedStringEvent(allocator, writer, "pull", pull_id, "pull.state_set", "state", "closed", closed_at);
     }
 
     return .{ .id = pull_id, .is_new = true, .comment_count = comment_count };
@@ -994,7 +1374,8 @@ fn syncExistingIssueObject(
     defer allocator.free(title);
     const body = try githubSizedString(allocator, event_mod.jsonString(issue.get("body")), "", git.max_payload_text_bytes);
     defer allocator.free(body);
-    const state = event_mod.jsonString(issue.get("state")) orelse "open";
+    const raw_state = event_mod.jsonString(issue.get("state")) orelse "open";
+    const state = if (std.ascii.eqlIgnoreCase(raw_state, "closed")) "closed" else "open";
     const milestone = try githubSizedString(allocator, githubMilestoneTitle(issue), "", git.max_payload_atom_bytes);
     defer allocator.free(milestone);
     const labels = try githubIssueLabels(allocator, issue);
@@ -1018,7 +1399,7 @@ fn syncExistingIssueObject(
     };
     if (!update.hasChanges()) return;
 
-    const occurred_at = try githubTimestampOrNow(allocator, firstJsonValue(issue.get("updated_at"), issue.get("created_at")));
+    const occurred_at = try githubTimestampOrNow(allocator, firstJsonValue3(issue.get("updated_at"), issue.get("updatedAt"), firstJsonValue(issue.get("created_at"), issue.get("createdAt"))));
     defer allocator.free(occurred_at);
     try writeImportedIssueUpdated(allocator, writer, issue_id, occurred_at, update);
 }
@@ -1040,9 +1421,9 @@ fn syncExistingPullObject(
     defer allocator.free(title);
     const body = try githubSizedString(allocator, event_mod.jsonString(pull.get("body")), "", git.max_payload_text_bytes);
     defer allocator.free(body);
-    const base_ref = try githubSizedString(allocator, nestedString(pull, "base", "ref"), "main", git.max_payload_ref_bytes);
+    const base_ref = try githubSizedString(allocator, event_mod.jsonString(pull.get("baseRefName")) orelse nestedString(pull, "base", "ref"), "main", git.max_payload_ref_bytes);
     defer allocator.free(base_ref);
-    const head_ref = try githubSizedString(allocator, nestedString(pull, "head", "ref"), "unknown", git.max_payload_ref_bytes);
+    const head_ref = try githubSizedString(allocator, event_mod.jsonString(pull.get("headRefName")) orelse nestedString(pull, "head", "ref"), "unknown", git.max_payload_ref_bytes);
     defer allocator.free(head_ref);
     const labels = try githubIssueLabels(allocator, pull);
     defer git.freeStringList(allocator, labels);
@@ -1057,10 +1438,16 @@ fn syncExistingPullObject(
     var reviewer_diff = try diffStringLists(allocator, reviewers, current.reviewers);
     defer reviewer_diff.deinit();
 
-    const github_state = event_mod.jsonString(pull.get("state")) orelse "open";
-    const merged_at = event_mod.jsonString(pull.get("merged_at")) orelse "";
-    const merge_oid = event_mod.jsonString(pull.get("merge_commit_sha")) orelse "";
-    if (std.mem.eql(u8, github_state, "closed") and merged_at.len != 0 and
+    const raw_github_state = event_mod.jsonString(pull.get("state")) orelse "open";
+    const github_state: []const u8 = if (std.ascii.eqlIgnoreCase(raw_github_state, "merged"))
+        "merged"
+    else if (std.ascii.eqlIgnoreCase(raw_github_state, "closed"))
+        "closed"
+    else
+        "open";
+    const merged_at = event_mod.jsonString(firstJsonValue(pull.get("merged_at"), pull.get("mergedAt"))) orelse "";
+    const merge_oid = event_mod.jsonString(pull.get("merge_commit_sha")) orelse nestedString(pull, "mergeCommit", "oid") orelse "";
+    if ((std.mem.eql(u8, github_state, "closed") or std.mem.eql(u8, github_state, "merged")) and merged_at.len != 0 and
         (!std.mem.eql(u8, current.state, "merged") or (merge_oid.len != 0 and !std.mem.eql(u8, current.merge_oid, merge_oid))))
     {
         try writeImportedPullMerged(allocator, writer, pull_id, merged_at, merge_oid, null);
@@ -1088,7 +1475,7 @@ fn syncExistingPullObject(
     };
     if (!update.hasChanges()) return;
 
-    const occurred_at = try githubTimestampOrNow(allocator, firstJsonValue(pull.get("updated_at"), pull.get("created_at")));
+    const occurred_at = try githubTimestampOrNow(allocator, firstJsonValue3(pull.get("updated_at"), pull.get("updatedAt"), firstJsonValue(pull.get("created_at"), pull.get("createdAt"))));
     defer allocator.free(occurred_at);
     try writeImportedPullUpdated(allocator, writer, pull_id, occurred_at, update);
 }
@@ -1257,7 +1644,7 @@ fn importCommentsArrayWithContext(
         const body = try githubSizedString(allocator, event_mod.jsonString(item.object.get("body")), "", git.max_payload_text_bytes);
         defer allocator.free(body);
         if (std.mem.trim(u8, body, " \t\r\n").len == 0) continue;
-        const occurred_at = try githubTimestampOrNow(allocator, item.object.get("created_at"));
+        const occurred_at = try githubTimestampOrNow(allocator, firstJsonValue(item.object.get("created_at"), item.object.get("createdAt")));
         defer allocator.free(occurred_at);
         if (try importedCommentExists(db, parent_kind, parent_id, occurred_at, body)) continue;
         const source_author = try githubSizedString(allocator, githubAuthorLogin(item.object), "", git.max_payload_atom_bytes);
@@ -1279,7 +1666,7 @@ fn importCommentsArrayWithContext(
         var written_moved = false;
         errdefer if (!written_moved) written.deinit(allocator);
         imported += 1;
-        if (jsonInteger(item.object.get("id"))) |github_id| {
+        if (jsonInteger(firstJsonValue(item.object.get("databaseId"), item.object.get("id")))) |github_id| {
             if (map_file) |path| try exporter.recordMappedObjectId(allocator, path, "comment", written.id, github_id);
             const entry = try comment_refs.getOrPut(github_id);
             if (entry.found_existing) {

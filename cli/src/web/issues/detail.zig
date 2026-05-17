@@ -131,7 +131,7 @@ fn renderIssueDetailPageWithCommentForm(
     try issue_timeline.append(&buf, allocator, &db, detail.id);
     try appendIssueCommentForm(&buf, allocator, raw_ref, detail.state, current_actor, csrf_token, comment_error, comment_value);
     try buf.appendSlice(allocator, "    </div><aside class=\"issue-meta-sidebar\">");
-    try issue_sidebar.append(&buf, allocator, &db, raw_ref, detail.id, display_author, detail.milestone, detail.priority, detail.status, detail.body);
+    try issue_sidebar.append(&buf, allocator, &db, raw_ref, detail.id, display_author, detail.milestone, detail.issue_type, detail.priority, detail.status, detail.body);
     try buf.appendSlice(allocator, "</aside></div></section>");
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
