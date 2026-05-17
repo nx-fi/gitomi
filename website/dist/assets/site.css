@@ -4,23 +4,23 @@ html {
 
 :root {
   color-scheme: dark;
-  --site-bg: #060806;
-  --site-bg-2: #0d120d;
-  --site-panel: rgba(15, 20, 15, 0.92);
-  --site-panel-strong: rgba(23, 30, 24, 0.96);
-  --site-card: #101711;
-  --site-ink: #f4f1e8;
-  --site-muted: #a9b5aa;
-  --site-border: rgba(169, 204, 170, 0.24);
-  --site-border-strong: rgba(16, 184, 170, 0.48);
-  --site-green: #10B8AA;
-  --site-green-ink: #031413;
-  --site-cyan: #64d7ff;
-  --site-coral: #ff7f6e;
-  --site-amber: #ffd166;
-  --site-violet: #b59cff;
+  --site-bg: #0f090a;
+  --site-bg-2: #0d1514;
+  --site-panel: color-mix(in oklch, #232b2a 82%, transparent);
+  --site-panel-strong: color-mix(in oklch, #232b2a 92%, transparent);
+  --site-card: #232b2a;
+  --site-ink: #dde8e6;
+  --site-muted: #abb6b3;
+  --site-border: color-mix(in oklch, #dde8e6 24%, transparent);
+  --site-border-strong: color-mix(in oklch, #009c8f 48%, transparent);
+  --site-green: #009c8f;
+  --site-green-ink: #001b17;
+  --site-cyan: #73b7fc;
+  --site-coral: #cd6e86;
+  --site-amber: #ffd481;
+  --site-violet: #b3566f;
   --site-shadow: 0 30px 90px rgba(0, 0, 0, 0.44);
-  --site-shadow-hard: 0 22px 0 rgba(16, 184, 170, 0.08);
+  --site-shadow-hard: 0 22px 0 color-mix(in oklch, var(--site-green) 8%, transparent);
   --site-sans: "Google Sans Flex", "Google Sans", "Avenir Next", "Inter", "SF Pro Text", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
   --site-display: "Google Sans Flex", "Google Sans", "Avenir Next", "Inter", "SF Pro Display", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
 }
@@ -48,7 +48,7 @@ body.site-shell::after {
   z-index: -1;
   pointer-events: none;
   background:
-    repeating-linear-gradient(180deg, transparent 0 7px, rgba(16, 184, 170, 0.035) 7px 8px);
+    repeating-linear-gradient(180deg, transparent 0 7px, color-mix(in oklch, var(--site-green) 3.5%, transparent) 7px 8px);
   opacity: 0.75;
 }
 
@@ -58,9 +58,9 @@ body.site-shell::after {
   z-index: -2;
   pointer-events: none;
   background:
-    linear-gradient(120deg, rgba(16, 184, 170, 0.1), transparent 34%, rgba(255, 209, 102, 0.08) 62%, transparent),
-    repeating-linear-gradient(90deg, rgba(16, 184, 170, 0.11) 0 1px, transparent 1px 74px),
-    repeating-linear-gradient(0deg, rgba(100, 215, 255, 0.08) 0 1px, transparent 1px 74px);
+    linear-gradient(120deg, color-mix(in oklch, var(--site-green) 10%, transparent), transparent 34%, color-mix(in oklch, var(--site-amber) 8%, transparent) 62%, transparent),
+    repeating-linear-gradient(90deg, color-mix(in oklch, var(--site-green) 11%, transparent) 0 1px, transparent 1px 74px),
+    repeating-linear-gradient(0deg, color-mix(in oklch, var(--site-cyan) 8%, transparent) 0 1px, transparent 1px 74px);
   mask-image: linear-gradient(180deg, #000 0, #000 70%, transparent 100%);
 }
 
@@ -74,7 +74,7 @@ body.site-shell::after {
 
 .site-shell code {
   color: var(--site-green);
-  background: rgba(16, 184, 170, 0.09);
+  background: color-mix(in oklch, var(--site-green) 9%, transparent);
   border-color: var(--site-border);
 }
 
@@ -100,7 +100,7 @@ body.site-shell::after {
   stroke-width: 1.4;
   stroke-linecap: round;
   opacity: 0.39;
-  filter: drop-shadow(0 0 13px rgba(16, 184, 170, 0.16));
+  filter: drop-shadow(0 0 13px color-mix(in oklch, var(--site-green) 16%, transparent));
   vector-effect: non-scaling-stroke;
 }
 
@@ -135,7 +135,7 @@ body.site-shell::after {
   min-height: 40px;
   padding: 0;
   color: var(--site-ink);
-  background: color-mix(in srgb, var(--site-panel-strong) 88%, transparent);
+  background: color-mix(in oklch, var(--site-panel-strong) 88%, transparent);
   border: 1px solid var(--site-border);
   border-radius: 8px;
   box-shadow: var(--site-shadow);
@@ -180,12 +180,12 @@ body.site-shell::after {
 .site-shell .button.primary {
   color: var(--site-green-ink);
   background: var(--site-green);
-  border: 1px solid color-mix(in srgb, var(--site-green) 70%, #ffffff);
-  box-shadow: 0 0 0 4px rgba(16, 184, 170, 0.13);
+  border: 1px solid color-mix(in oklch, var(--site-green) 70%, #ffffff);
+  box-shadow: 0 0 0 4px color-mix(in oklch, var(--site-green) 13%, transparent);
 }
 
 .site-shell .button.primary:hover {
-  background: color-mix(in srgb, var(--site-green) 88%, #ffffff);
+  background: color-mix(in oklch, var(--site-green) 88%, #ffffff);
 }
 
 .site-shell .button.secondary {
@@ -255,7 +255,7 @@ body.site-shell::after {
 }
 
 .hero-brand.is-docked {
-  text-shadow: 0 0 22px rgba(16, 184, 170, 0.22);
+  text-shadow: 0 0 22px color-mix(in oklch, var(--site-green) 22%, transparent);
 }
 
 .pain-line,
@@ -271,8 +271,8 @@ body.site-shell::after {
   max-width: 620px;
   padding: 8px 10px;
   color: var(--site-cyan);
-  background: rgba(100, 215, 255, 0.08);
-  border: 1px solid rgba(100, 215, 255, 0.2);
+  background: color-mix(in oklch, var(--site-cyan) 8%, transparent);
+  border: 1px solid color-mix(in oklch, var(--site-cyan) 20%, transparent);
   border-radius: 8px;
   text-transform: none;
 }
@@ -308,7 +308,7 @@ body.site-shell::after {
   display: inline-flex;
   align-items: baseline;
   color: var(--site-green);
-  text-shadow: 0 0 28px rgba(16, 184, 170, 0.24);
+  text-shadow: 0 0 28px color-mix(in oklch, var(--site-green) 24%, transparent);
 }
 
 .hero-rotator {
@@ -351,7 +351,7 @@ body.site-shell::after {
   overflow: hidden;
   border: 1px solid var(--site-border-strong);
   border-radius: 8px;
-  box-shadow: 0 0 0 4px rgba(16, 184, 170, 0.08);
+  box-shadow: 0 0 0 4px color-mix(in oklch, var(--site-green) 8%, transparent);
 }
 
 .hero-install.command-code pre {
@@ -390,8 +390,8 @@ body.site-shell::after {
   border: 1px solid var(--site-border);
   border-radius: 8px;
   background:
-    linear-gradient(135deg, rgba(16, 184, 170, 0.11), transparent 26%),
-    linear-gradient(315deg, rgba(255, 127, 110, 0.1), transparent 30%),
+    linear-gradient(135deg, color-mix(in oklch, var(--site-green) 11%, transparent), transparent 26%),
+    linear-gradient(315deg, color-mix(in oklch, var(--site-coral) 10%, transparent), transparent 30%),
     rgba(255, 255, 255, 0.035);
   box-shadow: var(--site-shadow-hard), var(--site-shadow);
   overflow: hidden;
@@ -402,8 +402,8 @@ body.site-shell::after {
   position: absolute;
   inset: 0;
   background:
-    repeating-linear-gradient(90deg, transparent 0 23px, rgba(16, 184, 170, 0.06) 23px 24px),
-    repeating-linear-gradient(0deg, transparent 0 23px, rgba(100, 215, 255, 0.05) 23px 24px);
+    repeating-linear-gradient(90deg, transparent 0 23px, color-mix(in oklch, var(--site-green) 6%, transparent) 23px 24px),
+    repeating-linear-gradient(0deg, transparent 0 23px, color-mix(in oklch, var(--site-cyan) 5%, transparent) 23px 24px);
   opacity: 0.8;
 }
 
@@ -534,7 +534,7 @@ body.site-shell::after {
 
 .sim-sidebar .is-active {
   color: var(--site-ink);
-  background: rgba(16, 184, 170, 0.13);
+  background: color-mix(in oklch, var(--site-green) 13%, transparent);
   box-shadow: inset 3px 0 0 var(--site-green);
 }
 
@@ -597,8 +597,8 @@ body.site-shell::after {
 }
 
 .kanban-lane.is-hot {
-  border-color: rgba(16, 184, 170, 0.43);
-  box-shadow: inset 0 0 0 1px rgba(16, 184, 170, 0.12);
+  border-color: color-mix(in oklch, var(--site-green) 43%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--site-green) 12%, transparent);
 }
 
 .kanban-lane h3 {
@@ -620,7 +620,7 @@ body.site-shell::after {
 
 .kanban-lane article.is-selected {
   border-color: var(--site-green);
-  box-shadow: 0 0 0 3px rgba(16, 184, 170, 0.12);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--site-green) 12%, transparent);
 }
 
 .kanban-lane strong,
@@ -638,34 +638,34 @@ body.site-shell::after {
   min-height: 22px;
   padding: 3px 7px;
   color: var(--site-cyan);
-  background: rgba(100, 215, 255, 0.1);
-  border: 1px solid rgba(100, 215, 255, 0.24);
+  background: color-mix(in oklch, var(--site-cyan) 10%, transparent);
+  border: 1px solid color-mix(in oklch, var(--site-cyan) 24%, transparent);
   border-radius: 999px;
   font: 850 11px/1.2 var(--mono);
 }
 
 .issue-id.green {
   color: var(--site-green);
-  background: rgba(16, 184, 170, 0.1);
-  border-color: rgba(16, 184, 170, 0.24);
+  background: color-mix(in oklch, var(--site-green) 10%, transparent);
+  border-color: color-mix(in oklch, var(--site-green) 24%, transparent);
 }
 
 .issue-id.coral {
   color: var(--site-coral);
-  background: rgba(255, 127, 110, 0.1);
-  border-color: rgba(255, 127, 110, 0.24);
+  background: color-mix(in oklch, var(--site-coral) 10%, transparent);
+  border-color: color-mix(in oklch, var(--site-coral) 24%, transparent);
 }
 
 .issue-id.amber {
   color: var(--site-amber);
-  background: rgba(255, 209, 102, 0.1);
-  border-color: rgba(255, 209, 102, 0.24);
+  background: color-mix(in oklch, var(--site-amber) 10%, transparent);
+  border-color: color-mix(in oklch, var(--site-amber) 24%, transparent);
 }
 
 .issue-id.cyan {
   color: var(--site-violet);
-  background: rgba(181, 156, 255, 0.1);
-  border-color: rgba(181, 156, 255, 0.24);
+  background: color-mix(in oklch, var(--site-violet) 10%, transparent);
+  border-color: color-mix(in oklch, var(--site-violet) 24%, transparent);
 }
 
 .click-cursor {
@@ -713,7 +713,7 @@ body.site-shell::after {
   overflow: hidden;
   color: #d8ffe2;
   background: rgba(1, 6, 3, 0.94);
-  border: 1px solid rgba(16, 184, 170, 0.36);
+  border: 1px solid color-mix(in oklch, var(--site-green) 36%, transparent);
   border-radius: 8px;
   box-shadow: 0 26px 70px rgba(0, 0, 0, 0.48);
   transform: rotate(var(--tilt));
@@ -726,8 +726,8 @@ body.site-shell::after {
   min-height: 34px;
   padding: 0 12px;
   color: var(--site-muted);
-  background: rgba(16, 184, 170, 0.08);
-  border-bottom: 1px solid rgba(16, 184, 170, 0.2);
+  background: color-mix(in oklch, var(--site-green) 8%, transparent);
+  border-bottom: 1px solid color-mix(in oklch, var(--site-green) 20%, transparent);
 }
 
 .terminal-head span {
@@ -849,8 +849,8 @@ body.site-shell::after {
   padding: 14px;
   overflow: hidden;
   background:
-    linear-gradient(135deg, rgba(16, 184, 170, 0.08), transparent 38%),
-    linear-gradient(315deg, rgba(100, 215, 255, 0.08), transparent 42%),
+    linear-gradient(135deg, color-mix(in oklch, var(--site-green) 8%, transparent), transparent 38%),
+    linear-gradient(315deg, color-mix(in oklch, var(--site-cyan) 8%, transparent), transparent 42%),
     var(--site-panel);
 }
 
@@ -891,7 +891,7 @@ body.site-shell::after {
 
 .repo-window-head code {
   color: var(--site-green);
-  background: rgba(16, 184, 170, 0.08);
+  background: color-mix(in oklch, var(--site-green) 8%, transparent);
 }
 
 .repo-visual-grid {
@@ -925,7 +925,7 @@ body.site-shell::after {
 }
 
 .repo-tree div.is-live {
-  border-color: rgba(16, 184, 170, 0.45);
+  border-color: color-mix(in oklch, var(--site-green) 45%, transparent);
   box-shadow: inset 3px 0 0 var(--site-green);
 }
 
@@ -973,22 +973,22 @@ body.site-shell::after {
   min-height: 22px;
   padding: 3px 7px;
   color: var(--site-cyan);
-  background: rgba(100, 215, 255, 0.1);
-  border: 1px solid rgba(100, 215, 255, 0.24);
+  background: color-mix(in oklch, var(--site-cyan) 10%, transparent);
+  border: 1px solid color-mix(in oklch, var(--site-cyan) 24%, transparent);
   border-radius: 999px;
   font: 850 11px/1.2 var(--mono);
 }
 
 .event-kind.green {
   color: var(--site-green);
-  background: rgba(16, 184, 170, 0.1);
-  border-color: rgba(16, 184, 170, 0.24);
+  background: color-mix(in oklch, var(--site-green) 10%, transparent);
+  border-color: color-mix(in oklch, var(--site-green) 24%, transparent);
 }
 
 .event-kind.violet {
   color: var(--site-violet);
-  background: rgba(181, 156, 255, 0.1);
-  border-color: rgba(181, 156, 255, 0.24);
+  background: color-mix(in oklch, var(--site-violet) 10%, transparent);
+  border-color: color-mix(in oklch, var(--site-violet) 24%, transparent);
 }
 
 .proof-chips {
@@ -1018,8 +1018,8 @@ body.site-shell::after {
   padding: 16px;
   overflow: hidden;
   background:
-    linear-gradient(135deg, rgba(100, 215, 255, 0.1), transparent 36%),
-    linear-gradient(315deg, rgba(255, 209, 102, 0.11), transparent 38%),
+    linear-gradient(135deg, color-mix(in oklch, var(--site-cyan) 10%, transparent), transparent 36%),
+    linear-gradient(315deg, color-mix(in oklch, var(--site-amber) 11%, transparent), transparent 38%),
     var(--site-panel);
 }
 
@@ -1029,8 +1029,8 @@ body.site-shell::after {
   inset: 0;
   pointer-events: none;
   background:
-    repeating-linear-gradient(90deg, transparent 0 31px, rgba(16, 184, 170, 0.05) 31px 32px),
-    repeating-linear-gradient(0deg, transparent 0 31px, rgba(100, 215, 255, 0.04) 31px 32px);
+    repeating-linear-gradient(90deg, transparent 0 31px, color-mix(in oklch, var(--site-green) 5%, transparent) 31px 32px),
+    repeating-linear-gradient(0deg, transparent 0 31px, color-mix(in oklch, var(--site-cyan) 4%, transparent) 31px 32px);
   opacity: 0.75;
 }
 
@@ -1049,7 +1049,7 @@ body.site-shell::after {
   overflow: hidden;
   color: #d8ffe2;
   background: rgba(1, 6, 3, 0.82);
-  border: 1px solid rgba(16, 184, 170, 0.3);
+  border: 1px solid color-mix(in oklch, var(--site-green) 30%, transparent);
   border-radius: 8px;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.03);
 }
@@ -1085,8 +1085,8 @@ body.site-shell::after {
   align-items: center;
   min-height: 32px;
   padding: 7px 9px;
-  background: rgba(16, 184, 170, 0.07);
-  border: 1px solid rgba(16, 184, 170, 0.18);
+  background: color-mix(in oklch, var(--site-green) 7%, transparent);
+  border: 1px solid color-mix(in oklch, var(--site-green) 18%, transparent);
   border-radius: 7px;
 }
 
@@ -1131,11 +1131,11 @@ body.site-shell::after {
 }
 
 .remote-stack article:nth-child(2) {
-  border-color: rgba(16, 184, 170, 0.48);
+  border-color: color-mix(in oklch, var(--site-green) 48%, transparent);
 }
 
 .remote-stack article:nth-child(4) {
-  border-color: rgba(255, 209, 102, 0.38);
+  border-color: color-mix(in oklch, var(--site-amber) 38%, transparent);
 }
 
 .remote-stack .button-icon {
@@ -1173,8 +1173,8 @@ body.site-shell::after {
   place-items: center;
   min-height: 34px;
   color: var(--site-green);
-  background: rgba(16, 184, 170, 0.08);
-  border: 1px solid rgba(16, 184, 170, 0.2);
+  background: color-mix(in oklch, var(--site-green) 8%, transparent);
+  border: 1px solid color-mix(in oklch, var(--site-green) 20%, transparent);
   border-radius: 7px;
   font: 850 12px/1.2 var(--mono);
   text-transform: uppercase;
@@ -1213,12 +1213,12 @@ body.site-shell::after {
   height: 12px;
   background: var(--site-coral);
   border-radius: 50%;
-  box-shadow: 0 0 0 4px rgba(255, 127, 110, 0.13);
+  box-shadow: 0 0 0 4px color-mix(in oklch, var(--site-coral) 13%, transparent);
 }
 
 .device-panel.is-online .device-head span {
   background: var(--site-green);
-  box-shadow: 0 0 0 4px rgba(16, 184, 170, 0.13);
+  box-shadow: 0 0 0 4px color-mix(in oklch, var(--site-green) 13%, transparent);
 }
 
 .device-head strong,
@@ -1318,7 +1318,7 @@ body.site-shell::after {
   overflow: hidden;
   min-height: 360px;
   background:
-    linear-gradient(135deg, rgba(181, 156, 255, 0.11), transparent 44%),
+    linear-gradient(135deg, color-mix(in oklch, var(--site-violet) 11%, transparent), transparent 44%),
     var(--site-panel);
 }
 
@@ -1514,7 +1514,7 @@ body.site-shell::after {
   gap: 20px;
   padding: 20px;
   background:
-    linear-gradient(120deg, rgba(16, 184, 170, 0.08), transparent 40%),
+    linear-gradient(120deg, color-mix(in oklch, var(--site-green) 8%, transparent), transparent 40%),
     var(--site-panel);
 }
 

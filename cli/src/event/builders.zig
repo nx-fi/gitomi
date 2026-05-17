@@ -411,6 +411,16 @@ pub fn buildProjectUpdatedJson(
     if (update.name) |value| try appendJsonFieldString(&buf, allocator, "name", value, true);
     if (update.description) |value| try appendJsonFieldString(&buf, allocator, "description", value, true);
     if (update.state) |value| try appendJsonFieldString(&buf, allocator, "state", value, true);
+    if (update.status) |value| try appendJsonFieldString(&buf, allocator, "status", value, true);
+    if (update.priority) |value| try appendJsonFieldString(&buf, allocator, "priority", value, true);
+    if (update.start_at) |value| try appendJsonFieldString(&buf, allocator, "start_at", value, true);
+    if (update.end_at) |value| try appendJsonFieldString(&buf, allocator, "end_at", value, true);
+    if (update.leads_added.len != 0) try appendJsonFieldStringArray(&buf, allocator, "leads_added", update.leads_added, true);
+    if (update.leads_removed.len != 0) try appendJsonFieldStringArray(&buf, allocator, "leads_removed", update.leads_removed, true);
+    if (update.members_added.len != 0) try appendJsonFieldStringArray(&buf, allocator, "members_added", update.members_added, true);
+    if (update.members_removed.len != 0) try appendJsonFieldStringArray(&buf, allocator, "members_removed", update.members_removed, true);
+    if (update.labels_added.len != 0) try appendJsonFieldStringArray(&buf, allocator, "labels_added", update.labels_added, true);
+    if (update.labels_removed.len != 0) try appendJsonFieldStringArray(&buf, allocator, "labels_removed", update.labels_removed, true);
     if (buf.items[buf.items.len - 1] == ',') {
         buf.items.len -= 1;
     }

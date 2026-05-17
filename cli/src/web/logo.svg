@@ -17,7 +17,7 @@
 
   <!-- Filled eye with iris cutout -->
   <path
-    fill="#10B8AA"
+    fill="#009c8f"
     fill-rule="evenodd"
     clip-rule="evenodd"
     d="
@@ -38,7 +38,7 @@
   <g clip-path="url(#gitomi-iris-clip)">
     <!-- Straight lines -->
     <g
-      stroke="#10B8AA"
+      stroke="#009c8f"
       stroke-width="12"
       stroke-linecap="round"
       stroke-linejoin="round"
@@ -50,7 +50,7 @@
 
     <!-- Outline circles -->
     <g
-      stroke="#10B8AA"
+      stroke="#009c8f"
       stroke-width="15"
       fill="none"
     >
@@ -59,6 +59,6 @@
     </g>
 
     <!-- Filled circle -->
-    <circle cx="300" cy="158" r="22" fill="#10B8AA" />
+    <circle cx="300" cy="158" r="22" fill="#009c8f" />
   </g>
 </svg>

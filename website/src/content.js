@@ -153,7 +153,7 @@ export function renderSite() {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Gitomi keeps your entire development workflow - issues, PRs, projects, workflows, and agent activity - inside your Git repository.">
-  <meta name="theme-color" content="#10B8AA">
+  <meta name="theme-color" content="#009c8f">
   <title>Gitomi - Own your project, not just your code</title>
   <link rel="icon" href="./assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="./assets/webui.css">
@@ -169,32 +169,32 @@ export function renderSite() {
     <svg class="flow-line" viewBox="0 0 1440 4300" preserveAspectRatio="none" aria-hidden="true">
       <defs>
         <linearGradient id="flow-line-green" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stop-color="#10B8AA" stop-opacity="0"></stop>
-          <stop offset="0.18" stop-color="#10B8AA" stop-opacity="0.46"></stop>
-          <stop offset="0.56" stop-color="#64d7ff" stop-opacity="0.34"></stop>
-          <stop offset="0.84" stop-color="#10B8AA" stop-opacity="0.36"></stop>
-          <stop offset="1" stop-color="#10B8AA" stop-opacity="0"></stop>
+          <stop offset="0" stop-color="#009c8f" stop-opacity="0"></stop>
+          <stop offset="0.18" stop-color="#009c8f" stop-opacity="0.46"></stop>
+          <stop offset="0.56" stop-color="#73b7fc" stop-opacity="0.34"></stop>
+          <stop offset="0.84" stop-color="#009c8f" stop-opacity="0.36"></stop>
+          <stop offset="1" stop-color="#009c8f" stop-opacity="0"></stop>
         </linearGradient>
         <linearGradient id="flow-line-cyan" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stop-color="#64d7ff" stop-opacity="0"></stop>
-          <stop offset="0.2" stop-color="#64d7ff" stop-opacity="0.42"></stop>
-          <stop offset="0.58" stop-color="#b59cff" stop-opacity="0.32"></stop>
-          <stop offset="0.86" stop-color="#10B8AA" stop-opacity="0.3"></stop>
-          <stop offset="1" stop-color="#64d7ff" stop-opacity="0"></stop>
+          <stop offset="0" stop-color="#73b7fc" stop-opacity="0"></stop>
+          <stop offset="0.2" stop-color="#73b7fc" stop-opacity="0.42"></stop>
+          <stop offset="0.58" stop-color="#b3566f" stop-opacity="0.32"></stop>
+          <stop offset="0.86" stop-color="#009c8f" stop-opacity="0.3"></stop>
+          <stop offset="1" stop-color="#73b7fc" stop-opacity="0"></stop>
         </linearGradient>
         <linearGradient id="flow-line-amber" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stop-color="#ffd166" stop-opacity="0"></stop>
-          <stop offset="0.18" stop-color="#ffd166" stop-opacity="0.38"></stop>
-          <stop offset="0.55" stop-color="#10B8AA" stop-opacity="0.28"></stop>
-          <stop offset="0.84" stop-color="#64d7ff" stop-opacity="0.24"></stop>
-          <stop offset="1" stop-color="#ffd166" stop-opacity="0"></stop>
+          <stop offset="0" stop-color="#ffd481" stop-opacity="0"></stop>
+          <stop offset="0.18" stop-color="#ffd481" stop-opacity="0.38"></stop>
+          <stop offset="0.55" stop-color="#009c8f" stop-opacity="0.28"></stop>
+          <stop offset="0.84" stop-color="#73b7fc" stop-opacity="0.24"></stop>
+          <stop offset="1" stop-color="#ffd481" stop-opacity="0"></stop>
         </linearGradient>
         <linearGradient id="flow-line-violet" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stop-color="#b59cff" stop-opacity="0"></stop>
-          <stop offset="0.2" stop-color="#b59cff" stop-opacity="0.38"></stop>
-          <stop offset="0.58" stop-color="#64d7ff" stop-opacity="0.3"></stop>
-          <stop offset="0.86" stop-color="#ff7f6e" stop-opacity="0.22"></stop>
-          <stop offset="1" stop-color="#b59cff" stop-opacity="0"></stop>
+          <stop offset="0" stop-color="#b3566f" stop-opacity="0"></stop>
+          <stop offset="0.2" stop-color="#b3566f" stop-opacity="0.38"></stop>
+          <stop offset="0.58" stop-color="#73b7fc" stop-opacity="0.3"></stop>
+          <stop offset="0.86" stop-color="#cd6e86" stop-opacity="0.22"></stop>
+          <stop offset="1" stop-color="#b3566f" stop-opacity="0"></stop>
         </linearGradient>
       </defs>
       <g class="flow-stream">

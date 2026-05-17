@@ -22,6 +22,7 @@ const max_projected_project_columns: usize = 128;
 const max_projected_project_fields: usize = 128;
 const max_projected_project_field_options: usize = 512;
 const max_projected_project_views: usize = 64;
+const default_project_status = "WIP";
 const max_projected_reaction_emojis: usize = 64;
 const max_projected_reaction_actors: usize = 1024;
 
@@ -632,6 +633,59 @@ fn insertIssueCollectionValue(db: *SqliteDb, comptime sql_text: []const u8, issu
     try stmt.stepDone();
 }
 
+fn insertProjectPayloadStringArray(
+    db: *SqliteDb,
+    payload: std.json.ObjectMap,
+    key: []const u8,
+    comptime sql_text: []const u8,
+    project_id: []const u8,
+    event_hash: []const u8,
+    envelope: ValidatedEnvelope,
+) !void {
+    const value = payload.get(key) orelse return;
+    const array = switch (value) {
+        .array => |items| items,
+        else => return,
+    };
+    for (array.items) |item| {
+        if (item != .string) continue;
+        try insertProjectCollectionValue(db, sql_text, project_id, item.string, event_hash, envelope);
+    }
+}
+
+fn deleteProjectPayloadStringArray(
+    allocator: Allocator,
+    db: *SqliteDb,
+    payload: std.json.ObjectMap,
+    key: []const u8,
+    comptime select_sql: []const u8,
+    comptime delete_sql: []const u8,
+    project_id: []const u8,
+    event_hash: []const u8,
+) !void {
+    const value = payload.get(key) orelse return;
+    const array = switch (value) {
+        .array => |items| items,
+        else => return,
+    };
+    for (array.items) |item| {
+        if (item != .string) continue;
+        try deleteProjectCollectionValue(allocator, db, select_sql, delete_sql, project_id, item.string, event_hash);
+    }
+}
+
+fn insertProjectCollectionValue(db: *SqliteDb, comptime sql_text: []const u8, project_id: []const u8, value: []const u8, event_hash: []const u8, envelope: ValidatedEnvelope) !void {
+    if (std.mem.trim(u8, value, " \t\r\n").len == 0) return;
+    var stmt = try db.prepare(sql_text);
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    try stmt.bindText(2, value);
+    try stmt.bindText(3, event_hash);
+    try stmt.bindText(4, envelope.occurred_at);
+    try stmt.bindText(5, envelope.actor_principal);
+    try stmt.stepDone();
+}
+
 fn insertPayloadIssueProjects(
     db: *SqliteDb,
     payload: std.json.ObjectMap,
@@ -944,6 +998,32 @@ fn deleteIssueCollectionValue(
     }
 }
 
+fn deleteProjectCollectionValue(
+    allocator: Allocator,
+    db: *SqliteDb,
+    comptime select_sql: []const u8,
+    comptime delete_sql: []const u8,
+    project_id: []const u8,
+    value: []const u8,
+    remove_hash: []const u8,
+) !void {
+    var select = try db.prepare(select_sql);
+    defer select.deinit();
+    try select.bindText(1, project_id);
+    try select.bindText(2, value);
+    while (try select.step()) {
+        const add_hash = try select.columnTextDup(allocator, 0);
+        defer allocator.free(add_hash);
+        if (!(try git.isAncestor(allocator, add_hash, remove_hash))) continue;
+        var delete = try db.prepare(delete_sql);
+        defer delete.deinit();
+        try delete.bindText(1, project_id);
+        try delete.bindText(2, value);
+        try delete.bindText(3, add_hash);
+        try delete.stepDone();
+    }
+}
+
 fn issueCollectionLimitRejection(db: *SqliteDb, issue_id: []const u8) !?[]const u8 {
     if (try collectionCountExceeds(db, "SELECT COUNT(DISTINCT label) FROM issue_labels WHERE issue_id = ?", issue_id, max_projected_labels)) {
         return "collection_limit_exceeded";
@@ -986,7 +1066,8 @@ pub fn applyProjectProjection(allocator: Allocator, db: *SqliteDb, event_hash: [
         const state = event_mod.jsonString(payload.get("state")) orelse "open";
         try insertProjectCreated(db, event_hash, envelope, name, slug, description, state);
         try insertPayloadProjectColumns(allocator, db, payload, envelope.object_id, event_hash);
-        return try projectColumnLimitRejection(db, envelope.object_id);
+        if (try projectColumnLimitRejection(db, envelope.object_id)) |reason| return reason;
+        return try projectPropertyLimitRejection(db, envelope.object_id);
     }
 
     if (!(try acceptedCreationInFrontier(allocator, db, "project.created", envelope.object_id, event_hash))) return "object_not_created";
@@ -1001,6 +1082,25 @@ pub fn applyProjectProjection(allocator: Allocator, db: *SqliteDb, event_hash: [
         if (event_mod.jsonString(payload.get("state"))) |state| {
             try updateProjectScalar(allocator, db, envelope.object_id, state, event_hash, envelope, "state", "state_occurred_at", "state_actor_principal", "state_event_hash");
         }
+        if (event_mod.jsonString(payload.get("status"))) |status| {
+            try updateProjectScalar(allocator, db, envelope.object_id, status, event_hash, envelope, "status", "status_occurred_at", "status_actor_principal", "status_event_hash");
+        }
+        if (event_mod.jsonString(payload.get("priority"))) |priority| {
+            try updateProjectScalar(allocator, db, envelope.object_id, priority, event_hash, envelope, "priority", "priority_occurred_at", "priority_actor_principal", "priority_event_hash");
+        }
+        if (event_mod.jsonString(payload.get("start_at"))) |start_at| {
+            try updateProjectScalar(allocator, db, envelope.object_id, start_at, event_hash, envelope, "start_at", "start_at_occurred_at", "start_at_actor_principal", "start_at_event_hash");
+        }
+        if (event_mod.jsonString(payload.get("end_at"))) |end_at| {
+            try updateProjectScalar(allocator, db, envelope.object_id, end_at, event_hash, envelope, "end_at", "end_at_occurred_at", "end_at_actor_principal", "end_at_event_hash");
+        }
+        try insertProjectPayloadStringArray(db, payload, "leads_added", "INSERT OR IGNORE INTO project_leads(project_id, lead, add_hash, created_at, actor_principal) VALUES (?, ?, ?, ?, ?)", envelope.object_id, event_hash, envelope);
+        try deleteProjectPayloadStringArray(allocator, db, payload, "leads_removed", "SELECT add_hash FROM project_leads WHERE project_id = ? AND lead = ?", "DELETE FROM project_leads WHERE project_id = ? AND lead = ? AND add_hash = ?", envelope.object_id, event_hash);
+        try insertProjectPayloadStringArray(db, payload, "members_added", "INSERT OR IGNORE INTO project_members(project_id, member, add_hash, created_at, actor_principal) VALUES (?, ?, ?, ?, ?)", envelope.object_id, event_hash, envelope);
+        try deleteProjectPayloadStringArray(allocator, db, payload, "members_removed", "SELECT add_hash FROM project_members WHERE project_id = ? AND member = ?", "DELETE FROM project_members WHERE project_id = ? AND member = ? AND add_hash = ?", envelope.object_id, event_hash);
+        try insertProjectPayloadStringArray(db, payload, "labels_added", "INSERT OR IGNORE INTO project_labels(project_id, label, add_hash, created_at, actor_principal) VALUES (?, ?, ?, ?, ?)", envelope.object_id, event_hash, envelope);
+        try deleteProjectPayloadStringArray(allocator, db, payload, "labels_removed", "SELECT add_hash FROM project_labels WHERE project_id = ? AND label = ?", "DELETE FROM project_labels WHERE project_id = ? AND label = ? AND add_hash = ?", envelope.object_id, event_hash);
+        if (try projectPropertyLimitRejection(db, envelope.object_id)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "project.column_added")) {
         const column = event_mod.jsonString(payload.get("column")) orelse return "invalid_event_envelope";
         const column_ref = try projectColumnRefForAdd(allocator, db, payload, envelope.object_id, column);
@@ -1134,14 +1234,19 @@ pub fn applyLabelProjection(allocator: Allocator, db: *SqliteDb, event_hash: []c
 }
 
 fn insertProjectCreated(db: *SqliteDb, event_hash: []const u8, envelope: ValidatedEnvelope, name: []const u8, slug: []const u8, description: []const u8, state: []const u8) !void {
+    const start_at = eventDate(envelope.occurred_at);
     var stmt = try db.prepare(
         \\INSERT OR IGNORE INTO projects(
         \\  id,
         \\  name, slug, name_occurred_at, name_actor_principal, name_event_hash,
         \\  description, description_occurred_at, description_actor_principal, description_event_hash,
         \\  state, state_occurred_at, state_actor_principal, state_event_hash,
+        \\  status, status_occurred_at, status_actor_principal, status_event_hash,
+        \\  priority, priority_occurred_at, priority_actor_principal, priority_event_hash,
+        \\  start_at, start_at_occurred_at, start_at_actor_principal, start_at_event_hash,
+        \\  end_at, end_at_occurred_at, end_at_actor_principal, end_at_event_hash,
         \\  created_at, author_principal, author_device
-        \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     );
     defer stmt.deinit();
     try stmt.bindText(1, envelope.object_id);
@@ -1158,10 +1263,34 @@ fn insertProjectCreated(db: *SqliteDb, event_hash: []const u8, envelope: Validat
     try stmt.bindText(12, envelope.occurred_at);
     try stmt.bindText(13, envelope.actor_principal);
     try stmt.bindText(14, event_hash);
-    try stmt.bindText(15, envelope.occurred_at);
-    try stmt.bindText(16, envelope.actor_principal);
-    try stmt.bindText(17, envelope.actor_device);
+    try stmt.bindText(15, default_project_status);
+    try stmt.bindText(16, envelope.occurred_at);
+    try stmt.bindText(17, envelope.actor_principal);
+    try stmt.bindText(18, event_hash);
+    try stmt.bindText(19, "");
+    try stmt.bindText(20, envelope.occurred_at);
+    try stmt.bindText(21, envelope.actor_principal);
+    try stmt.bindText(22, event_hash);
+    try stmt.bindText(23, start_at);
+    try stmt.bindText(24, envelope.occurred_at);
+    try stmt.bindText(25, envelope.actor_principal);
+    try stmt.bindText(26, event_hash);
+    try stmt.bindText(27, "");
+    try stmt.bindText(28, envelope.occurred_at);
+    try stmt.bindText(29, envelope.actor_principal);
+    try stmt.bindText(30, event_hash);
+    try stmt.bindText(31, envelope.occurred_at);
+    try stmt.bindText(32, envelope.actor_principal);
+    try stmt.bindText(33, envelope.actor_device);
     try stmt.stepDone();
+    if (envelope.actor_principal.len != 0) {
+        try insertProjectCollectionValue(db, "INSERT OR IGNORE INTO project_leads(project_id, lead, add_hash, created_at, actor_principal) VALUES (?, ?, ?, ?, ?)", envelope.object_id, envelope.actor_principal, event_hash, envelope);
+    }
+}
+
+fn eventDate(occurred_at: []const u8) []const u8 {
+    if (occurred_at.len >= 10 and occurred_at[4] == '-' and occurred_at[7] == '-') return occurred_at[0..10];
+    return "";
 }
 
 fn projectExists(db: *SqliteDb, project_id: []const u8) !bool {
@@ -1386,6 +1515,19 @@ fn deleteProjectColumn(allocator: Allocator, db: *SqliteDb, project_id: []const 
 
 fn projectColumnLimitRejection(db: *SqliteDb, project_id: []const u8) !?[]const u8 {
     if (try collectionCountExceeds(db, "SELECT COUNT(DISTINCT column_name) FROM project_columns WHERE project_id = ?", project_id, max_projected_project_columns)) {
+        return "collection_limit_exceeded";
+    }
+    return null;
+}
+
+fn projectPropertyLimitRejection(db: *SqliteDb, project_id: []const u8) !?[]const u8 {
+    if (try collectionCountExceeds(db, "SELECT COUNT(DISTINCT lead) FROM project_leads WHERE project_id = ?", project_id, max_projected_participants)) {
+        return "collection_limit_exceeded";
+    }
+    if (try collectionCountExceeds(db, "SELECT COUNT(DISTINCT member) FROM project_members WHERE project_id = ?", project_id, max_projected_participants)) {
+        return "collection_limit_exceeded";
+    }
+    if (try collectionCountExceeds(db, "SELECT COUNT(DISTINCT label) FROM project_labels WHERE project_id = ?", project_id, max_projected_labels)) {
         return "collection_limit_exceeded";
     }
     return null;

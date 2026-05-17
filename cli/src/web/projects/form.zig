@@ -20,24 +20,18 @@ const looksLikeUuid = util.looksLikeUuid;
 const newUuidV7 = util.newUuidV7;
 const sendRedirect = shared.sendRedirect;
 const sendResponse = shared.sendResponse;
-const splitCommaFields = util.splitCommaFields;
 const sqlite = index.sqlite;
 const stageProjectCreatedEvent = project_mod.stageProjectCreatedEvent;
 const stageProjectViewCreatedEvent = project_mod.stageProjectViewCreatedEvent;
 const kanban_board_view_config = project_views.kanban_board_view_config;
 const priority_table_view_config = project_views.priority_table_view_config;
 const my_items_view_config = project_views.my_items_view_config;
-const isProjectStatusValue = project_views.isProjectStatusValue;
-
-const default_project_status_columns = "Draft, Todo, WIP, Review, Done, Failed";
 
 pub fn renderProjectForm(
     allocator: Allocator,
     repo: Repo,
     error_message: ?[]const u8,
     name_value: []const u8,
-    description_value: []const u8,
-    columns_value: []const u8,
 ) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -62,7 +56,7 @@ pub fn renderProjectForm(
         , .{ .message = message });
     }
     try buf.appendSlice(allocator, "<div class=\"project-create-layout\">");
-    try appendProjectConfigForm(&buf, allocator, project_id, name_value, description_value, columns_value);
+    try appendProjectConfigForm(&buf, allocator, project_id, name_value);
     try buf.appendSlice(allocator,
         \\</div>
         \\</section>
@@ -75,63 +69,43 @@ pub fn renderProjectForm(
 pub fn renderProjectFormFromTarget(allocator: Allocator, repo: Repo, target: []const u8) ![]u8 {
     const name = try queryValueOwned(allocator, target, "name");
     defer if (name) |value| allocator.free(value);
-    const description = try queryValueOwned(allocator, target, "description");
-    defer if (description) |value| allocator.free(value);
-    const columns = try queryValueOwned(allocator, target, "columns");
-    defer if (columns) |value| allocator.free(value);
 
     return renderProjectForm(
         allocator,
         repo,
         null,
         name orelse "",
-        description orelse "",
-        columns orelse default_project_status_columns,
     );
 }
 
 pub fn handleProjectPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
     const name_owned = (try formValueOwned(allocator, form_body, "name")) orelse try allocator.dupe(u8, "");
     defer allocator.free(name_owned);
-    const description_owned = (try formValueOwned(allocator, form_body, "description")) orelse try allocator.dupe(u8, "");
-    defer allocator.free(description_owned);
-    const columns_owned = (try formValueOwned(allocator, form_body, "columns")) orelse try allocator.dupe(u8, "");
-    defer allocator.free(columns_owned);
     const project_id_owned = (try formValueOwned(allocator, form_body, "project_id")) orelse try newUuidV7(allocator);
     defer allocator.free(project_id_owned);
     const project_id = std.mem.trim(u8, project_id_owned, " \t\r\n");
 
     const name = std.mem.trim(u8, name_owned, " \t\r\n");
     if (name.len == 0) {
-        const body = try renderProjectForm(allocator, repo, "Name is required.", name_owned, description_owned, columns_owned);
+        const body = try renderProjectForm(allocator, repo, "Name is required.", name_owned);
         defer allocator.free(body);
         try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", body, null);
         return;
     }
     if (!looksLikeUuid(project_id)) {
-        const body = try renderProjectForm(allocator, repo, "Could not create the project. The create token was invalid; reload the form and try again.", name_owned, description_owned, columns_owned);
+        const body = try renderProjectForm(allocator, repo, "Could not create the project. The create token was invalid; reload the form and try again.", name_owned);
         defer allocator.free(body);
         try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", body, null);
         return;
     }
 
-    const effective_columns = if (std.mem.trim(u8, columns_owned, " \t\r\n").len == 0) default_project_status_columns else columns_owned;
-    var columns = try splitCommaFields(allocator, effective_columns);
-    defer columns.deinit(allocator);
-    for (columns.items) |column| {
-        if (!isProjectStatusValue(column)) {
-            const body = try renderProjectForm(allocator, repo, "Status values must be Draft, Todo, WIP, Review, Done, or Failed.", name_owned, description_owned, effective_columns);
-            defer allocator.free(body);
-            try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", body, null);
-            return;
-        }
-    }
-
     var attempt: usize = 0;
     while (attempt < 2) : (attempt += 1) {
-        createProject(allocator, project_id, name, description_owned, columns.items) catch {
+        createProject(allocator, project_id, name) catch {
             if (projectExistsAfterIndex(allocator, repo, project_id) catch false) {
-                try sendRedirect(allocator, stream, "/projects");
+                const location = try projectOverviewLocationOwned(allocator, name);
+                defer allocator.free(location);
+                try sendRedirect(allocator, stream, location);
                 return;
             }
             if (attempt == 0) continue;
@@ -140,30 +114,36 @@ pub fn handleProjectPost(allocator: Allocator, repo: Repo, stream: std.net.Strea
                 repo,
                 "Could not create the project. Check that Gitomi is initialized and Git commit signing is configured.",
                 name_owned,
-                description_owned,
-                columns_owned,
             );
             defer allocator.free(body);
             try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", body, null);
             return;
         };
 
-        try sendRedirect(allocator, stream, "/projects");
+        const location = try projectOverviewLocationOwned(allocator, name);
+        defer allocator.free(location);
+        try sendRedirect(allocator, stream, location);
         return;
     }
+}
+
+fn projectOverviewLocationOwned(allocator: Allocator, name: []const u8) ![]u8 {
+    var location: std.ArrayList(u8) = .empty;
+    errdefer location.deinit(allocator);
+    try location.appendSlice(allocator, "/projects?project=");
+    try shared.appendUrlEncoded(&location, allocator, name);
+    return location.toOwnedSlice(allocator);
 }
 
 fn createProject(
     allocator: Allocator,
     project_id: []const u8,
     name: []const u8,
-    description: []const u8,
-    columns: []const []const u8,
 ) !void {
     var writer = try EventWriter.init(allocator, "gt project create");
     defer writer.deinit();
 
-    const commit_oid = try stageProjectCreatedEvent(allocator, &writer, project_id, name, description, columns);
+    const commit_oid = try stageProjectCreatedEvent(allocator, &writer, project_id, name, "", &.{});
     defer allocator.free(commit_oid);
     try seedProjectViews(allocator, &writer, project_id);
     try writer.commitStaged();
@@ -202,8 +182,6 @@ fn appendProjectConfigForm(
     allocator: Allocator,
     project_id: []const u8,
     name_value: []const u8,
-    description_value: []const u8,
-    columns_value: []const u8,
 ) !void {
     try appendTemplate(buf, allocator,
         \\<div class="project-config-card">
@@ -217,17 +195,7 @@ fn appendProjectConfigForm(
         .project_id = project_id,
         .name_value = name_value,
     });
-    try appendTemplate(buf, allocator,
-        \\    <label>Description<textarea name="description" rows="4">{description_value}</textarea></label>
-        \\    <label>Status values<input name="columns" value="{columns_value}" placeholder="Draft, Todo, WIP, Review, Done, Failed"></label>
-        \\    <div class="project-column-chips" aria-label="Status values">
-    , .{
-        .description_value = description_value,
-        .columns_value = columns_value,
-    });
-    try appendColumnChips(buf, allocator, columns_value);
     try buf.appendSlice(allocator,
-        \\    </div>
         \\    <div class="form-actions">
         \\      <a class="button secondary" href="/projects">Cancel</a>
         \\      <button class="button primary" type="submit">Create project</button>
@@ -235,20 +203,6 @@ fn appendProjectConfigForm(
         \\  </form>
         \\</div>
     );
-}
-
-fn appendColumnChips(buf: *std.ArrayList(u8), allocator: Allocator, columns_value: []const u8) !void {
-    var parts = std.mem.splitScalar(u8, columns_value, ',');
-    var shown = false;
-    while (parts.next()) |part| {
-        const column = std.mem.trim(u8, part, " \t\r\n");
-        if (column.len == 0) continue;
-        try appendTemplate(buf, allocator,
-            \\<span>{column}</span>
-        , .{ .column = column });
-        shown = true;
-    }
-    if (!shown) try buf.appendSlice(allocator, "<span>Draft</span><span>Todo</span><span>WIP</span><span>Review</span><span>Done</span><span>Failed</span>");
 }
 
 fn appendProjectSubmitScript(buf: *std.ArrayList(u8), allocator: Allocator) !void {
@@ -287,4 +241,23 @@ fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const
         return try issues_page.percentDecodeForm(allocator, raw_value);
     }
     return null;
+}
+
+test "project create form only asks for name" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendProjectConfigForm(&buf, std.testing.allocator, "018f0000-0000-7000-8000-000000000001", "Release");
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "name=\"name\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "name=\"description\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "name=\"columns\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Status values") == null);
+}
+
+test "project create redirects to overview location" {
+    const location = try projectOverviewLocationOwned(std.testing.allocator, "Release Plan");
+    defer std.testing.allocator.free(location);
+
+    try std.testing.expectEqualStrings("/projects?project=Release%20Plan", location);
 }

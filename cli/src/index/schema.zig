@@ -169,6 +169,22 @@ pub fn createIndexSchema(db: *SqliteDb) !void {
         \\  state_occurred_at TEXT NOT NULL,
         \\  state_actor_principal TEXT NOT NULL,
         \\  state_event_hash TEXT NOT NULL,
+        \\  status TEXT NOT NULL,
+        \\  status_occurred_at TEXT NOT NULL,
+        \\  status_actor_principal TEXT NOT NULL,
+        \\  status_event_hash TEXT NOT NULL,
+        \\  priority TEXT NOT NULL,
+        \\  priority_occurred_at TEXT NOT NULL,
+        \\  priority_actor_principal TEXT NOT NULL,
+        \\  priority_event_hash TEXT NOT NULL,
+        \\  start_at TEXT NOT NULL,
+        \\  start_at_occurred_at TEXT NOT NULL,
+        \\  start_at_actor_principal TEXT NOT NULL,
+        \\  start_at_event_hash TEXT NOT NULL,
+        \\  end_at TEXT NOT NULL,
+        \\  end_at_occurred_at TEXT NOT NULL,
+        \\  end_at_actor_principal TEXT NOT NULL,
+        \\  end_at_event_hash TEXT NOT NULL,
         \\  created_at TEXT NOT NULL,
         \\  author_principal TEXT NOT NULL,
         \\  author_device TEXT NOT NULL
@@ -184,6 +200,33 @@ pub fn createIndexSchema(db: *SqliteDb) !void {
         \\);
         \\CREATE INDEX project_columns_project_idx ON project_columns(project_id, column_name);
         \\CREATE INDEX project_columns_ref_idx ON project_columns(project_id, column_ref);
+        \\CREATE TABLE project_leads (
+        \\  project_id TEXT NOT NULL,
+        \\  lead TEXT NOT NULL,
+        \\  add_hash TEXT NOT NULL,
+        \\  created_at TEXT NOT NULL,
+        \\  actor_principal TEXT NOT NULL,
+        \\  PRIMARY KEY(project_id, lead, add_hash)
+        \\);
+        \\CREATE INDEX project_leads_project_idx ON project_leads(project_id, lead);
+        \\CREATE TABLE project_members (
+        \\  project_id TEXT NOT NULL,
+        \\  member TEXT NOT NULL,
+        \\  add_hash TEXT NOT NULL,
+        \\  created_at TEXT NOT NULL,
+        \\  actor_principal TEXT NOT NULL,
+        \\  PRIMARY KEY(project_id, member, add_hash)
+        \\);
+        \\CREATE INDEX project_members_project_idx ON project_members(project_id, member);
+        \\CREATE TABLE project_labels (
+        \\  project_id TEXT NOT NULL,
+        \\  label TEXT NOT NULL,
+        \\  add_hash TEXT NOT NULL,
+        \\  created_at TEXT NOT NULL,
+        \\  actor_principal TEXT NOT NULL,
+        \\  PRIMARY KEY(project_id, label, add_hash)
+        \\);
+        \\CREATE INDEX project_labels_project_idx ON project_labels(project_id, label);
         \\CREATE TABLE project_memberships (
         \\  project_id TEXT NOT NULL,
         \\  issue_id TEXT NOT NULL,

@@ -101,6 +101,7 @@ const routes = [_]Route{
     Route.get("/projects", handleProjectsPage),
     Route.get("/new-project", handleNewProjectPage),
     Route.post("/projects", handleProjectPost),
+    Route.post("/projects/properties", handleProjectPropertiesPost),
     Route.post("/projects/items", handleProjectItemPost),
     Route.get("/milestones", handleMilestonesPage),
     Route.get("/milestones/:ref/edit", handleMilestoneEditPage),
@@ -563,6 +564,10 @@ fn handleProjectPost(ctx: WebContext) !void {
 
 fn handleProjectItemPost(ctx: WebContext) !void {
     try projects_page.handleProjectItemPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
+}
+
+fn handleProjectPropertiesPost(ctx: WebContext) !void {
+    try projects_page.handleProjectPropertiesPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
 }
 
 fn handleMilestonesPage(ctx: WebContext) !void {

@@ -133,9 +133,31 @@ pub const ProjectUpdate = struct {
     name: ?[]const u8 = null,
     description: ?[]const u8 = null,
     state: ?[]const u8 = null,
+    status: ?[]const u8 = null,
+    priority: ?[]const u8 = null,
+    start_at: ?[]const u8 = null,
+    end_at: ?[]const u8 = null,
+    leads_added: []const []const u8 = &.{},
+    leads_removed: []const []const u8 = &.{},
+    members_added: []const []const u8 = &.{},
+    members_removed: []const []const u8 = &.{},
+    labels_added: []const []const u8 = &.{},
+    labels_removed: []const []const u8 = &.{},
 
     pub fn hasChanges(self: ProjectUpdate) bool {
-        return self.name != null or self.description != null or self.state != null;
+        return self.name != null or
+            self.description != null or
+            self.state != null or
+            self.status != null or
+            self.priority != null or
+            self.start_at != null or
+            self.end_at != null or
+            self.leads_added.len != 0 or
+            self.leads_removed.len != 0 or
+            self.members_added.len != 0 or
+            self.members_removed.len != 0 or
+            self.labels_added.len != 0 or
+            self.labels_removed.len != 0;
     }
 };
 
