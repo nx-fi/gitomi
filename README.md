@@ -109,7 +109,7 @@ Workflow requests and completions are signed Gitomi events. Local logs and run
 diagnostics are retained separately under `refs/gitomi/runs/*` and can be
 pruned without losing the durable workflow result.
 
-## GitHub Import and Export
+## GitHub and GitLab Import/Export
 
 Bring existing GitHub project history into Gitomi:
 
@@ -133,6 +133,19 @@ gt github live --repo OWNER/REPO --webhook-url https://example.test/github/webho
 Imports preserve GitHub issue and pull request numbers as secondary aliases, so
 references such as `#123`, `gh#123`, and `github:123` continue to work.
 
+GitLab projects can be imported, exported, or polled for two-way sync through
+the GitLab REST API:
+
+```sh
+gt gitlab import --project GROUP/PROJECT
+gt gitlab export --project GROUP/PROJECT --dry-run
+gt gitlab sync --project GROUP/PROJECT
+```
+
+GitLab credentials are read from `GITLAB_TOKEN`, `GL_TOKEN`, `--token-env`, or
+`--token-file`. Imported GitLab issue and merge request IIDs are preserved as
+aliases, so `gl#123` and `gitlab:123` references resolve locally.
+
 ## How It Works
 
 Gitomi separates a repository into two planes:
@@ -154,6 +167,7 @@ cache and can be rebuilt from Git refs.
 - Optional: [`nektos/act`](https://github.com/nektos/act) for local execution
   of GitHub Actions-compatible workflows
 - Optional: GitHub CLI credentials for GitHub import/export and live sync
+- Optional: GitLab API token for GitLab import/export/sync
 
 ## CLI Reference
 
@@ -164,6 +178,7 @@ The implemented command set includes:
 - `gt project ...`, `gt milestone ...`
 - `gt actions ...`, `gt runs prune`
 - `gt github import`, `gt github export`, `gt github live`
+- `gt gitlab import`, `gt gitlab export`, `gt gitlab sync`
 - `gt web`
 
 See [cli/README.md](cli/README.md) for build instructions, command syntax, and

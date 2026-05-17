@@ -1320,9 +1320,19 @@ pub fn lookupLegacyGithubObjectId(allocator: Allocator, repo: Repo, object_kind:
     return try index_query.lookupLegacyGithubObjectId(allocator, repo, object_kind, number);
 }
 
+pub fn lookupLegacyGitlabObjectId(allocator: Allocator, repo: Repo, object_kind: []const u8, number: i64) !?[]u8 {
+    try ensureIndex(allocator, repo);
+    return try index_query.lookupLegacyGitlabObjectId(allocator, repo, object_kind, number);
+}
+
 pub fn legacyGithubNumberForObject(allocator: Allocator, repo: Repo, object_kind: []const u8, object_id: []const u8) !?i64 {
     try ensureIndex(allocator, repo);
     return try index_query.legacyGithubNumberForObject(allocator, repo, object_kind, object_id);
+}
+
+pub fn legacyGitlabNumberForObject(allocator: Allocator, repo: Repo, object_kind: []const u8, object_id: []const u8) !?i64 {
+    try ensureIndex(allocator, repo);
+    return try index_query.legacyGitlabNumberForObject(allocator, repo, object_kind, object_id);
 }
 
 pub fn resolveCommentId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
