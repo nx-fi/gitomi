@@ -6,3 +6,7 @@ https://github.com/mozilla/pdf.js/releases/download/v5.7.284/pdfjs-5.7.284-dist.
 
 Only the runtime module, worker module, and upstream license are checked in for
 Gitomi's code-viewer PDF preview.
+
+The checked-in runtime and worker modules are minified from the upstream dist
+files with `bun build --minify --no-bundle --target=browser --format=esm`, with
+the upstream license/version headers preserved.

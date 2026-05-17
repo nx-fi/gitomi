@@ -962,6 +962,9 @@ main.page-projects:has(.project-detail-panel) {
   place-items: start center;
   padding-top: 5px;
 }
+.issue-state-cell {
+  padding-top: 2px;
+}
 .issue-row-content {
   min-width: 0;
 }
@@ -1023,8 +1026,9 @@ main.page-projects:has(.project-detail-panel) {
   border-color: #e05d44;
 }
 .issue-row-priority-p1 {
-  background: #ea7233;
-  border-color: #ea7233;
+  color: #1f1f1f;
+  background: #d9901a;
+  border-color: #d9901a;
 }
 .issue-row-priority-p2 {
   color: #1f1f1f;
@@ -1033,9 +1037,10 @@ main.page-projects:has(.project-detail-panel) {
 }
 .issue-row-priority-p3,
 .issue-row-priority-none {
-  color: var(--muted);
-  background: color-mix(in srgb, var(--muted) 10%, var(--panel));
-  border-color: var(--border);
+  --issue-row-priority-p3-bg: color-mix(in srgb, var(--muted) 22%, var(--panel));
+  color: var(--text);
+  background: var(--issue-row-priority-p3-bg);
+  border-color: var(--issue-row-priority-p3-bg);
 }
 .issue-row-labels {
   display: inline-flex;
@@ -1171,22 +1176,17 @@ main.page-projects:has(.project-detail-panel) {
   box-shadow: inset 0 0 0 2px var(--panel);
 }
 .issue-milestone-icon {
-  position: relative;
-  width: 14px;
-  height: 14px;
+  --issue-milestone-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Cpath d='M5 4v16M7 5h11l-2 5 2 5H7'/%3E%3C/g%3E%3C/svg%3E");
+  display: inline-block;
+  width: 16px;
+  height: 16px;
   flex: 0 0 auto;
-  border: 2px solid currentColor;
-  border-radius: 50%;
+  background: currentColor;
+  -webkit-mask: var(--issue-milestone-icon) center / contain no-repeat;
+  mask: var(--issue-milestone-icon) center / contain no-repeat;
 }
 .issue-milestone-icon::after {
-  content: "";
-  position: absolute;
-  top: -4px;
-  left: 5px;
-  width: 2px;
-  height: 18px;
-  background: currentColor;
-  border-radius: 999px;
+  content: none;
 }
 .issue-comments-icon {
   position: relative;
