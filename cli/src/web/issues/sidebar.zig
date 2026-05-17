@@ -1,8 +1,11 @@
 const std = @import("std");
+const cmd_common = @import("../../cmd_common.zig");
 const index = @import("../../index.zig");
 const issue = @import("../../issue.zig");
 const issue_form = @import("form.zig");
 const issue_relationships = @import("relationships.zig");
+const project_issue_render = @import("../projects/issue_render.zig");
+const project_views = @import("../projects/views.zig");
 const repo_mod = @import("../../repo.zig");
 const shared = @import("../shared.zig");
 const util = @import("../../util.zig");
@@ -14,6 +17,8 @@ const appendTemplate = shared.appendTemplate;
 const createIssueProjectEvent = issue.createIssueProjectEvent;
 const createIssueStringEvent = issue.createIssueStringEvent;
 const ensureIndex = index.ensureIndex;
+const isIssuePriority = cmd_common.isIssuePriority;
+const isIssueStatus = cmd_common.isIssueStatus;
 const commitHref = shared.commitHref;
 const pullHref = shared.pullHref;
 const sendRedirect = shared.sendRedirect;
@@ -69,10 +74,14 @@ pub fn append(
     issue_id: []const u8,
     author: []const u8,
     milestone: []const u8,
+    priority: []const u8,
+    status: []const u8,
     body: []const u8,
 ) !void {
     try appendIssueSidebarAssignees(buf, allocator, db, raw_ref, issue_id);
     try appendIssueSidebarLabels(buf, allocator, db, raw_ref, issue_id);
+    try appendIssueSidebarPriority(buf, allocator, raw_ref, priority);
+    try appendIssueSidebarStatus(buf, allocator, raw_ref, status);
     try appendIssueSidebarType(buf, allocator);
     try appendIssueSidebarProjects(buf, allocator, db, raw_ref, issue_id);
     try appendIssueSidebarMilestone(buf, allocator, db, raw_ref, milestone);
@@ -121,6 +130,30 @@ fn appendIssueSidebarLabels(buf: *std.ArrayList(u8), allocator: Allocator, db: *
         try buf.appendSlice(allocator, "</div>");
     } else {
         try buf.appendSlice(allocator, "<p class=\"issue-sidebar-empty\">None yet</p>");
+    }
+    try appendIssueSidebarSectionEnd(buf, allocator);
+}
+
+fn appendIssueSidebarPriority(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8, priority: []const u8) !void {
+    try appendIssueSidebarEditableSectionStart(buf, allocator, "Priority", "Set priority");
+    try appendIssueSidebarPriorityMenu(buf, allocator, raw_ref, priority);
+    try appendIssueSidebarEditableSectionBodyStart(buf, allocator);
+    if (priority.len == 0) {
+        try buf.appendSlice(allocator, "<p class=\"issue-sidebar-empty\">No priority</p>");
+    } else {
+        try appendIssuePriorityChip(buf, allocator, priority);
+    }
+    try appendIssueSidebarSectionEnd(buf, allocator);
+}
+
+fn appendIssueSidebarStatus(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8, status: []const u8) !void {
+    try appendIssueSidebarEditableSectionStart(buf, allocator, "Status", "Set status");
+    try appendIssueSidebarStatusMenu(buf, allocator, raw_ref, status);
+    try appendIssueSidebarEditableSectionBodyStart(buf, allocator);
+    if (status.len == 0) {
+        try buf.appendSlice(allocator, "<p class=\"issue-sidebar-empty\">No status</p>");
+    } else {
+        try appendIssueStatusChip(buf, allocator, status);
     }
     try appendIssueSidebarSectionEnd(buf, allocator);
 }
@@ -452,6 +485,22 @@ fn appendIssueSidebarMilestoneMenu(buf: *std.ArrayList(u8), allocator: Allocator
     try appendIssueSidebarMenuGroupEnd(buf, allocator);
 }
 
+fn appendIssueSidebarPriorityMenu(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8, selected_priority: []const u8) !void {
+    try appendIssueSidebarMenuGroupStart(buf, allocator, "Priorities");
+    for (project_views.project_priority_values) |priority| {
+        try appendIssueSidebarPriorityActionRow(buf, allocator, raw_ref, priority, std.mem.eql(u8, selected_priority, priority));
+    }
+    try appendIssueSidebarMenuGroupEnd(buf, allocator);
+}
+
+fn appendIssueSidebarStatusMenu(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8, selected_status: []const u8) !void {
+    try appendIssueSidebarMenuGroupStart(buf, allocator, "Statuses");
+    for (project_views.project_status_values) |status| {
+        try appendIssueSidebarStatusActionRow(buf, allocator, raw_ref, status, std.mem.eql(u8, selected_status, status));
+    }
+    try appendIssueSidebarMenuGroupEnd(buf, allocator);
+}
+
 fn appendIssueSidebarRelationshipsMenu(buf: *std.ArrayList(u8), allocator: Allocator) !void {
     try buf.appendSlice(allocator, "<div class=\"issue-sidebar-command-list\">");
     try appendIssueSidebarCommand(buf, allocator, "Add parent", "Alt P");
@@ -656,6 +705,30 @@ fn appendIssueSidebarProjectActionRow(
     });
 }
 
+fn appendIssueSidebarPriorityActionRow(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    raw_ref: []const u8,
+    priority: []const u8,
+    selected: bool,
+) !void {
+    try appendIssueSidebarValueActionFormStart(buf, allocator, raw_ref, "set-priority", "priority", priority, priority, selected);
+    try appendIssuePriorityChip(buf, allocator, priority);
+    try buf.appendSlice(allocator, "</button></form>");
+}
+
+fn appendIssueSidebarStatusActionRow(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    raw_ref: []const u8,
+    status: []const u8,
+    selected: bool,
+) !void {
+    try appendIssueSidebarValueActionFormStart(buf, allocator, raw_ref, "set-status", "status", status, status, selected);
+    try appendIssueStatusChip(buf, allocator, status);
+    try buf.appendSlice(allocator, "</button></form>");
+}
+
 fn appendIssueSidebarValueActionFormStart(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -678,6 +751,24 @@ fn appendIssueSidebarValueActionFormStart(
         .filter_text = filter_text,
         .state_class = state_class,
         .csrf_token = issueSidebarCsrfToken(),
+    });
+}
+
+fn appendIssuePriorityChip(buf: *std.ArrayList(u8), allocator: Allocator, priority: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<span class="project-priority-chip tone-{tone}">{priority}</span>
+    , .{
+        .tone = project_issue_render.priorityTone(priority),
+        .priority = priority,
+    });
+}
+
+fn appendIssueStatusChip(buf: *std.ArrayList(u8), allocator: Allocator, status: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<span class="project-status-chip tone-{tone}">{status}</span>
+    , .{
+        .tone = project_issue_render.columnTone(status),
+        .status = status,
     });
 }
 
@@ -815,6 +906,24 @@ pub fn handleIssueSidebarPost(allocator: Allocator, repo: Repo, stream: std.net.
         if (!(try writeSidebarStringEventOrFail(allocator, stream, issue_id, "issue.milestone_set", "milestone", milestone))) return;
     } else if (std.mem.eql(u8, action, "clear-milestone")) {
         if (!(try writeSidebarStringEventOrFail(allocator, stream, issue_id, "issue.milestone_set", "milestone", ""))) return;
+    } else if (std.mem.eql(u8, action, "set-priority")) {
+        const priority_owned = try requiredSidebarValue(allocator, stream, form_body, "priority", "Priority is required.");
+        const priority = priority_owned orelse return;
+        defer allocator.free(priority);
+        if (!isIssuePriority(priority)) {
+            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Priority must be P0, P1, P2, or P3\n");
+            return;
+        }
+        if (!(try writeSidebarStringEventOrFail(allocator, stream, issue_id, "issue.priority_set", "priority", priority))) return;
+    } else if (std.mem.eql(u8, action, "set-status")) {
+        const status_owned = try requiredSidebarValue(allocator, stream, form_body, "status", "Status is required.");
+        const status = status_owned orelse return;
+        defer allocator.free(status);
+        if (!isIssueStatus(status)) {
+            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Status must be Draft, Todo, WIP, Review, Done, or Failed\n");
+            return;
+        }
+        if (!(try writeSidebarStringEventOrFail(allocator, stream, issue_id, "issue.status_set", "status", status))) return;
     } else if (std.mem.eql(u8, action, "add-project") or std.mem.eql(u8, action, "remove-project")) {
         const project_owned = try requiredSidebarValue(allocator, stream, form_body, "project", "Project is required.");
         const project_value = project_owned orelse return;
