@@ -222,10 +222,11 @@ fn printUsage() !void {
         \\  gt events list [--json] [--limit N] [--ref REF]
         \\  gt issue list [--json] [--view agent] [--state open|closed|all] [--author PRINCIPAL] [--label LABEL] [--project PROJECT] [--milestone MILESTONE] [--assignee PRINCIPAL] [--sort newest|oldest|updated] [--limit N]
         \\  gt issue show ISSUE [--json] [--view agent]
-        \\  gt issue open --title TITLE [--body BODY] [--priority P0|P1|P2|P3] [--status Draft|Todo|WIP|Review|Done|Failed] [--label LABEL] [--assignee PRINCIPAL]
-        \\  gt issue edit ISSUE [--title TITLE] [--body BODY] [--state open|closed] [--priority P0|P1|P2|P3] [--status Draft|Todo|WIP|Review|Done|Failed] [--label LABEL] [--unlabel LABEL] [--assignee PRINCIPAL] [--unassign PRINCIPAL]
+        \\  gt issue open --title TITLE [--body BODY] [--type bug|feature|task] [--priority P0|P1|P2|P3] [--status Draft|Todo|WIP|Review|Done|Failed] [--label LABEL] [--assignee PRINCIPAL]
+        \\  gt issue edit ISSUE [--title TITLE] [--body BODY] [--state open|closed] [--type bug|feature|task] [--priority P0|P1|P2|P3] [--status Draft|Todo|WIP|Review|Done|Failed] [--label LABEL] [--unlabel LABEL] [--assignee PRINCIPAL] [--unassign PRINCIPAL]
         \\  gt issue title ISSUE --title TITLE
         \\  gt issue body ISSUE --body BODY
+        \\  gt issue type ISSUE --type bug|feature|task
         \\  gt issue priority ISSUE --priority P0|P1|P2|P3
         \\  gt issue status ISSUE --status Draft|Todo|WIP|Review|Done|Failed
         \\  gt issue comment ISSUE --body BODY [--reply COMMENT]

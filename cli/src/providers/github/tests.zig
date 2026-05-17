@@ -102,6 +102,17 @@ test "github repo slugs and API paths are validated" {
     const gh_path = try gh_client.repoPath(std.testing.allocator, "/issues");
     defer std.testing.allocator.free(gh_path);
     try std.testing.expectEqualStrings("/repos/{owner}/{repo}/issues", gh_path);
+
+    const gh_explicit_client = GitHubClient{
+        .allocator = std.testing.allocator,
+        .api_url = default_api_url,
+        .repo = slug,
+        .token = null,
+        .use_gh = true,
+    };
+    const gh_explicit_path = try gh_explicit_client.repoPath(std.testing.allocator, "/issues");
+    defer std.testing.allocator.free(gh_explicit_path);
+    try std.testing.expectEqualStrings("/repos/owner/repo/issues", gh_explicit_path);
 }
 
 test "github optional request detects gh and curl 404 output" {
@@ -113,13 +124,16 @@ test "github optional request detects gh and curl 404 output" {
 test "github import helpers extract labels authors milestones and counts" {
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
         \\{
-        \\  "labels": [{"name":"bug"}, "help wanted"],
+        \\  "labels": {"nodes": [{"name":"bug"}, {"name":"help wanted"}]},
         \\  "tags": [{"name":"triage"}],
         \\  "requested_reviewers": [{"login":"alice"}],
+        \\  "reviewRequests": {"nodes": [{"requestedReviewer": {"login": "dana"}}, {"requestedReviewer": {"slug": "platform"}}]},
         \\  "reviewers": ["bob"],
         \\  "user": {"login": "carol"},
         \\  "milestone": {"title": "v1"},
-        \\  "commits": 3,
+        \\  "comments": {"totalCount": 7},
+        \\  "commits": {"totalCount": 3},
+        \\  "changedFiles": 4,
         \\  "deletions": -1
         \\}
     , .{});
@@ -135,13 +149,17 @@ test "github import helpers extract labels authors milestones and counts" {
 
     const reviewers = try githubPullReviewers(std.testing.allocator, root);
     defer git.freeStringList(std.testing.allocator, reviewers);
-    try std.testing.expectEqual(@as(usize, 2), reviewers.len);
+    try std.testing.expectEqual(@as(usize, 4), reviewers.len);
     try std.testing.expectEqualStrings("alice", reviewers[0]);
     try std.testing.expectEqualStrings("bob", reviewers[1]);
+    try std.testing.expectEqualStrings("dana", reviewers[2]);
+    try std.testing.expectEqualStrings("platform", reviewers[3]);
 
     try std.testing.expectEqualStrings("carol", githubAuthorLogin(root).?);
     try std.testing.expectEqualStrings("v1", githubMilestoneTitle(root).?);
     try std.testing.expectEqual(@as(?u64, 3), githubOptionalUnsignedField(root, &.{"commits"}));
+    try std.testing.expectEqual(@as(?u64, 4), githubOptionalUnsignedField(root, &.{"changedFiles"}));
+    try std.testing.expectEqual(@as(?u64, 7), githubOptionalUnsignedField(root, &.{"comments"}));
     try std.testing.expect(githubOptionalUnsignedField(root, &.{"deletions"}) == null);
 }
 

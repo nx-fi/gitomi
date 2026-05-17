@@ -3255,6 +3255,13 @@ main.page-projects:has(.project-detail-panel) {
   border: 2px solid currentColor;
   border-radius: 50%;
 }
+.issue-type-chip {
+  gap: 6px;
+}
+.issue-type-chip .issue-type-dot {
+  width: 12px;
+  height: 12px;
+}
 .issue-type-bug {
   color: var(--red);
 }

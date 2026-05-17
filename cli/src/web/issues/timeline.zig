@@ -57,7 +57,7 @@ fn eventIcon(event_type: []const u8, body: []const u8) []const u8 {
         if (payloadStringEquals(body, "state", "open")) return "is-open";
         return "is-state";
     }
-    if (std.mem.eql(u8, event_type, "issue.priority_set") or std.mem.eql(u8, event_type, "issue.status_set")) return "is-project";
+    if (std.mem.eql(u8, event_type, "issue.priority_set") or std.mem.eql(u8, event_type, "issue.type_set") or std.mem.eql(u8, event_type, "issue.status_set")) return "is-project";
     if (std.mem.eql(u8, event_type, "issue.updated")) {
         if (payloadStringEquals(body, "state", "closed")) return "is-closed";
         if (payloadStringEquals(body, "state", "open")) return "is-open";
@@ -95,6 +95,10 @@ fn appendMessage(
     } else if (std.mem.eql(u8, event_type, "issue.priority_set")) {
         try appendTemplate(buf, allocator, "set priority to <span class=\"issue-event-value\">{priority}</span>", .{
             .priority = event_mod.jsonString(payload.get("priority")) orelse "priority",
+        });
+    } else if (std.mem.eql(u8, event_type, "issue.type_set")) {
+        try appendTemplate(buf, allocator, "set type to <span class=\"issue-event-value\">{issue_type}</span>", .{
+            .issue_type = issueTypeLabel(event_mod.jsonString(payload.get("type")) orelse "type"),
         });
     } else if (std.mem.eql(u8, event_type, "issue.status_set")) {
         try appendTemplate(buf, allocator, "set status to <span class=\"issue-event-value\">{status}</span>", .{
@@ -194,6 +198,8 @@ fn appendUpdatedMessage(buf: *std.ArrayList(u8), allocator: Allocator, payload: 
         try appendMilestoneMessage(buf, allocator, milestone);
     } else if (event_mod.jsonString(payload.get("priority"))) |priority| {
         try appendTemplate(buf, allocator, "set priority to <span class=\"issue-event-value\">{priority}</span>", .{ .priority = priority });
+    } else if (event_mod.jsonString(payload.get("type"))) |issue_type| {
+        try appendTemplate(buf, allocator, "set type to <span class=\"issue-event-value\">{issue_type}</span>", .{ .issue_type = issueTypeLabel(issue_type) });
     } else if (event_mod.jsonString(payload.get("status"))) |status| {
         try appendTemplate(buf, allocator, "set status to <span class=\"issue-event-value\">{status}</span>", .{ .status = status });
     } else if (firstStringFromJsonArray(payload, "labels_added")) |label| {
@@ -215,6 +221,13 @@ fn appendUpdatedMessage(buf: *std.ArrayList(u8), allocator: Allocator, payload: 
     } else {
         try buf.appendSlice(allocator, "updated this issue");
     }
+}
+
+fn issueTypeLabel(issue_type: []const u8) []const u8 {
+    if (std.mem.eql(u8, issue_type, "bug")) return "Bug";
+    if (std.mem.eql(u8, issue_type, "feature")) return "Feature";
+    if (std.mem.eql(u8, issue_type, "task")) return "Task";
+    return issue_type;
 }
 
 fn firstStringFromJsonArray(payload: std.json.ObjectMap, key: []const u8) ?[]const u8 {

@@ -133,6 +133,9 @@ pub fn buildIssueOpenedJsonWithLegacyAndMetadata(
     if (metadata.milestone) |value| {
         if (value.len != 0) try appendJsonFieldString(&buf, allocator, "milestone", value, true);
     }
+    if (metadata.issue_type) |value| {
+        if (value.len != 0) try appendJsonFieldString(&buf, allocator, "type", value, true);
+    }
     if (metadata.priority) |value| {
         if (value.len != 0) try appendJsonFieldString(&buf, allocator, "priority", value, true);
     }
@@ -279,6 +282,7 @@ pub fn buildIssueUpdatedJson(
     if (update.body) |value| try appendJsonFieldString(&buf, allocator, "body", value, true);
     if (update.state) |value| try appendJsonFieldString(&buf, allocator, "state", value, true);
     if (update.milestone) |value| try appendJsonFieldString(&buf, allocator, "milestone", value, true);
+    if (update.issue_type) |value| try appendJsonFieldString(&buf, allocator, "type", value, true);
     if (update.priority) |value| try appendJsonFieldString(&buf, allocator, "priority", value, true);
     if (update.status) |value| try appendJsonFieldString(&buf, allocator, "status", value, true);
     if (update.projects.len != 0) try appendIssueProjectsField(&buf, allocator, "projects", update.projects, true);

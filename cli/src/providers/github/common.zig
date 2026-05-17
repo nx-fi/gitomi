@@ -25,6 +25,11 @@ pub const gh_current_repo = RepoSlug{
     .slug = "OWNER/REPO",
 };
 
+pub const ApiMode = enum {
+    rest,
+    graphql,
+};
+
 pub const RepoSlug = struct {
     owner: []const u8,
     name: []const u8,
@@ -57,6 +62,10 @@ pub const GitHubClient = struct {
 
     pub fn requestAllowNotFound(self: GitHubClient, method: []const u8, path: []const u8, body: ?[]const u8) !?[]u8 {
         return try self.requestInternal(method, path, body, .{ .not_found_as_null = true });
+    }
+
+    pub fn graphqlRequest(self: GitHubClient, body: []const u8) ![]u8 {
+        return try self.request("POST", "/graphql", body);
     }
 
     const RequestOptions = struct {
@@ -192,7 +201,7 @@ pub const GitHubClient = struct {
     }
 
     pub fn repoPath(self: GitHubClient, allocator: Allocator, suffix: []const u8) ![]u8 {
-        if (self.use_gh) {
+        if (self.use_gh and std.mem.eql(u8, self.repo.slug, gh_current_repo.slug)) {
             return std.fmt.allocPrint(allocator, "/repos/{{owner}}/{{repo}}{s}", .{suffix});
         }
         return std.fmt.allocPrint(allocator, "/repos/{s}{s}", .{ self.repo.slug, suffix });
@@ -436,6 +445,15 @@ pub fn firstJsonValue(a: ?std.json.Value, b: ?std.json.Value) ?std.json.Value {
     return if (a) |value| value else b;
 }
 
+pub fn firstJsonValue3(a: ?std.json.Value, b: ?std.json.Value, c: ?std.json.Value) ?std.json.Value {
+    return firstJsonValue(firstJsonValue(a, b), c);
+}
+
+pub fn githubStateEquals(value: ?std.json.Value, expected_lower: []const u8) bool {
+    const raw = event_mod.jsonString(value) orelse return false;
+    return std.ascii.eqlIgnoreCase(raw, expected_lower);
+}
+
 pub fn githubIssueLabels(allocator: Allocator, issue: std.json.ObjectMap) ![][]u8 {
     var list: std.ArrayList([]u8) = .empty;
     errdefer git.freeStringList(allocator, list.items);
@@ -449,6 +467,8 @@ pub fn githubPullReviewers(allocator: Allocator, pull: std.json.ObjectMap) ![][]
     errdefer git.freeStringList(allocator, list.items);
     try appendGithubNamedArray(allocator, &list, pull.get("requested_reviewers"), "login");
     try appendGithubNamedArray(allocator, &list, pull.get("reviewers"), "login");
+    try appendGithubNamedArray(allocator, &list, pull.get("requestedReviewers"), "login");
+    try appendGithubReviewRequests(allocator, &list, pull.get("reviewRequests"));
     return list.toOwnedSlice(allocator);
 }
 
@@ -460,7 +480,33 @@ pub fn githubNamedArray(allocator: Allocator, value: ?std.json.Value, key: []con
 }
 
 pub fn appendGithubNamedArray(allocator: Allocator, list: *std.ArrayList([]u8), value: ?std.json.Value, key: []const u8) !void {
-    const array = jsonArray(value) orelse return;
+    const actual = value orelse return;
+    switch (actual) {
+        .array => |array| return appendGithubNamedArrayItems(allocator, list, array, key),
+        .object => |object| {
+            if (event_mod.jsonString(object.get(key))) |name| {
+                if (name.len != 0) try list.append(allocator, try githubSizedString(allocator, name, "", git.max_payload_atom_bytes));
+            }
+            if (jsonArray(object.get("nodes"))) |nodes| try appendGithubNamedArrayItems(allocator, list, nodes, key);
+            if (jsonArray(object.get("edges"))) |edges| {
+                for (edges.items) |edge| {
+                    if (edge != .object) continue;
+                    const node = switch (edge.object.get("node") orelse continue) {
+                        .object => |node_object| node_object,
+                        else => continue,
+                    };
+                    if (event_mod.jsonString(node.get(key))) |name| {
+                        if (name.len != 0) try list.append(allocator, try githubSizedString(allocator, name, "", git.max_payload_atom_bytes));
+                    }
+                }
+            }
+        },
+        .string => |string| if (string.len != 0) try list.append(allocator, try githubSizedString(allocator, string, "", git.max_payload_atom_bytes)),
+        else => {},
+    }
+}
+
+fn appendGithubNamedArrayItems(allocator: Allocator, list: *std.ArrayList([]u8), array: std.json.Array, key: []const u8) !void {
     for (array.items) |item| {
         if (item == .string) {
             try list.append(allocator, try githubSizedString(allocator, item.string, "", git.max_payload_atom_bytes));
@@ -469,6 +515,29 @@ pub fn appendGithubNamedArray(allocator: Allocator, list: *std.ArrayList([]u8), 
                 if (name.len != 0) try list.append(allocator, try githubSizedString(allocator, name, "", git.max_payload_atom_bytes));
             }
         }
+    }
+}
+
+fn appendGithubReviewRequests(allocator: Allocator, list: *std.ArrayList([]u8), value: ?std.json.Value) !void {
+    const connection = switch (value orelse return) {
+        .object => |object| object,
+        else => return,
+    };
+    const nodes = jsonArray(connection.get("nodes")) orelse return;
+    for (nodes.items) |item| {
+        const request = switch (item) {
+            .object => |object| object,
+            else => continue,
+        };
+        const reviewer = switch (request.get("requestedReviewer") orelse continue) {
+            .object => |object| object,
+            else => continue,
+        };
+        const name = event_mod.jsonString(reviewer.get("login")) orelse
+            event_mod.jsonString(reviewer.get("slug")) orelse
+            event_mod.jsonString(reviewer.get("name")) orelse
+            continue;
+        if (name.len != 0) try list.append(allocator, try githubSizedString(allocator, name, "", git.max_payload_atom_bytes));
     }
 }
 
@@ -602,7 +671,12 @@ pub fn jsonInteger(value: ?std.json.Value) ?i64 {
 }
 
 pub fn jsonOptionalUnsigned(value: ?std.json.Value) ?u64 {
-    const integer = jsonInteger(value) orelse return null;
+    const actual = value orelse return null;
+    const integer = switch (actual) {
+        .integer => |i| i,
+        .object => |object| return jsonOptionalUnsigned(object.get("totalCount")) orelse jsonOptionalUnsigned(object.get("count")),
+        else => return null,
+    };
     if (integer < 0) return null;
     return @intCast(integer);
 }

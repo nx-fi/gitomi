@@ -30,6 +30,7 @@ const dupeNonEmptyOption = cmd_common.dupeNonEmptyOption;
 const isIssuePriority = cmd_common.isIssuePriority;
 const isIssueState = cmd_common.isIssueState;
 const isIssueStatus = cmd_common.isIssueStatus;
+const isIssueType = cmd_common.isIssueType;
 const jsonStringArgument = cmd_common.jsonStringArgument;
 const parseBodyReplyOptions = cmd_common.parseBodyReplyOptions;
 const parseCollectionMutation = cmd_common.parseCollectionMutation;
@@ -527,6 +528,13 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
                     return CliError.UserError;
                 }
                 update.priority = priority;
+            } else if (std.mem.eql(u8, arg, "--type")) {
+                const issue_type = try util.requireValue(args, &i, "--type");
+                if (!isIssueType(issue_type)) {
+                    try io.eprint("gt issue edit: --type must be bug, feature, or task\n", .{});
+                    return CliError.UserError;
+                }
+                update.issue_type = issue_type;
             } else if (std.mem.eql(u8, arg, "--status")) {
                 const status = try util.requireValue(args, &i, "--status");
                 if (!isIssueStatus(status)) {
@@ -574,11 +582,13 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
         return;
     }
 
-    if (std.mem.eql(u8, args[0], "title") or std.mem.eql(u8, args[0], "body") or std.mem.eql(u8, args[0], "priority") or std.mem.eql(u8, args[0], "status")) {
+    if (std.mem.eql(u8, args[0], "title") or std.mem.eql(u8, args[0], "body") or std.mem.eql(u8, args[0], "priority") or std.mem.eql(u8, args[0], "type") or std.mem.eql(u8, args[0], "status")) {
         const payload_key: []const u8 = if (std.mem.eql(u8, args[0], "title"))
             "title"
         else if (std.mem.eql(u8, args[0], "body"))
             "body"
+        else if (std.mem.eql(u8, args[0], "type"))
+            "type"
         else
             args[0];
         const event_type: []const u8 = if (std.mem.eql(u8, args[0], "title"))
@@ -587,6 +597,8 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
             "issue.body_set"
         else if (std.mem.eql(u8, args[0], "priority"))
             "issue.priority_set"
+        else if (std.mem.eql(u8, args[0], "type"))
+            "issue.type_set"
         else
             "issue.status_set";
         const option_name: []const u8 = if (std.mem.eql(u8, args[0], "title"))
@@ -595,6 +607,8 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
             "--body"
         else if (std.mem.eql(u8, args[0], "priority"))
             "--priority"
+        else if (std.mem.eql(u8, args[0], "type"))
+            "--type"
         else
             "--status";
         if (args.len < 2) {
@@ -618,6 +632,10 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
         }
         if (std.mem.eql(u8, args[0], "priority") and !isIssuePriority(value.?)) {
             try io.eprint("gt issue priority: --priority must be P0, P1, P2, or P3\n", .{});
+            return CliError.UserError;
+        }
+        if (std.mem.eql(u8, args[0], "type") and !isIssueType(value.?)) {
+            try io.eprint("gt issue type: --type must be bug, feature, or task\n", .{});
             return CliError.UserError;
         }
         if (std.mem.eql(u8, args[0], "status") and !isIssueStatus(value.?)) {
@@ -839,6 +857,7 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
 
     var title: ?[]const u8 = null;
     var body: []const u8 = "";
+    var issue_type: ?[]const u8 = null;
     var priority: ?[]const u8 = null;
     var status: ?[]const u8 = null;
     var labels: std.ArrayList([]const u8) = .empty;
@@ -853,6 +872,13 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
             title = try util.requireValue(args, &i, "--title");
         } else if (std.mem.eql(u8, arg, "--body") or std.mem.eql(u8, arg, "-b")) {
             body = try util.requireValue(args, &i, "--body");
+        } else if (std.mem.eql(u8, arg, "--type")) {
+            const value = try util.requireValue(args, &i, "--type");
+            if (!isIssueType(value)) {
+                try io.eprint("gt issue open: --type must be bug, feature, or task\n", .{});
+                return CliError.UserError;
+            }
+            issue_type = value;
         } else if (std.mem.eql(u8, arg, "--priority")) {
             const value = try util.requireValue(args, &i, "--priority");
             if (!isIssuePriority(value)) {
@@ -882,8 +908,9 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
         return CliError.UserError;
     }
 
-    if (priority != null or status != null) {
+    if (issue_type != null or priority != null or status != null) {
         try issue.createIssueOpenedWithMetadataEvent(allocator, title.?, body, labels.items, assignees.items, .{
+            .issue_type = issue_type,
             .priority = priority,
             .status = status,
         });

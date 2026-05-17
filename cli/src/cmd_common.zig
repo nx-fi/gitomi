@@ -380,6 +380,12 @@ pub fn isIssuePriority(value: []const u8) bool {
         std.mem.eql(u8, value, "P3");
 }
 
+pub fn isIssueType(value: []const u8) bool {
+    return std.mem.eql(u8, value, "bug") or
+        std.mem.eql(u8, value, "feature") or
+        std.mem.eql(u8, value, "task");
+}
+
 pub fn isIssueStatus(value: []const u8) bool {
     return std.mem.eql(u8, value, "Draft") or
         std.mem.eql(u8, value, "Todo") or

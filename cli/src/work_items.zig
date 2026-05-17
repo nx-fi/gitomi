@@ -95,6 +95,7 @@ pub const IssueDetail = struct {
     state_actor_principal: []u8,
     body: []u8,
     milestone: []u8,
+    issue_type: []u8,
     priority: []u8,
     status: []u8,
     legacy_number: i64,
@@ -112,6 +113,7 @@ pub const IssueDetail = struct {
         allocator.free(self.state_actor_principal);
         allocator.free(self.body);
         allocator.free(self.milestone);
+        allocator.free(self.issue_type);
         allocator.free(self.priority);
         allocator.free(self.status);
     }
@@ -824,7 +826,7 @@ pub fn loadIssueDetail(allocator: Allocator, db: *SqliteDb, issue_id: []const u8
     var stmt = try db.prepare(
         \\SELECT i.id, i.title, i.state, i.author_principal, i.author_device, i.opened_at, i.body,
         \\       COALESCE(m.source_author, ''), COALESCE(m.milestone, ''),
-        \\       COALESCE(m.priority, ''), COALESCE(m.status, ''), COALESCE(a.number, 0),
+        \\       COALESCE(m.issue_type, ''), COALESCE(m.priority, ''), COALESCE(m.status, ''), COALESCE(a.number, 0),
         \\       i.state_occurred_at, i.state_actor_principal,
         \\       (SELECT COUNT(*) FROM comments c WHERE c.parent_kind = 'issue' AND c.parent_id = i.id)
         \\FROM issues i
@@ -846,12 +848,13 @@ pub fn loadIssueDetail(allocator: Allocator, db: *SqliteDb, issue_id: []const u8
         .body = try stmt.columnTextDup(allocator, 6),
         .source_author = try stmt.columnTextDup(allocator, 7),
         .milestone = try stmt.columnTextDup(allocator, 8),
-        .priority = try stmt.columnTextDup(allocator, 9),
-        .status = try stmt.columnTextDup(allocator, 10),
-        .legacy_number = stmt.columnInt64(11),
-        .state_occurred_at = try stmt.columnTextDup(allocator, 12),
-        .state_actor_principal = try stmt.columnTextDup(allocator, 13),
-        .comment_count = @as(usize, @intCast(stmt.columnInt64(14))),
+        .issue_type = try stmt.columnTextDup(allocator, 9),
+        .priority = try stmt.columnTextDup(allocator, 10),
+        .status = try stmt.columnTextDup(allocator, 11),
+        .legacy_number = stmt.columnInt64(12),
+        .state_occurred_at = try stmt.columnTextDup(allocator, 13),
+        .state_actor_principal = try stmt.columnTextDup(allocator, 14),
+        .comment_count = @as(usize, @intCast(stmt.columnInt64(15))),
     };
 }
 
@@ -1082,6 +1085,7 @@ pub fn prepareTimelineStmt(db: *SqliteDb, object_kind: []const u8, object_id: []
         \\    'issue.title_set',
         \\    'issue.body_set',
         \\    'issue.state_set',
+        \\    'issue.type_set',
         \\    'issue.priority_set',
         \\    'issue.status_set',
         \\    'issue.updated',
@@ -1236,6 +1240,7 @@ pub fn appendIssueDetailJsonFields(buf: *std.ArrayList(u8), allocator: Allocator
     try appendJsonFieldString(buf, allocator, "state_actor_principal", detail.state_actor_principal, true);
     if (detail.legacy_number > 0) try appendJsonFieldInteger(buf, allocator, "legacy_github_issue_number", detail.legacy_number, true);
     if (detail.milestone.len != 0) try appendJsonFieldString(buf, allocator, "milestone", detail.milestone, true);
+    if (detail.issue_type.len != 0) try appendJsonFieldString(buf, allocator, "type", detail.issue_type, true);
     if (detail.priority.len != 0) try appendJsonFieldString(buf, allocator, "priority", detail.priority, true);
     if (detail.status.len != 0) try appendJsonFieldString(buf, allocator, "status", detail.status, true);
     try appendJsonFieldInteger(buf, allocator, "comment_count", @intCast(detail.comment_count), true);

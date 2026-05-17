@@ -109,7 +109,7 @@ Workflow requests and completions are signed Gitomi events. Local logs and run
 diagnostics are retained separately under `refs/gitomi/runs/*` and can be
 pruned without losing the durable workflow result.
 
-## GitHub and GitLab Import/Export
+## GitHub and GitLab Import/Export/Sync
 
 Bring existing GitHub project history into Gitomi:
 
@@ -128,6 +128,13 @@ Run a two-way live bridge through the GitHub CLI and a local webhook receiver:
 
 ```sh
 gt github live --repo OWNER/REPO --webhook-url https://example.test/github/webhook --secret-env WEBHOOK_SECRET
+```
+
+Or poll GitHub for two-way API sync. GraphQL is the default mode; pass `--rest`
+to use the REST importer:
+
+```sh
+gt github sync --repo OWNER/REPO
 ```
 
 Imports preserve GitHub issue and pull request numbers as secondary aliases, so
@@ -177,7 +184,7 @@ The implemented command set includes:
 - `gt issue ...`, `gt pr ...`, `gt comment ...`
 - `gt project ...`, `gt milestone ...`
 - `gt actions ...`, `gt runs prune`
-- `gt github import`, `gt github export`, `gt github live`
+- `gt github import`, `gt github export`, `gt github sync`, `gt github live`
 - `gt gitlab import`, `gt gitlab export`, `gt gitlab sync`
 - `gt web`
 
