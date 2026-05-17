@@ -20,6 +20,7 @@ const min_tree_entry_commit_history = 32;
 const max_tree_entry_commit_history = 512;
 const tree_entry_commit_history_per_entry = 4;
 const max_tree_entry_commit_output = 1024 * 1024;
+const max_tree_entry_commit_fallback_output = 64 * 1024;
 const tree_entry_commit_format = "--format=%x1e%H%x09%s%x09%cr";
 
 const TreeEntry = model.TreeEntry;
@@ -519,6 +520,10 @@ pub fn loadTreeEntryCommits(allocator: Allocator, repo: Repo, ref: []const u8, p
         filled += 1;
         if (filled == entries.len) break;
     }
+
+    if (filled < entries.len) {
+        try loadMissingTreeEntryCommits(allocator, repo.root, ref, path, entries);
+    }
 }
 
 pub fn loadFilesystemTreeEntryCommits(allocator: Allocator, root: []const u8, path: []const u8, entries: []TreeEntry) !void {
@@ -559,6 +564,44 @@ pub fn loadFilesystemTreeEntryCommits(allocator: Allocator, root: []const u8, pa
         entries[entry_index].last_commit = try treeEntryCommitOwned(allocator, parsed_commit);
         filled += 1;
         if (filled == entries.len) break;
+    }
+
+    if (filled < entries.len) {
+        try loadMissingTreeEntryCommits(allocator, root, "HEAD", path, entries);
+    }
+}
+
+fn loadMissingTreeEntryCommits(
+    allocator: Allocator,
+    root: []const u8,
+    ref: []const u8,
+    path: []const u8,
+    entries: []TreeEntry,
+) !void {
+    for (entries) |*entry| {
+        if (entry.last_commit != null) continue;
+
+        const entry_path = try childPath(allocator, path, entry.name);
+        defer allocator.free(entry_path);
+
+        const raw = try gitMaybeAt(allocator, root, &.{
+            "log",
+            "-1",
+            tree_entry_commit_format,
+            "-z",
+            ref,
+            "--",
+            entry_path,
+        }, max_tree_entry_commit_fallback_output) orelse continue;
+        defer allocator.free(raw);
+
+        var records = std.mem.splitScalar(u8, raw, 0);
+        while (records.next()) |record| {
+            if (parseLogCommitHeader(record)) |parsed| {
+                entry.last_commit = try treeEntryCommitOwned(allocator, parsed);
+                break;
+            }
+        }
     }
 }
 
@@ -1215,17 +1258,45 @@ pub fn loadBranchRefs(allocator: Allocator, repo: Repo) ![]BranchRef {
             .scope = scope,
         });
     }
-    std.mem.sort(BranchRef, branches.items, {}, struct {
-        pub fn lessThan(_: void, a: BranchRef, b: BranchRef) bool {
-            if (a.scope != b.scope) return @intFromEnum(a.scope) < @intFromEnum(b.scope);
-            return std.ascii.lessThanIgnoreCase(a.name, b.name);
-        }
-    }.lessThan);
+    std.mem.sort(BranchRef, branches.items, {}, branchRefLessThan);
     try branches.insert(allocator, 0, .{
         .name = try allocator.dupe(u8, unstaged_ref),
         .scope = .unstaged,
     });
     return branches.toOwnedSlice(allocator);
+}
+
+const BranchSortGroup = enum {
+    unstaged,
+    main,
+    master,
+    other,
+};
+
+fn branchRefLessThan(_: void, a: BranchRef, b: BranchRef) bool {
+    const a_group = branchSortGroup(a);
+    const b_group = branchSortGroup(b);
+    if (a_group != b_group) return @intFromEnum(a_group) < @intFromEnum(b_group);
+    const a_sort_name = branchSortName(a);
+    const b_sort_name = branchSortName(b);
+    if (!std.ascii.eqlIgnoreCase(a_sort_name, b_sort_name)) return std.ascii.lessThanIgnoreCase(a_sort_name, b_sort_name);
+    if (a.scope != b.scope) return @intFromEnum(a.scope) < @intFromEnum(b.scope);
+    return std.mem.lessThan(u8, a.name, b.name);
+}
+
+fn branchSortGroup(branch: BranchRef) BranchSortGroup {
+    if (branch.scope == .unstaged) return .unstaged;
+    const sort_name = branchSortName(branch);
+    if (std.ascii.eqlIgnoreCase(sort_name, "main")) return .main;
+    if (std.ascii.eqlIgnoreCase(sort_name, "master")) return .master;
+    return .other;
+}
+
+fn branchSortName(branch: BranchRef) []const u8 {
+    if (branch.scope == .remote and std.mem.startsWith(u8, branch.name, "origin/")) {
+        return branch.name["origin/".len..];
+    }
+    return branch.name;
 }
 
 const PullBranchActivity = struct {
@@ -1802,6 +1873,97 @@ test "web explorer tree entry commit log args are bounded and pathless" {
     }
 }
 
+test "web explorer fills old tree entry commits outside recent history window" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makeDir("repo");
+    try writeTestFile(tmp.dir, "repo/.gitignore", "zig-cache/\n");
+
+    const repo_root = try tmp.dir.realpathAlloc(allocator, "repo");
+    defer allocator.free(repo_root);
+
+    try expectGitOk(allocator, repo_root, &.{ "init", "-q" });
+    try expectGitOk(allocator, repo_root, &.{ "config", "user.name", "Gitomi Test" });
+    try expectGitOk(allocator, repo_root, &.{ "config", "user.email", "gitomi-test@example.invalid" });
+    try expectGitOk(allocator, repo_root, &.{ "config", "commit.gpgsign", "false" });
+    try expectGitOk(allocator, repo_root, &.{ "add", ".gitignore" });
+    try expectGitOk(allocator, repo_root, &.{ "commit", "-q", "-m", "initial" });
+
+    var i: usize = 0;
+    while (i < min_tree_entry_commit_history + 1) : (i += 1) {
+        const content = try std.fmt.allocPrint(allocator, "{d}\n", .{i});
+        defer allocator.free(content);
+        try writeTestFile(tmp.dir, "repo/churn.txt", content);
+        try expectGitOk(allocator, repo_root, &.{ "add", "churn.txt" });
+        const message = try std.fmt.allocPrint(allocator, "churn {d}", .{i});
+        defer allocator.free(message);
+        try expectGitOk(allocator, repo_root, &.{ "commit", "-q", "-m", message });
+    }
+
+    var repo = Repo{
+        .allocator = allocator,
+        .root = try allocator.dupe(u8, repo_root),
+        .git_dir = try allocator.dupe(u8, ""),
+        .gitomi_dir = try allocator.dupe(u8, ""),
+        .config_path = try allocator.dupe(u8, ""),
+        .index_path = try allocator.dupe(u8, ""),
+        .cursors_path = try allocator.dupe(u8, ""),
+    };
+    defer repo.deinit();
+
+    const entries = (try loadTreeEntries(allocator, repo, "HEAD", "")) orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    defer freeTreeEntries(allocator, entries);
+
+    var found = false;
+    for (entries) |entry| {
+        if (!std.mem.eql(u8, entry.name, ".gitignore")) continue;
+        found = true;
+        const commit = entry.last_commit orelse {
+            try std.testing.expect(false);
+            return;
+        };
+        try std.testing.expectEqualStrings("initial", commit.subject);
+    }
+    try std.testing.expect(found);
+}
+
+test "web explorer sorts branch refs for the root dropdown" {
+    const allocator = std.testing.allocator;
+
+    var branches = [_]BranchRef{
+        try testBranchRef(allocator, "origin/feature", .remote),
+        try testBranchRef(allocator, "feature/z", .local),
+        try testBranchRef(allocator, "feature", .local),
+        try testBranchRef(allocator, "beta", .local),
+        try testBranchRef(allocator, "origin/master", .remote),
+        try testBranchRef(allocator, "master", .local),
+        try testBranchRef(allocator, "main", .local),
+        try testBranchRef(allocator, unstaged_ref, .unstaged),
+        try testBranchRef(allocator, "origin/main", .remote),
+        try testBranchRef(allocator, "alpha", .local),
+    };
+    defer for (branches) |branch| branch.deinit(allocator);
+
+    std.mem.sort(BranchRef, &branches, {}, branchRefLessThan);
+
+    try std.testing.expectEqualStrings(unstaged_ref, branches[0].name);
+    try std.testing.expectEqualStrings("main", branches[1].name);
+    try std.testing.expectEqualStrings("origin/main", branches[2].name);
+    try std.testing.expectEqualStrings("master", branches[3].name);
+    try std.testing.expectEqualStrings("origin/master", branches[4].name);
+    try std.testing.expectEqualStrings("alpha", branches[5].name);
+    try std.testing.expectEqualStrings("beta", branches[6].name);
+    try std.testing.expectEqualStrings("feature", branches[7].name);
+    try std.testing.expectEqualStrings("origin/feature", branches[8].name);
+    try std.testing.expectEqualStrings("feature/z", branches[9].name);
+}
+
 test "web explorer hides inactive pull request branches from picker data" {
     var activity = PullBranchActivity.init(std.testing.allocator);
     defer activity.deinit();
@@ -1882,6 +2044,19 @@ test "web explorer blob loading treats option-like refs as revisions" {
 
     try std.testing.expect(content == null);
     try std.testing.expectError(error.FileNotFound, tmp.dir.access("gitomi-poc:README.md", .{}));
+}
+
+fn writeTestFile(dir: std.fs.Dir, path: []const u8, bytes: []const u8) !void {
+    var file = try dir.createFile(path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(bytes);
+}
+
+fn testBranchRef(allocator: Allocator, name: []const u8, scope: BranchScope) !BranchRef {
+    return .{
+        .name = try allocator.dupe(u8, name),
+        .scope = scope,
+    };
 }
 
 fn expectGitOk(allocator: Allocator, root: []const u8, args: []const []const u8) !void {

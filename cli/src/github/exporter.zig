@@ -43,6 +43,7 @@ pub const ExportOptions = struct {
     after_ordinal: i64 = 0,
     skip_actor_principal: ?[]const u8 = null,
     skip_actor_device: ?[]const u8 = null,
+    max_events: usize = 0,
     quiet: bool = false,
 };
 
@@ -56,6 +57,8 @@ pub fn cmdExport(allocator: Allocator, args: []const []const u8) !void {
     var repo_opt: ?RepoSlug = null;
     var api_url: []const u8 = default_api_url;
     var token_arg: ?[]const u8 = null;
+    var token_source_owned: ?[]u8 = null;
+    defer if (token_source_owned) |value| allocator.free(value);
     var dry_run = false;
     var map_file_arg: ?[]const u8 = null;
     var reuse_legacy = false;
@@ -69,7 +72,21 @@ pub fn cmdExport(allocator: Allocator, args: []const []const u8) !void {
         } else if (std.mem.eql(u8, arg, "--api-url")) {
             api_url = try util.requireValue(args, &i, "--api-url");
         } else if (std.mem.eql(u8, arg, "--token")) {
-            token_arg = try util.requireValue(args, &i, "--token");
+            _ = try util.requireValue(args, &i, "--token");
+            try eprint("gt github export: --token exposes credentials in process lists; use --token-env, --token-file, GITHUB_TOKEN, GH_TOKEN, or --use-gh\n", .{});
+            return CliError.InvalidArgument;
+        } else if (std.mem.eql(u8, arg, "--token-env")) {
+            const env_name = try util.requireValue(args, &i, "--token-env");
+            if (token_source_owned) |value| allocator.free(value);
+            token_source_owned = null;
+            token_source_owned = try common.secretFromEnv(allocator, "gt github export", env_name);
+            token_arg = token_source_owned;
+        } else if (std.mem.eql(u8, arg, "--token-file")) {
+            const path = try util.requireValue(args, &i, "--token-file");
+            if (token_source_owned) |value| allocator.free(value);
+            token_source_owned = null;
+            token_source_owned = try common.secretFromFile(allocator, "gt github export", path);
+            token_arg = token_source_owned;
         } else if (std.mem.eql(u8, arg, "--dry-run")) {
             dry_run = true;
         } else if (std.mem.eql(u8, arg, "--map-file")) {
@@ -96,7 +113,7 @@ pub fn cmdExport(allocator: Allocator, args: []const []const u8) !void {
         break :blk token_owned;
     };
     if (!dry_run and token == null and !use_gh) {
-        try eprint("gt github export: --token, GITHUB_TOKEN, or --use-gh is required unless --dry-run is used\n", .{});
+        try eprint("gt github export: --token-env, --token-file, GITHUB_TOKEN, GH_TOKEN, or --use-gh is required unless --dry-run is used\n", .{});
         return CliError.MissingArgument;
     }
 
@@ -116,6 +133,7 @@ const MappingStore = struct {
     allocator: Allocator,
     path: []u8,
     dry_run: bool,
+    lock_file: ?std.fs.File = null,
     next_synthetic: i64 = 1,
     map: std.StringHashMap(i64),
 
@@ -129,15 +147,22 @@ const MappingStore = struct {
             defer allocator.free(name);
             break :blk try std.fs.path.join(allocator, &.{ repo.gitomi_dir, "github", owner, name, "map.jsonl" });
         };
+        errdefer allocator.free(path);
+
+        const lock_file = if (!dry_run) try acquireMapLock(allocator, path) else null;
+        errdefer if (lock_file) |file| file.close();
+
         return .{
             .allocator = allocator,
             .path = path,
             .dry_run = dry_run,
+            .lock_file = lock_file,
             .map = std.StringHashMap(i64).init(allocator),
         };
     }
 
     fn deinit(self: *MappingStore) void {
+        if (self.lock_file) |file| file.close();
         var keys = self.map.keyIterator();
         while (keys.next()) |key| self.allocator.free(key.*);
         self.map.deinit();
@@ -151,18 +176,35 @@ const MappingStore = struct {
         };
         defer self.allocator.free(bytes);
         var lines = std.mem.tokenizeScalar(u8, bytes, '\n');
+        var line_number: usize = 0;
         while (lines.next()) |line_raw| {
+            line_number += 1;
             const line = std.mem.trim(u8, line_raw, " \t\r\n");
             if (line.len == 0) continue;
-            var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, line, .{}) catch continue;
+            var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, line, .{}) catch {
+                try eprint("gt github export: map file {s} has an invalid JSON line at {d}; refusing to risk duplicate GitHub creates\n", .{ self.path, line_number });
+                return CliError.UserError;
+            };
             defer parsed.deinit();
             const root = switch (parsed.value) {
                 .object => |object| object,
-                else => continue,
+                else => {
+                    try eprint("gt github export: map file {s} line {d} must be a JSON object\n", .{ self.path, line_number });
+                    return CliError.UserError;
+                },
             };
-            const kind = event_mod.jsonString(root.get("kind")) orelse continue;
-            const id = event_mod.jsonString(root.get("id")) orelse continue;
-            const number = jsonInteger(root.get("number")) orelse continue;
+            const kind = event_mod.jsonString(root.get("kind")) orelse {
+                try eprint("gt github export: map file {s} line {d} is missing kind\n", .{ self.path, line_number });
+                return CliError.UserError;
+            };
+            const id = event_mod.jsonString(root.get("id")) orelse {
+                try eprint("gt github export: map file {s} line {d} is missing id\n", .{ self.path, line_number });
+                return CliError.UserError;
+            };
+            const number = jsonInteger(root.get("number")) orelse {
+                try eprint("gt github export: map file {s} line {d} is missing number\n", .{ self.path, line_number });
+                return CliError.UserError;
+            };
             try self.putMemory(kind, id, number);
             if (number >= self.next_synthetic) self.next_synthetic = number + 1;
         }
@@ -201,7 +243,7 @@ const MappingStore = struct {
     fn append(self: *MappingStore, kind: []const u8, id: []const u8, number: i64) !void {
         if (std.fs.path.dirname(self.path)) |dir| try std.fs.cwd().makePath(dir);
         var file = std.fs.cwd().openFile(self.path, .{ .mode = .write_only }) catch |err| switch (err) {
-            error.FileNotFound => try std.fs.cwd().createFile(self.path, .{}),
+            error.FileNotFound => try std.fs.cwd().createFile(self.path, .{ .mode = 0o600 }),
             else => return err,
         };
         defer file.close();
@@ -215,11 +257,62 @@ const MappingStore = struct {
         try json_writer.appendJsonFieldInteger(&line, self.allocator, "number", number, false);
         try line.appendSlice(self.allocator, "}\n");
         try file.writeAll(line.items);
+        try file.sync();
     }
 };
 
 fn mapKey(allocator: Allocator, kind: []const u8, id: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}\x1f{s}", .{ kind, id });
+}
+
+fn acquireMapLock(allocator: Allocator, map_path: []const u8) !std.fs.File {
+    if (std.fs.path.dirname(map_path)) |dir| try std.fs.cwd().makePath(dir);
+    const lock_path = try std.fmt.allocPrint(allocator, "{s}.lock", .{map_path});
+    defer allocator.free(lock_path);
+    return try std.fs.cwd().createFile(lock_path, .{
+        .read = true,
+        .truncate = false,
+        .lock = .exclusive,
+        .mode = 0o600,
+    });
+}
+
+pub fn lookupMappedObjectId(allocator: Allocator, map_file: []const u8, kind: []const u8, number: i64) !?[]u8 {
+    const lock_file = try acquireMapLock(allocator, map_file);
+    defer lock_file.close();
+
+    const bytes = std.fs.cwd().readFileAlloc(allocator, map_file, 8 * 1024 * 1024) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    defer allocator.free(bytes);
+
+    var lines = std.mem.tokenizeScalar(u8, bytes, '\n');
+    var line_number: usize = 0;
+    while (lines.next()) |line_raw| {
+        line_number += 1;
+        const line = std.mem.trim(u8, line_raw, " \t\r\n");
+        if (line.len == 0) continue;
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch {
+            try eprint("gt github: map file {s} has an invalid JSON line at {d}; refusing to risk duplicate GitHub creates\n", .{ map_file, line_number });
+            return CliError.UserError;
+        };
+        defer parsed.deinit();
+        const root = switch (parsed.value) {
+            .object => |object| object,
+            else => {
+                try eprint("gt github: map file {s} line {d} must be a JSON object\n", .{ map_file, line_number });
+                return CliError.UserError;
+            },
+        };
+        const mapped_kind = event_mod.jsonString(root.get("kind")) orelse continue;
+        if (!std.mem.eql(u8, mapped_kind, kind)) continue;
+        const mapped_number = jsonInteger(root.get("number")) orelse continue;
+        if (mapped_number != number) continue;
+        const id = event_mod.jsonString(root.get("id")) orelse continue;
+        return try allocator.dupe(u8, id);
+    }
+    return null;
 }
 
 pub fn exportToGithub(allocator: Allocator, options: ExportOptions) !ExportResult {
@@ -282,6 +375,7 @@ pub fn exportToGithub(allocator: Allocator, options: ExportOptions) !ExportResul
 
         if (try exportEvent(allocator, client, &mappings, options, event_type, object_kind, object_id, body)) {
             result.exported += 1;
+            if (options.max_events != 0 and result.exported >= options.max_events) break;
         }
     }
 

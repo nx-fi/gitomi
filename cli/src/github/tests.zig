@@ -28,6 +28,7 @@ const githubIssueCreateBody = exporter.githubIssueCreateBody;
 const githubPullCreateBody = exporter.githubPullCreateBody;
 const githubIssuePatchBody = exporter.githubIssuePatchBody;
 const githubCommentBody = exporter.githubCommentBody;
+const lookupMappedObjectId = exporter.lookupMappedObjectId;
 
 test "github import text capping preserves utf8 and limit" {
     const raw = "hello 世界 this text is too long";
@@ -224,4 +225,41 @@ test "github URL and response parsing helpers handle edge cases" {
     try std.testing.expectEqual(@as(?i64, 17), parseResponseNumber(std.testing.allocator, "{\"number\":17}", "number"));
     try std.testing.expect(parseResponseNumber(std.testing.allocator, "[]", "number") == null);
     try std.testing.expect(parseResponseNumber(std.testing.allocator, "not json", "number") == null);
+}
+
+test "github export map supports reverse object lookup" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{
+        .sub_path = "map.jsonl",
+        .data =
+        \\{"kind":"issue","id":"local-issue","number":42}
+        \\{"kind":"comment","id":"local-comment","number":9001}
+        \\
+        ,
+    });
+    const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/map.jsonl", .{tmp.sub_path[0..]});
+    defer std.testing.allocator.free(path);
+
+    const issue_id = (try lookupMappedObjectId(std.testing.allocator, path, "issue", 42)).?;
+    defer std.testing.allocator.free(issue_id);
+    try std.testing.expectEqualStrings("local-issue", issue_id);
+
+    const comment_id = (try lookupMappedObjectId(std.testing.allocator, path, "comment", 9001)).?;
+    defer std.testing.allocator.free(comment_id);
+    try std.testing.expectEqualStrings("local-comment", comment_id);
+    try std.testing.expect((try lookupMappedObjectId(std.testing.allocator, path, "pull", 42)) == null);
+}
+
+test "github export map rejects partial lines instead of losing mappings" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{
+        .sub_path = "map.jsonl",
+        .data = "{\"kind\":\"issue\",\"id\":\"local-issue\",\"number\":",
+    });
+    const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/map.jsonl", .{tmp.sub_path[0..]});
+    defer std.testing.allocator.free(path);
+
+    try std.testing.expectError(CliError.UserError, lookupMappedObjectId(std.testing.allocator, path, "issue", 42));
 }

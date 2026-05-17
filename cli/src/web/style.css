@@ -217,11 +217,12 @@ code {
 .theme-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  justify-content: center;
   align-self: start;
-  min-height: 28px;
+  width: 34px;
+  height: 34px;
   margin-left: 0;
-  padding: 0 8px;
+  padding: 0;
   color: var(--topbar-text);
   background: color-mix(in srgb, var(--topbar-text) 6%, transparent);
   border: 1px solid var(--topbar-border);
@@ -234,30 +235,18 @@ code {
   background: color-mix(in srgb, var(--topbar-text) 10%, transparent);
   border-color: var(--border-strong);
 }
-.theme-toggle-track {
-  position: relative;
-  width: 30px;
-  height: 16px;
-  border-radius: 999px;
-  background: var(--border-strong);
+.theme-toggle-icon {
+  width: 17px;
+  height: 17px;
 }
-.theme-toggle-thumb {
-  position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--panel);
-  transition: transform 120ms ease;
+.theme-toggle .theme-toggle-icon-dark {
+  display: none;
 }
-:root[data-theme="dark"] .theme-toggle-thumb {
-  transform: translateX(14px);
+:root[data-theme="dark"] .theme-toggle .theme-toggle-icon-light {
+  display: none;
 }
-.theme-toggle-label {
-  min-width: 30px;
-  font-size: 13px;
-  text-align: left;
+:root[data-theme="dark"] .theme-toggle .theme-toggle-icon-dark {
+  display: inline-block;
 }
 .topbar-actions {
   grid-area: actions;
@@ -1189,15 +1178,17 @@ main.page-projects:has(.project-detail-panel) {
 .pull-branch-line span {
   min-width: 0;
 }
-.pull-branch-link {
+.pull-branch-link,
+.refs-ref-link {
   display: inline-flex;
   min-width: 0;
   max-width: 100%;
   color: inherit;
   vertical-align: baseline;
 }
-.pull-branch-link:hover {
-  color: var(--text);
+.pull-branch-link:hover,
+.refs-ref-link:hover {
+  color: var(--blue);
   text-decoration: none;
 }
 .pull-branch-link code {
@@ -5465,6 +5456,52 @@ body.has-modal {
 .refs-sort-link.ascending .refs-sort-indicator {
   border-bottom: 5px solid currentColor;
 }
+.refs-actions-th {
+  width: 210px;
+}
+.refs-ref-cell {
+  min-width: 0;
+}
+.refs-ref-link:hover code {
+  border-color: var(--border-strong);
+}
+.refs-row-diverged {
+  background: color-mix(in srgb, var(--warning-bg) 28%, transparent);
+}
+.refs-diverged-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  margin-left: 8px;
+  padding: 0 7px;
+  color: var(--warning-border);
+  background: color-mix(in srgb, var(--warning-bg) 64%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning-border) 44%, transparent);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  vertical-align: middle;
+}
+.refs-actions-cell {
+  min-width: 0;
+}
+.refs-delete-form {
+  display: inline-flex;
+  margin: 0 6px 0 0;
+}
+.refs-delete-button {
+  min-height: 28px;
+  padding: 0 8px;
+  color: var(--red);
+  font-size: 12px;
+}
+.refs-delete-button:hover {
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 45%, var(--border-strong));
+}
+.refs-no-action {
+  color: var(--muted);
+}
 .worktrees-head {
   align-items: center;
 }
@@ -7091,8 +7128,10 @@ a.root-file-commit:hover,
   text-decoration: none;
 }
 .root-file-commit.empty {
+  padding: 0;
   font-weight: 500;
   opacity: 0.7;
+  text-align: left;
 }
 .root-file-time {
   justify-self: end;
@@ -7146,6 +7185,20 @@ a.root-file-commit:hover,
   font-weight: 600;
   line-height: 1.25;
 }
+.root-sidebar-title-line {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  justify-content: space-between;
+  min-width: 0;
+}
+.root-sidebar-title-line strong {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: right;
+  white-space: nowrap;
+}
 .root-about-text {
   margin: 0;
   color: color-mix(in srgb, var(--text) 82%, var(--muted));
@@ -7177,10 +7230,6 @@ a.root-file-commit:hover,
   align-items: center;
   min-height: 36px;
   padding: 8px 0;
-  border-top: 1px solid var(--border);
-}
-.root-meta-list div:first-child {
-  border-top: 0;
 }
 .root-meta-list dt {
   color: var(--muted);
@@ -7293,45 +7342,24 @@ a.root-file-commit:hover,
   display: grid;
   gap: 0;
 }
-.root-sloc-total {
-  display: flex;
-  gap: 12px;
-  align-items: baseline;
-  justify-content: space-between;
-  min-width: 0;
-  padding: 0 0 10px;
-  border-bottom: 1px solid var(--border);
-}
-.root-sloc-total span {
-  min-width: 0;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 500;
-}
-.root-sloc-total strong {
-  color: var(--text);
-  font-size: 14px;
-  font-weight: 600;
-  text-align: right;
-  white-space: nowrap;
-}
 .root-sloc-row {
-  position: relative;
   display: grid;
   gap: 8px;
   min-width: 0;
-  padding: 13px 0 12px;
+  padding: 2px 0 12px;
   color: var(--muted);
   font-size: 12px;
   line-height: 1.25;
 }
-.root-sloc-row + .root-sloc-row {
-  border-top: 1px solid var(--border);
+.root-sloc-row-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
 }
-.root-sloc-row::before {
-  content: "";
-  position: absolute;
-  inset: 0 auto auto 0;
+.root-sloc-bar {
+  display: block;
   width: var(--share, 0%);
   height: 3px;
   background: var(--language-color);
@@ -8018,6 +8046,12 @@ a.root-file-commit:hover,
 .icon-conflict {
   --button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='m15 9-6 6M9 9l6 6'/%3E%3C/g%3E%3C/svg%3E");
 }
+.icon-sun {
+  --button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Ccircle cx='12' cy='12' r='4'/%3E%3Cpath d='M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41'/%3E%3C/g%3E%3C/svg%3E");
+}
+.icon-moon {
+  --button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M20.99 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 20.99 12.79Z'/%3E%3C/svg%3E");
+}
 .icon-arrow-left {
   --button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Cpath d='m12 19-7-7 7-7'/%3E%3Cpath d='M19 12H5'/%3E%3C/g%3E%3C/svg%3E");
 }
@@ -8208,8 +8242,10 @@ a.root-file-commit:hover,
   text-decoration: none;
 }
 .file-commit.empty {
+  padding: 0;
   font-weight: 500;
   opacity: 0.7;
+  text-align: left;
 }
 .file-icon {
   position: relative;

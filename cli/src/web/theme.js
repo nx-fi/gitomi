@@ -36,9 +36,6 @@
       button.setAttribute("aria-label", isDark ? "Switch to light mode" : "Switch to dark mode");
       button.setAttribute("title", isDark ? "Switch to light mode" : "Switch to dark mode");
     });
-    document.querySelectorAll("[data-theme-label]").forEach((label) => {
-      label.textContent = theme === "dark" ? "Dark" : "Light";
-    });
   }
 
   function toggleTheme() {

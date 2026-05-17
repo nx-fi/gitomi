@@ -96,11 +96,11 @@ gt actions run-requested [RUN] [--dry-run] [--act PATH] [--agent-runner PATH] [-
 gt actions daemon [--once] [--replay] [--interval-ms N] [--dry-run] [--act PATH] [--agent-runner PATH] [-- ACT_ARGS...]
 gt runs prune [--dry-run] [--max-age-days N] [--max-count N] [--max-bytes N]
 gt sync [--remote REMOTE] [--pull-only|--push-only]
-gt github import [--repo OWNER/REPO] [--token TOKEN] [--from-file PATH] [--no-comments] [--no-projects]
-gt github export --repo OWNER/REPO [--token TOKEN] [--use-gh] [--dry-run] [--map-file PATH] [--reuse-legacy]
-gt github live [--repo OWNER/REPO] --webhook-url URL --secret SECRET [--host 127.0.0.1] [--port 12656] [--path /github/webhook] [--remote REMOTE] [--interval-ms N] [--once] [--no-subscribe] [--dry-run] [--no-git-sync]
+gt github import [--repo OWNER/REPO] [--token-env NAME|--token-file PATH] [--from-file PATH] [--no-comments] [--no-projects]
+gt github export --repo OWNER/REPO [--token-env NAME|--token-file PATH|--use-gh] [--dry-run] [--map-file PATH] [--reuse-legacy]
+gt github live [--repo OWNER/REPO] --webhook-url URL (--secret-env NAME|--secret-file PATH) [--host 127.0.0.1] [--port 12656] [--path /github/webhook] [--remote REMOTE] [--interval-ms N] [--once] [--no-subscribe] [--dry-run] [--no-git-sync]
 gt web [--local] [--host 127.0.0.1] [--port 12655] [--once]
-gt web --live [--host 127.0.0.1] [--port 12655] [--repo OWNER/REPO] [--webhook-url URL] --secret SECRET [--live-host 127.0.0.1] [--live-port 12656] [--live-path /github/webhook] [--remote REMOTE] [--interval-ms N] [--no-subscribe] [--dry-run] [--no-git-sync]
+gt web --live [--host 127.0.0.1] [--port 12655] [--repo OWNER/REPO] [--webhook-url URL] (--secret-env NAME|--secret-file PATH) [--live-host 127.0.0.1] [--live-port 12656] [--live-path /github/webhook] [--remote REMOTE] [--interval-ms N] [--no-subscribe] [--dry-run] [--no-git-sync]
 ```
 
 `gt init` writes a signed genesis manifest to `refs/gitomi/genesis`, including
@@ -257,7 +257,7 @@ GitHub through the GitHub CLI. Live state and the export map are stored under
 `.git/gitomi/github/<owner>/<repo>/`; use `--no-subscribe` when the webhook
 already exists, `--once` for one webhook request plus one export pass, or
 `--no-git-sync` to skip the surrounding Gitomi `gt sync` pull/push steps. Live
-webhook imports require `--secret` so GitHub deliveries are authenticated with
+webhook imports require `--secret-env` or `--secret-file` so GitHub deliveries are authenticated with
 `X-Hub-Signature-256`; use the same secret when configuring an existing hook with
 `--no-subscribe`.
 
@@ -267,7 +267,7 @@ port is occupied. `--local` is the default mode. `--live` starts the web UI and 
 GitHub live sync daemon in the same process; the web UI remains loopback-only,
 while the live webhook listener uses `--live-host`, `--live-port`, and
 `--live-path`, requires `--webhook-url` unless `--no-subscribe` is used, and
-requires `--secret` for authenticated webhook deliveries. It
+requires `--secret-env` or `--secret-file` for authenticated webhook deliveries. It
 opens on a committed-tree code explorer, also serves
 overview/issues/projects/workflows/events/refs pages, and can create signed issue
 events and workflow run requests through the same storage path as the CLI. The

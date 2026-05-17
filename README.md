@@ -72,7 +72,7 @@ Gitomi does not treat this endpoint as production-facing infrastructure.
 To run the web UI and GitHub live sync together:
 
 ```sh
-gt web --live --repo OWNER/REPO --webhook-url https://example.test/github/webhook --secret "$WEBHOOK_SECRET"
+gt web --live --repo OWNER/REPO --webhook-url https://example.test/github/webhook --secret-env WEBHOOK_SECRET
 ```
 
 ## Sync With a Remote
@@ -127,7 +127,7 @@ gt github export --repo OWNER/REPO --dry-run
 Run a two-way live bridge through the GitHub CLI and a local webhook receiver:
 
 ```sh
-gt github live --repo OWNER/REPO --webhook-url https://example.test/github/webhook --secret "$WEBHOOK_SECRET"
+gt github live --repo OWNER/REPO --webhook-url https://example.test/github/webhook --secret-env WEBHOOK_SECRET
 ```
 
 Imports preserve GitHub issue and pull request numbers as secondary aliases, so

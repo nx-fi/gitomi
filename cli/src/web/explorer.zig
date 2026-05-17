@@ -432,7 +432,7 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
             if (sync_flash) |flash| try appendCodeSyncFlash(&buf, allocator, flash);
             try appendRootCodePanelStart(&buf, allocator);
             try appendRootCommitBar(&buf, allocator, &reference_resolver, ref, summary_opt, null);
-            try appendRootTreeListing(&buf, allocator, &reference_resolver, ref, entries);
+            try appendRootTreeListing(&buf, allocator, ref, entries);
             try appendCodePanelEnd(&buf, allocator);
         } else {
             try appendCodePanelStart(&buf, allocator, repo, ref, path);
@@ -1029,7 +1029,7 @@ fn appendRootCodeToolbar(
         \\      </label>
     , .{
         .branch_count = shared.groupedUnsigned(@intCast(branch_count)),
-        .branch_label = if (branch_count == 1) "Active Branch" else "Active Branches",
+        .branch_label = if (branch_count == 1) "Branch" else "Branches",
         .tag_count = shared.groupedUnsigned(@intCast(tag_count)),
         .tag_label = if (tag_count == 1) "Tag" else "Tags",
         .worktree_count = shared.groupedUnsigned(@intCast(worktree_count)),
@@ -1164,13 +1164,12 @@ fn appendRootCommitCountLink(buf: *std.ArrayList(u8), allocator: Allocator, ref:
 fn appendRootTreeListing(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
-    reference_resolver: *shared.InternalReferenceResolver,
     ref: []const u8,
     entries: []const TreeEntry,
 ) !void {
     try appendTemplate(buf, allocator, "<div class=\"root-file-list\" data-root-file-list>", .{});
     for (entries) |entry| {
-        try appendRootTreeEntryRow(buf, allocator, reference_resolver, ref, entry);
+        try appendRootTreeEntryRow(buf, allocator, ref, entry);
     }
 
     if (entries.len == 0) {
@@ -1182,7 +1181,6 @@ fn appendRootTreeListing(
 fn appendRootTreeEntryRow(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
-    reference_resolver: *shared.InternalReferenceResolver,
     ref: []const u8,
     entry: TreeEntry,
 ) !void {
@@ -1219,14 +1217,12 @@ fn appendRootTreeEntryRow(
         } else {
             const commit_href = commitHref(commit.full_hash);
             try appendTemplate(buf, allocator,
-                \\<span class="root-file-commit" title="{subject}">
+                \\<a class="root-file-commit" href="{href}" title="{subject}">{subject}</a><span class="root-file-time">{relative}</span>
             , .{
+                .href = commit_href,
                 .subject = commit.subject,
+                .relative = commit.relative,
             });
-            try shared.appendInternalReferenceLinkedTextWithDefaultHref(buf, allocator, reference_resolver, commit.subject, commit_href);
-            try appendTemplate(buf, allocator,
-                \\</span><span class="root-file-time">{relative}</span>
-            , .{ .relative = commit.relative });
         }
     } else {
         try appendTemplate(buf, allocator,
@@ -2003,31 +1999,30 @@ fn appendRootLanguages(buf: *std.ArrayList(u8), allocator: Allocator, stats_opt:
 fn appendRootSloc(buf: *std.ArrayList(u8), allocator: Allocator, stats_opt: ?source_stats.Stats) !void {
     try appendTemplate(buf, allocator,
         \\<div class="root-sidebar-section">
-        \\  <h2>SLOC</h2>
     , .{});
     const stats = stats_opt orelse {
         try appendTemplate(buf, allocator,
-            \\<p class="root-sidebar-empty">No SLOC data available.</p></div>
+            \\<h2>SLOC</h2><p class="root-sidebar-empty">No SLOC data available.</p></div>
         , .{});
         return;
     };
     const total = stats.total();
     if (total == 0 or stats.rows.len == 0) {
         try appendTemplate(buf, allocator,
-            \\<p class="root-sidebar-empty">No source files counted.</p></div>
+            \\<h2>SLOC</h2><p class="root-sidebar-empty">No source files counted.</p></div>
         , .{});
         return;
     }
 
     try appendTemplate(buf, allocator,
-        \\<div class="root-sloc-total" aria-label="Total source lines of code"><span>Total SLOC</span><strong>{total} {lines_label}</strong></div><div class="root-sloc-breakdown" aria-label="Top source lines of code by language">
+        \\<div class="root-sidebar-title-line"><h2>SLOC</h2><strong>{total} {lines_label}</strong></div><div class="root-sloc-breakdown" aria-label="Top source lines of code by language">
     , .{
         .total = shared.groupedUnsigned(total),
         .lines_label = if (total == 1) "line" else "lines",
     });
     for (stats.rows[0..@min(stats.rows.len, 3)]) |stat| {
         try appendTemplate(buf, allocator,
-            \\<div class="root-sloc-row" style="--language-color: {color}; --share: {share};"><span class="root-sloc-language"><span class="language-dot"></span><span>{name}</span></span><span class="root-sloc-metrics"><span><strong>{code}</strong> code</span><span><strong>{test_count}</strong> test</span><span><strong>{comment}</strong> comments</span></span></div>
+            \\<div class="root-sloc-row" style="--language-color: {color}; --share: {share};"><div class="root-sloc-row-head"><span class="root-sloc-bar" aria-hidden="true"></span><span class="root-sloc-language"><span class="language-dot"></span><span>{name}</span></span></div><span class="root-sloc-metrics"><span><strong>{code}</strong> code</span><span><strong>{test_count}</strong> test</span><span><strong>{comment}</strong> comments</span></span></div>
         , .{
             .color = source_stats.languageColor(stat.language),
             .share = shared.percent(stat.total(), total),

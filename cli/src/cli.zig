@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const actions = @import("actions.zig");
 const auth_binding = @import("auth_binding.zig");
 const build_options = @import("build_options");
@@ -82,6 +83,7 @@ fn realMain() !void {
 
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
+    scrubSensitiveProcessArgs();
 
     if (args.len <= 1) {
         try printUsage();
@@ -96,6 +98,29 @@ fn realMain() !void {
     };
 
     try command.handler(allocator, args[2..], command.command_name);
+}
+
+fn scrubSensitiveProcessArgs() void {
+    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return;
+
+    var i: usize = 0;
+    while (i < std.os.argv.len) : (i += 1) {
+        const arg = std.mem.sliceTo(std.os.argv[i], 0);
+        if (std.mem.eql(u8, arg, "--secret") or std.mem.eql(u8, arg, "--token")) {
+            if (i + 1 < std.os.argv.len) {
+                scrubArgvValue(std.os.argv[i + 1]);
+                i += 1;
+            }
+        } else if (std.mem.startsWith(u8, arg, "--secret=") or std.mem.startsWith(u8, arg, "--token=")) {
+            const eq = std.mem.indexOfScalar(u8, arg, '=') orelse continue;
+            @memset(arg[eq + 1 ..], 'x');
+        }
+    }
+}
+
+fn scrubArgvValue(value_z: [*:0]u8) void {
+    const value = std.mem.sliceTo(value_z, 0);
+    @memset(value, 'x');
 }
 
 fn runHelp(_: Allocator, _: []const []const u8, _: []const u8) !void {
@@ -256,11 +281,11 @@ fn printUsage() !void {
         \\  gt actions daemon [--once] [--replay] [--interval-ms N] [--dry-run] [--act PATH] [--agent-runner PATH] [-- ACT_ARGS...]
         \\  gt runs prune [--dry-run] [--max-age-days N] [--max-count N] [--max-bytes N]
         \\  gt sync [--remote REMOTE] [--pull-only|--push-only]
-        \\  gt github import [--repo OWNER/REPO] [--token TOKEN] [--from-file PATH] [--no-comments] [--no-projects]
-        \\  gt github export --repo OWNER/REPO [--token TOKEN] [--use-gh] [--dry-run] [--map-file PATH] [--reuse-legacy]
-        \\  gt github live [--repo OWNER/REPO] --webhook-url URL --secret SECRET [--host 127.0.0.1] [--port 12656] [--path /github/webhook] [--remote REMOTE] [--interval-ms N] [--once] [--no-subscribe] [--dry-run] [--no-git-sync]
+        \\  gt github import [--repo OWNER/REPO] [--token-env NAME|--token-file PATH] [--from-file PATH] [--no-comments] [--no-projects]
+        \\  gt github export --repo OWNER/REPO [--token-env NAME|--token-file PATH|--use-gh] [--dry-run] [--map-file PATH] [--reuse-legacy]
+        \\  gt github live [--repo OWNER/REPO] --webhook-url URL (--secret-env NAME|--secret-file PATH) [--host 127.0.0.1] [--port 12656] [--path /github/webhook] [--remote REMOTE] [--interval-ms N] [--once] [--no-subscribe] [--dry-run] [--no-git-sync]
         \\  gt web [--local] [--host 127.0.0.1] [--port 12655] [--once]
-        \\  gt web --live [--host 127.0.0.1] [--port 12655] [--repo OWNER/REPO] [--webhook-url URL] --secret SECRET [--live-host 127.0.0.1] [--live-port 12656] [--live-path /github/webhook] [--remote REMOTE] [--interval-ms N] [--no-subscribe] [--dry-run] [--no-git-sync]
+        \\  gt web --live [--host 127.0.0.1] [--port 12655] [--repo OWNER/REPO] [--webhook-url URL] (--secret-env NAME|--secret-file PATH) [--live-host 127.0.0.1] [--live-port 12656] [--live-path /github/webhook] [--remote REMOTE] [--interval-ms N] [--no-subscribe] [--dry-run] [--no-git-sync]
         \\
         \\Gitomi stores local state in .git/gitomi and signed events in refs/gitomi/inbox/*.
         \\
@@ -1035,6 +1060,8 @@ fn cmdWeb(allocator: Allocator, args: []const []const u8) !void {
     var live_path: []const u8 = github_live.default_path;
     var live_webhook_url: ?[]const u8 = null;
     var live_secret: ?[]const u8 = null;
+    var live_secret_source_owned: ?[]u8 = null;
+    defer if (live_secret_source_owned) |value| allocator.free(value);
     var live_remote: []const u8 = "origin";
     var live_interval_ms: u64 = github_live.default_interval_ms;
     var live_subscribe = true;
@@ -1080,7 +1107,23 @@ fn cmdWeb(allocator: Allocator, args: []const []const u8) !void {
             live_webhook_url = try util.requireValue(args, &i, "--webhook-url");
         } else if (std.mem.eql(u8, arg, "--secret")) {
             live_option_seen = true;
-            live_secret = try util.requireValue(args, &i, "--secret");
+            _ = try util.requireValue(args, &i, "--secret");
+            try io.eprint("gt web: --secret exposes credentials in process lists; use --secret-env or --secret-file\n", .{});
+            return CliError.InvalidArgument;
+        } else if (std.mem.eql(u8, arg, "--secret-env")) {
+            live_option_seen = true;
+            const env_name = try util.requireValue(args, &i, "--secret-env");
+            if (live_secret_source_owned) |value| allocator.free(value);
+            live_secret_source_owned = null;
+            live_secret_source_owned = try github_common.secretFromEnv(allocator, "gt web", env_name);
+            live_secret = live_secret_source_owned;
+        } else if (std.mem.eql(u8, arg, "--secret-file")) {
+            live_option_seen = true;
+            const path_arg = try util.requireValue(args, &i, "--secret-file");
+            if (live_secret_source_owned) |value| allocator.free(value);
+            live_secret_source_owned = null;
+            live_secret_source_owned = try github_common.secretFromFile(allocator, "gt web", path_arg);
+            live_secret = live_secret_source_owned;
         } else if (std.mem.eql(u8, arg, "--remote")) {
             live_option_seen = true;
             live_remote = try util.requireValue(args, &i, "--remote");

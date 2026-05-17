@@ -477,8 +477,8 @@ pub fn appendShellStart(
     );
     try appendTemplate(buf, allocator,
         \\  <button class="theme-toggle" type="button" data-theme-toggle aria-pressed="false" aria-label="Toggle dark mode" title="Toggle dark mode">
-        \\    <span class="theme-toggle-track" aria-hidden="true"><span class="theme-toggle-thumb"></span></span>
-        \\    <span class="theme-toggle-label" data-theme-label>Light</span>
+        \\    <span class="button-icon theme-toggle-icon theme-toggle-icon-light icon-sun" aria-hidden="true"></span>
+        \\    <span class="button-icon theme-toggle-icon theme-toggle-icon-dark icon-moon" aria-hidden="true"></span>
         \\  </button>
     , .{});
     if (cfg_opt) |cfg| {
