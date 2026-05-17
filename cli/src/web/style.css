@@ -1062,6 +1062,22 @@ main.page-projects:has(.project-detail-panel) {
   font-size: 13px;
   overflow-wrap: anywhere;
 }
+.legacy-provider-link,
+.legacy-provider-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.legacy-external-icon {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  background: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Cpath d='M15 3h6v6'/%3E%3Cpath d='M10 14 21 3'/%3E%3Cpath d='M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5'/%3E%3C/g%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Cpath d='M15 3h6v6'/%3E%3Cpath d='M10 14 21 3'/%3E%3Cpath d='M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5'/%3E%3C/g%3E%3C/svg%3E") center / contain no-repeat;
+  vertical-align: -1px;
+}
 .issue-row-side {
   display: flex;
   align-items: center;
@@ -8489,6 +8505,59 @@ a.root-file-commit:hover,
 .media-preview video {
   width: min(100%, 960px);
 }
+.pdf-preview {
+  display: grid;
+  gap: 18px;
+  min-height: 300px;
+  padding: 18px;
+  border-top: 1px solid var(--border);
+  background: var(--subtle);
+}
+.pdf-preview-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+.pdf-preview-toolbar strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pdf-preview.failed .pdf-pages {
+  display: none;
+}
+.pdf-pages {
+  display: grid;
+  justify-items: center;
+  gap: 18px;
+}
+.pdf-page {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  max-width: 100%;
+}
+.pdf-page canvas {
+  display: block;
+  max-width: 100%;
+  height: auto !important;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 10px 24px rgb(0 0 0 / 12%);
+}
+.pdf-page-label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
 .blame-lines {
   margin: 0;
   padding: 0;
@@ -9428,14 +9497,14 @@ a.root-file-commit:hover,
 .markdown-table {
   --markdown-table-row-odd: var(--panel);
   --markdown-table-row-even: var(--subtle);
-  --markdown-table-row-highlight: #fafbfc;
+  --markdown-table-row-highlight: #eaeef2;
   width: max-content;
   min-width: min(100%, 520px);
   border-collapse: collapse;
   font-size: 14px;
 }
 :root[data-theme="dark"] .markdown-table {
-  --markdown-table-row-highlight: #1b2129;
+  --markdown-table-row-highlight: #2b333d;
 }
 .markdown-table th,
 .markdown-table td {

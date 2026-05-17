@@ -170,19 +170,12 @@ fn localDomainRejectionCanBeAudited(event_type: []const u8, reason: []const u8) 
 }
 
 fn localDelegationAuthorizesWrite(allocator: Allocator, repo: Repo, envelope: event_mod.ValidatedEnvelope) !bool {
-    if (!projection.githubImportDelegatesEvent(envelope.event_type)) return false;
+    if (!projection.importDelegatesEvent(envelope.event_type)) return false;
 
     var signing_key = repo_mod.configuredSigningKey(allocator) catch return false;
     defer signing_key.deinit();
-    return try hasActiveDelegation(
-        allocator,
-        repo,
-        envelope.actor_principal,
-        envelope.actor_device,
-        "github.import",
-        "github:*",
-        signing_key.fingerprint,
-    );
+    return try hasActiveDelegation(allocator, repo, envelope.actor_principal, envelope.actor_device, "github.import", "github:*", signing_key.fingerprint) or
+        try hasActiveDelegation(allocator, repo, envelope.actor_principal, envelope.actor_device, "gitlab.import", "gitlab:*", signing_key.fingerprint);
 }
 
 pub fn roleForPrincipal(allocator: Allocator, repo: Repo, principal: []const u8) !?[]u8 {
@@ -867,39 +860,65 @@ fn lookupObjectIdByHashRefInDb(
 }
 
 pub fn lookupLegacyGithubObjectId(allocator: Allocator, repo: Repo, object_kind: []const u8, number: i64) !?[]u8 {
+    return try lookupLegacyProviderObjectId(allocator, repo, "github", object_kind, number);
+}
+
+pub fn lookupLegacyGitlabObjectId(allocator: Allocator, repo: Repo, object_kind: []const u8, number: i64) !?[]u8 {
+    return try lookupLegacyProviderObjectId(allocator, repo, "gitlab", object_kind, number);
+}
+
+pub fn lookupLegacyProviderObjectId(allocator: Allocator, repo: Repo, provider: []const u8, object_kind: []const u8, number: i64) !?[]u8 {
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
-    return try lookupLegacyGithubObjectIdInDb(allocator, &db, object_kind, number);
+    return try lookupLegacyProviderObjectIdInDb(allocator, &db, provider, object_kind, number);
 }
 
 fn lookupLegacyGithubObjectIdInDb(allocator: Allocator, db: *SqliteDb, object_kind: []const u8, number: i64) !?[]u8 {
+    return try lookupLegacyProviderObjectIdInDb(allocator, db, "github", object_kind, number);
+}
+
+fn lookupLegacyProviderObjectIdInDb(allocator: Allocator, db: *SqliteDb, provider: []const u8, object_kind: []const u8, number: i64) !?[]u8 {
     var stmt = try db.prepare(
         \\SELECT object_id
         \\FROM legacy_aliases
-        \\WHERE provider = 'github' AND object_kind = ? AND number = ?
+        \\WHERE provider = ? AND object_kind = ? AND number = ?
     );
     defer stmt.deinit();
-    try stmt.bindText(1, object_kind);
-    try stmt.bindInt64(2, number);
+    try stmt.bindText(1, provider);
+    try stmt.bindText(2, object_kind);
+    try stmt.bindInt64(3, number);
     if (!(try stmt.step())) return null;
     return try stmt.columnTextDup(allocator, 0);
 }
 
 pub fn legacyGithubNumberForObject(allocator: Allocator, repo: Repo, object_kind: []const u8, object_id: []const u8) !?i64 {
+    return try legacyProviderNumberForObject(allocator, repo, "github", object_kind, object_id);
+}
+
+pub fn legacyGitlabNumberForObject(allocator: Allocator, repo: Repo, object_kind: []const u8, object_id: []const u8) !?i64 {
+    return try legacyProviderNumberForObject(allocator, repo, "gitlab", object_kind, object_id);
+}
+
+pub fn legacyProviderNumberForObject(allocator: Allocator, repo: Repo, provider: []const u8, object_kind: []const u8, object_id: []const u8) !?i64 {
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
-    return try legacyGithubNumberForObjectInDb(&db, object_kind, object_id);
+    return try legacyProviderNumberForObjectInDb(&db, provider, object_kind, object_id);
 }
 
 fn legacyGithubNumberForObjectInDb(db: *SqliteDb, object_kind: []const u8, object_id: []const u8) !?i64 {
+    return try legacyProviderNumberForObjectInDb(db, "github", object_kind, object_id);
+}
+
+fn legacyProviderNumberForObjectInDb(db: *SqliteDb, provider: []const u8, object_kind: []const u8, object_id: []const u8) !?i64 {
     var stmt = try db.prepare(
         \\SELECT number
         \\FROM legacy_aliases
-        \\WHERE provider = 'github' AND object_kind = ? AND object_id = ?
+        \\WHERE provider = ? AND object_kind = ? AND object_id = ?
     );
     defer stmt.deinit();
-    try stmt.bindText(1, object_kind);
-    try stmt.bindText(2, object_id);
+    try stmt.bindText(1, provider);
+    try stmt.bindText(2, object_kind);
+    try stmt.bindText(3, object_id);
     if (!(try stmt.step())) return null;
     return stmt.columnInt64(0);
 }

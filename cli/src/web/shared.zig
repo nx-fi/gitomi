@@ -23,7 +23,7 @@ const loadConfig = repo_mod.loadConfig;
 const default_web_shortcut_leader = "Space";
 const default_web_shortcut_keys = "A S D F J K L E R U I O W Q P Z X C V B N M G H Y T";
 const default_web_shortcut_timeout_ms: u64 = 900;
-const asset_version = "20260516-projects";
+const asset_version = "20260517-pdf-preview";
 
 const WebStats = struct {
     inbox_refs: usize = 0,
@@ -84,7 +84,32 @@ const WorkItemReferenceKind = enum {
     pull,
 };
 
+const LegacyProviderKind = enum {
+    github,
+    gitlab,
+};
+
 const max_internal_reference_links_per_text: usize = 64;
+
+pub const LegacyReference = struct {
+    provider: []u8,
+    number: i64,
+
+    pub fn deinit(self: *LegacyReference, allocator: Allocator) void {
+        allocator.free(self.provider);
+    }
+};
+
+pub const LegacyRemoteLinks = struct {
+    github_base: ?[]u8 = null,
+    gitlab_base: ?[]u8 = null,
+
+    pub fn deinit(self: *LegacyRemoteLinks, allocator: Allocator) void {
+        if (self.github_base) |value| allocator.free(value);
+        if (self.gitlab_base) |value| allocator.free(value);
+        self.* = .{};
+    }
+};
 
 pub const InternalReferenceResolver = struct {
     allocator: Allocator,
@@ -291,6 +316,80 @@ pub fn appendIssueReferenceLink(buf: *std.ArrayList(u8), allocator: Allocator, i
     try buf.appendSlice(allocator, "</a>");
 }
 
+pub fn appendPullReferenceLink(buf: *std.ArrayList(u8), allocator: Allocator, pull_ref: []const u8) !void {
+    try buf.appendSlice(allocator, "<a href=\"");
+    try appendHref(buf, allocator, pullHref(pull_ref));
+    try buf.appendSlice(allocator, "\">#");
+    try appendHtml(buf, allocator, pull_ref);
+    try buf.appendSlice(allocator, "</a>");
+}
+
+pub fn loadLegacyRemoteLinks(allocator: Allocator, repo: Repo) LegacyRemoteLinks {
+    var links: LegacyRemoteLinks = .{};
+    var result = git.runCommand(allocator, &.{ "git", "-C", repo.root, "remote", "-v" }, null, 512 * 1024) catch return links;
+    defer result.deinit();
+    if (result.exitCode() != 0) return links;
+
+    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+    while (lines.next()) |line| {
+        var fields = std.mem.tokenizeAny(u8, line, " \t");
+        _ = fields.next() orelse continue;
+        const raw_url = fields.next() orelse continue;
+        const parsed = remoteWebBaseOwned(allocator, raw_url) catch null;
+        if (parsed) |web_base| {
+            switch (web_base.provider) {
+                .github => {
+                    if (links.github_base == null) {
+                        links.github_base = web_base.base;
+                    } else {
+                        allocator.free(web_base.base);
+                    }
+                },
+                .gitlab => {
+                    if (links.gitlab_base == null) {
+                        links.gitlab_base = web_base.base;
+                    } else {
+                        allocator.free(web_base.base);
+                    }
+                },
+            }
+        }
+    }
+    return links;
+}
+
+pub fn loadLegacyReference(allocator: Allocator, db: *index.SqliteDb, object_kind: []const u8, object_id: []const u8) !?LegacyReference {
+    var stmt = try db.prepare(
+        \\SELECT provider, number
+        \\FROM legacy_aliases
+        \\WHERE object_kind = ?
+        \\  AND object_id = ?
+        \\  AND lower(provider) IN ('github', 'gitlab')
+        \\ORDER BY CASE lower(provider)
+        \\  WHEN 'github' THEN 0
+        \\  WHEN 'gitlab' THEN 1
+        \\  ELSE 2
+        \\END
+        \\LIMIT 1
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, object_kind);
+    try stmt.bindText(2, object_id);
+    if (!(try stmt.step())) return null;
+    return .{
+        .provider = try stmt.columnTextDup(allocator, 0),
+        .number = stmt.columnInt64(1),
+    };
+}
+
+pub fn appendLegacyIssueReference(buf: *std.ArrayList(u8), allocator: Allocator, remote_links: *const LegacyRemoteLinks, provider: []const u8, number: i64) !void {
+    try appendLegacyReference(buf, allocator, remote_links, provider, "issue", number);
+}
+
+pub fn appendLegacyPullReference(buf: *std.ArrayList(u8), allocator: Allocator, remote_links: *const LegacyRemoteLinks, provider: []const u8, number: i64) !void {
+    try appendLegacyReference(buf, allocator, remote_links, provider, "pull", number);
+}
+
 pub fn appendIssueLinkedText(buf: *std.ArrayList(u8), allocator: Allocator, value: []const u8) !void {
     var plain_start: usize = 0;
     var i: usize = 0;
@@ -380,6 +479,123 @@ fn appendInternalReferenceLink(
     try buf.appendSlice(allocator, "\">#");
     try appendHtml(buf, allocator, token);
     try buf.appendSlice(allocator, "</a>");
+}
+
+fn appendLegacyReference(buf: *std.ArrayList(u8), allocator: Allocator, remote_links: *const LegacyRemoteLinks, provider: []const u8, object_kind: []const u8, number: i64) !void {
+    const label = legacyProviderLabel(provider);
+    if (try legacyExternalUrlOwned(allocator, remote_links, provider, object_kind, number)) |external_url| {
+        defer allocator.free(external_url);
+        try buf.appendSlice(allocator, "<a class=\"legacy-provider-link\" href=\"");
+        try appendHref(buf, allocator, literalHref(external_url));
+        try buf.appendSlice(allocator, "\" target=\"_blank\" rel=\"noopener noreferrer\" aria-label=\"Open ");
+        try appendHtml(buf, allocator, label);
+        try buf.append(allocator, ' ');
+        try std.fmt.format(buf.writer(allocator), "#{d}", .{number});
+        try buf.appendSlice(allocator, " externally\">");
+        try appendHtml(buf, allocator, label);
+        try buf.appendSlice(allocator, "<span class=\"legacy-external-icon\" aria-hidden=\"true\"></span></a>");
+    } else {
+        try buf.appendSlice(allocator, "<span class=\"legacy-provider-label\">");
+        try appendHtml(buf, allocator, label);
+        try buf.appendSlice(allocator, "</span>");
+    }
+    try buf.append(allocator, ' ');
+
+    const number_ref = try std.fmt.allocPrint(allocator, "{d}", .{number});
+    defer allocator.free(number_ref);
+    if (std.mem.eql(u8, object_kind, "pull")) {
+        try appendPullReferenceLink(buf, allocator, number_ref);
+    } else {
+        try appendIssueReferenceLink(buf, allocator, number_ref);
+    }
+}
+
+fn legacyExternalUrlOwned(allocator: Allocator, remote_links: *const LegacyRemoteLinks, provider: []const u8, object_kind: []const u8, number: i64) !?[]u8 {
+    if (legacyProviderKind(provider)) |kind| {
+        return switch (kind) {
+            .github => if (remote_links.github_base) |base| try githubLegacyUrlOwned(allocator, base, object_kind, number) else null,
+            .gitlab => if (remote_links.gitlab_base) |base| try gitlabLegacyUrlOwned(allocator, base, object_kind, number) else null,
+        };
+    }
+    return null;
+}
+
+fn githubLegacyUrlOwned(allocator: Allocator, base: []const u8, object_kind: []const u8, number: i64) ![]u8 {
+    const path = if (std.mem.eql(u8, object_kind, "pull")) "pull" else "issues";
+    return try std.fmt.allocPrint(allocator, "{s}/{s}/{d}", .{ base, path, number });
+}
+
+fn gitlabLegacyUrlOwned(allocator: Allocator, base: []const u8, object_kind: []const u8, number: i64) ![]u8 {
+    const path = if (std.mem.eql(u8, object_kind, "pull")) "merge_requests" else "issues";
+    return try std.fmt.allocPrint(allocator, "{s}/-/{s}/{d}", .{ base, path, number });
+}
+
+fn legacyProviderLabel(provider: []const u8) []const u8 {
+    if (std.ascii.eqlIgnoreCase(provider, "github")) return "GitHub";
+    if (std.ascii.eqlIgnoreCase(provider, "gitlab")) return "GitLab";
+    return provider;
+}
+
+fn legacyProviderKind(provider: []const u8) ?LegacyProviderKind {
+    if (std.ascii.eqlIgnoreCase(provider, "github")) return .github;
+    if (std.ascii.eqlIgnoreCase(provider, "gitlab")) return .gitlab;
+    return null;
+}
+
+const RemoteWebBase = struct {
+    provider: LegacyProviderKind,
+    base: []u8,
+};
+
+fn remoteWebBaseOwned(allocator: Allocator, raw_url: []const u8) !?RemoteWebBase {
+    const url = std.mem.trim(u8, raw_url, " \t\r\n");
+    if (url.len == 0) return null;
+
+    if (std.mem.indexOf(u8, url, "://")) |scheme_end| {
+        const scheme = url[0..scheme_end];
+        const rest = url[scheme_end + 3 ..];
+        const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
+        const authority = rest[0..slash];
+        const path = rest[slash + 1 ..];
+        const userinfo_end = std.mem.lastIndexOfScalar(u8, authority, '@');
+        const host = if (userinfo_end) |idx| authority[idx + 1 ..] else authority;
+        const web_scheme = if (std.ascii.eqlIgnoreCase(scheme, "http")) "http" else "https";
+        return try remoteWebBaseFromHostPathOwned(allocator, web_scheme, host, path);
+    }
+
+    const at = std.mem.indexOfScalar(u8, url, '@') orelse return null;
+    const colon = std.mem.indexOfScalarPos(u8, url, at + 1, ':') orelse return null;
+    return try remoteWebBaseFromHostPathOwned(allocator, "https", url[at + 1 .. colon], url[colon + 1 ..]);
+}
+
+fn remoteWebBaseFromHostPathOwned(allocator: Allocator, scheme: []const u8, raw_host: []const u8, raw_path: []const u8) !?RemoteWebBase {
+    const host = std.mem.trim(u8, raw_host, " \t\r\n");
+    if (host.len == 0) return null;
+    const provider = legacyProviderKindForHost(host) orelse return null;
+    var path = std.mem.trim(u8, raw_path, " /\t\r\n");
+    if (std.mem.endsWith(u8, path, ".git")) path = path[0 .. path.len - ".git".len];
+    path = std.mem.trimRight(u8, path, "/");
+    if (path.len == 0) return null;
+    return .{
+        .provider = provider,
+        .base = try std.fmt.allocPrint(allocator, "{s}://{s}/{s}", .{ scheme, host, path }),
+    };
+}
+
+fn legacyProviderKindForHost(host: []const u8) ?LegacyProviderKind {
+    if (asciiContainsIgnoreCase(host, "github")) return .github;
+    if (asciiContainsIgnoreCase(host, "gitlab")) return .gitlab;
+    return null;
+}
+
+fn asciiContainsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
+    }
+    return false;
 }
 
 fn isPositiveDecimalReference(value: []const u8) bool {
@@ -555,6 +771,7 @@ pub fn appendShellEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
         \\<script src="/shortcuts.js?v={asset_version}"></script>
         \\<script src="/tree.js?v={asset_version}"></script>
         \\<script src="/code.js?v={asset_version}"></script>
+        \\<script src="/pdf.js?v={asset_version}"></script>
         \\<script src="/projects.js?v={asset_version}"></script>
         \\<script src="/vendor/marked/marked.umd.min.js"></script>
         \\<script src="/vendor/dompurify/purify.min.js"></script>
@@ -1320,6 +1537,50 @@ test "web shell stylesheets are local assets" {
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "@latest") == null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/vendor/devicon/devicon.min.css?v=") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/style.css?v=") != null);
+}
+
+test "web work item reference links point to detail pages" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendIssueReferenceLink(&buf, std.testing.allocator, "abc1234");
+    try buf.append(std.testing.allocator, ' ');
+    try appendPullReferenceLink(&buf, std.testing.allocator, "def5678");
+
+    try std.testing.expectEqualStrings("<a href=\"/issues/abc1234\">#abc1234</a> <a href=\"/pulls/def5678\">#def5678</a>", buf.items);
+}
+
+test "web legacy references split external provider and internal number links" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    var remotes = LegacyRemoteLinks{
+        .github_base = try std.testing.allocator.dupe(u8, "https://github.com/Owner/Repo"),
+        .gitlab_base = try std.testing.allocator.dupe(u8, "https://gitlab.com/group/repo"),
+    };
+    defer remotes.deinit(std.testing.allocator);
+
+    try appendLegacyIssueReference(&buf, std.testing.allocator, &remotes, "Github", 3);
+    try buf.append(std.testing.allocator, ' ');
+    try appendLegacyPullReference(&buf, std.testing.allocator, &remotes, "gitlab", 4);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"https://github.com/Owner/Repo/issues/3\" target=\"_blank\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, ">GitHub<span class=\"legacy-external-icon\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues/3\">#3</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"https://gitlab.com/group/repo/-/merge_requests/4\" target=\"_blank\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, ">GitLab<span class=\"legacy-external-icon\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/pulls/4\">#4</a>") != null);
+}
+
+test "web remote url parsing finds GitHub and GitLab web bases" {
+    const github = (try remoteWebBaseOwned(std.testing.allocator, "git@GitHub.com:Owner/Repo.git")).?;
+    defer std.testing.allocator.free(github.base);
+    try std.testing.expectEqual(LegacyProviderKind.github, github.provider);
+    try std.testing.expectEqualStrings("https://GitHub.com/Owner/Repo", github.base);
+
+    const gitlab = (try remoteWebBaseOwned(std.testing.allocator, "https://gitlab.com/group/sub/repo.git")).?;
+    defer std.testing.allocator.free(gitlab.base);
+    try std.testing.expectEqual(LegacyProviderKind.gitlab, gitlab.provider);
+    try std.testing.expectEqualStrings("https://gitlab.com/group/sub/repo", gitlab.base);
 }
 
 test "web issue linked text autolinks legacy and hash references" {

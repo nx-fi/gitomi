@@ -11,6 +11,7 @@ const git = @import("git.zig");
 const github = @import("github.zig");
 const github_common = @import("github/common.zig");
 const github_live = @import("github/live.zig");
+const gitlab = @import("gitlab.zig");
 const index = @import("index.zig");
 const io = @import("io.zig");
 const issue = @import("issue.zig");
@@ -64,6 +65,7 @@ const command_dispatch = std.StaticStringMap(Command).initComptime(.{
     .{ "runs", Command{ .handler = runRuns, .command_name = "gt runs" } },
     .{ "sync", Command{ .handler = runSync, .command_name = "gt sync" } },
     .{ "github", Command{ .handler = runGithub, .command_name = "gt github" } },
+    .{ "gitlab", Command{ .handler = runGitlab, .command_name = "gt gitlab" } },
     .{ "web", Command{ .handler = runWeb, .command_name = "gt web" } },
 });
 
@@ -203,6 +205,10 @@ fn runGithub(allocator: Allocator, args: []const []const u8, _: []const u8) !voi
     try github.cmdGithub(allocator, args);
 }
 
+fn runGitlab(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
+    try gitlab.cmdGitlab(allocator, args);
+}
+
 fn runWeb(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
     try cmdWeb(allocator, args);
 }
@@ -284,6 +290,9 @@ fn printUsage() !void {
         \\  gt github import [--repo OWNER/REPO] [--token-env NAME|--token-file PATH] [--from-file PATH] [--no-comments] [--no-projects]
         \\  gt github export --repo OWNER/REPO [--token-env NAME|--token-file PATH|--use-gh] [--dry-run] [--map-file PATH] [--reuse-legacy]
         \\  gt github live [--repo OWNER/REPO] --webhook-url URL (--secret-env NAME|--secret-file PATH) [--host 127.0.0.1] [--port 12656] [--path /github/webhook] [--remote REMOTE] [--interval-ms N] [--once] [--no-subscribe] [--dry-run] [--no-git-sync]
+        \\  gt gitlab import [--project GROUP/PROJECT] [--token-env NAME|--token-file PATH] [--from-file PATH] [--no-comments]
+        \\  gt gitlab export --project GROUP/PROJECT [--token-env NAME|--token-file PATH] [--dry-run] [--map-file PATH] [--reuse-legacy]
+        \\  gt gitlab sync --project GROUP/PROJECT [--token-env NAME|--token-file PATH] [--remote REMOTE] [--interval-ms N] [--max-pages N] [--dry-run] [--no-git-sync]
         \\  gt web [--local] [--host 127.0.0.1] [--port 12655] [--once]
         \\  gt web --live [--host 127.0.0.1] [--port 12655] [--repo OWNER/REPO] [--webhook-url URL] (--secret-env NAME|--secret-file PATH) [--live-host 127.0.0.1] [--live-port 12656] [--live-path /github/webhook] [--remote REMOTE] [--interval-ms N] [--no-subscribe] [--dry-run] [--no-git-sync]
         \\

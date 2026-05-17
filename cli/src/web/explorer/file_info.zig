@@ -481,8 +481,16 @@ pub fn mediaKindForPath(path: []const u8) ?MediaKind {
     return null;
 }
 
+pub fn isPdfPath(path: []const u8) bool {
+    return endsWithIgnoreCase(path, ".pdf");
+}
+
+pub fn isSvgPath(path: []const u8) bool {
+    return endsWithIgnoreCase(path, ".svg");
+}
+
 pub fn isImagePath(path: []const u8) bool {
-    return endsWithIgnoreCase(path, ".svg") or
+    return isSvgPath(path) or
         endsWithIgnoreCase(path, ".jpg") or
         endsWithIgnoreCase(path, ".jpeg") or
         endsWithIgnoreCase(path, ".png") or
@@ -502,6 +510,7 @@ pub fn isVideoPath(path: []const u8) bool {
 }
 
 pub fn contentTypeForPath(path: []const u8) []const u8 {
+    if (isPdfPath(path)) return "application/pdf";
     if (endsWithIgnoreCase(path, ".svg")) return "image/svg+xml";
     if (endsWithIgnoreCase(path, ".jpg") or endsWithIgnoreCase(path, ".jpeg")) return "image/jpeg";
     if (endsWithIgnoreCase(path, ".png")) return "image/png";

@@ -1403,8 +1403,18 @@ fn appendLegacyInfo(buf: *std.ArrayList(u8), allocator: Allocator, legacy: Legac
     }
 
     try buf.appendSlice(allocator, "\"legacy\":{");
-    if (legacy.github_issue_number) |number| try appendJsonFieldUnsigned(buf, allocator, "github_issue_number", number, legacy.github_pull_number != null);
-    if (legacy.github_pull_number) |number| try appendJsonFieldUnsigned(buf, allocator, "github_pull_number", number, false);
+    if (legacy.github_issue_number) |number| {
+        try appendJsonFieldUnsigned(buf, allocator, "github_issue_number", number, legacy.github_pull_number != null or legacy.gitlab_issue_iid != null or legacy.gitlab_merge_request_iid != null);
+    }
+    if (legacy.github_pull_number) |number| {
+        try appendJsonFieldUnsigned(buf, allocator, "github_pull_number", number, legacy.gitlab_issue_iid != null or legacy.gitlab_merge_request_iid != null);
+    }
+    if (legacy.gitlab_issue_iid) |number| {
+        try appendJsonFieldUnsigned(buf, allocator, "gitlab_issue_iid", number, legacy.gitlab_merge_request_iid != null);
+    }
+    if (legacy.gitlab_merge_request_iid) |number| {
+        try appendJsonFieldUnsigned(buf, allocator, "gitlab_merge_request_iid", number, false);
+    }
     try buf.appendSlice(allocator, "},");
 }
 

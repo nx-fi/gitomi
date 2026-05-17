@@ -50,6 +50,8 @@ pub fn renderIssuesPage(allocator: Allocator, repo: Repo, target: []const u8) ![
 
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
+    var legacy_links = shared.loadLegacyRemoteLinks(allocator, repo);
+    defer legacy_links.deinit(allocator);
 
     const requested_filter = try issueStateFilterFromTarget(allocator, target);
     const counts = try work_items.loadIssueCounts(&db);
@@ -78,7 +80,7 @@ pub fn renderIssuesPage(allocator: Allocator, repo: Repo, target: []const u8) ![
         const row = try work_items.issueListRowFromStmt(allocator, &stmt);
         defer row.deinit(allocator);
         const task_summary = shared.markdownTaskSummary(row.body);
-        try appendIssueListRow(&buf, allocator, &db, row.id, row.title, row.state, row.author, row.opened_at, row.state_at, row.milestone, row.comment_count, row.legacy_number, task_summary);
+        try appendIssueListRow(&buf, allocator, &db, &legacy_links, row.id, row.title, row.state, row.author, row.opened_at, row.state_at, row.milestone, row.comment_count, task_summary);
         shown += 1;
     }
 
@@ -490,6 +492,7 @@ fn appendIssueListRow(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
     db: *SqliteDb,
+    legacy_links: *const shared.LegacyRemoteLinks,
     id: []const u8,
     title: []const u8,
     state: []const u8,
@@ -498,7 +501,6 @@ fn appendIssueListRow(
     state_at: []const u8,
     milestone: []const u8,
     comment_count: usize,
-    legacy_number: i64,
     task_summary: shared.MarkdownTaskSummary,
 ) !void {
     var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
@@ -517,14 +519,13 @@ fn appendIssueListRow(
         .title = title,
     });
     try appendIssueRowLabels(buf, allocator, db, id);
-    try appendTemplate(buf, allocator,
-        \\</div><p class="issue-row-meta">#{id}
-    , .{
-        .id = issue_ref,
-    });
-    if (legacy_number > 0) {
-        try buf.appendSlice(allocator, " / GitHub ");
-        try appendLegacyIssueLink(buf, allocator, legacy_number);
+    try buf.appendSlice(allocator, "</div><p class=\"issue-row-meta\">");
+    try shared.appendIssueReferenceLink(buf, allocator, issue_ref);
+    var legacy_ref = try shared.loadLegacyReference(allocator, db, "issue", id);
+    defer if (legacy_ref) |*value| value.deinit(allocator);
+    if (legacy_ref) |value| {
+        try buf.appendSlice(allocator, " / ");
+        try shared.appendLegacyIssueReference(buf, allocator, legacy_links, value.provider, value.number);
     }
     try appendTemplate(buf, allocator,
         \\ by {author} {verb}
@@ -601,12 +602,6 @@ fn appendIssueAssignees(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqli
         try shared.appendAvatar(buf, allocator, assignee, "");
     }
     if (shown) try buf.appendSlice(allocator, "</span>");
-}
-
-fn appendLegacyIssueLink(buf: *std.ArrayList(u8), allocator: Allocator, legacy_number: i64) !void {
-    const issue_ref = try std.fmt.allocPrint(allocator, "{d}", .{legacy_number});
-    defer allocator.free(issue_ref);
-    try shared.appendIssueReferenceLink(buf, allocator, issue_ref);
 }
 
 fn issueSortLabel(sort: IssueSort) []const u8 {

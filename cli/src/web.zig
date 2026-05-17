@@ -58,8 +58,11 @@ const routes = [_]Route{
     Route.static("/shortcuts.js", "application/javascript", shortcuts_js),
     Route.static("/tree.js", "application/javascript", tree_js),
     Route.static("/code.js", "application/javascript", code_js),
+    Route.static("/pdf.js", "application/javascript", pdf_js),
     Route.static("/projects.js", "application/javascript", projects_js),
     Route.static("/markdown.js", "application/javascript", markdown_js),
+    Route.static("/vendor/pdfjs/build/pdf.mjs", "application/javascript", pdfjs_mjs),
+    Route.static("/vendor/pdfjs/build/pdf.worker.mjs", "application/javascript", pdfjs_worker_mjs),
     Route.static("/vendor/hljs/all-languages.min.js", "application/javascript", highlight_js),
     Route.static("/highlight/zig.js", "application/javascript", highlight_zig_js),
     Route.static("/highlight/solidity.js", "application/javascript", solidity_js),
@@ -912,8 +915,11 @@ const ui_js = @embedFile("web/ui.js");
 const shortcuts_js = @embedFile("web/shortcuts.js");
 const tree_js = @embedFile("web/tree.js");
 const code_js = @embedFile("web/code.js");
+const pdf_js = @embedFile("web/pdf.js");
 const projects_js = @embedFile("web/projects.js");
 const markdown_js = @embedFile("web/markdown.js");
+const pdfjs_mjs = @embedFile("web/vendor/pdfjs/build/pdf.mjs");
+const pdfjs_worker_mjs = @embedFile("web/vendor/pdfjs/build/pdf.worker.mjs");
 const marked_js = @embedFile("web/vendor/marked/marked.umd.min.js");
 const dompurify_js = @embedFile("web/vendor/dompurify/purify.min.js");
 const katex_js = @embedFile("web/vendor/katex/katex.min.js");
@@ -1343,6 +1349,28 @@ test "web devicon stylesheets and fonts are vendored" {
     try expectVendorAsset("/vendor/devicon/fonts/devicon.ttf", "font/ttf", true);
     try expectVendorAsset("/vendor/devicon/fonts/devicon.woff", "font/woff", true);
     try expectVendorAsset("/vendor/devicon/fonts/devicon.svg", "image/svg+xml", true);
+}
+
+test "web PDF preview assets are routed" {
+    try expectStaticRoute("/pdf.js", "application/javascript", false);
+    try expectStaticRoute("/vendor/pdfjs/build/pdf.mjs", "application/javascript", false);
+    try expectStaticRoute("/vendor/pdfjs/build/pdf.worker.mjs", "application/javascript", false);
+}
+
+fn expectStaticRoute(path: []const u8, content_type: []const u8, binary: bool) !void {
+    for (routes) |route| {
+        if (!std.mem.eql(u8, route.path, path)) continue;
+        switch (route.action) {
+            .static_asset => |asset| {
+                try std.testing.expectEqualStrings(content_type, asset.content_type);
+                try std.testing.expectEqual(binary, asset.binary);
+                try std.testing.expect(asset.body.len > 0);
+                return;
+            },
+            .handler => return error.ExpectedStaticRoute,
+        }
+    }
+    return error.MissingStaticRoute;
 }
 
 fn expectVendorAsset(path: []const u8, content_type: []const u8, binary: bool) !void {
