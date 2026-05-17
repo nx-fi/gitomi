@@ -586,7 +586,23 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!optionalString(payload, "description")) return "project.updated payload.description must be a string";
         if (!optionalStringWithin(payload, "description", git.max_payload_text_bytes)) return "project.updated payload.description exceeds v1 text size limit";
         if (!optionalState(payload, "state", &.{ "open", "closed" })) return "project.updated payload.state must be open or closed";
-        if (!hasAnyKey(payload, &.{ "name", "description", "state" })) return "project.updated payload must contain at least one update field";
+        if (!optionalIssueStatus(payload, "status")) return "project.updated payload.status must be Draft, Todo, WIP, Review, Done, or Failed";
+        if (!optionalIssuePriority(payload, "priority")) return "project.updated payload.priority must be P0, P1, P2, or P3";
+        if (!optionalDateString(payload, "start_at")) return "project.updated payload.start_at must be YYYY-MM-DD";
+        if (!optionalDateString(payload, "end_at")) return "project.updated payload.end_at must be YYYY-MM-DD";
+        if (!optionalStringArray(payload, "leads_added")) return "project.updated payload.leads_added must be an array of strings";
+        if (!optionalStringArrayWithin(payload, "leads_added", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "project.updated payload.leads_added exceeds v1 collection limits";
+        if (!optionalStringArray(payload, "leads_removed")) return "project.updated payload.leads_removed must be an array of strings";
+        if (!optionalStringArrayWithin(payload, "leads_removed", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "project.updated payload.leads_removed exceeds v1 collection limits";
+        if (!optionalStringArray(payload, "members_added")) return "project.updated payload.members_added must be an array of strings";
+        if (!optionalStringArrayWithin(payload, "members_added", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "project.updated payload.members_added exceeds v1 collection limits";
+        if (!optionalStringArray(payload, "members_removed")) return "project.updated payload.members_removed must be an array of strings";
+        if (!optionalStringArrayWithin(payload, "members_removed", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "project.updated payload.members_removed exceeds v1 collection limits";
+        if (!optionalStringArray(payload, "labels_added")) return "project.updated payload.labels_added must be an array of strings";
+        if (!optionalStringArrayWithin(payload, "labels_added", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "project.updated payload.labels_added exceeds v1 collection limits";
+        if (!optionalStringArray(payload, "labels_removed")) return "project.updated payload.labels_removed must be an array of strings";
+        if (!optionalStringArrayWithin(payload, "labels_removed", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "project.updated payload.labels_removed exceeds v1 collection limits";
+        if (!hasAnyKey(payload, &.{ "name", "description", "state", "status", "priority", "start_at", "end_at", "leads_added", "leads_removed", "members_added", "members_removed", "labels_added", "labels_removed" })) return "project.updated payload must contain at least one update field";
         return null;
     }
     if (std.mem.eql(u8, event_type, "project.column_added") or std.mem.eql(u8, event_type, "project.column_removed")) {
@@ -1146,6 +1162,28 @@ fn optionalStringWithin(object: std.json.ObjectMap, key: []const u8, max_bytes: 
         else => return false,
     };
     return string.len <= max_bytes;
+}
+
+fn optionalDateString(object: std.json.ObjectMap, key: []const u8) bool {
+    const value = object.get(key) orelse return true;
+    const string = switch (value) {
+        .string => |s| s,
+        else => return false,
+    };
+    return isDateString(string);
+}
+
+fn isDateString(value: []const u8) bool {
+    if (value.len == 0) return true;
+    if (value.len != 10) return false;
+    for (value, 0..) |char, index_value| {
+        if (index_value == 4 or index_value == 7) {
+            if (char != '-') return false;
+        } else if (!std.ascii.isDigit(char)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 fn optionalObjectWithin(object: std.json.ObjectMap, key: []const u8, max_bytes: usize) bool {

@@ -1,5 +1,9 @@
 const std = @import("std");
+const cmd_common = @import("../../cmd_common.zig");
+const event_mod = @import("../../event.zig");
 const index = @import("../../index.zig");
+const issues_page = @import("../issues.zig");
+const project_mod = @import("../../project.zig");
 const repo_mod = @import("../../repo.zig");
 const util = @import("../../util.zig");
 const project_issue_render = @import("issue_render.zig");
@@ -9,8 +13,13 @@ const shared = @import("../shared.zig");
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
 const SqliteDb = index.SqliteDb;
+const createProjectUpdatedEvent = project_mod.createProjectUpdatedEvent;
+const formValueOwned = issues_page.formValueOwned;
 const appendRelativeTime = shared.appendRelativeTime;
 const appendTemplate = shared.appendTemplate;
+const isIssuePriority = cmd_common.isIssuePriority;
+const sendPlainResponse = shared.sendPlainResponse;
+const sendRedirect = shared.sendRedirect;
 
 pub const ProjectPageTab = enum {
     overview,
@@ -25,6 +34,10 @@ const ProjectSummary = struct {
     name: []u8,
     description: []u8,
     state: []u8,
+    status: []u8,
+    priority: []u8,
+    start_at: []u8,
+    end_at: []u8,
     created_at: []u8,
     author_principal: []u8,
 
@@ -33,6 +46,10 @@ const ProjectSummary = struct {
         allocator.free(self.name);
         allocator.free(self.description);
         allocator.free(self.state);
+        allocator.free(self.status);
+        allocator.free(self.priority);
+        allocator.free(self.start_at);
+        allocator.free(self.end_at);
         allocator.free(self.created_at);
         allocator.free(self.author_principal);
     }
@@ -43,26 +60,11 @@ const ProjectMetrics = struct {
     open_issue_count: usize = 0,
     closed_issue_count: usize = 0,
     comment_count: usize = 0,
-    assignee_count: usize = 0,
+    member_count: usize = 0,
     label_count: usize = 0,
     milestone_count: usize = 0,
     field_count: usize = 0,
     view_count: usize = 0,
-    top_status: []u8,
-    top_status_count: usize = 0,
-    top_priority: []u8,
-    top_priority_count: usize = 0,
-    start_at: []u8,
-    end_at: []u8,
-    lead: []u8,
-
-    fn deinit(self: *ProjectMetrics, allocator: Allocator) void {
-        allocator.free(self.top_status);
-        allocator.free(self.top_priority);
-        allocator.free(self.start_at);
-        allocator.free(self.end_at);
-        allocator.free(self.lead);
-    }
 };
 
 pub fn appendProjectOverview(
@@ -72,10 +74,10 @@ pub fn appendProjectOverview(
     db: *SqliteDb,
     project: []const u8,
 ) !void {
+    _ = repo;
     var summary = try loadProjectSummary(allocator, db, project);
     defer summary.deinit(allocator);
-    var metrics = try loadProjectMetrics(allocator, db, &summary);
-    defer metrics.deinit(allocator);
+    const metrics = try loadProjectMetrics(allocator, db, &summary);
 
     try buf.appendSlice(allocator, "<section class=\"project-overview-page\">");
     try appendProjectOverviewHeader(buf, allocator, &summary, &metrics);
@@ -84,7 +86,7 @@ pub fn appendProjectOverview(
         \\<div class="project-overview-layout">
         \\  <div class="project-overview-main">
     );
-    try appendProjectInlineProperties(buf, allocator, repo, &summary, &metrics);
+    try appendProjectInlineProperties(buf, allocator, db, &summary, &metrics);
     try appendProjectResources(buf, allocator, project);
     try appendProjectUpdateBox(buf, allocator);
     try appendProjectDescription(buf, allocator, &summary);
@@ -93,7 +95,7 @@ pub fn appendProjectOverview(
         \\  </div>
         \\  <aside class="project-overview-sidebar">
     );
-    try appendProjectPropertiesPanel(buf, allocator, repo, &summary, &metrics);
+    try appendProjectPropertiesPanel(buf, allocator, db, &summary, &metrics);
     try appendProjectMilestones(buf, allocator, db, project, .sidebar);
     try appendProjectActivityPanel(buf, allocator, db, &summary, project);
     try buf.appendSlice(allocator,
@@ -110,10 +112,10 @@ pub fn appendProjectActivityView(
     db: *SqliteDb,
     project: []const u8,
 ) !void {
+    _ = repo;
     var summary = try loadProjectSummary(allocator, db, project);
     defer summary.deinit(allocator);
-    var metrics = try loadProjectMetrics(allocator, db, &summary);
-    defer metrics.deinit(allocator);
+    const metrics = try loadProjectMetrics(allocator, db, &summary);
 
     try buf.appendSlice(allocator, "<section class=\"project-overview-page project-activity-page\">");
     try appendProjectOverviewHeader(buf, allocator, &summary, &metrics);
@@ -127,7 +129,7 @@ pub fn appendProjectActivityView(
         \\  </div>
         \\  <aside class="project-overview-sidebar">
     );
-    try appendProjectPropertiesPanel(buf, allocator, repo, &summary, &metrics);
+    try appendProjectPropertiesPanel(buf, allocator, db, &summary, &metrics);
     try appendProjectMilestones(buf, allocator, db, project, .sidebar);
     try buf.appendSlice(allocator,
         \\  </aside>
@@ -136,9 +138,166 @@ pub fn appendProjectActivityView(
     );
 }
 
+pub fn handleProjectPropertiesPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
+    try index.ensureIndex(allocator, repo);
+
+    const action_owned = try formTrimmedOwned(allocator, form_body, "action");
+    defer allocator.free(action_owned);
+    const project_ref_owned = try formTrimmedOwned(allocator, form_body, "project_id");
+    defer allocator.free(project_ref_owned);
+    const project_name_owned = try formTrimmedOwned(allocator, form_body, "project");
+    defer allocator.free(project_name_owned);
+
+    if (action_owned.len == 0) {
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Project property action is required\n");
+        return;
+    }
+
+    const project_ref = if (project_ref_owned.len != 0) project_ref_owned else project_name_owned;
+    if (project_ref.len == 0) {
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Project is required\n");
+        return;
+    }
+
+    const project_id = index.resolveProjectId(allocator, repo, project_ref) catch {
+        try sendPlainResponse(allocator, stream, 404, "Not Found", "Project not found\n");
+        return;
+    };
+    defer allocator.free(project_id);
+
+    if (std.mem.eql(u8, action_owned, "set-status")) {
+        const status_owned = try requiredProjectFormValue(allocator, stream, form_body, "status", "Status is required\n");
+        const status = status_owned orelse return;
+        defer allocator.free(status);
+        if (!project_views.isProjectStatusValue(status)) {
+            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Status must be Draft, Todo, WIP, Review, Done, or Failed\n");
+            return;
+        }
+        if (!(try writeProjectUpdateOrFail(allocator, stream, project_id, .{ .status = status }))) return;
+    } else if (std.mem.eql(u8, action_owned, "set-priority")) {
+        const priority_owned = try requiredProjectFormValue(allocator, stream, form_body, "priority", "Priority is required\n");
+        const priority = priority_owned orelse return;
+        defer allocator.free(priority);
+        if (!isIssuePriority(priority)) {
+            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Priority must be P0, P1, P2, or P3\n");
+            return;
+        }
+        if (!(try writeProjectUpdateOrFail(allocator, stream, project_id, .{ .priority = priority }))) return;
+    } else if (std.mem.eql(u8, action_owned, "set-dates")) {
+        const start_owned = try requiredProjectFormValue(allocator, stream, form_body, "start_at", "Start date is required\n");
+        const start_at = start_owned orelse return;
+        defer allocator.free(start_at);
+        const end_owned = try formTrimmedOwned(allocator, form_body, "end_at");
+        defer allocator.free(end_owned);
+        if (!isProjectDateValue(start_at) or !isProjectDateValue(end_owned)) {
+            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Dates must use YYYY-MM-DD\n");
+            return;
+        }
+        if (end_owned.len != 0 and std.mem.order(u8, end_owned, start_at) != .gt) {
+            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "End date must be after start date\n");
+            return;
+        }
+        if (!(try writeProjectUpdateOrFail(allocator, stream, project_id, .{ .start_at = start_at, .end_at = end_owned }))) return;
+    } else if (std.mem.eql(u8, action_owned, "add-lead") or std.mem.eql(u8, action_owned, "remove-lead")) {
+        const value_owned = try requiredProjectFormValue(allocator, stream, form_body, "value", "Lead is required\n");
+        const value = value_owned orelse return;
+        defer allocator.free(value);
+        const values = [_][]const u8{value};
+        var update = event_mod.ProjectUpdate{};
+        if (std.mem.eql(u8, action_owned, "add-lead")) {
+            update.leads_added = values[0..];
+        } else {
+            update.leads_removed = values[0..];
+        }
+        if (!(try writeProjectUpdateOrFail(allocator, stream, project_id, update))) return;
+    } else if (std.mem.eql(u8, action_owned, "add-member") or std.mem.eql(u8, action_owned, "remove-member")) {
+        const value_owned = try requiredProjectFormValue(allocator, stream, form_body, "value", "Member is required\n");
+        const value = value_owned orelse return;
+        defer allocator.free(value);
+        const values = [_][]const u8{value};
+        var update = event_mod.ProjectUpdate{};
+        if (std.mem.eql(u8, action_owned, "add-member")) {
+            update.members_added = values[0..];
+        } else {
+            update.members_removed = values[0..];
+        }
+        if (!(try writeProjectUpdateOrFail(allocator, stream, project_id, update))) return;
+    } else if (std.mem.eql(u8, action_owned, "add-label") or std.mem.eql(u8, action_owned, "remove-label")) {
+        const value_owned = try requiredProjectFormValue(allocator, stream, form_body, "value", "Label is required\n");
+        const value = value_owned orelse return;
+        defer allocator.free(value);
+        const values = [_][]const u8{value};
+        var update = event_mod.ProjectUpdate{};
+        if (std.mem.eql(u8, action_owned, "add-label")) {
+            update.labels_added = values[0..];
+        } else {
+            update.labels_removed = values[0..];
+        }
+        if (!(try writeProjectUpdateOrFail(allocator, stream, project_id, update))) return;
+    } else {
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Unknown project property action\n");
+        return;
+    }
+
+    const location = try projectOverviewLocationOwned(allocator, project_name_owned, project_ref);
+    defer allocator.free(location);
+    try sendRedirect(allocator, stream, location);
+}
+
+fn formTrimmedOwned(allocator: Allocator, form_body: []const u8, wanted_key: []const u8) ![]u8 {
+    const owned = (try formValueOwned(allocator, form_body, wanted_key)) orelse try allocator.dupe(u8, "");
+    defer allocator.free(owned);
+    const trimmed = std.mem.trim(u8, owned, " \t\r\n");
+    return try allocator.dupe(u8, trimmed);
+}
+
+fn requiredProjectFormValue(allocator: Allocator, stream: std.net.Stream, form_body: []const u8, name: []const u8, message: []const u8) !?[]u8 {
+    const value_owned = try formTrimmedOwned(allocator, form_body, name);
+    errdefer allocator.free(value_owned);
+    if (value_owned.len == 0) {
+        allocator.free(value_owned);
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", message);
+        return null;
+    }
+    return value_owned;
+}
+
+fn writeProjectUpdateOrFail(allocator: Allocator, stream: std.net.Stream, project_id: []const u8, update: event_mod.ProjectUpdate) !bool {
+    createProjectUpdatedEvent(allocator, project_id, update) catch {
+        try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update project properties\n");
+        return false;
+    };
+    return true;
+}
+
+fn projectOverviewLocationOwned(allocator: Allocator, project_name: []const u8, fallback_ref: []const u8) ![]u8 {
+    var location: std.ArrayList(u8) = .empty;
+    errdefer location.deinit(allocator);
+    try location.appendSlice(allocator, "/projects?project=");
+    if (project_name.len != 0) {
+        try shared.appendUrlEncoded(&location, allocator, project_name);
+    } else {
+        try shared.appendUrlEncoded(&location, allocator, fallback_ref);
+    }
+    return location.toOwnedSlice(allocator);
+}
+
+fn isProjectDateValue(value: []const u8) bool {
+    if (value.len == 0) return true;
+    if (value.len != 10) return false;
+    for (value, 0..) |char, index_value| {
+        if (index_value == 4 or index_value == 7) {
+            if (char != '-') return false;
+        } else if (!std.ascii.isDigit(char)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 fn loadProjectSummary(allocator: Allocator, db: *SqliteDb, project: []const u8) !ProjectSummary {
     var stmt = try db.prepare(
-        \\SELECT id, name, description, state, created_at, author_principal
+        \\SELECT id, name, description, state, status, priority, start_at, end_at, created_at, author_principal
         \\FROM projects
         \\WHERE name = ?
         \\ORDER BY created_at DESC, id DESC
@@ -152,8 +311,12 @@ fn loadProjectSummary(allocator: Allocator, db: *SqliteDb, project: []const u8) 
             .name = try stmt.columnTextDup(allocator, 1),
             .description = try stmt.columnTextDup(allocator, 2),
             .state = try stmt.columnTextDup(allocator, 3),
-            .created_at = try stmt.columnTextDup(allocator, 4),
-            .author_principal = try stmt.columnTextDup(allocator, 5),
+            .status = try stmt.columnTextDup(allocator, 4),
+            .priority = try stmt.columnTextDup(allocator, 5),
+            .start_at = try stmt.columnTextDup(allocator, 6),
+            .end_at = try stmt.columnTextDup(allocator, 7),
+            .created_at = try stmt.columnTextDup(allocator, 8),
+            .author_principal = try stmt.columnTextDup(allocator, 9),
         };
     }
 
@@ -162,26 +325,20 @@ fn loadProjectSummary(allocator: Allocator, db: *SqliteDb, project: []const u8) 
         .name = try allocator.dupe(u8, project),
         .description = try allocator.dupe(u8, ""),
         .state = try allocator.dupe(u8, "open"),
+        .status = try allocator.dupe(u8, "WIP"),
+        .priority = try allocator.dupe(u8, ""),
+        .start_at = try allocator.dupe(u8, ""),
+        .end_at = try allocator.dupe(u8, ""),
         .created_at = try allocator.dupe(u8, ""),
         .author_principal = try allocator.dupe(u8, ""),
     };
 }
 
 fn loadProjectMetrics(allocator: Allocator, db: *SqliteDb, summary: *const ProjectSummary) !ProjectMetrics {
-    var metrics = ProjectMetrics{
-        .top_status = try allocator.dupe(u8, ""),
-        .top_priority = try allocator.dupe(u8, ""),
-        .start_at = try allocator.dupe(u8, ""),
-        .end_at = try allocator.dupe(u8, ""),
-        .lead = try allocator.dupe(u8, ""),
-    };
-    errdefer metrics.deinit(allocator);
-
+    _ = allocator;
+    var metrics = ProjectMetrics{};
     try loadProjectIssueCounts(db, summary.name, &metrics);
-    try loadProjectTopStatus(allocator, db, summary.name, &metrics);
-    try loadProjectTopPriority(allocator, db, summary.name, &metrics);
-    try loadProjectDateRange(allocator, db, summary.name, &metrics);
-    try loadProjectLead(allocator, db, summary.name, summary.author_principal, &metrics);
+    try loadProjectPropertyCounts(db, summary.id, &metrics);
     if (summary.id.len != 0) {
         metrics.field_count = try countProjectRows(db, "project_fields", summary.id, "state != 'removed'");
         metrics.view_count = try countProjectRows(db, "project_views", summary.id, "state != 'removed'");
@@ -210,14 +367,10 @@ fn loadProjectIssueCounts(db: *SqliteDb, project: []const u8, metrics: *ProjectM
         \\  COUNT(DISTINCT i.id),
         \\  COUNT(DISTINCT CASE WHEN i.state = 'open' THEN i.id END),
         \\  COUNT(DISTINCT CASE WHEN i.state = 'closed' THEN i.id END),
-        \\  COUNT(DISTINCT ia.assignee),
-        \\  COUNT(DISTINCT il.label),
         \\  COUNT(DISTINCT NULLIF(im.milestone, '')),
         \\  COUNT(DISTINCT c.id)
         \\FROM project_items p
         \\JOIN issues i ON i.id = p.issue_id
-        \\LEFT JOIN issue_assignees ia ON ia.issue_id = i.id
-        \\LEFT JOIN issue_labels il ON il.issue_id = i.id
         \\LEFT JOIN issue_metadata im ON im.issue_id = i.id
         \\LEFT JOIN comments c ON c.parent_kind = 'issue' AND c.parent_id = i.id
     ));
@@ -227,97 +380,14 @@ fn loadProjectIssueCounts(db: *SqliteDb, project: []const u8, metrics: *ProjectM
     metrics.issue_count = @intCast(stmt.columnInt64(0));
     metrics.open_issue_count = @intCast(stmt.columnInt64(1));
     metrics.closed_issue_count = @intCast(stmt.columnInt64(2));
-    metrics.assignee_count = @intCast(stmt.columnInt64(3));
-    metrics.label_count = @intCast(stmt.columnInt64(4));
-    metrics.milestone_count = @intCast(stmt.columnInt64(5));
-    metrics.comment_count = @intCast(stmt.columnInt64(6));
+    metrics.milestone_count = @intCast(stmt.columnInt64(3));
+    metrics.comment_count = @intCast(stmt.columnInt64(4));
 }
 
-fn loadProjectTopStatus(allocator: Allocator, db: *SqliteDb, project: []const u8, metrics: *ProjectMetrics) !void {
-    var stmt = try db.prepare(projectItemsCte(
-        \\SELECT
-        \\  CASE
-        \\    WHEN COALESCE(im.status, '') <> '' THEN im.status
-        \\    WHEN p.legacy_column <> '' THEN p.legacy_column
-        \\    ELSE ''
-        \\  END AS status_value,
-        \\  COUNT(DISTINCT p.issue_id)
-        \\FROM project_items p
-        \\JOIN issues i ON i.id = p.issue_id
-        \\LEFT JOIN issue_metadata im ON im.issue_id = p.issue_id
-        \\GROUP BY status_value
-        \\ORDER BY COUNT(DISTINCT p.issue_id) DESC, lower(status_value), status_value
-        \\LIMIT 1
-    ));
-    defer stmt.deinit();
-    try bindProjectNameTwice(&stmt, project);
-    if (!(try stmt.step())) return;
-    allocator.free(metrics.top_status);
-    metrics.top_status = try stmt.columnTextDup(allocator, 0);
-    metrics.top_status_count = @intCast(stmt.columnInt64(1));
-}
-
-fn loadProjectTopPriority(allocator: Allocator, db: *SqliteDb, project: []const u8, metrics: *ProjectMetrics) !void {
-    var stmt = try db.prepare(projectItemsCte(
-        \\SELECT COALESCE(im.priority, ''), COUNT(DISTINCT p.issue_id)
-        \\FROM project_items p
-        \\JOIN issues i ON i.id = p.issue_id
-        \\LEFT JOIN issue_metadata im ON im.issue_id = p.issue_id
-        \\GROUP BY COALESCE(im.priority, '')
-        \\ORDER BY COUNT(DISTINCT p.issue_id) DESC, COALESCE(im.priority, '')
-        \\LIMIT 1
-    ));
-    defer stmt.deinit();
-    try bindProjectNameTwice(&stmt, project);
-    if (!(try stmt.step())) return;
-    allocator.free(metrics.top_priority);
-    metrics.top_priority = try stmt.columnTextDup(allocator, 0);
-    metrics.top_priority_count = @intCast(stmt.columnInt64(1));
-}
-
-fn loadProjectDateRange(allocator: Allocator, db: *SqliteDb, project: []const u8, metrics: *ProjectMetrics) !void {
-    var stmt = try db.prepare(
-        \\SELECT
-        \\  COALESCE(MIN(CASE WHEN pf.key = 'start_at' THEN json_extract(pfv.value_json, '$') END), ''),
-        \\  COALESCE(
-        \\    MAX(CASE WHEN pf.key = 'end_at' THEN json_extract(pfv.value_json, '$') END),
-        \\    MAX(CASE WHEN pf.key = 'target_at' THEN json_extract(pfv.value_json, '$') END),
-        \\    ''
-        \\  )
-        \\FROM projects p
-        \\JOIN project_fields pf ON pf.project_id = p.id
-        \\JOIN project_field_values pfv ON pfv.project_id = p.id AND pfv.field_id = pf.id
-        \\WHERE p.name = ?
-        \\  AND pf.key IN ('start_at', 'end_at', 'target_at')
-        \\  AND pf.state != 'removed'
-        \\  AND COALESCE(json_extract(pfv.value_json, '$'), '') <> ''
-    );
-    defer stmt.deinit();
-    try stmt.bindText(1, project);
-    if (!(try stmt.step())) return;
-    allocator.free(metrics.start_at);
-    metrics.start_at = try stmt.columnTextDup(allocator, 0);
-    allocator.free(metrics.end_at);
-    metrics.end_at = try stmt.columnTextDup(allocator, 1);
-}
-
-fn loadProjectLead(allocator: Allocator, db: *SqliteDb, project: []const u8, fallback: []const u8, metrics: *ProjectMetrics) !void {
-    var stmt = try db.prepare(projectItemsCte(
-        \\SELECT ia.assignee, COUNT(DISTINCT ia.issue_id)
-        \\FROM project_items p
-        \\JOIN issue_assignees ia ON ia.issue_id = p.issue_id
-        \\GROUP BY ia.assignee
-        \\ORDER BY COUNT(DISTINCT ia.issue_id) DESC, lower(ia.assignee), ia.assignee
-        \\LIMIT 1
-    ));
-    defer stmt.deinit();
-    try bindProjectNameTwice(&stmt, project);
-    allocator.free(metrics.lead);
-    if (try stmt.step()) {
-        metrics.lead = try stmt.columnTextDup(allocator, 0);
-    } else {
-        metrics.lead = try allocator.dupe(u8, fallback);
-    }
+fn loadProjectPropertyCounts(db: *SqliteDb, project_id: []const u8, metrics: *ProjectMetrics) !void {
+    if (project_id.len == 0) return;
+    metrics.member_count = try countProjectRows(db, "project_members", project_id, "member <> ''");
+    metrics.label_count = try countProjectRows(db, "project_labels", project_id, "label <> ''");
 }
 
 fn countProjectRows(db: *SqliteDb, comptime table: []const u8, project_id: []const u8, comptime where_extra: []const u8) !usize {
@@ -423,15 +493,19 @@ fn appendProjectPageTab(
     });
 }
 
-fn appendProjectInlineProperties(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, summary: *const ProjectSummary, metrics: *const ProjectMetrics) !void {
+fn appendProjectInlineProperties(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, summary: *const ProjectSummary, metrics: *const ProjectMetrics) !void {
     try buf.appendSlice(allocator, "<section class=\"project-overview-properties-strip\" aria-label=\"Project properties\">");
-    try appendProjectProperty(buf, allocator, "Status", "project-overview-status-icon", projectStateLabel(summary.state), .{ .tone = projectStateTone(summary.state) });
-    try appendProjectProperty(buf, allocator, "Priority", "project-overview-priority-icon", priorityLabel(metrics.top_priority), .{ .tone = project_issue_render.priorityTone(metrics.top_priority) });
-    try appendProjectProperty(buf, allocator, "Lead", "icon-users", if (metrics.lead.len == 0) "No lead" else metrics.lead, .{});
-    const date_label = try projectDatesLabelOwned(allocator, metrics);
+    try appendProjectProperty(buf, allocator, "Status", "project-overview-status-icon", statusLabel(summary.status), .{ .tone = project_issue_render.columnTone(summary.status) });
+    try appendProjectProperty(buf, allocator, "Priority", "project-overview-priority-icon", priorityLabel(summary.priority), .{ .tone = project_issue_render.priorityTone(summary.priority) });
+    const leads_label = try projectCollectionPreviewOwned(allocator, db, "project_leads", "lead", summary.id, "No lead");
+    defer allocator.free(leads_label);
+    try appendProjectProperty(buf, allocator, "Lead", "icon-users", leads_label, .{});
+    const date_label = try projectDatesLabelOwned(allocator, summary);
     defer allocator.free(date_label);
     try appendProjectProperty(buf, allocator, "Dates", "icon-calendar", date_label, .{});
-    try appendProjectProperty(buf, allocator, "Teams", "icon-projects", repositoryOwnerLabel(repo), .{});
+    const issues_label = try countLabelOwned(allocator, metrics.issue_count, "issue", "issues");
+    defer allocator.free(issues_label);
+    try appendProjectProperty(buf, allocator, "Issues", "icon-issues", issues_label, .{});
     try buf.appendSlice(allocator, "</section>");
 }
 
@@ -635,29 +709,25 @@ fn appendProjectMilestoneRow(
     try buf.appendSlice(allocator, "</article>");
 }
 
-fn appendProjectPropertiesPanel(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, summary: *const ProjectSummary, metrics: *const ProjectMetrics) !void {
+fn appendProjectPropertiesPanel(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, summary: *const ProjectSummary, metrics: *const ProjectMetrics) !void {
     try buf.appendSlice(allocator,
         \\<section class="project-overview-side-panel">
         \\  <div class="project-overview-side-panel-head"><h2>Properties</h2></div>
         \\  <dl class="project-overview-side-properties">
     );
-    try appendSidebarProperty(buf, allocator, "Status", "project-overview-status-icon", projectStateLabel(summary.state));
-    try appendSidebarProperty(buf, allocator, "Priority", "project-overview-priority-icon", priorityLabel(metrics.top_priority));
-    try appendSidebarProperty(buf, allocator, "Lead", "icon-users", if (metrics.lead.len == 0) "No lead" else metrics.lead);
-    const members_label = try countLabelOwned(allocator, metrics.assignee_count, "member", "members");
+    try appendProjectStatusProperty(buf, allocator, summary);
+    try appendProjectPriorityProperty(buf, allocator, summary);
+    try appendProjectPeopleProperty(buf, allocator, db, summary, "Lead", "icon-users", "project_leads", "lead", "add-lead", "remove-lead", "Add lead", "Filter leads", "No lead");
+    const members_label = try countLabelOwned(allocator, metrics.member_count, "member", "members");
     defer allocator.free(members_label);
     const issues_label = try countLabelOwned(allocator, metrics.issue_count, "issue", "issues");
     defer allocator.free(issues_label);
-    const labels_label = try countLabelOwned(allocator, metrics.label_count, "label", "labels");
-    defer allocator.free(labels_label);
-    try appendSidebarProperty(buf, allocator, "Members", "icon-users", members_label);
+    try appendProjectPeopleProperty(buf, allocator, db, summary, "Members", "icon-users", "project_members", "member", "add-member", "remove-member", "Add member", "Filter members", members_label);
     try appendSidebarProperty(buf, allocator, "Issues", "icon-issues", issues_label);
-    const date_label = try projectDatesLabelOwned(allocator, metrics);
+    const date_label = try projectDatesLabelOwned(allocator, summary);
     defer allocator.free(date_label);
-    try appendSidebarProperty(buf, allocator, "Dates", "icon-calendar", date_label);
-    try appendSidebarProperty(buf, allocator, "Teams", "icon-projects", repositoryOwnerLabel(repo));
-    try appendSidebarProperty(buf, allocator, "Slack", "icon-slack", "No Slack channel");
-    try appendSidebarProperty(buf, allocator, "Labels", "icon-labels", labels_label);
+    try appendProjectDatesProperty(buf, allocator, summary, date_label);
+    try appendProjectLabelsProperty(buf, allocator, db, summary, metrics);
     try buf.appendSlice(allocator,
         \\  </dl>
         \\</section>
@@ -681,6 +751,387 @@ fn appendSidebarProperty(
         .icon_class = icon_class,
         .value = value,
     });
+}
+
+fn appendProjectStatusProperty(buf: *std.ArrayList(u8), allocator: Allocator, summary: *const ProjectSummary) !void {
+    try appendProjectPropertyMenuStart(buf, allocator, "Status", "project-overview-status-icon", "Set status", statusLabel(summary.status));
+    try appendProjectMenuGroupStart(buf, allocator, "Statuses");
+    for (project_views.project_status_values) |status| {
+        try appendProjectValueActionRow(buf, allocator, summary, "set-status", "status", status, status, std.mem.eql(u8, summary.status, status), .status);
+    }
+    try appendProjectMenuGroupEnd(buf, allocator);
+    try appendProjectPropertyMenuEnd(buf, allocator);
+}
+
+fn appendProjectPriorityProperty(buf: *std.ArrayList(u8), allocator: Allocator, summary: *const ProjectSummary) !void {
+    try appendProjectPropertyMenuStart(buf, allocator, "Priority", "project-overview-priority-icon", "Set priority", priorityLabel(summary.priority));
+    try appendProjectMenuGroupStart(buf, allocator, "Priorities");
+    for (project_views.project_priority_values) |priority| {
+        try appendProjectValueActionRow(buf, allocator, summary, "set-priority", "priority", priority, priority, std.mem.eql(u8, summary.priority, priority), .priority);
+    }
+    try appendProjectMenuGroupEnd(buf, allocator);
+    try appendProjectPropertyMenuEnd(buf, allocator);
+}
+
+const ProjectValueKind = enum {
+    text,
+    status,
+    priority,
+};
+
+fn appendProjectPeopleProperty(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    summary: *const ProjectSummary,
+    label: []const u8,
+    icon_class: []const u8,
+    comptime table: []const u8,
+    comptime column: []const u8,
+    add_action: []const u8,
+    remove_action: []const u8,
+    menu_label: []const u8,
+    placeholder: []const u8,
+    empty_label: []const u8,
+) !void {
+    const value = try projectCollectionPreviewOwned(allocator, db, table, column, summary.id, empty_label);
+    defer allocator.free(value);
+    try appendProjectPropertyMenuStart(buf, allocator, label, icon_class, menu_label, value);
+    try appendProjectSingleInputForm(buf, allocator, summary, add_action, "value", menu_label, placeholder);
+    try appendProjectMenuGroupStart(buf, allocator, "Selected");
+    var selected = try db.prepare("SELECT DISTINCT " ++ column ++ " FROM " ++ table ++ " WHERE project_id = ? ORDER BY lower(" ++ column ++ "), " ++ column);
+    defer selected.deinit();
+    try selected.bindText(1, summary.id);
+    var shown = false;
+    while (try selected.step()) {
+        const person = try selected.columnTextDup(allocator, 0);
+        defer allocator.free(person);
+        try appendProjectPersonActionRow(buf, allocator, summary, remove_action, person, true);
+        shown = true;
+    }
+    if (!shown) try appendProjectMenuEmpty(buf, allocator, empty_label);
+    try appendProjectMenuGroupEnd(buf, allocator);
+
+    try appendProjectMenuGroupStart(buf, allocator, "Suggestions");
+    var suggestions = try db.prepare(
+        \\SELECT DISTINCT person
+        \\FROM (
+        \\  SELECT lead AS person FROM project_leads
+        \\  UNION
+        \\  SELECT member AS person FROM project_members
+        \\  UNION
+        \\  SELECT assignee AS person FROM issue_assignees
+        \\  UNION
+        \\  SELECT author_principal AS person FROM issues
+        \\  UNION
+        \\  SELECT author_principal AS person FROM projects
+        \\  UNION
+        \\  SELECT COALESCE(NULLIF(display_name, ''), NULLIF(email, ''), id) AS person FROM identities
+        \\)
+        \\WHERE person <> ''
+        \\  AND person NOT IN (SELECT 
+    ++ column ++
+        \\ FROM 
+    ++ table ++
+        \\ WHERE project_id = ?)
+        \\ORDER BY lower(person), person
+        \\LIMIT 20
+    );
+    defer suggestions.deinit();
+    try suggestions.bindText(1, summary.id);
+    shown = false;
+    while (try suggestions.step()) {
+        const person = try suggestions.columnTextDup(allocator, 0);
+        defer allocator.free(person);
+        try appendProjectPersonActionRow(buf, allocator, summary, add_action, person, false);
+        shown = true;
+    }
+    if (!shown) try appendProjectMenuEmpty(buf, allocator, "No suggestions.");
+    try appendProjectMenuGroupEnd(buf, allocator);
+    try appendProjectPropertyMenuEnd(buf, allocator);
+}
+
+fn appendProjectDatesProperty(buf: *std.ArrayList(u8), allocator: Allocator, summary: *const ProjectSummary, value: []const u8) !void {
+    try appendProjectPropertyMenuStart(buf, allocator, "Dates", "icon-calendar", "Set dates", value);
+    try buf.appendSlice(allocator, "<form class=\"project-property-date-form\" method=\"post\" action=\"/projects/properties\">");
+    try appendProjectHiddenFields(buf, allocator, summary);
+    try appendTemplate(buf, allocator,
+        \\<input type="hidden" name="action" value="set-dates">
+        \\<label>Start<input type="date" name="start_at" value="{start_at}" required></label>
+        \\<label>End<input type="date" name="end_at" value="{end_at}" min="{min_end_at}"></label>
+        \\<button type="submit">Save dates</button>
+    , .{
+        .start_at = summary.start_at,
+        .end_at = summary.end_at,
+        .min_end_at = summary.start_at,
+    });
+    try buf.appendSlice(allocator, "</form>");
+    try appendProjectPropertyMenuEnd(buf, allocator);
+}
+
+fn appendProjectLabelsProperty(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, summary: *const ProjectSummary, metrics: *const ProjectMetrics) !void {
+    const labels_label = try countLabelOwned(allocator, metrics.label_count, "label", "labels");
+    defer allocator.free(labels_label);
+    try appendProjectPropertyMenuStart(buf, allocator, "Labels", "icon-labels", "Apply labels", labels_label);
+    try appendProjectSingleInputForm(buf, allocator, summary, "add-label", "value", "Add label", "Filter labels");
+    try appendProjectMenuGroupStart(buf, allocator, "Selected labels");
+    var selected = try db.prepare(
+        \\SELECT selected.label, COALESCE(ld.color, '')
+        \\FROM (SELECT DISTINCT label FROM project_labels WHERE project_id = ?) AS selected
+        \\LEFT JOIN label_definitions ld ON ld.name = selected.label
+        \\ORDER BY CASE WHEN ld.id IS NULL THEN 1 ELSE 0 END,
+        \\         ld.position,
+        \\         lower(selected.label),
+        \\         selected.label
+    );
+    defer selected.deinit();
+    try selected.bindText(1, summary.id);
+    var shown = false;
+    while (try selected.step()) {
+        const label = try selected.columnTextDup(allocator, 0);
+        defer allocator.free(label);
+        const color = try selected.columnTextDup(allocator, 1);
+        defer allocator.free(color);
+        try appendProjectLabelActionRow(buf, allocator, summary, "remove-label", label, color, true);
+        shown = true;
+    }
+    if (!shown) try appendProjectMenuEmpty(buf, allocator, "No labels selected.");
+    try appendProjectMenuGroupEnd(buf, allocator);
+
+    try appendProjectMenuGroupStart(buf, allocator, "Suggestions");
+    var suggestions = try db.prepare(
+        \\WITH label_names AS (
+        \\  SELECT name AS label FROM label_definitions
+        \\  UNION
+        \\  SELECT label FROM issue_labels
+        \\  UNION
+        \\  SELECT label FROM pull_labels
+        \\  UNION
+        \\  SELECT label FROM project_labels
+        \\)
+        \\SELECT label_names.label, COALESCE(ld.color, '')
+        \\FROM label_names
+        \\LEFT JOIN label_definitions ld ON ld.name = label_names.label
+        \\WHERE label_names.label NOT IN (SELECT label FROM project_labels WHERE project_id = ?)
+        \\ORDER BY CASE WHEN ld.id IS NULL THEN 1 ELSE 0 END,
+        \\         ld.position,
+        \\         lower(label_names.label),
+        \\         label_names.label
+        \\LIMIT 24
+    );
+    defer suggestions.deinit();
+    try suggestions.bindText(1, summary.id);
+    shown = false;
+    while (try suggestions.step()) {
+        const label = try suggestions.columnTextDup(allocator, 0);
+        defer allocator.free(label);
+        const color = try suggestions.columnTextDup(allocator, 1);
+        defer allocator.free(color);
+        try appendProjectLabelActionRow(buf, allocator, summary, "add-label", label, color, false);
+        shown = true;
+    }
+    if (!shown) try appendProjectMenuEmpty(buf, allocator, "No label suggestions.");
+    try appendProjectMenuGroupEnd(buf, allocator);
+    try appendProjectPropertyMenuEnd(buf, allocator);
+}
+
+fn appendProjectPropertyMenuStart(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    label: []const u8,
+    icon_class: []const u8,
+    menu_label: []const u8,
+    value: []const u8,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<div>
+        \\  <dt>{label}</dt>
+        \\  <dd><details class="project-property-menu" data-popover-menu data-issue-sidebar-menu><summary aria-label="{menu_label}" title="{menu_label}"><span class="button-icon {icon_class}" aria-hidden="true"></span><span>{value}</span></summary><div class="issue-sidebar-popover project-property-popover" role="dialog" aria-label="{menu_label}"><div class="issue-sidebar-popover-title">{menu_label}</div>
+    , .{
+        .label = label,
+        .icon_class = icon_class,
+        .menu_label = menu_label,
+        .value = value,
+    });
+}
+
+fn appendProjectPropertyMenuEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try buf.appendSlice(allocator, "</div></details></dd></div>");
+}
+
+fn appendProjectMenuGroupStart(buf: *std.ArrayList(u8), allocator: Allocator, title: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="issue-sidebar-menu-group"><div class="issue-sidebar-menu-group-title">{title}</div>
+    , .{ .title = title });
+}
+
+fn appendProjectMenuGroupEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try buf.appendSlice(allocator, "</div>");
+}
+
+fn appendProjectMenuEmpty(buf: *std.ArrayList(u8), allocator: Allocator, message: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<p class="issue-sidebar-menu-empty" data-sidebar-filter-text="">{message}</p>
+    , .{ .message = message });
+}
+
+fn appendProjectSingleInputForm(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    summary: *const ProjectSummary,
+    action: []const u8,
+    input_name: []const u8,
+    button_label: []const u8,
+    placeholder: []const u8,
+) !void {
+    try buf.appendSlice(allocator, "<form class=\"issue-sidebar-add-form issue-sidebar-menu-form\" method=\"post\" action=\"/projects/properties\">");
+    try appendProjectHiddenFields(buf, allocator, summary);
+    try appendTemplate(buf, allocator,
+        \\<input type="hidden" name="action" value="{action}"><label class="issue-sidebar-menu-input"><span aria-hidden="true"></span><input name="{input_name}" placeholder="{placeholder}" aria-label="{placeholder}" autocomplete="off" data-issue-sidebar-filter></label><button type="submit">{button_label}</button></form>
+    , .{
+        .action = action,
+        .input_name = input_name,
+        .placeholder = placeholder,
+        .button_label = button_label,
+    });
+}
+
+fn appendProjectHiddenFields(buf: *std.ArrayList(u8), allocator: Allocator, summary: *const ProjectSummary) !void {
+    try appendTemplate(buf, allocator,
+        \\<input type="hidden" name="project_id" value="{project_id}"><input type="hidden" name="project" value="{project}">
+    , .{
+        .project_id = summary.id,
+        .project = summary.name,
+    });
+}
+
+fn appendProjectValueActionRow(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    summary: *const ProjectSummary,
+    action: []const u8,
+    input_name: []const u8,
+    value: []const u8,
+    filter_text: []const u8,
+    selected: bool,
+    kind: ProjectValueKind,
+) !void {
+    const state_class: []const u8 = if (selected) " is-selected" else "";
+    try buf.appendSlice(allocator, "<form class=\"issue-sidebar-picker-form\" method=\"post\" action=\"/projects/properties\">");
+    try appendProjectHiddenFields(buf, allocator, summary);
+    try appendTemplate(buf, allocator,
+        \\<input type="hidden" name="action" value="{action}"><input type="hidden" name="{input_name}" value="{value}"><button class="issue-sidebar-picker-row{state_class}" type="submit" data-sidebar-filter-text="{filter_text}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span>
+    , .{
+        .action = action,
+        .input_name = input_name,
+        .value = value,
+        .filter_text = filter_text,
+        .state_class = state_class,
+    });
+    switch (kind) {
+        .status => try appendProjectStatusChip(buf, allocator, value),
+        .priority => try appendProjectPriorityChip(buf, allocator, value),
+        .text => try appendTemplate(buf, allocator, "<span class=\"issue-sidebar-picker-primary\">{value}</span>", .{ .value = value }),
+    }
+    try buf.appendSlice(allocator, "</button></form>");
+}
+
+fn appendProjectPersonActionRow(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    summary: *const ProjectSummary,
+    action: []const u8,
+    person: []const u8,
+    selected: bool,
+) !void {
+    const state_class: []const u8 = if (selected) " is-selected" else "";
+    try buf.appendSlice(allocator, "<form class=\"issue-sidebar-picker-form\" method=\"post\" action=\"/projects/properties\">");
+    try appendProjectHiddenFields(buf, allocator, summary);
+    try appendTemplate(buf, allocator,
+        \\<input type="hidden" name="action" value="{action}"><input type="hidden" name="value" value="{person}"><button class="issue-sidebar-picker-row{state_class}" type="submit" data-sidebar-filter-text="{person}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span>
+    , .{
+        .action = action,
+        .person = person,
+        .state_class = state_class,
+    });
+    try project_issue_render.appendIssueAvatar(buf, allocator, person, "");
+    try appendTemplate(buf, allocator, "<span class=\"issue-sidebar-picker-primary\">{person}</span></button></form>", .{ .person = person });
+}
+
+fn appendProjectLabelActionRow(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    summary: *const ProjectSummary,
+    action: []const u8,
+    label: []const u8,
+    color: []const u8,
+    selected: bool,
+) !void {
+    const state_class: []const u8 = if (selected) " is-selected" else "";
+    try buf.appendSlice(allocator, "<form class=\"issue-sidebar-picker-form\" method=\"post\" action=\"/projects/properties\">");
+    try appendProjectHiddenFields(buf, allocator, summary);
+    try appendTemplate(buf, allocator,
+        \\<input type="hidden" name="action" value="{action}"><input type="hidden" name="value" value="{label}"><button class="issue-sidebar-picker-row{state_class}" type="submit" data-sidebar-filter-text="{label}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span>
+    , .{
+        .action = action,
+        .label = label,
+        .state_class = state_class,
+    });
+    try appendProjectLabel(buf, allocator, label, color);
+    try buf.appendSlice(allocator, "</button></form>");
+}
+
+fn appendProjectStatusChip(buf: *std.ArrayList(u8), allocator: Allocator, status: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<span class="project-status-chip tone-{tone}">{status}</span>
+    , .{
+        .tone = project_issue_render.columnTone(status),
+        .status = statusLabel(status),
+    });
+}
+
+fn appendProjectPriorityChip(buf: *std.ArrayList(u8), allocator: Allocator, priority: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<span class="issue-row-priority issue-row-priority-{tone}" title="Priority: {priority}" aria-label="Priority: {priority}">{priority}</span>
+    , .{
+        .tone = project_issue_render.priorityTone(priority),
+        .priority = priority,
+    });
+}
+
+fn appendProjectLabel(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, color: []const u8) !void {
+    if (validHexColor(color)) {
+        try appendTemplate(buf, allocator,
+            \\<span class="issue-label label-custom" style="--label-color: {color}">{label}</span>
+        , .{
+            .color = color,
+            .label = label,
+        });
+        return;
+    }
+    try appendTemplate(buf, allocator,
+        \\<span class="issue-label {kind}">{label}</span>
+    , .{
+        .kind = issueLabelKind(label),
+        .label = label,
+    });
+}
+
+fn validHexColor(value: []const u8) bool {
+    if (value.len != 7 or value[0] != '#') return false;
+    for (value[1..]) |c| {
+        if (!std.ascii.isHex(c)) return false;
+    }
+    return true;
+}
+
+fn issueLabelKind(label: []const u8) []const u8 {
+    if (asciiEqlIgnoreCase(label, "bug")) return "label-bug";
+    if (asciiEqlIgnoreCase(label, "enhancement") or asciiEqlIgnoreCase(label, "feature") or asciiEqlIgnoreCase(label, "feat")) return "label-enhancement";
+    if (asciiEqlIgnoreCase(label, "docs") or asciiEqlIgnoreCase(label, "documentation")) return "label-docs";
+    if (asciiEqlIgnoreCase(label, "question")) return "label-question";
+    if (asciiEqlIgnoreCase(label, "security")) return "label-security";
+    return "label-default";
 }
 
 fn appendProjectActivityMain(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, summary: *const ProjectSummary, project: []const u8) !void {
@@ -842,6 +1293,12 @@ fn projectStateTone(state: []const u8) []const u8 {
     return "neutral";
 }
 
+fn statusLabel(status: []const u8) []const u8 {
+    if (status.len == 0) return "No status";
+    if (std.mem.eql(u8, status, "WIP")) return "In Progress";
+    return status;
+}
+
 fn priorityLabel(priority: []const u8) []const u8 {
     return if (priority.len == 0) "No priority" else priority;
 }
@@ -851,12 +1308,42 @@ fn repositoryOwnerLabel(repo: Repo) []const u8 {
     return std.fs.path.basename(repo.root);
 }
 
-fn projectDatesLabelOwned(allocator: Allocator, metrics: *const ProjectMetrics) ![]u8 {
-    const start_label = if (metrics.start_at.len != 0) try dateLabelOwned(allocator, metrics.start_at) else try allocator.dupe(u8, "No start date");
+fn projectDatesLabelOwned(allocator: Allocator, summary: *const ProjectSummary) ![]u8 {
+    const start_label = if (summary.start_at.len != 0) try dateLabelOwned(allocator, summary.start_at) else try allocator.dupe(u8, "No start date");
     defer allocator.free(start_label);
-    const end_label = if (metrics.end_at.len != 0) try dateLabelOwned(allocator, metrics.end_at) else try allocator.dupe(u8, "No end date");
+    const end_label = if (summary.end_at.len != 0) try dateLabelOwned(allocator, summary.end_at) else try allocator.dupe(u8, "No end date");
     defer allocator.free(end_label);
     return std.fmt.allocPrint(allocator, "{s} + {s}", .{ start_label, end_label });
+}
+
+fn projectCollectionPreviewOwned(
+    allocator: Allocator,
+    db: *SqliteDb,
+    comptime table: []const u8,
+    comptime column: []const u8,
+    project_id: []const u8,
+    empty_label: []const u8,
+) ![]u8 {
+    var stmt = try db.prepare(
+        "SELECT " ++ column ++ ", COUNT(*) OVER () FROM (SELECT DISTINCT " ++ column ++ " FROM " ++ table ++ " WHERE project_id = ? ORDER BY lower(" ++ column ++ "), " ++ column ++ ") LIMIT 2"
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    var values: [2][]u8 = undefined;
+    var len: usize = 0;
+    var total: usize = 0;
+    while (try stmt.step()) {
+        values[len] = try stmt.columnTextDup(allocator, 0);
+        len += 1;
+        total = @intCast(stmt.columnInt64(1));
+    }
+    defer {
+        for (values[0..len]) |value| allocator.free(value);
+    }
+
+    if (total == 0) return try allocator.dupe(u8, empty_label);
+    if (total == 1) return try allocator.dupe(u8, values[0]);
+    return try std.fmt.allocPrint(allocator, "{s} + {d}", .{ values[0], total - 1 });
 }
 
 fn dateLabelOwned(allocator: Allocator, value: []const u8) ![]u8 {
@@ -876,6 +1363,14 @@ fn monthNames() []const []const u8 {
 
 fn countLabelOwned(allocator: Allocator, value: usize, singular: []const u8, plural: []const u8) ![]u8 {
     return try std.fmt.allocPrint(allocator, "{d} {s}", .{ value, if (value == 1) singular else plural });
+}
+
+fn asciiEqlIgnoreCase(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |left, right| {
+        if (std.ascii.toLower(left) != std.ascii.toLower(right)) return false;
+    }
+    return true;
 }
 
 fn appendProjectViewHref(buf: *std.ArrayList(u8), allocator: Allocator, project: []const u8, view_ref: []const u8) !void {
@@ -898,18 +1393,15 @@ test "project overview header renders plain project name" {
         .name = try std.testing.allocator.dupe(u8, "Release & Plan"),
         .description = try std.testing.allocator.dupe(u8, ""),
         .state = try std.testing.allocator.dupe(u8, "open"),
+        .status = try std.testing.allocator.dupe(u8, "WIP"),
+        .priority = try std.testing.allocator.dupe(u8, ""),
+        .start_at = try std.testing.allocator.dupe(u8, ""),
+        .end_at = try std.testing.allocator.dupe(u8, ""),
         .created_at = try std.testing.allocator.dupe(u8, ""),
         .author_principal = try std.testing.allocator.dupe(u8, ""),
     };
     defer summary.deinit(std.testing.allocator);
-    var metrics = ProjectMetrics{
-        .top_status = try std.testing.allocator.dupe(u8, ""),
-        .top_priority = try std.testing.allocator.dupe(u8, ""),
-        .start_at = try std.testing.allocator.dupe(u8, ""),
-        .end_at = try std.testing.allocator.dupe(u8, ""),
-        .lead = try std.testing.allocator.dupe(u8, ""),
-    };
-    defer metrics.deinit(std.testing.allocator);
+    const metrics = ProjectMetrics{};
 
     try appendProjectOverviewHeader(&buf, std.testing.allocator, &summary, &metrics);
 
@@ -918,16 +1410,21 @@ test "project overview header renders plain project name" {
 }
 
 test "project dates label uses start plus end" {
-    var metrics = ProjectMetrics{
-        .top_status = try std.testing.allocator.dupe(u8, ""),
-        .top_priority = try std.testing.allocator.dupe(u8, ""),
+    var summary = ProjectSummary{
+        .id = try std.testing.allocator.dupe(u8, "p1"),
+        .name = try std.testing.allocator.dupe(u8, "Release"),
+        .description = try std.testing.allocator.dupe(u8, ""),
+        .state = try std.testing.allocator.dupe(u8, "open"),
+        .status = try std.testing.allocator.dupe(u8, "WIP"),
+        .priority = try std.testing.allocator.dupe(u8, ""),
         .start_at = try std.testing.allocator.dupe(u8, "2026-05-17"),
         .end_at = try std.testing.allocator.dupe(u8, "2026-05-28"),
-        .lead = try std.testing.allocator.dupe(u8, ""),
+        .created_at = try std.testing.allocator.dupe(u8, ""),
+        .author_principal = try std.testing.allocator.dupe(u8, ""),
     };
-    defer metrics.deinit(std.testing.allocator);
+    defer summary.deinit(std.testing.allocator);
 
-    const label = try projectDatesLabelOwned(std.testing.allocator, &metrics);
+    const label = try projectDatesLabelOwned(std.testing.allocator, &summary);
     defer std.testing.allocator.free(label);
 
     try std.testing.expectEqualStrings("May 17 + May 28", label);

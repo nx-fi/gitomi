@@ -1974,12 +1974,20 @@ test "project field key collision is domain rejected" {
         \\  id, name, slug, name_occurred_at, name_actor_principal, name_event_hash,
         \\  description, description_occurred_at, description_actor_principal, description_event_hash,
         \\  state, state_occurred_at, state_actor_principal, state_event_hash,
+        \\  status, status_occurred_at, status_actor_principal, status_event_hash,
+        \\  priority, priority_occurred_at, priority_actor_principal, priority_event_hash,
+        \\  start_at, start_at_occurred_at, start_at_actor_principal, start_at_event_hash,
+        \\  end_at, end_at_occurred_at, end_at_actor_principal, end_at_event_hash,
         \\  created_at, author_principal, author_device
         \\) VALUES (
         \\  '018f0000-0000-7000-8000-000000000100', 'Roadmap', 'roadmap',
         \\  '2026-05-16T00:00:00Z', 'alice', '',
         \\  '', '2026-05-16T00:00:00Z', 'alice', '',
         \\  'open', '2026-05-16T00:00:00Z', 'alice', '',
+        \\  'WIP', '2026-05-16T00:00:00Z', 'alice', '',
+        \\  '', '2026-05-16T00:00:00Z', 'alice', '',
+        \\  '2026-05-16', '2026-05-16T00:00:00Z', 'alice', '',
+        \\  '', '2026-05-16T00:00:00Z', 'alice', '',
         \\  '2026-05-16T00:00:00Z', 'alice', 'laptop'
         \\);
         \\INSERT INTO events(

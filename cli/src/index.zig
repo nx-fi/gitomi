@@ -257,6 +257,8 @@ fn requiredIndexTablesExist(db: *SqliteDb) bool {
     defer pull_metadata.deinit();
     var projects_slug = db.prepare("SELECT slug FROM projects LIMIT 0") catch return false;
     defer projects_slug.deinit();
+    var project_properties = db.prepare("SELECT status, priority, start_at, end_at FROM projects LIMIT 0") catch return false;
+    defer project_properties.deinit();
     var project_columns_ref = db.prepare("SELECT column_ref FROM project_columns LIMIT 0") catch return false;
     defer project_columns_ref.deinit();
     var issue_metadata_fields = db.prepare("SELECT issue_type, priority, status, issue_type_event_hash, priority_event_hash, status_event_hash FROM issue_metadata LIMIT 0") catch return false;
@@ -267,6 +269,12 @@ fn requiredIndexTablesExist(db: *SqliteDb) bool {
     defer issue_concurrent_groups.deinit();
     var project_memberships = db.prepare("SELECT project_id FROM project_memberships LIMIT 0") catch return false;
     defer project_memberships.deinit();
+    var project_leads = db.prepare("SELECT project_id FROM project_leads LIMIT 0") catch return false;
+    defer project_leads.deinit();
+    var project_members = db.prepare("SELECT project_id FROM project_members LIMIT 0") catch return false;
+    defer project_members.deinit();
+    var project_labels = db.prepare("SELECT project_id FROM project_labels LIMIT 0") catch return false;
+    defer project_labels.deinit();
     var project_fields = db.prepare("SELECT id FROM project_fields LIMIT 0") catch return false;
     defer project_fields.deinit();
     var project_field_options = db.prepare("SELECT id FROM project_field_options LIMIT 0") catch return false;
@@ -572,6 +580,9 @@ fn dropIndexSchemaTables(db: *SqliteDb) !void {
         \\DROP TABLE IF EXISTS issue_concurrent_groups;
         \\DROP TABLE IF EXISTS projects;
         \\DROP TABLE IF EXISTS project_columns;
+        \\DROP TABLE IF EXISTS project_leads;
+        \\DROP TABLE IF EXISTS project_members;
+        \\DROP TABLE IF EXISTS project_labels;
         \\DROP TABLE IF EXISTS project_memberships;
         \\DROP TABLE IF EXISTS project_fields;
         \\DROP TABLE IF EXISTS project_field_options;
