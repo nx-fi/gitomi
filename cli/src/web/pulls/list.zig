@@ -1,10 +1,10 @@
 const std = @import("std");
-const index = @import("../index.zig");
-const repo_mod = @import("../repo.zig");
-const util = @import("../util.zig");
-const work_items = @import("../work_items.zig");
-const issues_page = @import("issues.zig");
-const shared = @import("shared.zig");
+const index = @import("../../index.zig");
+const repo_mod = @import("../../repo.zig");
+const util = @import("../../util.zig");
+const work_items = @import("../../work_items.zig");
+const issues_page = @import("../issues.zig");
+const shared = @import("../shared.zig");
 
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;

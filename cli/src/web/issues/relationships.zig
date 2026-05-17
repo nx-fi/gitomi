@@ -1,7 +1,7 @@
 const std = @import("std");
-const index = @import("../index.zig");
-const shared = @import("shared.zig");
-const util = @import("../util.zig");
+const index = @import("../../index.zig");
+const shared = @import("../shared.zig");
+const util = @import("../../util.zig");
 
 const Allocator = std.mem.Allocator;
 const SqliteDb = index.SqliteDb;

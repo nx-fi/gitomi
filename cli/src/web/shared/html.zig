@@ -1,5 +1,5 @@
 const std = @import("std");
-const json_writer = @import("../json_writer.zig");
+const json_writer = @import("../../json_writer.zig");
 
 const Allocator = std.mem.Allocator;
 const appendJsonString = json_writer.appendJsonString;

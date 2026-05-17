@@ -1,7 +1,7 @@
 const std = @import("std");
 const git = @import("../git.zig");
 const repo_mod = @import("../repo.zig");
-const diff_render = @import("diff_render.zig");
+const diff_render = @import("diff/render.zig");
 const shared = @import("shared.zig");
 
 const Allocator = std.mem.Allocator;
