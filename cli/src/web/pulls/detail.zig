@@ -1,11 +1,12 @@
 const std = @import("std");
 const comment_mod = @import("../../comment.zig");
 const event_mod = @import("../../event.zig");
-const git = @import("../../git.zig");
 const index = @import("../../index.zig");
-const diff_render = @import("../diff/render.zig");
 const issues_page = @import("../issues.zig");
+const pull_comments = @import("comments.zig");
+const pull_git_tabs = @import("git_tabs.zig");
 const merge_editor = @import("merge_editor.zig");
+const pull_merge = @import("merge.zig");
 const pulls_list = @import("list.zig");
 const pull_sidebar = @import("sidebar.zig");
 const pull = @import("../../pr.zig");
@@ -32,45 +33,15 @@ const createCommentReplyEvent = comment_mod.createCommentReplyEvent;
 const createReactionEvent = reaction_mod.createReactionEvent;
 const literalHref = shared.literalHref;
 const pullHref = shared.pullHref;
-const runCommand = git.runCommand;
 const sendRedirect = shared.sendRedirect;
 const sendPlainResponse = shared.sendPlainResponse;
 const sendResponse = shared.sendResponse;
 const sqlite = index.sqlite;
 
-const max_pull_diff_bytes = work_items.max_pull_diff_bytes;
-
 const PullDetailTab = enum {
     conversation,
     commits,
     files,
-};
-
-const ReactionChoice = struct {
-    value: []const u8,
-    label: []const u8,
-    title: []const u8,
-};
-
-const ReactionSummary = struct {
-    emoji: []u8,
-    count: i64,
-    reacted: bool,
-
-    fn deinit(self: *ReactionSummary, allocator: Allocator) void {
-        allocator.free(self.emoji);
-    }
-};
-
-const reaction_choices = [_]ReactionChoice{
-    .{ .value = "\xF0\x9F\x91\x8D", .label = "\xF0\x9F\x91\x8D", .title = "Thumbs up" },
-    .{ .value = "\xF0\x9F\x91\x8E", .label = "\xF0\x9F\x91\x8E", .title = "Thumbs down" },
-    .{ .value = "\xF0\x9F\x98\x84", .label = "\xF0\x9F\x98\x84", .title = "Laugh" },
-    .{ .value = "\xF0\x9F\x8E\x89", .label = "\xF0\x9F\x8E\x89", .title = "Hooray" },
-    .{ .value = "\xF0\x9F\x98\x95", .label = "\xF0\x9F\x98\x95", .title = "Confused" },
-    .{ .value = "\xE2\x9D\xA4\xEF\xB8\x8F", .label = "\xE2\x9D\xA4\xEF\xB8\x8F", .title = "Heart" },
-    .{ .value = "\xF0\x9F\x9A\x80", .label = "\xF0\x9F\x9A\x80", .title = "Rocket" },
-    .{ .value = "\xF0\x9F\x91\x80", .label = "\xF0\x9F\x91\x80", .title = "Eyes" },
 };
 
 const PullDetail = work_items.PullDetail;
@@ -83,18 +54,10 @@ const PullTabCounts = struct {
     deletions: ?usize = null,
 };
 
-const PullGitRefs = work_items.PullGitRefs;
-const PullMergeMethod = merge_editor.PullMergeMethod;
-const PullMergeResult = merge_editor.PullMergeResult;
 const PullMergeSnapshot = merge_editor.PullMergeSnapshot;
 const PullMergeStatus = merge_editor.PullMergeStatus;
-const RemoteBranchTarget = merge_editor.RemoteBranchTarget;
 const ResolvedConflictFile = merge_editor.ResolvedConflictFile;
 const contentHasConflictMarkers = merge_editor.contentHasConflictMarkers;
-const isRegularGitMode = merge_editor.isRegularGitMode;
-const isSafeMergePath = merge_editor.isSafeMergePath;
-const tempPath = merge_editor.tempPath;
-const writeFileBytes = merge_editor.writeFileBytes;
 
 const FormField = struct {
     name: []u8,
@@ -113,22 +76,6 @@ const SubmittedExpectedOids = struct {
 
 const DiffCommentSide = work_items.DiffCommentSide;
 const DiffCommentContext = work_items.DiffCommentContext;
-
-const PullCommit = struct {
-    full_hash: []u8,
-    short_hash: []u8,
-    author: []u8,
-    relative: []u8,
-    subject: []u8,
-
-    fn deinit(self: PullCommit, allocator: Allocator) void {
-        allocator.free(self.full_hash);
-        allocator.free(self.short_hash);
-        allocator.free(self.author);
-        allocator.free(self.relative);
-        allocator.free(self.subject);
-    }
-};
 
 pub const renderPullsPage = pulls_list.renderPullsPage;
 
@@ -163,7 +110,7 @@ fn renderPullDetailPageWithMergeError(allocator: Allocator, repo: Repo, raw_ref:
     var pull_ref_buf: [util.short_object_ref_len]u8 = undefined;
     const pull_ref = util.shortObjectRef(&pull_ref_buf, detail.id);
     const tab_counts = try loadPullTabCounts(allocator, repo, &db, detail);
-    const merge_status = try loadPullMergeStatus(allocator, repo, detail);
+    const merge_status = try pull_merge.loadStatus(allocator, repo, detail);
     defer merge_status.deinit(allocator);
 
     var buf: std.ArrayList(u8) = .empty;
@@ -185,8 +132,8 @@ fn renderPullDetailPageWithMergeError(allocator: Allocator, repo: Repo, raw_ref:
     const can_edit_pull = currentActorCanEditAuthor(current_actor, current_role, detail.author_principal);
     switch (tab) {
         .conversation => try appendPullConversation(&buf, allocator, &db, detail, raw_ref, tab_counts, current_actor, can_edit_pull, merge_status, csrf_token, merge_error),
-        .commits => try appendPullCommits(&buf, allocator, repo, detail),
-        .files => try appendPullFiles(&buf, allocator, repo, detail, raw_ref),
+        .commits => try pull_git_tabs.appendCommits(&buf, allocator, repo, detail),
+        .files => try pull_git_tabs.appendFiles(&buf, allocator, repo, detail, raw_ref),
     }
     try buf.appendSlice(allocator, "</div><aside class=\"issue-meta-sidebar pull-sidebar\">");
     try pull_sidebar.append(&buf, allocator, repo, &db, detail, pull_ref);
@@ -221,7 +168,7 @@ pub fn renderPullMergeEditorPage(allocator: Allocator, repo: Repo, raw_ref: []co
     const detail = (try work_items.loadPullDetail(allocator, &db, pull_id)) orelse return renderPullNotFound(allocator, repo, raw_ref);
     defer detail.deinit(allocator);
 
-    const merge_status = try loadPullMergeStatus(allocator, repo, detail);
+    const merge_status = try pull_merge.loadStatus(allocator, repo, detail);
     defer merge_status.deinit(allocator);
 
     var pull_ref_buf: [util.short_object_ref_len]u8 = undefined;
@@ -264,39 +211,9 @@ fn loadPullTabCounts(allocator: Allocator, repo: Repo, db: *SqliteDb, detail: Pu
     counts.additions = detail.additions;
     counts.deletions = detail.deletions;
 
-    const git_counts = try loadPullGitTabCounts(allocator, repo, detail);
+    const git_counts = try pull_git_tabs.loadCounts(allocator, repo, detail);
     if (git_counts.commits) |value| counts.commits = value;
     if (git_counts.files) |value| counts.files = value;
-    return counts;
-}
-
-fn loadPullGitTabCounts(allocator: Allocator, repo: Repo, detail: PullDetail) !PullTabCounts {
-    var counts: PullTabCounts = .{};
-    const git_refs = (try work_items.loadPullGitRefs(allocator, repo, detail)) orelse return counts;
-    defer git_refs.deinit(allocator);
-
-    const merge_base = try work_items.loadMergeBase(allocator, repo, git_refs.base, git_refs.head);
-    defer if (merge_base) |value| allocator.free(value);
-    const base = merge_base orelse return counts;
-
-    const range = try std.fmt.allocPrint(allocator, "{s}..{s}", .{ base, git_refs.head });
-    defer allocator.free(range);
-    if (try work_items.gitMaybe(allocator, repo, &.{ "rev-list", "--count", range }, 64 * 1024)) |raw_count| {
-        defer allocator.free(raw_count);
-        const trimmed = std.mem.trim(u8, raw_count, " \t\r\n");
-        counts.commits = std.fmt.parseUnsigned(usize, trimmed, 10) catch null;
-    }
-
-    if (try work_items.gitMaybe(allocator, repo, &.{ "diff", "--name-only", "--find-renames", base, git_refs.head }, max_pull_diff_bytes)) |raw_files| {
-        defer allocator.free(raw_files);
-        var files: usize = 0;
-        var lines = std.mem.splitScalar(u8, raw_files, '\n');
-        while (lines.next()) |raw_line| {
-            if (std.mem.trim(u8, raw_line, " \t\r\n").len != 0) files += 1;
-        }
-        counts.files = files;
-    }
-
     return counts;
 }
 
@@ -560,7 +477,7 @@ fn appendPullFacts(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, db
     }
     if (detail.merge_oid.len != 0 or detail.target_oid.len != 0) {
         try buf.appendSlice(allocator, "<div><dt>Local merge</dt><dd>");
-        try appendLocalMergeCheck(buf, allocator, repo, detail);
+        try pull_merge.appendLocalMergeCheck(buf, allocator, repo, detail);
         try buf.appendSlice(allocator, "</dd></div>");
     }
     try appendPullCollectionFact(buf, allocator, db, "Labels", "SELECT DISTINCT label FROM pull_labels WHERE pull_id = ? ORDER BY label", detail.id);
@@ -632,73 +549,13 @@ fn appendPullConversation(
         try shared.appendMarkdownSource(buf, allocator, detail.body, .{});
     }
     try buf.appendSlice(allocator, "</div>");
-    try appendPullReactionBar(buf, allocator, db, "pull", detail.id, raw_ref, "", current_actor);
+    try pull_comments.appendReactionBar(buf, allocator, db, "pull", detail.id, raw_ref, "", current_actor);
     try buf.appendSlice(allocator, "</article></div>");
-    try appendPullComments(buf, allocator, db, raw_ref, detail.id, current_actor);
+    try pull_comments.appendComments(buf, allocator, db, raw_ref, detail.id, current_actor);
     try appendPullMergeabilityTimeline(buf, allocator, detail, raw_ref, counts.commits, merge_status, csrf_token, merge_error);
     try appendPullResolutionTimeline(buf, allocator, detail);
-    try appendPullCommentForm(buf, allocator, raw_ref, current_actor);
+    try pull_comments.appendCommentForm(buf, allocator, raw_ref, current_actor);
     try buf.appendSlice(allocator, "</div>");
-}
-
-fn appendPullComments(
-    buf: *std.ArrayList(u8),
-    allocator: Allocator,
-    db: *SqliteDb,
-    raw_ref: []const u8,
-    pull_id: []const u8,
-    current_actor: ?[]const u8,
-) !void {
-    var stmt = try work_items.prepareCommentsStmt(db, "pull", pull_id);
-    defer stmt.deinit();
-    while (try stmt.step()) {
-        const row = try work_items.commentRowFromStmt(allocator, &stmt);
-        defer row.deinit(allocator);
-        const anchor = try std.fmt.allocPrint(allocator, "comment-{s}", .{row.id[0..@min(row.id.len, 7)]});
-        defer allocator.free(anchor);
-        var comment_ref_buf: [util.short_object_ref_len]u8 = undefined;
-        const comment_ref = util.shortObjectRef(&comment_ref_buf, row.id);
-        const comment_ref_value = try std.fmt.allocPrint(allocator, "comment:{s}", .{comment_ref});
-        defer allocator.free(comment_ref_value);
-
-        try appendTemplate(buf, allocator,
-            \\<div class="{classes}" id="{anchor}"><div class="issue-timeline-avatar">
-        , .{
-            .classes = shared.classes("issue-timeline-item", &.{shared.class("is-reply", row.isReply())}),
-            .anchor = anchor,
-        });
-        try appendAvatar(buf, allocator, row.display_author, "issue-detail-avatar");
-        try appendTemplate(buf, allocator,
-            \\</div><article class="issue-comment-box comment-card"><header class="issue-comment-head"><div><strong>{author}</strong><span>commented
-        , .{
-            .author = row.display_author,
-        });
-        try buf.append(allocator, ' ');
-        try appendRelativeTime(buf, allocator, row.created_at);
-        try buf.appendSlice(allocator, "</span></div>");
-        try issues_page.appendIssueActionMenu(buf, allocator, anchor, comment_ref_value, row.body, !row.redacted and row.body.len != 0, "");
-        try buf.appendSlice(allocator, "</header>");
-        if (row.isReply()) {
-            try buf.appendSlice(allocator, "<p class=\"reply-note\">Reply to ");
-            if (row.reply_parent_id.len != 0) {
-                var reply_ref_buf: [util.short_object_ref_len]u8 = undefined;
-                const reply_ref = util.shortObjectRef(&reply_ref_buf, row.reply_parent_id);
-                try appendTemplate(buf, allocator, "comment:{reply_ref}", .{ .reply_ref = reply_ref });
-            } else {
-                try appendTemplate(buf, allocator, "{reply_parent_hash}", .{ .reply_parent_hash = row.reply_parent_hash[0..@min(row.reply_parent_hash.len, 12)] });
-            }
-            try buf.appendSlice(allocator, "</p>");
-        }
-        try buf.appendSlice(allocator, "<div class=\"markdown-body\">");
-        if (row.redacted) {
-            try buf.appendSlice(allocator, "<p class=\"muted\">Comment redacted.</p>");
-        } else {
-            try shared.appendMarkdownSource(buf, allocator, row.body, .{});
-        }
-        try buf.appendSlice(allocator, "</div>");
-        try appendPullReactionBar(buf, allocator, db, "comment", row.id, raw_ref, comment_ref_value, current_actor);
-        try buf.appendSlice(allocator, "</article></div>");
-    }
 }
 
 fn appendPullResolutionTimeline(buf: *std.ArrayList(u8), allocator: Allocator, detail: PullDetail) !void {
@@ -861,611 +718,6 @@ fn appendPullReadyToMergeTimeline(
     });
 }
 
-fn appendPullReactionBar(
-    buf: *std.ArrayList(u8),
-    allocator: Allocator,
-    db: *SqliteDb,
-    object_kind: []const u8,
-    object_id: []const u8,
-    raw_pull_ref: []const u8,
-    target_ref: []const u8,
-    current_actor: ?[]const u8,
-) !void {
-    var reactions: std.ArrayList(ReactionSummary) = .empty;
-    defer {
-        for (reactions.items) |*item| item.deinit(allocator);
-        reactions.deinit(allocator);
-    }
-
-    try buf.appendSlice(allocator, "<div class=\"reaction-bar\">");
-    var stmt = try db.prepare(
-        \\SELECT emoji, COUNT(DISTINCT actor_principal),
-        \\       SUM(CASE WHEN actor_principal = ? THEN 1 ELSE 0 END)
-        \\FROM reactions
-        \\WHERE object_kind = ? AND object_id = ?
-        \\GROUP BY emoji
-        \\ORDER BY MIN(created_at), emoji
-    );
-    defer stmt.deinit();
-    try stmt.bindText(1, current_actor orelse "");
-    try stmt.bindText(2, object_kind);
-    try stmt.bindText(3, object_id);
-
-    while (try stmt.step()) {
-        const emoji = try stmt.columnTextDup(allocator, 0);
-        const count = stmt.columnInt64(1);
-        const reacted = current_actor != null and stmt.columnInt64(2) > 0;
-        errdefer allocator.free(emoji);
-        try reactions.append(allocator, .{
-            .emoji = emoji,
-            .count = count,
-            .reacted = reacted,
-        });
-    }
-
-    try appendPullReactionPicker(buf, allocator, raw_pull_ref, object_kind, target_ref, reactions.items);
-    for (reactions.items) |item| {
-        try appendPullReactionButton(buf, allocator, raw_pull_ref, object_kind, target_ref, item.emoji, item.emoji, item.count, item.reacted);
-    }
-    try buf.appendSlice(allocator, "</div>");
-}
-
-fn appendPullReactionPicker(
-    buf: *std.ArrayList(u8),
-    allocator: Allocator,
-    raw_pull_ref: []const u8,
-    object_kind: []const u8,
-    target_ref: []const u8,
-    reactions: []const ReactionSummary,
-) !void {
-    try buf.appendSlice(allocator,
-        \\<details class="reaction-picker" data-popover-menu>
-        \\  <summary class="reaction-add-button" aria-label="Add reaction" title="Add reaction"><span class="reaction-add-icon" aria-hidden="true"></span></summary>
-        \\  <div class="reaction-popover" role="menu" aria-label="Add reaction">
-    );
-    for (reaction_choices) |choice| {
-        try appendPullReactionChoiceButton(buf, allocator, raw_pull_ref, object_kind, target_ref, choice, pullReactionWasSelected(reactions, choice.value));
-    }
-    try buf.appendSlice(allocator, "</div></details>");
-}
-
-fn appendPullReactionChoiceButton(
-    buf: *std.ArrayList(u8),
-    allocator: Allocator,
-    raw_pull_ref: []const u8,
-    object_kind: []const u8,
-    target_ref: []const u8,
-    choice: ReactionChoice,
-    reacted: bool,
-) !void {
-    try appendPullReactionFormOpen(buf, allocator, raw_pull_ref, "reaction-choice-form", if (reacted) "remove-reaction" else "add-reaction", object_kind, target_ref, choice.value);
-    try appendTemplate(buf, allocator,
-        \\<button{class_attr} type="submit" role="menuitem" aria-pressed="{pressed}" title="{title}"><span class="reaction-emoji">
-    , .{
-        .class_attr = shared.classAttr("reaction-choice-button", &.{
-            shared.class("selected", reacted),
-            shared.class("is-selected", reacted),
-        }),
-        .pressed = reacted,
-        .title = if (reacted) "Remove your reaction" else choice.title,
-    });
-    try shared.appendHtml(buf, allocator, choice.label);
-    try buf.appendSlice(allocator, "</span></button></form>");
-}
-
-fn appendPullReactionButton(
-    buf: *std.ArrayList(u8),
-    allocator: Allocator,
-    raw_pull_ref: []const u8,
-    object_kind: []const u8,
-    target_ref: []const u8,
-    emoji_value: []const u8,
-    emoji_label: []const u8,
-    count: i64,
-    reacted: bool,
-) !void {
-    try appendPullReactionFormOpen(buf, allocator, raw_pull_ref, "reaction-form", if (reacted) "remove-reaction" else "add-reaction", object_kind, target_ref, emoji_value);
-    try appendTemplate(buf, allocator,
-        \\<button{class_attr} type="submit" aria-pressed="{pressed}" title="{title}"><span class="reaction-emoji">
-    , .{
-        .class_attr = shared.classAttr("reaction-button", &.{
-            shared.class("selected", reacted),
-            shared.class("is-selected", reacted),
-        }),
-        .pressed = reacted,
-        .title = if (reacted) "Remove your reaction" else "Add reaction",
-    });
-    try shared.appendHtml(buf, allocator, emoji_label);
-    try appendTemplate(buf, allocator, "</span><span class=\"reaction-count\">{count}</span></button></form>", .{ .count = count });
-}
-
-fn appendPullReactionFormOpen(
-    buf: *std.ArrayList(u8),
-    allocator: Allocator,
-    raw_pull_ref: []const u8,
-    form_class: []const u8,
-    action: []const u8,
-    object_kind: []const u8,
-    target_ref: []const u8,
-    emoji_value: []const u8,
-) !void {
-    try appendTemplate(buf, allocator, "<form class=\"{form_class}\" method=\"post\" action=\"/pulls/", .{ .form_class = form_class });
-    try shared.appendUrlEncoded(buf, allocator, raw_pull_ref);
-    try appendTemplate(buf, allocator,
-        \\/comments"><input type="hidden" name="action" value="{action}"><input type="hidden" name="target_kind" value="{object_kind}">
-    , .{
-        .action = action,
-        .object_kind = object_kind,
-    });
-    if (target_ref.len != 0) {
-        try appendTemplate(buf, allocator,
-            \\<input type="hidden" name="target_ref" value="{target_ref}">
-        , .{ .target_ref = target_ref });
-    }
-    try appendTemplate(buf, allocator,
-        \\<input type="hidden" name="emoji" value="{emoji_value}">
-    , .{ .emoji_value = emoji_value });
-}
-
-fn pullReactionWasSelected(reactions: []const ReactionSummary, emoji: []const u8) bool {
-    for (reactions) |item| {
-        if (std.mem.eql(u8, item.emoji, emoji)) return item.reacted;
-    }
-    return false;
-}
-
-fn appendPullCommentForm(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8, current_actor: ?[]const u8) !void {
-    try buf.appendSlice(allocator,
-        \\<div class="issue-timeline-item issue-comment-form-item">
-        \\  <div class="issue-timeline-avatar">
-    );
-    try appendAvatar(buf, allocator, current_actor orelse "Current user", "issue-detail-avatar issue-comment-form-avatar");
-    try buf.appendSlice(allocator,
-        \\  </div>
-        \\  <form class="issue-comment-box issue-comment-form" method="post" action="/pulls/
-    );
-    try shared.appendUrlEncoded(buf, allocator, raw_ref);
-    try buf.appendSlice(allocator,
-        \\/comments">
-        \\  <input type="hidden" name="reply_parent_ref" value="" data-reply-parent-ref>
-    );
-    try shared.appendMarkdownEditor(buf, allocator, .{});
-    try buf.appendSlice(allocator,
-        \\  <div class="issue-comment-form-actions">
-        \\    <button class="button primary" type="submit">Comment</button>
-        \\  </div>
-        \\</form>
-        \\</div>
-    );
-}
-
-fn appendPullCommits(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, detail: PullDetail) !void {
-    const commits_opt = try loadPullCommits(allocator, repo, detail);
-    const commits = commits_opt orelse {
-        if (detail.commit_count) |count| {
-            const hint = try pullGitDataFetchHint(allocator, detail);
-            defer allocator.free(hint);
-            const detail_text = try std.fmt.allocPrint(allocator, "GitHub reported {d} {s}. {s}", .{ count, commitWord(count), hint });
-            defer allocator.free(detail_text);
-            try appendEmptyState(buf, allocator, "Commit range unavailable.", detail_text);
-        } else {
-            try appendEmptyState(buf, allocator, "Commit range unavailable.", "Fetch or create the base and head refs locally to inspect this pull request.");
-        }
-        return;
-    };
-    defer freePullCommits(allocator, commits);
-    if (commits.len == 0) {
-        try appendEmptyState(buf, allocator, "No commits in this range.", "The head ref currently has no commits ahead of the merge base.");
-        return;
-    }
-    try buf.appendSlice(allocator, "<section class=\"panel commits-panel\"><div class=\"commit-list\">");
-    for (commits) |commit| {
-        try appendTemplate(buf, allocator,
-            \\<article class="commit-row pull-commit-row"><div><a class="commit-title" href="{href}">{subject}</a><p>{author} committed {relative}</p></div><code class="commit-sha">{short_hash}</code></article>
-        , .{
-            .href = commitHref(commit.full_hash),
-            .subject = commit.subject,
-            .author = commit.author,
-            .relative = commit.relative,
-            .short_hash = commit.short_hash,
-        });
-    }
-    try buf.appendSlice(allocator, "</div></section>");
-}
-
-fn appendPullFiles(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, detail: PullDetail, raw_ref: []const u8) !void {
-    const diff_opt = try work_items.loadPullDiff(allocator, repo, detail, 3);
-    const diff = diff_opt orelse {
-        if (detail.changed_files != null or detail.additions != null or detail.deletions != null) {
-            const detail_text = try pullImportedFileSummary(allocator, detail);
-            defer allocator.free(detail_text);
-            try appendEmptyState(buf, allocator, "File changes unavailable.", detail_text);
-        } else {
-            try appendEmptyState(buf, allocator, "File changes unavailable.", "Fetch or create the base and head refs locally to inspect this pull request.");
-        }
-        return;
-    };
-    defer allocator.free(diff);
-    try buf.appendSlice(allocator, "<section class=\"diff-section pull-diff-section\" data-diff-review-action=\"/pulls/");
-    try shared.appendUrlEncoded(buf, allocator, raw_ref);
-    try buf.appendSlice(allocator, "/comments\">");
-    try diff_render.append(buf, allocator, diff, .{
-        .empty_message = "The head ref currently has no patch ahead of the merge base.",
-    });
-    try buf.appendSlice(allocator, "</section>");
-}
-
-fn pullImportedFileSummary(allocator: Allocator, detail: PullDetail) ![]u8 {
-    const file_count = detail.changed_files orelse 0;
-    const additions = detail.additions orelse 0;
-    const deletions = detail.deletions orelse 0;
-    const hint = try pullGitDataFetchHint(allocator, detail);
-    defer allocator.free(hint);
-    if (detail.additions != null or detail.deletions != null) {
-        return std.fmt.allocPrint(allocator, "GitHub reported {d} changed {s} with +{d} -{d}. {s}", .{ file_count, if (file_count == 1) "file" else "files", additions, deletions, hint });
-    }
-    return std.fmt.allocPrint(allocator, "GitHub reported {d} changed {s}. {s}", .{ file_count, if (file_count == 1) "file" else "files", hint });
-}
-
-fn pullGitDataFetchHint(allocator: Allocator, detail: PullDetail) ![]u8 {
-    if (detail.legacy_number > 0) {
-        return std.fmt.allocPrint(
-            allocator,
-            "Fetch the PR head with `git fetch origin pull/{d}/head:refs/remotes/origin/pr/{d}`, then reload this page.",
-            .{ detail.legacy_number, detail.legacy_number },
-        );
-    }
-    return allocator.dupe(u8, "Fetch or create the base and head refs locally, then reload this page.");
-}
-
-fn loadPullCommits(allocator: Allocator, repo: Repo, detail: PullDetail) !?[]PullCommit {
-    const git_refs = (try work_items.loadPullGitRefs(allocator, repo, detail)) orelse return null;
-    defer git_refs.deinit(allocator);
-
-    const merge_base = try work_items.loadMergeBase(allocator, repo, git_refs.base, git_refs.head);
-    defer if (merge_base) |value| allocator.free(value);
-    const base = merge_base orelse return null;
-    const range = try std.fmt.allocPrint(allocator, "{s}..{s}", .{ base, git_refs.head });
-    defer allocator.free(range);
-    const raw = try work_items.gitMaybe(allocator, repo, &.{ "log", "--reverse", "--format=%H%x00%h%x00%an%x00%cr%x00%s", range }, git.max_git_output) orelse return null;
-    defer allocator.free(raw);
-
-    var commits: std.ArrayList(PullCommit) = .empty;
-    errdefer {
-        for (commits.items) |commit| commit.deinit(allocator);
-        commits.deinit(allocator);
-    }
-    var lines = std.mem.splitScalar(u8, raw, '\n');
-    while (lines.next()) |raw_line| {
-        const line = std.mem.trimRight(u8, raw_line, "\r");
-        if (line.len == 0) continue;
-        var cols = std.mem.splitScalar(u8, line, 0);
-        try commits.append(allocator, .{
-            .full_hash = try allocator.dupe(u8, cols.next() orelse ""),
-            .short_hash = try allocator.dupe(u8, cols.next() orelse ""),
-            .author = try allocator.dupe(u8, cols.next() orelse ""),
-            .relative = try allocator.dupe(u8, cols.next() orelse ""),
-            .subject = try allocator.dupe(u8, cols.next() orelse ""),
-        });
-    }
-    return try commits.toOwnedSlice(allocator);
-}
-
-fn resolveGithubPullHeadCommit(allocator: Allocator, repo: Repo, number: i64) !?[]u8 {
-    if (try resolveFormattedGithubPullRef(allocator, repo, "refs/remotes/origin/pr/{d}", number)) |oid| return oid;
-    if (try resolveFormattedGithubPullRef(allocator, repo, "refs/remotes/origin/pull/{d}/head", number)) |oid| return oid;
-    if (try resolveFormattedGithubPullRef(allocator, repo, "refs/pull/{d}/head", number)) |oid| return oid;
-    if (try resolveFormattedGithubPullRef(allocator, repo, "refs/gitomi/github/pull/{d}/head", number)) |oid| return oid;
-    return null;
-}
-
-fn resolveFormattedGithubPullRef(allocator: Allocator, repo: Repo, comptime pattern: []const u8, number: i64) !?[]u8 {
-    const ref = try std.fmt.allocPrint(allocator, pattern, .{number});
-    defer allocator.free(ref);
-    return try resolveGitCommit(allocator, repo, ref);
-}
-
-fn resolveGitCommit(allocator: Allocator, repo: Repo, ref: []const u8) !?[]u8 {
-    const commit_ref = try std.fmt.allocPrint(allocator, "{s}^{{commit}}", .{ref});
-    defer allocator.free(commit_ref);
-    const raw = try work_items.gitMaybe(allocator, repo, &.{ "rev-parse", "--verify", "--quiet", commit_ref }, 1024 * 1024) orelse return null;
-    defer allocator.free(raw);
-    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
-    if (trimmed.len == 0) return null;
-    return try allocator.dupe(u8, trimmed);
-}
-
-fn isBranchShorthand(ref: []const u8) bool {
-    if (std.mem.startsWith(u8, ref, "refs/")) return false;
-    if (std.mem.startsWith(u8, ref, "origin/")) return false;
-    if (std.mem.eql(u8, ref, "HEAD")) return false;
-    return isSafeLocalBranchName(ref);
-}
-
-fn isSafeLocalBranchName(ref: []const u8) bool {
-    if (ref.len == 0) return false;
-    if (std.mem.startsWith(u8, ref, "-")) return false;
-    if (std.mem.endsWith(u8, ref, ".lock")) return false;
-    if (std.mem.indexOf(u8, ref, "..") != null) return false;
-    if (std.mem.indexOf(u8, ref, "//") != null) return false;
-    if (std.mem.indexOf(u8, ref, "@{") != null) return false;
-    if (std.mem.indexOfAny(u8, ref, " \t\r\n\x00:^~?*[\\") != null) return false;
-    return true;
-}
-
-fn remoteBranchTargetForPullRef(allocator: Allocator, repo: Repo, ref: []const u8) !?RemoteBranchTarget {
-    const heads_prefix = "refs/heads/";
-    if (std.mem.startsWith(u8, ref, heads_prefix)) {
-        return try remoteBranchTargetForBranch(allocator, repo, null, ref[heads_prefix.len..]);
-    }
-
-    const remotes_prefix = "refs/remotes/";
-    if (std.mem.startsWith(u8, ref, remotes_prefix)) {
-        const rest = ref[remotes_prefix.len..];
-        const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
-        return try remoteBranchTargetForBranch(allocator, repo, rest[0..slash], rest[slash + 1 ..]);
-    }
-
-    if (std.mem.indexOfScalar(u8, ref, '/')) |slash| {
-        const maybe_remote = ref[0..slash];
-        const maybe_branch = ref[slash + 1 ..];
-        if (try remoteExists(allocator, repo, maybe_remote)) {
-            return try remoteBranchTargetForBranch(allocator, repo, maybe_remote, maybe_branch);
-        }
-    }
-
-    if (!isBranchShorthand(ref)) return null;
-    return try remoteBranchTargetForBranch(allocator, repo, null, ref);
-}
-
-fn remoteBranchTargetForBranch(allocator: Allocator, repo: Repo, remote_hint: ?[]const u8, branch: []const u8) !?RemoteBranchTarget {
-    if (!isSafeLocalBranchName(branch)) return null;
-
-    const remote = if (remote_hint) |hint|
-        try configuredRemoteName(allocator, repo, hint)
-    else
-        try defaultRemoteForBranch(allocator, repo, branch);
-    const owned_remote = remote orelse return null;
-    errdefer allocator.free(owned_remote);
-
-    const owned_branch = try allocator.dupe(u8, branch);
-    errdefer allocator.free(owned_branch);
-    const remote_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch});
-    errdefer allocator.free(remote_ref);
-    const tracking_ref = try std.fmt.allocPrint(allocator, "refs/remotes/{s}/{s}", .{ owned_remote, branch });
-    errdefer allocator.free(tracking_ref);
-
-    return .{
-        .remote = owned_remote,
-        .branch = owned_branch,
-        .remote_ref = remote_ref,
-        .tracking_ref = tracking_ref,
-    };
-}
-
-fn defaultRemoteForBranch(allocator: Allocator, repo: Repo, branch: []const u8) !?[]u8 {
-    const config_key = try std.fmt.allocPrint(allocator, "branch.{s}.remote", .{branch});
-    defer allocator.free(config_key);
-    if (try gitConfigValueAt(allocator, repo, config_key)) |remote| {
-        errdefer allocator.free(remote);
-        if (try remoteExists(allocator, repo, remote)) return remote;
-        allocator.free(remote);
-    }
-    if (try remoteExists(allocator, repo, "origin")) return try allocator.dupe(u8, "origin");
-    return try singleConfiguredRemote(allocator, repo);
-}
-
-fn configuredRemoteName(allocator: Allocator, repo: Repo, remote: []const u8) !?[]u8 {
-    if (!isSafeRemoteName(remote)) return null;
-    if (!(try remoteExists(allocator, repo, remote))) return null;
-    return try allocator.dupe(u8, remote);
-}
-
-fn remoteExists(allocator: Allocator, repo: Repo, remote: []const u8) !bool {
-    if (!isSafeRemoteName(remote)) return false;
-    var result = try gitRunAt(allocator, repo.root, &.{ "remote", "get-url", "--push", remote }, 1024 * 1024);
-    defer result.deinit();
-    return result.exitCode() == 0 and std.mem.trim(u8, result.stdout, " \t\r\n").len != 0;
-}
-
-fn singleConfiguredRemote(allocator: Allocator, repo: Repo) !?[]u8 {
-    const raw = try gitCheckedAt(allocator, repo.root, &.{"remote"}, 1024 * 1024);
-    defer allocator.free(raw);
-
-    var found: ?[]const u8 = null;
-    var lines = std.mem.tokenizeScalar(u8, raw, '\n');
-    while (lines.next()) |raw_line| {
-        const remote = std.mem.trim(u8, raw_line, " \t\r\n");
-        if (!isSafeRemoteName(remote)) continue;
-        if (found != null) return null;
-        found = remote;
-    }
-    return if (found) |remote| try allocator.dupe(u8, remote) else null;
-}
-
-fn isSafeRemoteName(remote: []const u8) bool {
-    if (remote.len == 0 or std.mem.eql(u8, remote, ".")) return false;
-    if (std.mem.startsWith(u8, remote, "-")) return false;
-    if (std.mem.indexOf(u8, remote, "..") != null) return false;
-    if (std.mem.indexOfAny(u8, remote, " \t\r\n\x00:^~?*[\\") != null) return false;
-    return true;
-}
-
-fn gitConfigValueAt(allocator: Allocator, repo: Repo, key: []const u8) !?[]u8 {
-    var result = try gitRunAt(allocator, repo.root, &.{ "config", "--get", key }, 512 * 1024);
-    defer result.deinit();
-    if (result.exitCode() != 0) return null;
-    const trimmed = std.mem.trim(u8, result.stdout, " \t\r\n");
-    if (trimmed.len == 0) return null;
-    return try allocator.dupe(u8, trimmed);
-}
-
-fn fetchRemoteBranches(allocator: Allocator, repo: Repo, remote: []const u8) !void {
-    var result = try gitRunAt(allocator, repo.root, &.{ "fetch", "--no-tags", remote }, git.max_git_output);
-    defer result.deinit();
-    if (result.exitCode() != 0) return error.RemoteFetchFailed;
-}
-
-fn loadPullMergeStatus(allocator: Allocator, repo: Repo, detail: PullDetail) !PullMergeStatus {
-    if (!std.mem.eql(u8, detail.state, "open")) return .{ .kind = .unavailable };
-
-    const snapshot = (loadPullMergeSnapshot(allocator, repo, detail) catch |err| switch (err) {
-        error.RemoteFetchFailed => return .{ .kind = .unavailable },
-        else => return err,
-    }) orelse return .{ .kind = .unavailable };
-    errdefer snapshot.deinit(allocator);
-
-    const merge_base = try work_items.loadMergeBase(allocator, repo, snapshot.expected_base_oid, snapshot.expected_head_oid);
-    defer if (merge_base) |value| allocator.free(value);
-    if (merge_base == null) {
-        snapshot.deinit(allocator);
-        return .{ .kind = .unavailable };
-    }
-
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(allocator);
-    try argv.appendSlice(allocator, &.{
-        "git",
-        "-C",
-        repo.root,
-        "merge-tree",
-        "--write-tree",
-        "--name-only",
-        "--no-messages",
-        "-z",
-        snapshot.expected_base_oid,
-        snapshot.expected_head_oid,
-    });
-
-    var result = try runCommand(allocator, argv.items, null, max_pull_diff_bytes);
-    defer result.deinit();
-    if (result.exitCode() == 0) return .{ .kind = .clean, .snapshot = snapshot };
-    if (result.exitCode() != 1) {
-        snapshot.deinit(allocator);
-        return .{ .kind = .unavailable };
-    }
-
-    const conflict_files = try parseMergeTreeConflictFiles(allocator, result.stdout);
-    errdefer freeConflictFiles(allocator, conflict_files);
-    if (conflict_files.len == 0) {
-        freeConflictFiles(allocator, conflict_files);
-        snapshot.deinit(allocator);
-        return .{ .kind = .unavailable };
-    }
-    return .{
-        .kind = .conflicts,
-        .conflict_files = conflict_files,
-        .snapshot = snapshot,
-    };
-}
-
-fn loadPullMergeSnapshot(allocator: Allocator, repo: Repo, detail: PullDetail) !?PullMergeSnapshot {
-    var base_target = (try remoteBranchTargetForPullRef(allocator, repo, detail.base_ref)) orelse return null;
-    var base_target_owned = true;
-    defer if (base_target_owned) base_target.deinit(allocator);
-
-    try fetchRemoteBranches(allocator, repo, base_target.remote);
-
-    const head_target = try remoteBranchTargetForPullRef(allocator, repo, detail.head_ref);
-    var head_target_owned = head_target != null;
-    defer if (head_target_owned) if (head_target) |target| target.deinit(allocator);
-
-    if (head_target) |target| {
-        if (!std.mem.eql(u8, target.remote, base_target.remote)) {
-            try fetchRemoteBranches(allocator, repo, target.remote);
-        }
-    }
-
-    const base_oid = (try resolveGitCommit(allocator, repo, base_target.tracking_ref)) orelse return null;
-    errdefer allocator.free(base_oid);
-
-    const head_oid = (try resolvePullHeadForMergeSnapshot(allocator, repo, detail, head_target)) orelse {
-        allocator.free(base_oid);
-        return null;
-    };
-    errdefer allocator.free(head_oid);
-
-    const snapshot = PullMergeSnapshot{
-        .expected_base_oid = base_oid,
-        .expected_head_oid = head_oid,
-        .base_target = base_target,
-        .head_target = head_target,
-    };
-    base_target_owned = false;
-    head_target_owned = false;
-    return snapshot;
-}
-
-fn resolvePullHeadForMergeSnapshot(allocator: Allocator, repo: Repo, detail: PullDetail, head_target: ?RemoteBranchTarget) !?[]u8 {
-    if (detail.legacy_number > 0) {
-        if (try resolveGithubPullHeadCommit(allocator, repo, detail.legacy_number)) |oid| return oid;
-    }
-    if (head_target) |target| {
-        return try resolveGitCommit(allocator, repo, target.tracking_ref);
-    }
-    if (try localHeadRefName(allocator, detail.head_ref)) |local_head| {
-        allocator.free(local_head);
-        return null;
-    }
-    return try resolveGitCommit(allocator, repo, detail.head_ref);
-}
-
-fn parseMergeTreeConflictFiles(allocator: Allocator, raw: []const u8) ![][]u8 {
-    var files: std.ArrayList([]u8) = .empty;
-    errdefer {
-        for (files.items) |file| allocator.free(file);
-        files.deinit(allocator);
-    }
-
-    var parts = std.mem.splitScalar(u8, raw, 0);
-    _ = parts.next();
-    while (parts.next()) |raw_path| {
-        const path = std.mem.trim(u8, raw_path, " \t\r\n");
-        if (path.len == 0 or conflictFileAlreadyListed(files.items, path)) continue;
-        const owned = try allocator.dupe(u8, path);
-        files.append(allocator, owned) catch |err| {
-            allocator.free(owned);
-            return err;
-        };
-    }
-    return try files.toOwnedSlice(allocator);
-}
-
-fn conflictFileAlreadyListed(files: []const []const u8, path: []const u8) bool {
-    for (files) |file| {
-        if (std.mem.eql(u8, file, path)) return true;
-    }
-    return false;
-}
-
-fn freeConflictFiles(allocator: Allocator, files: [][]u8) void {
-    for (files) |file| allocator.free(file);
-    allocator.free(files);
-}
-
-fn appendLocalMergeCheck(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, detail: PullDetail) !void {
-    const oid = if (detail.target_oid.len != 0) detail.target_oid else detail.merge_oid;
-    const status = try localContainsOid(allocator, repo, oid, detail.base_ref);
-    if (status) |contains| {
-        try buf.appendSlice(allocator, if (contains) "Confirmed in base ref" else "Not confirmed in base ref");
-    } else {
-        try buf.appendSlice(allocator, "Unavailable");
-    }
-}
-
-fn localContainsOid(allocator: Allocator, repo: Repo, oid: []const u8, base_ref: []const u8) !?bool {
-    var argv = std.ArrayList([]const u8).empty;
-    defer argv.deinit(allocator);
-    try argv.appendSlice(allocator, &.{ "git", "-C", repo.root, "merge-base", "--is-ancestor", oid, base_ref });
-    var result = try runCommand(allocator, argv.items, null, 1024 * 1024);
-    defer result.deinit();
-    if (result.exitCode()) |code| {
-        if (code == 0) return true;
-        if (code == 1) return false;
-    }
-    return null;
-}
-
 fn appendPullStatePill(buf: *std.ArrayList(u8), allocator: Allocator, state: []const u8, draft: bool) !void {
     if (draft and std.mem.eql(u8, state, "open")) {
         try buf.appendSlice(allocator, "<span class=\"state draft\">draft</span>");
@@ -1541,7 +793,7 @@ pub fn handlePullConflictPost(allocator: Allocator, repo: Repo, stream: std.net.
     };
     defer detail.deinit(allocator);
 
-    const merge_status = try loadPullMergeStatus(allocator, repo, detail);
+    const merge_status = try pull_merge.loadStatus(allocator, repo, detail);
     defer merge_status.deinit(allocator);
     if (!merge_status.hasConflicts()) {
         try sendMergeEditorError(allocator, repo, stream, raw_ref, 409, "Conflict", "This pull request no longer reports merge conflicts.");
@@ -1598,8 +850,8 @@ pub fn handlePullConflictPost(allocator: Allocator, repo: Repo, stream: std.net.
         return;
     }
 
-    const merge_commit = commitPullConflictResolution(allocator, repo, snapshot, raw_ref, resolved.items) catch |err| {
-        const message = mergeCommitErrorMessage(err) orelse return err;
+    const merge_commit = pull_merge.commitConflictResolution(allocator, repo, snapshot, raw_ref, resolved.items) catch |err| {
+        const message = pull_merge.commitErrorMessage(err) orelse return err;
         try sendMergeEditorError(allocator, repo, stream, raw_ref, 422, "Unprocessable Entity", message);
         return;
     };
@@ -1644,7 +896,7 @@ pub fn handlePullMergePost(allocator: Allocator, repo: Repo, stream: std.net.Str
     }
 
     const method_value = std.mem.trim(u8, findFormField(fields, "method") orelse "merge", " \t\r\n");
-    const method = pullMergeMethodFromValue(method_value) orelse {
+    const method = pull_merge.methodFromValue(method_value) orelse {
         try sendPullMergeError(allocator, repo, stream, raw_ref, csrf_token, 422, "Unprocessable Entity", "Unknown merge method.");
         return;
     };
@@ -1653,7 +905,7 @@ pub fn handlePullMergePost(allocator: Allocator, repo: Repo, stream: std.net.Str
         return;
     };
 
-    const merge_status = try loadPullMergeStatus(allocator, repo, detail);
+    const merge_status = try pull_merge.loadStatus(allocator, repo, detail);
     defer merge_status.deinit(allocator);
     if (merge_status.hasConflicts()) {
         try sendPullMergeError(allocator, repo, stream, raw_ref, csrf_token, 409, "Conflict", "Resolve merge conflicts before merging this pull request.");
@@ -1672,8 +924,8 @@ pub fn handlePullMergePost(allocator: Allocator, repo: Repo, stream: std.net.Str
         return;
     }
 
-    const merge_result = mergePullIntoBase(allocator, repo, detail, raw_ref, snapshot, method) catch |err| {
-        const message = pullMergeErrorMessage(err) orelse return err;
+    const merge_result = pull_merge.mergeIntoBase(allocator, repo, detail, raw_ref, snapshot, method) catch |err| {
+        const message = pull_merge.mergeErrorMessage(err) orelse return err;
         try sendPullMergeError(allocator, repo, stream, raw_ref, csrf_token, 422, "Unprocessable Entity", message);
         return;
     };
@@ -1993,376 +1245,6 @@ fn parseDiffCommentLine(value: []const u8) ?usize {
     return if (parsed == 0) null else parsed;
 }
 
-fn pullMergeMethodFromValue(value: []const u8) ?PullMergeMethod {
-    if (std.mem.eql(u8, value, "merge") or std.mem.eql(u8, value, "merge_commit")) return .merge_commit;
-    if (std.mem.eql(u8, value, "squash")) return .squash;
-    if (std.mem.eql(u8, value, "rebase")) return .rebase;
-    return null;
-}
-
-fn mergePullIntoBase(
-    allocator: Allocator,
-    repo: Repo,
-    detail: PullDetail,
-    raw_ref: []const u8,
-    snapshot: PullMergeSnapshot,
-    method: PullMergeMethod,
-) !PullMergeResult {
-    if (!(try mergeWouldBeClean(allocator, repo, snapshot.expected_base_oid, snapshot.expected_head_oid))) return error.MergeConflicts;
-
-    const result = switch (method) {
-        .merge_commit => try createMergeCommitOnBase(allocator, repo, detail, raw_ref, snapshot.expected_base_oid, snapshot.expected_head_oid),
-        .squash => try createSquashCommitOnBase(allocator, repo, detail, raw_ref, snapshot.expected_base_oid, snapshot.expected_head_oid),
-        .rebase => try rebasePullOntoBase(allocator, repo, snapshot.expected_base_oid, snapshot.expected_head_oid),
-    };
-    errdefer result.deinit(allocator);
-
-    const target = result.merge_oid orelse result.target_oid orelse return error.MergeCommitFailed;
-    if (!(try commitIsAncestorAt(allocator, repo, snapshot.expected_base_oid, target))) return error.NonFastForwardResult;
-    try pushRemoteBranchWithLease(allocator, repo, snapshot.base_target, target, snapshot.expected_base_oid);
-    return result;
-}
-
-fn mergeWouldBeClean(allocator: Allocator, repo: Repo, base_commit: []const u8, head_commit: []const u8) !bool {
-    var result = try gitRunAt(allocator, repo.root, &.{ "merge-tree", "--write-tree", "--no-messages", base_commit, head_commit }, max_pull_diff_bytes);
-    defer result.deinit();
-    if (result.exitCode()) |code| {
-        if (code == 0) return true;
-        if (code == 1) return false;
-    }
-    return error.MergeStatusUnavailable;
-}
-
-fn createMergeCommitOnBase(
-    allocator: Allocator,
-    repo: Repo,
-    detail: PullDetail,
-    raw_ref: []const u8,
-    old_base: []const u8,
-    head_commit: []const u8,
-) !PullMergeResult {
-    const tmp_worktree = try tempPath(allocator, "gitomi-pr-merge");
-    defer allocator.free(tmp_worktree);
-    var worktree_created = false;
-    defer cleanupTempWorktree(allocator, repo.root, tmp_worktree, &worktree_created);
-
-    const worktree_add_raw = try gitCheckedAt(allocator, repo.root, &.{ "worktree", "add", "--detach", tmp_worktree, old_base }, git.max_git_output);
-    allocator.free(worktree_add_raw);
-    worktree_created = true;
-
-    const message = try std.fmt.allocPrint(allocator, "Merge pull request #{s} from {s}", .{ raw_ref, detail.head_ref });
-    defer allocator.free(message);
-    var merge_result = try gitRunAt(allocator, tmp_worktree, &.{ "merge", "--no-ff", "-m", message, head_commit }, git.max_git_output);
-    defer merge_result.deinit();
-    if (merge_result.exitCode()) |code| {
-        if (code != 0) return error.MergeFailed;
-    } else {
-        return error.MergeFailed;
-    }
-
-    const commit_oid = try tempWorktreeHead(allocator, tmp_worktree);
-    errdefer allocator.free(commit_oid);
-    if (std.mem.eql(u8, commit_oid, old_base)) {
-        return .{ .target_oid = commit_oid };
-    }
-    return .{ .merge_oid = commit_oid };
-}
-
-fn createSquashCommitOnBase(
-    allocator: Allocator,
-    repo: Repo,
-    detail: PullDetail,
-    raw_ref: []const u8,
-    old_base: []const u8,
-    head_commit: []const u8,
-) !PullMergeResult {
-    const tmp_worktree = try tempPath(allocator, "gitomi-pr-squash");
-    defer allocator.free(tmp_worktree);
-    var worktree_created = false;
-    defer cleanupTempWorktree(allocator, repo.root, tmp_worktree, &worktree_created);
-
-    const worktree_add_raw = try gitCheckedAt(allocator, repo.root, &.{ "worktree", "add", "--detach", tmp_worktree, old_base }, git.max_git_output);
-    allocator.free(worktree_add_raw);
-    worktree_created = true;
-
-    var merge_result = try gitRunAt(allocator, tmp_worktree, &.{ "merge", "--squash", "--no-commit", head_commit }, git.max_git_output);
-    defer merge_result.deinit();
-    if (merge_result.exitCode()) |code| {
-        if (code != 0) return error.MergeFailed;
-    } else {
-        return error.MergeFailed;
-    }
-
-    if (try worktreeHasStagedChanges(allocator, tmp_worktree)) {
-        const message = try std.fmt.allocPrint(allocator, "Squash merge pull request #{s} from {s}", .{ raw_ref, detail.head_ref });
-        defer allocator.free(message);
-        const commit_output = try gitCheckedAt(allocator, tmp_worktree, &.{ "commit", "-m", message }, git.max_git_output);
-        allocator.free(commit_output);
-    }
-
-    const commit_oid = try tempWorktreeHead(allocator, tmp_worktree);
-    errdefer allocator.free(commit_oid);
-    return .{ .target_oid = commit_oid };
-}
-
-fn rebasePullOntoBase(
-    allocator: Allocator,
-    repo: Repo,
-    old_base: []const u8,
-    head_commit: []const u8,
-) !PullMergeResult {
-    const merge_base = try work_items.loadMergeBase(allocator, repo, old_base, head_commit);
-    defer if (merge_base) |value| allocator.free(value);
-    const base = merge_base orelse return error.MergeStatusUnavailable;
-
-    const tmp_worktree = try tempPath(allocator, "gitomi-pr-rebase");
-    defer allocator.free(tmp_worktree);
-    var worktree_created = false;
-    defer cleanupTempWorktree(allocator, repo.root, tmp_worktree, &worktree_created);
-
-    const worktree_add_raw = try gitCheckedAt(allocator, repo.root, &.{ "worktree", "add", "--detach", tmp_worktree, head_commit }, git.max_git_output);
-    allocator.free(worktree_add_raw);
-    worktree_created = true;
-
-    var rebase_result = try gitRunAt(allocator, tmp_worktree, &.{ "rebase", "--onto", old_base, base }, git.max_git_output);
-    defer rebase_result.deinit();
-    if (rebase_result.exitCode()) |code| {
-        if (code != 0) return error.RebaseFailed;
-    } else {
-        return error.RebaseFailed;
-    }
-
-    const commit_oid = try tempWorktreeHead(allocator, tmp_worktree);
-    errdefer allocator.free(commit_oid);
-    return .{ .target_oid = commit_oid };
-}
-
-fn tempWorktreeHead(allocator: Allocator, tmp_worktree: []const u8) ![]u8 {
-    const raw = try gitCheckedAt(allocator, tmp_worktree, &.{ "rev-parse", "HEAD" }, 1024 * 1024);
-    defer allocator.free(raw);
-    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
-    if (trimmed.len == 0) return error.MergeCommitFailed;
-    return try allocator.dupe(u8, trimmed);
-}
-
-fn worktreeHasStagedChanges(allocator: Allocator, tmp_worktree: []const u8) !bool {
-    var diff_result = try gitRunAt(allocator, tmp_worktree, &.{ "diff", "--cached", "--quiet" }, 1024 * 1024);
-    defer diff_result.deinit();
-    if (diff_result.exitCode()) |code| {
-        if (code == 0) return false;
-        if (code == 1) return true;
-    }
-    return error.GitFailed;
-}
-
-fn commitIsAncestorAt(allocator: Allocator, repo: Repo, ancestor: []const u8, descendant: []const u8) !bool {
-    var result = try gitRunAt(allocator, repo.root, &.{ "merge-base", "--is-ancestor", ancestor, descendant }, git.max_git_output);
-    defer result.deinit();
-    if (result.exitCode()) |code| {
-        if (code == 0) return true;
-        if (code == 1) return false;
-    }
-    return error.GitFailed;
-}
-
-fn pushRemoteBranchWithLease(allocator: Allocator, repo: Repo, target: RemoteBranchTarget, new_oid: []const u8, expected_oid: []const u8) !void {
-    const lease = try std.fmt.allocPrint(allocator, "--force-with-lease={s}:{s}", .{ target.remote_ref, expected_oid });
-    defer allocator.free(lease);
-    const refspec = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ new_oid, target.remote_ref });
-    defer allocator.free(refspec);
-    const push_output = gitCheckedAt(allocator, repo.root, &.{ "push", target.remote, lease, refspec }, git.max_git_output) catch |err| switch (err) {
-        error.GitFailed => return error.RemoteBranchUpdateFailed,
-        else => return err,
-    };
-    allocator.free(push_output);
-}
-
-fn cleanupTempWorktree(allocator: Allocator, repo_root: []const u8, tmp_worktree: []const u8, worktree_created: *bool) void {
-    if (worktree_created.*) {
-        var remove_result = gitRunAt(allocator, repo_root, &.{ "worktree", "remove", "--force", tmp_worktree }, 1024 * 1024) catch null;
-        if (remove_result) |*result| result.deinit();
-    }
-    std.fs.deleteTreeAbsolute(tmp_worktree) catch {};
-}
-
-fn pullMergeErrorMessage(err: anyerror) ?[]const u8 {
-    return switch (err) {
-        error.NoLocalBaseBranch => "The pull request base must be available on a configured remote before the web UI can merge it.",
-        error.NoPullHeadCommit => "The pull request head commit is not available in the local repository.",
-        error.MergeStatusUnavailable => "The local repository could not verify mergeability for this pull request.",
-        error.MergeConflicts => "This pull request has conflicts with the current base branch.",
-        error.MergeFailed => "Git could not merge this pull request into a temporary worktree.",
-        error.RebaseFailed => "Git could not rebase this pull request onto the base branch.",
-        error.MergeCommitFailed => "Git could not identify the merged target commit.",
-        error.NonFastForwardResult => "The selected merge method did not produce a fast-forward result for the confirmed base.",
-        error.BaseUpdateFailed, error.RemoteBranchUpdateFailed => "Git could not update the remote base branch. It may have changed while the merge was running.",
-        error.GitFailed => "Git could not complete the merge. Check the repository state and commit signing configuration.",
-        else => null,
-    };
-}
-
-fn commitPullConflictResolution(
-    allocator: Allocator,
-    repo: Repo,
-    snapshot: PullMergeSnapshot,
-    raw_ref: []const u8,
-    resolved_files: []const ResolvedConflictFile,
-) ![]u8 {
-    if (resolved_files.len == 0) return error.NoConflictResolutions;
-    const head_target = snapshot.head_target orelse return error.NoRemoteHeadBranch;
-
-    const tmp_worktree = try tempPath(allocator, "gitomi-merge-worktree");
-    defer allocator.free(tmp_worktree);
-    var worktree_created = false;
-    defer {
-        if (worktree_created) {
-            var remove_result = gitRunAt(allocator, repo.root, &.{ "worktree", "remove", "--force", tmp_worktree }, 1024 * 1024) catch null;
-            if (remove_result) |*result| result.deinit();
-        }
-        std.fs.deleteTreeAbsolute(tmp_worktree) catch {};
-    }
-
-    const worktree_add_raw = try gitCheckedAt(allocator, repo.root, &.{ "worktree", "add", "--detach", tmp_worktree, snapshot.expected_head_oid }, git.max_git_output);
-    allocator.free(worktree_add_raw);
-    worktree_created = true;
-
-    var merge_result = try gitRunAt(allocator, tmp_worktree, &.{ "merge", "--no-ff", "--no-commit", snapshot.expected_base_oid }, git.max_git_output);
-    defer merge_result.deinit();
-    if (merge_result.exitCode()) |code| {
-        if (code != 0 and code != 1) return error.MergePreparationFailed;
-    } else {
-        return error.MergePreparationFailed;
-    }
-
-    for (resolved_files) |file| {
-        if (!isSafeMergePath(file.path)) return error.UnsafeConflictPath;
-        const conflict_path_is_regular = try worktreeConflictPathIsRegularFile(allocator, tmp_worktree, file.path);
-        if (!conflict_path_is_regular) return error.UnsafeConflictPath;
-        const absolute_path = try std.fs.path.join(allocator, &.{ tmp_worktree, file.path });
-        defer allocator.free(absolute_path);
-        try writeFileBytes(absolute_path, file.content);
-        const add_raw = try gitCheckedAt(allocator, tmp_worktree, &.{ "add", "--", file.path }, git.max_git_output);
-        allocator.free(add_raw);
-    }
-
-    const unmerged_raw = try gitCheckedAt(allocator, tmp_worktree, &.{ "diff", "--name-only", "--diff-filter=U" }, git.max_git_output);
-    defer allocator.free(unmerged_raw);
-    if (std.mem.trim(u8, unmerged_raw, " \t\r\n").len != 0) return error.UnresolvedConflicts;
-
-    const message = try std.fmt.allocPrint(allocator, "Resolve merge conflicts for PR {s}", .{raw_ref});
-    defer allocator.free(message);
-    const commit_output = try gitCheckedAt(allocator, tmp_worktree, &.{ "commit", "-m", message }, git.max_git_output);
-    allocator.free(commit_output);
-
-    const commit_raw = try gitCheckedAt(allocator, tmp_worktree, &.{ "rev-parse", "HEAD" }, 1024 * 1024);
-    defer allocator.free(commit_raw);
-    const commit_oid = try allocator.dupe(u8, std.mem.trim(u8, commit_raw, " \t\r\n"));
-    errdefer allocator.free(commit_oid);
-    if (commit_oid.len == 0) return error.MergeCommitFailed;
-
-    try pushRemoteBranchWithLease(allocator, repo, head_target, commit_oid, snapshot.expected_head_oid);
-    return commit_oid;
-}
-
-fn worktreeConflictPathIsRegularFile(allocator: Allocator, worktree: []const u8, path: []const u8) !bool {
-    const raw = try gitCheckedAt(allocator, worktree, &.{ "ls-files", "-s", "-z", "--", path }, git.max_git_output);
-    defer allocator.free(raw);
-    return lsFilesStagesAreRegularFile(raw, path);
-}
-
-fn lsFilesStagesAreRegularFile(raw: []const u8, path: []const u8) bool {
-    var found = false;
-    var records = std.mem.splitScalar(u8, raw, 0);
-    while (records.next()) |record| {
-        if (record.len == 0) continue;
-        const tab = std.mem.indexOfScalar(u8, record, '\t') orelse return false;
-        if (!std.mem.eql(u8, record[tab + 1 ..], path)) return false;
-        const space = std.mem.indexOfScalar(u8, record[0..tab], ' ') orelse return false;
-        if (!isRegularGitMode(record[0..space])) return false;
-        found = true;
-    }
-    return found;
-}
-
-fn localHeadRefName(allocator: Allocator, head_ref: []const u8) !?[]u8 {
-    const heads_prefix = "refs/heads/";
-    if (std.mem.startsWith(u8, head_ref, heads_prefix)) {
-        const branch_name = head_ref[heads_prefix.len..];
-        if (!isSafeLocalBranchName(branch_name)) return null;
-        return try allocator.dupe(u8, head_ref);
-    }
-    if (!isBranchShorthand(head_ref)) return null;
-    return try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{head_ref});
-}
-
-fn mergeCommitErrorMessage(err: anyerror) ?[]const u8 {
-    return switch (err) {
-        error.NoLocalHeadBranch, error.NoRemoteHeadBranch => "The pull request head must be a writable branch on the configured remote before the web resolver can update it.",
-        error.NoConflictResolutions => "No conflict resolutions were submitted.",
-        error.PullHeadChanged => "The local pull request head no longer matches the conflicts shown by the web resolver. Refresh the page and try again.",
-        error.UnsafeConflictPath => "A conflicting path is not safe to write from the web resolver.",
-        error.MergePreparationFailed => "Git could not prepare a merge worktree for this pull request.",
-        error.UnresolvedConflicts => "Git still reports unresolved conflicts after applying the submitted files.",
-        error.MergeCommitFailed => "Git could not create the merge-resolution commit.",
-        error.RemoteBranchUpdateFailed => "Git could not update the remote pull request branch. It may have changed while the resolution was being committed.",
-        error.GitFailed => "Git could not commit the resolution. Check the repository state and signing configuration.",
-        else => null,
-    };
-}
-
-fn gitRunAt(allocator: Allocator, root: []const u8, git_args: []const []const u8, max_output_bytes: usize) !git.RunOutput {
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(allocator);
-    try argv.append(allocator, "git");
-    try argv.append(allocator, "-C");
-    try argv.append(allocator, root);
-    for (git_args) |arg| try argv.append(allocator, arg);
-    return runCommand(allocator, argv.items, null, max_output_bytes);
-}
-
-fn gitCheckedAt(allocator: Allocator, root: []const u8, git_args: []const []const u8, max_output_bytes: usize) ![]u8 {
-    var result = try gitRunAt(allocator, root, git_args, max_output_bytes);
-    if (result.exitCode() == 0) {
-        const stdout = result.stdout;
-        allocator.free(result.stderr);
-        return stdout;
-    }
-    result.deinit();
-    return error.GitFailed;
-}
-
-fn freePullCommits(allocator: Allocator, commits: []PullCommit) void {
-    for (commits) |commit| commit.deinit(allocator);
-    allocator.free(commits);
-}
-
-test "parse merge-tree conflict file names" {
-    const raw = "b8424e5199eed14e5e0c4fa9a3668f146ef44ae9\x00cli/src/github.zig\x00cli/src/sync.zig\x00";
-    const files = try parseMergeTreeConflictFiles(std.testing.allocator, raw);
-    defer freeConflictFiles(std.testing.allocator, files);
-
-    try std.testing.expectEqual(@as(usize, 2), files.len);
-    try std.testing.expectEqualStrings("cli/src/github.zig", files[0]);
-    try std.testing.expectEqualStrings("cli/src/sync.zig", files[1]);
-}
-
-test "parse merge-tree conflict file names skips duplicates and empty records" {
-    const raw = "tree\x00a.zig\x00\x00a.zig\x00b.zig\x00";
-    const files = try parseMergeTreeConflictFiles(std.testing.allocator, raw);
-    defer freeConflictFiles(std.testing.allocator, files);
-
-    try std.testing.expectEqual(@as(usize, 2), files.len);
-    try std.testing.expectEqualStrings("a.zig", files[0]);
-    try std.testing.expectEqualStrings("b.zig", files[1]);
-}
-
-test "parse merge-tree conflict file names returns empty for git errors without paths" {
-    const files = try parseMergeTreeConflictFiles(std.testing.allocator, "");
-    defer freeConflictFiles(std.testing.allocator, files);
-
-    try std.testing.expectEqual(@as(usize, 0), files.len);
-}
-
 test "parse diff comment context from form fields" {
     const fields = try parseFormFieldsOwned(std.testing.allocator, "diff_file=cli%2Fsrc%2Fpulls.zig&diff_side=new&diff_start=139&diff_end=151");
     defer freeFormFields(std.testing.allocator, fields);
@@ -2387,19 +1269,6 @@ test "format diff comment body includes file and line range" {
         "Review comment on `cli/src/pulls.zig` (new lines 139-151).\n\nLooks good.",
         body,
     );
-}
-
-test "content conflict marker detection" {
-    try std.testing.expect(contentHasConflictMarkers("a\n<<<<<<< head\nb\n=======\nc\n>>>>>>> main\n"));
-    try std.testing.expect(!contentHasConflictMarkers("const divider = \"=======\";\n"));
-}
-
-test "pull merge method parser" {
-    try std.testing.expectEqual(PullMergeMethod.merge_commit, pullMergeMethodFromValue("merge").?);
-    try std.testing.expectEqual(PullMergeMethod.merge_commit, pullMergeMethodFromValue("merge_commit").?);
-    try std.testing.expectEqual(PullMergeMethod.squash, pullMergeMethodFromValue("squash").?);
-    try std.testing.expectEqual(PullMergeMethod.rebase, pullMergeMethodFromValue("rebase").?);
-    try std.testing.expect(pullMergeMethodFromValue("fast-forward") == null);
 }
 
 test "pull merge form includes csrf token" {
@@ -2443,31 +1312,4 @@ test "submitted merge oids require full hex object ids" {
     );
     defer freeFormFields(std.testing.allocator, short_fields);
     try std.testing.expect(submittedExpectedOids(short_fields) == null);
-}
-
-test "merge editor rejects symlink conflict index stages" {
-    try std.testing.expect(lsFilesStagesAreRegularFile(
-        "100644 abcdef 1\tconflict.txt\x00100755 abcdef 2\tconflict.txt\x00100644 abcdef 3\tconflict.txt\x00",
-        "conflict.txt",
-    ));
-    try std.testing.expect(!lsFilesStagesAreRegularFile(
-        "100644 abcdef 1\tconflict.txt\x00120000 abcdef 2\tconflict.txt\x00100644 abcdef 3\tconflict.txt\x00",
-        "conflict.txt",
-    ));
-    try std.testing.expect(!lsFilesStagesAreRegularFile("", "conflict.txt"));
-}
-
-test "merge resolver derives local head refs only from safe branch names" {
-    const shorthand = (try localHeadRefName(std.testing.allocator, "feature/conflict-fix")).?;
-    defer std.testing.allocator.free(shorthand);
-    try std.testing.expectEqualStrings("refs/heads/feature/conflict-fix", shorthand);
-
-    const full = (try localHeadRefName(std.testing.allocator, "refs/heads/origin/feature")).?;
-    defer std.testing.allocator.free(full);
-    try std.testing.expectEqualStrings("refs/heads/origin/feature", full);
-
-    try std.testing.expect((try localHeadRefName(std.testing.allocator, "origin/feature")) == null);
-    try std.testing.expect((try localHeadRefName(std.testing.allocator, "refs/remotes/origin/feature")) == null);
-    try std.testing.expect((try localHeadRefName(std.testing.allocator, "HEAD")) == null);
-    try std.testing.expect((try localHeadRefName(std.testing.allocator, "feature^{commit}")) == null);
 }
