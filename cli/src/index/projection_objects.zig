@@ -1080,6 +1080,8 @@ fn applyProjectFieldUpdated(
     defer allocator.free(default_value_json);
     const state = event_mod.jsonString(payload.get("state")) orelse current.state;
 
+    if (try projectFieldKeyInUse(db, project_id, key, field_id)) return "duplicate_project_field_key";
+
     var stmt = try db.prepare(
         \\UPDATE project_fields
         \\SET key = ?, name = ?, field_type = ?, position = ?, required = ?, default_value_json = ?,
@@ -1514,6 +1516,24 @@ fn projectFieldExists(db: *SqliteDb, project_id: []const u8, field_id: []const u
     defer stmt.deinit();
     try stmt.bindText(1, project_id);
     try stmt.bindText(2, field_id);
+    return try stmt.step();
+}
+
+fn projectFieldKeyInUse(db: *SqliteDb, project_id: []const u8, key: []const u8, except_id: ?[]const u8) !bool {
+    var stmt = try db.prepare(
+        \\SELECT 1
+        \\FROM project_fields
+        \\WHERE project_id = ?
+        \\  AND key = ?
+        \\  AND (? = '' OR id != ?)
+        \\LIMIT 1
+    );
+    defer stmt.deinit();
+    const excluded = except_id orelse "";
+    try stmt.bindText(1, project_id);
+    try stmt.bindText(2, key);
+    try stmt.bindText(3, excluded);
+    try stmt.bindText(4, excluded);
     return try stmt.step();
 }
 

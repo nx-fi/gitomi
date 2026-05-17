@@ -1,6 +1,12 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+pub const JsonRootKind = enum {
+    any,
+    object,
+    array,
+};
+
 pub fn appendJsonFieldString(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -66,6 +72,42 @@ pub fn appendJsonString(buf: *std.ArrayList(u8), allocator: Allocator, value: []
     try buf.append(allocator, '"');
 }
 
+pub fn canonicalizeJsonValue(allocator: Allocator, bytes: []const u8, root_kind: JsonRootKind) !?[]u8 {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return null,
+    };
+    defer parsed.deinit();
+
+    if (!jsonRootKindMatches(parsed.value, root_kind)) return null;
+    return try stringifyJsonValue(allocator, parsed.value);
+}
+
+pub fn requireCanonicalJsonValue(allocator: Allocator, bytes: []const u8, root_kind: JsonRootKind) ![]u8 {
+    return (try canonicalizeJsonValue(allocator, bytes, root_kind)) orelse error.InvalidJsonValue;
+}
+
+pub fn stringifyJsonValue(allocator: Allocator, value: std.json.Value) ![]u8 {
+    var out: std.io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    try std.json.Stringify.value(value, .{}, &out.writer);
+    return try out.toOwnedSlice();
+}
+
+fn jsonRootKindMatches(value: std.json.Value, root_kind: JsonRootKind) bool {
+    return switch (root_kind) {
+        .any => true,
+        .object => switch (value) {
+            .object => true,
+            else => false,
+        },
+        .array => switch (value) {
+            .array => true,
+            else => false,
+        },
+    };
+}
+
 pub fn appendJsonFieldBool(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -97,4 +139,16 @@ test "json string escaping handles control characters" {
     defer buf.deinit(std.testing.allocator);
     try appendJsonString(&buf, std.testing.allocator, "a\n\"b\\");
     try std.testing.expectEqualStrings("\"a\\n\\\"b\\\\\"", buf.items);
+}
+
+test "canonical json values must be complete values with expected root type" {
+    const canonical = try canonicalizeJsonValue(std.testing.allocator, " { \"ok\" : true } ", .object) orelse unreachable;
+    defer std.testing.allocator.free(canonical);
+    try std.testing.expectEqualStrings("{\"ok\":true}", canonical);
+
+    const injected = try canonicalizeJsonValue(std.testing.allocator, "{}},\"conclusion\":\"success\",\"pad\":{", .object);
+    try std.testing.expect(injected == null);
+
+    const wrong_root = try canonicalizeJsonValue(std.testing.allocator, "[]", .object);
+    try std.testing.expect(wrong_root == null);
 }

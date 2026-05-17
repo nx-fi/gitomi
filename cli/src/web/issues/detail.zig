@@ -13,6 +13,7 @@ const repo_mod = @import("../../repo.zig");
 const shared = @import("../shared.zig");
 const util = @import("../../util.zig");
 const work_items = @import("../../work_items.zig");
+const zwf = @import("../../zwf.zig");
 
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
@@ -39,14 +40,15 @@ pub const renderIssuesPage = issues_list.renderIssuesPage;
 const formValueOwned = issue_form.formValueOwned;
 const queryValueOwned = issue_form.queryValueOwned;
 
-pub fn renderIssueDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
-    return renderIssueDetailPageWithCommentForm(allocator, repo, raw_ref, null, "");
+pub fn renderIssueDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u8, csrf_token: []const u8) ![]u8 {
+    return renderIssueDetailPageWithCommentForm(allocator, repo, raw_ref, csrf_token, null, "");
 }
 
 fn renderIssueDetailPageWithCommentForm(
     allocator: Allocator,
     repo: Repo,
     raw_ref: []const u8,
+    csrf_token: []const u8,
     comment_error: ?[]const u8,
     comment_value: []const u8,
 ) ![]u8 {
@@ -107,7 +109,9 @@ fn renderIssueDetailPageWithCommentForm(
     if (can_edit_issue) {
         try buf.appendSlice(allocator, " data-checklist-owner=\"issue\" data-checklist-update-action=\"/issues/");
         try shared.appendUrlEncoded(&buf, allocator, raw_ref);
-        try buf.appendSlice(allocator, "/checklist\"");
+        try buf.appendSlice(allocator, "/checklist\" data-checklist-csrf=\"");
+        try shared.appendHtml(&buf, allocator, csrf_token);
+        try buf.append(allocator, '"');
     }
     try buf.appendSlice(allocator, ">");
     if (detail.body.len == 0) {
@@ -118,14 +122,14 @@ fn renderIssueDetailPageWithCommentForm(
     try buf.appendSlice(allocator,
         \\          </div>
     );
-    try issue_reactions.appendBar(&buf, allocator, &db, "issue", detail.id, raw_ref, "", current_actor);
+    try issue_reactions.appendBar(&buf, allocator, &db, "issue", detail.id, raw_ref, "", current_actor, csrf_token);
     try buf.appendSlice(allocator,
         \\        </article>
         \\      </div>
     );
-    try appendIssueComments(&buf, allocator, &db, raw_ref, detail.id, current_actor, current_role);
+    try appendIssueComments(&buf, allocator, &db, raw_ref, detail.id, current_actor, current_role, csrf_token);
     try issue_timeline.append(&buf, allocator, &db, detail.id);
-    try appendIssueCommentForm(&buf, allocator, raw_ref, detail.state, current_actor, comment_error, comment_value);
+    try appendIssueCommentForm(&buf, allocator, raw_ref, detail.state, current_actor, csrf_token, comment_error, comment_value);
     try buf.appendSlice(allocator, "    </div><aside class=\"issue-meta-sidebar\">");
     try issue_sidebar.append(&buf, allocator, &db, raw_ref, detail.id, display_author, detail.milestone, detail.body);
     try buf.appendSlice(allocator, "</aside></div></section>");
@@ -464,6 +468,7 @@ fn appendIssueComments(
     issue_id: []const u8,
     current_actor: ?[]const u8,
     current_role: ?[]const u8,
+    csrf_token: []const u8,
 ) !void {
     var stmt = try work_items.prepareCommentsStmt(db, "issue", issue_id);
     defer stmt.deinit();
@@ -517,7 +522,7 @@ fn appendIssueComments(
             try shared.appendMarkdownSource(buf, allocator, row.body, .{});
         }
         try buf.appendSlice(allocator, "</div>");
-        try issue_reactions.appendBar(buf, allocator, db, "comment", row.id, raw_ref, comment_ref_value, current_actor);
+        try issue_reactions.appendBar(buf, allocator, db, "comment", row.id, raw_ref, comment_ref_value, current_actor, csrf_token);
         try buf.appendSlice(allocator, "</article></div>");
     }
 }
@@ -596,6 +601,7 @@ fn appendIssueCommentForm(
     raw_ref: []const u8,
     state: []const u8,
     current_actor: ?[]const u8,
+    csrf_token: []const u8,
     error_message: ?[]const u8,
     body_value: []const u8,
 ) !void {
@@ -611,8 +617,9 @@ fn appendIssueCommentForm(
     try shared.appendUrlEncoded(buf, allocator, raw_ref);
     try appendTemplate(buf, allocator,
         \\/comments">
+        \\    <input type="hidden" name="{csrf_field}" value="{csrf_token}">
         \\    <input type="hidden" name="reply_parent_ref" value="" data-reply-parent-ref>
-    , .{});
+    , .{ .csrf_field = zwf.csrf.field_name, .csrf_token = csrf_token });
     try shared.appendMarkdownEditor(buf, allocator, .{ .value = body_value });
     if (error_message) |message| {
         try appendTemplate(buf, allocator,
@@ -840,7 +847,7 @@ fn handleCommentBodyEditPost(
     try sendRedirect(allocator, stream, location);
 }
 
-pub fn handleIssueCommentPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
+pub fn handleIssueCommentPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, csrf_token: []const u8, form_body: []const u8) !void {
     const action_owned = try formValueOwned(allocator, form_body, "action");
     defer if (action_owned) |value| allocator.free(value);
     if (action_owned) |raw_action| {
@@ -923,7 +930,7 @@ pub fn handleIssueCommentPost(allocator: Allocator, repo: Repo, stream: std.net.
 
     const body = std.mem.trim(u8, body_owned, " \t\r\n");
     if (body.len == 0 and target_state == null) {
-        const page = try renderIssueDetailPageWithCommentForm(allocator, repo, raw_ref, "Comment is required.", body_owned);
+        const page = try renderIssueDetailPageWithCommentForm(allocator, repo, raw_ref, csrf_token, "Comment is required.", body_owned);
         defer allocator.free(page);
         try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", page, null);
         return;
@@ -944,7 +951,7 @@ pub fn handleIssueCommentPost(allocator: Allocator, repo: Repo, stream: std.net.
         const reply_ref = if (reply_ref_owned) |value| std.mem.trim(u8, value, " \t\r\n") else "";
         if (reply_ref.len != 0) {
             const reply_parent_id = index.resolveCommentId(allocator, repo, reply_ref) catch {
-                const page = try renderIssueDetailPageWithCommentForm(allocator, repo, raw_ref, "Reply target was not found.", body_owned);
+                const page = try renderIssueDetailPageWithCommentForm(allocator, repo, raw_ref, csrf_token, "Reply target was not found.", body_owned);
                 defer allocator.free(page);
                 try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", page, null);
                 return;
@@ -953,7 +960,7 @@ pub fn handleIssueCommentPost(allocator: Allocator, repo: Repo, stream: std.net.
             var parent = try index.commentParentInfo(allocator, repo, reply_parent_id);
             defer parent.deinit();
             if (!std.mem.eql(u8, parent.parent_kind, "issue") or !std.mem.eql(u8, parent.parent_id, issue_id)) {
-                const page = try renderIssueDetailPageWithCommentForm(allocator, repo, raw_ref, "Reply target is not in this issue.", body_owned);
+                const page = try renderIssueDetailPageWithCommentForm(allocator, repo, raw_ref, csrf_token, "Reply target is not in this issue.", body_owned);
                 defer allocator.free(page);
                 try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", page, null);
                 return;
@@ -963,6 +970,7 @@ pub fn handleIssueCommentPost(allocator: Allocator, repo: Repo, stream: std.net.
                     allocator,
                     repo,
                     raw_ref,
+                    csrf_token,
                     "Could not add the reply. Check that Gitomi is initialized and Git commit signing is configured.",
                     body_owned,
                 );
@@ -976,6 +984,7 @@ pub fn handleIssueCommentPost(allocator: Allocator, repo: Repo, stream: std.net.
                     allocator,
                     repo,
                     raw_ref,
+                    csrf_token,
                     "Could not add the comment. Check that Gitomi is initialized and Git commit signing is configured.",
                     body_owned,
                 );
@@ -992,6 +1001,7 @@ pub fn handleIssueCommentPost(allocator: Allocator, repo: Repo, stream: std.net.
                 allocator,
                 repo,
                 raw_ref,
+                csrf_token,
                 if (std.mem.eql(u8, state_value, "closed"))
                     "Could not close the issue. Check that Gitomi is initialized and Git commit signing is configured."
                 else

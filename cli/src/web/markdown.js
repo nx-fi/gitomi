@@ -437,6 +437,14 @@
     }
   }
 
+  function decodeUrlHash(hash) {
+    try {
+      return decodeURIComponent(String(hash || "").slice(1));
+    } catch (_) {
+      return null;
+    }
+  }
+
   function encodePathQuery(value) {
     return String(value || "").split("/").map(encodeURIComponent).join("/");
   }
@@ -504,13 +512,52 @@
   }
 
   function rewriteMarkdownMedia(root, context) {
-    root.querySelectorAll("img[src]").forEach(function (image) {
+    root.querySelectorAll("audio").forEach(function (audio) {
+      audio.removeAttribute("src");
+    });
+
+    root.querySelectorAll("video").forEach(function (video) {
+      video.classList.add("markdown-media");
+      video.setAttribute("controls", "");
+      if (!video.getAttribute("preload")) video.setAttribute("preload", "metadata");
+      video.removeAttribute("poster");
+      if (video.hasAttribute("src")) {
+        const src = video.getAttribute("src") || "";
+        const rewritten = isSafeHref(src) ? repositoryHref(src, context, true) : "";
+        if (rewritten) {
+          video.setAttribute("src", rewritten);
+        } else {
+          video.removeAttribute("src");
+        }
+      }
+    });
+
+    root.querySelectorAll("track[src]").forEach(function (track) {
+      track.remove();
+    });
+
+    root.querySelectorAll("source").forEach(function (source) {
+      if (source.hasAttribute("srcset")) {
+        source.remove();
+        return;
+      }
+      const src = source.getAttribute("src") || "";
+      const rewritten = isSafeHref(src) ? repositoryHref(src, context, true) : "";
+      if (!rewritten) {
+        source.remove();
+        return;
+      }
+      source.setAttribute("src", rewritten);
+    });
+
+    root.querySelectorAll("img").forEach(function (image) {
       const src = image.getAttribute("src") || "";
-      if (!isSafeHref(src)) {
+      const rewritten = isSafeHref(src) ? repositoryHref(src, context, true) : "";
+      image.removeAttribute("srcset");
+      if (!rewritten) {
         image.remove();
         return;
       }
-      const rewritten = repositoryHref(src, context, true) || src;
       if (isVideoHref(src)) {
         const video = document.createElement("video");
         video.className = "markdown-media";
@@ -527,22 +574,6 @@
       }
       image.classList.add("markdown-media");
       image.setAttribute("src", rewritten);
-    });
-
-    root.querySelectorAll("video").forEach(function (video) {
-      video.classList.add("markdown-media");
-      video.setAttribute("controls", "");
-      if (!video.getAttribute("preload")) video.setAttribute("preload", "metadata");
-    });
-
-    root.querySelectorAll("video source[src]").forEach(function (source) {
-      const src = source.getAttribute("src") || "";
-      if (!isSafeHref(src)) {
-        source.remove();
-        return;
-      }
-      const rewritten = repositoryHref(src, context, true);
-      if (rewritten) source.setAttribute("src", rewritten);
     });
   }
 
@@ -671,11 +702,14 @@
 
     const params = new URLSearchParams();
     params.set("body", source);
+    const csrf = root.dataset.checklistCsrf || "";
+    if (!csrf) throw new Error("Checklist CSRF token is missing.");
     const response = await fetch(action, {
       method: "POST",
       headers: {
         "Accept": "text/plain",
         "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+        "X-CSRF-Token": csrf,
       },
       body: params.toString(),
     });
@@ -910,9 +944,11 @@
   function renderMarkdownToElement(root, source, context) {
     root.gitomiMarkdownSource = String(source || "");
     root.gitomiMarkdownContext = context || { ref: "", path: "" };
-    root.innerHTML = markdownHtml(source);
-    rewriteMarkdownLinks(root, context);
-    rewriteMarkdownMedia(root, context);
+    const template = document.createElement("template");
+    template.innerHTML = markdownHtml(source);
+    rewriteMarkdownLinks(template.content, context);
+    rewriteMarkdownMedia(template.content, context);
+    root.replaceChildren(template.content);
     normalizeMarkdownTables(root);
     normalizeTaskListInputs(root, source);
     renderMath(root);
@@ -1252,7 +1288,8 @@
     document.querySelectorAll("[data-markdown-outline-panel]").forEach(initMarkdownOutlinePanel);
     document.querySelectorAll("[data-root-docs]").forEach(initRootDocTabs);
     if (window.location.hash) {
-      const id = decodeURIComponent(window.location.hash.slice(1));
+      const id = decodeUrlHash(window.location.hash);
+      if (id === null) return;
       const target = document.getElementById(id);
       if (target && !renderMarkdownOutlines.scrolledHash) {
         renderMarkdownOutlines.scrolledHash = true;

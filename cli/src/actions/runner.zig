@@ -745,7 +745,10 @@ pub fn collectBackendOutputs(allocator: Allocator, diagnostics: *RunDiagnostics,
         const diag_path = try std.fmt.allocPrint(allocator, "attempts/{s}/outputs/{s}-result.json", .{ diagnostics.attempt_id, safe_job });
         defer allocator.free(diag_path);
         try diagnostics.addCopy(diag_path, bytes);
-        if (jsonFragmentLooksLike(bytes, '{')) try diagnostics.addJobOutputCopy(job.id, bytes);
+        if (try json_writer.canonicalizeJsonValue(allocator, bytes, .object)) |output_json| {
+            defer allocator.free(output_json);
+            try diagnostics.addJobOutputCopy(job.id, output_json);
+        }
         conclusion = try collectResultJsonMetadata(allocator, diagnostics, job, bytes);
     } else if (try readOutputFile(allocator, output_dir, "outputs.json")) |bytes| {
         defer allocator.free(bytes);
@@ -754,7 +757,10 @@ pub fn collectBackendOutputs(allocator: Allocator, diagnostics: *RunDiagnostics,
         const diag_path = try std.fmt.allocPrint(allocator, "attempts/{s}/outputs/{s}.json", .{ diagnostics.attempt_id, safe_job });
         defer allocator.free(diag_path);
         try diagnostics.addCopy(diag_path, bytes);
-        if (jsonFragmentLooksLike(bytes, '{')) try diagnostics.addJobOutputCopy(job.id, bytes);
+        if (try json_writer.canonicalizeJsonValue(allocator, bytes, .object)) |output_json| {
+            defer allocator.free(output_json);
+            try diagnostics.addJobOutputCopy(job.id, output_json);
+        }
     }
     if (try readOutputFile(allocator, output_dir, "artifacts.json")) |bytes| {
         defer allocator.free(bytes);
@@ -763,7 +769,10 @@ pub fn collectBackendOutputs(allocator: Allocator, diagnostics: *RunDiagnostics,
         const diag_path = try std.fmt.allocPrint(allocator, "attempts/{s}/artifacts/{s}.json", .{ diagnostics.attempt_id, safe_job });
         defer allocator.free(diag_path);
         try diagnostics.addCopy(diag_path, bytes);
-        if (jsonFragmentLooksLike(bytes, '[')) try diagnostics.addJobArtifactsCopy(job.id, bytes);
+        if (try json_writer.canonicalizeJsonValue(allocator, bytes, .array)) |artifact_json| {
+            defer allocator.free(artifact_json);
+            try diagnostics.addJobArtifactsCopy(job.id, artifact_json);
+        }
     }
     if (try readOutputFile(allocator, output_dir, "published_events.json")) |bytes| {
         defer allocator.free(bytes);
@@ -780,14 +789,24 @@ pub fn collectResultJsonMetadata(allocator: Allocator, diagnostics: *RunDiagnost
         else => return null,
     };
     if (root.get("artifacts")) |value| {
-        const artifact_json = try stringifyJsonValue(allocator, value);
-        defer allocator.free(artifact_json);
-        if (jsonFragmentLooksLike(artifact_json, '[')) try diagnostics.addJobArtifactsCopy(job.id, artifact_json);
+        switch (value) {
+            .array => {
+                const artifact_json = try json_writer.stringifyJsonValue(allocator, value);
+                defer allocator.free(artifact_json);
+                try diagnostics.addJobArtifactsCopy(job.id, artifact_json);
+            },
+            else => {},
+        }
     }
     if (root.get("published_events")) |value| {
-        const events_json = try stringifyJsonValue(allocator, value);
-        defer allocator.free(events_json);
-        try collectPublishedEventsArray(allocator, diagnostics, events_json);
+        switch (value) {
+            .array => {
+                const events_json = try json_writer.stringifyJsonValue(allocator, value);
+                defer allocator.free(events_json);
+                try collectPublishedEventsArray(allocator, diagnostics, events_json);
+            },
+            else => {},
+        }
     }
     if (event_mod.jsonString(root.get("conclusion"))) |value| return canonicalConclusion(value);
     return null;
@@ -815,18 +834,6 @@ pub fn collectPublishedEventsArray(allocator: Allocator, diagnostics: *RunDiagno
             else => {},
         }
     }
-}
-
-pub fn stringifyJsonValue(allocator: Allocator, value: std.json.Value) ![]u8 {
-    var out: std.io.Writer.Allocating = .init(allocator);
-    errdefer out.deinit();
-    try std.json.Stringify.value(value, .{}, &out.writer);
-    return try out.toOwnedSlice();
-}
-
-pub fn jsonFragmentLooksLike(bytes: []const u8, expected: u8) bool {
-    const trimmed = std.mem.trim(u8, bytes, " \t\r\n");
-    return trimmed.len != 0 and trimmed[0] == expected;
 }
 
 pub fn addStepLogs(
@@ -1046,11 +1053,11 @@ pub fn buildFinalOutputJson(allocator: Allocator, run_id: []const u8, attempt_id
     try appendJsonFieldString(&buf, allocator, "conclusion", conclusion, true);
     try appendJsonString(&buf, allocator, "outputs");
     try buf.append(allocator, ':');
-    try appendJobJsonFragmentObject(&buf, allocator, diagnostics.job_outputs.items);
+    try appendJobJsonFragmentObject(&buf, allocator, diagnostics.job_outputs.items, .object);
     try buf.append(allocator, ',');
     try appendJsonString(&buf, allocator, "artifacts");
     try buf.append(allocator, ':');
-    try appendJobJsonFragmentObject(&buf, allocator, diagnostics.job_artifacts.items);
+    try appendJobJsonFragmentObject(&buf, allocator, diagnostics.job_artifacts.items, .array);
     try buf.append(allocator, ',');
     try appendJsonString(&buf, allocator, "logs");
     try buf.append(allocator, ':');
@@ -1066,7 +1073,7 @@ pub fn buildFinalOutputJson(allocator: Allocator, run_id: []const u8, attempt_id
 pub fn buildCompletionOutputsJson(allocator: Allocator, diagnostics: RunDiagnostics) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
-    try appendJobJsonFragmentObject(&buf, allocator, diagnostics.job_outputs.items);
+    try appendJobJsonFragmentObject(&buf, allocator, diagnostics.job_outputs.items, .object);
     return try buf.toOwnedSlice(allocator);
 }
 
@@ -1077,15 +1084,51 @@ pub fn buildPublishedEventsJson(allocator: Allocator, diagnostics: RunDiagnostic
     return try buf.toOwnedSlice(allocator);
 }
 
-pub fn appendJobJsonFragmentObject(buf: *std.ArrayList(u8), allocator: Allocator, fragments: []const model.JobJsonFragment) !void {
+pub fn appendJobJsonFragmentObject(buf: *std.ArrayList(u8), allocator: Allocator, fragments: []const model.JobJsonFragment, root_kind: json_writer.JsonRootKind) !void {
     try buf.append(allocator, '{');
     for (fragments, 0..) |fragment, idx| {
         if (idx != 0) try buf.append(allocator, ',');
         try appendJsonString(buf, allocator, fragment.job_id);
         try buf.append(allocator, ':');
-        try buf.appendSlice(allocator, std.mem.trim(u8, fragment.json, " \t\r\n"));
+        const canonical = try json_writer.requireCanonicalJsonValue(allocator, fragment.json, root_kind);
+        defer allocator.free(canonical);
+        try buf.appendSlice(allocator, canonical);
     }
     try buf.append(allocator, '}');
+}
+
+test "job JSON fragments are canonicalized before object assembly" {
+    const allocator = std.testing.allocator;
+    const job_id = try allocator.dupe(u8, "build");
+    defer allocator.free(job_id);
+    const json = try allocator.dupe(u8, " { \"ok\" : true } ");
+    defer allocator.free(json);
+    const fragments = [_]model.JobJsonFragment{.{
+        .job_id = job_id,
+        .json = json,
+    }};
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try appendJobJsonFragmentObject(&buf, allocator, &fragments, .object);
+
+    try std.testing.expectEqualStrings("{\"build\":{\"ok\":true}}", buf.items);
+}
+
+test "job JSON fragments reject structural injection" {
+    const allocator = std.testing.allocator;
+    const job_id = try allocator.dupe(u8, "build");
+    defer allocator.free(job_id);
+    const json = try allocator.dupe(u8, "{}},\"conclusion\":\"success\",\"pad\":{");
+    defer allocator.free(json);
+    const fragments = [_]model.JobJsonFragment{.{
+        .job_id = job_id,
+        .json = json,
+    }};
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try std.testing.expectError(error.InvalidJsonValue, appendJobJsonFragmentObject(&buf, allocator, &fragments, .object));
 }
 
 pub fn appendLogRefsArray(buf: *std.ArrayList(u8), allocator: Allocator, logs: []const model.LogRef) !void {

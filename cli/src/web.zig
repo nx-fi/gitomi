@@ -418,7 +418,7 @@ fn handleIssueDetailPage(ctx: WebContext) !void {
         try sendPlainNotFound(ctx);
         return;
     };
-    try sendOwnedHtml(ctx, try issues_page.renderIssueDetailPage(ctx.allocator, ctx.repo, issue_ref));
+    try sendOwnedHtml(ctx, try issues_page.renderIssueDetailPage(ctx.allocator, ctx.repo, issue_ref, ctx.csrf_token));
 }
 
 fn handleIssueActionPost(ctx: WebContext) !void {
@@ -434,9 +434,11 @@ fn handleIssueActionPost(ctx: WebContext) !void {
     if (std.mem.eql(u8, action, "edit")) {
         try issues_page.handleIssueEditPost(ctx.allocator, ctx.repo, ctx.stream, issue_ref, ctx.request.body);
     } else if (std.mem.eql(u8, action, "checklist")) {
+        if (!try requireCsrfToken(ctx)) return;
         try issues_page.handleIssueChecklistPost(ctx.allocator, ctx.repo, ctx.stream, issue_ref, ctx.request.body);
     } else if (std.mem.eql(u8, action, "comments")) {
-        try issues_page.handleIssueCommentPost(ctx.allocator, ctx.repo, ctx.stream, issue_ref, ctx.request.body);
+        if (!try requireCsrfToken(ctx)) return;
+        try issues_page.handleIssueCommentPost(ctx.allocator, ctx.repo, ctx.stream, issue_ref, ctx.csrf_token, ctx.request.body);
     } else if (std.mem.eql(u8, action, "sidebar")) {
         try issues_page.handleIssueSidebarPost(ctx.allocator, ctx.repo, ctx.stream, issue_ref, ctx.request.body);
     } else {
@@ -453,7 +455,7 @@ fn handlePullConflictsPage(ctx: WebContext) !void {
         try sendPlainNotFound(ctx);
         return;
     };
-    try sendOwnedHtml(ctx, try pulls_page.renderPullMergeEditorPage(ctx.allocator, ctx.repo, pull_ref, ctx.request.target, null));
+    try sendOwnedHtml(ctx, try pulls_page.renderPullMergeEditorPage(ctx.allocator, ctx.repo, pull_ref, ctx.request.target, ctx.csrf_token, null));
 }
 
 fn handlePullDetailPage(ctx: WebContext) !void {
@@ -475,7 +477,11 @@ fn handlePullActionPost(ctx: WebContext) !void {
     };
 
     if (std.mem.eql(u8, action, "conflicts")) {
-        try pulls_page.handlePullConflictPost(ctx.allocator, ctx.repo, ctx.stream, pull_ref, ctx.request.body);
+        if (!requestHasTrustedOrigin(ctx.request)) {
+            try shared.sendPlainResponse(ctx.allocator, ctx.stream, 403, "Forbidden", "Forbidden\n");
+            return;
+        }
+        try pulls_page.handlePullConflictPost(ctx.allocator, ctx.repo, ctx.stream, pull_ref, ctx.csrf_token, ctx.request.body);
     } else if (std.mem.eql(u8, action, "merge")) {
         if (!requestHasTrustedOrigin(ctx.request)) {
             try shared.sendPlainResponse(ctx.allocator, ctx.stream, 403, "Forbidden", "Forbidden\n");
@@ -483,6 +489,7 @@ fn handlePullActionPost(ctx: WebContext) !void {
         }
         try pulls_page.handlePullMergePost(ctx.allocator, ctx.repo, ctx.stream, pull_ref, ctx.csrf_token, ctx.request.body);
     } else if (std.mem.eql(u8, action, "checklist")) {
+        if (!try requireCsrfToken(ctx)) return;
         try pulls_page.handlePullChecklistPost(ctx.allocator, ctx.repo, ctx.stream, pull_ref, ctx.request.body);
     } else if (std.mem.eql(u8, action, "comments")) {
         try pulls_page.handlePullCommentPost(ctx.allocator, ctx.repo, ctx.stream, pull_ref, ctx.request.body);
@@ -564,7 +571,7 @@ fn handleAccessDevicePost(ctx: WebContext) !void {
 }
 
 fn handleActionsPage(ctx: WebContext) !void {
-    try sendOwnedHtml(ctx, try actions_page.renderActionsPage(ctx.allocator, ctx.repo, ctx.request.target));
+    try sendOwnedHtml(ctx, try actions_page.renderActionsPage(ctx.allocator, ctx.repo, ctx.request.target, ctx.csrf_token));
 }
 
 fn handleActionsRedirect(ctx: WebContext) !void {
@@ -581,11 +588,13 @@ fn handleRunRequestedRedirect(ctx: WebContext) !void {
 
 fn handleActionsRequestPost(ctx: WebContext) !void {
     if (!try requireSameOriginActionPost(ctx)) return;
-    try actions_page.handleActionsRequestPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
+    if (!try requireCsrfToken(ctx)) return;
+    try actions_page.handleActionsRequestPost(ctx.allocator, ctx.repo, ctx.stream, ctx.csrf_token, ctx.request.body);
 }
 
 fn handleRunRequestedPost(ctx: WebContext) !void {
     if (!try requireSameOriginActionPost(ctx)) return;
+    if (!try requireCsrfToken(ctx)) return;
     try actions_page.handleRunRequestedPost(ctx.allocator, ctx.stream, ctx.request.body);
 }
 
@@ -659,6 +668,16 @@ pub fn parseHttpRequestOwned(allocator: Allocator, raw: []const u8) !HttpRequest
 fn isValidCsrfRequest(request: HttpRequest) bool {
     if (request.method != .POST) return true;
     return isSameOriginPost(request);
+}
+
+fn requireCsrfToken(ctx: WebContext) !bool {
+    if (requestHasValidCsrfToken(ctx.allocator, ctx.request, ctx.csrf_token)) return true;
+    try shared.sendPlainResponse(ctx.allocator, ctx.stream, 403, "Forbidden", "Invalid CSRF token\n");
+    return false;
+}
+
+fn requestHasValidCsrfToken(allocator: Allocator, request: HttpRequest, expected: []const u8) bool {
+    return zwf.csrf.verifyRequest(allocator, request, expected) catch false;
 }
 
 fn requireSameOriginActionPost(ctx: WebContext) !bool {
@@ -1090,15 +1109,19 @@ test "web CSRF validation requires same-origin POST metadata" {
     try std.testing.expect(!isValidCsrfRequest(missing_metadata));
 }
 
-test "actions csrf guard accepts same-origin posts" {
+test "actions csrf guard accepts same-origin posts with token" {
+    const body = "_csrf=action-token";
     const raw =
         "POST /actions/request HTTP/1.1\r\n" ++
         "Host: 127.0.0.1:12655\r\n" ++
         "Origin: http://127.0.0.1:12655\r\n" ++
-        "Content-Length: 0\r\n" ++
-        "\r\n";
+        "Content-Type: application/x-www-form-urlencoded\r\n" ++
+        "Content-Length: " ++ std.fmt.comptimePrint("{d}", .{body.len}) ++ "\r\n" ++
+        "\r\n" ++
+        body;
     const request = try parseHttpRequest(raw);
     try std.testing.expect(isSameOriginBrowserRequest(request));
+    try std.testing.expect(try zwf.csrf.verifyRequest(std.testing.allocator, request, "action-token"));
 }
 
 test "actions csrf guard rejects cross-origin and missing browser source" {
@@ -1119,6 +1142,18 @@ test "actions csrf guard rejects cross-origin and missing browser source" {
         "\r\n";
     const missing_source_request = try parseHttpRequest(missing_source);
     try std.testing.expect(!isSameOriginBrowserRequest(missing_source_request));
+}
+
+test "actions csrf token rejects same-origin post without token" {
+    const raw =
+        "POST /actions/request HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1:12655\r\n" ++
+        "Origin: http://127.0.0.1:12655\r\n" ++
+        "Content-Length: 0\r\n" ++
+        "\r\n";
+    const request = try parseHttpRequest(raw);
+    try std.testing.expect(isSameOriginBrowserRequest(request));
+    try std.testing.expect(!try zwf.csrf.verifyRequest(std.testing.allocator, request, "action-token"));
 }
 
 test "actions csrf guard rejects dns-rebound non-loopback host" {
@@ -1188,6 +1223,106 @@ test "label csrf rejects form post without token" {
     try std.testing.expect(!try zwf.csrf.verifyRequest(std.testing.allocator, request, "local-token"));
 }
 
+test "checklist posts require explicit csrf token" {
+    const body = "body=updated";
+    const header_raw =
+        "POST /issues/abc/checklist HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1:12655\r\n" ++
+        "Origin: http://127.0.0.1:12655\r\n" ++
+        "X-CSRF-Token: local-token\r\n" ++
+        "Content-Type: application/x-www-form-urlencoded\r\n" ++
+        "Content-Length: " ++ std.fmt.comptimePrint("{d}", .{body.len}) ++ "\r\n" ++
+        "\r\n" ++
+        body;
+    const header_request = try parseHttpRequest(header_raw);
+    try std.testing.expect(isValidCsrfRequest(header_request));
+    try std.testing.expect(requestHasValidCsrfToken(std.testing.allocator, header_request, "local-token"));
+    try std.testing.expect(!requestHasValidCsrfToken(std.testing.allocator, header_request, "other-token"));
+
+    const missing_raw =
+        "POST /issues/abc/checklist HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1:12655\r\n" ++
+        "Origin: http://127.0.0.1:12655\r\n" ++
+        "Content-Type: application/x-www-form-urlencoded\r\n" ++
+        "Content-Length: " ++ std.fmt.comptimePrint("{d}", .{body.len}) ++ "\r\n" ++
+        "\r\n" ++
+        body;
+    const missing_request = try parseHttpRequest(missing_raw);
+    try std.testing.expect(isValidCsrfRequest(missing_request));
+    try std.testing.expect(!requestHasValidCsrfToken(std.testing.allocator, missing_request, "local-token"));
+}
+
+test "issue comment posts require explicit csrf token" {
+    const body = "_csrf=local-token&body=hello";
+    const raw =
+        "POST /issues/abc/comments HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1:12655\r\n" ++
+        "Origin: http://127.0.0.1:12655\r\n" ++
+        "Content-Type: application/x-www-form-urlencoded\r\n" ++
+        "Content-Length: " ++ std.fmt.comptimePrint("{d}", .{body.len}) ++ "\r\n" ++
+        "\r\n" ++
+        body;
+    const request = try parseHttpRequest(raw);
+    try std.testing.expect(isValidCsrfRequest(request));
+    try std.testing.expect(requestHasValidCsrfToken(std.testing.allocator, request, "local-token"));
+
+    const missing_body = "body=hello";
+    const missing_raw =
+        "POST /issues/abc/comments HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1:12655\r\n" ++
+        "Origin: http://127.0.0.1:12655\r\n" ++
+        "Content-Type: application/x-www-form-urlencoded\r\n" ++
+        "Content-Length: " ++ std.fmt.comptimePrint("{d}", .{missing_body.len}) ++ "\r\n" ++
+        "\r\n" ++
+        missing_body;
+    const missing_request = try parseHttpRequest(missing_raw);
+    try std.testing.expect(isValidCsrfRequest(missing_request));
+    try std.testing.expect(!requestHasValidCsrfToken(std.testing.allocator, missing_request, "local-token"));
+}
+
+test "pull conflict posts require trusted origin and explicit csrf token" {
+    const body = "_csrf=local-token&expected_base_oid=base&expected_head_oid=head";
+    const raw =
+        "POST /pulls/1/conflicts HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1:12655\r\n" ++
+        "Origin: http://127.0.0.1:12655\r\n" ++
+        "Content-Type: application/x-www-form-urlencoded\r\n" ++
+        "Content-Length: " ++ std.fmt.comptimePrint("{d}", .{body.len}) ++ "\r\n" ++
+        "\r\n" ++
+        body;
+    const request = try parseHttpRequest(raw);
+    try std.testing.expect(isValidCsrfRequest(request));
+    try std.testing.expect(requestHasTrustedOrigin(request));
+    try std.testing.expect(requestHasValidCsrfToken(std.testing.allocator, request, "local-token"));
+    try std.testing.expect(!requestHasValidCsrfToken(std.testing.allocator, request, "other-token"));
+
+    const missing_body = "expected_base_oid=base&expected_head_oid=head";
+    const missing_raw =
+        "POST /pulls/1/conflicts HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1:12655\r\n" ++
+        "Origin: http://127.0.0.1:12655\r\n" ++
+        "Content-Type: application/x-www-form-urlencoded\r\n" ++
+        "Content-Length: " ++ std.fmt.comptimePrint("{d}", .{missing_body.len}) ++ "\r\n" ++
+        "\r\n" ++
+        missing_body;
+    const missing_request = try parseHttpRequest(missing_raw);
+    try std.testing.expect(isValidCsrfRequest(missing_request));
+    try std.testing.expect(requestHasTrustedOrigin(missing_request));
+    try std.testing.expect(!requestHasValidCsrfToken(std.testing.allocator, missing_request, "local-token"));
+
+    const cross_origin_raw =
+        "POST /pulls/1/conflicts HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1:12655\r\n" ++
+        "Origin: https://attacker.example\r\n" ++
+        "Content-Type: application/x-www-form-urlencoded\r\n" ++
+        "Content-Length: " ++ std.fmt.comptimePrint("{d}", .{body.len}) ++ "\r\n" ++
+        "\r\n" ++
+        body;
+    const cross_origin_request = try parseHttpRequest(cross_origin_raw);
+    try std.testing.expect(!isValidCsrfRequest(cross_origin_request));
+    try std.testing.expect(!requestHasTrustedOrigin(cross_origin_request));
+}
+
 test "web vendor javascript assets use minified filenames" {
     for (vendor_assets) |asset| {
         if (std.mem.eql(u8, asset.content_type, "application/javascript")) {
@@ -1195,6 +1330,26 @@ test "web vendor javascript assets use minified filenames" {
         }
     }
     try expectVendorJavascriptMinifiedPath("/vendor/hljs/all-languages.min.js");
+}
+
+test "web devicon stylesheets and fonts are vendored" {
+    try expectVendorAsset("/vendor/devicon/devicon.min.css", "text/css", false);
+    try expectVendorAsset("/vendor/devicon/fonts/devicon.eot", "application/vnd.ms-fontobject", true);
+    try expectVendorAsset("/vendor/devicon/fonts/devicon.ttf", "font/ttf", true);
+    try expectVendorAsset("/vendor/devicon/fonts/devicon.woff", "font/woff", true);
+    try expectVendorAsset("/vendor/devicon/fonts/devicon.svg", "image/svg+xml", true);
+}
+
+fn expectVendorAsset(path: []const u8, content_type: []const u8, binary: bool) !void {
+    for (vendor_assets) |asset| {
+        if (std.mem.eql(u8, asset.path, path)) {
+            try std.testing.expectEqualStrings(content_type, asset.content_type);
+            try std.testing.expectEqual(binary, asset.binary);
+            try std.testing.expect(asset.body.len > 0);
+            return;
+        }
+    }
+    return error.MissingVendorAsset;
 }
 
 fn expectVendorJavascriptMinifiedPath(path: []const u8) !void {

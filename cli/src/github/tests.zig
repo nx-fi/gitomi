@@ -45,6 +45,30 @@ test "github import subject stays within event subject limit" {
     const subject = try githubSubject(std.testing.allocator, "issue.opened #1234567 GitHub #1 ", title);
     defer std.testing.allocator.free(subject);
     try std.testing.expect(subject.len <= git.max_event_subject_bytes);
+    try std.testing.expect(std.mem.indexOfScalar(u8, subject, '\n') == null);
+    try std.testing.expect(std.mem.indexOf(u8, subject, "[truncated by gitomi github import]") != null);
+}
+
+test "github import subject flattens title line breaks" {
+    const subject = try githubSubject(std.testing.allocator, "issue.opened #1234567 GitHub #1 ", "first\n\nsecond");
+    defer std.testing.allocator.free(subject);
+    try std.testing.expectEqualStrings("issue.opened #1234567 GitHub #1 first  second", subject);
+}
+
+test "github import subject flattens pre-capped title marker" {
+    const raw = try std.testing.allocator.alloc(u8, git.max_payload_title_bytes * 2);
+    defer std.testing.allocator.free(raw);
+    @memset(raw, 'a');
+
+    const capped_title = try githubSizedString(std.testing.allocator, raw, "", git.max_payload_title_bytes);
+    defer std.testing.allocator.free(capped_title);
+    try std.testing.expect(std.mem.indexOfScalar(u8, capped_title, '\n') != null);
+
+    const subject = try githubSubject(std.testing.allocator, "issue.opened #1234567 GitHub #1 ", capped_title);
+    defer std.testing.allocator.free(subject);
+    try std.testing.expect(subject.len <= git.max_event_subject_bytes);
+    try std.testing.expect(std.mem.indexOfScalar(u8, subject, '\r') == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, subject, '\n') == null);
 }
 
 test "github repo slugs and API paths are validated" {

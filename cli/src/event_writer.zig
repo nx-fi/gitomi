@@ -194,6 +194,61 @@ pub const EventWriter = struct {
     }
 };
 
+fn normalizeEventSubject(allocator: Allocator, subject: []const u8) ![]u8 {
+    var normalized: std.ArrayList(u8) = .empty;
+    errdefer normalized.deinit(allocator);
+
+    var pending_space = false;
+    for (subject) |c| {
+        if (std.ascii.isWhitespace(c)) {
+            pending_space = normalized.items.len != 0;
+            continue;
+        }
+
+        if (pending_space) {
+            if (normalized.items.len + 2 > git.max_event_subject_bytes) break;
+            try normalized.append(allocator, ' ');
+            pending_space = false;
+        }
+
+        if (normalized.items.len == git.max_event_subject_bytes) break;
+        try normalized.append(allocator, c);
+    }
+
+    return normalized.toOwnedSlice(allocator);
+}
+
+fn validateEventSubject(command_context: []const u8, subject: []const u8) !void {
+    if (subject.len > git.max_event_subject_bytes) {
+        try eprint("{s}: event subject exceeds v1 subject size limit\n", .{command_context});
+        return CliError.UserError;
+    }
+    if (std.mem.indexOfScalar(u8, subject, '\r') != null or std.mem.indexOfScalar(u8, subject, '\n') != null) {
+        try eprint("{s}: event subject must be a single line\n", .{command_context});
+        return CliError.UserError;
+    }
+}
+
+test "event subject normalization removes body-polluting line breaks" {
+    const normalized = try normalizeEventSubject(std.testing.allocator, "issue.body_set #1234567 first paragraph\n\nsecond paragraph");
+    defer std.testing.allocator.free(normalized);
+
+    try std.testing.expectEqualStrings("issue.body_set #1234567 first paragraph second paragraph", normalized);
+    try validateEventSubject("test", normalized);
+    try std.testing.expectError(CliError.UserError, validateEventSubject("test", "issue.body_set #1234567\n\nbad"));
+}
+
+test "event subject normalization enforces subject size limit" {
+    var raw: [git.max_event_subject_bytes + 32]u8 = undefined;
+    @memset(&raw, 'x');
+
+    const normalized = try normalizeEventSubject(std.testing.allocator, &raw);
+    defer std.testing.allocator.free(normalized);
+
+    try std.testing.expectEqual(@as(usize, git.max_event_subject_bytes), normalized.len);
+    try validateEventSubject("test", normalized);
+}
+
 fn buildRelatedHeads(
     allocator: Allocator,
     repo: repo_mod.Repo,
@@ -262,13 +317,16 @@ fn createSignedEventCommit(
 ) ![]u8 {
     const empty_tree = try git.emptyTreeOid(allocator);
     defer allocator.free(empty_tree);
+    const event_subject = try normalizeEventSubject(allocator, subject);
+    defer allocator.free(event_subject);
+    try validateEventSubject(command_context, event_subject);
 
     var commit_args: std.ArrayList([]const u8) = .empty;
     defer commit_args.deinit(allocator);
     try commit_args.append(allocator, "commit-tree");
     try commit_args.append(allocator, "-S");
     try commit_args.append(allocator, "-m");
-    try commit_args.append(allocator, subject);
+    try commit_args.append(allocator, event_subject);
     try commit_args.append(allocator, "-m");
     try commit_args.append(allocator, event_body);
     try commit_args.append(allocator, empty_tree);

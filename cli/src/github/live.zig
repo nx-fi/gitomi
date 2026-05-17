@@ -1,5 +1,6 @@
 const std = @import("std");
 const errors = @import("../errors.zig");
+const event_mod = @import("../event.zig");
 const git = @import("../git.zig");
 const index = @import("../index.zig");
 const io = @import("../io.zig");
@@ -137,6 +138,7 @@ pub fn cmdLive(allocator: Allocator, args: []const []const u8) !void {
         try eprint("gt github live: --webhook-url is required unless --no-subscribe is used\n", .{});
         return CliError.MissingArgument;
     }
+    try validateSecretPolicy("gt github live", secret, subscribe, dry_run);
 
     const options = Options{
         .repo = repo_arg.?,
@@ -159,6 +161,7 @@ pub fn cmdLive(allocator: Allocator, args: []const []const u8) !void {
 }
 
 pub fn runForeground(allocator: Allocator, options: Options) !void {
+    try validateOptions("gt github live", options);
     try prepareLive(allocator, options);
 
     const server_options = zwf.ServerOptions{
@@ -183,6 +186,7 @@ pub fn startDaemon(allocator: Allocator, options: Options) !void {
         try eprint("gt github live: background daemon mode does not support --once\n", .{});
         return CliError.InvalidArgument;
     }
+    try validateOptions("gt github live", options);
 
     try prepareLive(allocator, options);
 
@@ -324,21 +328,13 @@ fn handleConnection(allocator: Allocator, app_context: LiveAppContext, stream: s
         try sendPlain(allocator, stream, 405, "Method Not Allowed", "Method not allowed\n");
         return;
     }
-    if (app_context.options.secret) |secret| {
-        const signature = request.headerValue("x-hub-signature-256") orelse {
-            try sendPlain(allocator, stream, 401, "Unauthorized", "Missing signature\n");
-            return;
-        };
-        if (!verifyWebhookSignature(secret, request.body, signature)) {
-            try sendPlain(allocator, stream, 401, "Unauthorized", "Invalid signature\n");
-            return;
-        }
-    }
+    if (!try authenticateWebhookRequest(allocator, stream, app_context.options, request)) return;
 
     const event_name = request.headerValue("x-github-event") orelse {
         try sendPlain(allocator, stream, 400, "Bad Request", "Missing X-GitHub-Event\n");
         return;
     };
+    if (!try validateWebhookRepository(allocator, stream, app_context.options.repo, request.body)) return;
 
     if (std.mem.eql(u8, event_name, "push")) {
         if (app_context.options.git_sync and !app_context.options.dry_run) {
@@ -410,13 +406,18 @@ fn ensureWebhook(allocator: Allocator, options: Options) !void {
 }
 
 fn webhookCreateBody(allocator: Allocator, options: Options) ![]u8 {
+    const secret = nonEmptySecret(options.secret) orelse {
+        try eprint("gt github live: --secret is required when creating a GitHub webhook subscription\n", .{});
+        return CliError.MissingArgument;
+    };
+
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     try buf.appendSlice(allocator, "{\"name\":\"web\",\"active\":true,\"events\":[\"issues\",\"pull_request\",\"issue_comment\",\"push\"],\"config\":{");
     try appendJsonFieldString(&buf, allocator, "url", options.webhook_url.?, true);
     try appendJsonFieldString(&buf, allocator, "content_type", "json", true);
-    try appendJsonFieldString(&buf, allocator, "insecure_ssl", "0", options.secret != null);
-    if (options.secret) |secret| try appendJsonFieldString(&buf, allocator, "secret", secret, false);
+    try appendJsonFieldString(&buf, allocator, "insecure_ssl", "0", true);
+    try appendJsonFieldString(&buf, allocator, "secret", secret, false);
     try buf.appendSlice(allocator, "}}");
     return try buf.toOwnedSlice(allocator);
 }
@@ -498,6 +499,104 @@ pub fn resolveCurrentRepo(allocator: Allocator) !ResolvedRepo {
     };
 }
 
+fn validateOptions(command: []const u8, options: Options) !void {
+    if (options.subscribe and options.webhook_url == null) {
+        try eprint("{s}: --webhook-url is required unless --no-subscribe is used\n", .{command});
+        return CliError.MissingArgument;
+    }
+    try validateSecretPolicy(command, options.secret, options.subscribe, options.dry_run);
+}
+
+pub fn validateSecretPolicy(
+    command: []const u8,
+    secret: ?[]const u8,
+    subscribe: bool,
+    dry_run: bool,
+) !void {
+    if (nonEmptySecret(secret) != null) return;
+    if (secret != null) {
+        try eprint("{s}: --secret must not be empty\n", .{command});
+        return CliError.MissingArgument;
+    }
+    if (subscribe) {
+        try eprint("{s}: --secret is required when creating a GitHub webhook subscription\n", .{command});
+        return CliError.MissingArgument;
+    }
+    if (!dry_run) {
+        try eprint("{s}: --secret is required for non-dry-run webhook imports\n", .{command});
+        return CliError.MissingArgument;
+    }
+}
+
+fn nonEmptySecret(secret: ?[]const u8) ?[]const u8 {
+    const value = secret orelse return null;
+    if (std.mem.trim(u8, value, " \t\r\n").len == 0) return null;
+    return value;
+}
+
+fn authenticateWebhookRequest(
+    allocator: Allocator,
+    stream: std.net.Stream,
+    options: Options,
+    request: zwf.Request,
+) !bool {
+    const secret = nonEmptySecret(options.secret) orelse {
+        if (options.dry_run) return true;
+        try sendPlain(allocator, stream, 401, "Unauthorized", "Webhook secret required\n");
+        return false;
+    };
+    const signature = request.headerValue("x-hub-signature-256") orelse {
+        try sendPlain(allocator, stream, 401, "Unauthorized", "Missing signature\n");
+        return false;
+    };
+    if (!verifyWebhookSignature(secret, request.body, signature)) {
+        try sendPlain(allocator, stream, 401, "Unauthorized", "Invalid signature\n");
+        return false;
+    }
+    return true;
+}
+
+const WebhookRepositoryCheck = enum {
+    matches,
+    missing,
+    mismatch,
+    invalid_payload,
+};
+
+fn validateWebhookRepository(
+    allocator: Allocator,
+    stream: std.net.Stream,
+    expected: RepoSlug,
+    body: []const u8,
+) !bool {
+    switch (try checkWebhookRepository(allocator, expected, body)) {
+        .matches => return true,
+        .invalid_payload => try sendPlain(allocator, stream, 400, "Bad Request", "Webhook payload must contain a JSON object\n"),
+        .missing => try sendPlain(allocator, stream, 400, "Bad Request", "Webhook payload repository.full_name is required\n"),
+        .mismatch => try sendPlain(allocator, stream, 403, "Forbidden", "Webhook payload repository mismatch\n"),
+    }
+    return false;
+}
+
+fn checkWebhookRepository(allocator: Allocator, expected: RepoSlug, body: []const u8) !WebhookRepositoryCheck {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return .invalid_payload,
+    };
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return .invalid_payload,
+    };
+    const repository = switch (root.get("repository") orelse return .missing) {
+        .object => |object| object,
+        else => return .missing,
+    };
+    const full_name = event_mod.jsonString(repository.get("full_name")) orelse return .missing;
+    if (std.ascii.eqlIgnoreCase(full_name, expected.slug)) return .matches;
+    return .mismatch;
+}
+
 fn verifyWebhookSignature(secret: []const u8, body: []const u8, signature: []const u8) bool {
     const prefix = "sha256=";
     if (!std.mem.startsWith(u8, signature, prefix)) return false;
@@ -514,7 +613,7 @@ fn sendPlain(allocator: Allocator, stream: std.net.Stream, status: u16, reason: 
     try response.plain(status, reason, body);
 }
 
-test "github live webhook body includes secret only when supplied" {
+test "github live webhook body requires secret" {
     const slug = try common.parseRepoSlug("owner/repo");
     const body = try webhookCreateBody(std.testing.allocator, .{
         .repo = slug,
@@ -524,12 +623,47 @@ test "github live webhook body includes secret only when supplied" {
     defer std.testing.allocator.free(body);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"secret\":\"s3\"") != null);
 
-    const no_secret = try webhookCreateBody(std.testing.allocator, .{
+    try std.testing.expectError(CliError.MissingArgument, webhookCreateBody(std.testing.allocator, .{
         .repo = slug,
         .webhook_url = "https://example.test/github",
-    });
-    defer std.testing.allocator.free(no_secret);
-    try std.testing.expect(std.mem.indexOf(u8, no_secret, "\"secret\"") == null);
+    }));
+}
+
+test "github live requires secret for subscriptions and mutating imports" {
+    try std.testing.expectError(
+        CliError.MissingArgument,
+        validateSecretPolicy("gt github live", null, true, true),
+    );
+    try std.testing.expectError(
+        CliError.MissingArgument,
+        validateSecretPolicy("gt github live", null, false, false),
+    );
+    try std.testing.expectError(
+        CliError.MissingArgument,
+        validateSecretPolicy("gt github live", "", false, true),
+    );
+    try validateSecretPolicy("gt github live", null, false, true);
+    try validateSecretPolicy("gt github live", "s3", true, false);
+}
+
+test "github live validates webhook repository" {
+    const slug = try common.parseRepoSlug("owner/repo");
+    try std.testing.expectEqual(
+        WebhookRepositoryCheck.matches,
+        try checkWebhookRepository(std.testing.allocator, slug, "{\"repository\":{\"full_name\":\"Owner/Repo\"}}"),
+    );
+    try std.testing.expectEqual(
+        WebhookRepositoryCheck.mismatch,
+        try checkWebhookRepository(std.testing.allocator, slug, "{\"repository\":{\"full_name\":\"attacker/forged-repo\"}}"),
+    );
+    try std.testing.expectEqual(
+        WebhookRepositoryCheck.missing,
+        try checkWebhookRepository(std.testing.allocator, slug, "{\"repository\":{}}"),
+    );
+    try std.testing.expectEqual(
+        WebhookRepositoryCheck.invalid_payload,
+        try checkWebhookRepository(std.testing.allocator, slug, "not json"),
+    );
 }
 
 test "github live verifies sha256 webhook signatures" {

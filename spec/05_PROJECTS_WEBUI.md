@@ -450,6 +450,10 @@ Minimum payloads:
 These events target the issue, not the project. This keeps project-local
 planning history attached to the issue timeline.
 
+Authorization for these events MUST use project management permission. Issue
+edit ownership alone is not sufficient because the values are project-owned
+planning metadata.
+
 Reducers MUST domain-reject field value events when the target issue is not a
 visible member of the target project in the event's effective replay history.
 
@@ -774,9 +778,9 @@ Filtering MUST be view-local unless the user saves it into the view config.
 Project web actions require the same underlying permissions as their events:
 
 *   creating or updating project metadata requires project write permission
-*   adding an issue to a project requires issue write permission for that issue
+*   adding or removing an issue from a project requires project management permission
 *   setting issue metadata requires issue write permission for that issue
-*   setting a project field value requires issue write permission for that issue
+*   setting a project field value requires project management permission
 *   creating a new issue requires issue create permission
 *   editing saved project fields or views requires project write permission
 

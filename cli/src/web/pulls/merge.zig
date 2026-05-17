@@ -95,7 +95,7 @@ fn loadSnapshot(allocator: Allocator, repo: Repo, detail: PullDetail) !?PullMerg
     const base_oid = (try resolveGitCommit(allocator, repo, base_target.tracking_ref)) orelse return null;
     errdefer allocator.free(base_oid);
 
-    const head_oid = (try resolvePullHeadForMergeSnapshot(allocator, repo, detail, head_target)) orelse {
+    const head_oid = (try resolvePullHeadForMergeSnapshot(allocator, repo, detail, &head_target, &head_target_owned)) orelse {
         allocator.free(base_oid);
         return null;
     };
@@ -112,11 +112,24 @@ fn loadSnapshot(allocator: Allocator, repo: Repo, detail: PullDetail) !?PullMerg
     return snapshot;
 }
 
-fn resolvePullHeadForMergeSnapshot(allocator: Allocator, repo: Repo, detail: PullDetail, head_target: ?RemoteBranchTarget) !?[]u8 {
+fn resolvePullHeadForMergeSnapshot(
+    allocator: Allocator,
+    repo: Repo,
+    detail: PullDetail,
+    head_target: *?RemoteBranchTarget,
+    head_target_owned: *bool,
+) !?[]u8 {
     if (detail.legacy_number > 0) {
-        if (try resolveGithubPullHeadCommit(allocator, repo, detail.legacy_number)) |oid| return oid;
+        if (try resolveGithubPullHeadCommit(allocator, repo, detail.legacy_number)) |oid| {
+            if (head_target_owned.*) {
+                if (head_target.*) |target| target.deinit(allocator);
+                head_target.* = null;
+                head_target_owned.* = false;
+            }
+            return oid;
+        }
     }
-    if (head_target) |target| {
+    if (head_target.*) |target| {
         return try resolveGitCommit(allocator, repo, target.tracking_ref);
     }
     if (try localHeadRefName(allocator, detail.head_ref)) |local_head| {
@@ -735,4 +748,112 @@ test "merge resolver derives local head refs only from safe branch names" {
     try std.testing.expect((try localHeadRefName(std.testing.allocator, "refs/remotes/origin/feature")) == null);
     try std.testing.expect((try localHeadRefName(std.testing.allocator, "HEAD")) == null);
     try std.testing.expect((try localHeadRefName(std.testing.allocator, "feature^{commit}")) == null);
+}
+
+test "legacy GitHub pull refs are not treated as writable branch targets" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makeDir("seed");
+    try tmp.dir.makeDir("client");
+    try tmp.dir.makeDir("remote.git");
+
+    const seed_root = try tmp.dir.realpathAlloc(allocator, "seed");
+    defer allocator.free(seed_root);
+    const client_root = try tmp.dir.realpathAlloc(allocator, "client");
+    defer allocator.free(client_root);
+    const remote_root = try tmp.dir.realpathAlloc(allocator, "remote.git");
+    defer allocator.free(remote_root);
+
+    try expectGitOkAt(allocator, seed_root, &.{ "init", "-q" });
+    try expectGitOkAt(allocator, seed_root, &.{ "checkout", "-q", "-b", "main" });
+    try expectGitOkAt(allocator, seed_root, &.{ "config", "user.name", "Gitomi Test" });
+    try expectGitOkAt(allocator, seed_root, &.{ "config", "user.email", "gitomi-test@example.invalid" });
+    try expectGitOkAt(allocator, seed_root, &.{ "config", "commit.gpgsign", "false" });
+    try writeTmpFile(tmp.dir, "seed/conflict.txt", "initial\n");
+    try expectGitOkAt(allocator, seed_root, &.{ "add", "conflict.txt" });
+    try expectGitOkAt(allocator, seed_root, &.{ "commit", "-q", "-m", "initial" });
+    try expectGitOkAt(allocator, seed_root, &.{ "branch", "target" });
+
+    try writeTmpFile(tmp.dir, "seed/conflict.txt", "pull head\n");
+    try expectGitOkAt(allocator, seed_root, &.{ "commit", "-q", "-am", "pull head" });
+    const head_oid = try gitTrimmedAt(allocator, seed_root, &.{ "rev-parse", "HEAD" });
+    defer allocator.free(head_oid);
+
+    try expectGitOkAt(allocator, seed_root, &.{ "checkout", "-q", "target" });
+    try writeTmpFile(tmp.dir, "seed/conflict.txt", "base\n");
+    try expectGitOkAt(allocator, seed_root, &.{ "commit", "-q", "-am", "base" });
+
+    try expectGitOkAt(allocator, remote_root, &.{ "init", "--bare", "-q" });
+    try expectGitOkAt(allocator, seed_root, &.{ "remote", "add", "origin", remote_root });
+    try expectGitOkAt(allocator, seed_root, &.{ "push", "-q", "origin", "main", "target" });
+
+    try expectGitOkAt(allocator, client_root, &.{ "init", "-q" });
+    try expectGitOkAt(allocator, client_root, &.{ "remote", "add", "origin", remote_root });
+    try expectGitOkAt(allocator, client_root, &.{ "fetch", "-q", "origin" });
+    try expectGitOkAt(allocator, client_root, &.{ "update-ref", "refs/remotes/origin/pr/123", head_oid });
+
+    var repo = Repo{
+        .allocator = allocator,
+        .root = try allocator.dupe(u8, client_root),
+        .git_dir = try allocator.dupe(u8, ""),
+        .gitomi_dir = try allocator.dupe(u8, ""),
+        .config_path = try allocator.dupe(u8, ""),
+        .index_path = try allocator.dupe(u8, ""),
+        .cursors_path = try allocator.dupe(u8, ""),
+    };
+    defer repo.deinit();
+
+    var detail = try testPullDetail(allocator, "target", "main", 123);
+    defer detail.deinit(allocator);
+
+    const snapshot = (try loadSnapshot(allocator, repo, detail)).?;
+    defer snapshot.deinit(allocator);
+
+    try std.testing.expectEqualStrings(head_oid, snapshot.expected_head_oid);
+    try std.testing.expect(snapshot.head_target == null);
+}
+
+fn testPullDetail(allocator: Allocator, base_ref: []const u8, head_ref: []const u8, legacy_number: i64) !PullDetail {
+    return .{
+        .id = try allocator.dupe(u8, "pull-id"),
+        .title = try allocator.dupe(u8, "Pull"),
+        .state = try allocator.dupe(u8, "open"),
+        .author_principal = try allocator.dupe(u8, "alice"),
+        .author_device = try allocator.dupe(u8, "laptop"),
+        .source_author = try allocator.dupe(u8, "alice"),
+        .opened_at = try allocator.dupe(u8, "2026-01-01T00:00:00Z"),
+        .state_occurred_at = try allocator.dupe(u8, "2026-01-01T00:00:00Z"),
+        .state_actor_principal = try allocator.dupe(u8, "alice"),
+        .body = try allocator.dupe(u8, ""),
+        .base_ref = try allocator.dupe(u8, base_ref),
+        .head_ref = try allocator.dupe(u8, head_ref),
+        .draft = false,
+        .merge_oid = try allocator.dupe(u8, ""),
+        .target_oid = try allocator.dupe(u8, ""),
+        .legacy_number = legacy_number,
+        .commit_count = null,
+        .changed_files = null,
+        .additions = null,
+        .deletions = null,
+    };
+}
+
+fn writeTmpFile(dir: std.fs.Dir, path: []const u8, content: []const u8) !void {
+    var file = try dir.createFile(path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(content);
+}
+
+fn expectGitOkAt(allocator: Allocator, root: []const u8, args: []const []const u8) !void {
+    const output = try gitCheckedAt(allocator, root, args, git.max_git_output);
+    allocator.free(output);
+}
+
+fn gitTrimmedAt(allocator: Allocator, root: []const u8, args: []const []const u8) ![]u8 {
+    const raw = try gitCheckedAt(allocator, root, args, 1024 * 1024);
+    defer allocator.free(raw);
+    return try allocator.dupe(u8, std.mem.trim(u8, raw, " \t\r\n"));
 }
