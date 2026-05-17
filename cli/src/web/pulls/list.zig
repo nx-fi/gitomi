@@ -10,7 +10,6 @@ const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
 const SqliteDb = index.SqliteDb;
 const appendEmptyState = shared.appendEmptyState;
-const appendHref = shared.appendHref;
 const appendRelativeTime = shared.appendRelativeTime;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
@@ -40,6 +39,8 @@ pub fn renderPullsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]
 
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
+    var legacy_links = shared.loadLegacyRemoteLinks(allocator, repo);
+    defer legacy_links.deinit(allocator);
 
     const requested_filter = try pullStateFilterFromTarget(allocator, target);
     const counts = try work_items.loadPullCounts(&db);
@@ -67,7 +68,7 @@ pub fn renderPullsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]
         const row = try work_items.pullListRowFromStmt(allocator, &stmt);
         defer row.deinit(allocator);
         const task_summary = shared.markdownTaskSummary(row.body);
-        try appendPullListRow(&buf, allocator, &db, row.id, row.title, row.state, row.author, row.opened_at, row.state_at, row.base_ref, row.head_ref, row.draft, row.comment_count, row.legacy_number, task_summary);
+        try appendPullListRow(&buf, allocator, &db, &legacy_links, row.id, row.title, row.state, row.author, row.opened_at, row.state_at, row.base_ref, row.head_ref, row.draft, row.comment_count, task_summary);
         shown += 1;
     }
 
@@ -272,6 +273,7 @@ fn appendPullListRow(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
     db: *SqliteDb,
+    legacy_links: *const shared.LegacyRemoteLinks,
     id: []const u8,
     title: []const u8,
     state: []const u8,
@@ -282,7 +284,6 @@ fn appendPullListRow(
     head_ref: []const u8,
     draft: bool,
     comment_count: usize,
-    legacy_number: i64,
     task_summary: shared.MarkdownTaskSummary,
 ) !void {
     var pull_ref_buf: [util.short_object_ref_len]u8 = undefined;
@@ -301,12 +302,13 @@ fn appendPullListRow(
     });
     if (draft) try buf.appendSlice(allocator, "<span class=\"issue-label label-default\">Draft</span>");
     try appendPullRowCollection(buf, allocator, db, "SELECT DISTINCT label FROM pull_labels WHERE pull_id = ? ORDER BY label", id, "issue-row-labels", true);
-    try appendTemplate(buf, allocator,
-        \\</div><p class="issue-row-meta">#{id}
-    , .{ .id = pull_ref });
-    if (legacy_number > 0) {
-        try buf.appendSlice(allocator, " / GitHub ");
-        try appendLegacyPullLink(buf, allocator, legacy_number);
+    try buf.appendSlice(allocator, "</div><p class=\"issue-row-meta\">");
+    try shared.appendPullReferenceLink(buf, allocator, pull_ref);
+    var legacy_ref = try shared.loadLegacyReference(allocator, db, "pull", id);
+    defer if (legacy_ref) |*value| value.deinit(allocator);
+    if (legacy_ref) |value| {
+        try buf.appendSlice(allocator, " / ");
+        try shared.appendLegacyPullReference(buf, allocator, legacy_links, value.provider, value.number);
     }
     try appendTemplate(buf, allocator,
         \\ by {author} {verb}
@@ -390,16 +392,6 @@ fn appendLabel(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8)
 
 fn appendAvatar(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8, extra_class: []const u8) !void {
     try shared.appendAvatar(buf, allocator, name, extra_class);
-}
-
-fn appendLegacyPullLink(buf: *std.ArrayList(u8), allocator: Allocator, legacy_number: i64) !void {
-    const pull_ref = try std.fmt.allocPrint(allocator, "{d}", .{legacy_number});
-    defer allocator.free(pull_ref);
-    try buf.appendSlice(allocator, "<a href=\"");
-    try appendHref(buf, allocator, pullHref(pull_ref));
-    try buf.appendSlice(allocator, "\">#");
-    try shared.appendHtml(buf, allocator, pull_ref);
-    try buf.appendSlice(allocator, "</a>");
 }
 
 fn labelKind(label: []const u8) []const u8 {

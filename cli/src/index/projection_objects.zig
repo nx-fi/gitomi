@@ -358,23 +358,28 @@ fn metadataCount(payload: std.json.ObjectMap, key: []const u8) i64 {
 }
 
 fn insertLegacyAliasFromEnvelope(db: *SqliteDb, object_kind: []const u8, object_id: []const u8, legacy: std.json.ObjectMap) !void {
-    const key = if (std.mem.eql(u8, object_kind, "issue"))
-        "github_issue_number"
-    else if (std.mem.eql(u8, object_kind, "pull"))
-        "github_pull_number"
-    else
-        return;
+    if (std.mem.eql(u8, object_kind, "issue")) {
+        try insertLegacyAliasField(db, "github", object_kind, object_id, legacy, "github_issue_number");
+        try insertLegacyAliasField(db, "gitlab", object_kind, object_id, legacy, "gitlab_issue_iid");
+    } else if (std.mem.eql(u8, object_kind, "pull")) {
+        try insertLegacyAliasField(db, "github", object_kind, object_id, legacy, "github_pull_number");
+        try insertLegacyAliasField(db, "gitlab", object_kind, object_id, legacy, "gitlab_merge_request_iid");
+    }
+}
+
+fn insertLegacyAliasField(db: *SqliteDb, provider: []const u8, object_kind: []const u8, object_id: []const u8, legacy: std.json.ObjectMap, key: []const u8) !void {
     const number = event_mod.jsonInteger(legacy.get(key)) orelse return;
     if (number <= 0) return;
 
     var stmt = try db.prepare(
         \\INSERT OR IGNORE INTO legacy_aliases(provider, object_kind, object_id, number)
-        \\VALUES ('github', ?, ?, ?)
+        \\VALUES (?, ?, ?, ?)
     );
     defer stmt.deinit();
-    try stmt.bindText(1, object_kind);
-    try stmt.bindText(2, object_id);
-    try stmt.bindInt64(3, number);
+    try stmt.bindText(1, provider);
+    try stmt.bindText(2, object_kind);
+    try stmt.bindText(3, object_id);
+    try stmt.bindInt64(4, number);
     try stmt.stepDone();
 }
 

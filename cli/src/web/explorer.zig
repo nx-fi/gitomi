@@ -130,6 +130,8 @@ const findLicense = file_info.findLicense;
 const findAgents = file_info.findAgents;
 const licenseLabel = file_info.licenseLabel;
 const isMarkdownPath = file_info.isMarkdownPath;
+const isPdfPath = file_info.isPdfPath;
+const isSvgPath = file_info.isSvgPath;
 const mediaKindForPath = file_info.mediaKindForPath;
 const contentTypeForPath = file_info.contentTypeForPath;
 const languageForPath = file_info.languageForPath;
@@ -143,6 +145,12 @@ const containsNul = file_info.containsNul;
 const trimOwned = file_info.trimOwned;
 const hexValue = file_info.hexValue;
 const endsWithIgnoreCase = file_info.endsWithIgnoreCase;
+
+const BlobPreviewKind = enum {
+    markdown,
+    pdf,
+    svg,
+};
 
 pub fn renderCodePage(allocator: Allocator, repo: Repo, target: []const u8) ![]u8 {
     const ref = try targetRefOwned(allocator, repo, target);
@@ -386,7 +394,7 @@ pub fn loadRawBlob(allocator: Allocator, repo: Repo, target: []const u8) !?RawBl
     if (size != null and size.? > max_raw_blob_bytes) return error.BlobTooLarge;
 
     const body = try loadBlobBytes(allocator, repo, ref, path, max_raw_blob_bytes) orelse return null;
-    const content_type = if (mediaKindForPath(path) != null)
+    const content_type = if (mediaKindForPath(path) != null or isPdfPath(path))
         contentTypeForPath(path)
     else if (containsNul(body))
         "application/octet-stream"
@@ -471,8 +479,16 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     try appendRepoHeader(&buf, allocator, repo, ref);
     const size = try browseBlobSize(allocator, repo, ref, path);
     const media_kind = mediaKindForPath(path);
+    const preview_kind = previewKindForPath(path);
+    const source_selected = if (preview_kind) |kind| kind != .pdf and sourceViewSelected(view) else true;
+    const render_markdown = if (preview_kind) |kind| kind == .markdown and !source_selected else false;
+    const render_svg_preview = if (preview_kind) |kind| kind == .svg and !source_selected else false;
+    const render_pdf_preview = if (preview_kind) |kind| kind == .pdf else false;
     const can_preview_media = media_kind != null and (size == null or size.? <= max_raw_blob_bytes);
-    const content = if (!can_preview_media and size != null and size.? <= max_blob_display_bytes)
+    const can_preview_pdf = render_pdf_preview and (size == null or size.? <= max_raw_blob_bytes);
+    const can_display_source = size != null and size.? <= max_blob_display_bytes;
+    const should_load_content = can_display_source and !render_pdf_preview and (media_kind == null or preview_kind != null or !can_preview_media);
+    const content = if (should_load_content)
         try loadBlobBytes(allocator, repo, ref, path, max_blob_display_bytes + 1)
     else
         null;
@@ -481,10 +497,7 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     defer if (summary_opt) |summary| summary.deinit(allocator);
     const text_content = if (content) |bytes| if (containsNul(bytes)) null else bytes else null;
     const sloc_counts = if (text_content) |bytes| source_stats.countBlob(path, bytes) else null;
-    const markdown = isMarkdownPath(path);
-    const raw_selected = !markdown or std.mem.eql(u8, view, "raw");
-    const render_markdown = markdown and !raw_selected;
-    const show_symbols_panel = text_content != null and media_kind == null and !render_markdown and code_symbols.hasProvider(path);
+    const show_symbols_panel = text_content != null and media_kind == null and !render_markdown and !render_pdf_preview and code_symbols.hasProvider(path);
     const show_markdown_outline = render_markdown;
     const symbol_items = if (text_content) |bytes|
         if (show_symbols_panel)
@@ -499,7 +512,7 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
 
     try appendCodePanelStart(&buf, allocator, repo, ref, path);
     try appendCodeBlameSwitch(&buf, allocator, ref, path, false);
-    if (markdown) try appendMarkdownViewTabs(&buf, allocator, ref, path, raw_selected);
+    if (preview_kind) |kind| try appendPreviewViewTabs(&buf, allocator, ref, path, kind, source_selected);
     try appendBlobMetrics(&buf, allocator, size, text_content, sloc_counts);
     if (show_symbols_panel) try appendSymbolsToggleButton(&buf, allocator);
     if (show_markdown_outline) try appendMarkdownOutlineToggleButton(&buf, allocator);
@@ -511,12 +524,23 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     try appendCommitBar(&buf, allocator, &reference_resolver, summary_opt);
     try appendCodePanelHeadEnd(&buf, allocator);
     const permalink_ref = if (summary_opt) |summary| summary.full_hash else ref;
-    try appendBlobContent(&buf, allocator, ref, permalink_ref, path, media_kind, can_preview_media, content, render_markdown);
+    try appendBlobContent(&buf, allocator, ref, permalink_ref, path, preview_kind, media_kind, can_preview_media, can_preview_pdf, content, render_markdown, render_svg_preview, render_pdf_preview);
 
     try appendCodePanelEnd(&buf, allocator);
     try appendCodeLayoutEndWithPanels(&buf, allocator, show_symbols_panel, symbol_items, show_markdown_outline);
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
+}
+
+fn previewKindForPath(path: []const u8) ?BlobPreviewKind {
+    if (isMarkdownPath(path)) return .markdown;
+    if (isPdfPath(path)) return .pdf;
+    if (isSvgPath(path)) return .svg;
+    return null;
+}
+
+fn sourceViewSelected(view: []const u8) bool {
+    return std.mem.eql(u8, view, "raw") or std.mem.eql(u8, view, "source");
 }
 
 fn appendBlobContent(
@@ -525,18 +549,34 @@ fn appendBlobContent(
     ref: []const u8,
     permalink_ref: []const u8,
     path: []const u8,
+    preview_kind: ?BlobPreviewKind,
     media_kind: ?MediaKind,
     can_preview_media: bool,
+    can_preview_pdf: bool,
     content: ?[]const u8,
     render_markdown: bool,
+    render_svg_preview: bool,
+    render_pdf_preview: bool,
 ) !void {
-    if (media_kind) |kind| {
-        if (can_preview_media) {
-            try appendMediaPreview(buf, allocator, ref, path, kind);
+    if (render_pdf_preview) {
+        if (can_preview_pdf) {
+            try appendPdfPreview(buf, allocator, ref, path);
         } else {
-            try appendEmptyState(buf, allocator, "File too large to preview.", "Use Git locally to inspect this media blob.");
+            try appendEmptyState(buf, allocator, "File too large to preview.", "Use Git locally to inspect this PDF.");
         }
         return;
+    }
+
+    if (media_kind) |kind| {
+        if (preview_kind != null and !render_svg_preview) {
+            // SVG can be rendered as image preview or read as source.
+        } else if (can_preview_media) {
+            try appendMediaPreview(buf, allocator, ref, path, kind);
+            return;
+        } else {
+            try appendEmptyState(buf, allocator, "File too large to preview.", "Use Git locally to inspect this media blob.");
+            return;
+        }
     }
 
     const bytes = content orelse {
@@ -556,14 +596,34 @@ fn appendBlobContent(
     }
 }
 
-fn appendMarkdownViewTabs(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, path: []const u8, raw_selected: bool) !void {
+fn appendPreviewViewTabs(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    ref: []const u8,
+    path: []const u8,
+    kind: BlobPreviewKind,
+    source_selected: bool,
+) !void {
     try appendTemplate(buf, allocator,
-        \\<nav class="view-tabs" aria-label="Markdown view"><a{preview_class} href="{preview_href}">Preview</a><a{raw_class} href="{raw_href}">Raw</a></nav>
+        \\<nav class="view-tabs" aria-label="{aria_label}"><a{preview_class} href="{preview_href}">Preview</a><a{source_class} href="{source_href}">{source_label}</a></nav>
     , .{
-        .preview_class = shared.classAttr("", &.{shared.class("active", !raw_selected)}),
+        .aria_label = switch (kind) {
+            .markdown => "Markdown view",
+            .pdf => "PDF view",
+            .svg => "SVG view",
+        },
+        .preview_class = shared.classAttr("", &.{shared.class("active", !source_selected)}),
         .preview_href = codeHrefWithView(ref, path, "preview"),
-        .raw_class = shared.classAttr("", &.{shared.class("active", raw_selected)}),
-        .raw_href = codeHrefWithView(ref, path, "raw"),
+        .source_class = shared.classAttr("", &.{shared.class("active", source_selected)}),
+        .source_href = switch (kind) {
+            .markdown, .svg => codeHrefWithView(ref, path, "raw"),
+            .pdf => rawHref(ref, path),
+        },
+        .source_label = switch (kind) {
+            .markdown => "Raw",
+            .pdf => "Raw",
+            .svg => "Source",
+        },
     });
 }
 
@@ -1425,6 +1485,23 @@ fn appendMediaPreview(
     try appendTemplate(buf, allocator, "</div>", .{});
 }
 
+fn appendPdfPreview(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    ref: []const u8,
+    path: []const u8,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="pdf-preview" data-pdf-preview data-pdf-url="{href}">
+        \\  <div class="pdf-preview-toolbar"><strong>{name}</strong><span data-pdf-status>Loading PDF...</span></div>
+        \\  <div class="pdf-pages" data-pdf-pages></div>
+        \\</div>
+    , .{
+        .href = rawHref(ref, path),
+        .name = baseName(path),
+    });
+}
+
 fn appendBlameLines(buf: *std.ArrayList(u8), allocator: Allocator, path: []const u8, lines: []const BlameLine) !void {
     const language = languageForPath(path);
     const now = std.time.timestamp();
@@ -2072,9 +2149,44 @@ test "web explorer renders AGENTS markdown root doc tab" {
 test "web explorer maps file paths to highlight languages" {
     try std.testing.expectEqualStrings("zig", languageForPath("src/main.zig"));
     try std.testing.expectEqualStrings("markdown", languageForPath("README.md"));
+    try std.testing.expectEqualStrings("xml", languageForPath("assets/logo.svg"));
     try std.testing.expectEqualStrings("solidity", languageForPath("contracts/Token.sol"));
     try std.testing.expectEqualStrings("tla", languageForPath("spec/Consensus.tla"));
     try std.testing.expectEqualStrings("plaintext", languageForPath("LICENSE"));
+}
+
+test "web explorer maps source preview paths" {
+    try std.testing.expectEqual(@as(?BlobPreviewKind, .markdown), previewKindForPath("README.md"));
+    try std.testing.expectEqual(@as(?BlobPreviewKind, .pdf), previewKindForPath("docs/spec.PDF"));
+    try std.testing.expectEqual(@as(?BlobPreviewKind, .svg), previewKindForPath("assets/logo.SVG"));
+    try std.testing.expectEqual(@as(?BlobPreviewKind, null), previewKindForPath("assets/logo.png"));
+    try std.testing.expect(sourceViewSelected("raw"));
+    try std.testing.expect(sourceViewSelected("source"));
+    try std.testing.expect(!sourceViewSelected("preview"));
+}
+
+test "web explorer renders SVG preview source tabs" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendPreviewViewTabs(&buf, std.testing.allocator, "HEAD", "assets/logo.svg", .svg, false);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "aria-label=\"SVG view\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, ">Preview</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, ">Source</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "view=raw") != null);
+}
+
+test "web explorer renders PDF preview raw tabs" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendPreviewViewTabs(&buf, std.testing.allocator, "HEAD", "docs/spec.pdf", .pdf, false);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "aria-label=\"PDF view\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, ">Preview</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, ">Raw</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "/raw?ref=HEAD&amp;path=docs/spec.pdf") != null);
 }
 
 test "web explorer maps supported file paths to devicon classes" {
@@ -2251,6 +2363,8 @@ test "web explorer maps media paths to preview metadata" {
     try std.testing.expectEqual(@as(?MediaKind, .image), mediaKindForPath("assets/logo.SVG"));
     try std.testing.expectEqual(@as(?MediaKind, .image), mediaKindForPath("photo.jpeg"));
     try std.testing.expectEqual(@as(?MediaKind, .video), mediaKindForPath("demo.webm"));
+    try std.testing.expectEqual(@as(?MediaKind, null), mediaKindForPath("docs/spec.pdf"));
+    try std.testing.expectEqualStrings("application/pdf", contentTypeForPath("docs/spec.pdf"));
     try std.testing.expectEqualStrings("image/svg+xml", contentTypeForPath("assets/logo.SVG"));
     try std.testing.expectEqualStrings("image/jpeg", contentTypeForPath("photo.jpeg"));
     try std.testing.expectEqualStrings("image/gif", contentTypeForPath("animation.gif"));

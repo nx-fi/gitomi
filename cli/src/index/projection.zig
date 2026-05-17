@@ -637,13 +637,12 @@ pub fn signingKeyBindingRejection(allocator: Allocator, db: *SqliteDb, event_has
         return "unauthorized_device";
     }
 
-    if (githubImportDelegatesEvent(envelope.event_type)) {
-        if (try delegationFingerprintAtAuthFrontier(
+    if (importDelegatesEvent(envelope.event_type)) {
+        if (try importDelegationFingerprintAtAuthFrontier(
             allocator,
             db,
             envelope.actor_principal,
             envelope.actor_device,
-            "github.import",
             event_hash,
         )) |delegated_fingerprint| {
             defer allocator.free(delegated_fingerprint);
@@ -930,17 +929,16 @@ fn delegationAuthorizationRejection(
     envelope: ValidatedEnvelope,
 ) !?[]const u8 {
     const hash = event_hash orelse return "unauthorized_principal";
-    if (!githubImportDelegatesEvent(envelope.event_type)) return "unauthorized_principal";
+    if (!importDelegatesEvent(envelope.event_type)) return "unauthorized_principal";
 
     const signer_fingerprint = (try git.verifiedCommitSigningKeyFingerprint(allocator, hash)) orelse return "signing_key_mismatch";
     defer allocator.free(signer_fingerprint);
 
-    const delegated_fingerprint = (try delegationFingerprintAtAuthFrontier(
+    const delegated_fingerprint = (try importDelegationFingerprintAtAuthFrontier(
         allocator,
         db,
         envelope.actor_principal,
         envelope.actor_device,
-        "github.import",
         hash,
     )) orelse return "unauthorized_principal";
     defer allocator.free(delegated_fingerprint);
@@ -950,6 +948,10 @@ fn delegationAuthorizationRejection(
 }
 
 pub fn githubImportDelegatesEvent(event_type: []const u8) bool {
+    return importDelegatesEvent(event_type);
+}
+
+pub fn importDelegatesEvent(event_type: []const u8) bool {
     return std.mem.eql(u8, event_type, "issue.opened") or
         std.mem.eql(u8, event_type, "issue.updated") or
         std.mem.eql(u8, event_type, "issue.title_set") or
@@ -977,7 +979,9 @@ pub fn githubImportDelegatesEvent(event_type: []const u8) bool {
         std.mem.eql(u8, event_type, "pull.reviewer_added") or
         std.mem.eql(u8, event_type, "pull.reviewer_removed") or
         std.mem.eql(u8, event_type, "pull.merged") or
-        std.mem.eql(u8, event_type, "comment.added");
+        std.mem.eql(u8, event_type, "comment.added") or
+        std.mem.eql(u8, event_type, "comment.body_set") or
+        std.mem.eql(u8, event_type, "comment.redacted");
 }
 
 fn payloadHasAny(payload: std.json.ObjectMap, keys: []const []const u8) bool {
@@ -1477,10 +1481,22 @@ fn delegationFingerprintAtAuthFrontier(
     capability: []const u8,
     before_event_hash: []const u8,
 ) !?[]u8 {
-    var events = try loadDelegationEvents(allocator, db, principal, device, capability, "github:*", before_event_hash);
+    const scope: []const u8 = if (std.mem.eql(u8, capability, "gitlab.import")) "gitlab:*" else "github:*";
+    var events = try loadDelegationEvents(allocator, db, principal, device, capability, scope, before_event_hash);
     defer freeDelegationEvents(allocator, &events);
     const active_index = (try activeDelegationGrantIndex(allocator, events.items)) orelse return null;
     return try allocator.dupe(u8, events.items[active_index].key_fingerprint);
+}
+
+fn importDelegationFingerprintAtAuthFrontier(
+    allocator: Allocator,
+    db: *SqliteDb,
+    principal: []const u8,
+    device: []const u8,
+    before_event_hash: []const u8,
+) !?[]u8 {
+    if (try delegationFingerprintAtAuthFrontier(allocator, db, principal, device, "github.import", before_event_hash)) |value| return value;
+    return try delegationFingerprintAtAuthFrontier(allocator, db, principal, device, "gitlab.import", before_event_hash);
 }
 
 fn loadDelegationEvents(
