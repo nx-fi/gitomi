@@ -18,6 +18,13 @@ const appendJsonString = json_writer.appendJsonString;
 
 pub const max_pull_diff_bytes = 8 * 1024 * 1024;
 
+const issue_display_author_sql = "COALESCE(NULLIF(si.display_name, ''), NULLIF(m.source_author, ''), i.author_principal)";
+const issue_avatar_url_sql = "COALESCE(NULLIF(si.avatar_url, ''), NULLIF(m.source_avatar_url, ''), '')";
+const pull_display_author_sql = "COALESCE(NULLIF(sp.display_name, ''), NULLIF(pm.source_author, ''), p.author_principal)";
+const pull_avatar_url_sql = "COALESCE(NULLIF(sp.avatar_url, ''), NULLIF(pm.source_avatar_url, ''), '')";
+const comment_display_author_sql = "COALESCE(NULLIF(sc.display_name, ''), NULLIF(c.source_author, ''), c.author_principal)";
+const comment_avatar_url_sql = "COALESCE(NULLIF(sc.avatar_url, ''), NULLIF(c.source_avatar_url, ''), '')";
+
 pub const IssueStateFilter = enum {
     open,
     closed,
@@ -72,6 +79,7 @@ pub const IssueListRow = struct {
     comment_count: usize,
     legacy_number: i64,
     body: []u8,
+    author_avatar_url: []u8,
 
     pub fn deinit(self: IssueListRow, allocator: Allocator) void {
         allocator.free(self.id);
@@ -84,6 +92,7 @@ pub const IssueListRow = struct {
         allocator.free(self.issue_type);
         allocator.free(self.priority);
         allocator.free(self.body);
+        allocator.free(self.author_avatar_url);
     }
 };
 
@@ -94,6 +103,8 @@ pub const IssueDetail = struct {
     author_principal: []u8,
     author_device: []u8,
     source_author: []u8,
+    display_author: []u8,
+    source_avatar_url: []u8,
     opened_at: []u8,
     state_occurred_at: []u8,
     state_actor_principal: []u8,
@@ -112,6 +123,8 @@ pub const IssueDetail = struct {
         allocator.free(self.author_principal);
         allocator.free(self.author_device);
         allocator.free(self.source_author);
+        allocator.free(self.display_author);
+        allocator.free(self.source_avatar_url);
         allocator.free(self.opened_at);
         allocator.free(self.state_occurred_at);
         allocator.free(self.state_actor_principal);
@@ -123,7 +136,7 @@ pub const IssueDetail = struct {
     }
 
     pub fn displayAuthor(self: IssueDetail) []const u8 {
-        return if (self.source_author.len != 0) self.source_author else self.author_principal;
+        return self.display_author;
     }
 };
 
@@ -167,6 +180,7 @@ pub const PullListRow = struct {
     comment_count: usize,
     legacy_number: i64,
     body: []u8,
+    author_avatar_url: []u8,
 
     pub fn deinit(self: PullListRow, allocator: Allocator) void {
         allocator.free(self.id);
@@ -178,6 +192,7 @@ pub const PullListRow = struct {
         allocator.free(self.base_ref);
         allocator.free(self.head_ref);
         allocator.free(self.body);
+        allocator.free(self.author_avatar_url);
     }
 };
 
@@ -188,6 +203,8 @@ pub const PullDetail = struct {
     author_principal: []u8,
     author_device: []u8,
     source_author: []u8,
+    display_author: []u8,
+    source_avatar_url: []u8,
     opened_at: []u8,
     state_occurred_at: []u8,
     state_actor_principal: []u8,
@@ -210,6 +227,8 @@ pub const PullDetail = struct {
         allocator.free(self.author_principal);
         allocator.free(self.author_device);
         allocator.free(self.source_author);
+        allocator.free(self.display_author);
+        allocator.free(self.source_avatar_url);
         allocator.free(self.opened_at);
         allocator.free(self.state_occurred_at);
         allocator.free(self.state_actor_principal);
@@ -221,7 +240,7 @@ pub const PullDetail = struct {
     }
 
     pub fn displayAuthor(self: PullDetail) []const u8 {
-        return if (self.source_author.len != 0) self.source_author else self.author_principal;
+        return self.display_author;
     }
 };
 
@@ -233,6 +252,7 @@ pub const CommentRow = struct {
     author_device: []u8,
     source_author: []u8,
     display_author: []u8,
+    source_avatar_url: []u8,
     created_at: []u8,
     reply_parent_id: []u8,
     reply_parent_hash: []u8,
@@ -244,6 +264,7 @@ pub const CommentRow = struct {
         allocator.free(self.author_device);
         allocator.free(self.source_author);
         allocator.free(self.display_author);
+        allocator.free(self.source_avatar_url);
         allocator.free(self.created_at);
         allocator.free(self.reply_parent_id);
         allocator.free(self.reply_parent_hash);
@@ -702,13 +723,19 @@ pub fn issueListSql(allocator: Allocator, filters: IssueListOptions) ![]u8 {
 
     try sql.appendSlice(allocator,
         \\SELECT i.id, i.title, i.state,
-        \\       COALESCE(NULLIF(m.source_author, ''), i.author_principal),
+        \\
+    ++ issue_display_author_sql ++
+        \\,
         \\       i.opened_at, i.state_occurred_at, COALESCE(m.milestone, ''),
         \\       COALESCE(m.issue_type, ''), COALESCE(m.priority, ''),
         \\       (SELECT COUNT(*) FROM comments c WHERE c.parent_kind = 'issue' AND c.parent_id = i.id),
-        \\       COALESCE(a.number, 0), i.body
+        \\       COALESCE(a.number, 0), i.body,
+        \\
+    ++ issue_avatar_url_sql ++
+        \\
         \\FROM issues i
         \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
+        \\LEFT JOIN identities si ON si.id = m.source_identity
         \\LEFT JOIN legacy_aliases a
         \\  ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
     );
@@ -717,10 +744,12 @@ pub fn issueListSql(allocator: Allocator, filters: IssueListOptions) ![]u8 {
     if (filters.state != .all) try appendIssueListCondition(&sql, allocator, &conditions, "i.state = ?");
     if (filters.q != null) {
         try appendIssueListCondition(&sql, allocator, &conditions,
-            \\(i.title LIKE ? ESCAPE '\' OR i.body LIKE ? ESCAPE '\' OR COALESCE(NULLIF(m.source_author, ''), i.author_principal) LIKE ? ESCAPE '\' OR EXISTS (SELECT 1 FROM comments c WHERE c.parent_kind = 'issue' AND c.parent_id = i.id AND c.body LIKE ? ESCAPE '\'))
+            \\(i.title LIKE ? ESCAPE '\' OR i.body LIKE ? ESCAPE '\' OR
+        ++ issue_display_author_sql ++
+            \\ LIKE ? ESCAPE '\' OR EXISTS (SELECT 1 FROM comments c WHERE c.parent_kind = 'issue' AND c.parent_id = i.id AND c.body LIKE ? ESCAPE '\'))
         );
     }
-    if (filters.author != null) try appendIssueListCondition(&sql, allocator, &conditions, "COALESCE(NULLIF(m.source_author, ''), i.author_principal) = ?");
+    if (filters.author != null) try appendIssueListCondition(&sql, allocator, &conditions, issue_display_author_sql ++ " = ?");
     if (filters.label != null) try appendIssueListCondition(&sql, allocator, &conditions, "EXISTS (SELECT 1 FROM issue_labels il WHERE il.issue_id = i.id AND il.label = ?)");
     if (filters.project != null) try appendIssueListCondition(&sql, allocator, &conditions, "EXISTS (SELECT 1 FROM issue_projects ip WHERE ip.issue_id = i.id AND ip.project = ?)");
     if (filters.milestone != null) try appendIssueListCondition(&sql, allocator, &conditions, "COALESCE(m.milestone, '') = ?");
@@ -814,6 +843,7 @@ pub fn issueListRowFromStmt(allocator: Allocator, stmt: *SqliteStmt) !IssueListR
         .comment_count = @as(usize, @intCast(stmt.columnInt64(9))),
         .legacy_number = stmt.columnInt64(10),
         .body = try stmt.columnTextDup(allocator, 11),
+        .author_avatar_url = try stmt.columnTextDup(allocator, 12),
     };
 }
 
@@ -832,12 +862,17 @@ pub fn sqliteLikePatternOwned(allocator: Allocator, value: []const u8) ![]u8 {
 pub fn loadIssueDetail(allocator: Allocator, db: *SqliteDb, issue_id: []const u8) !?IssueDetail {
     var stmt = try db.prepare(
         \\SELECT i.id, i.title, i.state, i.author_principal, i.author_device, i.opened_at, i.body,
-        \\       COALESCE(m.source_author, ''), COALESCE(m.milestone, ''),
+        \\       COALESCE(m.source_author, ''),
+    ++ issue_display_author_sql ++
+        \\,
+    ++ issue_avatar_url_sql ++
+        \\, COALESCE(m.milestone, ''),
         \\       COALESCE(m.issue_type, ''), COALESCE(m.priority, ''), COALESCE(m.status, ''), COALESCE(a.number, 0),
         \\       i.state_occurred_at, i.state_actor_principal,
         \\       (SELECT COUNT(*) FROM comments c WHERE c.parent_kind = 'issue' AND c.parent_id = i.id)
         \\FROM issues i
         \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
+        \\LEFT JOIN identities si ON si.id = m.source_identity
         \\LEFT JOIN legacy_aliases a
         \\  ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
         \\WHERE i.id = ?
@@ -854,14 +889,16 @@ pub fn loadIssueDetail(allocator: Allocator, db: *SqliteDb, issue_id: []const u8
         .opened_at = try stmt.columnTextDup(allocator, 5),
         .body = try stmt.columnTextDup(allocator, 6),
         .source_author = try stmt.columnTextDup(allocator, 7),
-        .milestone = try stmt.columnTextDup(allocator, 8),
-        .issue_type = try stmt.columnTextDup(allocator, 9),
-        .priority = try stmt.columnTextDup(allocator, 10),
-        .status = try stmt.columnTextDup(allocator, 11),
-        .legacy_number = stmt.columnInt64(12),
-        .state_occurred_at = try stmt.columnTextDup(allocator, 13),
-        .state_actor_principal = try stmt.columnTextDup(allocator, 14),
-        .comment_count = @as(usize, @intCast(stmt.columnInt64(15))),
+        .display_author = try stmt.columnTextDup(allocator, 8),
+        .source_avatar_url = try stmt.columnTextDup(allocator, 9),
+        .milestone = try stmt.columnTextDup(allocator, 10),
+        .issue_type = try stmt.columnTextDup(allocator, 11),
+        .priority = try stmt.columnTextDup(allocator, 12),
+        .status = try stmt.columnTextDup(allocator, 13),
+        .legacy_number = stmt.columnInt64(14),
+        .state_occurred_at = try stmt.columnTextDup(allocator, 15),
+        .state_actor_principal = try stmt.columnTextDup(allocator, 16),
+        .comment_count = @as(usize, @intCast(stmt.columnInt64(17))),
     };
 }
 
@@ -890,24 +927,32 @@ pub fn pullListSql(allocator: Allocator, options: PullListOptions) ![]u8 {
     errdefer sql.deinit(allocator);
 
     try sql.appendSlice(allocator,
-        \\SELECT p.id, p.title, p.state, COALESCE(NULLIF(pm.source_author, ''), p.author_principal), p.opened_at, p.state_occurred_at,
+        \\SELECT p.id, p.title, p.state,
+    ++ pull_display_author_sql ++
+        \\, p.opened_at, p.state_occurred_at,
         \\       p.base_ref, p.head_ref, p.draft,
         \\       (SELECT COUNT(*) FROM comments c WHERE c.parent_kind = 'pull' AND c.parent_id = p.id),
-        \\       COALESCE(a.number, 0), p.body
+        \\       COALESCE(a.number, 0), p.body,
+        \\
+    ++ pull_avatar_url_sql ++
+        \\
         \\FROM pulls p
         \\LEFT JOIN legacy_aliases a
         \\  ON a.provider = 'github' AND a.object_kind = 'pull' AND a.object_id = p.id
         \\LEFT JOIN pull_metadata pm ON pm.pull_id = p.id
+        \\LEFT JOIN identities sp ON sp.id = pm.source_identity
     );
 
     var conditions: usize = 0;
     if (options.state != .all) try appendPullListCondition(&sql, allocator, &conditions, "p.state = ?");
     if (options.q != null) {
         try appendPullListCondition(&sql, allocator, &conditions,
-            \\(p.title LIKE ? ESCAPE '\' OR p.body LIKE ? ESCAPE '\' OR COALESCE(NULLIF(pm.source_author, ''), p.author_principal) LIKE ? ESCAPE '\' OR p.base_ref LIKE ? ESCAPE '\' OR p.head_ref LIKE ? ESCAPE '\' OR EXISTS (SELECT 1 FROM comments c WHERE c.parent_kind = 'pull' AND c.parent_id = p.id AND c.body LIKE ? ESCAPE '\'))
+            \\(p.title LIKE ? ESCAPE '\' OR p.body LIKE ? ESCAPE '\' OR
+        ++ pull_display_author_sql ++
+            \\ LIKE ? ESCAPE '\' OR p.base_ref LIKE ? ESCAPE '\' OR p.head_ref LIKE ? ESCAPE '\' OR EXISTS (SELECT 1 FROM comments c WHERE c.parent_kind = 'pull' AND c.parent_id = p.id AND c.body LIKE ? ESCAPE '\'))
         );
     }
-    if (options.author != null) try appendPullListCondition(&sql, allocator, &conditions, "COALESCE(NULLIF(pm.source_author, ''), p.author_principal) = ?");
+    if (options.author != null) try appendPullListCondition(&sql, allocator, &conditions, pull_display_author_sql ++ " = ?");
     if (options.label != null) try appendPullListCondition(&sql, allocator, &conditions, "EXISTS (SELECT 1 FROM pull_labels pl WHERE pl.pull_id = p.id AND pl.label = ?)");
     if (options.assignee != null) try appendPullListCondition(&sql, allocator, &conditions, "EXISTS (SELECT 1 FROM pull_assignees pa WHERE pa.pull_id = p.id AND pa.assignee = ?)");
     if (options.reviewer != null) try appendPullListCondition(&sql, allocator, &conditions, "EXISTS (SELECT 1 FROM pull_reviewers pr WHERE pr.pull_id = p.id AND pr.reviewer = ?)");
@@ -1009,6 +1054,7 @@ pub fn pullListRowFromStmt(allocator: Allocator, stmt: *SqliteStmt) !PullListRow
         .comment_count = @as(usize, @intCast(stmt.columnInt64(9))),
         .legacy_number = stmt.columnInt64(10),
         .body = try stmt.columnTextDup(allocator, 11),
+        .author_avatar_url = try stmt.columnTextDup(allocator, 12),
     };
 }
 
@@ -1017,12 +1063,17 @@ pub fn loadPullDetail(allocator: Allocator, db: *SqliteDb, pull_id: []const u8) 
         \\SELECT p.id, p.title, p.state, p.author_principal, p.author_device, p.opened_at, p.body,
         \\       p.base_ref, p.head_ref, p.draft, p.merge_oid, p.target_oid, COALESCE(a.number, 0),
         \\       p.state_occurred_at, p.state_actor_principal,
-        \\       COALESCE(pm.source_author, ''), COALESCE(pm.commit_count, -1), COALESCE(pm.changed_files, -1),
+        \\       COALESCE(pm.source_author, ''),
+    ++ pull_display_author_sql ++
+        \\,
+    ++ pull_avatar_url_sql ++
+        \\, COALESCE(pm.commit_count, -1), COALESCE(pm.changed_files, -1),
         \\       COALESCE(pm.additions, -1), COALESCE(pm.deletions, -1)
         \\FROM pulls p
         \\LEFT JOIN legacy_aliases a
         \\  ON a.provider = 'github' AND a.object_kind = 'pull' AND a.object_id = p.id
         \\LEFT JOIN pull_metadata pm ON pm.pull_id = p.id
+        \\LEFT JOIN identities sp ON sp.id = pm.source_identity
         \\WHERE p.id = ?
     );
     defer stmt.deinit();
@@ -1035,6 +1086,8 @@ pub fn loadPullDetail(allocator: Allocator, db: *SqliteDb, pull_id: []const u8) 
         .author_principal = try stmt.columnTextDup(allocator, 3),
         .author_device = try stmt.columnTextDup(allocator, 4),
         .source_author = try stmt.columnTextDup(allocator, 15),
+        .display_author = try stmt.columnTextDup(allocator, 16),
+        .source_avatar_url = try stmt.columnTextDup(allocator, 17),
         .opened_at = try stmt.columnTextDup(allocator, 5),
         .state_occurred_at = try stmt.columnTextDup(allocator, 13),
         .state_actor_principal = try stmt.columnTextDup(allocator, 14),
@@ -1045,10 +1098,10 @@ pub fn loadPullDetail(allocator: Allocator, db: *SqliteDb, pull_id: []const u8) 
         .merge_oid = try stmt.columnTextDup(allocator, 10),
         .target_oid = try stmt.columnTextDup(allocator, 11),
         .legacy_number = stmt.columnInt64(12),
-        .commit_count = optionalCount(stmt.columnInt64(16)),
-        .changed_files = optionalCount(stmt.columnInt64(17)),
-        .additions = optionalCount(stmt.columnInt64(18)),
-        .deletions = optionalCount(stmt.columnInt64(19)),
+        .commit_count = optionalCount(stmt.columnInt64(18)),
+        .changed_files = optionalCount(stmt.columnInt64(19)),
+        .additions = optionalCount(stmt.columnInt64(20)),
+        .deletions = optionalCount(stmt.columnInt64(21)),
     };
 }
 
@@ -1058,12 +1111,17 @@ pub fn optionalCount(value: i64) ?usize {
 
 pub fn prepareCommentsStmt(db: *SqliteDb, parent_kind: []const u8, parent_id: []const u8) !SqliteStmt {
     var stmt = try db.prepare(
-        \\SELECT id, body, redacted, author_principal, author_device, source_author,
-        \\       COALESCE(NULLIF(source_author, ''), author_principal),
-        \\       created_at, reply_parent_id, reply_parent_hash
-        \\FROM comments
-        \\WHERE parent_kind = ? AND parent_id = ?
-        \\ORDER BY created_at, id
+        \\SELECT c.id, c.body, c.redacted, c.author_principal, c.author_device, c.source_author,
+        \\
+    ++ comment_display_author_sql ++
+        \\,
+    ++ comment_avatar_url_sql ++
+        \\,
+        \\       c.created_at, c.reply_parent_id, c.reply_parent_hash
+        \\FROM comments c
+        \\LEFT JOIN identities sc ON sc.id = c.source_identity
+        \\WHERE c.parent_kind = ? AND c.parent_id = ?
+        \\ORDER BY c.created_at, c.id
     );
     errdefer stmt.deinit();
     try stmt.bindText(1, parent_kind);
@@ -1080,9 +1138,10 @@ pub fn commentRowFromStmt(allocator: Allocator, stmt: *SqliteStmt) !CommentRow {
         .author_device = try stmt.columnTextDup(allocator, 4),
         .source_author = try stmt.columnTextDup(allocator, 5),
         .display_author = try stmt.columnTextDup(allocator, 6),
-        .created_at = try stmt.columnTextDup(allocator, 7),
-        .reply_parent_id = try stmt.columnTextDup(allocator, 8),
-        .reply_parent_hash = try stmt.columnTextDup(allocator, 9),
+        .source_avatar_url = try stmt.columnTextDup(allocator, 7),
+        .created_at = try stmt.columnTextDup(allocator, 8),
+        .reply_parent_id = try stmt.columnTextDup(allocator, 9),
+        .reply_parent_hash = try stmt.columnTextDup(allocator, 10),
     };
 }
 
@@ -1242,6 +1301,7 @@ pub fn appendIssueDetailJsonFields(buf: *std.ArrayList(u8), allocator: Allocator
     try appendJsonFieldString(buf, allocator, "author_device", detail.author_device, true);
     try appendJsonFieldString(buf, allocator, "display_author", detail.displayAuthor(), true);
     if (detail.source_author.len != 0) try appendJsonFieldString(buf, allocator, "source_author", detail.source_author, true);
+    if (detail.source_avatar_url.len != 0) try appendJsonFieldString(buf, allocator, "source_avatar_url", detail.source_avatar_url, true);
     try appendJsonFieldString(buf, allocator, "opened_at", detail.opened_at, true);
     try appendJsonFieldString(buf, allocator, "state_occurred_at", detail.state_occurred_at, true);
     try appendJsonFieldString(buf, allocator, "state_actor_principal", detail.state_actor_principal, true);
@@ -1272,6 +1332,7 @@ pub fn appendPullDetailJsonFields(buf: *std.ArrayList(u8), allocator: Allocator,
     try appendJsonFieldString(buf, allocator, "author_device", detail.author_device, true);
     try appendJsonFieldString(buf, allocator, "display_author", detail.displayAuthor(), true);
     if (detail.source_author.len != 0) try appendJsonFieldString(buf, allocator, "source_author", detail.source_author, true);
+    if (detail.source_avatar_url.len != 0) try appendJsonFieldString(buf, allocator, "source_avatar_url", detail.source_avatar_url, true);
     try appendJsonFieldString(buf, allocator, "opened_at", detail.opened_at, true);
     try appendJsonFieldString(buf, allocator, "state_occurred_at", detail.state_occurred_at, true);
     try appendJsonFieldString(buf, allocator, "state_actor_principal", detail.state_actor_principal, true);
@@ -1296,6 +1357,7 @@ fn appendIssueListRowJson(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sq
     try appendJsonFieldString(buf, allocator, "state", row.state, true);
     try appendJsonFieldString(buf, allocator, "title", row.title, true);
     try appendJsonFieldString(buf, allocator, "author", row.author, true);
+    if (row.author_avatar_url.len != 0) try appendJsonFieldString(buf, allocator, "author_avatar_url", row.author_avatar_url, true);
     try appendJsonFieldString(buf, allocator, "opened_at", row.opened_at, true);
     try appendJsonFieldString(buf, allocator, "state_at", row.state_at, true);
     if (row.legacy_number > 0) try appendJsonFieldInteger(buf, allocator, "legacy_github_issue_number", row.legacy_number, true);
@@ -1318,6 +1380,7 @@ fn appendPullListRowJson(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sql
     try appendJsonFieldString(buf, allocator, "state", row.state, true);
     try appendJsonFieldString(buf, allocator, "title", row.title, true);
     try appendJsonFieldString(buf, allocator, "author", row.author, true);
+    if (row.author_avatar_url.len != 0) try appendJsonFieldString(buf, allocator, "author_avatar_url", row.author_avatar_url, true);
     try appendJsonFieldString(buf, allocator, "opened_at", row.opened_at, true);
     try appendJsonFieldString(buf, allocator, "state_at", row.state_at, true);
     try appendJsonFieldString(buf, allocator, "base_ref", row.base_ref, true);
@@ -1563,6 +1626,7 @@ fn appendCommentJson(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteD
     try appendJsonFieldString(buf, allocator, "author_device", row.author_device, true);
     try appendJsonFieldString(buf, allocator, "display_author", row.display_author, true);
     if (row.source_author.len != 0) try appendJsonFieldString(buf, allocator, "source_author", row.source_author, true);
+    if (row.source_avatar_url.len != 0) try appendJsonFieldString(buf, allocator, "source_avatar_url", row.source_avatar_url, true);
     if (row.reply_parent_id.len != 0) try appendJsonFieldString(buf, allocator, "reply_parent_id", row.reply_parent_id, true);
     if (row.reply_parent_hash.len != 0) try appendJsonFieldString(buf, allocator, "reply_parent_hash", row.reply_parent_hash, true);
     try appendJsonFieldString(buf, allocator, "created_at", row.created_at, true);

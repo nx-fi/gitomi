@@ -423,12 +423,126 @@
     });
   }
 
+  const githubAvatarChecks = new Map();
+
+  function equalBuffers(left, right) {
+    if (!left || !right || left.byteLength !== right.byteLength) return false;
+    const a = new Uint8Array(left);
+    const b = new Uint8Array(right);
+    for (let i = 0; i < a.length; i += 1) {
+      if (a[i] !== b[i]) return false;
+    }
+    return true;
+  }
+
+  function fetchAvatarBytes(url) {
+    if (!window.fetch || !url) return Promise.resolve(null);
+    return fetch(url, {
+      cache: "force-cache",
+      credentials: "omit",
+      mode: "cors",
+      redirect: "follow"
+    }).then(function (response) {
+      if (!response.ok) return null;
+      return response.arrayBuffer();
+    }).catch(function () {
+      return null;
+    });
+  }
+
+  function githubIdenticonUrl(login) {
+    return "https://github.com/identicons/" + encodeURIComponent(login) + ".png?size=80";
+  }
+
+  function githubAvatarIsCustom(img) {
+    const login = img.dataset.avatarGithubLogin || "";
+    if (!login) return Promise.resolve(false);
+
+    const src = img.currentSrc || img.src || "";
+    if (/\/identicons\//i.test(src)) return Promise.resolve(false);
+
+    const key = login.toLocaleLowerCase() + "\n" + src;
+    if (githubAvatarChecks.has(key)) return githubAvatarChecks.get(key);
+
+    const check = Promise.all([
+      fetchAvatarBytes(src),
+      fetchAvatarBytes(githubIdenticonUrl(login))
+    ]).then(function (buffers) {
+      const avatar = buffers[0];
+      const identicon = buffers[1];
+      return !!avatar && !!identicon && !equalBuffers(avatar, identicon);
+    });
+    githubAvatarChecks.set(key, check);
+    return check;
+  }
+
+  function activateAvatarCandidate(container, img) {
+    if (container.dataset.avatarResolved === "yes") return;
+    container.dataset.avatarResolved = "yes";
+    container.querySelectorAll(".avatar-image.is-active").forEach(function (active) {
+      active.classList.remove("is-active");
+    });
+    img.classList.add("is-active");
+    container.classList.add("has-external-avatar");
+  }
+
+  function tryAvatarCandidate(container, candidates, index) {
+    if (container.dataset.avatarResolved === "yes") return;
+    if (index >= candidates.length) {
+      container.dataset.avatarResolved = "generated";
+      return;
+    }
+
+    const img = candidates[index];
+    function next() {
+      tryAvatarCandidate(container, candidates, index + 1);
+    }
+    function loaded() {
+      if (!img.naturalWidth || !img.naturalHeight) {
+        next();
+        return;
+      }
+      if (img.dataset.avatarSource === "github") {
+        githubAvatarIsCustom(img).then(function (custom) {
+          if (custom) activateAvatarCandidate(container, img);
+          else next();
+        });
+        return;
+      }
+      activateAvatarCandidate(container, img);
+    }
+
+    if (img.complete) {
+      loaded();
+      return;
+    }
+    img.addEventListener("load", loaded, { once: true });
+    img.addEventListener("error", next, { once: true });
+  }
+
+  function initAvatars(root) {
+    const scope = root || document;
+    scope.querySelectorAll(".nouns-avatar").forEach(function (container) {
+      if (container.dataset.avatarReady === "yes") return;
+      const candidates = Array.from(container.querySelectorAll(".avatar-image"));
+      if (candidates.length === 0) return;
+      container.dataset.avatarReady = "yes";
+      tryAvatarCandidate(container, candidates, 0);
+    });
+  }
+
   function initUi() {
     initPopoverMenus();
     initNavStats();
     initLabelsPage();
     initPullMergeMethodMenus();
+    initAvatars(document);
   }
+
+  document.addEventListener("gitomi:partial-refresh", function (event) {
+    const detail = event.detail || {};
+    initAvatars(detail.root || document);
+  });
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", initUi);

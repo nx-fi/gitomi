@@ -33,10 +33,13 @@ const root_partial_priority_repository = 30;
 const root_partial_priority_branch = 30;
 const root_partial_priority_commit_count = 35;
 const root_partial_priority_stats = 40;
+const root_partial_priority_contributors = 45;
 const root_partial_priority_search = 50;
 const root_partial_timeout_fast_ms = 10_000;
 const root_partial_timeout_git_ms = 12_000;
 const root_partial_timeout_stats_ms = 20_000;
+const root_partial_timeout_contributors_ms = 30_000;
+const root_other_contributor_avatar_limit = 12;
 const root_readme_candidates = [_][]const u8{ "README.md", "README", "Readme.md", "readme.md" };
 const root_license_candidates = [_][]const u8{ "LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING", "COPYING.md", "COPYING.txt" };
 const root_agents_candidates = [_][]const u8{"AGENTS.md"};
@@ -198,6 +201,8 @@ pub fn renderCodeRootComponent(allocator: Allocator, repo: Repo, target: []const
         try appendRootBranchComponent(&buf, allocator, repo, ref);
     } else if (std.mem.eql(u8, component, "stats")) {
         try appendRootStatsComponent(&buf, allocator, repo);
+    } else if (std.mem.eql(u8, component, "contributors")) {
+        try appendRootContributorsComponent(&buf, allocator, repo);
     } else if (std.mem.eql(u8, component, "docs")) {
         try appendRootDocsComponent(&buf, allocator, repo, ref);
     } else if (std.mem.eql(u8, component, "search")) {
@@ -1742,6 +1747,7 @@ fn appendRootSidebar(
     try appendRootSidebarSlot(buf, allocator, ref, "repository", "Repository", "Loading repository details...", root_partial_priority_repository, root_partial_timeout_git_ms);
     try appendRootSidebarSlot(buf, allocator, ref, "branch", "Branch", "Loading branch details...", root_partial_priority_branch, root_partial_timeout_git_ms);
     try appendRootStatsSlot(buf, allocator, ref);
+    try appendRootSidebarSlot(buf, allocator, ref, "contributors", "Contributors", "Loading line authors...", root_partial_priority_contributors, root_partial_timeout_contributors_ms);
     try appendTemplate(buf, allocator, "</section></aside>", .{});
 }
 
@@ -1835,6 +1841,12 @@ fn appendRootStatsComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo:
     defer if (languages_opt) |*stats| stats.deinit(allocator);
     try appendRootLanguages(buf, allocator, languages_opt);
     try appendRootSloc(buf, allocator, languages_opt);
+}
+
+fn appendRootContributorsComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo) !void {
+    var contributors_opt = source_stats.loadRepositoryContributors(allocator, repo) catch null;
+    defer if (contributors_opt) |*contributors| contributors.deinit(allocator);
+    try appendRootContributors(buf, allocator, contributors_opt);
 }
 
 fn appendRootDocsComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8) !void {
@@ -2104,6 +2116,72 @@ fn appendRootSloc(buf: *std.ArrayList(u8), allocator: Allocator, stats_opt: ?sou
         });
     }
     try appendTemplate(buf, allocator, "</div></div>", .{});
+}
+
+fn appendRootContributors(buf: *std.ArrayList(u8), allocator: Allocator, contributors_opt: ?source_stats.Contributors) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="root-sidebar-section">
+    , .{});
+    const contributors = contributors_opt orelse {
+        try appendTemplate(buf, allocator,
+            \\<h2>Contributors</h2><p class="root-sidebar-empty">No contributor data available.</p></div>
+        , .{});
+        return;
+    };
+    const total = contributors.total();
+    if (total == 0 or contributors.rows.len == 0) {
+        try appendTemplate(buf, allocator,
+            \\<h2>Contributors</h2><p class="root-sidebar-empty">No tracked source lines attributed.</p></div>
+        , .{});
+        return;
+    }
+
+    try appendTemplate(buf, allocator,
+        \\<div class="root-sidebar-title-line"><h2>Contributors</h2><strong>{total} {lines_label}</strong></div><div class="root-contributor-breakdown" aria-label="Top contributors by attributed source lines">
+    , .{
+        .total = shared.groupedUnsigned(total),
+        .lines_label = if (total == 1) "line" else "lines",
+    });
+    for (contributors.rows[0..@min(contributors.rows.len, 3)]) |contributor| {
+        try appendTemplate(buf, allocator,
+            \\<div class="root-contributor-row" style="--contributor-color: {color}; --share: {share};"><div class="root-contributor-row-head"><span class="root-contributor-person">
+        , .{
+            .color = source_stats.contributorColor(contributor.name),
+            .share = shared.percent(contributor.total(), total),
+        });
+        try shared.appendAvatar(buf, allocator, contributor.name, "root-contributor-avatar");
+        try appendTemplate(buf, allocator,
+            \\<span class="root-contributor-name">{name}</span></span><strong>{share}</strong></div><span class="root-contributor-bar" aria-hidden="true"></span><span class="root-contributor-metrics"><span><strong>{lines}</strong> {lines_label}</span><span>{code} code</span><span>{test_count} test</span><span>{comment} comments</span></span></div>
+        , .{
+            .name = contributor.name,
+            .share = shared.percent(contributor.total(), total),
+            .lines = shared.groupedUnsigned(contributor.total()),
+            .lines_label = if (contributor.total() == 1) "line" else "lines",
+            .code = shared.groupedUnsigned(contributor.code),
+            .test_count = shared.groupedUnsigned(contributor.test_count),
+            .comment = shared.groupedUnsigned(contributor.comment),
+        });
+    }
+    try appendTemplate(buf, allocator, "</div>", .{});
+
+    if (contributors.rows.len > 3) {
+        const others = contributors.rows[3..];
+        const shown = @min(others.len, root_other_contributor_avatar_limit);
+        try appendTemplate(buf, allocator,
+            \\<div class="root-contributor-others" aria-label="Other contributors">
+        , .{});
+        for (others[0..shown]) |contributor| {
+            try shared.appendAvatar(buf, allocator, contributor.name, "root-contributor-other-avatar");
+        }
+        if (others.len > shown) {
+            try appendTemplate(buf, allocator,
+                \\<span class="root-contributor-more" title="{hidden} more contributors">+{hidden} more</span>
+            , .{ .hidden = shared.groupedUnsigned(@intCast(others.len - shown)) });
+        }
+        try appendTemplate(buf, allocator, "</div>", .{});
+    }
+
+    try appendTemplate(buf, allocator, "</div>", .{});
 }
 
 test "web explorer normalizes paths" {

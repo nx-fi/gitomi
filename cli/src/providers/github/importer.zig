@@ -48,6 +48,20 @@ const import_bot_device = "github";
 const github_import_capability = "github.import";
 const github_import_scope = "github:*";
 
+const GithubSourceIdentity = struct {
+    author: []u8,
+    identity: []u8,
+    email: []u8,
+    avatar_url: []u8,
+
+    fn deinit(self: GithubSourceIdentity, allocator: Allocator) void {
+        allocator.free(self.author);
+        allocator.free(self.identity);
+        allocator.free(self.email);
+        allocator.free(self.avatar_url);
+    }
+};
+
 pub const ImportOptions = struct {
     repo: ?RepoSlug = null,
     api_url: []const u8 = default_api_url,
@@ -527,13 +541,13 @@ const graphql_page_query =
     \\        createdAt
     \\        updatedAt
     \\        closedAt
-    \\        author { login }
+    \\        author { login avatarUrl(size: 96) }
     \\        milestone { title }
     \\        labels(first: 100) { nodes { name } }
     \\        assignees(first: 100) { nodes { login } }
     \\        comments(first: 100) @include(if: $includeComments) {
     \\          totalCount
-    \\          nodes { databaseId body createdAt author { login } }
+    \\          nodes { databaseId body createdAt author { login avatarUrl(size: 96) } }
     \\          pageInfo { hasNextPage endCursor }
     \\        }
     \\      }
@@ -553,7 +567,7 @@ const graphql_page_query =
     \\        mergeCommit { oid }
     \\        baseRefName
     \\        headRefName
-    \\        author { login }
+    \\        author { login avatarUrl(size: 96) }
     \\        labels(first: 100) { nodes { name } }
     \\        assignees(first: 100) { nodes { login } }
     \\        reviewRequests(first: 100) {
@@ -566,7 +580,7 @@ const graphql_page_query =
     \\        }
     \\        comments(first: 100) @include(if: $includeComments) {
     \\          totalCount
-    \\          nodes { databaseId body createdAt author { login } }
+    \\          nodes { databaseId body createdAt author { login avatarUrl(size: 96) } }
     \\          pageInfo { hasNextPage endCursor }
     \\        }
     \\        commits { totalCount }
@@ -586,14 +600,14 @@ const graphql_comments_query =
     \\    issue(number: $number) @skip(if: $isPull) {
     \\      comments(first: 100, after: $cursor) {
     \\        totalCount
-    \\        nodes { databaseId body createdAt author { login } }
+    \\        nodes { databaseId body createdAt author { login avatarUrl(size: 96) } }
     \\        pageInfo { hasNextPage endCursor }
     \\      }
     \\    }
     \\    pullRequest(number: $number) @include(if: $isPull) {
     \\      comments(first: 100, after: $cursor) {
     \\        totalCount
-    \\        nodes { databaseId body createdAt author { login } }
+    \\        nodes { databaseId body createdAt author { login avatarUrl(size: 96) } }
     \\        pageInfo { hasNextPage endCursor }
     \\      }
     \\    }
@@ -1202,6 +1216,93 @@ pub fn issueNumberFromContentUrl(url: []const u8) ?i64 {
     return std.fmt.parseInt(i64, raw, 10) catch null;
 }
 
+fn githubSourceIdentityOwned(allocator: Allocator, object: std.json.ObjectMap) !GithubSourceIdentity {
+    const author = try githubSizedString(allocator, githubAuthorLogin(object), "", git.max_payload_atom_bytes);
+    errdefer allocator.free(author);
+    const email = try githubSizedString(allocator, githubAuthorEmail(object), "", git.max_payload_atom_bytes);
+    errdefer allocator.free(email);
+    const avatar_url = try githubSizedString(allocator, githubAuthorAvatarUrl(object), "", git.max_payload_ref_bytes);
+    errdefer allocator.free(avatar_url);
+    const identity = try githubAuthorIdentityOwned(allocator, object, avatar_url);
+    errdefer allocator.free(identity);
+    return .{
+        .author = author,
+        .identity = identity,
+        .email = email,
+        .avatar_url = avatar_url,
+    };
+}
+
+fn githubAuthorIdentityOwned(allocator: Allocator, object: std.json.ObjectMap, avatar_url: []const u8) ![]u8 {
+    if (event_mod.jsonString(object.get("source_identity"))) |value| {
+        if (value.len != 0) return githubSizedString(allocator, value, "", git.max_payload_ref_bytes);
+    }
+    if (githubAuthorNumericId(object)) |id| {
+        return std.fmt.allocPrint(allocator, "github:{d}", .{id});
+    }
+    if (githubAvatarNumericId(avatar_url)) |id| {
+        return std.fmt.allocPrint(allocator, "github:{s}", .{id});
+    }
+    if (githubAuthorNodeId(object)) |id| {
+        return std.fmt.allocPrint(allocator, "github-node:{s}", .{id});
+    }
+    return allocator.dupe(u8, "");
+}
+
+fn githubAuthorNumericId(object: std.json.ObjectMap) ?i64 {
+    if (nestedInteger(object, "user", "id")) |value| if (value > 0) return value;
+    if (nestedInteger(object, "author", "databaseId")) |value| if (value > 0) return value;
+    if (nestedInteger(object, "author", "id")) |value| if (value > 0) return value;
+    if (jsonInteger(object.get("author_id"))) |value| if (value > 0) return value;
+    if (jsonInteger(object.get("user_id"))) |value| if (value > 0) return value;
+    return null;
+}
+
+fn githubAuthorNodeId(object: std.json.ObjectMap) ?[]const u8 {
+    if (nestedString(object, "author", "id")) |value| return value;
+    if (nestedString(object, "user", "node_id")) |value| return value;
+    if (event_mod.jsonString(object.get("author_node_id"))) |value| return value;
+    if (event_mod.jsonString(object.get("user_node_id"))) |value| return value;
+    return null;
+}
+
+fn githubAuthorAvatarUrl(object: std.json.ObjectMap) ?[]const u8 {
+    if (event_mod.jsonString(object.get("source_avatar_url"))) |value| return value;
+    if (nestedString(object, "user", "avatar_url")) |value| return value;
+    if (nestedString(object, "author", "avatarUrl")) |value| return value;
+    if (nestedString(object, "author", "avatar_url")) |value| return value;
+    if (event_mod.jsonString(object.get("author_avatar_url"))) |value| return value;
+    if (event_mod.jsonString(object.get("user_avatar_url"))) |value| return value;
+    return null;
+}
+
+fn githubAuthorEmail(object: std.json.ObjectMap) ?[]const u8 {
+    if (event_mod.jsonString(object.get("source_email"))) |value| return value;
+    if (nestedString(object, "user", "email")) |value| return value;
+    if (nestedString(object, "author", "email")) |value| return value;
+    if (event_mod.jsonString(object.get("author_email"))) |value| return value;
+    if (event_mod.jsonString(object.get("user_email"))) |value| return value;
+    return null;
+}
+
+fn nestedInteger(object: std.json.ObjectMap, parent_key: []const u8, child_key: []const u8) ?i64 {
+    const parent = switch (object.get(parent_key) orelse return null) {
+        .object => |map| map,
+        else => return null,
+    };
+    return jsonInteger(parent.get(child_key));
+}
+
+fn githubAvatarNumericId(url: []const u8) ?[]const u8 {
+    const marker = "avatars.githubusercontent.com/u/";
+    const marker_idx = std.mem.indexOf(u8, url, marker) orelse return null;
+    const start = marker_idx + marker.len;
+    var end = start;
+    while (end < url.len and url[end] >= '0' and url[end] <= '9') : (end += 1) {}
+    if (end == start) return null;
+    return url[start..end];
+}
+
 fn importIssueObject(
     allocator: Allocator,
     writer: *EventWriter,
@@ -1230,8 +1331,8 @@ fn importIssueObject(
     defer git.freeStringList(allocator, labels);
     const assignees = try githubNamedArray(allocator, issue.get("assignees"), "login");
     defer git.freeStringList(allocator, assignees);
-    const source_author = try githubSizedString(allocator, githubAuthorLogin(issue), "", git.max_payload_atom_bytes);
-    defer allocator.free(source_author);
+    const source_identity = try githubSourceIdentityOwned(allocator, issue);
+    defer source_identity.deinit(allocator);
     const milestone = try githubSizedString(allocator, githubMilestoneTitle(issue), "", git.max_payload_atom_bytes);
     defer allocator.free(milestone);
     const comment_count = githubOptionalUnsignedField(issue, &.{ "comments", "comment_count", "commentCount" });
@@ -1239,7 +1340,7 @@ fn importIssueObject(
     const issue_id = try util.newUuidV7(allocator);
     errdefer allocator.free(issue_id);
     try eprint("gt github import: importing issue #{d}\n", .{number});
-    try writeImportedIssueOpened(allocator, writer, issue_id, @intCast(number), occurred_at, title, body, labels, assignees, source_author, milestone, projects);
+    try writeImportedIssueOpened(allocator, writer, issue_id, @intCast(number), occurred_at, title, body, labels, assignees, source_identity, milestone, projects);
     stats.issues += 1;
 
     if (githubStateEquals(issue.get("state"), "closed")) {
@@ -1272,8 +1373,8 @@ fn importPullObject(allocator: Allocator, writer: *EventWriter, pull: std.json.O
     const draft = jsonBool(firstJsonValue(pull.get("draft"), pull.get("isDraft"))) orelse false;
     const occurred_at = try githubTimestampOrNow(allocator, firstJsonValue(pull.get("created_at"), pull.get("createdAt")));
     defer allocator.free(occurred_at);
-    const source_author = try githubSizedString(allocator, githubAuthorLogin(pull), "", git.max_payload_atom_bytes);
-    defer allocator.free(source_author);
+    const source_identity = try githubSourceIdentityOwned(allocator, pull);
+    defer source_identity.deinit(allocator);
     const labels = try githubIssueLabels(allocator, pull);
     defer git.freeStringList(allocator, labels);
     const assignees = try githubNamedArray(allocator, pull.get("assignees"), "login");
@@ -1297,7 +1398,10 @@ fn importPullObject(allocator: Allocator, writer: *EventWriter, pull: std.json.O
         head_ref,
         draft,
         .{
-            .source_author = if (source_author.len == 0) null else source_author,
+            .source_author = if (source_identity.author.len == 0) null else source_identity.author,
+            .source_identity = if (source_identity.identity.len == 0) null else source_identity.identity,
+            .source_email = if (source_identity.email.len == 0) null else source_identity.email,
+            .source_avatar_url = if (source_identity.avatar_url.len == 0) null else source_identity.avatar_url,
             .labels = labels,
             .assignees = assignees,
             .reviewers = reviewers,
@@ -1669,8 +1773,8 @@ fn importCommentsArrayWithContext(
         const occurred_at = try githubTimestampOrNow(allocator, firstJsonValue(item.object.get("created_at"), item.object.get("createdAt")));
         defer allocator.free(occurred_at);
         if (try importedCommentExists(db, parent_kind, parent_id, occurred_at, body)) continue;
-        const source_author = try githubSizedString(allocator, githubAuthorLogin(item.object), "", git.max_payload_atom_bytes);
-        defer allocator.free(source_author);
+        const source_identity = try githubSourceIdentityOwned(allocator, item.object);
+        defer source_identity.deinit(allocator);
         const reply = try importedCommentReply(allocator, item.object, comment_refs);
         defer if (reply.parent_id) |value| allocator.free(value);
         defer if (reply.parent_hash) |value| allocator.free(value);
@@ -1681,7 +1785,7 @@ fn importCommentsArrayWithContext(
             parent_id,
             occurred_at,
             body,
-            source_author,
+            source_identity,
             reply.parent_id orelse "",
             reply.parent_hash orelse "",
         );
@@ -1788,7 +1892,7 @@ fn writeImportedIssueOpened(
     body_text: []const u8,
     labels: []const []const u8,
     assignees: []const []const u8,
-    source_author: []const u8,
+    source_identity: GithubSourceIdentity,
     milestone: []const u8,
     projects: []const event_mod.IssueProjectPlacement,
 ) !void {
@@ -1811,7 +1915,10 @@ fn writeImportedIssueOpened(
         assignees,
         .{ .github_issue_number = number },
         .{
-            .source_author = if (source_author.len == 0) null else source_author,
+            .source_author = if (source_identity.author.len == 0) null else source_identity.author,
+            .source_identity = if (source_identity.identity.len == 0) null else source_identity.identity,
+            .source_email = if (source_identity.email.len == 0) null else source_identity.email,
+            .source_avatar_url = if (source_identity.avatar_url.len == 0) null else source_identity.avatar_url,
             .milestone = if (milestone.len == 0) null else milestone,
             .projects = projects,
         },
@@ -1992,7 +2099,7 @@ fn writeImportedCommentAdded(
     parent_id: []const u8,
     occurred_at: []const u8,
     body_text: []const u8,
-    source_author: []const u8,
+    source_identity: GithubSourceIdentity,
     reply_parent_id: []const u8,
     reply_parent_hash: []const u8,
 ) !ImportedCommentRef {
@@ -2035,7 +2142,10 @@ fn writeImportedCommentAdded(
         parent_id,
         body_text,
         .{
-            .source_author = if (source_author.len == 0) null else source_author,
+            .source_author = if (source_identity.author.len == 0) null else source_identity.author,
+            .source_identity = if (source_identity.identity.len == 0) null else source_identity.identity,
+            .source_email = if (source_identity.email.len == 0) null else source_identity.email,
+            .source_avatar_url = if (source_identity.avatar_url.len == 0) null else source_identity.avatar_url,
             .reply_parent_id = if (reply_parent_id.len == 0) null else reply_parent_id,
             .reply_parent_hash = if (reply_parent_hash.len == 0) null else reply_parent_hash,
         },

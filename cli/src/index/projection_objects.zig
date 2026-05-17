@@ -23,6 +23,65 @@ const max_projected_project_views: usize = 64;
 const max_projected_reaction_emojis: usize = 64;
 const max_projected_reaction_actors: usize = 1024;
 
+const ProjectedSourceIdentity = struct {
+    identity: []const u8,
+    author: []const u8,
+    email: []const u8,
+    avatar_url: []const u8,
+};
+
+fn sourceIdentityFromPayload(payload: std.json.ObjectMap) ProjectedSourceIdentity {
+    return .{
+        .identity = event_mod.jsonString(payload.get("source_identity")) orelse "",
+        .author = event_mod.jsonString(payload.get("source_author")) orelse "",
+        .email = event_mod.jsonString(payload.get("source_email")) orelse "",
+        .avatar_url = event_mod.jsonString(payload.get("source_avatar_url")) orelse "",
+    };
+}
+
+fn upsertSourceIdentity(db: *SqliteDb, source: ProjectedSourceIdentity) !void {
+    if (source.identity.len == 0) return;
+    const split = std.mem.indexOfScalar(u8, source.identity, ':');
+    const provider = if (split) |idx| source.identity[0..idx] else "";
+    const provider_user_id = if (split) |idx| source.identity[idx + 1 ..] else source.identity;
+
+    var stmt = try db.prepare(
+        \\INSERT INTO identities(id, provider, provider_user_id, display_name, email, avatar_url)
+        \\VALUES (?, ?, ?, ?, ?, ?)
+        \\ON CONFLICT(id) DO UPDATE SET
+        \\  provider = COALESCE(NULLIF(excluded.provider, ''), identities.provider),
+        \\  provider_user_id = COALESCE(NULLIF(excluded.provider_user_id, ''), identities.provider_user_id),
+        \\  display_name = COALESCE(NULLIF(excluded.display_name, ''), identities.display_name),
+        \\  email = COALESCE(NULLIF(excluded.email, ''), identities.email),
+        \\  avatar_url = COALESCE(NULLIF(excluded.avatar_url, ''), identities.avatar_url)
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, source.identity);
+    try stmt.bindText(2, provider);
+    try stmt.bindText(3, provider_user_id);
+    try stmt.bindText(4, source.author);
+    try stmt.bindText(5, source.email);
+    try stmt.bindText(6, source.avatar_url);
+    try stmt.stepDone();
+
+    try upsertIdentityAlias(db, "display", source.author, source.identity);
+    try upsertIdentityAlias(db, "email", source.email, source.identity);
+}
+
+fn upsertIdentityAlias(db: *SqliteDb, kind: []const u8, value: []const u8, identity: []const u8) !void {
+    if (value.len == 0) return;
+    var stmt = try db.prepare(
+        \\INSERT INTO identity_aliases(alias_kind, alias_value, identity_id)
+        \\VALUES (?, ?, ?)
+        \\ON CONFLICT(alias_kind, alias_value) DO UPDATE SET identity_id = excluded.identity_id
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, kind);
+    try stmt.bindText(2, value);
+    try stmt.bindText(3, identity);
+    try stmt.stepDone();
+}
+
 fn creationEventWins(db: *SqliteDb, event_type: []const u8, object_id: []const u8, event_hash: []const u8) !bool {
     var stmt = try db.prepare(
         \\SELECT event_hash
@@ -116,11 +175,13 @@ pub fn applyIssueProjection(allocator: Allocator, db: *SqliteDb, event_hash: []c
         if (!(try creationEventWins(db, "issue.opened", envelope.object_id, event_hash))) return "duplicate_object_id";
         const title = event_mod.jsonString(payload.get("title")) orelse return "invalid_event_envelope";
         const body_value = event_mod.jsonString(payload.get("body")) orelse "";
+        const source_identity = sourceIdentityFromPayload(payload);
+        try upsertSourceIdentity(db, source_identity);
         try insertIssueOpened(db, event_hash, envelope, title, body_value);
         try upsertIssueMetadata(
             db,
             envelope.object_id,
-            event_mod.jsonString(payload.get("source_author")) orelse "",
+            source_identity,
             event_mod.jsonString(payload.get("milestone")) orelse "",
             event_mod.jsonString(payload.get("type")) orelse "",
             event_mod.jsonString(payload.get("priority")) orelse "",
@@ -281,7 +342,7 @@ fn insertIssueOpened(db: *SqliteDb, event_hash: []const u8, envelope: ValidatedE
 fn upsertIssueMetadata(
     db: *SqliteDb,
     issue_id: []const u8,
-    source_author: []const u8,
+    source_identity: ProjectedSourceIdentity,
     milestone: []const u8,
     issue_type: []const u8,
     priority: []const u8,
@@ -291,44 +352,50 @@ fn upsertIssueMetadata(
 ) !void {
     var stmt = try db.prepare(
         \\INSERT INTO issue_metadata(
-        \\  issue_id, source_author, milestone,
+        \\  issue_id, source_author, source_identity, source_email, source_avatar_url, milestone,
         \\  issue_type, issue_type_occurred_at, issue_type_actor_principal, issue_type_event_hash,
         \\  priority, priority_occurred_at, priority_actor_principal, priority_event_hash,
         \\  status, status_occurred_at, status_actor_principal, status_event_hash
         \\)
-        \\VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        \\VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         \\ON CONFLICT(issue_id) DO UPDATE SET
         \\  source_author = excluded.source_author,
+        \\  source_identity = excluded.source_identity,
+        \\  source_email = excluded.source_email,
+        \\  source_avatar_url = excluded.source_avatar_url,
         \\  milestone = excluded.milestone
     );
     defer stmt.deinit();
     try stmt.bindText(1, issue_id);
-    try stmt.bindText(2, source_author);
-    try stmt.bindText(3, milestone);
-    try stmt.bindText(4, issue_type);
-    try stmt.bindText(5, envelope.occurred_at);
-    try stmt.bindText(6, envelope.actor_principal);
-    try stmt.bindText(7, event_hash);
-    try stmt.bindText(8, priority);
-    try stmt.bindText(9, envelope.occurred_at);
-    try stmt.bindText(10, envelope.actor_principal);
-    try stmt.bindText(11, event_hash);
-    try stmt.bindText(12, status);
-    try stmt.bindText(13, envelope.occurred_at);
-    try stmt.bindText(14, envelope.actor_principal);
-    try stmt.bindText(15, event_hash);
+    try stmt.bindText(2, source_identity.author);
+    try stmt.bindText(3, source_identity.identity);
+    try stmt.bindText(4, source_identity.email);
+    try stmt.bindText(5, source_identity.avatar_url);
+    try stmt.bindText(6, milestone);
+    try stmt.bindText(7, issue_type);
+    try stmt.bindText(8, envelope.occurred_at);
+    try stmt.bindText(9, envelope.actor_principal);
+    try stmt.bindText(10, event_hash);
+    try stmt.bindText(11, priority);
+    try stmt.bindText(12, envelope.occurred_at);
+    try stmt.bindText(13, envelope.actor_principal);
+    try stmt.bindText(14, event_hash);
+    try stmt.bindText(15, status);
+    try stmt.bindText(16, envelope.occurred_at);
+    try stmt.bindText(17, envelope.actor_principal);
+    try stmt.bindText(18, event_hash);
     try stmt.stepDone();
 }
 
 fn upsertIssueMilestone(db: *SqliteDb, issue_id: []const u8, milestone: []const u8) !void {
     var stmt = try db.prepare(
         \\INSERT INTO issue_metadata(
-        \\  issue_id, source_author, milestone,
+        \\  issue_id, source_author, source_identity, source_email, source_avatar_url, milestone,
         \\  issue_type, issue_type_occurred_at, issue_type_actor_principal, issue_type_event_hash,
         \\  priority, priority_occurred_at, priority_actor_principal, priority_event_hash,
         \\  status, status_occurred_at, status_actor_principal, status_event_hash
         \\)
-        \\VALUES (?, '', ?, '', '', '', '', '', '', '', '', '', '', '', '')
+        \\VALUES (?, '', '', '', '', ?, '', '', '', '', '', '', '', '', '', '', '', '')
         \\ON CONFLICT(issue_id) DO UPDATE SET milestone = excluded.milestone
     );
     defer stmt.deinit();
@@ -340,17 +407,20 @@ fn upsertIssueMilestone(db: *SqliteDb, issue_id: []const u8, milestone: []const 
 fn upsertPullMetadata(
     db: *SqliteDb,
     pull_id: []const u8,
-    source_author: []const u8,
+    source_identity: ProjectedSourceIdentity,
     commit_count: i64,
     changed_files: i64,
     additions: i64,
     deletions: i64,
 ) !void {
     var stmt = try db.prepare(
-        \\INSERT INTO pull_metadata(pull_id, source_author, commit_count, changed_files, additions, deletions)
-        \\VALUES (?, ?, ?, ?, ?, ?)
+        \\INSERT INTO pull_metadata(pull_id, source_author, source_identity, source_email, source_avatar_url, commit_count, changed_files, additions, deletions)
+        \\VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         \\ON CONFLICT(pull_id) DO UPDATE SET
         \\  source_author = excluded.source_author,
+        \\  source_identity = excluded.source_identity,
+        \\  source_email = excluded.source_email,
+        \\  source_avatar_url = excluded.source_avatar_url,
         \\  commit_count = excluded.commit_count,
         \\  changed_files = excluded.changed_files,
         \\  additions = excluded.additions,
@@ -358,11 +428,14 @@ fn upsertPullMetadata(
     );
     defer stmt.deinit();
     try stmt.bindText(1, pull_id);
-    try stmt.bindText(2, source_author);
-    try stmt.bindInt64(3, commit_count);
-    try stmt.bindInt64(4, changed_files);
-    try stmt.bindInt64(5, additions);
-    try stmt.bindInt64(6, deletions);
+    try stmt.bindText(2, source_identity.author);
+    try stmt.bindText(3, source_identity.identity);
+    try stmt.bindText(4, source_identity.email);
+    try stmt.bindText(5, source_identity.avatar_url);
+    try stmt.bindInt64(6, commit_count);
+    try stmt.bindInt64(7, changed_files);
+    try stmt.bindInt64(8, additions);
+    try stmt.bindInt64(9, deletions);
     try stmt.stepDone();
 }
 
@@ -448,12 +521,12 @@ fn updateIssueMetadataScalar(
 ) !void {
     var ensure = try db.prepare(
         \\INSERT OR IGNORE INTO issue_metadata(
-        \\  issue_id, source_author, milestone,
+        \\  issue_id, source_author, source_identity, source_email, source_avatar_url, milestone,
         \\  issue_type, issue_type_occurred_at, issue_type_actor_principal, issue_type_event_hash,
         \\  priority, priority_occurred_at, priority_actor_principal, priority_event_hash,
         \\  status, status_occurred_at, status_actor_principal, status_event_hash
         \\)
-        \\VALUES (?, '', '', '', '', '', '', '', '', '', '', '', '', '', '')
+        \\VALUES (?, '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '')
     );
     defer ensure.deinit();
     try ensure.bindText(1, issue_id);
@@ -2011,11 +2084,13 @@ pub fn applyPullProjection(allocator: Allocator, db: *SqliteDb, event_hash: []co
         const head_ref = event_mod.jsonString(payload.get("head_ref")) orelse return "invalid_event_envelope";
         const body_value = event_mod.jsonString(payload.get("body")) orelse "";
         const draft = event_mod.jsonBool(payload.get("draft")) orelse false;
+        const source_identity = sourceIdentityFromPayload(payload);
+        try upsertSourceIdentity(db, source_identity);
         try insertPullOpened(db, event_hash, envelope, title, body_value, base_ref, head_ref, draft);
         try upsertPullMetadata(
             db,
             envelope.object_id,
-            event_mod.jsonString(payload.get("source_author")) orelse "",
+            source_identity,
             metadataCount(payload, "commits"),
             metadataCount(payload, "changed_files"),
             metadataCount(payload, "additions"),
@@ -2360,7 +2435,9 @@ pub fn applyCommentProjection(allocator: Allocator, db: *SqliteDb, event_hash: [
         if (reply_parent_id.len != 0 and !(try acceptedCreationInFrontier(allocator, db, "comment.added", reply_parent_id, event_hash))) return "parent_not_created";
         if (reply_parent_id.len != 0 and !(try commentInParent(db, reply_parent_id, parent_kind, parent_id))) return "parent_not_created";
         if (reply_parent_id.len != 0 and reply_parent_hash.len != 0 and !(try acceptedCreationHashInFrontier(allocator, db, "comment.added", reply_parent_id, reply_parent_hash, event_hash))) return "parent_not_created";
-        try insertCommentAdded(db, event_hash, envelope, parent_kind, parent_id, comment_body, source_author, reply_parent_id, reply_parent_hash);
+        const source_identity = sourceIdentityFromPayload(payload);
+        try upsertSourceIdentity(db, source_identity);
+        try insertCommentAdded(db, event_hash, envelope, parent_kind, parent_id, comment_body, source_author, source_identity, reply_parent_id, reply_parent_hash);
     } else if (std.mem.eql(u8, envelope.event_type, "comment.body_set")) {
         if (!(try acceptedCreationInFrontier(allocator, db, "comment.added", envelope.object_id, event_hash))) return "object_not_created";
         const comment_body = event_mod.jsonString(payload.get("body")) orelse return "invalid_event_envelope";
@@ -2389,6 +2466,7 @@ fn insertCommentAdded(
     parent_id: []const u8,
     body: []const u8,
     source_author: []const u8,
+    source_identity: ProjectedSourceIdentity,
     reply_parent_id: []const u8,
     reply_parent_hash: []const u8,
 ) !void {
@@ -2398,8 +2476,9 @@ fn insertCommentAdded(
         \\  body, body_occurred_at, body_actor_principal, body_event_hash,
         \\  redacted, redacted_at, redacted_actor_principal, redacted_event_hash,
         \\  created_at, author_principal, author_device,
-        \\  source_author, reply_parent_id, reply_parent_hash
-        \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        \\  source_author, source_identity, source_email, source_avatar_url,
+        \\  reply_parent_id, reply_parent_hash
+        \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     );
     defer stmt.deinit();
     try stmt.bindText(1, envelope.object_id);
@@ -2417,8 +2496,11 @@ fn insertCommentAdded(
     try stmt.bindText(13, envelope.actor_principal);
     try stmt.bindText(14, envelope.actor_device);
     try stmt.bindText(15, source_author);
-    try stmt.bindText(16, reply_parent_id);
-    try stmt.bindText(17, reply_parent_hash);
+    try stmt.bindText(16, source_identity.identity);
+    try stmt.bindText(17, source_identity.email);
+    try stmt.bindText(18, source_identity.avatar_url);
+    try stmt.bindText(19, reply_parent_id);
+    try stmt.bindText(20, reply_parent_hash);
     try stmt.stepDone();
 }
 

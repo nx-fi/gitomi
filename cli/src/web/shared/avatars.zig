@@ -5,11 +5,15 @@ const nouns_assets = @import("../vendor/nouns-assets/image_data.zig");
 const Allocator = std.mem.Allocator;
 
 pub fn appendAvatar(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8, extra_class: []const u8) !void {
-    try appendAvatarContainer(buf, allocator, "issue-avatar", extra_class, name);
+    try appendAvatarContainer(buf, allocator, "issue-avatar", extra_class, name, "");
+}
+
+pub fn appendAvatarWithUrl(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8, avatar_url: []const u8, extra_class: []const u8) !void {
+    try appendAvatarContainer(buf, allocator, "issue-avatar", extra_class, name, avatar_url);
 }
 
 pub fn appendUserAvatar(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8) !void {
-    try appendAvatarContainer(buf, allocator, "user-avatar", "", name);
+    try appendAvatarContainer(buf, allocator, "user-avatar", "", name, "");
 }
 
 fn appendAvatarContainer(
@@ -18,7 +22,12 @@ fn appendAvatarContainer(
     base_class: []const u8,
     extra_class: []const u8,
     name: []const u8,
+    avatar_url: []const u8,
 ) !void {
+    const github_login = githubLogin(name);
+    const gravatar_email = try normalizedAvatarEmailOwned(allocator, name);
+    defer if (gravatar_email) |email| allocator.free(email);
+
     try html.appendTemplate(buf, allocator,
         \\<span class="{base_class} nouns-avatar {extra_class}" title="{name}" aria-label="{name}">
     , .{
@@ -27,7 +36,138 @@ fn appendAvatarContainer(
         .name = name,
     });
     try appendNounsAvatarSvg(buf, allocator, nounsAvatarSeed(name));
+    if (avatar_url.len != 0) try appendRemoteAvatarCandidate(buf, allocator, avatar_url, github_login);
+    if (github_login) |login| try appendGithubAvatarCandidate(buf, allocator, login);
+    if (gravatar_email) |email| try appendGravatarAvatarCandidate(buf, allocator, email);
     try buf.appendSlice(allocator, "</span>");
+}
+
+fn appendRemoteAvatarCandidate(buf: *std.ArrayList(u8), allocator: Allocator, avatar_url: []const u8, github_login: ?[]const u8) !void {
+    const is_github = isGithubAvatarUrl(avatar_url) and github_login != null;
+    try buf.appendSlice(allocator, "<img class=\"avatar-image\" data-avatar-source=\"");
+    try buf.appendSlice(allocator, if (is_github) "github" else "remote");
+    if (is_github) {
+        try buf.appendSlice(allocator, "\" data-avatar-github-login=\"");
+        try html.appendHtml(buf, allocator, github_login.?);
+    }
+    try buf.appendSlice(allocator, "\" src=\"");
+    try html.appendHtml(buf, allocator, avatar_url);
+    try buf.appendSlice(allocator, "\" alt=\"\" aria-hidden=\"true\" loading=\"lazy\" decoding=\"async\" crossorigin=\"anonymous\">");
+}
+
+fn appendGithubAvatarCandidate(buf: *std.ArrayList(u8), allocator: Allocator, login: []const u8) !void {
+    try buf.appendSlice(allocator,
+        \\<img class="avatar-image" data-avatar-source="github" data-avatar-github-login="
+    );
+    try html.appendHtml(buf, allocator, login);
+    try buf.appendSlice(allocator,
+        \\" src="https://github.com/
+    );
+    try appendUrlPathSegment(buf, allocator, login);
+    try buf.appendSlice(allocator,
+        \\.png?size=80" alt="" aria-hidden="true" loading="lazy" decoding="async" crossorigin="anonymous">
+    );
+}
+
+fn appendGravatarAvatarCandidate(buf: *std.ArrayList(u8), allocator: Allocator, email: []const u8) !void {
+    var hash: [std.crypto.hash.Md5.digest_length]u8 = undefined;
+    std.crypto.hash.Md5.hash(email, &hash, .{});
+
+    var hex: [std.crypto.hash.Md5.digest_length * 2]u8 = undefined;
+    hexLower(&hex, hash[0..]);
+
+    try html.appendTemplate(buf, allocator,
+        \\<img class="avatar-image" data-avatar-source="gravatar" src="https://www.gravatar.com/avatar/{hash}?s=80&amp;d=404" alt="" aria-hidden="true" loading="lazy" decoding="async" crossorigin="anonymous">
+    , .{ .hash = hex[0..] });
+}
+
+fn githubLogin(name: []const u8) ?[]const u8 {
+    if (avatarEmail(name) != null) return null;
+    var trimmed = std.mem.trim(u8, name, " \t\r\n");
+    if (std.mem.startsWith(u8, trimmed, "@")) trimmed = trimmed[1..];
+    if (!isGithubLogin(trimmed)) return null;
+    return trimmed;
+}
+
+fn isGithubLogin(value: []const u8) bool {
+    if (value.len == 0 or value.len > 100) return false;
+    if (std.mem.endsWith(u8, value, "[bot]")) {
+        const prefix = value[0 .. value.len - "[bot]".len];
+        return isGithubLoginCore(prefix);
+    }
+    return value.len <= 39 and isGithubLoginCore(value);
+}
+
+fn isGithubLoginCore(value: []const u8) bool {
+    if (value.len == 0 or value[0] == '-' or value[value.len - 1] == '-') return false;
+    for (value) |c| {
+        if ((c >= 'a' and c <= 'z') or
+            (c >= 'A' and c <= 'Z') or
+            (c >= '0' and c <= '9') or
+            c == '-')
+        {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+fn isGithubAvatarUrl(value: []const u8) bool {
+    return std.mem.startsWith(u8, value, "https://avatars.githubusercontent.com/") or
+        std.mem.startsWith(u8, value, "http://avatars.githubusercontent.com/") or
+        std.mem.startsWith(u8, value, "https://github.com/") or
+        std.mem.startsWith(u8, value, "http://github.com/");
+}
+
+fn normalizedAvatarEmailOwned(allocator: Allocator, name: []const u8) !?[]u8 {
+    const email = avatarEmail(name) orelse return null;
+    const normalized = try allocator.alloc(u8, email.len);
+    for (email, 0..) |c, i| normalized[i] = std.ascii.toLower(c);
+    return normalized;
+}
+
+fn avatarEmail(name: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, name, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    const candidate = if (std.mem.indexOfScalar(u8, trimmed, '<')) |start| blk: {
+        const rest = trimmed[start + 1 ..];
+        const end = std.mem.indexOfScalar(u8, rest, '>') orelse return null;
+        break :blk std.mem.trim(u8, rest[0..end], " \t\r\n");
+    } else trimmed;
+
+    const at = std.mem.indexOfScalar(u8, candidate, '@') orelse return null;
+    if (at == 0 or at == candidate.len - 1) return null;
+    if (std.mem.indexOfScalar(u8, candidate[at + 1 ..], '@') != null) return null;
+    for (candidate) |c| {
+        if (std.ascii.isWhitespace(c) or c == '<' or c == '>') return null;
+    }
+    return candidate;
+}
+
+fn appendUrlPathSegment(buf: *std.ArrayList(u8), allocator: Allocator, value: []const u8) !void {
+    const hex = "0123456789ABCDEF";
+    for (value) |c| {
+        if ((c >= 'a' and c <= 'z') or
+            (c >= 'A' and c <= 'Z') or
+            (c >= '0' and c <= '9') or
+            c == '-' or c == '_' or c == '.' or c == '~')
+        {
+            try buf.append(allocator, c);
+        } else {
+            try buf.append(allocator, '%');
+            try buf.append(allocator, hex[c >> 4]);
+            try buf.append(allocator, hex[c & 0x0f]);
+        }
+    }
+}
+
+fn hexLower(out: []u8, bytes: []const u8) void {
+    const hex = "0123456789abcdef";
+    for (bytes, 0..) |b, i| {
+        out[i * 2] = hex[b >> 4];
+        out[i * 2 + 1] = hex[b & 0x0f];
+    }
 }
 
 const NounsAvatarSeed = struct {

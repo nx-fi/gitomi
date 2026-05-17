@@ -68,7 +68,7 @@ pub fn renderPullsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]
         const row = try work_items.pullListRowFromStmt(allocator, &stmt);
         defer row.deinit(allocator);
         const task_summary = shared.markdownTaskSummary(row.body);
-        try appendPullListRow(&buf, allocator, &db, &legacy_links, row.id, row.title, row.state, row.author, row.opened_at, row.state_at, row.base_ref, row.head_ref, row.draft, row.comment_count, task_summary);
+        try appendPullListRow(&buf, allocator, &db, &legacy_links, row.id, row.title, row.state, row.author, row.author_avatar_url, row.opened_at, row.state_at, row.base_ref, row.head_ref, row.draft, row.comment_count, task_summary);
         shown += 1;
     }
 
@@ -278,6 +278,7 @@ fn appendPullListRow(
     title: []const u8,
     state: []const u8,
     author: []const u8,
+    author_avatar_url: []const u8,
     opened_at: []const u8,
     state_at: []const u8,
     base_ref: []const u8,
@@ -336,7 +337,7 @@ fn appendPullListRow(
             \\<span class="issue-comments" title="Comments"><span class="issue-comments-icon" aria-hidden="true"></span>{comment_count}</span>
         , .{ .comment_count = comment_count });
     }
-    try appendAvatar(buf, allocator, author, "issue-author-avatar");
+    try appendAvatar(buf, allocator, author, author_avatar_url, "issue-author-avatar");
     try buf.appendSlice(allocator,
         \\  </div>
         \\</article>
@@ -366,7 +367,7 @@ fn appendPullRowCollection(
         if (labels) {
             try appendLabel(buf, allocator, value);
         } else {
-            try appendAvatar(buf, allocator, value, "");
+            try appendAvatar(buf, allocator, value, "", "");
         }
     }
     if (shown) try buf.appendSlice(allocator, "</span>");
@@ -390,8 +391,8 @@ fn appendLabel(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8)
     });
 }
 
-fn appendAvatar(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8, extra_class: []const u8) !void {
-    try shared.appendAvatar(buf, allocator, name, extra_class);
+fn appendAvatar(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8, avatar_url: []const u8, extra_class: []const u8) !void {
+    try shared.appendAvatarWithUrl(buf, allocator, name, avatar_url, extra_class);
 }
 
 fn labelKind(label: []const u8) []const u8 {

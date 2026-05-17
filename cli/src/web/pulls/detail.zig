@@ -521,7 +521,7 @@ fn appendPullConversation(
         \\  <div class="issue-timeline-item">
         \\    <div class="issue-timeline-avatar">
     , .{});
-    try appendAvatar(buf, allocator, pullDisplayAuthor(detail), "issue-detail-avatar");
+    try appendAvatar(buf, allocator, pullDisplayAuthor(detail), detail.source_avatar_url, "issue-detail-avatar");
     try appendTemplate(buf, allocator,
         \\    </div>
         \\    <article class="issue-comment-box pull-card" id="pull-description">
@@ -737,8 +737,8 @@ fn appendLabel(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8)
     });
 }
 
-fn appendAvatar(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8, extra_class: []const u8) !void {
-    try shared.appendAvatar(buf, allocator, name, extra_class);
+fn appendAvatar(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8, avatar_url: []const u8, extra_class: []const u8) !void {
+    try shared.appendAvatarWithUrl(buf, allocator, name, avatar_url, extra_class);
 }
 
 fn appendLegacyPullLink(buf: *std.ArrayList(u8), allocator: Allocator, legacy_number: i64) !void {

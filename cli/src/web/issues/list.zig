@@ -80,7 +80,7 @@ pub fn renderIssuesPage(allocator: Allocator, repo: Repo, target: []const u8) ![
         const row = try work_items.issueListRowFromStmt(allocator, &stmt);
         defer row.deinit(allocator);
         const task_summary = shared.markdownTaskSummary(row.body);
-        try appendIssueListRow(&buf, allocator, &db, &legacy_links, row.id, row.title, row.state, row.author, row.opened_at, row.state_at, row.milestone, row.issue_type, row.priority, row.comment_count, task_summary);
+        try appendIssueListRow(&buf, allocator, &db, &legacy_links, row.id, row.title, row.state, row.author, row.author_avatar_url, row.opened_at, row.state_at, row.milestone, row.issue_type, row.priority, row.comment_count, task_summary);
         shown += 1;
     }
 
@@ -390,9 +390,10 @@ fn issueFilterOptionsSql(kind: IssueFilterKind) []const u8 {
         .author =>
         \\SELECT author, COUNT(*)
         \\FROM (
-        \\  SELECT i.id, COALESCE(NULLIF(m.source_author, ''), i.author_principal) AS author
+        \\  SELECT i.id, COALESCE(NULLIF(si.display_name, ''), NULLIF(m.source_author, ''), i.author_principal) AS author
         \\  FROM issues i
         \\  LEFT JOIN issue_metadata m ON m.issue_id = i.id
+        \\  LEFT JOIN identities si ON si.id = m.source_identity
         \\)
         \\WHERE author <> ''
         \\GROUP BY author
@@ -501,6 +502,7 @@ fn appendIssueListRow(
     title: []const u8,
     state: []const u8,
     author: []const u8,
+    author_avatar_url: []const u8,
     opened_at: []const u8,
     state_at: []const u8,
     milestone: []const u8,
@@ -562,7 +564,7 @@ fn appendIssueListRow(
             \\<span class="issue-comments" title="Comments"><span class="issue-comments-icon" aria-hidden="true"></span>{comment_count}</span>
         , .{ .comment_count = comment_count });
     }
-    try shared.appendAvatar(buf, allocator, author, "issue-author-avatar");
+    try shared.appendAvatarWithUrl(buf, allocator, author, author_avatar_url, "issue-author-avatar");
     try buf.appendSlice(allocator,
         \\  </div>
         \\</article>

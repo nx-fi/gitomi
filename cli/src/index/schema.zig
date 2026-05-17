@@ -57,6 +57,22 @@ pub fn createIndexSchema(db: *SqliteDb) !void {
         \\);
         \\CREATE INDEX events_ref_ordinal_idx ON events(ref, ordinal);
         \\CREATE INDEX events_type_ordinal_idx ON events(event_type, ordinal);
+        \\CREATE TABLE identities (
+        \\  id TEXT PRIMARY KEY,
+        \\  provider TEXT NOT NULL,
+        \\  provider_user_id TEXT NOT NULL,
+        \\  display_name TEXT NOT NULL,
+        \\  email TEXT NOT NULL,
+        \\  avatar_url TEXT NOT NULL
+        \\);
+        \\CREATE INDEX identities_provider_user_idx ON identities(provider, provider_user_id);
+        \\CREATE TABLE identity_aliases (
+        \\  alias_kind TEXT NOT NULL,
+        \\  alias_value TEXT NOT NULL,
+        \\  identity_id TEXT NOT NULL,
+        \\  PRIMARY KEY(alias_kind, alias_value)
+        \\);
+        \\CREATE INDEX identity_aliases_identity_idx ON identity_aliases(identity_id);
         \\CREATE TABLE issues (
         \\  id TEXT PRIMARY KEY,
         \\  title TEXT NOT NULL,
@@ -91,6 +107,9 @@ pub fn createIndexSchema(db: *SqliteDb) !void {
         \\CREATE TABLE issue_metadata (
         \\  issue_id TEXT PRIMARY KEY,
         \\  source_author TEXT NOT NULL,
+        \\  source_identity TEXT NOT NULL,
+        \\  source_email TEXT NOT NULL,
+        \\  source_avatar_url TEXT NOT NULL,
         \\  milestone TEXT NOT NULL,
         \\  issue_type TEXT NOT NULL,
         \\  issue_type_occurred_at TEXT NOT NULL,
@@ -307,6 +326,9 @@ pub fn createIndexSchema(db: *SqliteDb) !void {
         \\CREATE TABLE pull_metadata (
         \\  pull_id TEXT PRIMARY KEY,
         \\  source_author TEXT NOT NULL,
+        \\  source_identity TEXT NOT NULL,
+        \\  source_email TEXT NOT NULL,
+        \\  source_avatar_url TEXT NOT NULL,
         \\  commit_count INTEGER NOT NULL,
         \\  changed_files INTEGER NOT NULL,
         \\  additions INTEGER NOT NULL,
@@ -328,6 +350,9 @@ pub fn createIndexSchema(db: *SqliteDb) !void {
         \\  author_principal TEXT NOT NULL,
         \\  author_device TEXT NOT NULL,
         \\  source_author TEXT NOT NULL,
+        \\  source_identity TEXT NOT NULL,
+        \\  source_email TEXT NOT NULL,
+        \\  source_avatar_url TEXT NOT NULL,
         \\  reply_parent_id TEXT NOT NULL,
         \\  reply_parent_hash TEXT NOT NULL
         \\);
