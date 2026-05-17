@@ -305,7 +305,7 @@ fn appendStatusLine(buf: *std.ArrayList(u8), allocator: Allocator, status: u16, 
 fn appendCommonHeaders(buf: *std.ArrayList(u8), allocator: Allocator) !void {
     try appendHeader(buf, allocator, "Connection", "close");
     try appendHeader(buf, allocator, "X-Content-Type-Options", "nosniff");
-    try appendHeader(buf, allocator, "Referrer-Policy", "no-referrer");
+    try appendHeader(buf, allocator, "Referrer-Policy", "same-origin");
 }
 
 fn appendHeader(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8, value: []const u8) !void {
@@ -410,7 +410,7 @@ test "common response headers close the connection" {
     try appendCommonHeaders(&headers, std.testing.allocator);
     try std.testing.expect(std.mem.indexOf(u8, headers.items, "Connection: close\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, headers.items, "keep-alive") == null);
-    try std.testing.expect(std.mem.indexOf(u8, headers.items, "Referrer-Policy: no-referrer\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, headers.items, "Referrer-Policy: same-origin\r\n") != null);
 }
 
 test "bodyless response headers do not emit content length" {
