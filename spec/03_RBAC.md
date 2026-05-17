@@ -147,6 +147,8 @@ Every event type MUST map to a required permission. The following defines the ma
 | `issue.milestone_set`     | `issue.manage_milestones` | —       |
 | `issue.project_added`     | `issue.manage_projects`   | —       |
 | `issue.project_removed`   | `issue.manage_projects`   | —       |
+| `issue.project_field_set` | `issue.manage_projects`   | —       |
+| `issue.project_field_cleared` | `issue.manage_projects` | —       |
 | `issue.reaction_added`    | `reaction.add`            | —       |
 | `issue.reaction_removed`  | `reaction.remove_own`     | actor   |
 | `pull.opened`             | `pull.open`               | —       |

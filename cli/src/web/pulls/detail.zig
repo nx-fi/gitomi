@@ -154,7 +154,7 @@ fn renderPullNotFound(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]
     return buf.toOwnedSlice(allocator);
 }
 
-pub fn renderPullMergeEditorPage(allocator: Allocator, repo: Repo, raw_ref: []const u8, target: []const u8, error_message: ?[]const u8) ![]u8 {
+pub fn renderPullMergeEditorPage(allocator: Allocator, repo: Repo, raw_ref: []const u8, target: []const u8, csrf_token: []const u8, error_message: ?[]const u8) ![]u8 {
     if (try shared.renderIndexingPageIfStale(allocator, repo, "Resolve Conflicts", "pulls", target)) |body| return body;
     try index.ensureIndex(allocator, repo);
     const pull_id = index.resolvePullId(allocator, repo, raw_ref) catch {
@@ -195,7 +195,7 @@ pub fn renderPullMergeEditorPage(allocator: Allocator, repo: Repo, raw_ref: []co
     const files = try merge_editor.loadConflictFiles(allocator, repo, detail, snapshot, conflict_files);
     defer merge_editor.freeConflictFiles(allocator, files);
 
-    try merge_editor.appendEditor(&buf, allocator, detail, raw_ref, pull_ref, snapshot, files, error_message);
+    try merge_editor.appendEditor(&buf, allocator, detail, raw_ref, pull_ref, csrf_token, snapshot, files, error_message);
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
 }
@@ -540,7 +540,9 @@ fn appendPullConversation(
     if (can_edit_pull) {
         try buf.appendSlice(allocator, " data-checklist-owner=\"pull\" data-checklist-update-action=\"/pulls/");
         try shared.appendUrlEncoded(buf, allocator, raw_ref);
-        try buf.appendSlice(allocator, "/checklist\"");
+        try buf.appendSlice(allocator, "/checklist\" data-checklist-csrf=\"");
+        try shared.appendHtml(buf, allocator, csrf_token);
+        try buf.append(allocator, '"');
     }
     try buf.appendSlice(allocator, ">");
     if (detail.body.len == 0) {
@@ -777,7 +779,15 @@ fn mergeMethodCommitPhrase(allocator: Allocator, count: ?usize) ![]u8 {
     return allocator.dupe(u8, "The commits");
 }
 
-pub fn handlePullConflictPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
+pub fn handlePullConflictPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, csrf_token: []const u8, form_body: []const u8) !void {
+    const fields = try parseFormFieldsOwned(allocator, form_body);
+    defer freeFormFields(allocator, fields);
+    const submitted_csrf = findFormField(fields, zwf.csrf.field_name) orelse "";
+    if (!zwf.csrf.verify(csrf_token, submitted_csrf)) {
+        try sendPlainResponse(allocator, stream, 403, "Forbidden", "Invalid CSRF token\n");
+        return;
+    }
+
     try index.ensureIndex(allocator, repo);
     const pull_id = index.resolvePullId(allocator, repo, raw_ref) catch {
         try sendPlainResponse(allocator, stream, 404, "Not Found", "Pull request not found\n");
@@ -796,20 +806,17 @@ pub fn handlePullConflictPost(allocator: Allocator, repo: Repo, stream: std.net.
     const merge_status = try pull_merge.loadStatus(allocator, repo, detail);
     defer merge_status.deinit(allocator);
     if (!merge_status.hasConflicts()) {
-        try sendMergeEditorError(allocator, repo, stream, raw_ref, 409, "Conflict", "This pull request no longer reports merge conflicts.");
+        try sendMergeEditorError(allocator, repo, stream, raw_ref, csrf_token, 409, "Conflict", "This pull request no longer reports merge conflicts.");
         return;
     }
 
     const conflict_files = merge_status.conflict_files orelse {
-        try sendMergeEditorError(allocator, repo, stream, raw_ref, 409, "Conflict", "Git did not return the conflicting file list.");
+        try sendMergeEditorError(allocator, repo, stream, raw_ref, csrf_token, 409, "Conflict", "Git did not return the conflicting file list.");
         return;
     };
 
-    const fields = try parseFormFieldsOwned(allocator, form_body);
-    defer freeFormFields(allocator, fields);
-
     const submitted_oids = submittedExpectedOids(fields) orelse {
-        try sendMergeEditorError(allocator, repo, stream, raw_ref, 409, "Conflict", "The merge state was not confirmed. Refresh the page and try again.");
+        try sendMergeEditorError(allocator, repo, stream, raw_ref, csrf_token, 409, "Conflict", "The merge state was not confirmed. Refresh the page and try again.");
         return;
     };
 
@@ -822,37 +829,37 @@ pub fn handlePullConflictPost(allocator: Allocator, repo: Repo, stream: std.net.
         defer allocator.free(content_name);
 
         const submitted_path = findFormField(fields, path_name) orelse {
-            try sendMergeEditorError(allocator, repo, stream, raw_ref, 422, "Unprocessable Entity", "A conflict file path was missing from the submitted resolution.");
+            try sendMergeEditorError(allocator, repo, stream, raw_ref, csrf_token, 422, "Unprocessable Entity", "A conflict file path was missing from the submitted resolution.");
             return;
         };
         if (!std.mem.eql(u8, submitted_path, path)) {
-            try sendMergeEditorError(allocator, repo, stream, raw_ref, 422, "Unprocessable Entity", "The submitted conflict file list did not match the current merge conflicts.");
+            try sendMergeEditorError(allocator, repo, stream, raw_ref, csrf_token, 422, "Unprocessable Entity", "The submitted conflict file list did not match the current merge conflicts.");
             return;
         }
 
         const content = findFormField(fields, content_name) orelse {
-            try sendMergeEditorError(allocator, repo, stream, raw_ref, 422, "Unprocessable Entity", "Every conflicting file must be editable before the web resolver can commit.");
+            try sendMergeEditorError(allocator, repo, stream, raw_ref, csrf_token, 422, "Unprocessable Entity", "Every conflicting file must be editable before the web resolver can commit.");
             return;
         };
         if (contentHasConflictMarkers(content)) {
-            try sendMergeEditorError(allocator, repo, stream, raw_ref, 422, "Unprocessable Entity", "Resolve every conflict marker before committing the resolution.");
+            try sendMergeEditorError(allocator, repo, stream, raw_ref, csrf_token, 422, "Unprocessable Entity", "Resolve every conflict marker before committing the resolution.");
             return;
         }
         try resolved.append(allocator, .{ .path = path, .content = content });
     }
 
     const snapshot = merge_status.snapshot orelse {
-        try sendMergeEditorError(allocator, repo, stream, raw_ref, 409, "Conflict", "Git did not return the pull request refs.");
+        try sendMergeEditorError(allocator, repo, stream, raw_ref, csrf_token, 409, "Conflict", "Git did not return the pull request refs.");
         return;
     };
     if (!submittedOidsMatchSnapshot(submitted_oids, snapshot)) {
-        try sendMergeEditorError(allocator, repo, stream, raw_ref, 409, "Conflict", "The pull request changed after this page was rendered. Refresh and try again.");
+        try sendMergeEditorError(allocator, repo, stream, raw_ref, csrf_token, 409, "Conflict", "The pull request changed after this page was rendered. Refresh and try again.");
         return;
     }
 
     const merge_commit = pull_merge.commitConflictResolution(allocator, repo, snapshot, raw_ref, resolved.items) catch |err| {
         const message = pull_merge.commitErrorMessage(err) orelse return err;
-        try sendMergeEditorError(allocator, repo, stream, raw_ref, 422, "Unprocessable Entity", message);
+        try sendMergeEditorError(allocator, repo, stream, raw_ref, csrf_token, 422, "Unprocessable Entity", message);
         return;
     };
     defer allocator.free(merge_commit);
@@ -994,13 +1001,14 @@ fn sendMergeEditorError(
     repo: Repo,
     stream: std.net.Stream,
     raw_ref: []const u8,
+    csrf_token: []const u8,
     status: u16,
     reason: []const u8,
     message: []const u8,
 ) !void {
     const target = try std.fmt.allocPrint(allocator, "/pulls/{s}/conflicts", .{raw_ref});
     defer allocator.free(target);
-    const body = try renderPullMergeEditorPage(allocator, repo, raw_ref, target, message);
+    const body = try renderPullMergeEditorPage(allocator, repo, raw_ref, target, csrf_token, message);
     defer allocator.free(body);
     try sendResponse(allocator, stream, status, reason, "text/html", body, null);
 }

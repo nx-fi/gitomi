@@ -30,6 +30,7 @@ const appendJsonFieldStringArray = json_writer.appendJsonFieldStringArray;
 const appendJsonFieldBool = json_writer.appendJsonFieldBool;
 const appendJsonFieldInteger = json_writer.appendJsonFieldInteger;
 const appendJsonString = json_writer.appendJsonString;
+const JsonRootKind = json_writer.JsonRootKind;
 
 pub fn buildIssueOpenedJson(
     allocator: Allocator,
@@ -1289,10 +1290,7 @@ pub fn buildActionRunRequestedJson(
     if (metadata.source_workflow_from) |value| try appendJsonFieldString(&buf, allocator, "source_workflow_from", value, true);
     if (metadata.source_code_from) |value| try appendJsonFieldString(&buf, allocator, "source_code_from", value, true);
     if (metadata.permission_grant_json) |value| {
-        try appendJsonString(&buf, allocator, "permission_grant");
-        try buf.append(allocator, ':');
-        try buf.appendSlice(allocator, value);
-        try buf.append(allocator, ',');
+        try appendJsonFieldCanonicalRaw(&buf, allocator, "permission_grant", value, .object, true);
     }
     if (buf.items[buf.items.len - 1] == ',') {
         buf.items.len -= 1;
@@ -1336,16 +1334,10 @@ pub fn buildActionRunCompletedJson(
     if (metadata.runner_id) |value| try appendJsonFieldString(&buf, allocator, "runner_id", value, true);
     if (metadata.workflow_source_oid) |value| try appendJsonFieldString(&buf, allocator, "workflow_source_oid", value, true);
     if (metadata.outputs_json) |value| {
-        try appendJsonString(&buf, allocator, "outputs");
-        try buf.append(allocator, ':');
-        try buf.appendSlice(allocator, value);
-        try buf.append(allocator, ',');
+        try appendJsonFieldCanonicalRaw(&buf, allocator, "outputs", value, .object, true);
     }
     if (metadata.published_events_json) |value| {
-        try appendJsonString(&buf, allocator, "published_events");
-        try buf.append(allocator, ':');
-        try buf.appendSlice(allocator, value);
-        try buf.append(allocator, ',');
+        try appendJsonFieldCanonicalRaw(&buf, allocator, "published_events", value, .array, true);
     }
     if (buf.items[buf.items.len - 1] == ',') {
         buf.items.len -= 1;
@@ -1427,6 +1419,53 @@ fn appendJsonFieldRaw(
     try buf.append(allocator, ':');
     try buf.appendSlice(allocator, raw_json);
     if (comma) try buf.append(allocator, ',');
+}
+
+fn appendJsonFieldCanonicalRaw(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    key: []const u8,
+    raw_json: []const u8,
+    root_kind: JsonRootKind,
+    comma: bool,
+) !void {
+    const canonical = try json_writer.requireCanonicalJsonValue(allocator, raw_json, root_kind);
+    defer allocator.free(canonical);
+    try appendJsonString(buf, allocator, key);
+    try buf.append(allocator, ':');
+    try buf.appendSlice(allocator, canonical);
+    if (comma) try buf.append(allocator, ',');
+}
+
+test "action run completed rejects structurally invalid output metadata" {
+    const allocator = std.testing.allocator;
+    var cfg = Config{
+        .allocator = allocator,
+        .repo_id = try allocator.dupe(u8, "018f0000-0000-7000-8000-000000000001"),
+        .principal = try allocator.dupe(u8, "alice"),
+        .device = try allocator.dupe(u8, "laptop"),
+        .seq = 0,
+    };
+    defer cfg.deinit();
+
+    try std.testing.expectError(error.InvalidJsonValue, buildActionRunCompletedJson(
+        allocator,
+        cfg,
+        1,
+        "018f0000-0000-7000-8000-000000000002",
+        "018f0000-0000-7000-8000-000000000003",
+        "018f0000-0000-7000-8000-000000000004",
+        "2026-05-17T12:00:00Z",
+        .{},
+        "failure",
+        "refs/heads/main",
+        null,
+        ".gitomi/workflows/build.yml",
+        "push",
+        null,
+        null,
+        .{ .outputs_json = "{}},\"conclusion\":\"success\",\"pad\":{" },
+    ));
 }
 
 fn appendIssueProjectsField(

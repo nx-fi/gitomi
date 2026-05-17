@@ -346,11 +346,9 @@ fn replaceIssueProjectPlacement(allocator: Allocator, repo: Repo, issue_id: []co
             if (!std.mem.eql(u8, existing_column, filter)) continue;
         }
         if (std.mem.eql(u8, existing_column, column)) continue;
-        const removals = [_]event_mod.IssueProjectPlacement{.{ .project = project, .column = existing_column }};
-        try createIssueProjectEvent(allocator, issue_id, .{ .projects_removed = removals[0..] });
+        try createIssueProjectEvent(allocator, issue_id, project, existing_column, null, null, false);
     }
-    const additions = [_]event_mod.IssueProjectPlacement{.{ .project = project, .column = column }};
-    try createIssueProjectEvent(allocator, issue_id, .{ .projects_added = additions[0..] });
+    try createIssueProjectEvent(allocator, issue_id, project, column, null, null, true);
 }
 
 fn updateIssueProjectMetadata(allocator: Allocator, repo: Repo, issue_id: []const u8, project: []const u8, column: []const u8, priority: []const u8) !void {
@@ -365,8 +363,7 @@ fn updateIssueProjectMetadata(allocator: Allocator, repo: Repo, issue_id: []cons
         defer freeColumnList(allocator, &existing);
         for (existing.items) |existing_column| {
             if (std.mem.eql(u8, existing_column, "Done")) continue;
-            const removals = [_]event_mod.IssueProjectPlacement{.{ .project = project, .column = existing_column }};
-            try createIssueProjectEvent(allocator, issue_id, .{ .projects_removed = removals[0..] });
+            try createIssueProjectEvent(allocator, issue_id, project, existing_column, null, null, false);
         }
     }
 }
@@ -375,8 +372,7 @@ fn removeIssueProjectPlacements(allocator: Allocator, repo: Repo, issue_id: []co
     var existing = try loadIssueProjectColumns(allocator, repo, issue_id, project, column_filter);
     defer freeColumnList(allocator, &existing);
     for (existing.items) |existing_column| {
-        const removals = [_]event_mod.IssueProjectPlacement{.{ .project = project, .column = existing_column }};
-        try createIssueProjectEvent(allocator, issue_id, .{ .projects_removed = removals[0..] });
+        try createIssueProjectEvent(allocator, issue_id, project, existing_column, null, null, false);
     }
 }
 

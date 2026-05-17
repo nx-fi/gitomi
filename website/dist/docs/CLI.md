@@ -98,8 +98,9 @@ gt runs prune [--dry-run] [--max-age-days N] [--max-count N] [--max-bytes N]
 gt sync [--remote REMOTE] [--pull-only|--push-only]
 gt github import [--repo OWNER/REPO] [--token TOKEN] [--from-file PATH] [--no-comments] [--no-projects]
 gt github export --repo OWNER/REPO [--token TOKEN] [--use-gh] [--dry-run] [--map-file PATH] [--reuse-legacy]
-gt github live [--repo OWNER/REPO] --webhook-url URL [--secret SECRET] [--host 127.0.0.1] [--port 12656] [--path /github/webhook] [--remote REMOTE] [--interval-ms N] [--once] [--no-subscribe] [--dry-run] [--no-git-sync]
-gt web [--local|--live] [--host 127.0.0.1] [--port 12655] [--repo OWNER/REPO] [--webhook-url URL] [--secret SECRET] [--live-host 127.0.0.1] [--live-port 12656] [--live-path /github/webhook] [--remote REMOTE] [--interval-ms N] [--no-subscribe] [--dry-run] [--no-git-sync]
+gt github live [--repo OWNER/REPO] --webhook-url URL --secret SECRET [--host 127.0.0.1] [--port 12656] [--path /github/webhook] [--remote REMOTE] [--interval-ms N] [--once] [--no-subscribe] [--dry-run] [--no-git-sync]
+gt web [--local] [--host 127.0.0.1] [--port 12655] [--once]
+gt web --live [--host 127.0.0.1] [--port 12655] [--repo OWNER/REPO] [--webhook-url URL] --secret SECRET [--live-host 127.0.0.1] [--live-port 12656] [--live-path /github/webhook] [--remote REMOTE] [--interval-ms N] [--no-subscribe] [--dry-run] [--no-git-sync]
 ```
 
 `gt init` writes a signed genesis manifest to `refs/gitomi/genesis`, including
@@ -255,14 +256,18 @@ and periodically exports accepted local issue, pull, and comment events back to
 GitHub through the GitHub CLI. Live state and the export map are stored under
 `.git/gitomi/github/<owner>/<repo>/`; use `--no-subscribe` when the webhook
 already exists, `--once` for one webhook request plus one export pass, or
-`--no-git-sync` to skip the surrounding Gitomi `gt sync` pull/push steps.
+`--no-git-sync` to skip the surrounding Gitomi `gt sync` pull/push steps. Live
+webhook imports require `--secret` so GitHub deliveries are authenticated with
+`X-Hub-Signature-256`; use the same secret when configuring an existing hook with
+`--no-subscribe`.
 
 `gt web` starts a local-only GitHub-like web UI for the current repository. It
 binds to loopback on port 12655 by default, retrying nearby random ports if that
 port is occupied. `--local` is the default mode. `--live` starts the web UI and a
 GitHub live sync daemon in the same process; the web UI remains loopback-only,
 while the live webhook listener uses `--live-host`, `--live-port`, and
-`--live-path` and requires `--webhook-url` unless `--no-subscribe` is used. It
+`--live-path`, requires `--webhook-url` unless `--no-subscribe` is used, and
+requires `--secret` for authenticated webhook deliveries. It
 opens on a committed-tree code explorer, also serves
 overview/issues/projects/workflows/events/refs pages, and can create signed issue
 events and workflow run requests through the same storage path as the CLI. The

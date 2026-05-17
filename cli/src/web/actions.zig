@@ -6,6 +6,7 @@ const index = @import("../index.zig");
 const repo_mod = @import("../repo.zig");
 const shared = @import("shared.zig");
 const issues_page = @import("issues.zig");
+const zwf = @import("../zwf.zig");
 
 const Allocator = std.mem.Allocator;
 const CliError = errors.CliError;
@@ -109,11 +110,11 @@ const ActionsStats = struct {
     other: usize,
 };
 
-pub fn renderActionsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]u8 {
-    return renderActionsPageWithMessage(allocator, repo, target, null);
+pub fn renderActionsPage(allocator: Allocator, repo: Repo, target: []const u8, csrf_token: []const u8) ![]u8 {
+    return renderActionsPageWithMessage(allocator, repo, target, csrf_token, null);
 }
 
-fn renderActionsPageWithMessage(allocator: Allocator, repo: Repo, target: []const u8, message: ?[]const u8) ![]u8 {
+fn renderActionsPageWithMessage(allocator: Allocator, repo: Repo, target: []const u8, csrf_token: []const u8, message: ?[]const u8) ![]u8 {
     if (try shared.renderIndexingPageIfStale(allocator, repo, "Workflows", "actions", "/workflows")) |body| return body;
     try ensureIndex(allocator, repo);
 
@@ -137,7 +138,7 @@ fn renderActionsPageWithMessage(allocator: Allocator, repo: Repo, target: []cons
 
     try appendShellStart(&buf, allocator, repo, "Workflows", "actions");
     try buf.appendSlice(allocator, "<div class=\"actions-layout\">");
-    try appendActionsSidebar(&buf, allocator, workflows, runs.items, filters, stats);
+    try appendActionsSidebar(&buf, allocator, workflows, runs.items, filters, stats, csrf_token);
     try buf.appendSlice(allocator, "<section class=\"actions-main\">");
     if (message) |value| {
         try appendTemplate(&buf, allocator, "<div class=\"flash error\">{message}</div>", .{ .message = value });
@@ -146,7 +147,7 @@ fn renderActionsPageWithMessage(allocator: Allocator, repo: Repo, target: []cons
     } else if (std.mem.indexOf(u8, target, "run=1") != null) {
         try buf.appendSlice(allocator, "<div class=\"flash success\">Pending action runs processed.</div>");
     }
-    try appendActionsMain(&buf, allocator, workflows, runs.items, filters, stats);
+    try appendActionsMain(&buf, allocator, workflows, runs.items, filters, stats, csrf_token);
     try buf.appendSlice(allocator, "</section></div>");
 
     try appendShellEnd(&buf, allocator);
@@ -173,6 +174,7 @@ fn appendActionsSidebar(
     runs: []const RunRow,
     filters: ActionsFilters,
     stats: ActionsStats,
+    csrf_token: []const u8,
 ) !void {
     try buf.appendSlice(allocator,
         \\<aside class="actions-sidebar">
@@ -207,8 +209,9 @@ fn appendActionsSidebar(
         \\>
         \\    <summary>Request workflow</summary>
         \\    <form method="post" action="/workflows/request">
+        \\      <input type="hidden" name="{csrf_field}" value="{csrf_token}">
         \\      <label>Workflow<select name="workflow" required>
-    , .{});
+    , .{ .csrf_field = zwf.csrf.field_name, .csrf_token = csrf_token });
     for (workflows) |workflow| {
         try appendTemplate(buf, allocator, "<option value=\"{path}\"", .{
             .path = workflow.path,
@@ -236,11 +239,12 @@ fn appendActionsSidebar(
         \\      </div>
         \\    </form>
         \\    <form method="post" action="/workflows/run-requested">
+        \\      <input type="hidden" name="{csrf_field}" value="{csrf_token}">
         \\      <button class="button secondary" type="submit">Run pending ({pending})</button>
         \\    </form>
         \\  </details>
         \\</aside>
-    , .{ .pending = stats.pending });
+    , .{ .csrf_field = zwf.csrf.field_name, .csrf_token = csrf_token, .pending = stats.pending });
 }
 
 fn appendActionsStatus(buf: *std.ArrayList(u8), allocator: Allocator, stats: ActionsStats) !void {
@@ -297,6 +301,7 @@ fn appendActionsMain(
     runs: []const RunRow,
     filters: ActionsFilters,
     stats: ActionsStats,
+    csrf_token: []const u8,
 ) !void {
     const visible_count = filteredRunCount(runs, filters);
     const selected_title = if (filters.workflow) |selected| workflowDisplayName(workflows, selected) else "All workflows";
@@ -347,7 +352,7 @@ fn appendActionsMain(
     var shown: usize = 0;
     for (runs) |row| {
         if (!runMatchesFilters(row, filters)) continue;
-        try appendRunRow(buf, allocator, workflows, row);
+        try appendRunRow(buf, allocator, workflows, row, csrf_token);
         shown += 1;
     }
     if (shown == 0) {
@@ -473,7 +478,7 @@ fn appendActionsFilterMenuLink(
     });
 }
 
-fn appendRunRow(buf: *std.ArrayList(u8), allocator: Allocator, workflows: []const actions.Workflow, row: RunRow) !void {
+fn appendRunRow(buf: *std.ArrayList(u8), allocator: Allocator, workflows: []const actions.Workflow, row: RunRow, csrf_token: []const u8) !void {
     const workflow_name = workflowDisplayName(workflows, row.workflow);
     const title = try runTitleOwned(allocator, workflow_name, row);
     defer allocator.free(title);
@@ -516,11 +521,11 @@ fn appendRunRow(buf: *std.ArrayList(u8), allocator: Allocator, workflows: []cons
         \\    <summary class="actions-run-menu" aria-label="Run actions" title="Run actions"></summary>
         \\    <div class="actions-run-popover" role="menu">
     , .{ .duration = duration });
-    try appendRunMenu(buf, allocator, row);
+    try appendRunMenu(buf, allocator, row, csrf_token);
     try buf.appendSlice(allocator, "</div></details></article>");
 }
 
-fn appendRunMenu(buf: *std.ArrayList(u8), allocator: Allocator, row: RunRow) !void {
+fn appendRunMenu(buf: *std.ArrayList(u8), allocator: Allocator, row: RunRow, csrf_token: []const u8) !void {
     if (row.workflow.len != 0) {
         try appendRunMenuCodeLink(buf, allocator, "Workflow file", "HEAD", row.workflow);
     } else {
@@ -542,8 +547,8 @@ fn appendRunMenu(buf: *std.ArrayList(u8), allocator: Allocator, row: RunRow) !vo
     }
 
     try buf.appendSlice(allocator, "<div class=\"actions-run-popover-divider\" aria-hidden=\"true\"></div>");
-    try appendRunRequestForm(buf, allocator, row, "Rerun workflow", false);
-    try appendRunRequestForm(buf, allocator, row, "Run now", true);
+    try appendRunRequestForm(buf, allocator, row, "Rerun workflow", false, csrf_token);
+    try appendRunRequestForm(buf, allocator, row, "Run now", true, csrf_token);
 }
 
 fn appendRunMenuCodeLink(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, ref: []const u8, path: []const u8) !void {
@@ -562,16 +567,18 @@ fn appendRunMenuDisabled(buf: *std.ArrayList(u8), allocator: Allocator, label: [
     , .{ .label = label });
 }
 
-fn appendRunRequestForm(buf: *std.ArrayList(u8), allocator: Allocator, row: RunRow, label: []const u8, pending_only: bool) !void {
+fn appendRunRequestForm(buf: *std.ArrayList(u8), allocator: Allocator, row: RunRow, label: []const u8, pending_only: bool, csrf_token: []const u8) !void {
     const disabled = pending_only and !std.mem.eql(u8, row.conclusion, "pending");
     if (pending_only) {
         try appendTemplate(buf, allocator,
-            \\<form method="post" action="/workflows/run-requested"><input type="hidden" name="run" value="{run_id}">
-        , .{ .run_id = row.run_id });
+            \\<form method="post" action="/workflows/run-requested"><input type="hidden" name="{csrf_field}" value="{csrf_token}"><input type="hidden" name="run" value="{run_id}">
+        , .{ .csrf_field = zwf.csrf.field_name, .csrf_token = csrf_token, .run_id = row.run_id });
     } else {
         try appendTemplate(buf, allocator,
-            \\<form method="post" action="/workflows/request"><input type="hidden" name="workflow" value="{workflow}"><input type="hidden" name="event" value="{event_name}">
+            \\<form method="post" action="/workflows/request"><input type="hidden" name="{csrf_field}" value="{csrf_token}"><input type="hidden" name="workflow" value="{workflow}"><input type="hidden" name="event" value="{event_name}">
         , .{
+            .csrf_field = zwf.csrf.field_name,
+            .csrf_token = csrf_token,
             .workflow = row.workflow,
             .event_name = row.event_name,
         });
@@ -1312,7 +1319,7 @@ fn payloadStringOwned(allocator: Allocator, body: []const u8, field: []const u8,
     return allocator.dupe(u8, value);
 }
 
-pub fn handleActionsRequestPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
+pub fn handleActionsRequestPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, csrf_token: []const u8, form_body: []const u8) !void {
     const workflow_owned = (try issues_page.formValueOwned(allocator, form_body, "workflow")) orelse try allocator.dupe(u8, "");
     defer allocator.free(workflow_owned);
     const event_owned = (try issues_page.formValueOwned(allocator, form_body, "event")) orelse try allocator.dupe(u8, "workflow_dispatch");
@@ -1327,7 +1334,7 @@ pub fn handleActionsRequestPost(allocator: Allocator, repo: Repo, stream: std.ne
     const target_ref = std.mem.trim(u8, ref_owned, " \t\r\n");
     const target_oid = std.mem.trim(u8, oid_owned, " \t\r\n");
     if (workflow.len == 0) {
-        const body = try renderActionsPageWithMessage(allocator, repo, "/workflows", "Workflow is required.");
+        const body = try renderActionsPageWithMessage(allocator, repo, "/workflows", csrf_token, "Workflow is required.");
         defer allocator.free(body);
         try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", body, null);
         return;
@@ -1341,7 +1348,7 @@ pub fn handleActionsRequestPost(allocator: Allocator, repo: Repo, stream: std.ne
         if (event_name.len == 0) "workflow_dispatch" else event_name,
         null,
     ) catch {
-        const body = try renderActionsPageWithMessage(allocator, repo, "/workflows", "Could not request the workflow. Check signing and the workflow selector.");
+        const body = try renderActionsPageWithMessage(allocator, repo, "/workflows", csrf_token, "Could not request the workflow. Check signing and the workflow selector.");
         defer allocator.free(body);
         try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", body, null);
         return;

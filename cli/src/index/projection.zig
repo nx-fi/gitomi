@@ -3,6 +3,7 @@ const std = @import("std");
 const errors = @import("../errors.zig");
 const event_mod = @import("../event.zig");
 const git = @import("../git.zig");
+const index_schema = @import("schema.zig");
 const ordering = @import("projection_ordering.zig");
 const projection_objects = @import("projection_objects.zig");
 const repo_mod = @import("../repo.zig");
@@ -23,6 +24,8 @@ const eventInFrontier = ordering.eventInFrontier;
 const eventWins = ordering.eventWins;
 
 const max_derived_commit_log_bytes = 64 * 1024 * 1024;
+const max_derived_reference_tokens_per_commit: usize = 512;
+const max_derived_reference_tokens_per_rebuild: usize = 16 * 1024;
 
 fn isDataPlaneIndexRef(ref: []const u8) bool {
     return std.mem.startsWith(u8, ref, "refs/heads/") or std.mem.startsWith(u8, ref, "refs/tags/");
@@ -131,6 +134,144 @@ const DerivedReferenceToken = struct {
     }
 };
 
+const ObjectRefEntry = struct {
+    object_ref: [util.max_object_ref_len]u8,
+    object_id: []u8,
+};
+
+const ObjectRefResolution = union(enum) {
+    none,
+    ambiguous,
+    found: []const u8,
+};
+
+const ObjectRefIndex = struct {
+    entries: std.ArrayList(ObjectRefEntry) = .empty,
+
+    fn loadFromTable(self: *ObjectRefIndex, allocator: Allocator, db: *SqliteDb, comptime table: []const u8) !void {
+        var stmt = try db.prepare("SELECT id FROM " ++ table);
+        defer stmt.deinit();
+
+        while (try stmt.step()) {
+            const id = try stmt.columnTextDup(allocator, 0);
+            errdefer allocator.free(id);
+
+            var object_ref: [util.max_object_ref_len]u8 = undefined;
+            _ = util.objectRefPrefix(object_ref[0..], id);
+            try self.entries.append(allocator, .{
+                .object_ref = object_ref,
+                .object_id = id,
+            });
+        }
+    }
+
+    fn sort(self: *ObjectRefIndex) void {
+        std.mem.sort(ObjectRefEntry, self.entries.items, {}, objectRefEntryLessThan);
+    }
+
+    fn resolvePrefix(self: *const ObjectRefIndex, prefix: []const u8) ObjectRefResolution {
+        const first = self.lowerBound(prefix);
+        if (first >= self.entries.items.len) return .none;
+        if (!objectRefStartsWith(self.entries.items[first].object_ref[0..], prefix)) return .none;
+        if (first + 1 < self.entries.items.len and objectRefStartsWith(self.entries.items[first + 1].object_ref[0..], prefix)) return .ambiguous;
+        return .{ .found = self.entries.items[first].object_id };
+    }
+
+    fn lowerBound(self: *const ObjectRefIndex, prefix: []const u8) usize {
+        var low: usize = 0;
+        var high: usize = self.entries.items.len;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            if (objectRefLessThanPrefix(self.entries.items[mid].object_ref[0..], prefix)) {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        return low;
+    }
+
+    fn deinit(self: *ObjectRefIndex, allocator: Allocator) void {
+        for (self.entries.items) |entry| allocator.free(entry.object_id);
+        self.entries.deinit(allocator);
+    }
+};
+
+const DerivedReferenceResolver = struct {
+    allocator: Allocator,
+    db: *SqliteDb,
+    issues: ObjectRefIndex = .{},
+    pulls: ObjectRefIndex = .{},
+
+    fn init(allocator: Allocator, db: *SqliteDb) !DerivedReferenceResolver {
+        var resolver = DerivedReferenceResolver{
+            .allocator = allocator,
+            .db = db,
+        };
+        errdefer resolver.deinit();
+
+        try resolver.issues.loadFromTable(allocator, db, "issues");
+        try resolver.pulls.loadFromTable(allocator, db, "pulls");
+        resolver.issues.sort();
+        resolver.pulls.sort();
+
+        return resolver;
+    }
+
+    fn deinit(self: *DerivedReferenceResolver) void {
+        self.issues.deinit(self.allocator);
+        self.pulls.deinit(self.allocator);
+    }
+
+    fn resolve(self: *DerivedReferenceResolver, prefix: []const u8, object_kind: ?[]const u8) !?DerivedReferenceTarget {
+        if (util.isObjectRefPrefix(prefix)) {
+            if (try self.resolveHashReference(prefix, object_kind)) |target| return target;
+        }
+        if (parsePositiveDecimal(prefix)) |number| {
+            return try resolveDerivedLegacyReference(self.allocator, self.db, number, object_kind);
+        }
+        return null;
+    }
+
+    fn resolveHashReference(self: *DerivedReferenceResolver, prefix: []const u8, expected_kind: ?[]const u8) !?DerivedReferenceTarget {
+        if (expected_kind) |kind| {
+            if (std.mem.eql(u8, kind, "issue")) return try self.resolveHashInList("issue", &self.issues, prefix);
+            if (std.mem.eql(u8, kind, "pull")) return try self.resolveHashInList("pull", &self.pulls, prefix);
+            return null;
+        }
+
+        const issue_result = self.issues.resolvePrefix(prefix);
+        const pull_result = self.pulls.resolvePrefix(prefix);
+        if (resolutionIsAmbiguous(issue_result) or resolutionIsAmbiguous(pull_result)) return null;
+
+        const issue_id = resolutionFoundId(issue_result);
+        const pull_id = resolutionFoundId(pull_result);
+        if (issue_id != null and pull_id != null) return null;
+        if (issue_id) |id| return try self.targetFromId("issue", id);
+        if (pull_id) |id| return try self.targetFromId("pull", id);
+        return null;
+    }
+
+    fn resolveHashInList(self: *DerivedReferenceResolver, kind: []const u8, index: *const ObjectRefIndex, prefix: []const u8) !?DerivedReferenceTarget {
+        return switch (index.resolvePrefix(prefix)) {
+            .none, .ambiguous => null,
+            .found => |id| try self.targetFromId(kind, id),
+        };
+    }
+
+    fn targetFromId(self: *DerivedReferenceResolver, kind: []const u8, object_id: []const u8) !DerivedReferenceTarget {
+        const owned_kind = try self.allocator.dupe(u8, kind);
+        errdefer self.allocator.free(owned_kind);
+        const owned_id = try self.allocator.dupe(u8, object_id);
+        errdefer self.allocator.free(owned_id);
+        return .{
+            .allocator = self.allocator,
+            .object_kind = owned_kind,
+            .object_id = owned_id,
+        };
+    }
+};
+
 pub fn rebuildDerivedCommitReferences(allocator: Allocator, db: *SqliteDb, refs_raw: []const u8) !void {
     try db.exec("DELETE FROM commit_references");
 
@@ -147,8 +288,13 @@ pub fn rebuildDerivedCommitReferences(allocator: Allocator, db: *SqliteDb, refs_
     );
     defer insert.deinit();
 
+    var resolver = try DerivedReferenceResolver.init(allocator, db);
+    defer resolver.deinit();
+
+    var remaining_tokens = max_derived_reference_tokens_per_rebuild;
     var records = std.mem.splitScalar(u8, log, 0x1e);
     while (records.next()) |record_raw| {
+        if (remaining_tokens == 0) break;
         const record = std.mem.trim(u8, record_raw, "\r\n");
         if (record.len == 0) continue;
         const first = std.mem.indexOfScalar(u8, record, 0) orelse continue;
@@ -158,10 +304,11 @@ pub fn rebuildDerivedCommitReferences(allocator: Allocator, db: *SqliteDb, refs_
 
         var tokens: std.ArrayList(DerivedReferenceToken) = .empty;
         defer freeDerivedReferenceTokens(allocator, &tokens);
-        try collectReferenceTokens(allocator, message, &tokens);
+        try collectReferenceTokens(allocator, message, @min(max_derived_reference_tokens_per_commit, remaining_tokens), &tokens);
+        remaining_tokens -= tokens.items.len;
 
         for (tokens.items) |token| {
-            var target = (try resolveDerivedReference(allocator, db, token.prefix, token.object_kind)) orelse continue;
+            var target = (try resolver.resolve(token.prefix, token.object_kind)) orelse continue;
             defer target.deinit();
             try insertDerivedCommitReference(&insert, commit_oid, target.object_kind, target.object_id, token.prefix);
         }
@@ -194,9 +341,9 @@ fn dataPlaneCommitLog(allocator: Allocator, data_refs: []const []u8) ![]u8 {
     return gitCheckedMax(allocator, argv.items, max_derived_commit_log_bytes);
 }
 
-fn collectReferenceTokens(allocator: Allocator, message: []const u8, tokens: *std.ArrayList(DerivedReferenceToken)) !void {
+fn collectReferenceTokens(allocator: Allocator, message: []const u8, max_tokens: usize, tokens: *std.ArrayList(DerivedReferenceToken)) !void {
     var i: usize = 0;
-    while (i < message.len) {
+    while (i < message.len and tokens.items.len < max_tokens) {
         if (message[i] == '#') {
             if (try appendReferenceTokenAt(allocator, message, i + 1, null, tokens)) |end| {
                 i = end;
@@ -279,75 +426,35 @@ fn optionalStringEql(left: ?[]const u8, right: ?[]const u8) bool {
     return right == null;
 }
 
-fn resolveDerivedReference(allocator: Allocator, db: *SqliteDb, prefix: []const u8, object_kind: ?[]const u8) !?DerivedReferenceTarget {
-    if (util.isObjectRefPrefix(prefix)) {
-        if (try resolveDerivedHashReference(allocator, db, prefix, object_kind)) |target| return target;
-    }
-    if (parsePositiveDecimal(prefix)) |number| {
-        return try resolveDerivedLegacyReference(allocator, db, number, object_kind);
-    }
-    return null;
+fn objectRefEntryLessThan(_: void, a: ObjectRefEntry, b: ObjectRefEntry) bool {
+    return std.mem.lessThan(u8, a.object_ref[0..], b.object_ref[0..]);
 }
 
-fn resolveDerivedHashReference(allocator: Allocator, db: *SqliteDb, prefix: []const u8, expected_kind: ?[]const u8) !?DerivedReferenceTarget {
-    var stmt = try db.prepare(
-        \\SELECT object_kind, id FROM (
-        \\  SELECT 'issue' AS object_kind, id FROM issues
-        \\  UNION ALL
-        \\  SELECT 'pull' AS object_kind, id FROM pulls
-        \\)
-        \\ORDER BY id, object_kind
-    );
-    defer stmt.deinit();
-
-    var object_kind: ?[]u8 = null;
-    var object_id: ?[]u8 = null;
-    errdefer if (object_kind) |value| allocator.free(value);
-    errdefer if (object_id) |value| allocator.free(value);
-    while (try stmt.step()) {
-        const candidate_kind = try stmt.columnTextDup(allocator, 0);
-        errdefer allocator.free(candidate_kind);
-        const candidate_id = try stmt.columnTextDup(allocator, 1);
-        errdefer allocator.free(candidate_id);
-        if (expected_kind) |kind| {
-            if (!std.mem.eql(u8, candidate_kind, kind)) {
-                allocator.free(candidate_kind);
-                allocator.free(candidate_id);
-                continue;
-            }
-        }
-
-        var ref_buf: [util.max_object_ref_len]u8 = undefined;
-        const object_ref = util.objectRefPrefix(ref_buf[0..prefix.len], candidate_id);
-        if (!std.mem.eql(u8, object_ref, prefix)) {
-            allocator.free(candidate_kind);
-            allocator.free(candidate_id);
-            continue;
-        }
-
-        if (object_id != null) {
-            allocator.free(candidate_kind);
-            allocator.free(candidate_id);
-            allocator.free(object_kind.?);
-            allocator.free(object_id.?);
-            object_kind = null;
-            object_id = null;
-            return null;
-        }
-
-        object_kind = candidate_kind;
-        object_id = candidate_id;
+fn objectRefLessThanPrefix(object_ref: []const u8, prefix: []const u8) bool {
+    std.debug.assert(object_ref.len >= prefix.len);
+    for (prefix, 0..) |c, idx| {
+        if (object_ref[idx] < c) return true;
+        if (object_ref[idx] > c) return false;
     }
-    if (object_id == null) return null;
+    return false;
+}
 
-    const target = DerivedReferenceTarget{
-        .allocator = allocator,
-        .object_kind = object_kind.?,
-        .object_id = object_id.?,
+fn objectRefStartsWith(object_ref: []const u8, prefix: []const u8) bool {
+    return std.mem.startsWith(u8, object_ref, prefix);
+}
+
+fn resolutionIsAmbiguous(resolution: ObjectRefResolution) bool {
+    return switch (resolution) {
+        .ambiguous => true,
+        .none, .found => false,
     };
-    object_kind = null;
-    object_id = null;
-    return target;
+}
+
+fn resolutionFoundId(resolution: ObjectRefResolution) ?[]const u8 {
+    return switch (resolution) {
+        .found => |id| id,
+        .none, .ambiguous => null,
+    };
 }
 
 fn resolveDerivedLegacyReference(allocator: Allocator, db: *SqliteDb, number: i64, expected_kind: ?[]const u8) !?DerivedReferenceTarget {
@@ -644,14 +751,11 @@ fn eventAuthorizationRejection(
     }
     if (std.mem.eql(u8, envelope.event_type, "issue.milestone_set") or
         std.mem.eql(u8, envelope.event_type, "issue.project_added") or
-        std.mem.eql(u8, envelope.event_type, "issue.project_removed"))
-    {
-        return if (roleAtLeast(role, "maintainer")) null else "insufficient_role";
-    }
-    if (std.mem.eql(u8, envelope.event_type, "issue.project_field_set") or
+        std.mem.eql(u8, envelope.event_type, "issue.project_removed") or
+        std.mem.eql(u8, envelope.event_type, "issue.project_field_set") or
         std.mem.eql(u8, envelope.event_type, "issue.project_field_cleared"))
     {
-        return if (try canEditObject(allocator, db, role, envelope.actor_principal, "issue", envelope.object_id)) null else "insufficient_role";
+        return if (roleAtLeast(role, "maintainer")) null else "insufficient_role";
     }
     if (std.mem.eql(u8, envelope.event_type, "issue.reaction_added") or
         std.mem.eql(u8, envelope.event_type, "issue.reaction_removed"))
@@ -1666,20 +1770,151 @@ pub fn insertIndexedEvent(
     try stmt.stepDone();
 }
 
-fn testEnvelopeForEventType(allocator: Allocator, event_type: []const u8) !ValidatedEnvelope {
+fn testEnvelopeForObjectEventType(allocator: Allocator, event_type: []const u8, object_kind: []const u8, object_id: []const u8) !ValidatedEnvelope {
     return ValidatedEnvelope{
         .allocator = allocator,
         .repo_id = try allocator.dupe(u8, "repo"),
         .event_uuid = try allocator.dupe(u8, "018f0000-0000-7000-8000-000000000000"),
         .event_type = try allocator.dupe(u8, event_type),
-        .object_kind = try allocator.dupe(u8, "pull"),
-        .object_id = try allocator.dupe(u8, "pull-1"),
+        .object_kind = try allocator.dupe(u8, object_kind),
+        .object_id = try allocator.dupe(u8, object_id),
         .idempotency_key = try allocator.dupe(u8, "idem"),
         .actor_principal = try allocator.dupe(u8, "alice"),
         .actor_device = try allocator.dupe(u8, "laptop"),
         .seq = 1,
         .occurred_at = try allocator.dupe(u8, "2026-05-16T00:00:00Z"),
     };
+}
+
+fn testEnvelopeForEventType(allocator: Allocator, event_type: []const u8) !ValidatedEnvelope {
+    return testEnvelopeForObjectEventType(allocator, event_type, "pull", "pull-1");
+}
+
+test "project field key collision is domain rejected" {
+    const allocator = std.testing.allocator;
+    var db = try SqliteDb.open(allocator, ":memory:", sqlite_db.sqlite.SQLITE_OPEN_READWRITE | sqlite_db.sqlite.SQLITE_OPEN_CREATE, true);
+    defer db.deinit();
+    try index_schema.createIndexSchema(&db);
+    try db.exec(
+        \\INSERT INTO meta(key, value) VALUES ('access_mode', 'open');
+        \\INSERT INTO projects(
+        \\  id, name, slug, name_occurred_at, name_actor_principal, name_event_hash,
+        \\  description, description_occurred_at, description_actor_principal, description_event_hash,
+        \\  state, state_occurred_at, state_actor_principal, state_event_hash,
+        \\  created_at, author_principal, author_device
+        \\) VALUES (
+        \\  '018f0000-0000-7000-8000-000000000100', 'Roadmap', 'roadmap',
+        \\  '2026-05-16T00:00:00Z', 'alice', '',
+        \\  '', '2026-05-16T00:00:00Z', 'alice', '',
+        \\  'open', '2026-05-16T00:00:00Z', 'alice', '',
+        \\  '2026-05-16T00:00:00Z', 'alice', 'laptop'
+        \\);
+        \\INSERT INTO project_fields(
+        \\  id, project_id, key, name, field_type, position, required, default_value_json,
+        \\  state, created_at, actor_principal, event_hash
+        \\) VALUES
+        \\  (
+        \\    '018f0000-0000-7000-8000-000000000101',
+        \\    '018f0000-0000-7000-8000-000000000100',
+        \\    'priority', 'Priority', 'text', 0, 0, 'null', 'active',
+        \\    '2026-05-16T00:00:00Z', 'alice', ''
+        \\  ),
+        \\  (
+        \\    '018f0000-0000-7000-8000-000000000102',
+        \\    '018f0000-0000-7000-8000-000000000100',
+        \\    'status', 'Status', 'text', 1, 0, 'null', 'active',
+        \\    '2026-05-16T00:00:00Z', 'alice', ''
+        \\  );
+    );
+
+    const body =
+        \\{
+        \\  "$schema": "urn:gitomi:event:v1",
+        \\  "repo_id": "018f0000-0000-7000-8000-000000000001",
+        \\  "event_uuid": "018f0000-0000-7000-8000-000000000103",
+        \\  "event_type": "project.field_updated",
+        \\  "object": {
+        \\    "kind": "project",
+        \\    "id": "018f0000-0000-7000-8000-000000000100"
+        \\  },
+        \\  "idempotency_key": "018f0000-0000-7000-8000-000000000104",
+        \\  "actor": {
+        \\    "principal": "alice",
+        \\    "device": "laptop"
+        \\  },
+        \\  "seq": 1,
+        \\  "occurred_at": "2026-05-16T00:00:01Z",
+        \\  "parent_hashes": {
+        \\    "log": "",
+        \\    "anchor": "",
+        \\    "causal": [],
+        \\    "related": []
+        \\  },
+        \\  "legacy": {},
+        \\  "payload": {
+        \\    "field_id": "018f0000-0000-7000-8000-000000000101",
+        \\    "key": "status"
+        \\  }
+        \\}
+    ;
+    try insertPendingTestEvent(&db, "update-event", body);
+
+    try projectStoredEvent(allocator, &db, "update-event", body, false);
+
+    try expectDomainRejection(allocator, &db, "update-event", "duplicate_project_field_key");
+    try expectProjectFieldKey(allocator, &db, "018f0000-0000-7000-8000-000000000101", "priority");
+}
+
+fn insertPendingTestEvent(db: *SqliteDb, event_hash: []const u8, body: []const u8) !void {
+    var stmt = try db.prepare(
+        \\INSERT INTO events(
+        \\  ref, "commit", event_hash, tree, subject, body, empty_tree, valid_json,
+        \\  event_type, object_kind, object_id, actor_principal, actor_device, seq, occurred_at,
+        \\  domain_status, rejection_reason
+        \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, "refs/gitomi/inbox/alice/laptop");
+    try stmt.bindText(2, event_hash);
+    try stmt.bindText(3, event_hash);
+    try stmt.bindText(4, "");
+    try stmt.bindText(5, "project.field_updated @018f000 018f000");
+    try stmt.bindText(6, body);
+    try stmt.bindInt(7, 0);
+    try stmt.bindInt(8, 1);
+    try stmt.bindText(9, "project.field_updated");
+    try stmt.bindText(10, "project");
+    try stmt.bindText(11, "018f0000-0000-7000-8000-000000000100");
+    try stmt.bindText(12, "alice");
+    try stmt.bindText(13, "laptop");
+    try stmt.bindInt64(14, 1);
+    try stmt.bindText(15, "2026-05-16T00:00:01Z");
+    try stmt.bindText(16, "pending");
+    try stmt.bindText(17, "");
+    try stmt.stepDone();
+}
+
+fn expectDomainRejection(allocator: Allocator, db: *SqliteDb, event_hash: []const u8, reason: []const u8) !void {
+    var stmt = try db.prepare("SELECT domain_status, rejection_reason FROM events WHERE event_hash = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, event_hash);
+    try std.testing.expect(try stmt.step());
+    const status = try stmt.columnTextDup(allocator, 0);
+    defer allocator.free(status);
+    const rejection_reason = try stmt.columnTextDup(allocator, 1);
+    defer allocator.free(rejection_reason);
+    try std.testing.expectEqualStrings("rejected", status);
+    try std.testing.expectEqualStrings(reason, rejection_reason);
+}
+
+fn expectProjectFieldKey(allocator: Allocator, db: *SqliteDb, field_id: []const u8, expected_key: []const u8) !void {
+    var stmt = try db.prepare("SELECT key FROM project_fields WHERE id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, field_id);
+    try std.testing.expect(try stmt.step());
+    const key = try stmt.columnTextDup(allocator, 0);
+    defer allocator.free(key);
+    try std.testing.expectEqualStrings(expected_key, key);
 }
 
 test "pull opened metadata collections require maintainer role" {
@@ -1733,6 +1968,35 @@ test "pull opened without metadata collections remains contributor allowed" {
     try std.testing.expect((try eventAuthorizationRejection(allocator, &db, "contributor", envelope, payload)) == null);
 }
 
+test "issue project field updates require maintainer role" {
+    const allocator = std.testing.allocator;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator,
+        \\{
+        \\  "project_id": "project-1",
+        \\  "field_id": "field-1",
+        \\  "value": "Done"
+        \\}
+    , .{});
+    defer parsed.deinit();
+    const payload = switch (parsed.value) {
+        .object => |object| object,
+        else => unreachable,
+    };
+    var db = try SqliteDb.open(allocator, ":memory:", sqlite_db.sqlite.SQLITE_OPEN_READWRITE | sqlite_db.sqlite.SQLITE_OPEN_CREATE, true);
+    defer db.deinit();
+    try db.exec(
+        \\CREATE TABLE issues(id TEXT PRIMARY KEY, author_principal TEXT NOT NULL);
+        \\INSERT INTO issues(id, author_principal) VALUES ('issue-1', 'alice');
+    );
+
+    inline for (.{ "issue.project_field_set", "issue.project_field_cleared" }) |event_type| {
+        const envelope = try testEnvelopeForObjectEventType(allocator, event_type, "issue", "issue-1");
+        defer envelope.deinit();
+        try std.testing.expectEqualStrings("insufficient_role", (try eventAuthorizationRejection(allocator, &db, "contributor", envelope, payload)).?);
+        try std.testing.expect((try eventAuthorizationRejection(allocator, &db, "maintainer", envelope, payload)) == null);
+    }
+}
+
 test "data commit reference parser extracts unique typed hash and legacy refs" {
     var tokens: std.ArrayList(DerivedReferenceToken) = .empty;
     defer freeDerivedReferenceTokens(std.testing.allocator, &tokens);
@@ -1740,6 +2004,7 @@ test "data commit reference parser extracts unique typed hash and legacy refs" {
     try collectReferenceTokens(
         std.testing.allocator,
         "Fix #A1B2C3D and refs #a1b2c3d #42 issue:0ABCDEF pr:123 #not-a-ref #abcdef0g #018f000 issue:0abcdef",
+        max_derived_reference_tokens_per_commit,
         &tokens,
     );
 
@@ -1754,4 +2019,58 @@ test "data commit reference parser extracts unique typed hash and legacy refs" {
     try std.testing.expectEqualStrings("pull", tokens.items[3].object_kind.?);
     try std.testing.expectEqualStrings("018f000", tokens.items[4].prefix);
     try std.testing.expect(tokens.items[4].object_kind == null);
+}
+
+test "data commit reference parser caps unique refs" {
+    var tokens: std.ArrayList(DerivedReferenceToken) = .empty;
+    defer freeDerivedReferenceTokens(std.testing.allocator, &tokens);
+
+    try collectReferenceTokens(
+        std.testing.allocator,
+        "#0000000 #0000001 #0000002 #0000003",
+        2,
+        &tokens,
+    );
+
+    try std.testing.expectEqual(@as(usize, 2), tokens.items.len);
+    try std.testing.expectEqualStrings("0000000", tokens.items[0].prefix);
+    try std.testing.expectEqualStrings("0000001", tokens.items[1].prefix);
+}
+
+test "derived hash resolver uses precomputed object ref index" {
+    const allocator = std.testing.allocator;
+    var db = try SqliteDb.open(allocator, ":memory:", sqlite_db.sqlite.SQLITE_OPEN_READWRITE | sqlite_db.sqlite.SQLITE_OPEN_CREATE, true);
+    defer db.deinit();
+    try db.exec(
+        \\CREATE TABLE issues(id TEXT PRIMARY KEY);
+        \\CREATE TABLE pulls(id TEXT PRIMARY KEY);
+        \\CREATE TABLE legacy_aliases(
+        \\  provider TEXT NOT NULL,
+        \\  object_kind TEXT NOT NULL,
+        \\  object_id TEXT NOT NULL,
+        \\  number INTEGER NOT NULL
+        \\);
+        \\INSERT INTO issues(id) VALUES ('issue-object-1');
+        \\INSERT INTO issues(id) VALUES ('shared-object-id');
+        \\INSERT INTO pulls(id) VALUES ('shared-object-id');
+    );
+
+    var resolver = try DerivedReferenceResolver.init(allocator, &db);
+    defer resolver.deinit();
+
+    var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const issue_ref = util.shortObjectRef(&issue_ref_buf, "issue-object-1");
+    var issue_target = (try resolver.resolve(issue_ref, null)).?;
+    defer issue_target.deinit();
+    try std.testing.expectEqualStrings("issue", issue_target.object_kind);
+    try std.testing.expectEqualStrings("issue-object-1", issue_target.object_id);
+
+    var shared_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const shared_ref = util.shortObjectRef(&shared_ref_buf, "shared-object-id");
+    try std.testing.expect((try resolver.resolve(shared_ref, null)) == null);
+
+    var typed_target = (try resolver.resolve(shared_ref, "pull")).?;
+    defer typed_target.deinit();
+    try std.testing.expectEqualStrings("pull", typed_target.object_kind);
+    try std.testing.expectEqualStrings("shared-object-id", typed_target.object_id);
 }

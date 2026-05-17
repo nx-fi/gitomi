@@ -191,9 +191,12 @@ pub fn githubRequestStderrIsNotFound(stderr: []const u8) bool {
 
 pub fn githubSizedString(allocator: Allocator, value: ?[]const u8, fallback: []const u8, max_bytes: usize) ![]u8 {
     const raw = value orelse fallback;
+    return githubSizedStringWithMarker(allocator, raw, max_bytes, "\n\n[truncated by gitomi github import]");
+}
+
+fn githubSizedStringWithMarker(allocator: Allocator, raw: []const u8, max_bytes: usize, marker: []const u8) ![]u8 {
     if (raw.len <= max_bytes) return allocator.dupe(u8, raw);
 
-    const marker = "\n\n[truncated by gitomi github import]";
     if (max_bytes <= marker.len) return allocator.dupe(u8, raw[0..utf8PrefixLen(raw, max_bytes)]);
 
     const prefix_len = utf8PrefixLen(raw, max_bytes - marker.len);
@@ -206,9 +209,19 @@ pub fn githubSizedString(allocator: Allocator, value: ?[]const u8, fallback: []c
 
 pub fn githubSubject(allocator: Allocator, prefix: []const u8, title: []const u8) ![]u8 {
     const title_limit = if (prefix.len >= git.max_event_subject_bytes) 0 else git.max_event_subject_bytes - prefix.len;
-    const title_part = try githubSizedString(allocator, title, "", title_limit);
+    const title_line = try githubSubjectLine(allocator, title);
+    defer allocator.free(title_line);
+    const title_part = try githubSizedStringWithMarker(allocator, title_line, title_limit, " [truncated by gitomi github import]");
     defer allocator.free(title_part);
     return std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, title_part });
+}
+
+fn githubSubjectLine(allocator: Allocator, title: []const u8) ![]u8 {
+    const line = try allocator.dupe(u8, title);
+    for (line) |*byte| {
+        if (byte.* == '\r' or byte.* == '\n') byte.* = ' ';
+    }
+    return line;
 }
 
 pub fn utf8PrefixLen(value: []const u8, max_bytes: usize) usize {

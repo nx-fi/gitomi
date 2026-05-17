@@ -5,6 +5,7 @@ const util = @import("../../util.zig");
 const work_items = @import("../../work_items.zig");
 const shared = @import("../shared.zig");
 const source_stats = @import("../source_stats.zig");
+const zwf = @import("../../zwf.zig");
 
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
@@ -126,11 +127,13 @@ pub fn appendEditor(
     detail: PullDetail,
     raw_ref: []const u8,
     pull_ref: []const u8,
+    csrf_token: []const u8,
     snapshot: PullMergeSnapshot,
     files: []const MergeConflictFile,
     error_message: ?[]const u8,
 ) !void {
-    const editable = mergeEditorEditable(files);
+    const writable_head = snapshot.head_target != null;
+    const editable = writable_head and mergeEditorEditable(files);
     const total_conflicts = mergeEditorConflictCount(files);
     try appendTemplate(buf, allocator,
         \\<form class="merge-editor" data-merge-editor data-merge-unsupported="{unsupported}" data-merge-total-conflicts="{total_conflicts}" method="post" action="/pulls/
@@ -172,12 +175,15 @@ pub fn appendEditor(
         try appendTemplate(buf, allocator, "<div class=\"flash error merge-editor-flash\">{message}</div>", .{ .message = message });
     }
 
-    if (!editable) {
+    if (!writable_head) {
+        try buf.appendSlice(allocator, "<div class=\"flash warning merge-editor-flash\">This pull request head is not a writable branch in the configured remotes. Resolve these conflicts from the command line.</div>");
+    } else if (!editable) {
         try buf.appendSlice(allocator, "<div class=\"flash warning merge-editor-flash\">At least one conflict cannot be edited in the web resolver. Resolve unsupported conflicts from the command line.</div>");
     }
 
     try appendTemplate(buf, allocator,
         \\  <input type="hidden" name="file_count" value="{file_count}">
+        \\  <input type="hidden" name="{csrf_field}" value="{csrf}">
         \\  <input type="hidden" name="expected_base_oid" value="{expected_base_oid}">
         \\  <input type="hidden" name="expected_head_oid" value="{expected_head_oid}">
         \\  <div class="merge-editor-layout">
@@ -187,6 +193,8 @@ pub fn appendEditor(
     , .{
         .file_count = files.len,
         .file_word = if (files.len == 1) "file" else "files",
+        .csrf_field = zwf.csrf.field_name,
+        .csrf = csrf_token,
         .expected_base_oid = snapshot.expected_base_oid,
         .expected_head_oid = snapshot.expected_head_oid,
     });
@@ -531,7 +539,7 @@ pub fn freeConflictFiles(allocator: Allocator, files: []MergeConflictFile) void 
 fn loadBlobAtRef(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?[]u8 {
     const object = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ ref, path });
     defer allocator.free(object);
-    return work_items.gitMaybe(allocator, repo, &.{ "show", object }, max_merge_blob_bytes);
+    return work_items.gitMaybe(allocator, repo, &.{ "show", "--end-of-options", object }, max_merge_blob_bytes);
 }
 
 fn treePathIsRegularFile(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !bool {
@@ -743,6 +751,68 @@ test "merge editor accepts only regular git modes" {
     try std.testing.expect(isRegularGitMode("100755"));
     try std.testing.expect(!isRegularGitMode("120000"));
     try std.testing.expect(!isRegularGitMode("040000"));
+}
+
+test "merge conflict editor form includes csrf token and expected oids" {
+    const allocator = std.testing.allocator;
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+
+    var detail = PullDetail{
+        .id = try allocator.dupe(u8, "pull-id"),
+        .title = try allocator.dupe(u8, "Pull"),
+        .state = try allocator.dupe(u8, "open"),
+        .author_principal = try allocator.dupe(u8, "alice"),
+        .author_device = try allocator.dupe(u8, "laptop"),
+        .source_author = try allocator.dupe(u8, "alice"),
+        .opened_at = try allocator.dupe(u8, "2026-01-01T00:00:00Z"),
+        .state_occurred_at = try allocator.dupe(u8, "2026-01-01T00:00:00Z"),
+        .state_actor_principal = try allocator.dupe(u8, "alice"),
+        .body = try allocator.dupe(u8, ""),
+        .base_ref = try allocator.dupe(u8, "target"),
+        .head_ref = try allocator.dupe(u8, "feature"),
+        .draft = false,
+        .merge_oid = try allocator.dupe(u8, ""),
+        .target_oid = try allocator.dupe(u8, ""),
+        .legacy_number = 0,
+        .commit_count = null,
+        .changed_files = null,
+        .additions = null,
+        .deletions = null,
+    };
+    defer detail.deinit(allocator);
+
+    var snapshot = PullMergeSnapshot{
+        .expected_base_oid = try allocator.dupe(u8, "1111111111111111111111111111111111111111"),
+        .expected_head_oid = try allocator.dupe(u8, "2222222222222222222222222222222222222222"),
+        .base_target = .{
+            .remote = try allocator.dupe(u8, "origin"),
+            .branch = try allocator.dupe(u8, "target"),
+            .remote_ref = try allocator.dupe(u8, "refs/heads/target"),
+            .tracking_ref = try allocator.dupe(u8, "refs/remotes/origin/target"),
+        },
+        .head_target = .{
+            .remote = try allocator.dupe(u8, "origin"),
+            .branch = try allocator.dupe(u8, "feature"),
+            .remote_ref = try allocator.dupe(u8, "refs/heads/feature"),
+            .tracking_ref = try allocator.dupe(u8, "refs/remotes/origin/feature"),
+        },
+    };
+    defer snapshot.deinit(allocator);
+
+    var file = MergeConflictFile{
+        .path = try allocator.dupe(u8, "conflict.txt"),
+        .content = try allocator.dupe(u8, "resolved\n"),
+    };
+    defer file.deinit(allocator);
+
+    try appendEditor(&buf, allocator, detail, "1", "1", "token-123", snapshot, &.{file}, null);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "name=\"_csrf\" value=\"token-123\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "name=\"expected_base_oid\" value=\"1111111111111111111111111111111111111111\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "name=\"expected_head_oid\" value=\"2222222222222222222222222222222222222222\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "action=\"/pulls/1/conflicts\"") != null);
 }
 
 test "merge editor rejects symlink tree entries" {

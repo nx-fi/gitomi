@@ -15,6 +15,12 @@ const runCommand = git.runCommand;
 pub const unstaged_ref = "working tree";
 pub const worktree_ref_prefix = "worktree:";
 const max_blame_display_bytes = 16 * 1024 * 1024;
+const max_blame_display_epoch_seconds: i64 = 253_402_300_799;
+const min_tree_entry_commit_history = 32;
+const max_tree_entry_commit_history = 512;
+const tree_entry_commit_history_per_entry = 4;
+const max_tree_entry_commit_output = 1024 * 1024;
+const tree_entry_commit_format = "--format=%x1e%H%x09%s%x09%cr";
 
 const TreeEntry = model.TreeEntry;
 const TreeNavEntry = model.TreeNavEntry;
@@ -487,14 +493,9 @@ pub fn loadTreeEntryCommits(allocator: Allocator, repo: Repo, ref: []const u8, p
         try index_by_name.put(entry.name, i);
     }
 
-    const format = "--format=%x1e%H%x09%s%x09%cr";
-    const raw = if (path.len == 0)
-        try gitMaybe(allocator, repo, &.{ "log", format, "--name-only", "-z", ref, "--" }, git.max_git_output)
-    else blk: {
-        const pathspec = try std.fmt.allocPrint(allocator, ":(top){s}", .{path});
-        defer allocator.free(pathspec);
-        break :blk try gitMaybe(allocator, repo, &.{ "log", format, "--name-only", "-z", ref, "--", pathspec }, git.max_git_output);
-    };
+    var log_args = try treeEntryCommitLogArgs(allocator, ref, entries.len);
+    defer log_args.deinit(allocator);
+    const raw = try gitMaybe(allocator, repo, log_args.items[0..], max_tree_entry_commit_output);
     const text = raw orelse return;
     defer allocator.free(text);
 
@@ -529,14 +530,9 @@ pub fn loadFilesystemTreeEntryCommits(allocator: Allocator, root: []const u8, pa
 
     try markChangedFilesystemChildren(allocator, root, path, entries, &index_by_name);
 
-    const format = "--format=%x1e%H%x09%s%x09%cr";
-    const raw = if (path.len == 0)
-        try gitMaybeAt(allocator, root, &.{ "log", format, "--name-only", "-z", "HEAD", "--" }, git.max_git_output)
-    else blk: {
-        const pathspec = try std.fmt.allocPrint(allocator, ":(top){s}", .{path});
-        defer allocator.free(pathspec);
-        break :blk try gitMaybeAt(allocator, root, &.{ "log", format, "--name-only", "-z", "HEAD", "--", pathspec }, git.max_git_output);
-    };
+    var log_args = try treeEntryCommitLogArgs(allocator, "HEAD", entries.len);
+    defer log_args.deinit(allocator);
+    const raw = try gitMaybeAt(allocator, root, log_args.items[0..], max_tree_entry_commit_output);
     const text = raw orelse return;
     defer allocator.free(text);
 
@@ -659,6 +655,32 @@ pub fn syntheticTreeEntryCommitOwned(allocator: Allocator, state: ChangeState) !
         .synthetic = true,
         .change_state = state,
     };
+}
+
+const TreeEntryCommitLogArgs = struct {
+    max_count_arg: []u8,
+    items: [7][]const u8,
+
+    fn deinit(self: TreeEntryCommitLogArgs, allocator: Allocator) void {
+        allocator.free(self.max_count_arg);
+    }
+};
+
+fn treeEntryCommitLogArgs(allocator: Allocator, ref: []const u8, entry_count: usize) !TreeEntryCommitLogArgs {
+    const max_count_arg = try std.fmt.allocPrint(allocator, "--max-count={d}", .{treeEntryCommitHistoryLimit(entry_count)});
+    return .{
+        .max_count_arg = max_count_arg,
+        .items = .{ "log", max_count_arg, tree_entry_commit_format, "--name-only", "-z", ref, "--" },
+    };
+}
+
+fn treeEntryCommitHistoryLimit(entry_count: usize) usize {
+    if (entry_count == 0) return 0;
+    const scaled = if (entry_count > max_tree_entry_commit_history / tree_entry_commit_history_per_entry)
+        max_tree_entry_commit_history
+    else
+        entry_count * tree_entry_commit_history_per_entry;
+    return @min(max_tree_entry_commit_history, @max(min_tree_entry_commit_history, scaled));
 }
 
 pub const LogCommit = struct {
@@ -799,10 +821,8 @@ pub fn shortHashOwned(allocator: Allocator, hash: []const u8) ![]u8 {
 }
 
 pub fn authorDateOwned(allocator: Allocator, author_time: []const u8, author_tz: []const u8) ![]u8 {
-    const parsed = std.fmt.parseInt(i64, author_time, 10) catch return allocator.dupe(u8, "unknown");
-    const adjusted = parsed + parseTimezoneOffset(author_tz);
-    const safe_seconds: u64 = if (adjusted < 0) 0 else @intCast(adjusted);
-    const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = safe_seconds };
+    const adjusted = adjustedAuthorSeconds(author_time, author_tz) orelse return allocator.dupe(u8, "unknown");
+    const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = @intCast(adjusted) };
     const year_day = epoch_seconds.getEpochDay().calculateYearDay();
     const month_day = year_day.calculateMonthDay();
     const month = month_day.month.numeric();
@@ -814,9 +834,19 @@ pub fn authorDateOwned(allocator: Allocator, author_time: []const u8, author_tz:
     );
 }
 
+fn adjustedAuthorSeconds(author_time: []const u8, author_tz: []const u8) ?i64 {
+    const parsed = std.fmt.parseInt(i64, author_time, 10) catch return null;
+    const adjusted = std.math.add(i64, parsed, parseTimezoneOffset(author_tz)) catch return null;
+    if (adjusted < 0) return 0;
+    if (adjusted > max_blame_display_epoch_seconds) return null;
+    return adjusted;
+}
+
 pub fn parseAuthorTimestamp(author_time: []const u8) ?i64 {
     if (author_time.len == 0) return null;
-    return std.fmt.parseInt(i64, author_time, 10) catch null;
+    const parsed = std.fmt.parseInt(i64, author_time, 10) catch return null;
+    if (parsed > max_blame_display_epoch_seconds) return null;
+    return parsed;
 }
 
 pub fn blameAgeClass(author_timestamp: ?i64, now: i64) []const u8 {
@@ -824,7 +854,8 @@ pub fn blameAgeClass(author_timestamp: ?i64, now: i64) []const u8 {
     if (timestamp >= now) return "age-now";
 
     const seconds_per_day = 24 * 60 * 60;
-    const age_days = @divFloor(now - timestamp, seconds_per_day);
+    const age_seconds = std.math.sub(i64, now, timestamp) catch return "age-unknown";
+    const age_days = @divFloor(age_seconds, seconds_per_day);
     if (age_days <= 1) return "age-now";
     if (age_days <= 7) return "age-week";
     if (age_days <= 30) return "age-month";
@@ -835,7 +866,9 @@ pub fn blameAgeClass(author_timestamp: ?i64, now: i64) []const u8 {
 
 pub fn relativeTimeOwned(allocator: Allocator, author_timestamp: ?i64, now: i64) ![]u8 {
     const timestamp = author_timestamp orelse return allocator.dupe(u8, "unknown");
-    const age_seconds = now - timestamp;
+    if (timestamp >= now) return allocator.dupe(u8, "now");
+
+    const age_seconds = std.math.sub(i64, now, timestamp) catch return allocator.dupe(u8, "unknown");
     if (age_seconds < 60) return allocator.dupe(u8, "now");
 
     const minute = 60;
@@ -1468,7 +1501,7 @@ pub fn loadBlobBytes(allocator: Allocator, repo: Repo, ref: []const u8, path: []
     }
     const spec = try objectSpec(allocator, ref, path);
     defer allocator.free(spec);
-    return gitMaybe(allocator, repo, &.{ "show", spec }, max_bytes);
+    return gitMaybe(allocator, repo, &.{ "show", "--end-of-options", spec }, max_bytes);
 }
 
 pub fn defaultRef(allocator: Allocator, repo: Repo) ![]u8 {
@@ -1689,6 +1722,86 @@ pub fn freeBlameLines(allocator: Allocator, lines: []BlameLine) void {
     allocator.free(lines);
 }
 
+test "web explorer rejects overflowing blame date timestamps" {
+    const allocator = std.testing.allocator;
+
+    const high = try authorDateOwned(allocator, "9223372036854775807", "+0200");
+    defer allocator.free(high);
+    try std.testing.expectEqualStrings("unknown", high);
+
+    const low = try authorDateOwned(allocator, "-9223372036854775808", "-0200");
+    defer allocator.free(low);
+    try std.testing.expectEqualStrings("unknown", low);
+
+    const max_supported = try authorDateOwned(allocator, "253402300799", "+0000");
+    defer allocator.free(max_supported);
+    try std.testing.expectEqualStrings("9999-12-31", max_supported);
+
+    const beyond_supported = try authorDateOwned(allocator, "253402300800", "+0000");
+    defer allocator.free(beyond_supported);
+    try std.testing.expectEqualStrings("unknown", beyond_supported);
+}
+
+test "web explorer parses malicious blame timestamp as unknown date" {
+    const raw =
+        "0123456789abcdef0123456789abcdef01234567 1 1 1\n" ++
+        "author Mallory\n" ++
+        "author-time 9223372036854775807\n" ++
+        "author-tz +0200\n" ++
+        "summary Extreme date\n" ++
+        "filename victim.txt\n" ++
+        "\towned\n";
+    const lines = try parseBlamePorcelain(std.testing.allocator, raw);
+    defer freeBlameLines(std.testing.allocator, lines);
+
+    try std.testing.expectEqual(@as(usize, 1), lines.len);
+    try std.testing.expectEqualStrings("unknown", lines[0].date);
+    try std.testing.expectEqual(@as(?i64, null), lines[0].author_timestamp);
+}
+
+test "web explorer handles extreme blame relative timestamps" {
+    const allocator = std.testing.allocator;
+
+    try std.testing.expectEqualStrings("age-unknown", blameAgeClass(std.math.minInt(i64), 0));
+    try std.testing.expectEqualStrings("age-now", blameAgeClass(std.math.maxInt(i64), 0));
+
+    const too_old = try relativeTimeOwned(allocator, std.math.minInt(i64), 0);
+    defer allocator.free(too_old);
+    try std.testing.expectEqualStrings("unknown", too_old);
+
+    const future = try relativeTimeOwned(allocator, std.math.maxInt(i64), 0);
+    defer allocator.free(future);
+    try std.testing.expectEqualStrings("now", future);
+}
+
+test "web explorer bounds tree entry commit history window" {
+    try std.testing.expectEqual(@as(usize, 0), treeEntryCommitHistoryLimit(0));
+    try std.testing.expectEqual(@as(usize, min_tree_entry_commit_history), treeEntryCommitHistoryLimit(1));
+    try std.testing.expectEqual(@as(usize, min_tree_entry_commit_history), treeEntryCommitHistoryLimit(8));
+    try std.testing.expectEqual(@as(usize, 40), treeEntryCommitHistoryLimit(10));
+    try std.testing.expectEqual(@as(usize, max_tree_entry_commit_history), treeEntryCommitHistoryLimit(1000));
+}
+
+test "web explorer tree entry commit log args are bounded and pathless" {
+    const allocator = std.testing.allocator;
+
+    var args = try treeEntryCommitLogArgs(allocator, "HEAD", 1);
+    defer args.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 7), args.items.len);
+    try std.testing.expectEqualStrings("log", args.items[0]);
+    try std.testing.expectEqualStrings("--max-count=32", args.items[1]);
+    try std.testing.expectEqualStrings(tree_entry_commit_format, args.items[2]);
+    try std.testing.expectEqualStrings("--name-only", args.items[3]);
+    try std.testing.expectEqualStrings("-z", args.items[4]);
+    try std.testing.expectEqualStrings("HEAD", args.items[5]);
+    try std.testing.expectEqualStrings("--", args.items[6]);
+    try std.testing.expect(max_tree_entry_commit_output < git.max_git_output);
+    for (args.items) |arg| {
+        try std.testing.expect(std.mem.indexOf(u8, arg, ":(top)") == null);
+    }
+}
+
 test "web explorer hides inactive pull request branches from picker data" {
     var activity = PullBranchActivity.init(std.testing.allocator);
     defer activity.deinit();
@@ -1713,6 +1826,67 @@ test "web explorer normalizes pull head refs for branch activity" {
 
     try activity.addInactiveHeadRef("origin/topic/closed");
     try std.testing.expect(activity.branchIsInactive("refs/heads/topic/closed", "topic/closed", null));
+}
+
+test "web explorer blob loading treats option-like refs as revisions" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makeDir("repo");
+    {
+        var readme = try tmp.dir.createFile("repo/README.md", .{});
+        defer readme.close();
+        try readme.writeAll("hello\n");
+    }
+
+    const repo_root = try tmp.dir.realpathAlloc(allocator, "repo");
+    defer allocator.free(repo_root);
+    const tmp_root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_root);
+
+    try expectGitOk(allocator, repo_root, &.{ "init", "-q" });
+    try expectGitOk(allocator, repo_root, &.{ "add", "README.md" });
+    try expectGitOk(allocator, repo_root, &.{
+        "-c",
+        "user.name=Gitomi Test",
+        "-c",
+        "user.email=gitomi-test@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-q",
+        "-m",
+        "initial",
+    });
+
+    var repo = Repo{
+        .allocator = allocator,
+        .root = try allocator.dupe(u8, repo_root),
+        .git_dir = try allocator.dupe(u8, ""),
+        .gitomi_dir = try allocator.dupe(u8, ""),
+        .config_path = try allocator.dupe(u8, ""),
+        .index_path = try allocator.dupe(u8, ""),
+        .cursors_path = try allocator.dupe(u8, ""),
+    };
+    defer repo.deinit();
+
+    const output_base = try std.fs.path.join(allocator, &.{ tmp_root, "gitomi-poc" });
+    defer allocator.free(output_base);
+    const option_ref = try std.fmt.allocPrint(allocator, "--output={s}", .{output_base});
+    defer allocator.free(option_ref);
+
+    const content = try loadBlobBytes(allocator, repo, option_ref, "README.md", 64 * 1024);
+    defer if (content) |bytes| allocator.free(bytes);
+
+    try std.testing.expect(content == null);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("gitomi-poc:README.md", .{}));
+}
+
+fn expectGitOk(allocator: Allocator, root: []const u8, args: []const []const u8) !void {
+    const output = try gitMaybeAt(allocator, root, args, 1024 * 1024) orelse return error.GitCommandFailed;
+    allocator.free(output);
 }
 
 pub fn gitMaybe(allocator: Allocator, repo: Repo, git_args: []const []const u8, max_output_bytes: usize) !?[]u8 {

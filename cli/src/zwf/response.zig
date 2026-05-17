@@ -305,6 +305,7 @@ fn appendStatusLine(buf: *std.ArrayList(u8), allocator: Allocator, status: u16, 
 fn appendCommonHeaders(buf: *std.ArrayList(u8), allocator: Allocator) !void {
     try appendHeader(buf, allocator, "Connection", "close");
     try appendHeader(buf, allocator, "X-Content-Type-Options", "nosniff");
+    try appendHeader(buf, allocator, "Referrer-Policy", "no-referrer");
 }
 
 fn appendHeader(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8, value: []const u8) !void {
@@ -376,6 +377,7 @@ fn isManagedExtraHeaderName(name: []const u8) bool {
         std.ascii.eqlIgnoreCase(name, "transfer-encoding") or
         std.ascii.eqlIgnoreCase(name, "connection") or
         std.ascii.eqlIgnoreCase(name, "content-type") or
+        std.ascii.eqlIgnoreCase(name, "referrer-policy") or
         std.ascii.eqlIgnoreCase(name, "keep-alive") or
         std.ascii.eqlIgnoreCase(name, "proxy-authenticate") or
         std.ascii.eqlIgnoreCase(name, "proxy-authorization") or
@@ -408,6 +410,7 @@ test "common response headers close the connection" {
     try appendCommonHeaders(&headers, std.testing.allocator);
     try std.testing.expect(std.mem.indexOf(u8, headers.items, "Connection: close\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, headers.items, "keep-alive") == null);
+    try std.testing.expect(std.mem.indexOf(u8, headers.items, "Referrer-Policy: no-referrer\r\n") != null);
 }
 
 test "bodyless response headers do not emit content length" {
@@ -433,6 +436,9 @@ test "extra response headers reject managed and hop by hop names" {
     }));
     try std.testing.expectError(error.ManagedResponseHeader, validateExtraHeaders(&[_]Header{
         .{ .name = "Content-Type", .value = "text/plain" },
+    }));
+    try std.testing.expectError(error.ManagedResponseHeader, validateExtraHeaders(&[_]Header{
+        .{ .name = "Referrer-Policy", .value = "unsafe-url" },
     }));
 }
 

@@ -84,9 +84,13 @@ const WorkItemReferenceKind = enum {
     pull,
 };
 
+const max_internal_reference_links_per_text: usize = 64;
+
 pub const InternalReferenceResolver = struct {
     allocator: Allocator,
     db: ?index.SqliteDb = null,
+    object_refs: ?WorkItemObjectRefIndex = null,
+    object_refs_failed: bool = false,
 
     pub fn init(allocator: Allocator, repo: Repo) InternalReferenceResolver {
         if (!(index.isIndexFresh(allocator, repo) catch false)) {
@@ -100,6 +104,8 @@ pub const InternalReferenceResolver = struct {
     }
 
     pub fn deinit(self: *InternalReferenceResolver) void {
+        if (self.object_refs) |*object_refs| object_refs.deinit(self.allocator);
+        self.object_refs = null;
         if (self.db) |*db| db.deinit();
         self.db = null;
     }
@@ -121,22 +127,8 @@ pub const InternalReferenceResolver = struct {
     }
 
     fn matchesObjectHashRef(self: *InternalReferenceResolver, kind: WorkItemReferenceKind, token: []const u8) !bool {
-        const sql_text: []const u8 = switch (kind) {
-            .issue => "SELECT id FROM issues ORDER BY id",
-            .pull => "SELECT id FROM pulls ORDER BY id",
-        };
-        const db = if (self.db) |*value| value else return false;
-        var stmt = try db.prepare(sql_text);
-        defer stmt.deinit();
-
-        while (try stmt.step()) {
-            const id = try stmt.columnTextDup(self.allocator, 0);
-            defer self.allocator.free(id);
-            var ref_buf: [util.max_object_ref_len]u8 = undefined;
-            const candidate_ref = util.objectRefPrefix(ref_buf[0..token.len], id);
-            if (asciiEqlIgnoreCase(candidate_ref, token)) return true;
-        }
-        return false;
+        const refs = (try self.workItemObjectRefs()) orelse return false;
+        return refs.contains(kind, token);
     }
 
     fn matchesLegacyNumber(self: *InternalReferenceResolver, kind: WorkItemReferenceKind, number: i64) !bool {
@@ -154,7 +146,108 @@ pub const InternalReferenceResolver = struct {
         try stmt.bindInt64(2, number);
         return try stmt.step();
     }
+
+    fn workItemObjectRefs(self: *InternalReferenceResolver) !?*WorkItemObjectRefIndex {
+        if (self.object_refs) |*object_refs| return object_refs;
+        if (self.object_refs_failed) return null;
+
+        const db = if (self.db) |*value| value else return null;
+        self.object_refs = WorkItemObjectRefIndex.load(self.allocator, db) catch |err| {
+            self.object_refs_failed = true;
+            return err;
+        };
+        return &self.object_refs.?;
+    }
 };
+
+const WorkItemObjectRefIndex = struct {
+    issues: ObjectRefList = .{},
+    pulls: ObjectRefList = .{},
+
+    fn load(allocator: Allocator, db: *index.SqliteDb) !WorkItemObjectRefIndex {
+        var refs: WorkItemObjectRefIndex = .{};
+        errdefer refs.deinit(allocator);
+
+        try refs.issues.loadFromTable(allocator, db, "issues");
+        try refs.pulls.loadFromTable(allocator, db, "pulls");
+        refs.issues.sort();
+        refs.pulls.sort();
+
+        return refs;
+    }
+
+    fn deinit(self: *WorkItemObjectRefIndex, allocator: Allocator) void {
+        self.issues.deinit(allocator);
+        self.pulls.deinit(allocator);
+    }
+
+    fn contains(self: *const WorkItemObjectRefIndex, kind: WorkItemReferenceKind, token: []const u8) bool {
+        return switch (kind) {
+            .issue => self.issues.containsPrefix(token),
+            .pull => self.pulls.containsPrefix(token),
+        };
+    }
+};
+
+const ObjectRefList = struct {
+    refs: std.ArrayList([util.max_object_ref_len]u8) = .empty,
+
+    fn loadFromTable(self: *ObjectRefList, allocator: Allocator, db: *index.SqliteDb, comptime table: []const u8) !void {
+        var stmt = try db.prepare("SELECT id FROM " ++ table);
+        defer stmt.deinit();
+
+        while (try stmt.step()) {
+            const id = try stmt.columnTextDup(allocator, 0);
+            defer allocator.free(id);
+
+            var object_ref: [util.max_object_ref_len]u8 = undefined;
+            _ = util.objectRefPrefix(object_ref[0..], id);
+            try self.refs.append(allocator, object_ref);
+        }
+    }
+
+    fn sort(self: *ObjectRefList) void {
+        std.mem.sort([util.max_object_ref_len]u8, self.refs.items, {}, objectRefLessThan);
+    }
+
+    fn containsPrefix(self: *const ObjectRefList, token: []const u8) bool {
+        var low: usize = 0;
+        var high: usize = self.refs.items.len;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            if (objectRefPrefixLessThanToken(self.refs.items[mid][0..], token)) {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        if (low >= self.refs.items.len) return false;
+        return asciiStartsWithIgnoreCase(self.refs.items[low][0..], token);
+    }
+
+    fn deinit(self: *ObjectRefList, allocator: Allocator) void {
+        self.refs.deinit(allocator);
+    }
+};
+
+fn objectRefLessThan(_: void, a: [util.max_object_ref_len]u8, b: [util.max_object_ref_len]u8) bool {
+    return std.mem.lessThan(u8, a[0..], b[0..]);
+}
+
+fn objectRefPrefixLessThanToken(object_ref: []const u8, token: []const u8) bool {
+    std.debug.assert(object_ref.len >= token.len);
+    for (token, 0..) |c, i| {
+        const token_c = std.ascii.toLower(c);
+        if (object_ref[i] < token_c) return true;
+        if (object_ref[i] > token_c) return false;
+    }
+    return false;
+}
+
+fn asciiStartsWithIgnoreCase(value: []const u8, prefix: []const u8) bool {
+    if (prefix.len > value.len) return false;
+    return asciiEqlIgnoreCase(value[0..prefix.len], prefix);
+}
 
 fn workItemReferenceKindName(kind: WorkItemReferenceKind) []const u8 {
     return switch (kind) {
@@ -232,10 +325,16 @@ pub fn appendInternalReferenceLinkedTextWithDefaultHref(
 ) !void {
     var plain_start: usize = 0;
     var i: usize = 0;
+    var linked_references: usize = 0;
     while (i < value.len) {
         if (issueReferenceEnd(value, i)) |end| {
+            if (linked_references >= max_internal_reference_links_per_text) {
+                i = end;
+                continue;
+            }
             if (plain_start < i) try appendLinkedTextPlainSegment(buf, allocator, value[plain_start..i], default_href);
             try appendInternalReferenceLink(buf, allocator, resolver, value[i + 1 .. end]);
+            linked_references += 1;
             i = end;
             plain_start = i;
             continue;
@@ -260,6 +359,14 @@ fn appendLinkedTextPlainSegment(
     try buf.appendSlice(allocator, "\">");
     try appendHtml(buf, allocator, value);
     try buf.appendSlice(allocator, "</a>");
+}
+
+fn appendShellStylesheets(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try appendTemplate(buf, allocator,
+        \\  <link rel="stylesheet" href="/vendor/devicon/devicon.min.css?v={asset_version}">
+        \\  <link rel="stylesheet" href="/vendor/katex/katex.min.css">
+        \\  <link rel="stylesheet" href="/style.css?v={asset_version}">
+    , .{ .asset_version = asset_version });
 }
 
 fn appendInternalReferenceLink(
@@ -345,13 +452,11 @@ pub fn appendShellStart(
         \\  <title>
     );
     try appendHtml(buf, allocator, title);
-    try appendTemplate(buf, allocator,
+    try buf.appendSlice(allocator,
         \\ - Gitomi</title>
         \\  <link rel="icon" href="/logo.svg" type="image/svg+xml">
-        \\  <link rel="stylesheet" href="/vendor/devicon/devicon.min.css?v={asset_version}">
-        \\  <link rel="stylesheet" href="/vendor/katex/katex.min.css">
-        \\  <link rel="stylesheet" href="/style.css?v={asset_version}">
-    , .{ .asset_version = asset_version });
+    );
+    try appendShellStylesheets(buf, allocator);
     try appendShortcutConfigScript(buf, allocator, cfg_opt);
     try appendTemplate(buf, allocator,
         \\</head>
@@ -1205,6 +1310,18 @@ test "web avatar renders vendored nouns asset svg" {
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<rect width=\"") != null);
 }
 
+test "web shell stylesheets are local assets" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendShellStylesheets(&buf, std.testing.allocator);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "://") == null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "@latest") == null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/vendor/devicon/devicon.min.css?v=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/style.css?v=") != null);
+}
+
 test "web issue linked text autolinks legacy and hash references" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
@@ -1256,4 +1373,72 @@ test "web internal reference linked text prefers work items before commits" {
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/commit?sha=abcdef0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues/42\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/pulls/42\"") == null);
+}
+
+test "web internal reference resolver caches object refs per request" {
+    const allocator = std.testing.allocator;
+    var db = try index.SqliteDb.openWithOptions(allocator, ":memory:", index.sqlite.SQLITE_OPEN_READWRITE | index.sqlite.SQLITE_OPEN_CREATE, true, .{ .enable_wal = false });
+    var close_db = true;
+    defer if (close_db) db.deinit();
+
+    try db.exec(
+        \\CREATE TABLE issues(id TEXT NOT NULL);
+        \\CREATE TABLE pulls(id TEXT NOT NULL);
+        \\CREATE TABLE legacy_aliases(provider TEXT NOT NULL, object_kind TEXT NOT NULL, object_id TEXT NOT NULL, number INTEGER NOT NULL);
+        \\INSERT INTO issues(id) VALUES ('issue-object-1');
+        \\INSERT INTO pulls(id) VALUES ('pull-object-1');
+    );
+
+    var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const issue_ref = util.shortObjectRef(&issue_ref_buf, "issue-object-1");
+    var pull_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const pull_ref = util.shortObjectRef(&pull_ref_buf, "pull-object-1");
+
+    var resolver = InternalReferenceResolver{ .allocator = allocator, .db = db };
+    close_db = false;
+    defer resolver.deinit();
+
+    _ = resolver.hrefForHashReference("abcdef0");
+    if (resolver.db) |*resolver_db| try resolver_db.exec("DROP TABLE issues; DROP TABLE pulls;");
+
+    switch (resolver.hrefForHashReference(issue_ref)) {
+        .issue => |value| try std.testing.expectEqualStrings(issue_ref, value),
+        else => try std.testing.expect(false),
+    }
+    switch (resolver.hrefForHashReference(pull_ref)) {
+        .pull => |value| try std.testing.expectEqualStrings(pull_ref, value),
+        else => try std.testing.expect(false),
+    }
+}
+
+test "web internal reference linked text caps resolved references per value" {
+    const allocator = std.testing.allocator;
+    var resolver = InternalReferenceResolver{ .allocator = allocator };
+    defer resolver.deinit();
+
+    var input: std.ArrayList(u8) = .empty;
+    defer input.deinit(allocator);
+    for (0..max_internal_reference_links_per_text + 1) |_| {
+        try input.appendSlice(allocator, "#abcdef0 ");
+    }
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try appendInternalReferenceLinkedText(&buf, allocator, &resolver, input.items);
+
+    try std.testing.expectEqual(
+        max_internal_reference_links_per_text,
+        countSubstrings(buf.items, "<a href=\"/commit?sha=abcdef0\">#abcdef0</a>"),
+    );
+    try std.testing.expectEqual(max_internal_reference_links_per_text + 1, countSubstrings(buf.items, "#abcdef0"));
+}
+
+fn countSubstrings(haystack: []const u8, needle: []const u8) usize {
+    var count: usize = 0;
+    var start: usize = 0;
+    while (std.mem.indexOfPos(u8, haystack, start, needle)) |index_pos| {
+        count += 1;
+        start = index_pos + needle.len;
+    }
+    return count;
 }

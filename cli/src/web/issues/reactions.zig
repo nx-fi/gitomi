@@ -1,6 +1,7 @@
 const std = @import("std");
 const index = @import("../../index.zig");
 const shared = @import("../shared.zig");
+const zwf = @import("../../zwf.zig");
 
 const Allocator = std.mem.Allocator;
 const SqliteDb = index.SqliteDb;
@@ -42,6 +43,7 @@ pub fn appendBar(
     raw_issue_ref: []const u8,
     target_ref: []const u8,
     current_actor: ?[]const u8,
+    csrf_token: []const u8,
 ) !void {
     var reactions: std.ArrayList(ReactionSummary) = .empty;
     defer {
@@ -75,9 +77,9 @@ pub fn appendBar(
         });
     }
 
-    try appendPicker(buf, allocator, raw_issue_ref, object_kind, target_ref, reactions.items);
+    try appendPicker(buf, allocator, raw_issue_ref, object_kind, target_ref, reactions.items, csrf_token);
     for (reactions.items) |item| {
-        try appendButton(buf, allocator, raw_issue_ref, object_kind, target_ref, item.emoji, item.emoji, item.count, item.reacted);
+        try appendButton(buf, allocator, raw_issue_ref, object_kind, target_ref, item.emoji, item.emoji, item.count, item.reacted, csrf_token);
     }
     try buf.appendSlice(allocator, "</div>");
 }
@@ -89,6 +91,7 @@ fn appendPicker(
     object_kind: []const u8,
     target_ref: []const u8,
     reactions: []const ReactionSummary,
+    csrf_token: []const u8,
 ) !void {
     try buf.appendSlice(allocator,
         \\<details class="reaction-picker" data-popover-menu>
@@ -96,7 +99,7 @@ fn appendPicker(
         \\  <div class="reaction-popover" role="menu" aria-label="Add reaction">
     );
     for (reaction_choices) |choice| {
-        try appendChoiceButton(buf, allocator, raw_issue_ref, object_kind, target_ref, choice, reactionWasSelected(reactions, choice.value));
+        try appendChoiceButton(buf, allocator, raw_issue_ref, object_kind, target_ref, choice, reactionWasSelected(reactions, choice.value), csrf_token);
     }
     try buf.appendSlice(allocator, "</div></details>");
 }
@@ -109,8 +112,9 @@ fn appendChoiceButton(
     target_ref: []const u8,
     choice: ReactionChoice,
     reacted: bool,
+    csrf_token: []const u8,
 ) !void {
-    try appendFormOpen(buf, allocator, raw_issue_ref, "reaction-choice-form", if (reacted) "remove-reaction" else "add-reaction", object_kind, target_ref, choice.value);
+    try appendFormOpen(buf, allocator, raw_issue_ref, "reaction-choice-form", if (reacted) "remove-reaction" else "add-reaction", object_kind, target_ref, choice.value, csrf_token);
     try appendTemplate(buf, allocator,
         \\<button{class_attr} type="submit" role="menuitem" aria-pressed="{pressed}" title="{title}"><span class="reaction-emoji">
     , .{
@@ -135,8 +139,9 @@ fn appendButton(
     emoji_label: []const u8,
     count: i64,
     reacted: bool,
+    csrf_token: []const u8,
 ) !void {
-    try appendFormOpen(buf, allocator, raw_issue_ref, "reaction-form", if (reacted) "remove-reaction" else "add-reaction", object_kind, target_ref, emoji_value);
+    try appendFormOpen(buf, allocator, raw_issue_ref, "reaction-form", if (reacted) "remove-reaction" else "add-reaction", object_kind, target_ref, emoji_value, csrf_token);
     try appendTemplate(buf, allocator,
         \\<button{class_attr} type="submit" aria-pressed="{pressed}" title="{title}"><span class="reaction-emoji">
     , .{
@@ -160,12 +165,15 @@ fn appendFormOpen(
     object_kind: []const u8,
     target_ref: []const u8,
     emoji_value: []const u8,
+    csrf_token: []const u8,
 ) !void {
     try appendTemplate(buf, allocator, "<form class=\"{form_class}\" method=\"post\" action=\"/issues/", .{ .form_class = form_class });
     try shared.appendUrlEncoded(buf, allocator, raw_issue_ref);
     try appendTemplate(buf, allocator,
-        \\/comments"><input type="hidden" name="action" value="{action}"><input type="hidden" name="target_kind" value="{object_kind}">
+        \\/comments"><input type="hidden" name="{csrf_field}" value="{csrf_token}"><input type="hidden" name="action" value="{action}"><input type="hidden" name="target_kind" value="{object_kind}">
     , .{
+        .csrf_field = zwf.csrf.field_name,
+        .csrf_token = csrf_token,
         .action = action,
         .object_kind = object_kind,
     });

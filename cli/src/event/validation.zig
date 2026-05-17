@@ -819,6 +819,8 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!optionalStringWithin(payload, "event_name", git.max_payload_atom_bytes)) return "action.run_completed payload.event_name exceeds v1 field size limit";
         if (!optionalStringWithin(payload, "diagnostics_ref", git.max_payload_ref_bytes)) return "action.run_completed payload.diagnostics_ref exceeds v1 ref size limit";
         if (!optionalStringWithin(payload, "diagnostics_oid", git.max_payload_ref_bytes)) return "action.run_completed payload.diagnostics_oid exceeds v1 ref size limit";
+        if (!optionalObjectWithin(payload, "outputs", git.max_event_body_bytes)) return "action.run_completed payload.outputs must be an object within v1 size limits";
+        if (!optionalArrayWithin(payload, "published_events", git.max_event_body_bytes)) return "action.run_completed payload.published_events must be an array within v1 size limits";
         return null;
     }
 
@@ -1042,6 +1044,22 @@ fn optionalStringWithin(object: std.json.ObjectMap, key: []const u8, max_bytes: 
         else => return false,
     };
     return string.len <= max_bytes;
+}
+
+fn optionalObjectWithin(object: std.json.ObjectMap, key: []const u8, max_bytes: usize) bool {
+    const value = object.get(key) orelse return true;
+    switch (value) {
+        .object => return jsonValueWithin(value, max_bytes),
+        else => return false,
+    }
+}
+
+fn optionalArrayWithin(object: std.json.ObjectMap, key: []const u8, max_bytes: usize) bool {
+    const value = object.get(key) orelse return true;
+    switch (value) {
+        .array => return jsonValueWithin(value, max_bytes),
+        else => return false,
+    }
 }
 
 fn optionalLabelColor(object: std.json.ObjectMap, key: []const u8) bool {
