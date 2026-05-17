@@ -53,6 +53,9 @@ pub const IssueProjectPlacement = struct {
 
 pub const IssueOpenedMetadata = struct {
     source_author: ?[]const u8 = null,
+    source_identity: ?[]const u8 = null,
+    source_email: ?[]const u8 = null,
+    source_avatar_url: ?[]const u8 = null,
     milestone: ?[]const u8 = null,
     issue_type: ?[]const u8 = null,
     priority: ?[]const u8 = null,
@@ -62,6 +65,9 @@ pub const IssueOpenedMetadata = struct {
 
 pub const PullOpenedMetadata = struct {
     source_author: ?[]const u8 = null,
+    source_identity: ?[]const u8 = null,
+    source_email: ?[]const u8 = null,
+    source_avatar_url: ?[]const u8 = null,
     labels: []const []const u8 = &.{},
     assignees: []const []const u8 = &.{},
     reviewers: []const []const u8 = &.{},
@@ -80,6 +86,9 @@ pub const PullMergedMetadata = struct {
 
 pub const CommentAddedMetadata = struct {
     source_author: ?[]const u8 = null,
+    source_identity: ?[]const u8 = null,
+    source_email: ?[]const u8 = null,
+    source_avatar_url: ?[]const u8 = null,
     reply_parent_id: ?[]const u8 = null,
     reply_parent_hash: ?[]const u8 = null,
 };

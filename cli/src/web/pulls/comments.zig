@@ -63,7 +63,7 @@ pub fn appendComments(
             .classes = shared.classes("issue-timeline-item", &.{shared.class("is-reply", row.isReply())}),
             .anchor = anchor,
         });
-        try shared.appendAvatar(buf, allocator, row.display_author, "issue-detail-avatar");
+        try shared.appendAvatarWithUrl(buf, allocator, row.display_author, row.source_avatar_url, "issue-detail-avatar");
         try appendTemplate(buf, allocator,
             \\</div><article class="issue-comment-box comment-card"><header class="issue-comment-head"><div><strong>{author}</strong><span>commented
         , .{

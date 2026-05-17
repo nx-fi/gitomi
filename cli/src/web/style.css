@@ -301,6 +301,7 @@ code {
 .user-avatar::after {
   content: "";
   position: absolute;
+  z-index: 2;
   right: 2px;
   bottom: 2px;
   width: 8px;
@@ -1237,6 +1238,7 @@ main.page-projects:has(.project-detail-panel) {
   margin-left: -7px;
 }
 .issue-avatar {
+  position: relative;
   display: inline-grid;
   place-items: center;
   flex: 0 0 auto;
@@ -1250,10 +1252,37 @@ main.page-projects:has(.project-detail-panel) {
   font-size: 0;
   line-height: 1;
 }
+.issue-list-row .issue-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 9px;
+}
+.issue-list-row .issue-row-assignees .issue-avatar + .issue-avatar {
+  margin-left: -12px;
+}
 .nouns-avatar-svg {
+  position: relative;
+  z-index: 0;
   display: block;
   width: 100%;
   height: 100%;
+}
+.avatar-image {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  pointer-events: none;
+}
+.avatar-image.is-active {
+  opacity: 1;
+}
+.nouns-avatar.has-external-avatar .nouns-avatar-svg {
+  opacity: 0;
 }
 .pulls-panel {
   overflow: hidden;
@@ -7457,6 +7486,7 @@ a.root-file-commit:hover,
   display: flex;
   width: 100%;
   height: 10px;
+  margin-top: 8px;
   overflow: hidden;
   background: var(--soft-row);
   border-radius: 999px;
@@ -7470,7 +7500,7 @@ a.root-file-commit:hover,
 .root-language-list {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(122px, 1fr));
-  gap: 8px 12px;
+  gap: 10px 18px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -7478,7 +7508,7 @@ a.root-file-commit:hover,
 .root-language-list li {
   display: grid;
   grid-template-columns: 8px minmax(0, 1fr) auto;
-  gap: 6px;
+  gap: 8px;
   align-items: center;
   min-width: 0;
   font-size: 12px;
@@ -7551,6 +7581,95 @@ a.root-file-commit:hover,
   color: var(--text);
   font-size: 13px;
   font-weight: 600;
+}
+.root-contributor-breakdown {
+  display: grid;
+  gap: 12px;
+}
+.root-contributor-row {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.25;
+}
+.root-contributor-row-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+}
+.root-contributor-row-head strong {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.root-contributor-person {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  color: var(--text);
+  font-weight: 600;
+}
+.root-contributor-avatar,
+.root-contributor-other-avatar {
+  width: 24px;
+  height: 24px;
+  border-color: var(--border);
+  border-radius: 6px;
+}
+.root-contributor-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.root-contributor-bar {
+  display: block;
+  width: var(--share, 0%);
+  height: 3px;
+  background: var(--contributor-color);
+}
+.root-contributor-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+.root-contributor-metrics span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.root-contributor-metrics strong {
+  display: block;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+.root-contributor-others {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 54px;
+  min-width: 0;
+  overflow: hidden;
+}
+.root-contributor-more {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  color: var(--muted);
+  background: var(--soft-row);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
 }
 .root-sidebar-empty {
   margin: 0;

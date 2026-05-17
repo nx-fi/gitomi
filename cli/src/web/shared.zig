@@ -23,7 +23,7 @@ const loadConfig = repo_mod.loadConfig;
 const default_web_shortcut_leader = "Space";
 const default_web_shortcut_keys = "A S D F J K L E R U I O W Q P Z X C V B N M G H Y T";
 const default_web_shortcut_timeout_ms: u64 = 900;
-const asset_version = "20260517-label-order-task-progress-back-nav-colors";
+const asset_version = "20260517-label-order-task-progress-back-nav-colors-avatar-fallbacks";
 
 const WebStats = struct {
     inbox_refs: usize = 0,
@@ -67,6 +67,7 @@ pub const appendUrlEncoded = html.appendUrlEncoded;
 pub const appendFmt = html.appendFmt;
 pub const appendRelativeTime = time.appendRelativeTime;
 pub const appendAvatar = avatars.appendAvatar;
+pub const appendAvatarWithUrl = avatars.appendAvatarWithUrl;
 pub const sendRedirect = response.sendRedirect;
 pub const sendPlainResponse = response.sendPlainResponse;
 pub const sendResponse = response.sendResponse;
@@ -1574,6 +1575,24 @@ test "web avatar renders vendored nouns asset svg" {
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "viewBox=\"0 0 320 320\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<rect width=\"100%\" height=\"100%\" fill=\"#") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<rect width=\"") != null);
+}
+
+test "web avatar renders remote candidates before generated fallback" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendAvatar(&buf, std.testing.allocator, "octocat", "");
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-avatar-source=\"github\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "https://github.com/octocat.png?size=80") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "nouns-avatar-svg") != null);
+
+    buf.clearRetainingCapacity();
+    try appendAvatar(&buf, std.testing.allocator, "User@example.com", "");
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-avatar-source=\"github\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-avatar-source=\"gravatar\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "https://www.gravatar.com/avatar/") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "d=404") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "nouns-avatar-svg") != null);
 }
 
 test "web shell stylesheets are local assets" {

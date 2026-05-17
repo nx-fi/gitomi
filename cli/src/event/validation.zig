@@ -478,6 +478,9 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!optionalStringArray(payload, "assignees")) return "issue.opened payload.assignees must be an array of strings";
         if (!optionalStringArrayWithin(payload, "assignees", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "issue.opened payload.assignees exceeds v1 collection limits";
         if (!optionalStringWithin(payload, "source_author", git.max_payload_atom_bytes)) return "issue.opened payload.source_author exceeds v1 field size limit";
+        if (!optionalStringWithin(payload, "source_identity", git.max_payload_ref_bytes)) return "issue.opened payload.source_identity exceeds v1 ref size limit";
+        if (!optionalStringWithin(payload, "source_email", git.max_payload_atom_bytes)) return "issue.opened payload.source_email exceeds v1 field size limit";
+        if (!optionalStringWithin(payload, "source_avatar_url", git.max_payload_ref_bytes)) return "issue.opened payload.source_avatar_url exceeds v1 ref size limit";
         if (!optionalStringWithin(payload, "milestone", git.max_payload_atom_bytes)) return "issue.opened payload.milestone exceeds v1 field size limit";
         if (!optionalIssueType(payload, "type")) return "issue.opened payload.type must be bug, feature, or task";
         if (!optionalIssuePriority(payload, "priority")) return "issue.opened payload.priority must be P0, P1, P2, or P3";
@@ -727,6 +730,9 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!optionalStringWithin(payload, "body", git.max_payload_text_bytes)) return "pull.opened payload.body exceeds v1 text size limit";
         if (!optionalBool(payload, "draft")) return "pull.opened payload.draft must be a boolean";
         if (!optionalStringWithin(payload, "source_author", git.max_payload_atom_bytes)) return "pull.opened payload.source_author exceeds v1 field size limit";
+        if (!optionalStringWithin(payload, "source_identity", git.max_payload_ref_bytes)) return "pull.opened payload.source_identity exceeds v1 ref size limit";
+        if (!optionalStringWithin(payload, "source_email", git.max_payload_atom_bytes)) return "pull.opened payload.source_email exceeds v1 field size limit";
+        if (!optionalStringWithin(payload, "source_avatar_url", git.max_payload_ref_bytes)) return "pull.opened payload.source_avatar_url exceeds v1 ref size limit";
         if (!optionalStringArray(payload, "labels")) return "pull.opened payload.labels must be an array of strings";
         if (!optionalStringArrayWithin(payload, "labels", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "pull.opened payload.labels exceeds v1 collection limits";
         if (!optionalStringArray(payload, "assignees")) return "pull.opened payload.assignees must be an array of strings";
@@ -792,6 +798,9 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!hasString(payload, "parent_id")) return "comment.added payload.parent_id must be a string";
         if (!stringWithin(payload, "parent_id", git.max_payload_ref_bytes)) return "comment.added payload.parent_id exceeds v1 field size limit";
         if (!optionalStringWithin(payload, "source_author", git.max_payload_atom_bytes)) return "comment.added payload.source_author exceeds v1 field size limit";
+        if (!optionalStringWithin(payload, "source_identity", git.max_payload_ref_bytes)) return "comment.added payload.source_identity exceeds v1 ref size limit";
+        if (!optionalStringWithin(payload, "source_email", git.max_payload_atom_bytes)) return "comment.added payload.source_email exceeds v1 field size limit";
+        if (!optionalStringWithin(payload, "source_avatar_url", git.max_payload_ref_bytes)) return "comment.added payload.source_avatar_url exceeds v1 ref size limit";
         if (!optionalStringWithin(payload, "reply_parent_id", git.max_payload_ref_bytes)) return "comment.added payload.reply_parent_id exceeds v1 field size limit";
         if (!optionalStringWithin(payload, "reply_parent_hash", git.max_payload_ref_bytes)) return "comment.added payload.reply_parent_hash exceeds v1 field size limit";
         if (!hasString(payload, "body")) return "comment.added payload.body must be a string";

@@ -89,7 +89,7 @@ fn renderIssueDetailPageWithCommentForm(
         \\      <div class="issue-timeline-item">
         \\        <div class="issue-timeline-avatar">
     , .{});
-    try appendIssueAvatar(&buf, allocator, display_author, "issue-detail-avatar");
+    try appendIssueAvatar(&buf, allocator, display_author, detail.source_avatar_url, "issue-detail-avatar");
     try appendTemplate(&buf, allocator,
         \\        </div>
         \\        <article class="issue-comment-box" id="issue-description">
@@ -229,8 +229,8 @@ fn commentWord(count: usize) []const u8 {
     return if (count == 1) "comment" else "comments";
 }
 
-fn appendIssueAvatar(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8, extra_class: []const u8) !void {
-    try shared.appendAvatar(buf, allocator, name, extra_class);
+fn appendIssueAvatar(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8, avatar_url: []const u8, extra_class: []const u8) !void {
+    try shared.appendAvatarWithUrl(buf, allocator, name, avatar_url, extra_class);
 }
 
 fn renderIssueNotFound(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
@@ -491,7 +491,7 @@ fn appendIssueComments(
             .classes = shared.classes("issue-timeline-item", &.{shared.class("is-reply", row.isReply())}),
             .anchor = anchor,
         });
-        try appendIssueAvatar(buf, allocator, row.display_author, "issue-detail-avatar");
+        try appendIssueAvatar(buf, allocator, row.display_author, row.source_avatar_url, "issue-detail-avatar");
         try appendTemplate(buf, allocator,
             \\</div><article class="issue-comment-box"><header class="issue-comment-head"><div><strong>{author}</strong><span>commented
         , .{
@@ -609,7 +609,7 @@ fn appendIssueCommentForm(
         \\<div class="issue-timeline-item issue-comment-form-item">
     );
     try buf.appendSlice(allocator, "  <div class=\"issue-timeline-avatar\">");
-    try appendIssueAvatar(buf, allocator, current_actor orelse "Current user", "issue-detail-avatar issue-comment-form-avatar");
+    try appendIssueAvatar(buf, allocator, current_actor orelse "Current user", "", "issue-detail-avatar issue-comment-form-avatar");
     try buf.appendSlice(allocator, "</div>");
     try buf.appendSlice(allocator,
         \\  <form class="issue-comment-box issue-comment-form" method="post" action="/issues/

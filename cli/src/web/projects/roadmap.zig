@@ -146,12 +146,13 @@ fn appendProjectRoadmapLane(
         \\  LEFT JOIN issue_metadata m ON m.issue_id = pi.issue_id
         \\)
         \\SELECT DISTINCT i.id, i.title, i.state,
-        \\       COALESCE(NULLIF(m.source_author, ''), i.author_principal),
+        \\       COALESCE(NULLIF(si.display_name, ''), NULLIF(m.source_author, ''), i.author_principal),
         \\       i.opened_at,
         \\       COALESCE(a.number, 0)
         \\FROM project_items p
         \\JOIN issues i ON i.id = p.issue_id
         \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
+        \\LEFT JOIN identities si ON si.id = m.source_identity
         \\LEFT JOIN legacy_aliases a
         \\  ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
         \\WHERE p.effective_status = ?
@@ -216,12 +217,13 @@ fn appendProjectPriorityRoadmapLane(
         \\  WHERE p.name = ?
         \\)
         \\SELECT DISTINCT i.id, i.title, i.state,
-        \\       COALESCE(NULLIF(m.source_author, ''), i.author_principal),
+        \\       COALESCE(NULLIF(si.display_name, ''), NULLIF(m.source_author, ''), i.author_principal),
         \\       i.opened_at,
         \\       COALESCE(a.number, 0)
         \\FROM project_items p
         \\JOIN issues i ON i.id = p.issue_id
         \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
+        \\LEFT JOIN identities si ON si.id = m.source_identity
         \\LEFT JOIN legacy_aliases a
         \\  ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
         \\WHERE COALESCE(m.priority, '') = ?

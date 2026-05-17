@@ -188,6 +188,32 @@ pub const Stats = struct {
     }
 };
 
+pub const ContributorRow = struct {
+    name: []const u8,
+    code: u64,
+    test_count: u64,
+    comment: u64,
+
+    pub fn total(self: ContributorRow) u64 {
+        return self.code + self.test_count + self.comment;
+    }
+};
+
+pub const Contributors = struct {
+    rows: []ContributorRow,
+
+    pub fn deinit(self: *Contributors, allocator: Allocator) void {
+        freeContributorRows(allocator, self.rows);
+        allocator.free(self.rows);
+    }
+
+    pub fn total(self: Contributors) u64 {
+        var value: u64 = 0;
+        for (self.rows) |row| value +|= row.total();
+        return value;
+    }
+};
+
 pub fn loadRepositoryStats(allocator: Allocator, repo: Repo) !?Stats {
     const paths = try collectRepositoryPaths(allocator, repo) orelse return null;
     defer git.freeStringList(allocator, paths);
@@ -228,6 +254,47 @@ pub fn loadRepositoryStats(allocator: Allocator, repo: Repo) !?Stats {
         .total_test = total_test,
         .total_comment = total_comment,
     };
+}
+
+pub fn loadRepositoryContributors(allocator: Allocator, repo: Repo) !?Contributors {
+    const paths = try collectTrackedRepositoryPaths(allocator, repo) orelse return null;
+    defer git.freeStringList(allocator, paths);
+
+    var rows: std.ArrayList(ContributorRow) = .empty;
+    errdefer {
+        freeContributorRows(allocator, rows.items);
+        rows.deinit(allocator);
+    }
+    var row_index = std.StringHashMap(usize).init(allocator);
+    defer row_index.deinit();
+
+    for (paths) |path| {
+        const content = readWorktreeFile(allocator, repo, path) catch continue;
+        defer allocator.free(content);
+
+        const counts = countBlob(path, content) orelse continue;
+        if (counts.total() == 0) continue;
+
+        const language = languageForPath(path);
+        const plugin = pluginForPath(path, language);
+        const force_test = sloc_lang_plugins.isTestPath(path, plugin);
+        const line_kinds = try sloc_lang_plugins.classifyFileLines(allocator, content, force_test, plugin, .{});
+        defer allocator.free(line_kinds);
+
+        const blame = gitMaybe(allocator, repo, &.{ "blame", "--incremental", "--", path }, max_git_path_output) catch continue orelse continue;
+        defer allocator.free(blame);
+
+        try parseBlameIncrementalOutput(allocator, &rows, &row_index, line_kinds, blame);
+    }
+
+    std.mem.sort(ContributorRow, rows.items, {}, struct {
+        fn lessThan(_: void, a: ContributorRow, b: ContributorRow) bool {
+            if (a.total() != b.total()) return a.total() > b.total();
+            return std.mem.lessThan(u8, a.name, b.name);
+        }
+    }.lessThan);
+
+    return .{ .rows = try rows.toOwnedSlice(allocator) };
 }
 
 pub fn countBlob(path: []const u8, content: []const u8) ?Counts {
@@ -293,6 +360,20 @@ pub fn languageColor(language: []const u8) []const u8 {
     return "#8b949e";
 }
 
+pub fn contributorColor(name: []const u8) []const u8 {
+    const palette = [_][]const u8{
+        "#0969da",
+        "#2da44e",
+        "#bf8700",
+        "#8250df",
+        "#cf222e",
+        "#1a7f64",
+        "#9a6700",
+        "#6f42c1",
+    };
+    return palette[@intCast(std.hash.Wyhash.hash(0, name) % palette.len)];
+}
+
 fn collectRepositoryPaths(allocator: Allocator, repo: Repo) !?[][]u8 {
     var paths: std.ArrayList([]u8) = .empty;
     errdefer {
@@ -319,6 +400,22 @@ fn collectRepositoryPaths(allocator: Allocator, repo: Repo) !?[][]u8 {
     }
 
     if (!found_any) return null;
+    return try paths.toOwnedSlice(allocator);
+}
+
+fn collectTrackedRepositoryPaths(allocator: Allocator, repo: Repo) !?[][]u8 {
+    const tracked = try gitMaybe(allocator, repo, &.{ "ls-files", "-z" }, max_git_path_output) orelse return null;
+    defer allocator.free(tracked);
+
+    var paths: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (paths.items) |path| allocator.free(path);
+        paths.deinit(allocator);
+    }
+    var seen = std.StringHashMap(void).init(allocator);
+    defer seen.deinit();
+
+    try appendGitPaths(allocator, &paths, &seen, tracked);
     return try paths.toOwnedSlice(allocator);
 }
 
@@ -360,6 +457,119 @@ fn addLanguageCounts(
         .comment = counts.comment,
     });
     try row_index.put(language, rows.items.len - 1);
+}
+
+fn freeContributorRows(allocator: Allocator, rows: []ContributorRow) void {
+    for (rows) |row| allocator.free(row.name);
+}
+
+fn addCountsToContributor(row: *ContributorRow, counts: Counts) void {
+    row.code +|= counts.code;
+    row.test_count +|= counts.test_count;
+    row.comment +|= counts.comment;
+}
+
+fn addContributorCounts(
+    allocator: Allocator,
+    rows: *std.ArrayList(ContributorRow),
+    row_index: *std.StringHashMap(usize),
+    raw_name: []const u8,
+    counts: Counts,
+) !void {
+    if (counts.total() == 0) return;
+    const name = if (raw_name.len == 0) "Unknown" else raw_name;
+    if (row_index.get(name)) |idx| {
+        addCountsToContributor(&rows.items[idx], counts);
+        return;
+    }
+
+    const name_copy = try allocator.dupe(u8, name);
+    errdefer allocator.free(name_copy);
+    try rows.append(allocator, .{
+        .name = name_copy,
+        .code = counts.code,
+        .test_count = counts.test_count,
+        .comment = counts.comment,
+    });
+    errdefer _ = rows.pop();
+    try row_index.put(name_copy, rows.items.len - 1);
+}
+
+const BlameGroup = struct {
+    commit: []const u8,
+    result_line: usize,
+    line_count: usize,
+};
+
+fn parseBlameGroupHeader(line: []const u8) ?BlameGroup {
+    var fields = std.mem.splitScalar(u8, line, ' ');
+    const commit = fields.next() orelse return null;
+    const source_line_s = fields.next() orelse return null;
+    const result_line_s = fields.next() orelse return null;
+    const line_count_s = fields.next() orelse return null;
+    if (commit.len != 40 and commit.len != 64) return null;
+    for (commit) |c| {
+        if (!std.ascii.isHex(c)) return null;
+    }
+    _ = std.fmt.parseUnsigned(usize, source_line_s, 10) catch return null;
+    const result_line = std.fmt.parseUnsigned(usize, result_line_s, 10) catch return null;
+    const line_count = std.fmt.parseUnsigned(usize, line_count_s, 10) catch return null;
+    return .{
+        .commit = commit,
+        .result_line = result_line,
+        .line_count = line_count,
+    };
+}
+
+fn countKindsRange(kinds: []const sloc_lang_plugins.LineKind, start_line: usize, line_count: usize) Counts {
+    if (start_line == 0 or line_count == 0) return .{ .code = 0, .test_count = 0, .comment = 0 };
+    const start = start_line - 1;
+    if (start >= kinds.len) return .{ .code = 0, .test_count = 0, .comment = 0 };
+    const end = @min(kinds.len, start + line_count);
+
+    var counts = Counts{ .code = 0, .test_count = 0, .comment = 0 };
+    for (kinds[start..end]) |kind| {
+        switch (kind) {
+            .code => counts.code += 1,
+            .test_line => counts.test_count += 1,
+            .comment => counts.comment += 1,
+            .blank, .skipped => {},
+        }
+    }
+    return counts;
+}
+
+fn parseBlameIncrementalOutput(
+    allocator: Allocator,
+    rows: *std.ArrayList(ContributorRow),
+    row_index: *std.StringHashMap(usize),
+    line_kinds: []const sloc_lang_plugins.LineKind,
+    blame: []const u8,
+) !void {
+    var commit_authors = std.StringHashMap([]const u8).init(allocator);
+    defer commit_authors.deinit();
+
+    var current_group: ?BlameGroup = null;
+    var current_author: ?[]const u8 = null;
+
+    var it = std.mem.splitScalar(u8, blame, '\n');
+    while (it.next()) |line| {
+        if (parseBlameGroupHeader(line)) |group| {
+            current_group = group;
+            current_author = commit_authors.get(group.commit);
+        } else if (std.mem.startsWith(u8, line, "author ")) {
+            current_author = line["author ".len..];
+            if (current_group) |group| try commit_authors.put(group.commit, current_author.?);
+        } else if (std.mem.startsWith(u8, line, "filename ")) {
+            if (current_group) |group| {
+                const author = current_author orelse "Unknown";
+                const counts = countKindsRange(line_kinds, group.result_line, group.line_count);
+                try addContributorCounts(allocator, rows, row_index, author, counts);
+            }
+            current_group = null;
+            current_author = null;
+        }
+    }
 }
 
 fn readWorktreeFile(allocator: Allocator, repo: Repo, path: []const u8) ![]u8 {
@@ -476,4 +686,38 @@ test "source stats counts blob lines without the sloc binary" {
     try std.testing.expectEqual(@as(u64, 0), counts.test_count);
     try std.testing.expectEqual(@as(u64, 1), counts.comment);
     try std.testing.expect(countBlob("LICENSE", "plain text\n") == null);
+}
+
+test "source stats aggregates contributor blame ranges by counted line kind" {
+    const allocator = std.testing.allocator;
+    const kinds = [_]sloc_lang_plugins.LineKind{ .comment, .code, .test_line, .blank };
+    const blame =
+        \\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 1 1 2
+        \\author Alice
+        \\filename src/main.zig
+        \\bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 3 3 2
+        \\author Bob
+        \\filename src/main.zig
+        \\
+    ;
+
+    var rows: std.ArrayList(ContributorRow) = .empty;
+    defer {
+        freeContributorRows(allocator, rows.items);
+        rows.deinit(allocator);
+    }
+    var row_index = std.StringHashMap(usize).init(allocator);
+    defer row_index.deinit();
+
+    try parseBlameIncrementalOutput(allocator, &rows, &row_index, &kinds, blame);
+
+    try std.testing.expectEqual(@as(usize, 2), rows.items.len);
+    try std.testing.expectEqualStrings("Alice", rows.items[0].name);
+    try std.testing.expectEqual(@as(u64, 1), rows.items[0].code);
+    try std.testing.expectEqual(@as(u64, 0), rows.items[0].test_count);
+    try std.testing.expectEqual(@as(u64, 1), rows.items[0].comment);
+    try std.testing.expectEqualStrings("Bob", rows.items[1].name);
+    try std.testing.expectEqual(@as(u64, 0), rows.items[1].code);
+    try std.testing.expectEqual(@as(u64, 1), rows.items[1].test_count);
+    try std.testing.expectEqual(@as(u64, 0), rows.items[1].comment);
 }

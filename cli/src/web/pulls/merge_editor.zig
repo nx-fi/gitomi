@@ -766,6 +766,8 @@ test "merge conflict editor form includes csrf token and expected oids" {
         .author_principal = try allocator.dupe(u8, "alice"),
         .author_device = try allocator.dupe(u8, "laptop"),
         .source_author = try allocator.dupe(u8, "alice"),
+        .display_author = try allocator.dupe(u8, "alice"),
+        .source_avatar_url = try allocator.dupe(u8, ""),
         .opened_at = try allocator.dupe(u8, "2026-01-01T00:00:00Z"),
         .state_occurred_at = try allocator.dupe(u8, "2026-01-01T00:00:00Z"),
         .state_actor_principal = try allocator.dupe(u8, "alice"),

@@ -32,6 +32,24 @@ const appendJsonFieldInteger = json_writer.appendJsonFieldInteger;
 const appendJsonString = json_writer.appendJsonString;
 const JsonRootKind = json_writer.JsonRootKind;
 
+fn appendSourceIdentityFields(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    source_identity: ?[]const u8,
+    source_email: ?[]const u8,
+    source_avatar_url: ?[]const u8,
+) !void {
+    if (source_identity) |value| {
+        if (value.len != 0) try appendJsonFieldString(buf, allocator, "source_identity", value, true);
+    }
+    if (source_email) |value| {
+        if (value.len != 0) try appendJsonFieldString(buf, allocator, "source_email", value, true);
+    }
+    if (source_avatar_url) |value| {
+        if (value.len != 0) try appendJsonFieldString(buf, allocator, "source_avatar_url", value, true);
+    }
+}
+
 pub fn buildIssueOpenedJson(
     allocator: Allocator,
     cfg: Config,
@@ -130,6 +148,7 @@ pub fn buildIssueOpenedJsonWithLegacyAndMetadata(
     if (metadata.source_author) |value| {
         if (value.len != 0) try appendJsonFieldString(&buf, allocator, "source_author", value, true);
     }
+    try appendSourceIdentityFields(&buf, allocator, metadata.source_identity, metadata.source_email, metadata.source_avatar_url);
     if (metadata.milestone) |value| {
         if (value.len != 0) try appendJsonFieldString(&buf, allocator, "milestone", value, true);
     }
@@ -833,6 +852,7 @@ pub fn buildCommentAddedJsonWithMetadata(
     if (metadata.source_author) |value| {
         if (value.len != 0) try appendJsonFieldString(&buf, allocator, "source_author", value, true);
     }
+    try appendSourceIdentityFields(&buf, allocator, metadata.source_identity, metadata.source_email, metadata.source_avatar_url);
     if (metadata.reply_parent_id) |value| {
         if (value.len != 0) try appendJsonFieldString(&buf, allocator, "reply_parent_id", value, true);
     }
@@ -1013,6 +1033,7 @@ pub fn buildPullOpenedJsonWithLegacyAndMetadata(
     if (metadata.source_author) |value| {
         if (value.len != 0) try appendJsonFieldString(&buf, allocator, "source_author", value, true);
     }
+    try appendSourceIdentityFields(&buf, allocator, metadata.source_identity, metadata.source_email, metadata.source_avatar_url);
     if (metadata.labels.len != 0) try appendJsonFieldStringArray(&buf, allocator, "labels", metadata.labels, true);
     if (metadata.assignees.len != 0) try appendJsonFieldStringArray(&buf, allocator, "assignees", metadata.assignees, true);
     if (metadata.reviewers.len != 0) try appendJsonFieldStringArray(&buf, allocator, "reviewers", metadata.reviewers, true);
