@@ -639,8 +639,14 @@ fn appendLabelRow(
     defer allocator.free(summary);
     const effective_description = if (description.len == 0) summary else description;
     const effective_color = if (validHexColor(color)) color else defaultLabelColor(label);
+    try buf.appendSlice(allocator, "<article class=\"labels-list-row\"");
+    if (label_id.len != 0) {
+        try buf.appendSlice(allocator, " id=\"label-");
+        try shared.appendHtml(buf, allocator, label_id);
+        try buf.append(allocator, '"');
+    }
     try appendTemplate(buf, allocator,
-        \\<article class="labels-list-row" data-label-row data-label-name="{label}" data-label-id="{label_id}" data-label-description="{description}" data-label-color="{color}" data-label-total="{total_count}" data-label-order="{order}" data-label-search-text="{label} {description} {summary}">
+        \\ data-label-row data-label-name="{label}" data-label-id="{label_id}" data-label-description="{description}" data-label-color="{color}" data-label-total="{total_count}" data-label-order="{order}" data-label-search-text="{label} {description} {summary}">
         \\  <button class="labels-drag-handle" type="button" draggable="true" aria-label="Reorder {label}" title="Reorder label" data-label-drag-handle></button>
         \\  <div class="labels-row-main">
     , .{

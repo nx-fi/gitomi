@@ -592,18 +592,23 @@ code {
 }
 .user-menu {
   position: relative;
-  align-self: start;
+  align-self: stretch;
   flex: 0 1 auto;
   min-width: 0;
 }
+.user-menu[open] {
+  z-index: 40;
+}
 .user-menu summary {
-  display: inline-flex;
+  display: grid;
+  grid-template-rows: 36px minmax(0, 1fr);
+  place-items: center;
   align-items: center;
-  gap: 8px;
-  height: 34px;
-  min-height: 34px;
-  max-width: 238px;
-  padding: 0 9px 0 7px;
+  gap: 6px;
+  height: 100%;
+  min-height: 88px;
+  max-width: 210px;
+  padding: 6px 12px 7px;
   color: var(--topbar-text);
   background: color-mix(in oklch, var(--topbar-text) 6%, transparent);
   border: 1px solid var(--topbar-border);
@@ -627,34 +632,34 @@ code {
   position: relative;
   display: inline-grid;
   place-items: center;
-  width: 24px;
-  height: 24px;
+  width: 32px;
+  height: 32px;
   flex: 0 0 auto;
   overflow: hidden;
   border: 1px solid color-mix(in oklch, var(--topbar-border) 78%, var(--panel));
-  border-radius: 6px;
+  border-radius: 7px;
   background: var(--panel-strong);
 }
 .user-avatar::after {
   content: "";
   position: absolute;
   z-index: 2;
-  right: 1px;
-  bottom: 1px;
-  width: 7px;
-  height: 7px;
+  right: 2px;
+  bottom: 2px;
+  width: 8px;
+  height: 8px;
   background: var(--green);
   border: 2px solid var(--panel);
   border-radius: 50%;
 }
 .user-menu-label {
   display: grid;
-  justify-content: start;
+  justify-content: center;
   gap: 2px;
   min-width: 0;
-  max-width: 152px;
+  max-width: 184px;
   line-height: 1.12;
-  text-align: left;
+  text-align: center;
 }
 .user-menu-label strong,
 .user-menu-label span {
@@ -671,25 +676,13 @@ code {
   font-size: 11px;
   font-weight: 700;
 }
-.user-menu summary > .root-caret {
-  margin-left: 2px;
-  color: var(--topbar-link);
-  transition: transform 120ms ease, color 120ms ease;
-}
-.user-menu summary:hover > .root-caret,
-.user-menu[open] summary > .root-caret {
-  color: var(--topbar-text);
-}
-.user-menu[open] summary > .root-caret {
-  transform: rotate(180deg);
-}
 .user-menu-popover {
   position: absolute;
-  top: calc(100% + 6px);
+  top: calc(100% + 8px);
   right: 0;
   z-index: 32;
   display: grid;
-  gap: 2px;
+  gap: 0;
   width: min(340px, calc(100vw - 24px));
   padding: 6px;
   overflow: hidden;
@@ -700,9 +693,9 @@ code {
 }
 .user-menu-section {
   display: grid;
-  gap: 4px;
+  gap: 3px;
   min-width: 0;
-  padding: 9px 10px;
+  padding: 10px 12px;
   border-radius: 7px;
 }
 .user-menu-section + .user-menu-section {
@@ -716,21 +709,21 @@ code {
   overflow-wrap: anywhere;
 }
 .user-menu-section strong {
-  color: var(--text);
-  font-size: 14px;
+  color: var(--muted);
+  font-size: 13px;
   font-weight: 700;
   line-height: 1.25;
 }
 .user-menu-section span {
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1.35;
 }
 .user-menu-section code {
   display: block;
   max-width: 100%;
   padding: 6px 7px;
-  color: var(--text);
+  color: var(--muted);
   background: var(--code-bg);
   border-color: color-mix(in oklch, var(--dropdown-border) 70%, transparent);
   font-size: 11px;
@@ -11596,9 +11589,6 @@ input[type="reset"]:hover,
     padding: 0 8px;
   }
   .user-menu-label {
-    display: none;
-  }
-  .user-menu-caret {
     display: none;
   }
   .user-menu summary {
