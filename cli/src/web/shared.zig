@@ -24,7 +24,7 @@ const loadConfig = repo_mod.loadConfig;
 const default_web_shortcut_leader = "Space";
 const default_web_shortcut_keys = "A S D F J K L E R U I O W Q P Z X C V B N M G H Y T";
 const default_web_shortcut_timeout_ms: u64 = 900;
-const asset_version = "20260517-topbar-sync-live-mode-dictation-vendored-model";
+const asset_version = "20260517-topbar-sync-live-mode";
 
 const WebStats = struct {
     inbox_refs: usize = 0,
@@ -1009,7 +1009,6 @@ pub fn appendShellEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
         \\<script src="/vendor/katex/auto-render.min.js"></script>
         \\<script src="/vendor/mermaid/mermaid.min.js"></script>
         \\<script src="/markdown.js?v={asset_version}"></script>
-        \\<script src="/dictation.js?v={asset_version}"></script>
         \\<script src="/vendor/hljs/all-languages.min.js"></script>
         \\<script src="/highlight/zig.js?v={asset_version}"></script>
         \\<script src="/highlight/solidity.js?v={asset_version}"></script>
@@ -1137,16 +1136,6 @@ pub const MarkdownEditorOptions = struct {
     placeholder: []const u8 = "Leave a comment",
     value: []const u8 = "",
     required: bool = true,
-    dictation: bool = true,
-};
-
-pub const DictationTextareaOptions = struct {
-    label: []const u8,
-    name: []const u8,
-    rows: usize,
-    value: []const u8 = "",
-    placeholder: []const u8 = "",
-    required: bool = false,
 };
 
 pub const MarkdownSourceOptions = struct {
@@ -1328,13 +1317,6 @@ pub fn appendMarkdownEditor(buf: *std.ArrayList(u8), allocator: Allocator, optio
         \\        <button type="button" data-markdown-action="mention" aria-label="Mention" title="Mention">@</button>
         \\        <button type="button" data-markdown-action="reference" aria-label="Issue reference" title="Issue reference">#</button>
     , .{});
-    if (options.dictation) {
-        try appendTemplate(buf, allocator,
-            \\        <span class="markdown-editor-divider" aria-hidden="true"></span>
-            \\        <button class="dictation-toggle" type="button" data-dictation-toggle aria-label="Start dictation" title="Start dictation"><span class="md-icon md-icon-mic" aria-hidden="true"></span></button>
-            \\        <span class="dictation-status" data-dictation-status hidden></span>
-        , .{});
-    }
     try appendTemplate(buf, allocator,
         \\      </div>
         \\      <textarea name="{name}" rows="{rows}" placeholder="{placeholder}"
@@ -1344,33 +1326,10 @@ pub fn appendMarkdownEditor(buf: *std.ArrayList(u8), allocator: Allocator, optio
         .placeholder = options.placeholder,
     });
     if (options.required) try buf.appendSlice(allocator, " required");
-    if (options.dictation) try buf.appendSlice(allocator, " data-dictation-input");
     try appendTemplate(buf, allocator,
         \\ data-markdown-input>{value}</textarea>
         \\      <div class="markdown-editor-preview markdown-body" data-markdown-preview hidden></div>
         \\    </div>
-    , .{ .value = options.value });
-}
-
-pub fn appendDictationTextarea(buf: *std.ArrayList(u8), allocator: Allocator, options: DictationTextareaOptions) !void {
-    try appendTemplate(buf, allocator,
-        \\  <label>{label}</label>
-        \\  <div class="text-block-editor" data-text-block-editor>
-        \\    <div class="text-block-toolbar">
-        \\      <button class="dictation-toggle" type="button" data-dictation-toggle aria-label="Start dictation" title="Start dictation"><span class="md-icon md-icon-mic" aria-hidden="true"></span></button>
-        \\      <span class="dictation-status" data-dictation-status hidden></span>
-        \\    </div>
-        \\    <textarea name="{name}" rows="{rows}" placeholder="{placeholder}" data-dictation-input
-    , .{
-        .label = options.label,
-        .name = options.name,
-        .rows = options.rows,
-        .placeholder = options.placeholder,
-    });
-    if (options.required) try buf.appendSlice(allocator, " required");
-    try appendTemplate(buf, allocator,
-        \\>{value}</textarea>
-        \\  </div>
     , .{ .value = options.value });
 }
 
