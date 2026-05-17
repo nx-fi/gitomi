@@ -2,9 +2,17 @@
   "use strict";
 
   const defaultConfig = {
-    libraryUrl: "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3",
+    libraryUrl: "/vendor/transformers/transformers.min.js",
+    wasmRuntimePath: "/vendor/transformers/",
+    wasmRuntimeModuleUrl: "/vendor/transformers/ort-wasm-simd-threaded.jsep.min.mjs",
+    wasmRuntimeBinaryUrl: "/vendor/transformers/ort-wasm-simd-threaded.jsep.wasm",
     model: "onnx-community/distil-small.en",
+    dtype: "q8",
     device: "auto",
+    allowLocalModels: true,
+    allowRemoteModels: false,
+    localFilesOnly: true,
+    localModelPath: "/models/",
     sampleRate: 16000,
     task: "transcribe",
     language: "english",
@@ -15,6 +23,7 @@
   let transcriberPromise = null;
   let transcriberKey = "";
   let messageQueue = Promise.resolve();
+  let webgpuDisabledReason = "";
 
   function mergedConfig(config) {
     return Object.assign({}, defaultConfig, config || {});
@@ -33,6 +42,10 @@
       message: message,
       detail: detail || null,
     });
+  }
+
+  function trailingSlash(value) {
+    return value && value.charAt(value.length - 1) === "/" ? value : value + "/";
   }
 
   async function importTransformers(config) {
@@ -59,22 +72,34 @@
     if (typeof config.remoteHost === "string" && config.remoteHost) {
       env.remoteHost = config.remoteHost;
     }
+    if (env.backends && env.backends.onnx && env.backends.onnx.wasm) {
+      const wasmRuntimePath = trailingSlash(config.wasmRuntimePath || defaultConfig.wasmRuntimePath);
+      env.backends.onnx.wasm.wasmPaths = {
+        mjs: config.wasmRuntimeModuleUrl || wasmRuntimePath + "ort-wasm-simd-threaded.jsep.min.mjs",
+        wasm: config.wasmRuntimeBinaryUrl || wasmRuntimePath + "ort-wasm-simd-threaded.jsep.wasm",
+      };
+      env.backends.onnx.wasm.proxy = false;
+      if (Number.isFinite(config.wasmNumThreads)) {
+        env.backends.onnx.wasm.numThreads = config.wasmNumThreads;
+      }
+    }
   }
 
   function progressMessage(progress) {
     if (!progress || typeof progress !== "object") return "";
     if (progress.status === "progress" && typeof progress.progress === "number") {
       const file = progress.file ? " " + progress.file : "";
-      return "Downloading model" + file + " " + Math.round(progress.progress) + "%";
+      return "Loading model" + file + " " + Math.round(progress.progress) + "%";
     }
     if (progress.status === "ready") return "Model ready";
     if (progress.status === "initiate") return "Preparing model";
-    if (progress.status === "download") return "Downloading model";
+    if (progress.status === "download") return "Loading model";
     return "";
   }
 
   function candidateDevices(config) {
     if (config.device && config.device !== "auto") return [config.device];
+    if (webgpuDisabledReason) return ["wasm"];
     return self.navigator && self.navigator.gpu ? ["webgpu", "wasm"] : ["wasm"];
   }
 
@@ -87,6 +112,7 @@
       },
     };
     if (config.dtype) options.dtype = config.dtype;
+    if (typeof config.localFilesOnly === "boolean") options.local_files_only = config.localFilesOnly;
     if (config.quantized !== undefined) options.quantized = Boolean(config.quantized);
     return options;
   }
@@ -99,6 +125,10 @@
       dtype: config.dtype || null,
       quantized: config.quantized,
       localModelPath: config.localModelPath || "",
+      wasmRuntimePath: config.wasmRuntimePath || "",
+      wasmRuntimeModuleUrl: config.wasmRuntimeModuleUrl || "",
+      wasmRuntimeBinaryUrl: config.wasmRuntimeBinaryUrl || "",
+      localFilesOnly: config.localFilesOnly,
       allowLocalModels: config.allowLocalModels,
       allowRemoteModels: config.allowRemoteModels,
       remoteHost: config.remoteHost || "",
@@ -133,7 +163,8 @@
         } catch (error) {
           lastError = error;
           if (device === "webgpu" && devices.indexOf("wasm") !== -1) {
-            postStatus("loading", "WebGPU unavailable, falling back to WASM");
+            webgpuDisabledReason = errorMessage(error);
+            postStatus("loading", "WebGPU unavailable, falling back to WASM", { message: webgpuDisabledReason });
           }
         }
       }
@@ -150,6 +181,13 @@
     return transcriberPromise;
   }
 
+  function clearTranscriber(config) {
+    if (transcriberKey === pipelineKey(config)) {
+      transcriberKey = "";
+      transcriberPromise = null;
+    }
+  }
+
   function transcriptionOptions(config) {
     const options = {
       sampling_rate: config.sampleRate || defaultConfig.sampleRate,
@@ -161,14 +199,45 @@
     return options;
   }
 
+  function recognizedText(result) {
+    if (!result) return "";
+    if (typeof result === "string") return result;
+    if (Array.isArray(result)) {
+      return result.map(recognizedText).filter(Boolean).join(" ");
+    }
+    if (typeof result.text === "string" && result.text) return result.text;
+    if (Array.isArray(result.chunks)) {
+      return result.chunks.map(function (chunk) {
+        return chunk && typeof chunk.text === "string" ? chunk.text : "";
+      }).filter(Boolean).join(" ");
+    }
+    return "";
+  }
+
   async function handleTranscribe(data) {
     const id = data.id;
     const config = mergedConfig(data.config);
     try {
-      const loaded = await loadTranscriber(config);
-      postStatus("transcribing", "Transcribing");
-      const result = await loaded.pipe(data.audio, transcriptionOptions(config));
-      const text = typeof result === "string" ? result : String((result && result.text) || "");
+      let loaded = await loadTranscriber(config);
+      let result = null;
+
+      try {
+        postStatus("transcribing", "Transcribing");
+        result = await loaded.pipe(data.audio, transcriptionOptions(config));
+      } catch (error) {
+        if (loaded.device !== "webgpu" || (config.device && config.device !== "auto")) {
+          throw error;
+        }
+
+        webgpuDisabledReason = errorMessage(error);
+        clearTranscriber(config);
+        postStatus("loading", "WebGPU transcription failed, falling back to WASM", { message: webgpuDisabledReason });
+        loaded = await loadTranscriber(config);
+        postStatus("transcribing", "Transcribing");
+        result = await loaded.pipe(data.audio, transcriptionOptions(config));
+      }
+
+      const text = recognizedText(result);
       self.postMessage({
         type: "result",
         id: id,

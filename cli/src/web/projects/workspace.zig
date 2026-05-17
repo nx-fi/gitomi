@@ -6,6 +6,7 @@ const project_chrome = @import("chrome.zig");
 const project_data = @import("data.zig");
 const project_groups = @import("groups.zig");
 const project_issue_render = @import("issue_render.zig");
+const project_overview = @import("overview.zig");
 const project_board = @import("board.zig");
 const project_roadmap = @import("roadmap.zig");
 const project_table = @import("table.zig");
@@ -74,6 +75,8 @@ const appendProjectPriorityOptions = project_chrome.appendProjectPriorityOptions
 const appendProjectNotFound = project_chrome.appendProjectNotFound;
 const appendProjectColumns = project_groups.appendProjectColumns;
 const appendProjectPriorityGroups = project_groups.appendProjectPriorityGroups;
+const appendProjectActivityView = project_overview.appendProjectActivityView;
+const appendProjectOverview = project_overview.appendProjectOverview;
 const appendProjectIssueAssignees = project_issue_render.appendProjectIssueAssignees;
 const appendKanbanCardLabels = project_issue_render.appendKanbanCardLabels;
 const appendIssueAvatar = project_issue_render.appendIssueAvatar;
@@ -96,6 +99,17 @@ pub fn renderProjectWorkspace(
     try shared.appendDetailBackButton(&buf, allocator, shared.literalHref("/projects"), "Back to projects");
     if (!(try projectExists(db, project))) {
         try appendProjectNotFound(&buf, allocator, project);
+        try appendShellEnd(&buf, allocator);
+        return buf.toOwnedSlice(allocator);
+    }
+
+    if (view_ref.len == 0 or std.mem.eql(u8, view_ref, "overview")) {
+        try appendProjectOverview(&buf, allocator, repo, db, project);
+        try appendShellEnd(&buf, allocator);
+        return buf.toOwnedSlice(allocator);
+    }
+    if (std.mem.eql(u8, view_ref, "activity")) {
+        try appendProjectActivityView(&buf, allocator, repo, db, project);
         try appendShellEnd(&buf, allocator);
         return buf.toOwnedSlice(allocator);
     }

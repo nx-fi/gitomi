@@ -65,6 +65,17 @@ const routes = [_]Route{
     Route.static("/markdown.js", "application/javascript", markdown_js),
     Route.static("/dictation.js", "application/javascript", dictation_js),
     Route.static("/dictation.worker.js", "application/javascript", dictation_worker_js),
+    Route.static("/vendor/transformers/transformers.min.js", "application/javascript", transformers_js),
+    Route.static("/vendor/transformers/ort.bundle.min.mjs", "application/javascript", transformers_ort_bundle_mjs),
+    Route.static("/vendor/transformers/ort-wasm-simd-threaded.jsep.min.mjs", "application/javascript", transformers_ort_jsep_mjs),
+    Route.staticBinary("/vendor/transformers/ort-wasm-simd-threaded.jsep.wasm", "application/wasm", transformers_ort_jsep_wasm),
+    Route.static("/models/onnx-community/distil-small.en/config.json", "application/json", model_distil_small_config_json),
+    Route.static("/models/onnx-community/distil-small.en/generation_config.json", "application/json", model_distil_small_generation_config_json),
+    Route.static("/models/onnx-community/distil-small.en/preprocessor_config.json", "application/json", model_distil_small_preprocessor_config_json),
+    Route.static("/models/onnx-community/distil-small.en/tokenizer.json", "application/json", model_distil_small_tokenizer_json),
+    Route.static("/models/onnx-community/distil-small.en/tokenizer_config.json", "application/json", model_distil_small_tokenizer_config_json),
+    Route.staticBinary("/models/onnx-community/distil-small.en/onnx/encoder_model_quantized.onnx", "application/octet-stream", model_distil_small_encoder_quantized_onnx),
+    Route.staticBinary("/models/onnx-community/distil-small.en/onnx/decoder_model_merged_quantized.onnx", "application/octet-stream", model_distil_small_decoder_merged_quantized_onnx),
     Route.static("/vendor/pdfjs/build/pdf.mjs", "application/javascript", pdfjs_mjs),
     Route.static("/vendor/pdfjs/build/pdf.worker.mjs", "application/javascript", pdfjs_worker_mjs),
     Route.static("/vendor/hljs/all-languages.min.js", "application/javascript", highlight_js),
@@ -977,6 +988,17 @@ const projects_js = @embedFile("web/projects.js");
 const markdown_js = @embedFile("web/markdown.js");
 const dictation_js = @embedFile("web/dictation.js");
 const dictation_worker_js = @embedFile("web/dictation.worker.js");
+const transformers_js = @embedFile("web/vendor/transformers/transformers.min.js");
+const transformers_ort_bundle_mjs = @embedFile("web/vendor/transformers/ort.bundle.min.mjs");
+const transformers_ort_jsep_mjs = @embedFile("web/vendor/transformers/ort-wasm-simd-threaded.jsep.min.mjs");
+const transformers_ort_jsep_wasm = @embedFile("web/vendor/transformers/ort-wasm-simd-threaded.jsep.wasm");
+const model_distil_small_config_json = @embedFile("web/models/onnx-community/distil-small.en/config.json");
+const model_distil_small_generation_config_json = @embedFile("web/models/onnx-community/distil-small.en/generation_config.json");
+const model_distil_small_preprocessor_config_json = @embedFile("web/models/onnx-community/distil-small.en/preprocessor_config.json");
+const model_distil_small_tokenizer_json = @embedFile("web/models/onnx-community/distil-small.en/tokenizer.json");
+const model_distil_small_tokenizer_config_json = @embedFile("web/models/onnx-community/distil-small.en/tokenizer_config.json");
+const model_distil_small_encoder_quantized_onnx = @embedFile("web/models/onnx-community/distil-small.en/onnx/encoder_model_quantized.onnx");
+const model_distil_small_decoder_merged_quantized_onnx = @embedFile("web/models/onnx-community/distil-small.en/onnx/decoder_model_merged_quantized.onnx");
 const pdfjs_mjs = @embedFile("web/vendor/pdfjs/build/pdf.mjs");
 const pdfjs_worker_mjs = @embedFile("web/vendor/pdfjs/build/pdf.worker.mjs");
 const marked_js = @embedFile("web/vendor/marked/marked.umd.min.js");
@@ -1445,6 +1467,23 @@ test "web PDF preview assets are routed" {
 test "web dictation assets are routed" {
     try expectStaticRoute("/dictation.js", "application/javascript", false);
     try expectStaticRoute("/dictation.worker.js", "application/javascript", false);
+    try expectStaticRoute("/vendor/transformers/transformers.min.js", "application/javascript", false);
+    try expectStaticRoute("/vendor/transformers/ort.bundle.min.mjs", "application/javascript", false);
+    try expectStaticRoute("/vendor/transformers/ort-wasm-simd-threaded.jsep.min.mjs", "application/javascript", false);
+    try expectStaticRoute("/vendor/transformers/ort-wasm-simd-threaded.jsep.wasm", "application/wasm", true);
+    try expectVendorJavascriptMinifiedPath("/vendor/transformers/transformers.min.js");
+    try expectVendorJavascriptMinifiedPath("/vendor/transformers/ort.bundle.min.mjs");
+    try expectVendorJavascriptMinifiedPath("/vendor/transformers/ort-wasm-simd-threaded.jsep.min.mjs");
+}
+
+test "web dictation model assets are routed" {
+    try expectStaticRoute("/models/onnx-community/distil-small.en/config.json", "application/json", false);
+    try expectStaticRoute("/models/onnx-community/distil-small.en/generation_config.json", "application/json", false);
+    try expectStaticRoute("/models/onnx-community/distil-small.en/preprocessor_config.json", "application/json", false);
+    try expectStaticRoute("/models/onnx-community/distil-small.en/tokenizer.json", "application/json", false);
+    try expectStaticRoute("/models/onnx-community/distil-small.en/tokenizer_config.json", "application/json", false);
+    try expectStaticRoute("/models/onnx-community/distil-small.en/onnx/encoder_model_quantized.onnx", "application/octet-stream", true);
+    try expectStaticRoute("/models/onnx-community/distil-small.en/onnx/decoder_model_merged_quantized.onnx", "application/octet-stream", true);
 }
 
 fn expectStaticRoute(path: []const u8, content_type: []const u8, binary: bool) !void {
@@ -1477,7 +1516,7 @@ fn expectVendorAsset(path: []const u8, content_type: []const u8, binary: bool) !
 
 fn expectVendorJavascriptMinifiedPath(path: []const u8) !void {
     try std.testing.expect(std.mem.startsWith(u8, path, "/vendor/"));
-    try std.testing.expect(std.mem.endsWith(u8, path, ".min.js"));
+    try std.testing.expect(std.mem.endsWith(u8, path, ".min.js") or std.mem.endsWith(u8, path, ".min.mjs"));
 }
 
 test "web static asset etag matcher handles lists and weak tags" {

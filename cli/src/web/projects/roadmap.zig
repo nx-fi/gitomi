@@ -269,11 +269,15 @@ fn appendProjectRoadmapItem(
     legacy_number: i64,
 ) !void {
     const has_start_field = try projectFieldKeyExists(db, project, "start_at");
-    const has_target_field = try projectFieldKeyExists(db, project, "target_at");
+    const has_end_field = try projectFieldKeyExists(db, project, "end_at");
+    const has_legacy_target_field = try projectFieldKeyExists(db, project, "target_at");
     const start_at = if (has_start_field) try projectFieldStringValue(allocator, db, project, id, "start_at") else try allocator.dupe(u8, "");
     defer allocator.free(start_at);
-    const target_at = if (has_target_field) try projectFieldStringValue(allocator, db, project, id, "target_at") else try allocator.dupe(u8, "");
-    defer allocator.free(target_at);
+    const end_at = if (has_end_field) try projectFieldStringValue(allocator, db, project, id, "end_at") else try allocator.dupe(u8, "");
+    defer allocator.free(end_at);
+    const legacy_target_at = if (has_legacy_target_field and end_at.len == 0) try projectFieldStringValue(allocator, db, project, id, "target_at") else try allocator.dupe(u8, "");
+    defer allocator.free(legacy_target_at);
+    const visible_end_at = if (end_at.len != 0) end_at else legacy_target_at;
 
     var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
     const issue_ref = util.shortObjectRef(&issue_ref_buf, id);
@@ -294,7 +298,7 @@ fn appendProjectRoadmapItem(
     try appendTemplate(buf, allocator, " by {author} opened ", .{ .author = author });
     try appendRelativeTime(buf, allocator, opened_at);
     try buf.appendSlice(allocator, "</small>");
-    if (has_start_field or has_target_field) {
+    if (has_start_field or has_end_field or has_legacy_target_field) {
         try appendTemplate(buf, allocator,
             \\<form class="project-roadmap-date-form" method="post" action="/projects/items">
             \\  <input type="hidden" name="action" value="set-roadmap-dates">
@@ -310,10 +314,10 @@ fn appendProjectRoadmapItem(
                 \\  <label>Start<input type="date" name="start_at" value="{start_at}"></label>
             , .{ .start_at = start_at });
         }
-        if (has_target_field) {
+        if (has_end_field or has_legacy_target_field) {
             try appendTemplate(buf, allocator,
-                \\  <label>Target<input type="date" name="target_at" value="{target_at}"></label>
-            , .{ .target_at = target_at });
+                \\  <label>End<input type="date" name="end_at" value="{end_at}"></label>
+            , .{ .end_at = visible_end_at });
         }
         try buf.appendSlice(allocator,
             \\  <button class="button secondary" type="submit">Save</button>
