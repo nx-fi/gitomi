@@ -8,16 +8,13 @@ const errors = @import("errors.zig");
 const event_mod = @import("event.zig");
 const fsck = @import("fsck.zig");
 const git = @import("git.zig");
-const github = @import("github.zig");
-const github_common = @import("github/common.zig");
-const github_live = @import("github/live.zig");
-const gitlab = @import("gitlab.zig");
 const index = @import("index.zig");
 const io = @import("io.zig");
 const issue = @import("issue.zig");
 const milestone = @import("milestone.zig");
 const project = @import("project.zig");
 const pr_mod = @import("pr.zig");
+const providers = @import("providers.zig");
 const rbac = @import("rbac.zig");
 const repo_mod = @import("repo.zig");
 const reset = @import("reset.zig");
@@ -28,6 +25,8 @@ const web = @import("web.zig");
 
 const Allocator = std.mem.Allocator;
 const CliError = errors.CliError;
+const github_common = providers.github.common;
+const github_live = providers.github.live;
 
 const CommandHandler = *const fn (Allocator, []const []const u8, []const u8) anyerror!void;
 
@@ -64,8 +63,6 @@ const command_dispatch = std.StaticStringMap(Command).initComptime(.{
     .{ "action", Command{ .handler = runActions, .command_name = "gt action" } },
     .{ "runs", Command{ .handler = runRuns, .command_name = "gt runs" } },
     .{ "sync", Command{ .handler = runSync, .command_name = "gt sync" } },
-    .{ "github", Command{ .handler = runGithub, .command_name = "gt github" } },
-    .{ "gitlab", Command{ .handler = runGitlab, .command_name = "gt gitlab" } },
     .{ "web", Command{ .handler = runWeb, .command_name = "gt web" } },
 });
 
@@ -94,6 +91,10 @@ fn realMain() !void {
 
     const cmd = args[1];
     const command = command_dispatch.get(cmd) orelse {
+        if (providers.get(cmd)) |provider| {
+            try provider.run(allocator, args[2..]);
+            return;
+        }
         try io.eprint("gt: unknown command '{s}'\n\n", .{cmd});
         try printUsage();
         return CliError.InvalidArgument;
@@ -199,14 +200,6 @@ fn runRuns(allocator: Allocator, args: []const []const u8, _: []const u8) !void 
 
 fn runSync(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
     try cmdSync(allocator, args);
-}
-
-fn runGithub(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
-    try github.cmdGithub(allocator, args);
-}
-
-fn runGitlab(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
-    try gitlab.cmdGitlab(allocator, args);
 }
 
 fn runWeb(allocator: Allocator, args: []const []const u8, _: []const u8) !void {

@@ -28,7 +28,7 @@ const sendRedirect = shared.sendRedirect;
 const sendResponse = shared.sendResponse;
 
 const max_blob_display_bytes = 512 * 1024;
-const max_raw_blob_bytes = git.max_git_output;
+const max_raw_blob_bytes = 128 * 1024 * 1024;
 const root_partial_priority_repository = 30;
 const root_partial_priority_branch = 30;
 const root_partial_priority_commit_count = 35;

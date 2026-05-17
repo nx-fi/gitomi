@@ -1,10 +1,10 @@
 const std = @import("std");
-const errors = @import("../errors.zig");
-const event_mod = @import("../event.zig");
-const git = @import("../git.zig");
-const io = @import("../io.zig");
-const json_writer = @import("../json_writer.zig");
-const util = @import("../util.zig");
+const errors = @import("../../errors.zig");
+const event_mod = @import("../../event.zig");
+const git = @import("../../git.zig");
+const io = @import("../../io.zig");
+const json_writer = @import("../../json_writer.zig");
+const util = @import("../../util.zig");
 
 const Allocator = std.mem.Allocator;
 const CliError = errors.CliError;

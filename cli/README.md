@@ -99,6 +99,9 @@ gt sync [--remote REMOTE] [--pull-only|--push-only]
 gt github import [--repo OWNER/REPO] [--token-env NAME|--token-file PATH] [--from-file PATH] [--no-comments] [--no-projects]
 gt github export --repo OWNER/REPO [--token-env NAME|--token-file PATH|--use-gh] [--dry-run] [--map-file PATH] [--reuse-legacy]
 gt github live [--repo OWNER/REPO] --webhook-url URL (--secret-env NAME|--secret-file PATH) [--host 127.0.0.1] [--port 12656] [--path /github/webhook] [--remote REMOTE] [--interval-ms N] [--once] [--no-subscribe] [--dry-run] [--no-git-sync]
+gt gitlab import [--project GROUP/PROJECT] [--token-env NAME|--token-file PATH] [--from-file PATH] [--no-comments]
+gt gitlab export --project GROUP/PROJECT [--token-env NAME|--token-file PATH] [--dry-run] [--map-file PATH] [--reuse-legacy]
+gt gitlab sync --project GROUP/PROJECT [--token-env NAME|--token-file PATH] [--remote REMOTE] [--interval-ms N] [--max-pages N] [--dry-run] [--no-git-sync]
 gt web [--local] [--host 127.0.0.1] [--port 12655] [--once]
 gt web --live [--host 127.0.0.1] [--port 12655] [--repo OWNER/REPO] [--webhook-url URL] (--secret-env NAME|--secret-file PATH) [--live-host 127.0.0.1] [--live-port 12656] [--live-path /github/webhook] [--remote REMOTE] [--interval-ms N] [--no-subscribe] [--dry-run] [--no-git-sync]
 ```
@@ -260,6 +263,26 @@ already exists, `--once` for one webhook request plus one export pass, or
 webhook imports require `--secret-env` or `--secret-file` so GitHub deliveries are authenticated with
 `X-Hub-Signature-256`; use the same secret when configuring an existing hook with
 `--no-subscribe`.
+
+`gt gitlab import` reads GitLab issues and merge requests from the GitLab REST
+API, or a fixture JSON object with `issues`, `merge_requests`/`pulls`, and
+optional `notes`/`comments` fields. It writes signed import events through a
+delegated `import-bot/gitlab` actor. GitLab credentials come from
+`GITLAB_TOKEN`, `GL_TOKEN`, `--token-env`, or `--token-file`. Imported issue and
+merge request IIDs are stored as `legacy.gitlab_issue_iid` and
+`legacy.gitlab_merge_request_iid`, materialized as `gitlab` aliases, and can be
+used as `gl#123`, `gl:123`, `gitlab#123`, or `gitlab:123` references.
+
+`gt gitlab export` replays accepted Gitomi issue, pull, and comment transitions
+through the GitLab REST API and stores UUID-to-IID mappings in
+`.git/gitomi/gitlab/<project>/map.jsonl`. `--reuse-legacy` maps previously
+imported GitLab objects instead of recreating them.
+
+`gt gitlab sync` performs a two-way API sync: optional Gitomi `gt sync` pull,
+GitLab import, GitLab export of local accepted events since the last sync, and
+optional Gitomi `gt sync` push. State and mappings live under
+`.git/gitomi/gitlab/<project>/`; set `--interval-ms N` to poll continuously or
+`--no-git-sync` to skip the surrounding Git transport steps.
 
 `gt web` starts a local-only GitHub-like web UI for the current repository. It
 binds to loopback on port 12655 by default, retrying nearby random ports if that

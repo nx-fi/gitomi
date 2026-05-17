@@ -387,6 +387,11 @@ pub fn resolveIssueId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]
         try eprint("gt issue: no issue has GitHub legacy number #{d}\n", .{number});
         return CliError.NotFound;
     }
+    if (parseExplicitLegacyGitlabNumber(raw_ref)) |number| {
+        if (try lookupLegacyGitlabObjectId(allocator, repo, "issue", number)) |id| return id;
+        try eprint("gt issue: no issue has GitLab legacy IID #{d}\n", .{number});
+        return CliError.NotFound;
+    }
 
     const value = issueRefValue(raw_ref);
 
@@ -403,6 +408,7 @@ pub fn resolveIssueId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]
         if (try lookupObjectIdByHashRefInDb(allocator, &db, "issues", "issue", value)) |id| return id;
         if (parsePositiveDecimal(value)) |number| {
             if (try lookupLegacyGithubObjectIdInDb(allocator, &db, "issue", number)) |id| return id;
+            if (try lookupLegacyProviderObjectIdInDb(allocator, &db, "gitlab", "issue", number)) |id| return id;
         }
         try eprint("gt issue: no issue matches #{s}\n", .{value});
         return CliError.NotFound;
@@ -410,11 +416,12 @@ pub fn resolveIssueId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]
 
     if (parsePositiveDecimal(value)) |number| {
         if (try lookupLegacyGithubObjectIdInDb(allocator, &db, "issue", number)) |id| return id;
-        try eprint("gt issue: no issue has GitHub legacy number #{d}\n", .{number});
+        if (try lookupLegacyProviderObjectIdInDb(allocator, &db, "gitlab", "issue", number)) |id| return id;
+        try eprint("gt issue: no issue has GitHub or GitLab legacy number #{d}\n", .{number});
         return CliError.NotFound;
     }
 
-    try eprint("gt issue: issue reference must be a 7+ hex hash alias, full UUID, or GitHub number\n", .{});
+    try eprint("gt issue: issue reference must be a 7+ hex hash alias, full UUID, or GitHub/GitLab number\n", .{});
     return CliError.InvalidReference;
 }
 
@@ -422,6 +429,11 @@ pub fn resolvePullId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u
     if (parseExplicitLegacyGithubNumber(raw_ref)) |number| {
         if (try lookupLegacyGithubObjectId(allocator, repo, "pull", number)) |id| return id;
         try eprint("gt pr: no PR has GitHub legacy number #{d}\n", .{number});
+        return CliError.NotFound;
+    }
+    if (parseExplicitLegacyGitlabNumber(raw_ref)) |number| {
+        if (try lookupLegacyGitlabObjectId(allocator, repo, "pull", number)) |id| return id;
+        try eprint("gt pr: no PR has GitLab legacy IID !{d}\n", .{number});
         return CliError.NotFound;
     }
 
@@ -440,6 +452,7 @@ pub fn resolvePullId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u
         if (try lookupObjectIdByHashRefInDb(allocator, &db, "pulls", "PR", value)) |id| return id;
         if (parsePositiveDecimal(value)) |number| {
             if (try lookupLegacyGithubObjectIdInDb(allocator, &db, "pull", number)) |id| return id;
+            if (try lookupLegacyProviderObjectIdInDb(allocator, &db, "gitlab", "pull", number)) |id| return id;
         }
         try eprint("gt pr: no PR matches #{s}\n", .{value});
         return CliError.NotFound;
@@ -447,11 +460,12 @@ pub fn resolvePullId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u
 
     if (parsePositiveDecimal(value)) |number| {
         if (try lookupLegacyGithubObjectIdInDb(allocator, &db, "pull", number)) |id| return id;
-        try eprint("gt pr: no PR has GitHub legacy number #{d}\n", .{number});
+        if (try lookupLegacyProviderObjectIdInDb(allocator, &db, "gitlab", "pull", number)) |id| return id;
+        try eprint("gt pr: no PR has GitHub or GitLab legacy number #{d}\n", .{number});
         return CliError.NotFound;
     }
 
-    try eprint("gt pr: PR reference must be a 7+ hex hash alias, full UUID, or GitHub number\n", .{});
+    try eprint("gt pr: PR reference must be a 7+ hex hash alias, full UUID, or GitHub/GitLab number\n", .{});
     return CliError.InvalidReference;
 }
 
@@ -789,6 +803,21 @@ fn parseExplicitLegacyGithubNumber(raw_ref: []const u8) ?i64 {
         trimmed["gh#".len..]
     else if (std.mem.startsWith(u8, trimmed, "gh:"))
         trimmed["gh:".len..]
+    else
+        return null;
+    return parsePositiveDecimal(value);
+}
+
+fn parseExplicitLegacyGitlabNumber(raw_ref: []const u8) ?i64 {
+    const trimmed = std.mem.trim(u8, raw_ref, " \t\r\n");
+    const value = if (std.mem.startsWith(u8, trimmed, "gitlab#"))
+        trimmed["gitlab#".len..]
+    else if (std.mem.startsWith(u8, trimmed, "gitlab:"))
+        trimmed["gitlab:".len..]
+    else if (std.mem.startsWith(u8, trimmed, "gl#"))
+        trimmed["gl#".len..]
+    else if (std.mem.startsWith(u8, trimmed, "gl:"))
+        trimmed["gl:".len..]
     else
         return null;
     return parsePositiveDecimal(value);
@@ -1162,6 +1191,9 @@ pub fn showIssueFromIndex(allocator: Allocator, repo: Repo, issue_id: []const u8
     if (try legacyGithubNumberForObjectInDb(&db, "issue", id)) |number| {
         try out("github:    #{d}\n", .{number});
     }
+    if (try legacyProviderNumberForObjectInDb(&db, "gitlab", "issue", id)) |number| {
+        try out("gitlab:    #{d}\n", .{number});
+    }
     try out("labels:    {s}\n", .{labels});
     try out("assignees: {s}\n", .{assignees});
     if (milestone.len != 0) {
@@ -1475,6 +1507,9 @@ pub fn showPullFromIndex(allocator: Allocator, repo: Repo, pull_id: []const u8, 
     try out("opened_at:  {s}\n", .{opened_at});
     if (try legacyGithubNumberForObjectInDb(&db, "pull", id)) |number| {
         try out("github:     #{d}\n", .{number});
+    }
+    if (try legacyProviderNumberForObjectInDb(&db, "gitlab", "pull", id)) |number| {
+        try out("gitlab:     !{d}\n", .{number});
     }
     try out("base:       {s}\n", .{base_ref});
     try out("head:       {s}\n", .{head_ref});

@@ -24,6 +24,6 @@ test {
     _ = @import("runs.zig");
     _ = @import("sync.zig");
     _ = @import("fsck.zig");
-    _ = @import("github.zig");
+    _ = @import("providers.zig");
     _ = @import("web.zig");
 }
