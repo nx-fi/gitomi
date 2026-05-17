@@ -147,6 +147,12 @@ pub const PullStateFilter = enum {
     all,
 };
 
+pub const PullSort = enum {
+    newest,
+    oldest,
+    updated,
+};
+
 pub const PullCounts = struct {
     open: usize = 0,
     merged: usize = 0,
@@ -163,6 +169,7 @@ pub const PullListOptions = struct {
     reviewer: ?[]const u8 = null,
     base: ?[]const u8 = null,
     head: ?[]const u8 = null,
+    sort: PullSort = .newest,
     limit: ?usize = null,
     offset: ?usize = null,
 };
@@ -377,6 +384,7 @@ pub const ParsedPullSearchQuery = struct {
     reviewer: ?[]u8 = null,
     base: ?[]u8 = null,
     head: ?[]u8 = null,
+    sort: ?PullSort = null,
 
     pub fn deinit(self: *ParsedPullSearchQuery, allocator: Allocator) void {
         if (self.q) |value| allocator.free(value);
@@ -534,6 +542,13 @@ fn parsePullSearchPredicate(allocator: Allocator, parsed: *ParsedPullSearchQuery
     if (std.ascii.eqlIgnoreCase(predicate.key, "reviewer")) return try setParsedSearchValue(allocator, &parsed.reviewer, predicate.value);
     if (std.ascii.eqlIgnoreCase(predicate.key, "base")) return try setParsedSearchValue(allocator, &parsed.base, predicate.value);
     if (std.ascii.eqlIgnoreCase(predicate.key, "head")) return try setParsedSearchValue(allocator, &parsed.head, predicate.value);
+    if (std.ascii.eqlIgnoreCase(predicate.key, "sort")) {
+        if (pullSortFromValueIgnoreCase(predicate.value)) |sort| {
+            parsed.sort = sort;
+            return true;
+        }
+        return false;
+    }
     return false;
 }
 
@@ -597,6 +612,20 @@ pub fn issueSortFromValue(value: []const u8) ?IssueSort {
     return null;
 }
 
+fn pullSortFromValueIgnoreCase(value: []const u8) ?PullSort {
+    if (std.ascii.eqlIgnoreCase(value, "newest")) return .newest;
+    if (std.ascii.eqlIgnoreCase(value, "oldest")) return .oldest;
+    if (std.ascii.eqlIgnoreCase(value, "updated")) return .updated;
+    return null;
+}
+
+pub fn pullSortFromValue(value: []const u8) ?PullSort {
+    if (std.mem.eql(u8, value, "newest")) return .newest;
+    if (std.mem.eql(u8, value, "oldest")) return .oldest;
+    if (std.mem.eql(u8, value, "updated")) return .updated;
+    return null;
+}
+
 pub fn hasRestrictiveIssueFilters(filters: IssueListOptions) bool {
     return filters.q != null or
         filters.author != null or
@@ -625,6 +654,14 @@ pub fn pullStateValue(filter: PullStateFilter) []const u8 {
     };
 }
 
+pub fn pullSortValue(sort: PullSort) []const u8 {
+    return switch (sort) {
+        .newest => "newest",
+        .oldest => "oldest",
+        .updated => "updated",
+    };
+}
+
 pub fn pullSearchQuery(filter: PullStateFilter) []const u8 {
     return switch (filter) {
         .open => "is:pr state:open",
@@ -646,6 +683,7 @@ pub fn pullFilterQueryOwned(allocator: Allocator, filters: PullListOptions) ![]u
     if (filters.reviewer) |value| try appendSearchFilterToken(&query, allocator, "reviewer", value);
     if (filters.base) |value| try appendSearchFilterToken(&query, allocator, "base", value);
     if (filters.head) |value| try appendSearchFilterToken(&query, allocator, "head", value);
+    if (filters.sort != .newest) try appendSearchFilterToken(&query, allocator, "sort", pullSortValue(filters.sort));
     if (filters.q) |value| try appendSearchValueToken(&query, allocator, value);
     return query.toOwnedSlice(allocator);
 }
@@ -959,9 +997,10 @@ pub fn pullListSql(allocator: Allocator, options: PullListOptions) ![]u8 {
     if (options.base != null) try appendPullListCondition(&sql, allocator, &conditions, "p.base_ref = ?");
     if (options.head != null) try appendPullListCondition(&sql, allocator, &conditions, "p.head_ref = ?");
 
-    try sql.appendSlice(allocator, switch (options.state) {
-        .open => "\nORDER BY p.opened_at DESC, p.id DESC",
-        .merged, .closed, .all => "\nORDER BY p.state_occurred_at DESC, p.opened_at DESC, p.id DESC",
+    try sql.appendSlice(allocator, switch (options.sort) {
+        .newest => "\nORDER BY p.opened_at DESC, p.id DESC",
+        .oldest => "\nORDER BY p.opened_at ASC, p.id ASC",
+        .updated => "\nORDER BY p.state_occurred_at DESC, p.opened_at DESC, p.id DESC",
     });
     if (options.limit) |_| try sql.appendSlice(allocator, "\nLIMIT ?");
     if (options.limit != null and options.offset != null) try sql.appendSlice(allocator, "\nOFFSET ?");
@@ -1404,12 +1443,12 @@ fn appendIssueFiltersJsonField(buf: *std.ArrayList(u8), allocator: Allocator, fi
     try buf.append(allocator, ':');
     try buf.append(allocator, '{');
     try appendJsonFieldString(buf, allocator, "state", issueStateValue(filters.state), true);
-    try appendJsonFieldString(buf, allocator, "sort", issueSortValue(filters.sort), filters.q != null or filters.author != null or filters.label != null or filters.project != null or filters.milestone != null or filters.assignee != null or filters.limit != null);
-    try appendOptionalStringJsonField(buf, allocator, "q", filters.q, filters.author != null or filters.label != null or filters.project != null or filters.milestone != null or filters.assignee != null or filters.limit != null);
-    try appendOptionalStringJsonField(buf, allocator, "author", filters.author, filters.label != null or filters.project != null or filters.milestone != null or filters.assignee != null or filters.limit != null);
-    try appendOptionalStringJsonField(buf, allocator, "label", filters.label, filters.project != null or filters.milestone != null or filters.assignee != null or filters.limit != null);
-    try appendOptionalStringJsonField(buf, allocator, "project", filters.project, filters.milestone != null or filters.assignee != null or filters.limit != null);
-    try appendOptionalStringJsonField(buf, allocator, "milestone", filters.milestone, filters.assignee != null or filters.limit != null);
+    try appendJsonFieldString(buf, allocator, "sort", issueSortValue(filters.sort), true);
+    try appendOptionalStringJsonField(buf, allocator, "q", filters.q, true);
+    try appendOptionalStringJsonField(buf, allocator, "author", filters.author, true);
+    try appendOptionalStringJsonField(buf, allocator, "label", filters.label, true);
+    try appendOptionalStringJsonField(buf, allocator, "project", filters.project, true);
+    try appendOptionalStringJsonField(buf, allocator, "milestone", filters.milestone, true);
     try appendOptionalStringJsonField(buf, allocator, "assignee", filters.assignee, filters.limit != null);
     if (filters.limit) |value| try appendJsonFieldInteger(buf, allocator, "limit", @intCast(value), false);
     try buf.append(allocator, '}');
@@ -1420,13 +1459,14 @@ fn appendPullFiltersJsonField(buf: *std.ArrayList(u8), allocator: Allocator, fil
     try appendJsonString(buf, allocator, "filters");
     try buf.append(allocator, ':');
     try buf.append(allocator, '{');
-    try appendJsonFieldString(buf, allocator, "state", pullStateValue(filters.state), filters.q != null or filters.author != null or filters.label != null or filters.assignee != null or filters.reviewer != null or filters.base != null or filters.head != null or filters.limit != null);
-    try appendOptionalStringJsonField(buf, allocator, "q", filters.q, filters.author != null or filters.label != null or filters.assignee != null or filters.reviewer != null or filters.base != null or filters.head != null or filters.limit != null);
-    try appendOptionalStringJsonField(buf, allocator, "author", filters.author, filters.label != null or filters.assignee != null or filters.reviewer != null or filters.base != null or filters.head != null or filters.limit != null);
-    try appendOptionalStringJsonField(buf, allocator, "label", filters.label, filters.assignee != null or filters.reviewer != null or filters.base != null or filters.head != null or filters.limit != null);
-    try appendOptionalStringJsonField(buf, allocator, "assignee", filters.assignee, filters.reviewer != null or filters.base != null or filters.head != null or filters.limit != null);
-    try appendOptionalStringJsonField(buf, allocator, "reviewer", filters.reviewer, filters.base != null or filters.head != null or filters.limit != null);
-    try appendOptionalStringJsonField(buf, allocator, "base", filters.base, filters.head != null or filters.limit != null);
+    try appendJsonFieldString(buf, allocator, "state", pullStateValue(filters.state), true);
+    try appendJsonFieldString(buf, allocator, "sort", pullSortValue(filters.sort), true);
+    try appendOptionalStringJsonField(buf, allocator, "q", filters.q, true);
+    try appendOptionalStringJsonField(buf, allocator, "author", filters.author, true);
+    try appendOptionalStringJsonField(buf, allocator, "label", filters.label, true);
+    try appendOptionalStringJsonField(buf, allocator, "assignee", filters.assignee, true);
+    try appendOptionalStringJsonField(buf, allocator, "reviewer", filters.reviewer, true);
+    try appendOptionalStringJsonField(buf, allocator, "base", filters.base, true);
     try appendOptionalStringJsonField(buf, allocator, "head", filters.head, filters.limit != null);
     if (filters.limit) |value| try appendJsonFieldInteger(buf, allocator, "limit", @intCast(value), false);
     try buf.append(allocator, '}');
@@ -2085,7 +2125,7 @@ test "work item search query filters state and keeps text terms" {
     try std.testing.expectEqualStrings("alice", quoted_issue_query.assignee.?);
     try std.testing.expectEqualStrings("manual filter", quoted_issue_query.q.?);
 
-    var pull_query = try parsePullSearchQuery(std.testing.allocator, "is:pr state:merged author:alice label:review reviewer:bob base:main head:\"feature branch\" branch search");
+    var pull_query = try parsePullSearchQuery(std.testing.allocator, "is:pr state:merged author:alice label:review reviewer:bob base:main head:\"feature branch\" sort:updated branch search");
     defer pull_query.deinit(std.testing.allocator);
     try std.testing.expectEqual(PullStateFilter.merged, pull_query.state.?);
     try std.testing.expectEqualStrings("alice", pull_query.author.?);
@@ -2093,6 +2133,7 @@ test "work item search query filters state and keeps text terms" {
     try std.testing.expectEqualStrings("bob", pull_query.reviewer.?);
     try std.testing.expectEqualStrings("main", pull_query.base.?);
     try std.testing.expectEqualStrings("feature branch", pull_query.head.?);
+    try std.testing.expectEqual(PullSort.updated, pull_query.sort.?);
     try std.testing.expectEqualStrings("branch search", pull_query.q.?);
 }
 
@@ -2115,9 +2156,39 @@ test "work item search query formatter emits canonical filters" {
         .q = "branch search",
         .reviewer = "bob",
         .head = "feature branch",
+        .sort = .updated,
     });
     defer std.testing.allocator.free(pull_query);
-    try std.testing.expectEqualStrings("is:pr state:all reviewer:bob head:\"feature branch\" \"branch search\"", pull_query);
+    try std.testing.expectEqualStrings("is:pr state:all reviewer:bob head:\"feature branch\" sort:updated \"branch search\"", pull_query);
+}
+
+test "work item filter JSON emits valid defaults" {
+    var issue_buf: std.ArrayList(u8) = .empty;
+    defer issue_buf.deinit(std.testing.allocator);
+    try issue_buf.append(std.testing.allocator, '{');
+    try appendIssueFiltersJsonField(&issue_buf, std.testing.allocator, .{
+        .allocator = std.testing.allocator,
+        .state = .open,
+    }, false);
+    try issue_buf.append(std.testing.allocator, '}');
+
+    var issue_parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, issue_buf.items, .{});
+    defer issue_parsed.deinit();
+    const issue_filters = issue_parsed.value.object.get("filters").?.object;
+    try std.testing.expectEqualStrings("newest", issue_filters.get("sort").?.string);
+
+    var pull_buf: std.ArrayList(u8) = .empty;
+    defer pull_buf.deinit(std.testing.allocator);
+    try pull_buf.append(std.testing.allocator, '{');
+    try appendPullFiltersJsonField(&pull_buf, std.testing.allocator, .{
+        .state = .open,
+    }, false);
+    try pull_buf.append(std.testing.allocator, '}');
+
+    var pull_parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, pull_buf.items, .{});
+    defer pull_parsed.deinit();
+    const pull_filters = pull_parsed.value.object.get("filters").?.object;
+    try std.testing.expectEqualStrings("newest", pull_filters.get("sort").?.string);
 }
 
 test "pull list SQL includes search filter" {
@@ -2126,6 +2197,7 @@ test "pull list SQL includes search filter" {
         .q = "feature",
         .label = "review",
         .reviewer = "alice",
+        .sort = .updated,
     });
     defer std.testing.allocator.free(sql);
     try std.testing.expect(std.mem.indexOf(u8, sql, "p.state = ?") != null);
@@ -2134,6 +2206,7 @@ test "pull list SQL includes search filter" {
     try std.testing.expect(std.mem.indexOf(u8, sql, "comments c") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "pull_labels") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "pull_reviewers") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "ORDER BY p.state_occurred_at DESC") != null);
 }
 
 test "work item list SQL supports limit and offset pagination" {

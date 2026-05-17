@@ -339,30 +339,30 @@ pub fn languageDisplayName(language: []const u8) []const u8 {
 }
 
 pub fn languageColor(language: []const u8) []const u8 {
-    if (std.ascii.eqlIgnoreCase(language, "zig")) return "#ec915c";
-    if (std.ascii.eqlIgnoreCase(language, "c")) return "#555555";
-    if (std.ascii.eqlIgnoreCase(language, "cpp")) return "#f34b7d";
-    if (std.ascii.eqlIgnoreCase(language, "javascript")) return "#f1e05a";
-    if (std.ascii.eqlIgnoreCase(language, "typescript")) return "#3178c6";
-    if (std.ascii.eqlIgnoreCase(language, "css")) return "#563d7c";
-    if (std.ascii.eqlIgnoreCase(language, "bash") or std.ascii.eqlIgnoreCase(language, "shell")) return "#89e051";
-    if (std.ascii.eqlIgnoreCase(language, "markdown")) return "#083fa1";
-    if (std.ascii.eqlIgnoreCase(language, "python")) return "#3572a5";
-    if (std.ascii.eqlIgnoreCase(language, "rust")) return "#dea584";
-    if (std.ascii.eqlIgnoreCase(language, "go")) return "#00add8";
-    if (std.ascii.eqlIgnoreCase(language, "html")) return "#e34c26";
-    if (std.ascii.eqlIgnoreCase(language, "json")) return "#292929";
-    if (std.ascii.eqlIgnoreCase(language, "xml")) return "#0060ac";
-    if (std.ascii.eqlIgnoreCase(language, "yaml")) return "#cb171e";
-    if (std.ascii.eqlIgnoreCase(language, "sql")) return "#e38c00";
-    if (std.ascii.eqlIgnoreCase(language, "nix")) return "#7e7eff";
-    if (std.ascii.eqlIgnoreCase(language, "tla")) return "#4c4f69";
-    if (std.ascii.eqlIgnoreCase(language, "solidity")) return "#aa6746";
-    return "#8b949e";
+    if (std.ascii.eqlIgnoreCase(language, "zig")) return "var(--sg-color-data-8)";
+    if (std.ascii.eqlIgnoreCase(language, "c")) return "var(--sg-color-data-5)";
+    if (std.ascii.eqlIgnoreCase(language, "cpp")) return "var(--sg-color-data-7)";
+    if (std.ascii.eqlIgnoreCase(language, "javascript")) return "var(--sg-color-data-10)";
+    if (std.ascii.eqlIgnoreCase(language, "typescript")) return "var(--sg-color-data-3)";
+    if (std.ascii.eqlIgnoreCase(language, "css")) return "var(--sg-color-data-5)";
+    if (std.ascii.eqlIgnoreCase(language, "bash") or std.ascii.eqlIgnoreCase(language, "shell")) return "var(--sg-color-data-11)";
+    if (std.ascii.eqlIgnoreCase(language, "markdown")) return "var(--sg-color-data-3)";
+    if (std.ascii.eqlIgnoreCase(language, "python")) return "var(--sg-color-data-3)";
+    if (std.ascii.eqlIgnoreCase(language, "rust")) return "var(--sg-color-data-8)";
+    if (std.ascii.eqlIgnoreCase(language, "go")) return "var(--sg-color-data-2)";
+    if (std.ascii.eqlIgnoreCase(language, "html")) return "var(--sg-color-data-8)";
+    if (std.ascii.eqlIgnoreCase(language, "json")) return "var(--sg-color-data-5)";
+    if (std.ascii.eqlIgnoreCase(language, "xml")) return "var(--sg-color-data-2)";
+    if (std.ascii.eqlIgnoreCase(language, "yaml")) return "var(--sg-color-data-8)";
+    if (std.ascii.eqlIgnoreCase(language, "sql")) return "var(--sg-color-data-9)";
+    if (std.ascii.eqlIgnoreCase(language, "nix")) return "var(--sg-color-data-4)";
+    if (std.ascii.eqlIgnoreCase(language, "tla")) return "var(--sg-color-data-5)";
+    if (std.ascii.eqlIgnoreCase(language, "solidity")) return "var(--sg-color-data-8)";
+    return "var(--sg-color-data-5)";
 }
 
 pub fn contributorColor(_: []const u8) []const u8 {
-    return "#10B8AA";
+    return "var(--sg-color-primary)";
 }
 
 fn collectRepositoryPaths(allocator: Allocator, repo: Repo) !?[][]u8 {

@@ -20,12 +20,23 @@ const sqlite = index.sqlite;
 const PullStateFilter = work_items.PullStateFilter;
 const PullFilters = work_items.PullListOptions;
 const PullCounts = work_items.PullCounts;
+const PullSort = work_items.PullSort;
 
 const pulls_default_page_size = 25;
 const pulls_max_page_size = 100;
 
+const PullFilterKind = enum {
+    author,
+    label,
+    reviewer,
+    assignee,
+};
+
 const PullHrefOverride = struct {
     state: ?PullStateFilter = null,
+    sort: ?PullSort = null,
+    param_name: ?[]const u8 = null,
+    param_value: ?[]const u8 = null,
     page: ?usize = null,
     per_page: ?usize = null,
 };
@@ -53,7 +64,7 @@ pub fn renderPullsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]
     try appendShellStart(&buf, allocator, repo, "Pull Requests", "pulls");
     try appendPullsToolbar(&buf, allocator, filters);
     try buf.appendSlice(allocator, "<section class=\"panel pulls-panel\">");
-    try appendPullsListHeader(&buf, allocator, filters, counts);
+    try appendPullsListHeader(&buf, allocator, &db, filters, counts);
 
     var stmt = try work_items.preparePullListStmt(allocator, &db, filters);
     defer stmt.deinit();
@@ -115,12 +126,14 @@ fn pullFiltersFromTarget(allocator: Allocator, target: []const u8, default_state
     filters.reviewer = try queryTextFilterOwned(allocator, target, "reviewer");
     filters.base = try queryTextFilterOwned(allocator, target, "base");
     filters.head = try queryTextFilterOwned(allocator, target, "head");
+    filters.sort = try pullSortFromTarget(allocator, target);
 
     if (try queryTextFilterOwned(allocator, target, "q")) |query| {
         defer allocator.free(query);
         var parsed = try work_items.parsePullSearchQuery(allocator, query);
         defer parsed.deinit(allocator);
         if (parsed.state) |state| filters.state = state;
+        if (parsed.sort) |sort| filters.sort = sort;
         takePullFilterValue(allocator, &filters.q, &parsed.q);
         takePullFilterValue(allocator, &filters.author, &parsed.author);
         takePullFilterValue(allocator, &filters.label, &parsed.label);
@@ -130,6 +143,13 @@ fn pullFiltersFromTarget(allocator: Allocator, target: []const u8, default_state
         takePullFilterValue(allocator, &filters.head, &parsed.head);
     }
     return filters;
+}
+
+fn pullSortFromTarget(allocator: Allocator, target: []const u8) !PullSort {
+    const sort_value = try queryValueOwned(allocator, target, "sort");
+    defer if (sort_value) |value| allocator.free(value);
+    const value = sort_value orelse return .newest;
+    return work_items.pullSortFromValue(value) orelse .newest;
 }
 
 fn pullFiltersDeinit(allocator: Allocator, filters: *PullFilters) void {
@@ -174,7 +194,7 @@ fn pullSearchInputValue(allocator: Allocator, filters: PullFilters) ![]u8 {
     return work_items.pullFilterQueryOwned(allocator, filters);
 }
 
-fn appendPullsListHeader(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters, counts: PullCounts) !void {
+fn appendPullsListHeader(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, filters: PullFilters, counts: PullCounts) !void {
     try buf.appendSlice(allocator,
         \\<header class="pulls-list-head issues-list-head">
         \\  <div class="issues-select-all"><input type="checkbox" aria-label="Select all pull requests" disabled></div>
@@ -186,11 +206,13 @@ fn appendPullsListHeader(buf: *std.ArrayList(u8), allocator: Allocator, filters:
     try buf.appendSlice(allocator,
         \\  </nav>
         \\  <div class="issues-filter-menus">
-        \\    <button type="button" disabled>Author</button>
-        \\    <button type="button" disabled>Labels</button>
-        \\    <button type="button" disabled>Reviewers</button>
-        \\    <button type="button" disabled>Assignees</button>
-        \\    <button type="button" disabled>Newest</button>
+    );
+    try appendPullFilterMenu(buf, allocator, db, filters, .author);
+    try appendPullFilterMenu(buf, allocator, db, filters, .label);
+    try appendPullFilterMenu(buf, allocator, db, filters, .reviewer);
+    try appendPullFilterMenu(buf, allocator, db, filters, .assignee);
+    try appendPullSortMenu(buf, allocator, filters);
+    try buf.appendSlice(allocator,
         \\  </div>
         \\</header>
     );
@@ -220,19 +242,203 @@ fn appendPullStateTab(
     });
 }
 
+fn appendPullFilterMenu(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    filters: PullFilters,
+    kind: PullFilterKind,
+) !void {
+    const active = pullFilterValue(filters, kind);
+    try appendTemplate(buf, allocator,
+        \\<details{classes} data-popover-menu><summary>{label}
+    , .{
+        .classes = shared.classAttr("issues-filter-menu", &.{shared.class("active", active != null)}),
+        .label = pullFilterLabel(kind),
+    });
+    if (active) |value| {
+        try appendTemplate(buf, allocator, ": {value}", .{ .value = value });
+    }
+    try buf.appendSlice(allocator,
+        \\</summary><div class="issues-filter-popover" role="menu">
+    );
+    try appendPullFilterMenuLink(buf, allocator, filters, kind, null, pullFilterAllLabel(kind), null, active == null);
+
+    var stmt = try db.prepare(pullFilterOptionsSql(kind));
+    defer stmt.deinit();
+    var shown = false;
+    while (try stmt.step()) {
+        const value = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(value);
+        const count = @as(usize, @intCast(stmt.columnInt64(1)));
+        try appendPullFilterMenuLink(
+            buf,
+            allocator,
+            filters,
+            kind,
+            value,
+            value,
+            count,
+            active != null and std.mem.eql(u8, active.?, value),
+        );
+        shown = true;
+    }
+    if (!shown) {
+        try appendTemplate(buf, allocator,
+            \\<span class="issues-filter-empty">No values</span>
+        , .{});
+    }
+    try buf.appendSlice(allocator, "</div></details>");
+}
+
+fn appendPullFilterMenuLink(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    filters: PullFilters,
+    kind: PullFilterKind,
+    value: ?[]const u8,
+    label: []const u8,
+    count: ?usize,
+    selected: bool,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<a class="{classes}" role="menuitem" href="
+    , .{ .classes = shared.classes("issues-filter-option", &.{shared.class("selected", selected)}) });
+    try appendPullsHref(buf, allocator, filters, .{
+        .param_name = pullFilterParamName(kind),
+        .param_value = value,
+    });
+    try appendTemplate(buf, allocator,
+        \\"><span>{label}</span>
+    , .{ .label = label });
+    if (count) |value_count| {
+        try appendTemplate(buf, allocator,
+            \\<small>{count}</small>
+        , .{ .count = value_count });
+    }
+    try buf.appendSlice(allocator, "</a>");
+}
+
+fn appendPullSortMenu(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters) !void {
+    try appendTemplate(buf, allocator,
+        \\<details{classes} data-popover-menu><summary>{label}</summary><div class="issues-filter-popover" role="menu">
+    , .{
+        .classes = shared.classAttr("issues-filter-menu", &.{shared.class("active", filters.sort != .newest)}),
+        .label = pullSortLabel(filters.sort),
+    });
+    try appendPullSortMenuLink(buf, allocator, filters, .newest);
+    try appendPullSortMenuLink(buf, allocator, filters, .oldest);
+    try appendPullSortMenuLink(buf, allocator, filters, .updated);
+    try buf.appendSlice(allocator, "</div></details>");
+}
+
+fn appendPullSortMenuLink(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters, sort: PullSort) !void {
+    try appendTemplate(buf, allocator,
+        \\<a class="{classes}" role="menuitem" href="
+    , .{ .classes = shared.classes("issues-filter-option", &.{shared.class("selected", filters.sort == sort)}) });
+    try appendPullsHref(buf, allocator, filters, .{ .sort = sort });
+    try appendTemplate(buf, allocator,
+        \\"><span>{label}</span></a>
+    , .{ .label = pullSortLabel(sort) });
+}
+
+fn pullFilterValue(filters: PullFilters, kind: PullFilterKind) ?[]const u8 {
+    return switch (kind) {
+        .author => filters.author,
+        .label => filters.label,
+        .reviewer => filters.reviewer,
+        .assignee => filters.assignee,
+    };
+}
+
+fn pullFilterLabel(kind: PullFilterKind) []const u8 {
+    return switch (kind) {
+        .author => "Author",
+        .label => "Labels",
+        .reviewer => "Reviewers",
+        .assignee => "Assignees",
+    };
+}
+
+fn pullFilterAllLabel(kind: PullFilterKind) []const u8 {
+    return switch (kind) {
+        .author => "Any author",
+        .label => "Any label",
+        .reviewer => "Any reviewer",
+        .assignee => "Anyone",
+    };
+}
+
+fn pullFilterParamName(kind: PullFilterKind) []const u8 {
+    return switch (kind) {
+        .author => "author",
+        .label => "label",
+        .reviewer => "reviewer",
+        .assignee => "assignee",
+    };
+}
+
+fn pullSortLabel(sort: PullSort) []const u8 {
+    return switch (sort) {
+        .newest => "Newest",
+        .oldest => "Oldest",
+        .updated => "Recently updated",
+    };
+}
+
+fn pullFilterOptionsSql(kind: PullFilterKind) []const u8 {
+    return switch (kind) {
+        .author =>
+        \\SELECT author, COUNT(*)
+        \\FROM (
+        \\  SELECT p.id, COALESCE(NULLIF(sp.display_name, ''), NULLIF(pm.source_author, ''), p.author_principal) AS author
+        \\  FROM pulls p
+        \\  LEFT JOIN pull_metadata pm ON pm.pull_id = p.id
+        \\  LEFT JOIN identities sp ON sp.id = pm.source_identity
+        \\)
+        \\WHERE author <> ''
+        \\GROUP BY author
+        \\ORDER BY lower(author), author
+        ,
+        .label =>
+        \\SELECT pl.label, COUNT(DISTINCT pl.pull_id)
+        \\FROM pull_labels pl
+        \\LEFT JOIN label_definitions ld ON ld.name = pl.label
+        \\GROUP BY pl.label
+        \\ORDER BY CASE WHEN MAX(ld.id) IS NULL THEN 1 ELSE 0 END,
+        \\         MIN(ld.position),
+        \\         lower(pl.label),
+        \\         pl.label
+        ,
+        .reviewer =>
+        \\SELECT reviewer, COUNT(DISTINCT pull_id)
+        \\FROM pull_reviewers
+        \\GROUP BY reviewer
+        \\ORDER BY lower(reviewer), reviewer
+        ,
+        .assignee =>
+        \\SELECT assignee, COUNT(DISTINCT pull_id)
+        \\FROM pull_assignees
+        \\GROUP BY assignee
+        \\ORDER BY lower(assignee), assignee
+        ,
+    };
+}
+
 fn appendPullsHref(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters, override: PullHrefOverride) !void {
     try buf.appendSlice(allocator, "/pulls");
     var first = true;
     try shared.appendQueryParam(buf, allocator, &first, "state", work_items.pullStateValue(override.state orelse filters.state));
-    if (filters.q) |query| {
-        try shared.appendQueryParam(buf, allocator, &first, "q", query);
-    }
-    if (filters.author) |value| try shared.appendQueryParam(buf, allocator, &first, "author", value);
-    if (filters.label) |value| try shared.appendQueryParam(buf, allocator, &first, "label", value);
-    if (filters.assignee) |value| try shared.appendQueryParam(buf, allocator, &first, "assignee", value);
-    if (filters.reviewer) |value| try shared.appendQueryParam(buf, allocator, &first, "reviewer", value);
-    if (filters.base) |value| try shared.appendQueryParam(buf, allocator, &first, "base", value);
-    if (filters.head) |value| try shared.appendQueryParam(buf, allocator, &first, "head", value);
+    if (pullHrefValue(filters, override, "q")) |value| try shared.appendQueryParam(buf, allocator, &first, "q", value);
+    if (pullHrefValue(filters, override, "author")) |value| try shared.appendQueryParam(buf, allocator, &first, "author", value);
+    if (pullHrefValue(filters, override, "label")) |value| try shared.appendQueryParam(buf, allocator, &first, "label", value);
+    if (pullHrefValue(filters, override, "assignee")) |value| try shared.appendQueryParam(buf, allocator, &first, "assignee", value);
+    if (pullHrefValue(filters, override, "reviewer")) |value| try shared.appendQueryParam(buf, allocator, &first, "reviewer", value);
+    if (pullHrefValue(filters, override, "base")) |value| try shared.appendQueryParam(buf, allocator, &first, "base", value);
+    if (pullHrefValue(filters, override, "head")) |value| try shared.appendQueryParam(buf, allocator, &first, "head", value);
+
+    const sort = override.sort orelse filters.sort;
+    if (sort != .newest) try shared.appendQueryParam(buf, allocator, &first, "sort", work_items.pullSortValue(sort));
     if (override.page) |page| {
         const pagination = shared.Pagination{
             .page = page,
@@ -240,6 +446,20 @@ fn appendPullsHref(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullF
         };
         try shared.appendPaginationQueryParams(buf, allocator, &first, pagination, page, pulls_default_page_size);
     }
+}
+
+fn pullHrefValue(filters: PullFilters, override: PullHrefOverride, name: []const u8) ?[]const u8 {
+    if (override.param_name) |param| {
+        if (std.mem.eql(u8, param, name)) return override.param_value;
+    }
+    if (std.mem.eql(u8, name, "q")) return filters.q;
+    if (std.mem.eql(u8, name, "author")) return filters.author;
+    if (std.mem.eql(u8, name, "label")) return filters.label;
+    if (std.mem.eql(u8, name, "assignee")) return filters.assignee;
+    if (std.mem.eql(u8, name, "reviewer")) return filters.reviewer;
+    if (std.mem.eql(u8, name, "base")) return filters.base;
+    if (std.mem.eql(u8, name, "head")) return filters.head;
+    return null;
 }
 
 fn pullsHrefOwned(allocator: Allocator, filters: PullFilters, pagination: shared.Pagination, page: usize) ![]u8 {
