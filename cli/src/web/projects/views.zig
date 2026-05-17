@@ -101,7 +101,7 @@ pub const my_items_view_config =
     \\{"filter":{"assignee":"@me"},"group_by":"issue.status","fields":["issue.priority","issue.status","issue.state","issue.assignees","issue.labels"]}
 ;
 pub const roadmap_view_config =
-    \\{"start":"project.start_at","target":"project.target_at","group_by":"issue.priority","status":"issue.status","fields":["issue.priority","issue.status","project.start_at","project.target_at"]}
+    \\{"start":"project.start_at","target":"project.end_at","group_by":"issue.priority","status":"issue.status","fields":["issue.priority","issue.status","project.start_at","project.end_at"]}
 ;
 pub const bugs_view_config =
     \\{"filter":{"any":[{"issue.type":"bug"},{"label":"bug"}]},"group_by":"issue.status","fields":["issue.priority","issue.status","issue.state","issue.assignees","issue.labels"]}

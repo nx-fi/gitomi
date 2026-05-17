@@ -106,9 +106,13 @@ pub fn handleProjectItemPost(allocator: Allocator, repo: Repo, stream: std.net.S
         }
         const start_at_owned = try formTrimmedOwned(allocator, form_body, "start_at");
         defer allocator.free(start_at_owned);
-        const target_at_owned = try formTrimmedOwned(allocator, form_body, "target_at");
-        defer allocator.free(target_at_owned);
-        if (!isProjectDateValue(start_at_owned) or !isProjectDateValue(target_at_owned)) {
+        const raw_end_at_owned = try formValueOwned(allocator, form_body, "end_at");
+        defer if (raw_end_at_owned) |value| allocator.free(value);
+        const end_at_owned = if (raw_end_at_owned) |value| blk: {
+            break :blk try allocator.dupe(u8, std.mem.trim(u8, value, " \t\r\n"));
+        } else try formTrimmedOwned(allocator, form_body, "target_at");
+        defer allocator.free(end_at_owned);
+        if (!isProjectDateValue(start_at_owned) or !isProjectDateValue(end_at_owned)) {
             try sendProjectItemError(allocator, stream, wants_async, 422, "Unprocessable Entity", "Dates must use YYYY-MM-DD\n");
             return;
         }
@@ -123,12 +127,12 @@ pub fn handleProjectItemPost(allocator: Allocator, repo: Repo, stream: std.net.S
             return;
         };
         defer allocator.free(project_id);
-        setProjectDateField(allocator, repo, issue_id, project_id, project_owned, "start_at", start_at_owned) catch {
+        setProjectDateFieldByKey(allocator, repo, issue_id, project_id, project_owned, "start_at", start_at_owned) catch {
             try sendProjectItemError(allocator, stream, wants_async, 500, "Internal Server Error", "Could not update roadmap start date\n");
             return;
         };
-        setProjectDateField(allocator, repo, issue_id, project_id, project_owned, "target_at", target_at_owned) catch {
-            try sendProjectItemError(allocator, stream, wants_async, 500, "Internal Server Error", "Could not update roadmap target date\n");
+        setProjectEndDateField(allocator, repo, issue_id, project_id, project_owned, end_at_owned) catch {
+            try sendProjectItemError(allocator, stream, wants_async, 500, "Internal Server Error", "Could not update roadmap end date\n");
             return;
         };
     } else if (std.mem.eql(u8, action_owned, "set-project-field")) {
@@ -212,7 +216,7 @@ pub fn handleProjectItemPost(allocator: Allocator, repo: Repo, stream: std.net.S
     try sendRedirect(allocator, stream, location);
 }
 
-fn setProjectDateField(
+fn setProjectDateFieldByKey(
     allocator: Allocator,
     repo: Repo,
     issue_id: []const u8,
@@ -221,11 +225,48 @@ fn setProjectDateField(
     field_key: []const u8,
     value: []const u8,
 ) !void {
-    const field_id = index.resolveProjectFieldId(allocator, repo, project_id, field_key) catch |err| {
+    const field_id = (try projectFieldIdByKeyOwned(allocator, repo, project_id, field_key)) orelse {
         if (value.len == 0) return;
-        return err;
+        return error.ProjectFieldNotFound;
     };
     defer allocator.free(field_id);
+    try setProjectDateFieldById(allocator, issue_id, project_id, project_ref, field_id, value);
+}
+
+fn setProjectEndDateField(
+    allocator: Allocator,
+    repo: Repo,
+    issue_id: []const u8,
+    project_id: []const u8,
+    project_ref: []const u8,
+    value: []const u8,
+) !void {
+    if (try projectFieldIdByKeyOwned(allocator, repo, project_id, "end_at")) |field_id| {
+        defer allocator.free(field_id);
+        try setProjectDateFieldById(allocator, issue_id, project_id, project_ref, field_id, value);
+        if (try projectFieldIdByKeyOwned(allocator, repo, project_id, "target_at")) |legacy_field_id| {
+            defer allocator.free(legacy_field_id);
+            try setProjectDateFieldById(allocator, issue_id, project_id, project_ref, legacy_field_id, "");
+        }
+        return;
+    }
+    if (try projectFieldIdByKeyOwned(allocator, repo, project_id, "target_at")) |legacy_field_id| {
+        defer allocator.free(legacy_field_id);
+        try setProjectDateFieldById(allocator, issue_id, project_id, project_ref, legacy_field_id, value);
+        return;
+    }
+    if (value.len == 0) return;
+    return error.ProjectFieldNotFound;
+}
+
+fn setProjectDateFieldById(
+    allocator: Allocator,
+    issue_id: []const u8,
+    project_id: []const u8,
+    project_ref: []const u8,
+    field_id: []const u8,
+    value: []const u8,
+) !void {
     if (value.len == 0) {
         try createIssueProjectFieldClearedEvent(allocator, issue_id, project_id, project_ref, field_id, null);
         return;
@@ -233,6 +274,23 @@ fn setProjectDateField(
     const value_json = try jsonStringArgument(allocator, value);
     defer allocator.free(value_json);
     try createIssueProjectFieldSetEvent(allocator, issue_id, project_id, project_ref, field_id, null, value_json);
+}
+
+fn projectFieldIdByKeyOwned(allocator: Allocator, repo: Repo, project_id: []const u8, field_key: []const u8) !?[]u8 {
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    var stmt = try db.prepare(
+        \\SELECT id
+        \\FROM project_fields
+        \\WHERE project_id = ? AND key = ? AND state != 'removed'
+        \\ORDER BY position, id
+        \\LIMIT 1
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    try stmt.bindText(2, field_key);
+    if (!(try stmt.step())) return null;
+    return try stmt.columnTextDup(allocator, 0);
 }
 
 fn setProjectFieldValue(

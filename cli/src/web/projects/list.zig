@@ -145,7 +145,7 @@ fn appendProjectIndexCard(
         \\      <p class="eyebrow">Project</p>
         \\      <h2><a href="
     , .{});
-    try appendProjectHref(buf, allocator, project, .board);
+    try appendProjectOverviewHref(buf, allocator, project);
     try appendTemplate(buf, allocator,
         \\">{project}</a></h2>
         \\    </div>
@@ -185,6 +185,11 @@ fn appendProjectViewLink(buf: *std.ArrayList(u8), allocator: Allocator, project:
     , .{});
     try appendProjectHref(buf, allocator, project, view);
     try appendTemplate(buf, allocator, "\">{label}</a>", .{ .label = label });
+}
+
+fn appendProjectOverviewHref(buf: *std.ArrayList(u8), allocator: Allocator, project: []const u8) !void {
+    try buf.appendSlice(allocator, "/projects?project=");
+    try shared.appendUrlEncoded(buf, allocator, project);
 }
 
 fn appendProjectHref(buf: *std.ArrayList(u8), allocator: Allocator, project: []const u8, view: ProjectView) !void {

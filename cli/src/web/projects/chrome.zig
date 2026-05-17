@@ -3,6 +3,7 @@ const index = @import("../../index.zig");
 const repo_mod = @import("../../repo.zig");
 const util = @import("../../util.zig");
 const project_data = @import("data.zig");
+const project_overview = @import("overview.zig");
 const project_views = @import("views.zig");
 const shared = @import("../shared.zig");
 
@@ -208,18 +209,13 @@ fn appendProjectViewTabs(
     active_view: *const ActiveProjectView,
     issue_count: usize,
 ) !void {
-    try buf.appendSlice(allocator, "<div class=\"project-view-tabs\" aria-label=\"Project views\">");
-    const shown_saved_views = try appendProjectSavedViewTabs(buf, allocator, db, project, active_view);
-    if (!shown_saved_views) {
-        try appendProjectViewTab(buf, allocator, project, active_view, .table, "Table", "project-view-table-icon");
-        try appendProjectViewTab(buf, allocator, project, active_view, .board, "Board", "project-view-board-icon");
-        try appendProjectViewTab(buf, allocator, project, active_view, .roadmap, "Roadmap", "project-view-roadmap-icon");
-    }
-    try buf.appendSlice(allocator, "<a class=\"project-view-tab\" href=\"/issues?project=");
-    try shared.appendUrlEncoded(buf, allocator, project);
-    try appendTemplate(buf, allocator,
-        \\">Issues <span class="issue-count-badge">{issue_count}</span></a></div>
-    , .{ .issue_count = issue_count });
+    _ = db;
+    const active_tab: project_overview.ProjectPageTab = switch (active_view.layout) {
+        .table => .table,
+        .board => .board,
+        .roadmap => .roadmap,
+    };
+    try project_overview.appendProjectPageTabs(buf, allocator, project, active_tab, issue_count);
 }
 
 fn appendProjectItemActions(

@@ -3,12 +3,21 @@
 
   const defaultConfig = {
     workerUrl: "/dictation.worker.js",
-    libraryUrl: "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3",
+    libraryUrl: "/vendor/transformers/transformers.min.js",
+    wasmRuntimePath: "/vendor/transformers/",
+    wasmRuntimeModuleUrl: "/vendor/transformers/ort-wasm-simd-threaded.jsep.min.mjs",
+    wasmRuntimeBinaryUrl: "/vendor/transformers/ort-wasm-simd-threaded.jsep.wasm",
     model: "onnx-community/distil-small.en",
+    dtype: "q8",
     device: "auto",
+    allowLocalModels: true,
+    allowRemoteModels: false,
+    localFilesOnly: true,
+    localModelPath: "/models/",
     sampleRate: 16000,
     chunkMs: 8000,
     minChunkSeconds: 1.25,
+    minFinalChunkSeconds: 0.25,
     task: "transcribe",
     language: "english",
   };
@@ -239,8 +248,9 @@
     this.sampleCount += chunk.length;
   };
 
-  DictationSession.prototype.flush = function () {
-    if (this.sampleCount < Math.floor(this.config.minChunkSeconds * this.config.sampleRate)) return;
+  DictationSession.prototype.flush = function (force) {
+    const minimumSeconds = force ? this.config.minFinalChunkSeconds : this.config.minChunkSeconds;
+    if (this.sampleCount < Math.floor(minimumSeconds * this.config.sampleRate)) return false;
     const audio = mergeChunks(this.chunks, this.sampleCount);
     this.chunks = [];
     this.sampleCount = 0;
@@ -258,6 +268,7 @@
         setButtonState(this.button, "idle", "");
       }
     }.bind(this));
+    return true;
   };
 
   DictationSession.prototype.start = async function () {
@@ -317,7 +328,7 @@
       this.audioContext.close().catch(function () {});
       this.audioContext = null;
     }
-    this.flush();
+    this.flush(true);
     if (this.pending === 0) setButtonState(this.button, "idle", "");
     if (activeSession === this) activeSession = null;
   };
