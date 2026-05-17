@@ -961,7 +961,7 @@ pub fn parseTimezoneOffset(value: []const u8) i64 {
 pub fn loadCommitSummary(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?CommitSummary {
     if (isFilesystemRef(ref)) return null;
 
-    const format = "--format=%H%x09%h%x09%an%x09%s%x09%cr";
+    const format = "--format=%H%x09%h%x09%an%x09%ae%x09%s%x09%cr";
     const raw = if (path.len == 0)
         try gitMaybe(allocator, repo, &.{ "log", "-1", format, ref }, 1024 * 1024)
     else blk: {
@@ -980,14 +980,17 @@ pub fn loadCommitSummary(allocator: Allocator, repo: Repo, ref: []const u8, path
     const hash_end = std.mem.indexOfScalarPos(u8, line, hash_start, '\t') orelse return null;
     const author_start = hash_end + 1;
     const author_end = std.mem.indexOfScalarPos(u8, line, author_start, '\t') orelse return null;
+    const email_start = author_end + 1;
+    const email_end = std.mem.indexOfScalarPos(u8, line, email_start, '\t') orelse return null;
     const relative_start = std.mem.lastIndexOfScalar(u8, line, '\t') orelse return null;
-    if (relative_start <= author_end) return null;
+    if (relative_start <= email_end) return null;
 
     return .{
         .full_hash = try allocator.dupe(u8, line[0..full_end]),
         .hash = try allocator.dupe(u8, line[hash_start..hash_end]),
         .author = try allocator.dupe(u8, line[author_start..author_end]),
-        .subject = try allocator.dupe(u8, line[author_end + 1 .. relative_start]),
+        .author_email = try allocator.dupe(u8, line[email_start..email_end]),
+        .subject = try allocator.dupe(u8, line[email_end + 1 .. relative_start]),
         .relative = try allocator.dupe(u8, line[relative_start + 1 ..]),
     };
 }

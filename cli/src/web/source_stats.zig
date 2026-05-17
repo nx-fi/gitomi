@@ -190,6 +190,7 @@ pub const Stats = struct {
 
 pub const ContributorRow = struct {
     name: []const u8,
+    email: []const u8,
     code: u64,
     test_count: u64,
     comment: u64,
@@ -360,18 +361,8 @@ pub fn languageColor(language: []const u8) []const u8 {
     return "#8b949e";
 }
 
-pub fn contributorColor(name: []const u8) []const u8 {
-    const palette = [_][]const u8{
-        "#0969da",
-        "#2da44e",
-        "#bf8700",
-        "#8250df",
-        "#cf222e",
-        "#1a7f64",
-        "#9a6700",
-        "#6f42c1",
-    };
-    return palette[@intCast(std.hash.Wyhash.hash(0, name) % palette.len)];
+pub fn contributorColor(_: []const u8) []const u8 {
+    return "#10B8AA";
 }
 
 fn collectRepositoryPaths(allocator: Allocator, repo: Repo) !?[][]u8 {
@@ -460,7 +451,10 @@ fn addLanguageCounts(
 }
 
 fn freeContributorRows(allocator: Allocator, rows: []ContributorRow) void {
-    for (rows) |row| allocator.free(row.name);
+    for (rows) |row| {
+        allocator.free(row.name);
+        allocator.free(row.email);
+    }
 }
 
 fn addCountsToContributor(row: *ContributorRow, counts: Counts) void {
@@ -474,31 +468,42 @@ fn addContributorCounts(
     rows: *std.ArrayList(ContributorRow),
     row_index: *std.StringHashMap(usize),
     raw_name: []const u8,
+    raw_email: []const u8,
     counts: Counts,
 ) !void {
     if (counts.total() == 0) return;
     const name = if (raw_name.len == 0) "Unknown" else raw_name;
-    if (row_index.get(name)) |idx| {
+    const email = std.mem.trim(u8, raw_email, " \t\r\n<>");
+    const key = if (email.len != 0) email else name;
+    if (row_index.get(key)) |idx| {
         addCountsToContributor(&rows.items[idx], counts);
         return;
     }
 
     const name_copy = try allocator.dupe(u8, name);
     errdefer allocator.free(name_copy);
+    const email_copy = try allocator.dupe(u8, email);
+    errdefer allocator.free(email_copy);
     try rows.append(allocator, .{
         .name = name_copy,
+        .email = email_copy,
         .code = counts.code,
         .test_count = counts.test_count,
         .comment = counts.comment,
     });
     errdefer _ = rows.pop();
-    try row_index.put(name_copy, rows.items.len - 1);
+    try row_index.put(if (email_copy.len != 0) email_copy else name_copy, rows.items.len - 1);
 }
 
 const BlameGroup = struct {
     commit: []const u8,
     result_line: usize,
     line_count: usize,
+};
+
+const BlameAuthor = struct {
+    name: []const u8,
+    email: []const u8,
 };
 
 fn parseBlameGroupHeader(line: []const u8) ?BlameGroup {
@@ -546,28 +551,41 @@ fn parseBlameIncrementalOutput(
     line_kinds: []const sloc_lang_plugins.LineKind,
     blame: []const u8,
 ) !void {
-    var commit_authors = std.StringHashMap([]const u8).init(allocator);
+    var commit_authors = std.StringHashMap(BlameAuthor).init(allocator);
     defer commit_authors.deinit();
 
     var current_group: ?BlameGroup = null;
     var current_author: ?[]const u8 = null;
+    var current_email: []const u8 = "";
 
     var it = std.mem.splitScalar(u8, blame, '\n');
     while (it.next()) |line| {
         if (parseBlameGroupHeader(line)) |group| {
             current_group = group;
-            current_author = commit_authors.get(group.commit);
+            if (commit_authors.get(group.commit)) |author| {
+                current_author = author.name;
+                current_email = author.email;
+            } else {
+                current_author = null;
+                current_email = "";
+            }
         } else if (std.mem.startsWith(u8, line, "author ")) {
             current_author = line["author ".len..];
-            if (current_group) |group| try commit_authors.put(group.commit, current_author.?);
+            if (current_group) |group| try commit_authors.put(group.commit, .{ .name = current_author.?, .email = current_email });
+        } else if (std.mem.startsWith(u8, line, "author-mail ")) {
+            current_email = std.mem.trim(u8, line["author-mail ".len..], " \t\r\n<>");
+            if (current_group) |group| {
+                if (current_author) |author| try commit_authors.put(group.commit, .{ .name = author, .email = current_email });
+            }
         } else if (std.mem.startsWith(u8, line, "filename ")) {
             if (current_group) |group| {
                 const author = current_author orelse "Unknown";
                 const counts = countKindsRange(line_kinds, group.result_line, group.line_count);
-                try addContributorCounts(allocator, rows, row_index, author, counts);
+                try addContributorCounts(allocator, rows, row_index, author, current_email, counts);
             }
             current_group = null;
             current_author = null;
+            current_email = "";
         }
     }
 }

@@ -869,7 +869,7 @@ pub fn resolveCurrentRepo(allocator: Allocator) !ResolvedRepo {
         }
         return CliError.UserError;
     }
-    const owned = try util.trimOwned(allocator, result.stdout);
+    const owned = try util.trimDup(allocator, result.stdout);
     errdefer allocator.free(owned);
     return .{
         .owned = owned,

@@ -10,6 +10,9 @@ const issueHref = shared.issueHref;
 const pullHref = shared.pullHref;
 
 const RelationshipKind = enum {
+    parent,
+    sub_issue,
+    concurrent,
     refs,
     relates_to,
     blocks,
@@ -36,9 +39,12 @@ pub const ResolvedObjectRef = struct {
 pub const RelationshipItem = struct {
     kind: RelationshipKind,
     target: ResolvedObjectRef,
+    group: ?[]u8 = null,
+    stored: bool = false,
 
     pub fn deinit(self: *RelationshipItem) void {
         self.target.deinit();
+        if (self.group) |group| self.target.allocator.free(group);
     }
 };
 
@@ -64,8 +70,79 @@ pub fn collectDirectivesFromText(
                 target.deinit();
                 continue;
             }
-            try collectRelationshipTarget(allocator, kind, target, seen, relationships);
+            try collectRelationshipTarget(allocator, kind, target, null, false, seen, relationships);
         }
+    }
+}
+
+pub fn collectStoredIssueRelationships(
+    allocator: Allocator,
+    db: *SqliteDb,
+    issue_id: []const u8,
+    seen: *std.StringHashMap(void),
+    relationships: *std.ArrayList(RelationshipItem),
+) !void {
+    var stmt = try db.prepare(
+        \\SELECT DISTINCT rel.display_kind,
+        \\       rel.group_key,
+        \\       i.id,
+        \\       i.title,
+        \\       i.state,
+        \\       COALESCE(a.number, 0)
+        \\FROM (
+        \\  SELECT 'parent' AS display_kind, '' AS group_key, r.target_issue_id AS target_issue_id
+        \\  FROM issue_relationships r
+        \\  WHERE r.source_issue_id = ? AND r.relationship = 'parent'
+        \\  UNION ALL
+        \\  SELECT 'sub_issue' AS display_kind, '' AS group_key, r.source_issue_id AS target_issue_id
+        \\  FROM issue_relationships r
+        \\  WHERE r.target_issue_id = ? AND r.relationship = 'parent'
+        \\  UNION ALL
+        \\  SELECT 'blocks' AS display_kind, '' AS group_key, r.target_issue_id AS target_issue_id
+        \\  FROM issue_relationships r
+        \\  WHERE r.source_issue_id = ? AND r.relationship = 'blocks'
+        \\  UNION ALL
+        \\  SELECT 'blocked_by' AS display_kind, '' AS group_key, r.source_issue_id AS target_issue_id
+        \\  FROM issue_relationships r
+        \\  WHERE r.target_issue_id = ? AND r.relationship = 'blocks'
+        \\  UNION ALL
+        \\  SELECT 'concurrent' AS display_kind, mine.group_key AS group_key, peer.issue_id AS target_issue_id
+        \\  FROM issue_concurrent_groups mine
+        \\  JOIN issue_concurrent_groups peer ON peer.group_key = mine.group_key
+        \\  WHERE mine.issue_id = ?
+        \\) rel
+        \\JOIN issues i ON i.id = rel.target_issue_id
+        \\LEFT JOIN legacy_aliases a
+        \\  ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
+        \\ORDER BY rel.display_kind, lower(rel.group_key), rel.group_key, i.opened_at, i.id
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    try stmt.bindText(2, issue_id);
+    try stmt.bindText(3, issue_id);
+    try stmt.bindText(4, issue_id);
+    try stmt.bindText(5, issue_id);
+
+    while (try stmt.step()) {
+        const display_kind = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(display_kind);
+        const kind = relationshipKindFromStoredDisplay(display_kind) orelse continue;
+        const group_key = try stmt.columnTextDup(allocator, 1);
+        const group: ?[]u8 = if (group_key.len == 0) blk: {
+            allocator.free(group_key);
+            break :blk null;
+        } else group_key;
+        errdefer if (group) |value| allocator.free(value);
+        var target = ResolvedObjectRef{
+            .allocator = allocator,
+            .object_kind = "issue",
+            .object_id = try stmt.columnTextDup(allocator, 2),
+            .title = try stmt.columnTextDup(allocator, 3),
+            .state = try stmt.columnTextDup(allocator, 4),
+            .legacy_number = stmt.columnInt64(5),
+        };
+        errdefer target.deinit();
+        try collectRelationshipTarget(allocator, kind, target, group, true, seen, relationships);
     }
 }
 
@@ -73,26 +150,30 @@ fn collectRelationshipTarget(
     allocator: Allocator,
     kind: RelationshipKind,
     target: ResolvedObjectRef,
+    group: ?[]u8,
+    stored: bool,
     seen: *std.StringHashMap(void),
     relationships: *std.ArrayList(RelationshipItem),
 ) !void {
     errdefer {
         var cleanup = target;
         cleanup.deinit();
+        if (group) |value| allocator.free(value);
     }
 
-    const key = try std.fmt.allocPrint(allocator, "{s}\x1f{s}\x1f{s}", .{ @tagName(kind), target.object_kind, target.object_id });
+    const key = try std.fmt.allocPrint(allocator, "{s}\x1f{s}\x1f{s}\x1f{s}", .{ @tagName(kind), target.object_kind, target.object_id, group orelse "" });
     errdefer allocator.free(key);
     const entry = try seen.getOrPut(key);
     if (entry.found_existing) {
         allocator.free(key);
         var duplicate = target;
         duplicate.deinit();
+        if (group) |value| allocator.free(value);
         return;
     }
     entry.value_ptr.* = {};
     errdefer _ = seen.remove(key);
-    try relationships.append(allocator, .{ .kind = kind, .target = target });
+    try relationships.append(allocator, .{ .kind = kind, .target = target, .group = group, .stored = stored });
 }
 
 fn trimRelationshipToken(raw: []const u8) []const u8 {
@@ -100,6 +181,9 @@ fn trimRelationshipToken(raw: []const u8) []const u8 {
 }
 
 fn relationshipKindFromKey(key: []const u8) ?RelationshipKind {
+    if (asciiEqlIgnoreCase(key, "Parent") or asciiEqlIgnoreCase(key, "Parent-Issue")) return .parent;
+    if (asciiEqlIgnoreCase(key, "Sub-Issue") or asciiEqlIgnoreCase(key, "Subissue") or asciiEqlIgnoreCase(key, "Child")) return .sub_issue;
+    if (asciiEqlIgnoreCase(key, "Concurrent") or asciiEqlIgnoreCase(key, "Concurrent-With")) return .concurrent;
     if (asciiEqlIgnoreCase(key, "Refs")) return .refs;
     if (asciiEqlIgnoreCase(key, "Relates-To") or asciiEqlIgnoreCase(key, "Related-To")) return .relates_to;
     if (asciiEqlIgnoreCase(key, "Blocks")) return .blocks;
@@ -109,25 +193,95 @@ fn relationshipKindFromKey(key: []const u8) ?RelationshipKind {
     return null;
 }
 
+fn relationshipKindFromStoredDisplay(value: []const u8) ?RelationshipKind {
+    if (std.mem.eql(u8, value, "parent")) return .parent;
+    if (std.mem.eql(u8, value, "sub_issue")) return .sub_issue;
+    if (std.mem.eql(u8, value, "blocks")) return .blocks;
+    if (std.mem.eql(u8, value, "blocked_by")) return .blocked_by;
+    if (std.mem.eql(u8, value, "concurrent")) return .concurrent;
+    return null;
+}
+
 fn relationshipGroupTitle(kind: RelationshipKind, object_kind: []const u8) []const u8 {
     const is_pull = std.mem.eql(u8, object_kind, "pull");
     return switch (kind) {
+        .parent => "Parent issue",
+        .sub_issue => "Sub-issues",
+        .concurrent => "Concurrent group",
         .refs => if (is_pull) "Referenced pull request" else "Referenced issue",
         .relates_to => if (is_pull) "Related pull request" else "Related issue",
-        .blocks => if (is_pull) "Blocking pull request" else "Blocking issue",
-        .blocked_by => if (is_pull) "Blocked by pull request" else "Blocked by issue",
+        .blocks => if (is_pull) "Is blocking pull request" else "Is blocking",
+        .blocked_by => if (is_pull) "Blocked by pull request" else "Blocked by",
         .duplicates => if (is_pull) "Duplicate pull request" else "Duplicate issue",
         .duplicate_of => if (is_pull) "Original pull request" else "Original issue",
     };
 }
 
 pub fn appendGroups(buf: *std.ArrayList(u8), allocator: Allocator, relationships: []const RelationshipItem) !void {
+    try appendGroupsInternal(buf, allocator, relationships, .{});
+}
+
+pub fn appendEditableGroups(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    raw_ref: []const u8,
+    csrf_token: []const u8,
+    relationships: []const RelationshipItem,
+) !void {
+    try appendGroupsInternal(buf, allocator, relationships, .{
+        .editable = true,
+        .raw_ref = raw_ref,
+        .csrf_token = csrf_token,
+    });
+}
+
+const RelationshipRenderOptions = struct {
+    editable: bool = false,
+    raw_ref: []const u8 = "",
+    csrf_token: []const u8 = "",
+};
+
+fn appendGroupsInternal(buf: *std.ArrayList(u8), allocator: Allocator, relationships: []const RelationshipItem, options: RelationshipRenderOptions) !void {
     try buf.appendSlice(allocator, "<div class=\"issue-relationships\">");
-    inline for (.{ RelationshipKind.blocked_by, .blocks, .duplicate_of, .duplicates, .relates_to, .refs }) |kind| {
-        try appendRelationshipGroup(buf, allocator, relationships, kind, "issue");
-        try appendRelationshipGroup(buf, allocator, relationships, kind, "pull");
+    inline for (.{ RelationshipKind.parent, .sub_issue, .blocked_by, .blocks, .duplicate_of, .duplicates, .relates_to, .refs }) |kind| {
+        try appendRelationshipGroup(buf, allocator, relationships, kind, "issue", options);
+        try appendRelationshipGroup(buf, allocator, relationships, kind, "pull", options);
     }
+    try appendConcurrentRelationshipGroups(buf, allocator, relationships, options);
     try buf.appendSlice(allocator, "</div>");
+}
+
+fn appendConcurrentRelationshipGroups(buf: *std.ArrayList(u8), allocator: Allocator, relationships: []const RelationshipItem, options: RelationshipRenderOptions) !void {
+    for (relationships, 0..) |item, idx| {
+        if (item.kind != .concurrent) continue;
+        var first_for_group = true;
+        for (relationships[0..idx]) |previous| {
+            if (previous.kind == .concurrent and optionalStringEql(previous.group, item.group)) {
+                first_for_group = false;
+                break;
+            }
+        }
+        if (!first_for_group) continue;
+
+        try appendTemplate(buf, allocator,
+            \\<div class="issue-relationship-group"><div class="issue-relationship-group-title"><span>{title}
+        , .{ .title = relationshipGroupTitle(.concurrent, "issue") });
+        if (item.group) |group| {
+            try appendTemplate(buf, allocator, ": {group}", .{ .group = group });
+        }
+        try buf.appendSlice(allocator, "</span>");
+        if (options.editable and item.stored) {
+            if (item.group) |group| {
+                try appendRelationshipRemoveForm(buf, allocator, options, "remove-concurrent-group", "group", group, "Remove concurrent group");
+            }
+        }
+        try buf.appendSlice(allocator, "</div><div class=\"issue-relationship-list\">");
+        for (relationships) |candidate| {
+            if (candidate.kind != .concurrent or !optionalStringEql(candidate.group, item.group)) continue;
+            try appendRelationshipRow(buf, allocator, candidate.target);
+        }
+        try buf.appendSlice(allocator, "</div></div>");
+    }
 }
 
 fn appendRelationshipGroup(
@@ -136,6 +290,7 @@ fn appendRelationshipGroup(
     relationships: []const RelationshipItem,
     kind: RelationshipKind,
     object_kind: []const u8,
+    options: RelationshipRenderOptions,
 ) !void {
     var shown = false;
     for (relationships) |item| {
@@ -146,9 +301,22 @@ fn appendRelationshipGroup(
             , .{ .title = relationshipGroupTitle(kind, object_kind) });
             shown = true;
         }
-        try appendRelationshipRow(buf, allocator, item.target);
+        try appendRelationshipEntry(buf, allocator, item, options);
     }
     if (shown) try buf.appendSlice(allocator, "</div></div>");
+}
+
+fn appendRelationshipEntry(buf: *std.ArrayList(u8), allocator: Allocator, item: RelationshipItem, options: RelationshipRenderOptions) !void {
+    if (options.editable and item.stored) {
+        if (removeActionForKind(item.kind)) |action| {
+            try buf.appendSlice(allocator, "<div class=\"issue-relationship-entry\">");
+            try appendRelationshipRow(buf, allocator, item.target);
+            try appendRelationshipRemoveForm(buf, allocator, options, action, "target", item.target.object_id, "Remove relationship");
+            try buf.appendSlice(allocator, "</div>");
+            return;
+        }
+    }
+    try appendRelationshipRow(buf, allocator, item.target);
 }
 
 fn appendRelationshipRow(buf: *std.ArrayList(u8), allocator: Allocator, target: ResolvedObjectRef) !void {
@@ -182,6 +350,38 @@ fn appendRelationshipRow(buf: *std.ArrayList(u8), allocator: Allocator, target: 
             shared.class("is-merged", std.mem.eql(u8, target.state, "merged")),
         }),
         .state = relationshipStateLabel(target.state),
+    });
+}
+
+fn removeActionForKind(kind: RelationshipKind) ?[]const u8 {
+    return switch (kind) {
+        .parent => "remove-parent",
+        .sub_issue => "remove-sub-issue",
+        .blocks => "remove-blocking",
+        .blocked_by => "remove-blocked-by",
+        else => null,
+    };
+}
+
+fn appendRelationshipRemoveForm(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    options: RelationshipRenderOptions,
+    action: []const u8,
+    input_name: []const u8,
+    value: []const u8,
+    label: []const u8,
+) !void {
+    try buf.appendSlice(allocator, "<form class=\"issue-relationship-remove-form\" method=\"post\" action=\"/issues/");
+    try shared.appendUrlEncoded(buf, allocator, options.raw_ref);
+    try appendTemplate(buf, allocator,
+        \\/sidebar"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="action" value="{action}"><input type="hidden" name="{input_name}" value="{value}"><button type="submit" aria-label="{label}" title="{label}">x</button></form>
+    , .{
+        .csrf_token = options.csrf_token,
+        .action = action,
+        .input_name = input_name,
+        .value = value,
+        .label = label,
     });
 }
 
@@ -336,6 +536,14 @@ fn asciiStartsWithIgnoreCase(value: []const u8, prefix: []const u8) bool {
     return value.len >= prefix.len and asciiEqlIgnoreCase(value[0..prefix.len], prefix);
 }
 
+fn optionalStringEql(a: ?[]const u8, b: ?[]const u8) bool {
+    if (a) |left| {
+        const right = b orelse return false;
+        return std.mem.eql(u8, left, right);
+    }
+    return b == null;
+}
+
 fn asciiEqlIgnoreCase(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
     for (a, b) |left, right| {
@@ -378,7 +586,7 @@ test "relationship groups render stateful issue rows" {
     defer buf.deinit(std.testing.allocator);
     try appendGroups(&buf, std.testing.allocator, relationships[0..]);
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Blocked by issue") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Blocked by") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "Parent issue") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues/1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "is-open") != null);

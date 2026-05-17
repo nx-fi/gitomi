@@ -609,7 +609,7 @@ fn appendIssueCommentForm(
         \\<div class="issue-timeline-item issue-comment-form-item">
     );
     try buf.appendSlice(allocator, "  <div class=\"issue-timeline-avatar\">");
-    try appendIssueAvatar(buf, allocator, current_actor orelse "Current user", "", "issue-detail-avatar issue-comment-form-avatar");
+    try shared.appendCurrentActorAvatar(buf, allocator, current_actor, "issue-detail-avatar issue-comment-form-avatar");
     try buf.appendSlice(allocator, "</div>");
     try buf.appendSlice(allocator,
         \\  <form class="issue-comment-box issue-comment-form" method="post" action="/issues/

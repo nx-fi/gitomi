@@ -261,6 +261,10 @@ fn requiredIndexTablesExist(db: *SqliteDb) bool {
     defer project_columns_ref.deinit();
     var issue_metadata_fields = db.prepare("SELECT issue_type, priority, status, issue_type_event_hash, priority_event_hash, status_event_hash FROM issue_metadata LIMIT 0") catch return false;
     defer issue_metadata_fields.deinit();
+    var issue_relationships = db.prepare("SELECT source_issue_id, relationship, target_issue_id FROM issue_relationships LIMIT 0") catch return false;
+    defer issue_relationships.deinit();
+    var issue_concurrent_groups = db.prepare("SELECT issue_id, group_key FROM issue_concurrent_groups LIMIT 0") catch return false;
+    defer issue_concurrent_groups.deinit();
     var project_memberships = db.prepare("SELECT project_id FROM project_memberships LIMIT 0") catch return false;
     defer project_memberships.deinit();
     var project_fields = db.prepare("SELECT id FROM project_fields LIMIT 0") catch return false;
@@ -451,40 +455,7 @@ fn rebuildIndexFromScratch(
     var committed = false;
     errdefer if (!committed) db.exec("ROLLBACK") catch {};
 
-    try db.exec(
-        \\DROP TABLE IF EXISTS meta;
-        \\DROP TABLE IF EXISTS ref_heads;
-        \\DROP TABLE IF EXISTS events;
-        \\DROP TABLE IF EXISTS issues;
-        \\DROP TABLE IF EXISTS issue_labels;
-        \\DROP TABLE IF EXISTS issue_assignees;
-        \\DROP TABLE IF EXISTS issue_metadata;
-        \\DROP TABLE IF EXISTS issue_projects;
-        \\DROP TABLE IF EXISTS projects;
-        \\DROP TABLE IF EXISTS project_columns;
-        \\DROP TABLE IF EXISTS project_memberships;
-        \\DROP TABLE IF EXISTS project_fields;
-        \\DROP TABLE IF EXISTS project_field_options;
-        \\DROP TABLE IF EXISTS project_field_values;
-        \\DROP TABLE IF EXISTS project_views;
-        \\DROP TABLE IF EXISTS milestones;
-        \\DROP TABLE IF EXISTS label_definitions;
-        \\DROP TABLE IF EXISTS pulls;
-        \\DROP TABLE IF EXISTS pull_labels;
-        \\DROP TABLE IF EXISTS pull_assignees;
-        \\DROP TABLE IF EXISTS pull_reviewers;
-        \\DROP TABLE IF EXISTS pull_metadata;
-        \\DROP TABLE IF EXISTS comments;
-        \\DROP TABLE IF EXISTS reactions;
-        \\DROP TABLE IF EXISTS commit_references;
-        \\DROP TABLE IF EXISTS legacy_aliases;
-        \\DROP TABLE IF EXISTS acl_roles;
-        \\DROP TABLE IF EXISTS acl_role_events;
-        \\DROP TABLE IF EXISTS acl_delegations;
-        \\DROP TABLE IF EXISTS acl_delegation_events;
-        \\DROP TABLE IF EXISTS identity_devices;
-        \\DROP TABLE IF EXISTS identity_device_events;
-    );
+    try dropIndexSchemaTables(&db);
     try createIndexSchema(&db);
 
     var meta_stmt = try db.prepare("INSERT INTO meta(key, value) VALUES (?, ?)");
@@ -530,6 +501,47 @@ fn rebuildIndexFromScratch(
     committed = true;
 
     return stats;
+}
+
+fn dropIndexSchemaTables(db: *SqliteDb) !void {
+    try db.exec(
+        \\DROP TABLE IF EXISTS meta;
+        \\DROP TABLE IF EXISTS ref_heads;
+        \\DROP TABLE IF EXISTS events;
+        \\DROP TABLE IF EXISTS identities;
+        \\DROP TABLE IF EXISTS identity_aliases;
+        \\DROP TABLE IF EXISTS issues;
+        \\DROP TABLE IF EXISTS issue_labels;
+        \\DROP TABLE IF EXISTS issue_assignees;
+        \\DROP TABLE IF EXISTS issue_metadata;
+        \\DROP TABLE IF EXISTS issue_projects;
+        \\DROP TABLE IF EXISTS issue_relationships;
+        \\DROP TABLE IF EXISTS issue_concurrent_groups;
+        \\DROP TABLE IF EXISTS projects;
+        \\DROP TABLE IF EXISTS project_columns;
+        \\DROP TABLE IF EXISTS project_memberships;
+        \\DROP TABLE IF EXISTS project_fields;
+        \\DROP TABLE IF EXISTS project_field_options;
+        \\DROP TABLE IF EXISTS project_field_values;
+        \\DROP TABLE IF EXISTS project_views;
+        \\DROP TABLE IF EXISTS milestones;
+        \\DROP TABLE IF EXISTS label_definitions;
+        \\DROP TABLE IF EXISTS pulls;
+        \\DROP TABLE IF EXISTS pull_labels;
+        \\DROP TABLE IF EXISTS pull_assignees;
+        \\DROP TABLE IF EXISTS pull_reviewers;
+        \\DROP TABLE IF EXISTS pull_metadata;
+        \\DROP TABLE IF EXISTS comments;
+        \\DROP TABLE IF EXISTS reactions;
+        \\DROP TABLE IF EXISTS commit_references;
+        \\DROP TABLE IF EXISTS legacy_aliases;
+        \\DROP TABLE IF EXISTS acl_roles;
+        \\DROP TABLE IF EXISTS acl_role_events;
+        \\DROP TABLE IF EXISTS acl_delegations;
+        \\DROP TABLE IF EXISTS acl_delegation_events;
+        \\DROP TABLE IF EXISTS identity_devices;
+        \\DROP TABLE IF EXISTS identity_device_events;
+    );
 }
 
 pub fn currentIndexRefsRaw(allocator: Allocator) ![]u8 {
@@ -671,6 +683,21 @@ test "snapshot policy checkpoints first, threshold, and aged incremental rebuild
     try std.testing.expect(!shouldCreateSnapshot(&stale, .{ .events = 10, .new_events = 63 }, policy, 999));
     try std.testing.expect(shouldCreateSnapshot(&stale, .{ .events = 10, .new_events = 64 }, policy, 999));
     try std.testing.expect(shouldCreateSnapshot(&stale, .{ .events = 10, .new_events = 1 }, policy, 1000));
+}
+
+test "index schema reset drops identity tables" {
+    const allocator = std.testing.allocator;
+    var db = try SqliteDb.openWithOptions(allocator, ":memory:", sqlite.SQLITE_OPEN_READWRITE | sqlite.SQLITE_OPEN_CREATE, true, .{ .enable_wal = false });
+    defer db.deinit();
+
+    try createIndexSchema(&db);
+    try dropIndexSchemaTables(&db);
+    try createIndexSchema(&db);
+
+    var identities = try db.prepare("SELECT id FROM identities LIMIT 0");
+    defer identities.deinit();
+    var identity_aliases = try db.prepare("SELECT alias_kind FROM identity_aliases LIMIT 0");
+    defer identity_aliases.deinit();
 }
 
 test "index admission rejects repo, sequence, and idempotency conflicts" {

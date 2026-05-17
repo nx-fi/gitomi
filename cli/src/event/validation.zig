@@ -541,6 +541,15 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!optionalStringWithin(payload, "column_ref", git.max_payload_atom_bytes)) return "issue project event payload.column_ref exceeds v1 field size limit";
         return null;
     }
+    if (std.mem.eql(u8, event_type, "issue.relationship_added") or std.mem.eql(u8, event_type, "issue.relationship_removed")) {
+        if (!hasIssueRelationshipKind(payload, "kind")) return "issue relationship event payload.kind must be parent or blocks";
+        if (!hasNonEmptyStringWithin(payload, "target_id", git.max_payload_ref_bytes)) return "issue relationship event payload.target_id must be a non-empty string within v1 ref size limit";
+        return null;
+    }
+    if (std.mem.eql(u8, event_type, "issue.concurrent_group_added") or std.mem.eql(u8, event_type, "issue.concurrent_group_removed")) {
+        if (!hasNonEmptyStringWithin(payload, "group", git.max_payload_atom_bytes)) return "issue concurrent group event payload.group must be a non-empty string within v1 field size limit";
+        return null;
+    }
     if (std.mem.eql(u8, event_type, "issue.project_field_set")) {
         if (!hasString(payload, "project_id") and !hasString(payload, "project_ref")) return "issue.project_field_set payload.project_id or payload.project_ref must be a string";
         if (!optionalStringWithin(payload, "project_id", git.max_payload_ref_bytes)) return "issue.project_field_set payload.project_id exceeds v1 ref size limit";
@@ -977,6 +986,11 @@ fn hasIssueStatus(object: std.json.ObjectMap, key: []const u8) bool {
         std.mem.eql(u8, value, "Failed");
 }
 
+fn hasIssueRelationshipKind(object: std.json.ObjectMap, key: []const u8) bool {
+    const value = jsonString(object.get(key)) orelse return false;
+    return std.mem.eql(u8, value, "parent") or std.mem.eql(u8, value, "blocks");
+}
+
 fn jsonValueWithin(value: std.json.Value, max_bytes: usize) bool {
     return jsonValueApproxLen(value) <= max_bytes;
 }
@@ -1100,6 +1114,11 @@ fn requirePayloadStringWithin(payload: std.json.ObjectMap, event_type: []const u
 fn hasString(object: std.json.ObjectMap, key: []const u8) bool {
     const value = object.get(key) orelse return false;
     return value == .string;
+}
+
+fn hasNonEmptyStringWithin(object: std.json.ObjectMap, key: []const u8, max_bytes: usize) bool {
+    const value = jsonString(object.get(key)) orelse return false;
+    return value.len != 0 and value.len <= max_bytes;
 }
 
 fn stringWithin(object: std.json.ObjectMap, key: []const u8, max_bytes: usize) bool {

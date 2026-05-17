@@ -528,6 +528,7 @@ fn appendIssueListRow(
     });
     try appendIssueRowType(buf, allocator, issue_type);
     try appendIssueRowPriority(buf, allocator, priority);
+    try appendIssueRowRelationshipBadges(buf, allocator, db, id);
     try appendIssueRowLabels(buf, allocator, db, id);
     try buf.appendSlice(allocator, "</div><p class=\"issue-row-meta\">");
     try shared.appendIssueReferenceLink(buf, allocator, issue_ref);
@@ -616,6 +617,48 @@ fn appendIssueRowPriority(buf: *std.ArrayList(u8), allocator: Allocator, priorit
         .tone = priorityTone(priority),
         .priority = priority,
     });
+}
+
+fn appendIssueRowRelationshipBadges(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8) !void {
+    if (try hasBlockingIssue(db, issue_id)) {
+        try buf.appendSlice(allocator, "<span class=\"issue-row-relationship-badge is-blocked\" title=\"Blocked by another issue\">Blocked</span>");
+    }
+
+    var stmt = try db.prepare(
+        \\SELECT COUNT(DISTINCT child.id),
+        \\       SUM(CASE WHEN child.state = 'closed' THEN 1 ELSE 0 END)
+        \\FROM issue_relationships r
+        \\JOIN issues child ON child.id = r.source_issue_id
+        \\WHERE r.target_issue_id = ?
+        \\  AND r.relationship = 'parent'
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    if (!(try stmt.step())) return;
+    const total = stmt.columnInt64(0);
+    if (total <= 0) return;
+    const done = stmt.columnInt64(1);
+    try appendTemplate(buf, allocator,
+        \\<span class="issue-row-relationship-badge" title="Sub-issues">{done} / {total}</span>
+    , .{
+        .done = done,
+        .total = total,
+    });
+}
+
+fn hasBlockingIssue(db: *SqliteDb, issue_id: []const u8) !bool {
+    var stmt = try db.prepare(
+        \\SELECT 1
+        \\FROM issue_relationships r
+        \\JOIN issues blocker ON blocker.id = r.source_issue_id
+        \\WHERE r.target_issue_id = ?
+        \\  AND r.relationship = 'blocks'
+        \\  AND blocker.state = 'open'
+        \\LIMIT 1
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    return try stmt.step();
 }
 
 fn appendIssueLabel(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, color: []const u8) !void {

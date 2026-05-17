@@ -445,7 +445,7 @@ fn resolveCurrentRepo(allocator: Allocator) ![]u8 {
         }
         return CliError.UserError;
     }
-    return try util.trimOwned(allocator, result.stdout);
+    return try util.trimDup(allocator, result.stdout);
 }
 
 pub fn importFromApi(allocator: Allocator, client: GitHubClient, options: ImportOptions, stats: *ImportStats) !void {

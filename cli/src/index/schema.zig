@@ -132,6 +132,27 @@ pub fn createIndexSchema(db: *SqliteDb) !void {
         \\  PRIMARY KEY(issue_id, project, column_name, add_hash)
         \\);
         \\CREATE INDEX issue_projects_project_idx ON issue_projects(project, column_name, issue_id);
+        \\CREATE TABLE issue_relationships (
+        \\  source_issue_id TEXT NOT NULL,
+        \\  relationship TEXT NOT NULL,
+        \\  target_issue_id TEXT NOT NULL,
+        \\  add_hash TEXT NOT NULL,
+        \\  created_at TEXT NOT NULL,
+        \\  actor_principal TEXT NOT NULL,
+        \\  PRIMARY KEY(source_issue_id, relationship, target_issue_id, add_hash)
+        \\);
+        \\CREATE INDEX issue_relationships_source_idx ON issue_relationships(source_issue_id, relationship, target_issue_id);
+        \\CREATE INDEX issue_relationships_target_idx ON issue_relationships(target_issue_id, relationship, source_issue_id);
+        \\CREATE TABLE issue_concurrent_groups (
+        \\  issue_id TEXT NOT NULL,
+        \\  group_key TEXT NOT NULL,
+        \\  add_hash TEXT NOT NULL,
+        \\  created_at TEXT NOT NULL,
+        \\  actor_principal TEXT NOT NULL,
+        \\  PRIMARY KEY(issue_id, group_key, add_hash)
+        \\);
+        \\CREATE INDEX issue_concurrent_groups_issue_idx ON issue_concurrent_groups(issue_id, group_key);
+        \\CREATE INDEX issue_concurrent_groups_group_idx ON issue_concurrent_groups(group_key, issue_id);
         \\CREATE TABLE projects (
         \\  id TEXT PRIMARY KEY,
         \\  name TEXT NOT NULL,

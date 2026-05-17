@@ -1174,7 +1174,7 @@ fn appendRootCommitBar(
 ) !void {
     try appendTemplate(buf, allocator, "<div class=\"root-commit-row\">", .{});
     if (summary_opt) |summary| {
-        try shared.appendAvatar(buf, allocator, summary.author, "root-commit-avatar");
+        try shared.appendResolvedGitIdentityAvatar(buf, allocator, summary.author, summary.author_email, "root-commit-avatar");
         const commit_href = commitHref(summary.full_hash);
         try appendTemplate(buf, allocator,
             \\<div class="root-commit-main"><span class="root-commit-author">{author}</span><a class="root-commit-message" href="{href}" title="{subject}">{subject}</a></div>
@@ -2149,7 +2149,7 @@ fn appendRootContributors(buf: *std.ArrayList(u8), allocator: Allocator, contrib
             .color = source_stats.contributorColor(contributor.name),
             .share = shared.percent(contributor.total(), total),
         });
-        try shared.appendAvatar(buf, allocator, contributor.name, "root-contributor-avatar");
+        try shared.appendResolvedGitIdentityAvatar(buf, allocator, contributor.name, contributor.email, "root-contributor-avatar");
         try appendTemplate(buf, allocator,
             \\<span class="root-contributor-name">{name}</span></span><strong>{share}</strong></div><span class="root-contributor-bar" aria-hidden="true"></span><span class="root-contributor-metrics"><span><strong>{lines}</strong> {lines_label}</span><span>{code} code</span><span>{test_count} test</span><span>{comment} comments</span></span></div>
         , .{
@@ -2171,7 +2171,7 @@ fn appendRootContributors(buf: *std.ArrayList(u8), allocator: Allocator, contrib
             \\<div class="root-contributor-others" aria-label="Other contributors">
         , .{});
         for (others[0..shown]) |contributor| {
-            try shared.appendAvatar(buf, allocator, contributor.name, "root-contributor-other-avatar");
+            try shared.appendResolvedGitIdentityAvatar(buf, allocator, contributor.name, contributor.email, "root-contributor-other-avatar");
         }
         if (others.len > shown) {
             try appendTemplate(buf, allocator,

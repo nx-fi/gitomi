@@ -816,6 +816,10 @@ fn eventAuthorizationRejection(
     if (std.mem.eql(u8, envelope.event_type, "issue.milestone_set") or
         std.mem.eql(u8, envelope.event_type, "issue.project_added") or
         std.mem.eql(u8, envelope.event_type, "issue.project_removed") or
+        std.mem.eql(u8, envelope.event_type, "issue.relationship_added") or
+        std.mem.eql(u8, envelope.event_type, "issue.relationship_removed") or
+        std.mem.eql(u8, envelope.event_type, "issue.concurrent_group_added") or
+        std.mem.eql(u8, envelope.event_type, "issue.concurrent_group_removed") or
         std.mem.eql(u8, envelope.event_type, "issue.project_field_set") or
         std.mem.eql(u8, envelope.event_type, "issue.project_field_cleared"))
     {

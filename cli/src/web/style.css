@@ -365,6 +365,13 @@ code {
   font-weight: 800;
   text-transform: uppercase;
 }
+.user-menu-role-pill {
+  width: fit-content;
+}
+.user-menu-role-muted {
+  color: var(--muted);
+  font-weight: 700;
+}
 main {
   position: relative;
   width: min(1280px, calc(100vw - 32px));
@@ -1057,6 +1064,25 @@ main.page-projects:has(.project-detail-panel) {
   color: var(--text);
   background: var(--issue-row-priority-p3-bg);
   border-color: var(--issue-row-priority-p3-bg);
+}
+.issue-row-relationship-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 7px;
+  color: var(--muted);
+  background: var(--button-secondary-bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+}
+.issue-row-relationship-badge.is-blocked {
+  color: #cf222e;
+  background: color-mix(in srgb, #cf222e 10%, transparent);
+  border-color: color-mix(in srgb, #cf222e 42%, var(--border));
 }
 .issue-row-labels {
   display: inline-flex;
@@ -3244,10 +3270,16 @@ main.page-projects:has(.project-detail-panel) {
   height: 16px;
   background: var(--muted);
   transform: translateY(-50%);
+  pointer-events: none;
   -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-width='2'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.5-3.5'/%3E%3C/g%3E%3C/svg%3E") center / contain no-repeat;
   mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-width='2'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.5-3.5'/%3E%3C/g%3E%3C/svg%3E") center / contain no-repeat;
 }
-.issue-sidebar-add-form input {
+.issue-sidebar-menu-filter > span {
+  top: calc(50% - 6px);
+  left: 22px;
+}
+.issue-sidebar-add-form input,
+.issue-sidebar-add-form select {
   min-width: 0;
   height: 34px;
   padding: 0 9px;
@@ -3258,6 +3290,10 @@ main.page-projects:has(.project-detail-panel) {
   font: inherit;
   font-size: 13px;
   box-shadow: none;
+}
+.issue-sidebar-add-form select,
+.issue-sidebar-project-status-select {
+  appearance: auto;
 }
 .issue-sidebar-menu-input input {
   padding-left: 34px;
@@ -3345,6 +3381,86 @@ main.page-projects:has(.project-detail-panel) {
   border-bottom: 2px solid #ffffff;
   border-left: 2px solid #ffffff;
   transform: translateY(-1px) rotate(-45deg);
+}
+.issue-sidebar-project-choice-row {
+  display: grid;
+  grid-template-columns: 22px minmax(0, auto) minmax(0, 1fr) minmax(96px, auto);
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 42px;
+  padding: 7px 14px;
+  color: var(--text);
+  background: transparent;
+  border-left: 3px solid transparent;
+}
+.issue-sidebar-project-choice-row.has-remove {
+  grid-template-columns: 22px minmax(0, auto) minmax(0, 1fr) minmax(96px, auto) 24px;
+}
+.issue-sidebar-project-choice-row:hover,
+.issue-sidebar-project-choice-row:focus-within {
+  background: var(--panel-strong);
+}
+.issue-sidebar-project-choice-row.is-selected {
+  border-left-color: var(--blue);
+  background: color-mix(in srgb, var(--blue) 8%, transparent);
+}
+.issue-sidebar-project-check,
+.issue-sidebar-project-remove-button {
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+}
+.issue-sidebar-project-check {
+  width: 22px;
+  height: 22px;
+}
+.issue-sidebar-project-check:hover .issue-sidebar-picker-check,
+.issue-sidebar-project-check:focus-visible .issue-sidebar-picker-check {
+  border-color: var(--blue);
+}
+.issue-sidebar-project-check.is-selected .issue-sidebar-picker-check {
+  background: var(--blue);
+  border-color: var(--blue);
+}
+.issue-sidebar-project-check.is-selected .issue-sidebar-picker-check::before {
+  content: "";
+  width: 8px;
+  height: 4px;
+  border-bottom: 2px solid #ffffff;
+  border-left: 2px solid #ffffff;
+  transform: translateY(-1px) rotate(-45deg);
+}
+.issue-sidebar-project-status-select {
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  color: var(--text);
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 12px;
+}
+.issue-sidebar-add-form .issue-sidebar-project-status-select {
+  height: 34px;
+  font-size: 13px;
+}
+.issue-sidebar-project-remove-button {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  line-height: 1;
+}
+.issue-sidebar-project-remove-button:hover,
+.issue-sidebar-project-remove-button:focus-visible {
+  color: var(--text);
+  background: var(--subtle);
 }
 .issue-sidebar-picker-text {
   display: grid;
@@ -3502,13 +3618,29 @@ main.page-projects:has(.project-detail-panel) {
   min-width: 0;
 }
 .issue-relationship-group-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   color: var(--muted);
   font-size: 13px;
   font-weight: 700;
 }
+.issue-relationship-group-title > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .issue-relationship-list {
   display: grid;
   gap: 2px;
+  min-width: 0;
+}
+.issue-relationship-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
   min-width: 0;
 }
 .issue-relationship-row {
@@ -3527,6 +3659,31 @@ main.page-projects:has(.project-detail-panel) {
 .issue-relationship-row:hover {
   background: var(--panel-strong);
   text-decoration: none;
+}
+.issue-relationship-entry .issue-relationship-row {
+  margin-right: 0;
+}
+.issue-relationship-remove-form {
+  display: inline-flex;
+}
+.issue-relationship-remove-form button {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1;
+  cursor: pointer;
+}
+.issue-relationship-remove-form button:hover {
+  color: var(--text);
+  background: var(--panel-strong);
 }
 .issue-relationship-main {
   display: grid;

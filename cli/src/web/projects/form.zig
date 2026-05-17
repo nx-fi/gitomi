@@ -1,4 +1,6 @@
 const std = @import("std");
+const event_writer_mod = @import("../../event_writer.zig");
+const index = @import("../../index.zig");
 const project_mod = @import("../../project.zig");
 const repo_mod = @import("../../repo.zig");
 const util = @import("../../util.zig");
@@ -7,18 +9,23 @@ const issues_page = @import("../issues.zig");
 const shared = @import("../shared.zig");
 
 const Allocator = std.mem.Allocator;
+const EventWriter = event_writer_mod.EventWriter;
 const Repo = repo_mod.Repo;
+const SqliteDb = index.SqliteDb;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
 const appendTemplate = shared.appendTemplate;
-const createProjectCreatedEvent = project_mod.createProjectCreatedEvent;
-const createProjectFieldCreatedEvent = project_mod.createProjectFieldCreatedEvent;
-const createProjectFieldOptionAddedEvent = project_mod.createProjectFieldOptionAddedEvent;
-const createProjectViewCreatedEvent = project_mod.createProjectViewCreatedEvent;
 const formValueOwned = issues_page.formValueOwned;
+const looksLikeUuid = util.looksLikeUuid;
+const newUuidV7 = util.newUuidV7;
 const sendRedirect = shared.sendRedirect;
 const sendResponse = shared.sendResponse;
 const splitCommaFields = util.splitCommaFields;
+const sqlite = index.sqlite;
+const stageProjectCreatedEvent = project_mod.stageProjectCreatedEvent;
+const stageProjectFieldCreatedEvent = project_mod.stageProjectFieldCreatedEvent;
+const stageProjectFieldOptionAddedEvent = project_mod.stageProjectFieldOptionAddedEvent;
+const stageProjectViewCreatedEvent = project_mod.stageProjectViewCreatedEvent;
 const table_status_view_config = project_views.table_status_view_config;
 const board_status_view_config = project_views.board_status_view_config;
 const kanban_board_view_config = project_views.kanban_board_view_config;
@@ -132,6 +139,8 @@ pub fn renderProjectForm(
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
+    const project_id = try newUuidV7(allocator);
+    defer allocator.free(project_id);
     const selected_template = projectTemplateById(template_id);
 
     try appendShellStart(&buf, allocator, repo, "New Project", "projects");
@@ -170,7 +179,7 @@ pub fn renderProjectForm(
     try buf.appendSlice(allocator,
         \\    </div>
     );
-    try appendProjectConfigForm(&buf, allocator, selected_template, name_value, description_value, columns_value);
+    try appendProjectConfigForm(&buf, allocator, selected_template, project_id, name_value, description_value, columns_value);
     try buf.appendSlice(allocator,
         \\  </div>
         \\</div>
@@ -214,10 +223,19 @@ pub fn handleProjectPost(allocator: Allocator, repo: Repo, stream: std.net.Strea
     defer allocator.free(columns_owned);
     const template_owned = (try formValueOwned(allocator, form_body, "template")) orelse try allocator.dupe(u8, default_project_template_id);
     defer allocator.free(template_owned);
+    const project_id_owned = (try formValueOwned(allocator, form_body, "project_id")) orelse try newUuidV7(allocator);
+    defer allocator.free(project_id_owned);
+    const project_id = std.mem.trim(u8, project_id_owned, " \t\r\n");
 
     const name = std.mem.trim(u8, name_owned, " \t\r\n");
     if (name.len == 0) {
         const body = try renderProjectForm(allocator, repo, "Name is required.", name_owned, description_owned, columns_owned, template_owned);
+        defer allocator.free(body);
+        try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", body, null);
+        return;
+    }
+    if (!looksLikeUuid(project_id)) {
+        const body = try renderProjectForm(allocator, repo, "Could not create the project. The create token was invalid; reload the form and try again.", name_owned, description_owned, columns_owned, template_owned);
         defer allocator.free(body);
         try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", body, null);
         return;
@@ -235,129 +253,152 @@ pub fn handleProjectPost(allocator: Allocator, repo: Repo, stream: std.net.Strea
         }
     }
 
-    const project_id = createProjectCreatedEvent(allocator, name, description_owned, columns.items) catch {
-        const body = try renderProjectForm(
-            allocator,
-            repo,
-            "Could not create the project. Check that Gitomi is initialized and Git commit signing is configured.",
-            name_owned,
-            description_owned,
-            columns_owned,
-            template_owned,
-        );
-        defer allocator.free(body);
-        try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", body, null);
-        return;
-    };
-    defer allocator.free(project_id);
+    var attempt: usize = 0;
+    while (attempt < 2) : (attempt += 1) {
+        createProjectFromTemplate(allocator, project_id, name, description_owned, columns.items, template_owned) catch {
+            if (projectExistsAfterIndex(allocator, repo, project_id) catch false) {
+                try sendRedirect(allocator, stream, "/projects");
+                return;
+            }
+            if (attempt == 0) continue;
+            const body = try renderProjectForm(
+                allocator,
+                repo,
+                "Could not create the project. Check that Gitomi is initialized and Git commit signing is configured.",
+                name_owned,
+                description_owned,
+                columns_owned,
+                template_owned,
+            );
+            defer allocator.free(body);
+            try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", body, null);
+            return;
+        };
 
-    seedProjectTemplateEvents(allocator, template_owned, project_id) catch {
-        const body = try renderProjectForm(
-            allocator,
-            repo,
-            "Project was created, but template setup failed. Check that Gitomi commit signing is configured and try adding views from the project CLI.",
-            name_owned,
-            description_owned,
-            columns_owned,
-            template_owned,
-        );
-        defer allocator.free(body);
-        try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", body, null);
+        try sendRedirect(allocator, stream, "/projects");
         return;
-    };
-
-    try sendRedirect(allocator, stream, "/projects");
+    }
 }
 
-fn seedProjectTemplateEvents(allocator: Allocator, template_id: []const u8, project_id: []const u8) !void {
+fn createProjectFromTemplate(
+    allocator: Allocator,
+    project_id: []const u8,
+    name: []const u8,
+    description: []const u8,
+    columns: []const []const u8,
+    template_id: []const u8,
+) !void {
+    var writer = try EventWriter.init(allocator, "gt project create");
+    defer writer.deinit();
+
+    const commit_oid = try stageProjectCreatedEvent(allocator, &writer, project_id, name, description, columns);
+    defer allocator.free(commit_oid);
+    try seedProjectTemplateEvents(allocator, &writer, template_id, project_id);
+    try writer.commitStaged();
+}
+
+fn projectExistsAfterIndex(allocator: Allocator, repo: Repo, project_id: []const u8) !bool {
+    try index.ensureIndex(allocator, repo);
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    var stmt = try db.prepare("SELECT 1 FROM projects WHERE id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    return try stmt.step();
+}
+
+fn seedProjectTemplateEvents(allocator: Allocator, writer: *EventWriter, template_id: []const u8, project_id: []const u8) !void {
     const template = projectTemplateById(template_id);
     if (std.mem.eql(u8, template.id, "table")) {
-        try seedTemplateView(allocator, project_id, "Table", "table", 1, table_status_view_config);
+        try seedTemplateView(allocator, writer, project_id, "Table", "table", 1, table_status_view_config);
     } else if (std.mem.eql(u8, template.id, "board")) {
-        try seedTemplateView(allocator, project_id, "Board", "board", 1, board_status_view_config);
-        try seedTemplateView(allocator, project_id, "Table", "table", 2, table_status_view_config);
+        try seedTemplateView(allocator, writer, project_id, "Board", "board", 1, board_status_view_config);
+        try seedTemplateView(allocator, writer, project_id, "Table", "table", 2, table_status_view_config);
     } else if (std.mem.eql(u8, template.id, "roadmap")) {
-        try seedRoadmapFields(allocator, project_id, 1);
-        try seedTemplateView(allocator, project_id, "Roadmap", "roadmap", 1, roadmap_view_config);
-        try seedTemplateView(allocator, project_id, "Table", "table", 2, table_status_view_config);
+        try seedRoadmapFields(allocator, writer, project_id, 1);
+        try seedTemplateView(allocator, writer, project_id, "Roadmap", "roadmap", 1, roadmap_view_config);
+        try seedTemplateView(allocator, writer, project_id, "Table", "table", 2, table_status_view_config);
     } else if (std.mem.eql(u8, template.id, "kanban")) {
-        try seedTemplateView(allocator, project_id, "Board", "board", 1, kanban_board_view_config);
-        try seedTemplateView(allocator, project_id, "Prioritized", "table", 2, priority_table_view_config);
-        try seedTemplateView(allocator, project_id, "My items", "table", 3, my_items_view_config);
+        try seedTemplateView(allocator, writer, project_id, "Board", "board", 1, kanban_board_view_config);
+        try seedTemplateView(allocator, writer, project_id, "Prioritized", "table", 2, priority_table_view_config);
+        try seedTemplateView(allocator, writer, project_id, "My items", "table", 3, my_items_view_config);
     } else if (std.mem.eql(u8, template.id, "feature-release")) {
-        try seedSizeField(allocator, project_id, 1);
-        try seedRoadmapFields(allocator, project_id, 2);
-        try seedTemplateView(allocator, project_id, "Prioritized", "table", 1, priority_table_view_config);
-        try seedTemplateView(allocator, project_id, "Status", "board", 2, board_status_view_config);
-        try seedTemplateView(allocator, project_id, "Roadmap", "roadmap", 3, roadmap_view_config);
-        try seedTemplateView(allocator, project_id, "Bugs", "table", 4, bugs_view_config);
+        try seedSizeField(allocator, writer, project_id, 1);
+        try seedRoadmapFields(allocator, writer, project_id, 2);
+        try seedTemplateView(allocator, writer, project_id, "Prioritized", "table", 1, priority_table_view_config);
+        try seedTemplateView(allocator, writer, project_id, "Status", "board", 2, board_status_view_config);
+        try seedTemplateView(allocator, writer, project_id, "Roadmap", "roadmap", 3, roadmap_view_config);
+        try seedTemplateView(allocator, writer, project_id, "Bugs", "table", 4, bugs_view_config);
     } else if (std.mem.eql(u8, template.id, "bug-tracker")) {
-        try seedTemplateView(allocator, project_id, "Prioritized bugs", "table", 1, bugs_priority_view_config);
-        try seedTemplateView(allocator, project_id, "Triage", "board", 2, bug_triage_view_config);
-        try seedTemplateView(allocator, project_id, "My items", "table", 3, my_items_view_config);
+        try seedTemplateView(allocator, writer, project_id, "Prioritized bugs", "table", 1, bugs_priority_view_config);
+        try seedTemplateView(allocator, writer, project_id, "Triage", "board", 2, bug_triage_view_config);
+        try seedTemplateView(allocator, writer, project_id, "My items", "table", 3, my_items_view_config);
     } else if (std.mem.eql(u8, template.id, "team-planning")) {
-        try seedTemplateField(allocator, project_id, "iteration", "Iteration", "text", 1);
-        try seedTemplateField(allocator, project_id, "estimate", "Estimate", "number", 2);
-        try seedRoadmapFields(allocator, project_id, 3);
-        try seedTemplateView(allocator, project_id, "Backlog", "table", 1, table_status_view_config);
-        try seedTemplateView(allocator, project_id, "Board", "board", 2, board_status_view_config);
-        try seedTemplateView(allocator, project_id, "Current iteration", "table", 3, current_iteration_view_config);
-        try seedTemplateView(allocator, project_id, "Roadmap", "roadmap", 4, roadmap_view_config);
-        try seedTemplateView(allocator, project_id, "My items", "table", 5, my_items_view_config);
+        try seedTemplateField(allocator, writer, project_id, "iteration", "Iteration", "text", 1);
+        try seedTemplateField(allocator, writer, project_id, "estimate", "Estimate", "number", 2);
+        try seedRoadmapFields(allocator, writer, project_id, 3);
+        try seedTemplateView(allocator, writer, project_id, "Backlog", "table", 1, table_status_view_config);
+        try seedTemplateView(allocator, writer, project_id, "Board", "board", 2, board_status_view_config);
+        try seedTemplateView(allocator, writer, project_id, "Current iteration", "table", 3, current_iteration_view_config);
+        try seedTemplateView(allocator, writer, project_id, "Roadmap", "roadmap", 4, roadmap_view_config);
+        try seedTemplateView(allocator, writer, project_id, "My items", "table", 5, my_items_view_config);
     }
 }
 
 fn seedTemplateField(
     allocator: Allocator,
+    writer: *EventWriter,
     project_id: []const u8,
     key: []const u8,
     name: []const u8,
     field_type: []const u8,
     position: i64,
 ) !void {
-    const field_id = try createProjectFieldCreatedEvent(allocator, project_id, key, name, field_type, position, false, null);
+    const field_id = try stageProjectFieldCreatedEvent(allocator, writer, project_id, key, name, field_type, position, false, null);
     defer allocator.free(field_id);
 }
 
 fn seedTemplateSingleSelectField(
     allocator: Allocator,
+    writer: *EventWriter,
     project_id: []const u8,
     key: []const u8,
     name: []const u8,
     position: i64,
     options: []const TemplateFieldOption,
 ) !void {
-    const field_id = try createProjectFieldCreatedEvent(allocator, project_id, key, name, "single_select", position, false, null);
+    const field_id = try stageProjectFieldCreatedEvent(allocator, writer, project_id, key, name, "single_select", position, false, null);
     defer allocator.free(field_id);
     for (options, 0..) |option, option_index| {
         const option_position: i64 = @intCast(option_index + 1);
-        try createProjectFieldOptionAddedEvent(allocator, project_id, field_id, option.name, option.color, option_position);
+        try stageProjectFieldOptionAddedEvent(allocator, writer, project_id, field_id, option.name, option.color, option_position);
     }
 }
 
-fn seedRoadmapFields(allocator: Allocator, project_id: []const u8, start_position: i64) !void {
-    try seedTemplateField(allocator, project_id, "start_at", "Start date", "date", start_position);
-    try seedTemplateField(allocator, project_id, "target_at", "Target date", "date", start_position + 1);
+fn seedRoadmapFields(allocator: Allocator, writer: *EventWriter, project_id: []const u8, start_position: i64) !void {
+    try seedTemplateField(allocator, writer, project_id, "start_at", "Start date", "date", start_position);
+    try seedTemplateField(allocator, writer, project_id, "target_at", "Target date", "date", start_position + 1);
 }
 
-fn seedSizeField(allocator: Allocator, project_id: []const u8, position: i64) !void {
+fn seedSizeField(allocator: Allocator, writer: *EventWriter, project_id: []const u8, position: i64) !void {
     const size_options = [_]TemplateFieldOption{
         .{ .name = "S", .color = "green" },
         .{ .name = "M", .color = "blue" },
         .{ .name = "L", .color = "orange" },
     };
-    try seedTemplateSingleSelectField(allocator, project_id, "size", "Size", position, size_options[0..]);
+    try seedTemplateSingleSelectField(allocator, writer, project_id, "size", "Size", position, size_options[0..]);
 }
 
 fn seedTemplateView(
     allocator: Allocator,
+    writer: *EventWriter,
     project_id: []const u8,
     name: []const u8,
     layout: []const u8,
     position: i64,
     config_json: []const u8,
 ) !void {
-    try createProjectViewCreatedEvent(allocator, project_id, name, layout, position, config_json);
+    try stageProjectViewCreatedEvent(allocator, writer, project_id, name, layout, position, config_json);
 }
 
 fn appendProjectTemplateSidebar(buf: *std.ArrayList(u8), allocator: Allocator, selected_id: []const u8) !void {
@@ -450,6 +491,7 @@ fn appendProjectConfigForm(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
     selected_template: *const ProjectTemplate,
+    project_id: []const u8,
     name_value: []const u8,
     description_value: []const u8,
     columns_value: []const u8,
@@ -463,6 +505,7 @@ fn appendProjectConfigForm(
         \\  </div>
         \\  <form method="post" action="/projects" class="issue-form project-form">
         \\    <input type="hidden" name="template" value="{template_id}">
+        \\    <input type="hidden" name="project_id" value="{project_id}">
         \\    <label>Name<input name="name" value="{name_value}" autofocus required></label>
         \\    <label>Description<textarea name="description" rows="4">{description_value}</textarea></label>
         \\    <label>Status values<input name="columns" value="{columns_value}" placeholder="Draft, Todo, WIP, Review, Done, Failed"></label>
@@ -471,6 +514,7 @@ fn appendProjectConfigForm(
         .title = selected_template.title,
         .description = selected_template.description,
         .template_id = selected_template.id,
+        .project_id = project_id,
         .name_value = name_value,
         .description_value = description_value,
         .columns_value = columns_value,
@@ -506,14 +550,29 @@ fn appendProjectTemplateSearchScript(buf: *std.ArrayList(u8), allocator: Allocat
         \\<script>
         \\(function () {
         \\  var search = document.querySelector("[data-project-template-search]");
-        \\  if (!search) return;
-        \\  var cards = Array.prototype.slice.call(document.querySelectorAll("[data-project-template-card]"));
-        \\  search.addEventListener("input", function () {
-        \\    var query = search.value.trim().toLowerCase();
-        \\    cards.forEach(function (card) {
-        \\      var text = (card.getAttribute("data-template-text") || "").toLowerCase();
-        \\      card.hidden = query.length !== 0 && text.indexOf(query) === -1;
+        \\  if (search) {
+        \\    var cards = Array.prototype.slice.call(document.querySelectorAll("[data-project-template-card]"));
+        \\    search.addEventListener("input", function () {
+        \\      var query = search.value.trim().toLowerCase();
+        \\      cards.forEach(function (card) {
+        \\        var text = (card.getAttribute("data-template-text") || "").toLowerCase();
+        \\        card.hidden = query.length !== 0 && text.indexOf(query) === -1;
+        \\      });
         \\    });
+        \\  }
+        \\  var form = document.querySelector(".project-form");
+        \\  if (!form) return;
+        \\  form.addEventListener("submit", function (event) {
+        \\    if (form.dataset.projectSubmitState === "pending") {
+        \\      event.preventDefault();
+        \\      return;
+        \\    }
+        \\    form.dataset.projectSubmitState = "pending";
+        \\    var submit = form.querySelector("button[type=submit]");
+        \\    if (submit) {
+        \\      submit.disabled = true;
+        \\      submit.textContent = "Creating...";
+        \\    }
         \\  });
         \\}());
         \\</script>
