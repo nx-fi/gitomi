@@ -783,7 +783,7 @@ fn appendIssueSidebarValueActionFormStart(
 
 fn appendIssuePriorityChip(buf: *std.ArrayList(u8), allocator: Allocator, priority: []const u8) !void {
     try appendTemplate(buf, allocator,
-        \\<span class="project-priority-chip tone-{tone}">{priority}</span>
+        \\<span class="issue-row-priority issue-row-priority-{tone}" title="Priority: {priority}" aria-label="Priority: {priority}">{priority}</span>
     , .{
         .tone = project_issue_render.priorityTone(priority),
         .priority = priority,
