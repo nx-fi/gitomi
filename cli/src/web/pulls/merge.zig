@@ -82,7 +82,7 @@ fn loadSnapshot(allocator: Allocator, repo: Repo, detail: PullDetail) !?PullMerg
 
     try fetchRemoteBranches(allocator, repo, base_target.remote);
 
-    const head_target = try remoteBranchTargetForPullRef(allocator, repo, detail.head_ref);
+    var head_target = try remoteBranchTargetForPullRef(allocator, repo, detail.head_ref);
     var head_target_owned = head_target != null;
     defer if (head_target_owned) if (head_target) |target| target.deinit(allocator);
 
