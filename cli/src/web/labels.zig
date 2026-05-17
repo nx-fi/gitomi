@@ -580,15 +580,7 @@ fn appendLabelDialog(buf: *std.ArrayList(u8), allocator: Allocator, csrf_token: 
         \\          <input type="hidden" name="action" value="create" data-label-dialog-action>
         \\          <input type="hidden" name="label" value="" data-label-dialog-original>
         \\          <label class="labels-dialog-field">Name<input class="labels-dialog-input" type="text" name="new_label" required data-label-dialog-name></label>
-        \\          <div class="labels-dialog-field"><span>Description</span>
-        \\          <div class="text-block-editor labels-dialog-text-block" data-text-block-editor>
-        \\            <div class="text-block-toolbar">
-        \\              <button class="dictation-toggle" type="button" data-dictation-toggle aria-label="Start dictation" title="Start dictation"><span class="md-icon md-icon-mic" aria-hidden="true"></span></button>
-        \\              <span class="dictation-status" data-dictation-status hidden></span>
-        \\            </div>
-        \\            <textarea class="labels-dialog-textarea" name="description" rows="4" data-label-dialog-description data-dictation-input></textarea>
-        \\          </div>
-        \\          </div>
+        \\          <label class="labels-dialog-field">Description<textarea class="labels-dialog-textarea" name="description" rows="4" data-label-dialog-description></textarea></label>
         \\          <label class="labels-dialog-field">Color<span class="labels-color-control"><button class="button secondary labels-color-random" type="button" aria-label="Choose another color" title="Choose another color" data-label-color-random><span class="button-icon icon-sync" aria-hidden="true"></span></button><input class="labels-dialog-input" type="text" name="color" value="#0075ca" pattern="#[0-9a-fA-F]{{6}}" data-label-dialog-color></span></label>
         \\        </div>
         \\        <footer class="labels-dialog-actions">

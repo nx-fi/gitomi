@@ -3148,32 +3148,6 @@ main.page-projects:has(.project-overview-page) {
   color: var(--text);
   background: var(--button-secondary-bg);
 }
-.dictation-toggle.is-loading,
-.dictation-toggle.is-recording,
-.dictation-toggle.is-error {
-  color: var(--text);
-  background: var(--button-secondary-bg);
-}
-.dictation-toggle.is-loading .md-icon,
-.dictation-toggle.is-recording .md-icon {
-  color: var(--green);
-}
-.dictation-toggle.is-recording {
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--green) 70%, var(--border));
-}
-.dictation-toggle.is-error .md-icon {
-  color: var(--red);
-}
-.dictation-status {
-  min-width: 0;
-  max-width: min(34vw, 280px);
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .markdown-editor-divider {
   width: 1px;
   height: 22px;
@@ -3193,48 +3167,6 @@ main.page-projects:has(.project-overview-page) {
 .markdown-editor-preview {
   min-height: 150px;
   padding: 14px;
-}
-.text-block-editor {
-  display: grid;
-  overflow: hidden;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-}
-.text-block-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 38px;
-  padding: 5px 8px;
-  background: var(--panel-strong);
-  border-bottom: 1px solid var(--border);
-}
-.text-block-toolbar .dictation-toggle {
-  display: inline-grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  color: var(--muted);
-  background: transparent;
-  border: 0;
-  border-radius: 6px;
-  cursor: pointer;
-}
-.text-block-toolbar .dictation-toggle:hover,
-.text-block-toolbar .dictation-toggle:focus-visible {
-  color: var(--text);
-  background: var(--button-secondary-bg);
-}
-.text-block-editor textarea {
-  width: 100%;
-  min-height: 112px;
-  border: 0;
-  border-radius: 0;
-}
-.text-block-editor textarea:focus {
-  outline: 2px solid var(--blue);
-  outline-offset: -2px;
 }
 .md-icon {
   display: inline-block;
@@ -3261,9 +3193,6 @@ main.page-projects:has(.project-overview-page) {
 }
 .md-icon-task {
   --md-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Cpath d='M9 6h11M9 12h11M9 18h11M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2'/%3E%3C/g%3E%3C/svg%3E");
-}
-.md-icon-mic {
-  --md-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Cpath d='M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z'/%3E%3Cpath d='M19 10v2a7 7 0 0 1-14 0v-2M12 19v3M8 22h8'/%3E%3C/g%3E%3C/svg%3E");
 }
 .issue-comment-form-actions {
   display: flex;

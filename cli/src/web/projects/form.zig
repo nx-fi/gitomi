@@ -217,16 +217,14 @@ fn appendProjectConfigForm(
         .project_id = project_id,
         .name_value = name_value,
     });
-    try shared.appendDictationTextarea(buf, allocator, .{
-        .label = "Description",
-        .name = "description",
-        .rows = 4,
-        .value = description_value,
-    });
     try appendTemplate(buf, allocator,
+        \\    <label>Description<textarea name="description" rows="4">{description_value}</textarea></label>
         \\    <label>Status values<input name="columns" value="{columns_value}" placeholder="Draft, Todo, WIP, Review, Done, Failed"></label>
         \\    <div class="project-column-chips" aria-label="Status values">
-    , .{ .columns_value = columns_value });
+    , .{
+        .description_value = description_value,
+        .columns_value = columns_value,
+    });
     try appendColumnChips(buf, allocator, columns_value);
     try buf.appendSlice(allocator,
         \\    </div>
