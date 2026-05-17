@@ -69,14 +69,15 @@ pub const Verifier = struct {
         self.repo.deinit();
     }
 
-    pub fn checkExisting(self: *Verifier, commit: []const u8, envelope: ValidatedEnvelope) !?[]const u8 {
-        return try index.signingKeyBindingRejection(self.allocator, &self.db, commit, envelope);
+    pub fn checkExisting(self: *Verifier, commit: []const u8, envelope: ValidatedEnvelope, body: []const u8) !?[]const u8 {
+        return try index.signingKeyBindingRejection(self.allocator, &self.db, commit, envelope, body);
     }
 
     pub fn checkAndRemember(self: *Verifier, record: CommitRecord, envelope: ValidatedEnvelope) !?[]const u8 {
-        if (try self.checkExisting(record.commit, envelope)) |reason| return reason;
+        if (try self.checkExisting(record.commit, envelope, record.body)) |reason| return reason;
 
         if (isAuthorizationEvent(envelope.event_type)) {
+            if (try indexedEventExists(&self.db, record.commit)) return "duplicate_event_hash";
             try index.insertIndexedEvent(
                 self.allocator,
                 &self.insert_stmt,
@@ -96,4 +97,31 @@ pub const Verifier = struct {
 
 fn isAuthorizationEvent(event_type: []const u8) bool {
     return std.mem.startsWith(u8, event_type, "acl.") or std.mem.startsWith(u8, event_type, "identity.");
+}
+
+fn indexedEventExists(db: *index.SqliteDb, event_hash: []const u8) !bool {
+    var stmt = try db.prepare("SELECT 1 FROM events WHERE event_hash = ? LIMIT 1");
+    defer stmt.deinit();
+    try stmt.bindText(1, event_hash);
+    return try stmt.step();
+}
+
+test "auth verifier detects duplicate indexed event before insert" {
+    const allocator = std.testing.allocator;
+    var db = try index.SqliteDb.open(allocator, ":memory:", index.sqlite.SQLITE_OPEN_READWRITE | index.sqlite.SQLITE_OPEN_CREATE, true);
+    defer db.deinit();
+    try index.createIndexSchema(&db);
+    try db.exec(
+        \\INSERT INTO events(
+        \\  ref, "commit", event_hash, tree, subject, body, empty_tree, valid_json,
+        \\  event_type, object_kind, object_id, actor_principal, actor_device, seq, occurred_at,
+        \\  domain_status, rejection_reason
+        \\) VALUES (
+        \\  'refs/gitomi/inbox/alice/laptop', 'commit-1', 'commit-1', '', '', '', 1, 0,
+        \\  '', '', '', '', '', NULL, '', 'pending', ''
+        \\);
+    );
+
+    try std.testing.expect(try indexedEventExists(&db, "commit-1"));
+    try std.testing.expect(!(try indexedEventExists(&db, "commit-2")));
 }

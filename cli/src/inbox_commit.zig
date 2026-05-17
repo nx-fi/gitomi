@@ -10,6 +10,29 @@ pub const Record = struct {
     body: []const u8,
 };
 
+pub const RefIdentity = struct {
+    principal: []const u8,
+    device: []const u8,
+};
+
+pub fn parseRefIdentity(ref: []const u8) ?RefIdentity {
+    const prefix = "refs/gitomi/inbox/";
+    if (!std.mem.startsWith(u8, ref, prefix)) return null;
+
+    const suffix = ref[prefix.len..];
+    const slash = std.mem.indexOfScalar(u8, suffix, '/') orelse return null;
+    const principal = suffix[0..slash];
+    const device = suffix[slash + 1 ..];
+    if (principal.len == 0 or device.len == 0) return null;
+    if (std.mem.indexOfScalar(u8, device, '/') != null) return null;
+    return .{ .principal = principal, .device = device };
+}
+
+pub fn actorMatchesRefIdentity(identity: RefIdentity, actor_principal: []const u8, actor_device: []const u8) bool {
+    return std.mem.eql(u8, identity.principal, actor_principal) and
+        std.mem.eql(u8, identity.device, actor_device);
+}
+
 pub fn parseRecord(record_raw: []const u8) ?Record {
     const record = std.mem.trim(u8, record_raw, "\r\n");
     if (record.len == 0) return null;
@@ -44,4 +67,19 @@ test "inbox commit records parse git log fields" {
     try std.testing.expectEqualStrings("body", record.body);
 
     try std.testing.expect(parseRecord("commit\x00tree\x00parents") == null);
+}
+
+test "inbox ref identity parses exact principal and device" {
+    const identity = parseRefIdentity("refs/gitomi/inbox/alice/laptop") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("alice", identity.principal);
+    try std.testing.expectEqualStrings("laptop", identity.device);
+    try std.testing.expect(actorMatchesRefIdentity(identity, "alice", "laptop"));
+    try std.testing.expect(!actorMatchesRefIdentity(identity, "bob", "laptop"));
+    try std.testing.expect(!actorMatchesRefIdentity(identity, "alice", "phone"));
+
+    try std.testing.expect(parseRefIdentity("refs/heads/main") == null);
+    try std.testing.expect(parseRefIdentity("refs/gitomi/inbox/alice") == null);
+    try std.testing.expect(parseRefIdentity("refs/gitomi/inbox/alice/") == null);
+    try std.testing.expect(parseRefIdentity("refs/gitomi/inbox//laptop") == null);
+    try std.testing.expect(parseRefIdentity("refs/gitomi/inbox/alice/laptop/extra") == null);
 }

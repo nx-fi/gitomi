@@ -105,6 +105,7 @@ The following table defines the minimum permission set and the lowest role requi
 | `pull.merge`                |        |          |             | ✓          | ✓     |
 | `project.manage`            |        |          |             | ✓          | ✓     |
 | `milestone.manage`          |        |          |             | ✓          | ✓     |
+| `label.manage`              |        |          |             | ✓          | ✓     |
 | `action.run_request`        |        |          |             | ✓          | ✓     |
 | `delegation.manage`         |        |          |             | ✓          | ✓     |
 | `acl.grant`                 |        |          |             |            | ✓     |
@@ -125,6 +126,10 @@ Permissions suffixed with `_own` apply only when the actor principal matches the
 *   `pull.edit_own` permits `pull.title_set`, `pull.body_set`, `pull.state_set`, `pull.base_set`, and `pull.head_set` on pull requests the actor opened.
 *   `comment.edit_own` permits `comment.body_set` and `comment.redacted` on comments the actor authored.
 
+The creating event MUST be accepted and reachable from the event being
+authorized. A current projection row is not sufficient evidence of authorship
+for `_own` permissions if the creation event is absent from the causal frontier.
+
 A `maintainer` or `owner` MAY edit any object regardless of authorship via the `_any` permissions.
 `comment.edit_any` permits rewriting another principal's comment body.
 `comment.redact_any` permits redacting another principal's comment, but it does
@@ -137,9 +142,12 @@ Every event type MUST map to a required permission. The following defines the ma
 | Event type                | Required permission       | Scope   |
 |---------------------------|---------------------------|---------|
 | `issue.opened`            | `issue.open`              | —       |
+| `issue.updated`           | field-specific permissions below | mixed |
 | `issue.title_set`         | `issue.edit_own` or `issue.edit_any` | object |
 | `issue.body_set`          | `issue.edit_own` or `issue.edit_any` | object |
 | `issue.state_set`         | `issue.edit_own` or `issue.edit_any` | object |
+| `issue.priority_set`      | `issue.edit_own` or `issue.edit_any` | object |
+| `issue.status_set`        | `issue.edit_own` or `issue.edit_any` | object |
 | `issue.label_added`       | `issue.manage_labels`     | —       |
 | `issue.label_removed`     | `issue.manage_labels`     | —       |
 | `issue.assignee_added`    | `issue.manage_assignees`  | —       |
@@ -152,6 +160,7 @@ Every event type MUST map to a required permission. The following defines the ma
 | `issue.reaction_added`    | `reaction.add`            | —       |
 | `issue.reaction_removed`  | `reaction.remove_own`     | actor   |
 | `pull.opened`             | `pull.open`               | —       |
+| `pull.updated`            | field-specific permissions below | mixed |
 | `pull.title_set`          | `pull.edit_own` or `pull.edit_any` | object |
 | `pull.body_set`           | `pull.edit_own` or `pull.edit_any` | object |
 | `pull.state_set`          | `pull.edit_own` or `pull.edit_any` | object |
@@ -170,9 +179,21 @@ Every event type MUST map to a required permission. The following defines the ma
 | `project.updated`         | `project.manage`          | —       |
 | `project.column_added`    | `project.manage`          | —       |
 | `project.column_removed`  | `project.manage`          | —       |
+| `project.field_created`   | `project.manage`          | —       |
+| `project.field_updated`   | `project.manage`          | —       |
+| `project.field_removed`   | `project.manage`          | —       |
+| `project.field_option_added` | `project.manage`       | —       |
+| `project.field_option_updated` | `project.manage`     | —       |
+| `project.field_option_removed` | `project.manage`     | —       |
+| `project.view_created`    | `project.manage`          | —       |
+| `project.view_updated`    | `project.manage`          | —       |
+| `project.view_removed`    | `project.manage`          | —       |
 | `milestone.created`       | `milestone.manage`        | —       |
 | `milestone.updated`       | `milestone.manage`        | —       |
 | `milestone.state_set`     | `milestone.manage`        | —       |
+| `label.created`           | `label.manage`            | —       |
+| `label.updated`           | `label.manage`            | —       |
+| `label.deleted`           | `label.manage`            | —       |
 | `comment.added`           | `comment.add`             | —       |
 | `comment.body_set`        | `comment.edit_own` or `comment.edit_any` | object |
 | `comment.redacted`        | `comment.edit_own` or `comment.redact_any` | object |
@@ -199,6 +220,11 @@ collection additions cannot bypass RBAC by being batched into the issue creation
 event. An `issue.opened` event that includes `payload.milestone` MUST also
 require `issue.manage_milestones`, and one that includes `payload.projects`
 MUST also require `issue.manage_projects`.
+
+`issue.updated` and `pull.updated` are batch update events. Each populated
+payload field MUST satisfy the same permission as its single-purpose event; for
+example, `issue.updated.payload.title` requires issue edit permission, while
+`issue.updated.payload.labels_added` requires `issue.manage_labels`.
 
 ## 4. Bootstrap Trust
 
@@ -408,7 +434,7 @@ When ingesting an event, the authorization check (product specification §5.4, s
 1.  **Resolve effective role**: Look up `actor.principal` in the ACL projection at the event's causal frontier, seeded by genesis.
 2.  **Resolve device authorization**: If the actor has an effective role, verify `actor.device` is in the identity projection for `actor.principal` at the causal frontier, seeded by genesis. If not, reject the event.
 3.  **Map event type to required permission**: Use the table in §3.3.
-4.  **Check own-object scope**: For scoped permissions, look up the creating event of the target object to determine authorship.
+4.  **Check own-object scope**: For scoped permissions, look up the accepted creating event of the target object in the event's causal frontier to determine authorship.
 5.  **Evaluate role authorization**: Accept if the effective role satisfies the required permission per the matrix in §3.1.
 6.  **Evaluate delegation authorization**: If the actor has no effective role, look for an active delegation for `(actor.principal, actor.device)` whose capability explicitly authorizes the event type. Verify the commit signer fingerprint matches the delegated key. Accept only if the delegation authorizes that event; otherwise reject.
 

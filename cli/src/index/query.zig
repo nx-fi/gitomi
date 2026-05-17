@@ -3,6 +3,7 @@ const std = @import("std");
 const errors = @import("../errors.zig");
 const event_mod = @import("../event.zig");
 const index_event_row = @import("event_row.zig");
+const index_schema = @import("schema.zig");
 const io = @import("../io.zig");
 const json_writer = @import("../json_writer.zig");
 const projection = @import("projection.zig");
@@ -103,7 +104,7 @@ pub fn countIndexedEventsInDb(db: *SqliteDb) !usize {
     return if (count <= 0) 0 else @as(usize, @intCast(count));
 }
 
-pub fn requireAuthorizedWrite(allocator: Allocator, _: Repo, event_body: []const u8) !void {
+pub fn requireAuthorizedWrite(allocator: Allocator, repo: Repo, event_body: []const u8) !void {
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, event_body, .{}) catch {
         try eprint("gt: refusing to create invalid event envelope: event body is not valid JSON\n", .{});
         return CliError.InvalidEvent;
@@ -129,6 +130,59 @@ pub fn requireAuthorizedWrite(allocator: Allocator, _: Repo, event_body: []const
         return CliError.InvalidEvent;
     };
     defer envelope.deinit();
+
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    if ((try accessModeFromDb(allocator, &db)) == .open and !(try openLocalActorAuthorized(allocator, &db, envelope, event_body))) {
+        try eprint("gt: refusing to create unauthorized event: unauthorized_device\n", .{});
+        return CliError.Unauthorized;
+    }
+    if (try projection.authorizationRejection(allocator, &db, null, envelope, event_body)) |reason| {
+        if (std.mem.eql(u8, reason, "unauthorized_principal") and try localDelegationAuthorizesWrite(allocator, repo, envelope)) {
+            return;
+        }
+        if (localDomainRejectionCanBeAudited(envelope.event_type, reason)) {
+            return;
+        }
+        try eprint("gt: refusing to create unauthorized event: {s}\n", .{reason});
+        return CliError.Unauthorized;
+    }
+}
+
+fn openLocalActorAuthorized(allocator: Allocator, db: *SqliteDb, envelope: event_mod.ValidatedEnvelope, event_body: []const u8) !bool {
+    var signing_key = repo_mod.configuredSigningKey(allocator) catch return false;
+    defer signing_key.deinit();
+
+    if (try projection.currentDeviceFingerprint(allocator, db, envelope.actor_principal, envelope.actor_device)) |expected_fingerprint| {
+        defer allocator.free(expected_fingerprint);
+        return std.mem.eql(u8, expected_fingerprint, signing_key.fingerprint);
+    }
+
+    if (!std.mem.eql(u8, envelope.event_type, "identity.device_added")) return false;
+    const expected_fingerprint = (try projection.selfRegistrationFingerprint(allocator, envelope, event_body)) orelse return false;
+    defer allocator.free(expected_fingerprint);
+    return std.mem.eql(u8, expected_fingerprint, signing_key.fingerprint);
+}
+
+fn localDomainRejectionCanBeAudited(event_type: []const u8, reason: []const u8) bool {
+    if (std.mem.startsWith(u8, event_type, "acl.") or std.mem.startsWith(u8, event_type, "identity.")) return false;
+    return std.mem.eql(u8, reason, "insufficient_role") or std.mem.eql(u8, reason, "unauthorized_principal");
+}
+
+fn localDelegationAuthorizesWrite(allocator: Allocator, repo: Repo, envelope: event_mod.ValidatedEnvelope) !bool {
+    if (!projection.githubImportDelegatesEvent(envelope.event_type)) return false;
+
+    var signing_key = repo_mod.configuredSigningKey(allocator) catch return false;
+    defer signing_key.deinit();
+    return try hasActiveDelegation(
+        allocator,
+        repo,
+        envelope.actor_principal,
+        envelope.actor_device,
+        "github.import",
+        "github:*",
+        signing_key.fingerprint,
+    );
 }
 
 pub fn roleForPrincipal(allocator: Allocator, repo: Repo, principal: []const u8) !?[]u8 {
@@ -2058,3 +2112,109 @@ pub fn sqliteLimitValue(limit: ?usize) !i64 {
     }
     return -1;
 }
+
+test "write preflight enforces current RBAC" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    const index_path = try std.fs.path.join(allocator, &.{ root, "index.sqlite" });
+    defer allocator.free(index_path);
+
+    var db = try SqliteDb.open(allocator, index_path, sqlite.SQLITE_OPEN_READWRITE | sqlite.SQLITE_OPEN_CREATE, true);
+    try index_schema.createIndexSchema(&db);
+    try db.exec("INSERT INTO meta(key, value) VALUES ('access_mode', 'closed')");
+    db.deinit();
+
+    var repo = try testRepo(allocator, root, index_path);
+    defer repo.deinit();
+
+    try requireAuthorizedWrite(allocator, repo, test_issue_opened_body);
+    try std.testing.expectError(CliError.Unauthorized, requireAuthorizedWrite(allocator, repo, test_acl_grant_body));
+
+    db = try SqliteDb.open(allocator, index_path, sqlite.SQLITE_OPEN_READWRITE, false);
+    try db.exec(
+        \\INSERT INTO acl_roles(principal, role, grant_event_hash)
+        \\VALUES ('alice', 'reporter', '');
+        \\INSERT INTO identity_devices(principal, device, key_fingerprint, public_key, added_event_hash, revoked_event_hash)
+        \\VALUES ('alice', 'laptop', 'SHA256:alice', 'ssh-ed25519 AAAA', '', NULL);
+    );
+    db.deinit();
+
+    try requireAuthorizedWrite(allocator, repo, test_issue_opened_body);
+}
+
+fn testRepo(allocator: Allocator, root: []const u8, index_path: []const u8) !Repo {
+    return .{
+        .allocator = allocator,
+        .root = try allocator.dupe(u8, root),
+        .git_dir = try allocator.dupe(u8, root),
+        .gitomi_dir = try allocator.dupe(u8, root),
+        .config_path = try std.fs.path.join(allocator, &.{ root, "config.toml" }),
+        .index_path = try allocator.dupe(u8, index_path),
+        .cursors_path = try std.fs.path.join(allocator, &.{ root, "cursors.sqlite" }),
+    };
+}
+
+const test_issue_opened_body =
+    \\{
+    \\  "$schema": "urn:gitomi:event:v1",
+    \\  "repo_id": "018f0000-0000-7000-8000-000000000001",
+    \\  "event_uuid": "018f0000-0000-7000-8000-000000000101",
+    \\  "event_type": "issue.opened",
+    \\  "object": {
+    \\    "kind": "issue",
+    \\    "id": "018f0000-0000-7000-8000-000000000100"
+    \\  },
+    \\  "idempotency_key": "018f0000-0000-7000-8000-000000000102",
+    \\  "actor": {
+    \\    "principal": "alice",
+    \\    "device": "laptop"
+    \\  },
+    \\  "seq": 1,
+    \\  "occurred_at": "2026-05-16T00:00:00Z",
+    \\  "parent_hashes": {
+    \\    "log": "",
+    \\    "anchor": "",
+    \\    "causal": [],
+    \\    "related": []
+    \\  },
+    \\  "legacy": {},
+    \\  "payload": {
+    \\    "title": "Smoke"
+    \\  }
+    \\}
+;
+
+const test_acl_grant_body =
+    \\{
+    \\  "$schema": "urn:gitomi:event:v1",
+    \\  "repo_id": "018f0000-0000-7000-8000-000000000001",
+    \\  "event_uuid": "018f0000-0000-7000-8000-000000000201",
+    \\  "event_type": "acl.role_granted",
+    \\  "object": {
+    \\    "kind": "acl",
+    \\    "id": "acl:bob"
+    \\  },
+    \\  "idempotency_key": "018f0000-0000-7000-8000-000000000202",
+    \\  "actor": {
+    \\    "principal": "alice",
+    \\    "device": "laptop"
+    \\  },
+    \\  "seq": 1,
+    \\  "occurred_at": "2026-05-16T00:00:00Z",
+    \\  "parent_hashes": {
+    \\    "log": "",
+    \\    "anchor": "",
+    \\    "causal": [],
+    \\    "related": []
+    \\  },
+    \\  "legacy": {},
+    \\  "payload": {
+    \\    "principal": "bob",
+    \\    "role": "reporter"
+    \\  }
+    \\}
+;

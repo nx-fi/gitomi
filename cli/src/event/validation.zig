@@ -215,7 +215,7 @@ pub fn validateEnvelopeObject(allocator: Allocator, root: std.json.ObjectMap) !?
         .value => |value| value,
         .message => |message| return message,
     };
-    if (occurred_at[occurred_at.len - 1] != 'Z') {
+    if (!isUtcRfc3339Timestamp(occurred_at)) {
         return try validationMessage(allocator, "occurred_at must be a UTC RFC3339 timestamp", .{});
     }
 
@@ -331,6 +331,60 @@ fn requiredEnvelopeSeq(allocator: Allocator, object: std.json.ObjectMap) !Envelo
             .{ .message = try validationMessage(allocator, "seq must be a non-negative integer", .{}) },
         else => .{ .message = try validationMessage(allocator, "seq must be a non-negative integer", .{}) },
     };
+}
+
+pub fn isUtcRfc3339Timestamp(value: []const u8) bool {
+    if (value.len < 20) return false;
+    if (!allDigits(value[0..4])) return false;
+    if (value[4] != '-' or value[7] != '-' or value[10] != 'T' or value[13] != ':' or value[16] != ':') return false;
+    if (!allDigits(value[5..7]) or !allDigits(value[8..10]) or !allDigits(value[11..13]) or !allDigits(value[14..16]) or !allDigits(value[17..19])) return false;
+
+    const month = parseTwoDigits(value[5..7]);
+    const day = parseTwoDigits(value[8..10]);
+    const hour = parseTwoDigits(value[11..13]);
+    const minute = parseTwoDigits(value[14..16]);
+    const second = parseTwoDigits(value[17..19]);
+
+    if (month < 1 or month > 12) return false;
+    if (day < 1 or day > daysInMonth(parseFourDigits(value[0..4]), month)) return false;
+    if (hour > 23 or minute > 59 or second > 59) return false;
+
+    if (value[19] == 'Z') return value.len == 20;
+    if (value[19] != '.') return false;
+    if (value.len < 22 or value[value.len - 1] != 'Z') return false;
+    return allDigits(value[20 .. value.len - 1]);
+}
+
+fn allDigits(value: []const u8) bool {
+    if (value.len == 0) return false;
+    for (value) |c| {
+        if (!std.ascii.isDigit(c)) return false;
+    }
+    return true;
+}
+
+fn parseTwoDigits(value: []const u8) u8 {
+    return (value[0] - '0') * 10 + (value[1] - '0');
+}
+
+fn parseFourDigits(value: []const u8) u16 {
+    return @as(u16, value[0] - '0') * 1000 +
+        @as(u16, value[1] - '0') * 100 +
+        @as(u16, value[2] - '0') * 10 +
+        @as(u16, value[3] - '0');
+}
+
+fn daysInMonth(year: u16, month: u8) u8 {
+    return switch (month) {
+        1, 3, 5, 7, 8, 10, 12 => 31,
+        4, 6, 9, 11 => 30,
+        2 => if (isLeapYear(year)) 29 else 28,
+        else => 0,
+    };
+}
+
+fn isLeapYear(year: u16) bool {
+    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0);
 }
 
 fn validateEnvelopeStringArray(allocator: Allocator, object: std.json.ObjectMap, key: []const u8, label: []const u8) !?[]u8 {
@@ -1173,4 +1227,18 @@ fn hasState(object: std.json.ObjectMap, key: []const u8, allowed: []const []cons
         if (std.mem.eql(u8, value, candidate)) return true;
     }
     return false;
+}
+
+test "UTC RFC3339 timestamp validation is structural" {
+    try std.testing.expect(isUtcRfc3339Timestamp("2026-05-13T18:30:59Z"));
+    try std.testing.expect(isUtcRfc3339Timestamp("2026-05-13T18:30:59.123Z"));
+    try std.testing.expect(isUtcRfc3339Timestamp("2024-02-29T00:00:00Z"));
+
+    try std.testing.expect(!isUtcRfc3339Timestamp("invalid_date_Z"));
+    try std.testing.expect(!isUtcRfc3339Timestamp("2026-02-29T00:00:00Z"));
+    try std.testing.expect(!isUtcRfc3339Timestamp("2026-05-13T24:00:00Z"));
+    try std.testing.expect(!isUtcRfc3339Timestamp("2026-05-13T18:30:60Z"));
+    try std.testing.expect(!isUtcRfc3339Timestamp("2026-05-13T18:30:59+00:00"));
+    try std.testing.expect(!isUtcRfc3339Timestamp("2026-05-13 18:30:59Z"));
+    try std.testing.expect(!isUtcRfc3339Timestamp("2026-05-13T18:30:59.Z"));
 }

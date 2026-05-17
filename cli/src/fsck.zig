@@ -2,6 +2,7 @@ const std = @import("std");
 const auth_binding = @import("auth_binding.zig");
 const event_mod = @import("event.zig");
 const git = @import("git.zig");
+const inbox_commit = @import("inbox_commit.zig");
 const util = @import("util.zig");
 
 const Allocator = std.mem.Allocator;
@@ -68,7 +69,7 @@ pub const State = struct {
 
 pub fn checkInboxRef(allocator: Allocator, fsck: *State, auth_verifier: ?*auth_binding.Verifier, ref: []const u8, empty_tree: []const u8, genesis_oid: []const u8) !void {
     fsck.refs += 1;
-    try checkInboxRefName(fsck, ref);
+    const expected_identity = (try checkInboxRefName(fsck, ref)) orelse return;
 
     const range = try std.fmt.allocPrint(allocator, "{s}..{s}", .{ genesis_oid, ref });
     defer allocator.free(range);
@@ -80,35 +81,41 @@ pub fn checkInboxRef(allocator: Allocator, fsck: *State, auth_verifier: ?*auth_b
     while (it.next()) |commit_raw| {
         const commit = std.mem.trim(u8, commit_raw, " \t\r\n");
         if (commit.len == 0) continue;
-        try checkInboxCommit(allocator, fsck, auth_verifier, ref, commit, expected_first_parent, empty_tree);
+        try checkInboxCommit(allocator, fsck, auth_verifier, ref, expected_identity, commit, expected_first_parent, empty_tree);
         expected_first_parent = commit;
     }
 }
 
-pub fn checkInboxRefName(fsck: *State, ref: []const u8) !void {
+pub fn checkInboxRefName(fsck: *State, ref: []const u8) !?inbox_commit.RefIdentity {
     const prefix = "refs/gitomi/inbox/";
     if (!std.mem.startsWith(u8, ref, prefix)) {
         try fsck.fail("{s}: inbox ref is outside {s}", .{ ref, prefix });
-        return;
+        return null;
     }
 
     const suffix = ref[prefix.len..];
     const slash = std.mem.indexOfScalar(u8, suffix, '/') orelse {
         try fsck.fail("{s}: inbox ref must be refs/gitomi/inbox/<principal>/<device>", .{ref});
-        return;
+        return null;
     };
     const principal = suffix[0..slash];
     const device = suffix[slash + 1 ..];
 
+    var valid = true;
     if (std.mem.indexOfScalar(u8, device, '/') != null) {
         try fsck.fail("{s}: inbox ref has extra path segments", .{ref});
+        valid = false;
     }
     if (!isRefSafeSegment(principal)) {
         try fsck.fail("{s}: principal segment is not ref-safe", .{ref});
+        valid = false;
     }
     if (!isRefSafeSegment(device)) {
         try fsck.fail("{s}: device segment is not ref-safe", .{ref});
+        valid = false;
     }
+    if (!valid) return null;
+    return .{ .principal = principal, .device = device };
 }
 
 fn checkInboxCommit(
@@ -116,6 +123,7 @@ fn checkInboxCommit(
     fsck: *State,
     auth_verifier: ?*auth_binding.Verifier,
     ref: []const u8,
+    expected_identity: inbox_commit.RefIdentity,
     commit: []const u8,
     expected_first_parent: ?[]const u8,
     empty_tree: []const u8,
@@ -150,10 +158,20 @@ fn checkInboxCommit(
     const envelope = try parseEnvelope(allocator, fsck, ref, commit, body);
     if (envelope) |parsed| {
         defer parsed.deinit();
+        if (!inbox_commit.actorMatchesRefIdentity(expected_identity, parsed.actor_principal, parsed.actor_device)) {
+            try fsck.fail("{s}: {s}: actor {s}/{s} does not match inbox ref {s}/{s}", .{
+                ref,
+                commit,
+                parsed.actor_principal,
+                parsed.actor_device,
+                expected_identity.principal,
+                expected_identity.device,
+            });
+        }
         try fsck.checkRepoId(commit, parsed.repo_id);
         try fsck.checkActorSeq(commit, parsed.actor_principal, parsed.actor_device, parsed.seq);
         if (auth_verifier) |verifier| {
-            if (try verifier.checkExisting(commit, parsed)) |reason| {
+            if (try verifier.checkExisting(commit, parsed, body)) |reason| {
                 try fsck.fail("{s}: {s}: signing key is not authorized for actor {s}/{s}: {s}", .{ ref, commit, parsed.actor_principal, parsed.actor_device, reason });
             }
         }
@@ -251,19 +269,21 @@ test "fsck inbox ref name validates structure and ref-safe segments" {
     var state = State.init(std.testing.allocator, null);
     defer state.deinit();
 
-    try checkInboxRefName(&state, "refs/gitomi/inbox/alice/laptop");
+    const identity = (try checkInboxRefName(&state, "refs/gitomi/inbox/alice/laptop")).?;
+    try std.testing.expectEqualStrings("alice", identity.principal);
+    try std.testing.expectEqualStrings("laptop", identity.device);
     try std.testing.expectEqual(@as(usize, 0), state.errors);
 
-    try checkInboxRefName(&state, "refs/heads/main");
+    try std.testing.expect((try checkInboxRefName(&state, "refs/heads/main")) == null);
     try std.testing.expectEqual(@as(usize, 1), state.errors);
 
-    try checkInboxRefName(&state, "refs/gitomi/inbox/alice");
+    try std.testing.expect((try checkInboxRefName(&state, "refs/gitomi/inbox/alice")) == null);
     try std.testing.expectEqual(@as(usize, 2), state.errors);
 
-    try checkInboxRefName(&state, "refs/gitomi/inbox/alice/laptop/extra");
+    try std.testing.expect((try checkInboxRefName(&state, "refs/gitomi/inbox/alice/laptop/extra")) == null);
     try std.testing.expectEqual(@as(usize, 4), state.errors);
 
-    try checkInboxRefName(&state, "refs/gitomi/inbox/al ice/laptop");
+    try std.testing.expect((try checkInboxRefName(&state, "refs/gitomi/inbox/al ice/laptop")) == null);
     try std.testing.expectEqual(@as(usize, 5), state.errors);
 }
 
