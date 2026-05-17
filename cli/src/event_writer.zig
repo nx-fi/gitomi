@@ -55,15 +55,17 @@ pub const EventWriter = struct {
         errdefer cfg.deinit();
 
         if (actor_principal) |principal| {
-            const checked_principal = try util.checkedRefSegment(allocator, principal, "principal");
-            errdefer allocator.free(checked_principal);
-            const checked_device = try util.checkedRefSegment(allocator, actor_device.?, "device");
-            errdefer allocator.free(checked_device);
+            var checked_principal: ?[]u8 = try util.checkedRefSegment(allocator, principal, "principal");
+            errdefer if (checked_principal) |value| allocator.free(value);
+            var checked_device: ?[]u8 = try util.checkedRefSegment(allocator, actor_device.?, "device");
+            errdefer if (checked_device) |value| allocator.free(value);
 
             allocator.free(cfg.principal);
             allocator.free(cfg.device);
-            cfg.principal = checked_principal;
-            cfg.device = checked_device;
+            cfg.principal = checked_principal.?;
+            cfg.device = checked_device.?;
+            checked_principal = null;
+            checked_device = null;
             cfg.seq = 0;
             try repo_mod.recoverConfigSeq(allocator, &cfg);
         }
@@ -189,6 +191,9 @@ pub const EventWriter = struct {
     pub fn commitStaged(self: *EventWriter) !void {
         const commit_oid = self.staged_head orelse return;
         try updateEventRef(self.allocator, self.inbox_ref, commit_oid, self.prepared_parents.old_head);
+        if (self.persist_config) {
+            try repo_mod.writeConfig(self.repo.config_path, self.cfg);
+        }
         self.allocator.free(commit_oid);
         self.staged_head = null;
     }

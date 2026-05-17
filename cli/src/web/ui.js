@@ -470,7 +470,9 @@
     ]).then(function (buffers) {
       const avatar = buffers[0];
       const identicon = buffers[1];
-      return !!avatar && !!identicon && !equalBuffers(avatar, identicon);
+      if (!avatar) return true;
+      if (!identicon) return true;
+      return !equalBuffers(avatar, identicon);
     });
     githubAvatarChecks.set(key, check);
     return check;

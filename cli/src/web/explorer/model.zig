@@ -97,6 +97,7 @@ pub const CommitSummary = struct {
     full_hash: []u8,
     hash: []u8,
     author: []u8,
+    author_email: []u8,
     subject: []u8,
     relative: []u8,
 
@@ -104,6 +105,7 @@ pub const CommitSummary = struct {
         allocator.free(self.full_hash);
         allocator.free(self.hash);
         allocator.free(self.author);
+        allocator.free(self.author_email);
         allocator.free(self.subject);
         allocator.free(self.relative);
     }

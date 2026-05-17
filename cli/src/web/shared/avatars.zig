@@ -12,8 +12,36 @@ pub fn appendAvatarWithUrl(buf: *std.ArrayList(u8), allocator: Allocator, name: 
     try appendAvatarContainer(buf, allocator, "issue-avatar", extra_class, name, avatar_url);
 }
 
+pub fn appendGitIdentityAvatar(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    name: []const u8,
+    email: []const u8,
+    avatar_url: []const u8,
+    extra_class: []const u8,
+) !void {
+    try appendGitIdentityAvatarContainer(buf, allocator, "issue-avatar", extra_class, name, email, avatar_url);
+}
+
+pub fn appendAvatarWithIdentity(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    label: []const u8,
+    github_source: []const u8,
+    email_source: []const u8,
+    seed_name: []const u8,
+    avatar_url: []const u8,
+    extra_class: []const u8,
+) !void {
+    try appendAvatarContainerWithIdentity(buf, allocator, "issue-avatar", extra_class, label, seed_name, avatar_url, github_source, email_source);
+}
+
 pub fn appendUserAvatar(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8) !void {
     try appendAvatarContainer(buf, allocator, "user-avatar", "", name, "");
+}
+
+pub fn appendUserAvatarFromGitIdentity(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8, email: []const u8, avatar_url: []const u8) !void {
+    try appendGitIdentityAvatarContainer(buf, allocator, "user-avatar", "", name, email, avatar_url);
 }
 
 fn appendAvatarContainer(
@@ -24,8 +52,42 @@ fn appendAvatarContainer(
     name: []const u8,
     avatar_url: []const u8,
 ) !void {
-    const github_login = githubLogin(name);
-    const gravatar_email = try normalizedAvatarEmailOwned(allocator, name);
+    try appendAvatarContainerWithIdentity(buf, allocator, base_class, extra_class, name, name, avatar_url, name, name);
+}
+
+fn appendGitIdentityAvatarContainer(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    base_class: []const u8,
+    extra_class: []const u8,
+    name: []const u8,
+    email: []const u8,
+    avatar_url: []const u8,
+) !void {
+    const trimmed_name = std.mem.trim(u8, name, " \t\r\n");
+    const trimmed_email = std.mem.trim(u8, email, " \t\r\n<>");
+    const label = if (trimmed_name.len != 0) trimmed_name else if (trimmed_email.len != 0) trimmed_email else "Unknown";
+    const email_source = if (trimmed_email.len != 0) trimmed_email else label;
+    const normalized_email = try normalizedAvatarEmailOwned(allocator, email_source);
+    defer if (normalized_email) |value| allocator.free(value);
+    const seed_name = normalized_email orelse label;
+
+    try appendAvatarContainerWithIdentity(buf, allocator, base_class, extra_class, label, seed_name, avatar_url, label, email_source);
+}
+
+fn appendAvatarContainerWithIdentity(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    base_class: []const u8,
+    extra_class: []const u8,
+    label: []const u8,
+    seed_name: []const u8,
+    avatar_url: []const u8,
+    github_source: []const u8,
+    email_source: []const u8,
+) !void {
+    const github_login = githubLogin(github_source);
+    const gravatar_email = try normalizedAvatarEmailOwned(allocator, email_source);
     defer if (gravatar_email) |email| allocator.free(email);
 
     try html.appendTemplate(buf, allocator,
@@ -33,9 +95,9 @@ fn appendAvatarContainer(
     , .{
         .base_class = base_class,
         .extra_class = extra_class,
-        .name = name,
+        .name = label,
     });
-    try appendNounsAvatarSvg(buf, allocator, nounsAvatarSeed(name));
+    try appendNounsAvatarSvg(buf, allocator, nounsAvatarSeed(seed_name));
     if (avatar_url.len != 0) try appendRemoteAvatarCandidate(buf, allocator, avatar_url, github_login);
     if (github_login) |login| try appendGithubAvatarCandidate(buf, allocator, login);
     if (gravatar_email) |email| try appendGravatarAvatarCandidate(buf, allocator, email);

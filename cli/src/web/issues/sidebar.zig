@@ -13,9 +13,13 @@ const util = @import("../../util.zig");
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
 const SqliteDb = index.SqliteDb;
+const sqlite = index.sqlite;
 const appendTemplate = shared.appendTemplate;
+const createIssueConcurrentGroupEvent = issue.createIssueConcurrentGroupEvent;
 const createIssueProjectEvent = issue.createIssueProjectEvent;
+const createIssueRelationshipEvent = issue.createIssueRelationshipEvent;
 const createIssueStringEvent = issue.createIssueStringEvent;
+const createSubIssueOpenedWithMetadataEventResult = issue.createSubIssueOpenedWithMetadataEventResult;
 const ensureIndex = index.ensureIndex;
 const isIssuePriority = cmd_common.isIssuePriority;
 const isIssueStatus = cmd_common.isIssueStatus;
@@ -33,6 +37,35 @@ const issue_sidebar_csrf_token_len = 64;
 var issue_sidebar_csrf_mutex: std.Thread.Mutex = .{};
 var issue_sidebar_csrf_ready = false;
 var issue_sidebar_csrf_token: [issue_sidebar_csrf_token_len]u8 = undefined;
+
+const selected_issue_sidebar_projects_sql =
+    \\WITH selected_projects(project) AS (
+    \\  SELECT DISTINCT project
+    \\  FROM issue_projects
+    \\  WHERE issue_id = ?
+    \\  UNION
+    \\  SELECT DISTINCT p.name
+    \\  FROM project_memberships pm
+    \\  JOIN projects p ON p.id = pm.project_id
+    \\  WHERE pm.issue_id = ?
+    \\)
+    \\SELECT sp.project,
+    \\       COALESCE(
+    \\         NULLIF((
+    \\           SELECT ip.column_name
+    \\           FROM issue_projects ip
+    \\           LEFT JOIN events e ON e.event_hash = ip.add_hash
+    \\           WHERE ip.issue_id = ? AND ip.project = sp.project
+    \\           ORDER BY e.ordinal DESC, ip.add_hash DESC
+    \\           LIMIT 1
+    \\         ), ''),
+    \\         NULLIF((SELECT m.status FROM issue_metadata m WHERE m.issue_id = ?), ''),
+    \\         'Draft'
+    \\       ) AS column_name
+    \\FROM selected_projects sp
+    \\WHERE sp.project <> ''
+    \\ORDER BY lower(sp.project), sp.project
+;
 
 fn issueSidebarCsrfToken() []const u8 {
     issue_sidebar_csrf_mutex.lock();
@@ -87,7 +120,7 @@ pub fn append(
     try appendIssueSidebarType(buf, allocator, raw_ref, issue_type);
     try appendIssueSidebarProjects(buf, allocator, db, raw_ref, issue_id);
     try appendIssueSidebarMilestone(buf, allocator, db, raw_ref, milestone);
-    try appendIssueSidebarRelationships(buf, allocator, db, issue_id, body);
+    try appendIssueSidebarRelationships(buf, allocator, db, raw_ref, issue_id, body);
     try appendIssueSidebarDevelopment(buf, allocator, db, issue_id);
     try appendIssueSidebarNotifications(buf, allocator);
     try appendIssueSidebarParticipants(buf, allocator, db, issue_id, author);
@@ -193,14 +226,12 @@ fn appendIssueSidebarProjects(buf: *std.ArrayList(u8), allocator: Allocator, db:
     try appendIssueSidebarEditableSectionStart(buf, allocator, "Projects", "Select projects");
     try appendIssueSidebarProjectsMenu(buf, allocator, db, raw_ref, issue_id);
     try appendIssueSidebarEditableSectionBodyStart(buf, allocator);
-    var stmt = try db.prepare(
-        \\SELECT DISTINCT project, column_name
-        \\FROM issue_projects
-        \\WHERE issue_id = ?
-        \\ORDER BY project, column_name
-    );
+    var stmt = try db.prepare(selected_issue_sidebar_projects_sql);
     defer stmt.deinit();
     try stmt.bindText(1, issue_id);
+    try stmt.bindText(2, issue_id);
+    try stmt.bindText(3, issue_id);
+    try stmt.bindText(4, issue_id);
     var shown = false;
     while (try stmt.step()) {
         const project = try stmt.columnTextDup(allocator, 0);
@@ -231,9 +262,9 @@ fn appendIssueSidebarMilestone(buf: *std.ArrayList(u8), allocator: Allocator, db
     try appendIssueSidebarSectionEnd(buf, allocator);
 }
 
-fn appendIssueSidebarRelationships(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8, body: []const u8) !void {
+fn appendIssueSidebarRelationships(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, raw_ref: []const u8, issue_id: []const u8, body: []const u8) !void {
     try appendIssueSidebarEditableSectionStart(buf, allocator, "Relationships", "Add relationship");
-    try appendIssueSidebarRelationshipsMenu(buf, allocator);
+    try appendIssueSidebarRelationshipsMenu(buf, allocator, raw_ref);
     try appendIssueSidebarEditableSectionBodyStart(buf, allocator);
     var relationships: std.ArrayList(RelationshipItem) = .empty;
     defer {
@@ -246,6 +277,7 @@ fn appendIssueSidebarRelationships(buf: *std.ArrayList(u8), allocator: Allocator
         while (keys.next()) |key| allocator.free(key.*);
         seen.deinit();
     }
+    try issue_relationships.collectStoredIssueRelationships(allocator, db, issue_id, &seen, &relationships);
     try issue_relationships.collectDirectivesFromText(allocator, db, issue_id, body, &seen, &relationships);
 
     var stmt = try db.prepare(
@@ -267,7 +299,7 @@ fn appendIssueSidebarRelationships(buf: *std.ArrayList(u8), allocator: Allocator
     if (relationships.items.len == 0) {
         try buf.appendSlice(allocator, "<p class=\"issue-sidebar-empty\">None yet</p>");
     } else {
-        try issue_relationships.appendGroups(buf, allocator, relationships.items);
+        try issue_relationships.appendEditableGroups(buf, allocator, raw_ref, issueSidebarCsrfToken(), relationships.items);
     }
     try appendIssueSidebarSectionEnd(buf, allocator);
 }
@@ -434,21 +466,19 @@ fn appendIssueSidebarLabelsMenu(buf: *std.ArrayList(u8), allocator: Allocator, d
 fn appendIssueSidebarProjectsMenu(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, raw_ref: []const u8, issue_id: []const u8) !void {
     try appendIssueSidebarProjectForm(buf, allocator, raw_ref);
     try appendIssueSidebarMenuGroupStart(buf, allocator, "Selected projects");
-    var selected = try db.prepare(
-        \\SELECT DISTINCT project, column_name
-        \\FROM issue_projects
-        \\WHERE issue_id = ?
-        \\ORDER BY lower(project), lower(column_name), project, column_name
-    );
+    var selected = try db.prepare(selected_issue_sidebar_projects_sql);
     defer selected.deinit();
     try selected.bindText(1, issue_id);
+    try selected.bindText(2, issue_id);
+    try selected.bindText(3, issue_id);
+    try selected.bindText(4, issue_id);
     var shown = false;
     while (try selected.step()) {
         const project = try selected.columnTextDup(allocator, 0);
         defer allocator.free(project);
         const column = try selected.columnTextDup(allocator, 1);
         defer allocator.free(column);
-        try appendIssueSidebarProjectActionRow(buf, allocator, raw_ref, "remove-project", project, column, true);
+        try appendIssueSidebarProjectActionRow(buf, allocator, db, raw_ref, "add-project", project, column, true);
         shown = true;
     }
     if (!shown) try appendIssueSidebarMenuEmpty(buf, allocator, "No projects selected.");
@@ -458,33 +488,38 @@ fn appendIssueSidebarProjectsMenu(buf: *std.ArrayList(u8), allocator: Allocator,
     var suggestions = try db.prepare(
         \\SELECT DISTINCT candidate.project, candidate.column_name
         \\FROM (
-        \\  SELECT p.name AS project, pc.column_name AS column_name
+        \\  SELECT p.name AS project, 'Draft' AS column_name
         \\  FROM projects p
-        \\  JOIN project_columns pc ON pc.project_id = p.id
         \\  WHERE p.state <> 'closed'
         \\  UNION
-        \\  SELECT project, column_name FROM issue_projects
+        \\  SELECT project, 'Draft' AS column_name FROM issue_projects
         \\) AS candidate
         \\WHERE candidate.project <> ''
-        \\  AND candidate.column_name <> ''
         \\  AND NOT EXISTS (
         \\    SELECT 1 FROM issue_projects ip
         \\    WHERE ip.issue_id = ?
         \\      AND ip.project = candidate.project
-        \\      AND ip.column_name = candidate.column_name
         \\  )
-        \\ORDER BY lower(candidate.project), lower(candidate.column_name), candidate.project, candidate.column_name
+        \\  AND NOT EXISTS (
+        \\    SELECT 1
+        \\    FROM project_memberships pm
+        \\    JOIN projects p ON p.id = pm.project_id
+        \\    WHERE pm.issue_id = ?
+        \\      AND p.name = candidate.project
+        \\  )
+        \\ORDER BY lower(candidate.project), candidate.project
         \\LIMIT 20
     );
     defer suggestions.deinit();
     try suggestions.bindText(1, issue_id);
+    try suggestions.bindText(2, issue_id);
     shown = false;
     while (try suggestions.step()) {
         const project = try suggestions.columnTextDup(allocator, 0);
         defer allocator.free(project);
         const column = try suggestions.columnTextDup(allocator, 1);
         defer allocator.free(column);
-        try appendIssueSidebarProjectActionRow(buf, allocator, raw_ref, "add-project", project, column, false);
+        try appendIssueSidebarProjectActionRow(buf, allocator, db, raw_ref, "add-project", project, column, false);
         shown = true;
     }
     if (!shown) try appendIssueSidebarMenuEmpty(buf, allocator, "No project suggestions.");
@@ -543,13 +578,13 @@ fn appendIssueSidebarStatusMenu(buf: *std.ArrayList(u8), allocator: Allocator, r
     try appendIssueSidebarMenuGroupEnd(buf, allocator);
 }
 
-fn appendIssueSidebarRelationshipsMenu(buf: *std.ArrayList(u8), allocator: Allocator) !void {
-    try buf.appendSlice(allocator, "<div class=\"issue-sidebar-command-list\">");
-    try appendIssueSidebarCommand(buf, allocator, "Add parent", "Alt P");
-    try appendIssueSidebarCommand(buf, allocator, "Mark as blocked by", "B B");
-    try appendIssueSidebarCommand(buf, allocator, "Mark as blocking", "B X");
-    try appendIssueSidebarCommand(buf, allocator, "Add security alert", "");
-    try buf.appendSlice(allocator, "</div>");
+fn appendIssueSidebarRelationshipsMenu(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8) !void {
+    try appendIssueSidebarSingleInputForm(buf, allocator, raw_ref, "add-parent", "target", "Add parent", "Parent issue ref");
+    try appendIssueSidebarSingleInputForm(buf, allocator, raw_ref, "create-sub-issue", "title", "Create sub-issue", "Sub-issue title");
+    try appendIssueSidebarSingleInputForm(buf, allocator, raw_ref, "add-sub-issue", "target", "Add sub-issue", "Sub-issue ref");
+    try appendIssueSidebarSingleInputForm(buf, allocator, raw_ref, "add-blocked-by", "target", "Mark blocked by", "Blocking issue ref");
+    try appendIssueSidebarSingleInputForm(buf, allocator, raw_ref, "add-blocking", "target", "Mark as blocking", "Blocked issue ref");
+    try appendIssueSidebarSingleInputForm(buf, allocator, raw_ref, "add-concurrent-group", "group", "Add to group", "Concurrent group");
 }
 
 fn appendIssueSidebarDevelopmentMenu(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb) !void {
@@ -641,8 +676,11 @@ fn appendIssueSidebarProjectForm(buf: *std.ArrayList(u8), allocator: Allocator, 
     try buf.appendSlice(allocator, "<form class=\"issue-sidebar-add-form issue-sidebar-project-form issue-sidebar-menu-form\" method=\"post\" action=\"");
     try appendIssueSidebarAction(buf, allocator, raw_ref);
     try appendTemplate(buf, allocator,
-        \\"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="action" value="add-project"><label class="issue-sidebar-menu-input"><span aria-hidden="true"></span><input name="project" placeholder="Filter projects" aria-label="Project" autocomplete="off" data-issue-sidebar-filter></label><input name="column" placeholder="Column" aria-label="Column" autocomplete="off"><button type="submit">Add project</button></form>
-    , .{ .csrf_token = issueSidebarCsrfToken() });
+        \\"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="action" value="add-project"><input type="hidden" name="column" value="{column}"><label class="issue-sidebar-menu-input"><span aria-hidden="true"></span><input name="project" placeholder="Filter projects" aria-label="Project" autocomplete="off" data-issue-sidebar-filter></label><button type="submit">Add project</button></form>
+    , .{
+        .csrf_token = issueSidebarCsrfToken(),
+        .column = project_views.default_project_status,
+    });
 }
 
 fn appendIssueSidebarMenuFilter(buf: *std.ArrayList(u8), allocator: Allocator, placeholder: []const u8) !void {
@@ -728,6 +766,7 @@ fn appendIssueSidebarMilestoneActionRow(
 fn appendIssueSidebarProjectActionRow(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
+    db: *SqliteDb,
     raw_ref: []const u8,
     action: []const u8,
     project: []const u8,
@@ -735,17 +774,95 @@ fn appendIssueSidebarProjectActionRow(
     selected: bool,
 ) !void {
     const state_class: []const u8 = if (selected) " is-selected" else "";
+    const remove_class: []const u8 = if (selected) " has-remove" else "";
+    const check_label: []const u8 = if (selected) "Update project status" else "Add project to selected status";
     try buf.appendSlice(allocator, "<form class=\"issue-sidebar-picker-form\" method=\"post\" action=\"");
     try appendIssueSidebarAction(buf, allocator, raw_ref);
     try appendTemplate(buf, allocator,
-        \\"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="action" value="{action}"><input type="hidden" name="project" value="{project}"><input type="hidden" name="column" value="{column}"><button class="issue-sidebar-picker-row{state_class}" type="submit" data-sidebar-filter-text="{project} {column}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span><span class="issue-sidebar-project-icon" aria-hidden="true"></span><span class="issue-sidebar-picker-text"><span class="issue-sidebar-picker-primary">{project}</span><span class="issue-sidebar-picker-secondary">{column}</span></span></button></form>
+        \\" data-sidebar-filter-text="{project} {column}"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="project" value="{project}"><div class="issue-sidebar-project-choice-row{state_class}{remove_class}"><button class="issue-sidebar-project-check{state_class}" type="submit" name="action" value="{action}" aria-label="{check_label}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span></button><span class="issue-sidebar-project-icon" aria-hidden="true"></span><span class="issue-sidebar-picker-text"><span class="issue-sidebar-picker-primary">{project}</span></span><select class="issue-sidebar-project-status-select" name="column" aria-label="Status">
     , .{
         .action = action,
         .project = project,
         .column = column,
         .state_class = state_class,
+        .remove_class = remove_class,
+        .check_label = check_label,
         .csrf_token = issueSidebarCsrfToken(),
     });
+    try appendIssueSidebarProjectStatusOptions(buf, allocator, db, project, column);
+    try buf.appendSlice(allocator, "</select>");
+    if (selected) {
+        try buf.appendSlice(allocator, "<button class=\"issue-sidebar-project-remove-button\" type=\"submit\" name=\"action\" value=\"remove-project\" aria-label=\"Remove project\">x</button>");
+    }
+    try buf.appendSlice(allocator, "</div></form>");
+}
+
+fn appendIssueSidebarProjectStatusOptions(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    project: []const u8,
+    selected_column: []const u8,
+) !void {
+    var stmt = try db.prepare(
+        \\SELECT DISTINCT pc.column_name
+        \\FROM project_columns pc
+        \\JOIN projects p ON p.id = pc.project_id
+        \\WHERE p.name = ?
+        \\  AND pc.column_name <> ''
+        \\ORDER BY CASE pc.column_name
+        \\           WHEN 'Draft' THEN 0
+        \\           WHEN 'Todo' THEN 1
+        \\           WHEN 'WIP' THEN 2
+        \\           WHEN 'Review' THEN 3
+        \\           WHEN 'Done' THEN 4
+        \\           WHEN 'Failed' THEN 5
+        \\           ELSE 6
+        \\         END,
+        \\         lower(pc.column_name),
+        \\         pc.column_name
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, project);
+
+    var shown = false;
+    var selected_seen = false;
+    while (try stmt.step()) {
+        const column = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(column);
+        const is_selected = std.mem.eql(u8, column, selected_column);
+        selected_seen = selected_seen or is_selected;
+        shown = true;
+        try appendIssueSidebarProjectStatusOption(buf, allocator, column, is_selected);
+    }
+
+    if (!shown) {
+        try appendDefaultProjectStatusOptions(buf, allocator, selected_column);
+    } else if (selected_column.len != 0 and !selected_seen) {
+        try appendIssueSidebarProjectStatusOption(buf, allocator, selected_column, true);
+    }
+}
+
+fn appendDefaultProjectStatusOptions(buf: *std.ArrayList(u8), allocator: Allocator, selected_column: []const u8) !void {
+    var selected_seen = false;
+    for (project_views.project_status_values) |status| {
+        const is_selected = std.mem.eql(u8, status, selected_column);
+        selected_seen = selected_seen or is_selected;
+        try appendIssueSidebarProjectStatusOption(buf, allocator, status, is_selected);
+    }
+    if (selected_column.len != 0 and !selected_seen) {
+        try appendIssueSidebarProjectStatusOption(buf, allocator, selected_column, true);
+    }
+}
+
+fn appendIssueSidebarProjectStatusOption(buf: *std.ArrayList(u8), allocator: Allocator, value: []const u8, selected: bool) !void {
+    try buf.appendSlice(allocator, "<option value=\"");
+    try shared.appendHtml(buf, allocator, value);
+    try buf.append(allocator, '"');
+    if (selected) try buf.appendSlice(allocator, " selected");
+    try buf.append(allocator, '>');
+    try shared.appendHtml(buf, allocator, value);
+    try buf.appendSlice(allocator, "</option>");
 }
 
 fn appendIssueSidebarPriorityActionRow(
@@ -952,6 +1069,58 @@ fn appendIssueSidebarAction(buf: *std.ArrayList(u8), allocator: Allocator, raw_r
     try buf.appendSlice(allocator, "/sidebar");
 }
 
+fn replaceIssueProjectPlacement(allocator: Allocator, repo: Repo, issue_id: []const u8, project: []const u8, column: []const u8) !void {
+    var existing = try loadIssueProjectColumns(allocator, repo, issue_id, project);
+    defer freeColumnList(allocator, &existing);
+
+    if (existing.items.len == 1 and std.mem.eql(u8, existing.items[0], column)) return;
+
+    for (existing.items) |existing_column| {
+        try createIssueProjectEvent(allocator, issue_id, project, existing_column, null, null, false);
+    }
+    try createIssueProjectEvent(allocator, issue_id, project, column, null, null, true);
+}
+
+fn removeIssueProjectPlacements(allocator: Allocator, repo: Repo, issue_id: []const u8, project: []const u8) !void {
+    var existing = try loadIssueProjectColumns(allocator, repo, issue_id, project);
+    defer freeColumnList(allocator, &existing);
+
+    if (existing.items.len == 0) {
+        try createIssueProjectEvent(allocator, issue_id, project, "", null, null, false);
+        return;
+    }
+
+    for (existing.items) |existing_column| {
+        try createIssueProjectEvent(allocator, issue_id, project, existing_column, null, null, false);
+    }
+}
+
+fn loadIssueProjectColumns(allocator: Allocator, repo: Repo, issue_id: []const u8, project: []const u8) !std.ArrayList([]u8) {
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    var stmt = try db.prepare(
+        \\SELECT DISTINCT column_name
+        \\FROM issue_projects
+        \\WHERE issue_id = ? AND project = ?
+        \\ORDER BY column_name
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    try stmt.bindText(2, project);
+
+    var columns: std.ArrayList([]u8) = .empty;
+    errdefer freeColumnList(allocator, &columns);
+    while (try stmt.step()) {
+        try columns.append(allocator, try stmt.columnTextDup(allocator, 0));
+    }
+    return columns;
+}
+
+fn freeColumnList(allocator: Allocator, columns: *std.ArrayList([]u8)) void {
+    for (columns.items) |column| allocator.free(column);
+    columns.deinit(allocator);
+}
+
 pub fn handleIssueSidebarPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
     if (!(try validateIssueSidebarCsrf(allocator, stream, form_body))) return;
 
@@ -1020,17 +1189,69 @@ pub fn handleIssueSidebarPost(allocator: Allocator, repo: Repo, stream: std.net.
         const project_value = project_owned orelse return;
         defer allocator.free(project_value);
         const add = std.mem.eql(u8, action, "add-project");
-        const column_value = if (add) blk: {
-            const column_owned = try requiredSidebarValue(allocator, stream, form_body, "column", "Column is required.");
-            break :blk column_owned orelse return;
-        } else blk: {
-            const column_owned = (try formValueOwned(allocator, form_body, "column")) orelse try allocator.dupe(u8, "");
-            defer allocator.free(column_owned);
-            break :blk try allocator.dupe(u8, std.mem.trim(u8, column_owned, " \t\r\n"));
+        if (add) {
+            const column_owned = try requiredSidebarValue(allocator, stream, form_body, "column", "Status is required.");
+            const column_value = column_owned orelse return;
+            defer allocator.free(column_value);
+            replaceIssueProjectPlacement(allocator, repo, issue_id, project_value, column_value) catch {
+                try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update issue project placement\n");
+                return;
+            };
+        } else {
+            removeIssueProjectPlacements(allocator, repo, issue_id, project_value) catch {
+                try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update issue project placement\n");
+                return;
+            };
+        }
+    } else if (std.mem.eql(u8, action, "create-sub-issue")) {
+        const title_owned = try requiredSidebarValue(allocator, stream, form_body, "title", "Sub-issue title is required.");
+        const title = title_owned orelse return;
+        defer allocator.free(title);
+        const result = createSubIssueOpenedWithMetadataEventResult(allocator, issue_id, title, "", &.{}, &.{}, .{}) catch {
+            try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not create sub-issue\n");
+            return;
         };
-        defer allocator.free(column_value);
-        createIssueProjectEvent(allocator, issue_id, project_value, column_value, null, null, add) catch {
-            try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update issue project placement\n");
+        defer result.deinit(allocator);
+    } else if (std.mem.eql(u8, action, "add-parent") or
+        std.mem.eql(u8, action, "remove-parent") or
+        std.mem.eql(u8, action, "add-sub-issue") or
+        std.mem.eql(u8, action, "remove-sub-issue") or
+        std.mem.eql(u8, action, "add-blocked-by") or
+        std.mem.eql(u8, action, "remove-blocked-by") or
+        std.mem.eql(u8, action, "add-blocking") or
+        std.mem.eql(u8, action, "remove-blocking"))
+    {
+        const target_ref_owned = try requiredSidebarValue(allocator, stream, form_body, "target", "Issue ref is required.");
+        const target_ref = target_ref_owned orelse return;
+        defer allocator.free(target_ref);
+        const target_id = index.resolveIssueId(allocator, repo, target_ref) catch {
+            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Target issue was not found\n");
+            return;
+        };
+        defer allocator.free(target_id);
+        if (std.mem.eql(u8, issue_id, target_id)) {
+            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Issue cannot be related to itself\n");
+            return;
+        }
+
+        const inverse_action = std.mem.eql(u8, action, "add-sub-issue") or
+            std.mem.eql(u8, action, "remove-sub-issue") or
+            std.mem.eql(u8, action, "add-blocked-by") or
+            std.mem.eql(u8, action, "remove-blocked-by");
+        const relationship_source = if (inverse_action) target_id else issue_id;
+        const relationship_target = if (inverse_action) issue_id else target_id;
+        const relationship_kind: []const u8 = if (std.mem.indexOf(u8, action, "parent") != null or std.mem.indexOf(u8, action, "sub-issue") != null) "parent" else "blocks";
+        const add_relationship = std.mem.startsWith(u8, action, "add-");
+        createIssueRelationshipEvent(allocator, relationship_source, relationship_kind, relationship_target, add_relationship) catch {
+            try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update issue relationship\n");
+            return;
+        };
+    } else if (std.mem.eql(u8, action, "add-concurrent-group") or std.mem.eql(u8, action, "remove-concurrent-group")) {
+        const group_owned = try requiredSidebarValue(allocator, stream, form_body, "group", "Concurrent group is required.");
+        const group = group_owned orelse return;
+        defer allocator.free(group);
+        createIssueConcurrentGroupEvent(allocator, issue_id, group, std.mem.eql(u8, action, "add-concurrent-group")) catch {
+            try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update concurrent group\n");
             return;
         };
     } else {

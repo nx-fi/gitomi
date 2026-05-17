@@ -1161,7 +1161,11 @@ pub fn prepareTimelineStmt(db: *SqliteDb, object_kind: []const u8, object_id: []
         \\    'issue.assignee_removed',
         \\    'issue.milestone_set',
         \\    'issue.project_added',
-        \\    'issue.project_removed'
+        \\    'issue.project_removed',
+        \\    'issue.relationship_added',
+        \\    'issue.relationship_removed',
+        \\    'issue.concurrent_group_added',
+        \\    'issue.concurrent_group_removed'
         \\  )
     else
         \\(
@@ -1315,6 +1319,7 @@ pub fn appendIssueDetailJsonFields(buf: *std.ArrayList(u8), allocator: Allocator
     try appendStringArrayFieldFromQuery(buf, allocator, db, "assignees", "SELECT DISTINCT assignee FROM issue_assignees WHERE issue_id = ? ORDER BY assignee", detail.id, true);
     try appendIssueProjectsJsonField(buf, allocator, db, detail.id, true);
     try appendCommitReferencesJsonField(buf, allocator, db, "commit_references", "issue", detail.id, true);
+    try appendIssueRelationshipsJsonField(buf, allocator, db, detail.id, true);
     try appendReactionsJsonField(buf, allocator, db, "reactions", "issue", detail.id, comma);
 }
 
@@ -1513,6 +1518,141 @@ pub fn appendIssueProjectsJsonField(buf: *std.ArrayList(u8), allocator: Allocato
     if (comma) try buf.append(allocator, ',');
 }
 
+pub fn appendIssueRelationshipsJsonField(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8, comma: bool) !void {
+    try appendJsonString(buf, allocator, "relationships");
+    try buf.appendSlice(allocator, ":{");
+    try appendIssueRelationshipArrayJsonField(buf, allocator, db, "parent", issue_id,
+        \\SELECT DISTINCT i.id, i.title, i.state, COALESCE(m.status, ''), COALESCE(a.number, 0)
+        \\FROM issue_relationships r
+        \\JOIN issues i ON i.id = r.target_issue_id
+        \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
+        \\LEFT JOIN legacy_aliases a ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
+        \\WHERE r.source_issue_id = ? AND r.relationship = 'parent'
+        \\ORDER BY i.opened_at, i.id
+    , true);
+    try appendIssueRelationshipArrayJsonField(buf, allocator, db, "sub_issues", issue_id,
+        \\SELECT DISTINCT i.id, i.title, i.state, COALESCE(m.status, ''), COALESCE(a.number, 0)
+        \\FROM issue_relationships r
+        \\JOIN issues i ON i.id = r.source_issue_id
+        \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
+        \\LEFT JOIN legacy_aliases a ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
+        \\WHERE r.target_issue_id = ? AND r.relationship = 'parent'
+        \\ORDER BY i.opened_at, i.id
+    , true);
+    try appendIssueRelationshipArrayJsonField(buf, allocator, db, "blocked_by", issue_id,
+        \\SELECT DISTINCT i.id, i.title, i.state, COALESCE(m.status, ''), COALESCE(a.number, 0)
+        \\FROM issue_relationships r
+        \\JOIN issues i ON i.id = r.source_issue_id
+        \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
+        \\LEFT JOIN legacy_aliases a ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
+        \\WHERE r.target_issue_id = ? AND r.relationship = 'blocks'
+        \\ORDER BY i.opened_at, i.id
+    , true);
+    try appendIssueRelationshipArrayJsonField(buf, allocator, db, "blocking", issue_id,
+        \\SELECT DISTINCT i.id, i.title, i.state, COALESCE(m.status, ''), COALESCE(a.number, 0)
+        \\FROM issue_relationships r
+        \\JOIN issues i ON i.id = r.target_issue_id
+        \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
+        \\LEFT JOIN legacy_aliases a ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
+        \\WHERE r.source_issue_id = ? AND r.relationship = 'blocks'
+        \\ORDER BY i.opened_at, i.id
+    , true);
+    try appendConcurrentGroupsJsonField(buf, allocator, db, issue_id, false);
+    try buf.append(allocator, '}');
+    if (comma) try buf.append(allocator, ',');
+}
+
+fn appendIssueRelationshipArrayJsonField(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    key: []const u8,
+    issue_id: []const u8,
+    comptime sql_text: []const u8,
+    comma: bool,
+) !void {
+    try appendJsonString(buf, allocator, key);
+    try buf.appendSlice(allocator, ":[");
+    var stmt = try db.prepare(sql_text);
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    var first = true;
+    while (try stmt.step()) {
+        if (!first) try buf.append(allocator, ',');
+        first = false;
+        try appendIssueRelationshipTargetJson(buf, allocator, &stmt);
+    }
+    try buf.append(allocator, ']');
+    if (comma) try buf.append(allocator, ',');
+}
+
+fn appendConcurrentGroupsJsonField(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8, comma: bool) !void {
+    try appendJsonString(buf, allocator, "concurrent_groups");
+    try buf.appendSlice(allocator, ":[");
+    var groups = try db.prepare(
+        \\SELECT DISTINCT group_key
+        \\FROM issue_concurrent_groups
+        \\WHERE issue_id = ?
+        \\ORDER BY lower(group_key), group_key
+    );
+    defer groups.deinit();
+    try groups.bindText(1, issue_id);
+    var first_group = true;
+    while (try groups.step()) {
+        const group = try groups.columnTextDup(allocator, 0);
+        defer allocator.free(group);
+        if (!first_group) try buf.append(allocator, ',');
+        first_group = false;
+        try buf.append(allocator, '{');
+        try appendJsonFieldString(buf, allocator, "group", group, true);
+        try appendJsonString(buf, allocator, "members");
+        try buf.appendSlice(allocator, ":[");
+        var members = try db.prepare(
+            \\SELECT DISTINCT i.id, i.title, i.state, COALESCE(m.status, ''), COALESCE(a.number, 0)
+            \\FROM issue_concurrent_groups g
+            \\JOIN issues i ON i.id = g.issue_id
+            \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
+            \\LEFT JOIN legacy_aliases a ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
+            \\WHERE g.group_key = ?
+            \\ORDER BY CASE WHEN i.id = ? THEN 0 ELSE 1 END, i.opened_at, i.id
+        );
+        defer members.deinit();
+        try members.bindText(1, group);
+        try members.bindText(2, issue_id);
+        var first_member = true;
+        while (try members.step()) {
+            if (!first_member) try buf.append(allocator, ',');
+            first_member = false;
+            try appendIssueRelationshipTargetJson(buf, allocator, &members);
+        }
+        try buf.appendSlice(allocator, "]}");
+    }
+    try buf.append(allocator, ']');
+    if (comma) try buf.append(allocator, ',');
+}
+
+fn appendIssueRelationshipTargetJson(buf: *std.ArrayList(u8), allocator: Allocator, stmt: *SqliteStmt) !void {
+    const id = try stmt.columnTextDup(allocator, 0);
+    defer allocator.free(id);
+    const title = try stmt.columnTextDup(allocator, 1);
+    defer allocator.free(title);
+    const state = try stmt.columnTextDup(allocator, 2);
+    defer allocator.free(state);
+    const status = try stmt.columnTextDup(allocator, 3);
+    defer allocator.free(status);
+    const legacy_number = stmt.columnInt64(4);
+    var ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const short_ref = util.shortObjectRef(&ref_buf, id);
+    try buf.append(allocator, '{');
+    try appendJsonFieldString(buf, allocator, "id", id, true);
+    try appendJsonFieldString(buf, allocator, "ref", short_ref, true);
+    if (legacy_number > 0) try appendJsonFieldInteger(buf, allocator, "legacy_github_issue_number", legacy_number, true);
+    try appendJsonFieldString(buf, allocator, "title", title, true);
+    try appendJsonFieldString(buf, allocator, "state", state, true);
+    try appendJsonFieldString(buf, allocator, "status", status, false);
+    try buf.append(allocator, '}');
+}
+
 pub fn appendCommitReferencesJsonField(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, key: []const u8, object_kind: []const u8, object_id: []const u8, comma: bool) !void {
     try appendJsonString(buf, allocator, key);
     try buf.appendSlice(allocator, ":[");
@@ -1664,7 +1804,18 @@ fn appendIssueCommandsJsonField(buf: *std.ArrayList(u8), allocator: Allocator, i
     try appendCommandField(buf, allocator, "comment", "gt issue comment #{s} --body BODY", issue_ref, true);
     try appendCommandField(buf, allocator, "close", "gt issue close #{s} --body BODY", issue_ref, true);
     try appendCommandField(buf, allocator, "reopen", "gt issue reopen #{s} --body BODY", issue_ref, true);
-    try appendCommandField(buf, allocator, "edit", "gt issue edit #{s} --title TITLE --body BODY", issue_ref, false);
+    try appendCommandField(buf, allocator, "edit", "gt issue edit #{s} --title TITLE --body BODY", issue_ref, true);
+    try appendCommandField(buf, allocator, "create_sub_issue", "gt issue open --parent #{s} --title TITLE --body BODY", issue_ref, true);
+    try appendCommandField(buf, allocator, "add_parent", "gt issue parent #{s} add PARENT_ISSUE", issue_ref, true);
+    try appendCommandField(buf, allocator, "add_sub_issue", "gt issue sub-issue #{s} add CHILD_ISSUE", issue_ref, true);
+    try appendCommandField(buf, allocator, "add_blocked_by", "gt issue blocked-by #{s} add BLOCKING_ISSUE", issue_ref, true);
+    try appendCommandField(buf, allocator, "add_blocking", "gt issue blocking #{s} add BLOCKED_ISSUE", issue_ref, true);
+    try appendCommandField(buf, allocator, "join_concurrent_group", "gt issue concurrent-group #{s} add GROUP", issue_ref, true);
+    try appendCommandField(buf, allocator, "remove_parent", "gt issue parent #{s} remove PARENT_ISSUE", issue_ref, true);
+    try appendCommandField(buf, allocator, "remove_sub_issue", "gt issue sub-issue #{s} remove CHILD_ISSUE", issue_ref, true);
+    try appendCommandField(buf, allocator, "remove_blocked_by", "gt issue blocked-by #{s} remove BLOCKING_ISSUE", issue_ref, true);
+    try appendCommandField(buf, allocator, "remove_blocking", "gt issue blocking #{s} remove BLOCKED_ISSUE", issue_ref, true);
+    try appendCommandField(buf, allocator, "leave_concurrent_group", "gt issue concurrent-group #{s} remove GROUP", issue_ref, false);
     try buf.append(allocator, '}');
     if (comma) try buf.append(allocator, ',');
 }

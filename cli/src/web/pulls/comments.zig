@@ -255,7 +255,7 @@ pub fn appendCommentForm(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref:
         \\<div class="issue-timeline-item issue-comment-form-item">
         \\  <div class="issue-timeline-avatar">
     );
-    try shared.appendAvatar(buf, allocator, current_actor orelse "Current user", "issue-detail-avatar issue-comment-form-avatar");
+    try shared.appendCurrentActorAvatar(buf, allocator, current_actor, "issue-detail-avatar issue-comment-form-avatar");
     try buf.appendSlice(allocator,
         \\  </div>
         \\  <form class="issue-comment-box issue-comment-form" method="post" action="/pulls/

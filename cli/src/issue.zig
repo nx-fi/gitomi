@@ -19,6 +19,8 @@ const EventWriter = event_writer_mod.EventWriter;
 const buildIssueProjectEventJson = event_mod.buildIssueProjectEventJson;
 const buildIssueProjectFieldClearedJson = event_mod.buildIssueProjectFieldClearedJson;
 const buildIssueProjectFieldSetJson = event_mod.buildIssueProjectFieldSetJson;
+const buildIssueRelationshipEventJson = event_mod.buildIssueRelationshipEventJson;
+const buildIssueConcurrentGroupEventJson = event_mod.buildIssueConcurrentGroupEventJson;
 const buildIssueStringPayloadJson = event_mod.buildIssueStringPayloadJson;
 const buildIssueUpdatedJson = event_mod.buildIssueUpdatedJson;
 const newUuidV7 = util.newUuidV7;
@@ -39,6 +41,18 @@ const requireBodyOption = cmd_common.requireBodyOption;
 const requireNonEmptyOption = cmd_common.requireNonEmptyOption;
 const validateJsonArgument = cmd_common.validateJsonArgument;
 
+pub const IssueWriteResult = struct {
+    issue_id: []u8,
+    commit_oid: []u8,
+    inbox_ref: []u8,
+
+    pub fn deinit(self: IssueWriteResult, allocator: Allocator) void {
+        allocator.free(self.issue_id);
+        allocator.free(self.commit_oid);
+        allocator.free(self.inbox_ref);
+    }
+};
+
 pub fn createIssueOpenedEvent(
     allocator: Allocator,
     title: []const u8,
@@ -57,11 +71,30 @@ pub fn createIssueOpenedWithMetadataEvent(
     assignees: []const []const u8,
     metadata: event_mod.IssueOpenedMetadata,
 ) !void {
+    const result = try createIssueOpenedWithMetadataEventResult(allocator, title, body, labels, assignees, metadata);
+    defer result.deinit(allocator);
+
+    var issue_ref_buf: [short_object_ref_len]u8 = undefined;
+    const issue_ref = shortObjectRef(&issue_ref_buf, result.issue_id);
+    try out("opened issue #{s}\n", .{issue_ref});
+    try out("  id:     {s}\n", .{result.issue_id});
+    try out("  commit: {s}\n", .{result.commit_oid});
+    try out("  ref:    {s}\n", .{result.inbox_ref});
+}
+
+pub fn createIssueOpenedWithMetadataEventResult(
+    allocator: Allocator,
+    title: []const u8,
+    body: []const u8,
+    labels: []const []const u8,
+    assignees: []const []const u8,
+    metadata: event_mod.IssueOpenedMetadata,
+) !IssueWriteResult {
     var writer = try EventWriter.init(allocator, "gt issue open");
     defer writer.deinit();
 
     const issue_id = try newUuidV7(allocator);
-    defer allocator.free(issue_id);
+    errdefer allocator.free(issue_id);
     const event_uuid = try newUuidV7(allocator);
     defer allocator.free(event_uuid);
     const idem = try newUuidV7(allocator);
@@ -93,12 +126,102 @@ pub fn createIssueOpenedWithMetadataEvent(
     const subject = try std.fmt.allocPrint(allocator, "issue.opened #{s} {s}", .{ issue_ref, title });
     defer allocator.free(subject);
     const commit_oid = try writer.write("gt issue", subject, event_body);
-    defer allocator.free(commit_oid);
+    errdefer allocator.free(commit_oid);
 
-    try out("opened issue #{s}\n", .{issue_ref});
-    try out("  id:     {s}\n", .{issue_id});
-    try out("  commit: {s}\n", .{commit_oid});
-    try out("  ref:    {s}\n", .{writer.inbox_ref});
+    const inbox_ref = try allocator.dupe(u8, writer.inbox_ref);
+    errdefer allocator.free(inbox_ref);
+
+    return .{
+        .issue_id = issue_id,
+        .commit_oid = commit_oid,
+        .inbox_ref = inbox_ref,
+    };
+}
+
+pub fn createSubIssueOpenedWithMetadataEventResult(
+    allocator: Allocator,
+    parent_id: []const u8,
+    title: []const u8,
+    body: []const u8,
+    labels: []const []const u8,
+    assignees: []const []const u8,
+    metadata: event_mod.IssueOpenedMetadata,
+) !IssueWriteResult {
+    var writer = try EventWriter.init(allocator, "gt issue sub-issue");
+    defer writer.deinit();
+
+    const issue_id = try newUuidV7(allocator);
+    errdefer allocator.free(issue_id);
+    const event_uuid = try newUuidV7(allocator);
+    defer allocator.free(event_uuid);
+    const idem = try newUuidV7(allocator);
+    defer allocator.free(idem);
+    const occurred_at = try rfc3339Now(allocator);
+    defer allocator.free(occurred_at);
+
+    const event_body = try event_mod.buildIssueOpenedJsonWithLegacyAndMetadata(
+        allocator,
+        writer.cfg,
+        writer.nextSeq(),
+        issue_id,
+        event_uuid,
+        idem,
+        occurred_at,
+        writer.stagedEventParents(),
+        title,
+        body,
+        labels,
+        assignees,
+        .{},
+        metadata,
+    );
+    defer allocator.free(event_body);
+
+    var issue_ref_buf: [short_object_ref_len]u8 = undefined;
+    const issue_ref = shortObjectRef(&issue_ref_buf, issue_id);
+    const subject = try std.fmt.allocPrint(allocator, "issue.opened #{s} {s}", .{ issue_ref, title });
+    defer allocator.free(subject);
+    const open_commit_oid = try writer.stage("gt issue", subject, event_body);
+    defer allocator.free(open_commit_oid);
+
+    const relationship_event_uuid = try newUuidV7(allocator);
+    defer allocator.free(relationship_event_uuid);
+    const relationship_idem = try newUuidV7(allocator);
+    defer allocator.free(relationship_idem);
+    const relationship_occurred_at = try rfc3339Now(allocator);
+    defer allocator.free(relationship_occurred_at);
+    const relationship_body = try buildIssueRelationshipEventJson(
+        allocator,
+        writer.cfg,
+        writer.nextSeq(),
+        issue_id,
+        relationship_event_uuid,
+        relationship_idem,
+        relationship_occurred_at,
+        writer.stagedEventParents(),
+        "issue.relationship_added",
+        "parent",
+        parent_id,
+    );
+    defer allocator.free(relationship_body);
+
+    var parent_ref_buf: [short_object_ref_len]u8 = undefined;
+    const parent_ref = shortObjectRef(&parent_ref_buf, parent_id);
+    const relationship_subject = try std.fmt.allocPrint(allocator, "issue.relationship_added #{s} parent #{s}", .{ issue_ref, parent_ref });
+    defer allocator.free(relationship_subject);
+    const commit_oid = try writer.stage("gt issue", relationship_subject, relationship_body);
+    errdefer allocator.free(commit_oid);
+
+    try writer.commitStaged();
+
+    const inbox_ref = try allocator.dupe(u8, writer.inbox_ref);
+    errdefer allocator.free(inbox_ref);
+
+    return .{
+        .issue_id = issue_id,
+        .commit_oid = commit_oid,
+        .inbox_ref = inbox_ref,
+    };
 }
 
 pub fn createIssueStringEvent(
@@ -242,6 +365,96 @@ pub fn createIssueProjectEvent(
     try out("  ref:    {s}\n", .{writer.inbox_ref});
 }
 
+pub fn createIssueRelationshipEvent(
+    allocator: Allocator,
+    issue_id: []const u8,
+    kind: []const u8,
+    target_id: []const u8,
+    add: bool,
+) !void {
+    var writer = try EventWriter.init(allocator, "gt issue relationship");
+    defer writer.deinit();
+
+    const event_uuid = try newUuidV7(allocator);
+    defer allocator.free(event_uuid);
+    const idem = try newUuidV7(allocator);
+    defer allocator.free(idem);
+    const occurred_at = try rfc3339Now(allocator);
+    defer allocator.free(occurred_at);
+    const event_type: []const u8 = if (add) "issue.relationship_added" else "issue.relationship_removed";
+
+    const event_body = try buildIssueRelationshipEventJson(
+        allocator,
+        writer.cfg,
+        writer.nextSeq(),
+        issue_id,
+        event_uuid,
+        idem,
+        occurred_at,
+        writer.eventParents(),
+        event_type,
+        kind,
+        target_id,
+    );
+    defer allocator.free(event_body);
+
+    var issue_ref_buf: [short_object_ref_len]u8 = undefined;
+    const issue_ref = shortObjectRef(&issue_ref_buf, issue_id);
+    var target_ref_buf: [short_object_ref_len]u8 = undefined;
+    const target_ref = shortObjectRef(&target_ref_buf, target_id);
+    const subject = try std.fmt.allocPrint(allocator, "{s} #{s} {s} #{s}", .{ event_type, issue_ref, kind, target_ref });
+    defer allocator.free(subject);
+    const commit_oid = try writer.write("gt issue", subject, event_body);
+    defer allocator.free(commit_oid);
+
+    try out("{s} #{s}\n", .{ event_type, issue_ref });
+    try out("  commit: {s}\n", .{commit_oid});
+    try out("  ref:    {s}\n", .{writer.inbox_ref});
+}
+
+pub fn createIssueConcurrentGroupEvent(
+    allocator: Allocator,
+    issue_id: []const u8,
+    group: []const u8,
+    add: bool,
+) !void {
+    var writer = try EventWriter.init(allocator, "gt issue concurrent-group");
+    defer writer.deinit();
+
+    const event_uuid = try newUuidV7(allocator);
+    defer allocator.free(event_uuid);
+    const idem = try newUuidV7(allocator);
+    defer allocator.free(idem);
+    const occurred_at = try rfc3339Now(allocator);
+    defer allocator.free(occurred_at);
+    const event_type: []const u8 = if (add) "issue.concurrent_group_added" else "issue.concurrent_group_removed";
+
+    const event_body = try buildIssueConcurrentGroupEventJson(
+        allocator,
+        writer.cfg,
+        writer.nextSeq(),
+        issue_id,
+        event_uuid,
+        idem,
+        occurred_at,
+        writer.eventParents(),
+        event_type,
+        group,
+    );
+    defer allocator.free(event_body);
+
+    var issue_ref_buf: [short_object_ref_len]u8 = undefined;
+    const issue_ref = shortObjectRef(&issue_ref_buf, issue_id);
+    const subject = try std.fmt.allocPrint(allocator, "{s} #{s} {s}", .{ event_type, issue_ref, group });
+    defer allocator.free(subject);
+    const commit_oid = try writer.write("gt issue", subject, event_body);
+    defer allocator.free(commit_oid);
+
+    try out("{s} #{s}\n", .{ event_type, issue_ref });
+    try out("  commit: {s}\n", .{commit_oid});
+    try out("  ref:    {s}\n", .{writer.inbox_ref});
+}
+
 pub fn createIssueProjectFieldSetEvent(
     allocator: Allocator,
     issue_id: []const u8,
@@ -338,7 +551,7 @@ pub fn createIssueProjectFieldClearedEvent(
 
 pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
     if (args.len == 0) {
-        try io.eprint("gt issue: expected subcommand 'list', 'show', 'open', 'comment', or an issue update command\n", .{});
+        try io.eprint("gt issue: expected subcommand 'list', 'show', 'open', 'comment', relationship, or an issue update command\n", .{});
         return CliError.UserError;
     }
 
@@ -839,6 +1052,43 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
         return;
     }
 
+    if (std.mem.eql(u8, args[0], "parent") or
+        std.mem.eql(u8, args[0], "sub-issue") or
+        std.mem.eql(u8, args[0], "blocked-by") or
+        std.mem.eql(u8, args[0], "blocking") or
+        std.mem.eql(u8, args[0], "concurrent-group"))
+    {
+        if (args.len != 4) {
+            try io.eprint("gt issue {s}: expected ISSUE add|remove VALUE\n", .{args[0]});
+            return CliError.UserError;
+        }
+        const op = args[2];
+        if (!std.mem.eql(u8, op, "add") and !std.mem.eql(u8, op, "remove")) {
+            try io.eprint("gt issue {s}: expected add or remove\n", .{args[0]});
+            return CliError.UserError;
+        }
+        const issue_id = try command_repo.resolveIssueId(args[1]);
+        defer allocator.free(issue_id);
+        const add = std.mem.eql(u8, op, "add");
+        if (std.mem.eql(u8, args[0], "concurrent-group")) {
+            try requireNonEmptyOption("gt issue concurrent-group", "GROUP", args[3]);
+            try issue.createIssueConcurrentGroupEvent(allocator, issue_id, args[3], add);
+            return;
+        }
+
+        const target_id = try command_repo.resolveIssueId(args[3]);
+        defer allocator.free(target_id);
+        if (std.mem.eql(u8, issue_id, target_id)) {
+            try io.eprint("gt issue {s}: issue cannot be related to itself\n", .{args[0]});
+            return CliError.UserError;
+        }
+        const relationship_source = if (std.mem.eql(u8, args[0], "sub-issue") or std.mem.eql(u8, args[0], "blocked-by")) target_id else issue_id;
+        const relationship_target = if (std.mem.eql(u8, args[0], "sub-issue") or std.mem.eql(u8, args[0], "blocked-by")) issue_id else target_id;
+        const relationship_kind: []const u8 = if (std.mem.eql(u8, args[0], "parent") or std.mem.eql(u8, args[0], "sub-issue")) "parent" else "blocks";
+        try issue.createIssueRelationshipEvent(allocator, relationship_source, relationship_kind, relationship_target, add);
+        return;
+    }
+
     if (std.mem.eql(u8, args[0], "react") or std.mem.eql(u8, args[0], "unreact")) {
         if (args.len != 3) {
             try io.eprint("gt issue {s}: expected ISSUE EMOJI\n", .{args[0]});
@@ -851,7 +1101,7 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
     }
 
     if (!std.mem.eql(u8, args[0], "open")) {
-        try io.eprint("gt issue: expected subcommand 'list', 'show', 'open', 'comment', or an issue update command\n", .{});
+        try io.eprint("gt issue: expected subcommand 'list', 'show', 'open', 'comment', relationship, or an issue update command\n", .{});
         return CliError.UserError;
     }
 
@@ -860,6 +1110,7 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
     var issue_type: ?[]const u8 = null;
     var priority: ?[]const u8 = null;
     var status: ?[]const u8 = null;
+    var parent_ref: ?[]const u8 = null;
     var labels: std.ArrayList([]const u8) = .empty;
     defer labels.deinit(allocator);
     var assignees: std.ArrayList([]const u8) = .empty;
@@ -893,6 +1144,8 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
                 return CliError.UserError;
             }
             status = value;
+        } else if (std.mem.eql(u8, arg, "--parent")) {
+            parent_ref = try util.requireValue(args, &i, "--parent");
         } else if (std.mem.eql(u8, arg, "--label") or std.mem.eql(u8, arg, "-l")) {
             try labels.append(allocator, try util.requireValue(args, &i, "--label"));
         } else if (std.mem.eql(u8, arg, "--assignee") or std.mem.eql(u8, arg, "-a")) {
@@ -906,6 +1159,28 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
     if (title == null or std.mem.trim(u8, title.?, " \t\r\n").len == 0) {
         try io.eprint("gt issue open: --title is required\n", .{});
         return CliError.UserError;
+    }
+
+    const parent_id = if (parent_ref) |value| try command_repo.resolveIssueId(value) else null;
+    defer if (parent_id) |value| allocator.free(value);
+
+    if (parent_id) |value| {
+        const result = try issue.createSubIssueOpenedWithMetadataEventResult(allocator, value, title.?, body, labels.items, assignees.items, .{
+            .issue_type = issue_type,
+            .priority = priority,
+            .status = status,
+        });
+        defer result.deinit(allocator);
+        var issue_ref_buf: [short_object_ref_len]u8 = undefined;
+        const issue_ref = shortObjectRef(&issue_ref_buf, result.issue_id);
+        var parent_issue_ref_buf: [short_object_ref_len]u8 = undefined;
+        const parent_issue_ref = shortObjectRef(&parent_issue_ref_buf, value);
+        try out("opened sub-issue #{s}\n", .{issue_ref});
+        try out("  parent: #{s}\n", .{parent_issue_ref});
+        try out("  id:     {s}\n", .{result.issue_id});
+        try out("  commit: {s}\n", .{result.commit_oid});
+        try out("  ref:    {s}\n", .{result.inbox_ref});
+        return;
     }
 
     if (issue_type != null or priority != null or status != null) {

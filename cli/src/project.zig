@@ -76,6 +76,46 @@ pub fn createProjectCreatedEvent(
     return project_id;
 }
 
+pub fn stageProjectCreatedEvent(
+    allocator: Allocator,
+    writer: *EventWriter,
+    project_id: []const u8,
+    name: []const u8,
+    description: []const u8,
+    columns: []const []const u8,
+) ![]u8 {
+    const event_uuid = try newUuidV7(allocator);
+    defer allocator.free(event_uuid);
+    const idem = try newUuidV7(allocator);
+    defer allocator.free(idem);
+    const occurred_at = try rfc3339Now(allocator);
+    defer allocator.free(occurred_at);
+    const event_parents = writer.stagedEventParents();
+    const effective_columns = if (columns.len == 0) default_columns[0..] else columns;
+    const slug = try optionalSanitizedRef(allocator, name);
+    defer if (slug) |value| allocator.free(value);
+
+    const event_body = try event_mod.buildProjectCreatedJson(
+        allocator,
+        writer.cfg,
+        writer.nextSeq(),
+        project_id,
+        event_uuid,
+        idem,
+        occurred_at,
+        event_parents,
+        name,
+        description,
+        slug,
+        effective_columns,
+    );
+    defer allocator.free(event_body);
+
+    const subject = try std.fmt.allocPrint(allocator, "project.created @{s} {s}", .{ project_id[0..@min(project_id.len, 7)], name });
+    defer allocator.free(subject);
+    return try writer.stage("gt project", subject, event_body);
+}
+
 pub fn createProjectColumnEvent(
     allocator: Allocator,
     project_id: []const u8,
@@ -214,6 +254,52 @@ pub fn createProjectFieldCreatedEvent(
     return field_id;
 }
 
+pub fn stageProjectFieldCreatedEvent(
+    allocator: Allocator,
+    writer: *EventWriter,
+    project_id: []const u8,
+    key: []const u8,
+    name: []const u8,
+    field_type: []const u8,
+    position: ?i64,
+    required: ?bool,
+    default_value_json: ?[]const u8,
+) ![]u8 {
+    const field_id = try newUuidV7(allocator);
+    errdefer allocator.free(field_id);
+    const event_uuid = try newUuidV7(allocator);
+    defer allocator.free(event_uuid);
+    const idem = try newUuidV7(allocator);
+    defer allocator.free(idem);
+    const occurred_at = try rfc3339Now(allocator);
+    defer allocator.free(occurred_at);
+
+    const event_body = try event_mod.buildProjectFieldCreatedJson(
+        allocator,
+        writer.cfg,
+        writer.nextSeq(),
+        project_id,
+        event_uuid,
+        idem,
+        occurred_at,
+        writer.stagedEventParents(),
+        field_id,
+        key,
+        name,
+        field_type,
+        position,
+        required,
+        default_value_json,
+    );
+    defer allocator.free(event_body);
+
+    const subject = try std.fmt.allocPrint(allocator, "project.field_created @{s} {s}", .{ project_id[0..@min(project_id.len, 7)], key });
+    defer allocator.free(subject);
+    const commit_oid = try writer.stage("gt project", subject, event_body);
+    defer allocator.free(commit_oid);
+    return field_id;
+}
+
 pub fn createProjectFieldUpdatedEvent(
     allocator: Allocator,
     project_id: []const u8,
@@ -334,6 +420,47 @@ pub fn createProjectFieldOptionAddedEvent(
     try out("  option: {s}\n", .{option_id});
     try out("  commit: {s}\n", .{commit_oid});
     try out("  ref:    {s}\n", .{writer.inbox_ref});
+}
+
+pub fn stageProjectFieldOptionAddedEvent(
+    allocator: Allocator,
+    writer: *EventWriter,
+    project_id: []const u8,
+    field_id: []const u8,
+    name: []const u8,
+    color: ?[]const u8,
+    position: ?i64,
+) !void {
+    const option_id = try newUuidV7(allocator);
+    defer allocator.free(option_id);
+    const event_uuid = try newUuidV7(allocator);
+    defer allocator.free(event_uuid);
+    const idem = try newUuidV7(allocator);
+    defer allocator.free(idem);
+    const occurred_at = try rfc3339Now(allocator);
+    defer allocator.free(occurred_at);
+
+    const event_body = try event_mod.buildProjectFieldOptionAddedJson(
+        allocator,
+        writer.cfg,
+        writer.nextSeq(),
+        project_id,
+        event_uuid,
+        idem,
+        occurred_at,
+        writer.stagedEventParents(),
+        field_id,
+        option_id,
+        name,
+        color,
+        position,
+    );
+    defer allocator.free(event_body);
+
+    const subject = try std.fmt.allocPrint(allocator, "project.field_option_added @{s} {s}", .{ project_id[0..@min(project_id.len, 7)], name });
+    defer allocator.free(subject);
+    const commit_oid = try writer.stage("gt project", subject, event_body);
+    defer allocator.free(commit_oid);
 }
 
 pub fn createProjectFieldOptionUpdatedEvent(
@@ -459,6 +586,47 @@ pub fn createProjectViewCreatedEvent(
     try out("  view:   {s}\n", .{view_id});
     try out("  commit: {s}\n", .{commit_oid});
     try out("  ref:    {s}\n", .{writer.inbox_ref});
+}
+
+pub fn stageProjectViewCreatedEvent(
+    allocator: Allocator,
+    writer: *EventWriter,
+    project_id: []const u8,
+    name: []const u8,
+    layout: []const u8,
+    position: ?i64,
+    config_json: ?[]const u8,
+) !void {
+    const view_id = try newUuidV7(allocator);
+    defer allocator.free(view_id);
+    const event_uuid = try newUuidV7(allocator);
+    defer allocator.free(event_uuid);
+    const idem = try newUuidV7(allocator);
+    defer allocator.free(idem);
+    const occurred_at = try rfc3339Now(allocator);
+    defer allocator.free(occurred_at);
+
+    const event_body = try event_mod.buildProjectViewCreatedJson(
+        allocator,
+        writer.cfg,
+        writer.nextSeq(),
+        project_id,
+        event_uuid,
+        idem,
+        occurred_at,
+        writer.stagedEventParents(),
+        view_id,
+        name,
+        layout,
+        position,
+        config_json,
+    );
+    defer allocator.free(event_body);
+
+    const subject = try std.fmt.allocPrint(allocator, "project.view_created @{s} {s}", .{ project_id[0..@min(project_id.len, 7)], name });
+    defer allocator.free(subject);
+    const commit_oid = try writer.stage("gt project", subject, event_body);
+    defer allocator.free(commit_oid);
 }
 
 pub fn createProjectViewUpdatedEvent(

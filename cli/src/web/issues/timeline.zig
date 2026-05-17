@@ -1,6 +1,7 @@
 const std = @import("std");
 const event_mod = @import("../../event.zig");
 const index = @import("../../index.zig");
+const util = @import("../../util.zig");
 const work_items = @import("../../work_items.zig");
 const shared = @import("../shared.zig");
 
@@ -8,6 +9,7 @@ const Allocator = std.mem.Allocator;
 const SqliteDb = index.SqliteDb;
 const appendRelativeTime = shared.appendRelativeTime;
 const appendTemplate = shared.appendTemplate;
+const issueHref = shared.issueHref;
 
 const IssueProjectSummary = struct {
     project: []const u8,
@@ -64,6 +66,7 @@ fn eventIcon(event_type: []const u8, body: []const u8) []const u8 {
         if (payloadStringEquals(body, "state", "open")) return "is-open";
         return "is-edit";
     }
+    if (std.mem.indexOf(u8, event_type, "relationship") != null or std.mem.indexOf(u8, event_type, "concurrent_group") != null) return "is-project";
     if (std.mem.indexOf(u8, event_type, "label") != null) return "is-label";
     if (std.mem.indexOf(u8, event_type, "assignee") != null) return "is-assignee";
     if (std.mem.indexOf(u8, event_type, "milestone") != null) return "is-milestone";
@@ -132,11 +135,69 @@ fn appendMessage(
             .project = event_mod.jsonString(payload.get("project")) orelse "project",
             .column = event_mod.jsonString(payload.get("column")) orelse "",
         });
+    } else if (std.mem.eql(u8, event_type, "issue.relationship_added") or std.mem.eql(u8, event_type, "issue.relationship_removed")) {
+        try appendRelationshipMessage(buf, allocator, db, std.mem.eql(u8, event_type, "issue.relationship_added"), payload);
+    } else if (std.mem.eql(u8, event_type, "issue.concurrent_group_added") or std.mem.eql(u8, event_type, "issue.concurrent_group_removed")) {
+        const group = event_mod.jsonString(payload.get("group")) orelse "group";
+        try appendTemplate(buf, allocator, "{verb} concurrent group <span class=\"issue-sidebar-pill\">{group}</span>", .{
+            .verb = if (std.mem.eql(u8, event_type, "issue.concurrent_group_added")) "joined" else "left",
+            .group = group,
+        });
     } else if (std.mem.eql(u8, event_type, "issue.updated")) {
         try appendUpdatedMessage(buf, allocator, db, payload);
     } else {
         try appendTemplate(buf, allocator, "recorded <code>{event_type}</code>", .{ .event_type = event_type });
     }
+}
+
+fn appendRelationshipMessage(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, added: bool, payload: std.json.ObjectMap) !void {
+    const relationship = event_mod.jsonString(payload.get("kind")) orelse "relationship";
+    const target_id = event_mod.jsonString(payload.get("target_id")) orelse "";
+    try appendTemplate(buf, allocator, "{verb} {kind} ", .{
+        .verb = if (added) "added" else "removed",
+        .kind = relationshipLabel(relationship),
+    });
+    if (target_id.len == 0) {
+        try buf.appendSlice(allocator, "issue");
+        return;
+    }
+    try appendIssueReference(buf, allocator, db, target_id);
+}
+
+fn relationshipLabel(relationship: []const u8) []const u8 {
+    if (std.mem.eql(u8, relationship, "parent")) return "parent";
+    if (std.mem.eql(u8, relationship, "blocks")) return "blocking";
+    return relationship;
+}
+
+fn appendIssueReference(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8) !void {
+    var stmt = try db.prepare(
+        \\SELECT i.title, COALESCE(a.number, 0)
+        \\FROM issues i
+        \\LEFT JOIN legacy_aliases a
+        \\  ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
+        \\WHERE i.id = ?
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    if (!(try stmt.step())) {
+        try appendTemplate(buf, allocator, "issue <code>{id}</code>", .{ .id = issue_id });
+        return;
+    }
+    const title = try stmt.columnTextDup(allocator, 0);
+    defer allocator.free(title);
+    const legacy_number = stmt.columnInt64(1);
+
+    var ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const short_ref = util.shortObjectRef(&ref_buf, issue_id);
+    const display_ref = if (legacy_number > 0) try std.fmt.allocPrint(allocator, "{d}", .{legacy_number}) else try allocator.dupe(u8, short_ref);
+    defer allocator.free(display_ref);
+    try buf.appendSlice(allocator, "<a href=\"");
+    try shared.appendHref(buf, allocator, issueHref(display_ref));
+    try appendTemplate(buf, allocator, "\">{title} #{display_ref}</a>", .{
+        .title = title,
+        .display_ref = display_ref,
+    });
 }
 
 fn eventPayload(value: std.json.Value) ?std.json.ObjectMap {

@@ -23,7 +23,7 @@ const loadConfig = repo_mod.loadConfig;
 const default_web_shortcut_leader = "Space";
 const default_web_shortcut_keys = "A S D F J K L E R U I O W Q P Z X C V B N M G H Y T";
 const default_web_shortcut_timeout_ms: u64 = 900;
-const asset_version = "20260517-label-order-task-progress-back-nav-colors-avatar-fallbacks";
+const asset_version = "20260517-label-order-task-progress-back-nav-colors-identity-avatars-project-select-rbac-role";
 
 const WebStats = struct {
     inbox_refs: usize = 0,
@@ -31,6 +31,28 @@ const WebStats = struct {
     events: usize = 0,
     issues: usize = 0,
     pulls: usize = 0,
+};
+
+const ShellOptions = struct {
+    load_user_role: bool = true,
+};
+
+const CurrentUserRole = struct {
+    state: State = .not_initialized,
+    role: ?[]u8 = null,
+
+    const State = enum {
+        not_initialized,
+        not_loaded,
+        no_role,
+        loaded,
+        unavailable,
+    };
+
+    fn deinit(self: *CurrentUserRole, allocator: Allocator) void {
+        if (self.role) |value| allocator.free(value);
+        self.* = .{};
+    }
 };
 
 pub const Href = html.Href;
@@ -68,11 +90,13 @@ pub const appendFmt = html.appendFmt;
 pub const appendRelativeTime = time.appendRelativeTime;
 pub const appendAvatar = avatars.appendAvatar;
 pub const appendAvatarWithUrl = avatars.appendAvatarWithUrl;
+pub const appendGitIdentityAvatar = avatars.appendGitIdentityAvatar;
+pub const appendAvatarWithIdentity = avatars.appendAvatarWithIdentity;
 pub const sendRedirect = response.sendRedirect;
 pub const sendPlainResponse = response.sendPlainResponse;
 pub const sendResponse = response.sendResponse;
 pub const sendBinaryResponse = response.sendBinaryResponse;
-const appendUserAvatar = avatars.appendUserAvatar;
+const appendUserAvatarFromGitIdentity = avatars.appendUserAvatarFromGitIdentity;
 
 pub const Button = struct {
     label: []const u8,
@@ -642,6 +666,17 @@ pub fn appendShellStart(
     title: []const u8,
     active: []const u8,
 ) !void {
+    try appendShellStartWithOptions(buf, allocator, repo, title, active, .{});
+}
+
+fn appendShellStartWithOptions(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    repo: Repo,
+    title: []const u8,
+    active: []const u8,
+    options: ShellOptions,
+) !void {
     const stats = try loadWebStats(allocator, repo);
     var cfg_opt: ?Config = loadConfig(allocator, repo.config_path) catch |err| switch (err) {
         CliError.ConfigNotFound, CliError.ConfigInvalid => null,
@@ -699,7 +734,7 @@ pub fn appendShellStart(
         \\  </button>
     , .{});
     if (cfg_opt) |cfg| {
-        try appendUserMenu(buf, allocator, cfg);
+        try appendUserMenu(buf, allocator, repo, cfg, options.load_user_role);
     }
     try appendTemplate(buf, allocator,
         \\  </div>
@@ -717,32 +752,176 @@ pub fn appendShellStart(
     }
 }
 
-fn appendUserMenu(buf: *std.ArrayList(u8), allocator: Allocator, cfg: Config) !void {
+fn appendUserMenu(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, cfg: Config, load_user_role: bool) !void {
+    const git_user_name = try gitUserNameOwned(allocator);
+    defer if (git_user_name) |value| allocator.free(value);
+    const git_user_email = try gitUserEmailOwned(allocator);
+    defer if (git_user_email) |value| allocator.free(value);
+    const display_name = git_user_name orelse cfg.principal;
+    const display_email = git_user_email orelse cfg.principal;
+    const avatar_url = try identityAvatarUrlForCurrentUserOwned(allocator, cfg.principal, git_user_name, git_user_email);
+    defer if (avatar_url) |value| allocator.free(value);
+    var current_role = try currentUserRbacRoleOwned(allocator, repo, cfg, load_user_role);
+    defer current_role.deinit(allocator);
     try appendTemplate(buf, allocator,
         \\<details class="user-menu" data-popover-menu>
         \\  <summary aria-label="User menu">
     , .{});
-    try appendUserAvatar(buf, allocator, cfg.principal);
+    try appendUserAvatarFromGitIdentity(buf, allocator, display_name, display_email, avatar_url orelse "");
     try appendTemplate(buf, allocator,
-        \\    <span class="user-menu-label"><strong>{principal}</strong><span>{device}</span></span>
+        \\    <span class="user-menu-label"><strong>{display_name}</strong><span>{device}</span></span>
         \\  </summary>
         \\  <div class="user-menu-popover" role="menu">
         \\    <div class="user-menu-section">
         \\      <span class="user-menu-kicker">User</span>
-        \\      <strong>{principal}</strong>
+        \\      <strong>{display_name}</strong>
+        \\      <span>{principal}</span>
         \\      <span>{device}</span>
         \\    </div>
         \\    <div class="user-menu-section">
         \\      <span class="user-menu-kicker">Repository ID</span>
         \\      <code>{repo_id}</code>
         \\    </div>
-        \\  </div>
-        \\</details>
     , .{
+        .display_name = display_name,
         .principal = cfg.principal,
         .device = cfg.device,
         .repo_id = cfg.repo_id,
     });
+    try appendCurrentUserRoleSection(buf, allocator, current_role);
+    try buf.appendSlice(allocator,
+        \\  </div>
+        \\</details>
+    );
+}
+
+fn appendCurrentUserRoleSection(buf: *std.ArrayList(u8), allocator: Allocator, current_role: CurrentUserRole) !void {
+    switch (current_role.state) {
+        .not_initialized,
+        .not_loaded,
+        => return,
+        .loaded => {
+            const role = current_role.role orelse return;
+            try appendTemplate(buf, allocator,
+                \\    <div class="user-menu-section">
+                \\      <span class="user-menu-kicker">RBAC Role</span>
+                \\      <span><span class="access-role-pill user-menu-role-pill">{role}</span></span>
+                \\    </div>
+            , .{ .role = role });
+        },
+        .no_role => {
+            try buf.appendSlice(allocator,
+                \\    <div class="user-menu-section">
+                \\      <span class="user-menu-kicker">RBAC Role</span>
+                \\      <span class="user-menu-role-muted">No role</span>
+                \\    </div>
+            );
+        },
+        .unavailable => {
+            try buf.appendSlice(allocator,
+                \\    <div class="user-menu-section">
+                \\      <span class="user-menu-kicker">RBAC Role</span>
+                \\      <span class="user-menu-role-muted">Unavailable</span>
+                \\    </div>
+            );
+        },
+    }
+}
+
+fn currentUserRbacRoleOwned(allocator: Allocator, repo: Repo, cfg: Config, load_user_role: bool) !CurrentUserRole {
+    const genesis_oid = git.resolveOptionalRef(allocator, repo_mod.genesis_ref) catch return .{ .state = .unavailable };
+    defer if (genesis_oid) |oid| allocator.free(oid);
+    if (genesis_oid == null) return .{ .state = .not_initialized };
+    if (!load_user_role) return .{ .state = .not_loaded };
+
+    const role = index.roleForPrincipal(allocator, repo, cfg.principal) catch return .{ .state = .unavailable };
+    if (role) |value| return .{ .state = .loaded, .role = value };
+    return .{ .state = .no_role };
+}
+
+pub fn appendCurrentActorAvatar(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    current_actor: ?[]const u8,
+    extra_class: []const u8,
+) !void {
+    const label = current_actor orelse "Current user";
+    const git_user_name = try gitUserNameOwned(allocator);
+    defer if (git_user_name) |value| allocator.free(value);
+    const git_user_email = try gitUserEmailOwned(allocator);
+    defer if (git_user_email) |value| allocator.free(value);
+    const display_name = git_user_name orelse label;
+    const display_email = git_user_email orelse label;
+    const avatar_url = try identityAvatarUrlForCurrentUserOwned(allocator, label, git_user_name, git_user_email);
+    defer if (avatar_url) |value| allocator.free(value);
+    try appendGitIdentityAvatar(buf, allocator, display_name, display_email, avatar_url orelse "", extra_class);
+}
+
+pub fn appendResolvedGitIdentityAvatar(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    name: []const u8,
+    email: []const u8,
+    extra_class: []const u8,
+) !void {
+    const avatar_url = try identityAvatarUrlForGitIdentityOwned(allocator, name, email);
+    defer if (avatar_url) |value| allocator.free(value);
+    try appendGitIdentityAvatar(buf, allocator, name, email, avatar_url orelse "", extra_class);
+}
+
+fn gitUserNameOwned(allocator: Allocator) !?[]u8 {
+    const output = gitChecked(allocator, &.{ "config", "user.name" }) catch return null;
+    defer allocator.free(output);
+    const trimmed = std.mem.trim(u8, output, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    return try allocator.dupe(u8, trimmed);
+}
+
+fn gitUserEmailOwned(allocator: Allocator) !?[]u8 {
+    const output = gitChecked(allocator, &.{ "config", "user.email" }) catch return null;
+    defer allocator.free(output);
+    const trimmed = std.mem.trim(u8, output, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    return try allocator.dupe(u8, trimmed);
+}
+
+fn identityAvatarUrlForGitIdentityOwned(allocator: Allocator, name: []const u8, email: []const u8) !?[]u8 {
+    if (try identityAvatarUrlForAliasOwned(allocator, name)) |avatar_url| return avatar_url;
+    return try identityAvatarUrlForAliasOwned(allocator, email);
+}
+
+fn identityAvatarUrlForCurrentUserOwned(allocator: Allocator, principal: []const u8, git_user_name: ?[]const u8, git_user_email: ?[]const u8) !?[]u8 {
+    if (git_user_name) |value| {
+        if (try identityAvatarUrlForAliasOwned(allocator, value)) |avatar_url| return avatar_url;
+    }
+    if (git_user_email) |value| {
+        if (try identityAvatarUrlForAliasOwned(allocator, value)) |avatar_url| return avatar_url;
+    }
+    return try identityAvatarUrlForAliasOwned(allocator, principal);
+}
+
+fn identityAvatarUrlForAliasOwned(allocator: Allocator, alias: []const u8) !?[]u8 {
+    const trimmed = std.mem.trim(u8, alias, " \t\r\n");
+    if (trimmed.len == 0) return null;
+
+    var repo = repo_mod.discoverRepo(allocator) catch return null;
+    defer repo.deinit();
+    if (!(index.isIndexFresh(allocator, repo) catch false)) return null;
+
+    var db = index.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false) catch return null;
+    defer db.deinit();
+    var stmt = db.prepare(
+        \\SELECT i.avatar_url
+        \\FROM identity_aliases a
+        \\JOIN identities i ON i.id = a.identity_id
+        \\WHERE lower(a.alias_value) = lower(?) AND i.avatar_url <> ''
+        \\ORDER BY CASE a.alias_kind WHEN 'display' THEN 0 WHEN 'email' THEN 1 ELSE 2 END
+        \\LIMIT 1
+    ) catch return null;
+    defer stmt.deinit();
+    try stmt.bindText(1, trimmed);
+    if (!(try stmt.step())) return null;
+    return try stmt.columnTextDup(allocator, 0);
 }
 
 fn appendShortcutConfigScript(buf: *std.ArrayList(u8), allocator: Allocator, cfg_opt: ?Config) !void {
@@ -1223,7 +1402,7 @@ fn renderIndexingPopoverPage(
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
-    try appendShellStart(&buf, allocator, repo, title, active);
+    try appendShellStartWithOptions(&buf, allocator, repo, title, active, .{ .load_user_role = false });
     try buf.appendSlice(allocator,
         \\<section class="indexing-popover" role="dialog" aria-modal="false" aria-labelledby="indexing-popover-title" data-index-popover>
         \\  <div class="indexing-cue">

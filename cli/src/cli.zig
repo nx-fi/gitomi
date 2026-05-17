@@ -222,7 +222,7 @@ fn printUsage() !void {
         \\  gt events list [--json] [--limit N] [--ref REF]
         \\  gt issue list [--json] [--view agent] [--state open|closed|all] [--author PRINCIPAL] [--label LABEL] [--project PROJECT] [--milestone MILESTONE] [--assignee PRINCIPAL] [--sort newest|oldest|updated] [--limit N]
         \\  gt issue show ISSUE [--json] [--view agent]
-        \\  gt issue open --title TITLE [--body BODY] [--type bug|feature|task] [--priority P0|P1|P2|P3] [--status Draft|Todo|WIP|Review|Done|Failed] [--label LABEL] [--assignee PRINCIPAL]
+        \\  gt issue open --title TITLE [--body BODY] [--parent ISSUE] [--type bug|feature|task] [--priority P0|P1|P2|P3] [--status Draft|Todo|WIP|Review|Done|Failed] [--label LABEL] [--assignee PRINCIPAL]
         \\  gt issue edit ISSUE [--title TITLE] [--body BODY] [--state open|closed] [--type bug|feature|task] [--priority P0|P1|P2|P3] [--status Draft|Todo|WIP|Review|Done|Failed] [--label LABEL] [--unlabel LABEL] [--assignee PRINCIPAL] [--unassign PRINCIPAL]
         \\  gt issue title ISSUE --title TITLE
         \\  gt issue body ISSUE --body BODY
@@ -235,6 +235,11 @@ fn printUsage() !void {
         \\  gt issue assignee ISSUE add|remove PRINCIPAL
         \\  gt issue milestone ISSUE --milestone MILESTONE
         \\  gt issue project ISSUE add|remove PROJECT --column COLUMN
+        \\  gt issue parent ISSUE add|remove PARENT_ISSUE
+        \\  gt issue sub-issue ISSUE add|remove CHILD_ISSUE
+        \\  gt issue blocked-by ISSUE add|remove BLOCKING_ISSUE
+        \\  gt issue blocking ISSUE add|remove BLOCKED_ISSUE
+        \\  gt issue concurrent-group ISSUE add|remove GROUP
         \\  gt issue react|unreact ISSUE EMOJI
         \\  gt project list [--json]
         \\  gt project create --name NAME [--description TEXT] [--column COLUMN]
