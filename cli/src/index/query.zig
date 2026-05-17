@@ -2209,6 +2209,7 @@ fn testRepo(allocator: Allocator, root: []const u8, index_path: []const u8) !Rep
         .config_path = try std.fs.path.join(allocator, &.{ root, "config.toml" }),
         .index_path = try allocator.dupe(u8, index_path),
         .cursors_path = try std.fs.path.join(allocator, &.{ root, "cursors.sqlite" }),
+        .settings_path = try std.fs.path.join(allocator, &.{ root, "settings.sqlite" }),
     };
 }
 

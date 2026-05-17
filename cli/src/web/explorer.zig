@@ -1103,19 +1103,9 @@ fn appendRootCodeToolbar(
     try appendRootSearchIndexSlot(buf, allocator, ref);
     try appendTemplate(buf, allocator,
         \\    </div>
-        \\    <details class="root-action-menu root-sync-menu" data-popover-menu>
-        \\      <summary class="button primary root-menu-button" title="Sync Gitomi refs with origin"><span class="button-icon icon-sync" aria-hidden="true"></span>Sync refs<span class="root-caret" aria-hidden="true"></span></summary>
-        \\      <form class="root-action-popover root-sync-popover" method="post" action="/code/sync" role="menu">
-        \\        <input type="hidden" name="ref" value="{ref}">
-        \\        <button type="submit" name="action" value="exchange" role="menuitem">Exchange Gitomi refs</button>
-        \\        <button type="submit" name="action" value="import" role="menuitem">Import remote Gitomi refs</button>
-        \\        <button type="submit" name="action" value="publish" role="menuitem">Publish local Gitomi refs</button>
-        \\        <button type="submit" name="action" value="prune" role="menuitem">Prune deleted remote branches</button>
-        \\      </form>
-        \\    </details>
         \\  </div>
         \\</div>
-    , .{ .ref = ref });
+    , .{});
 }
 
 fn appendCodeSyncFlash(buf: *std.ArrayList(u8), allocator: Allocator, flash: CodeSyncFlash) !void {

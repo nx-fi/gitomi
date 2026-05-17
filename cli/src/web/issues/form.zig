@@ -38,7 +38,17 @@ pub fn renderIssueForm(
     try appendTemplate(&buf, allocator,
         \\  <form method="post" action="/issues" class="issue-form">
         \\    <label>Title<input name="title" value="{title_value}" autofocus required></label>
-        \\    <label>Body<textarea name="body" rows="8">{body_value}</textarea></label>
+        \\    <label>Body</label>
+    , .{
+        .title_value = title_value,
+    });
+    try shared.appendMarkdownEditor(&buf, allocator, .{
+        .rows = 8,
+        .placeholder = "Describe the issue",
+        .value = body_value,
+        .required = false,
+    });
+    try appendTemplate(&buf, allocator,
         \\    <div class="grid two">
         \\      <label>Labels<input name="labels" value="{labels_value}" placeholder="bug, docs"></label>
         \\      <label>Assignees<input name="assignees" value="{assignees_value}" placeholder="alice, bob"></label>
@@ -50,8 +60,6 @@ pub fn renderIssueForm(
         \\  </form>
         \\</section>
     , .{
-        .title_value = title_value,
-        .body_value = body_value,
         .labels_value = labels_value,
         .assignees_value = assignees_value,
     });

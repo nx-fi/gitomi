@@ -6,9 +6,11 @@ const events_page = @import("web/events.zig");
 const explorer = @import("web/explorer.zig");
 const index = @import("index.zig");
 const io = @import("io.zig");
+const github_live = @import("providers/github/live.zig");
 const access_page = @import("web/access.zig");
 const issues_page = @import("web/issues.zig");
 const labels_page = @import("web/labels.zig");
+const models_page = @import("web/models.zig");
 const milestones_page = @import("web/milestones.zig");
 const overview_page = @import("web/overview.zig");
 const projects_page = @import("web/projects.zig");
@@ -61,6 +63,8 @@ const routes = [_]Route{
     Route.static("/pdf.js", "application/javascript", pdf_js),
     Route.static("/projects.js", "application/javascript", projects_js),
     Route.static("/markdown.js", "application/javascript", markdown_js),
+    Route.static("/dictation.js", "application/javascript", dictation_js),
+    Route.static("/dictation.worker.js", "application/javascript", dictation_worker_js),
     Route.static("/vendor/pdfjs/build/pdf.mjs", "application/javascript", pdfjs_mjs),
     Route.static("/vendor/pdfjs/build/pdf.worker.mjs", "application/javascript", pdfjs_worker_mjs),
     Route.static("/vendor/hljs/all-languages.min.js", "application/javascript", highlight_js),
@@ -77,6 +81,7 @@ const routes = [_]Route{
     Route.get("/code/root/:component", handleCodeRootComponent),
     Route.get("/code", handleCodePage),
     Route.post("/code/sync", handleCodeSyncPost),
+    Route.post("/live-mode", handleLiveModePost),
     Route.get("/blame", handleBlamePage),
     Route.get("/commits", handleCommitsPage),
     Route.get("/commit", handleCommitPage),
@@ -108,6 +113,8 @@ const routes = [_]Route{
     Route.post("/access/roles", handleAccessRolePost),
     Route.post("/access/devices", handleAccessDevicePost),
     Route.get("/settings", handleSettingsPage),
+    Route.get("/settings/models", handleSettingsModelsPage),
+    Route.post("/settings/models", handleSettingsModelsPost),
     Route.get("/labels", handleLabelsPage),
     Route.post("/labels", handleLabelsPost),
     Route.get("/workflows", handleActionsPage),
@@ -321,6 +328,25 @@ fn handleCodeSyncPost(ctx: WebContext) !void {
     try explorer.handleCodeSyncPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
 }
 
+fn handleLiveModePost(ctx: WebContext) !void {
+    var form = try ctx.request.formValues(ctx.allocator);
+    defer form.deinit();
+
+    const enabled_raw = form.value("enabled") orelse "false";
+    const enabled = std.ascii.eqlIgnoreCase(enabled_raw, "true") or
+        std.mem.eql(u8, enabled_raw, "1") or
+        std.ascii.eqlIgnoreCase(enabled_raw, "on");
+
+    if (!github_live.setRuntimeActive(enabled)) {
+        try shared.sendPlainResponse(ctx.allocator, ctx.stream, 409, "Conflict", "Live mode is not available\n");
+        return;
+    }
+
+    const location = try sameOriginRefererTargetOwned(ctx.allocator, ctx.request, "/");
+    defer ctx.allocator.free(location);
+    try shared.sendRedirect(ctx.allocator, ctx.stream, location);
+}
+
 fn isSameOriginPost(request: HttpRequest) bool {
     const host_header = request.headerValue("host") orelse return false;
     const request_authority = parseAuthority(host_header) orelse return false;
@@ -343,6 +369,29 @@ const Authority = struct {
 fn sourceUrlMatchesAuthority(value: []const u8, expected: Authority) bool {
     const authority = parseSourceAuthority(value) orelse return false;
     return authoritiesMatch(authority, expected);
+}
+
+fn sameOriginRefererTargetOwned(allocator: Allocator, request: HttpRequest, fallback: []const u8) ![]u8 {
+    const referer = request.headerValue("referer") orelse return try allocator.dupe(u8, fallback);
+    const host_header = request.headerValue("host") orelse return try allocator.dupe(u8, fallback);
+    const expected = parseAuthority(host_header) orelse return try allocator.dupe(u8, fallback);
+    if (!sourceUrlMatchesAuthority(referer, expected)) return try allocator.dupe(u8, fallback);
+    const target = sourceUrlTarget(referer) orelse return try allocator.dupe(u8, fallback);
+    if (!isSafeRedirectTarget(target)) return try allocator.dupe(u8, fallback);
+    return try allocator.dupe(u8, target);
+}
+
+fn sourceUrlTarget(value: []const u8) ?[]const u8 {
+    const scheme_end = std.mem.indexOf(u8, value, "://") orelse return null;
+    const rest = value[scheme_end + 3 ..];
+    const authority_end = std.mem.indexOfAny(u8, rest, "/?#") orelse return "/";
+    return rest[authority_end..];
+}
+
+fn isSafeRedirectTarget(target: []const u8) bool {
+    if (target.len == 0 or target[0] != '/') return false;
+    if (target.len > 1 and target[1] == '/') return false;
+    return std.mem.indexOfAny(u8, target, "\r\n") == null;
 }
 
 fn authoritiesMatch(actual: Authority, expected: Authority) bool {
@@ -551,7 +600,15 @@ fn handleAccessPage(ctx: WebContext) !void {
 }
 
 fn handleSettingsPage(ctx: WebContext) !void {
-    try shared.sendRedirect(ctx.allocator, ctx.stream, "/events");
+    try sendOwnedHtml(ctx, try models_page.renderModelsPage(ctx.allocator, ctx.repo, ctx.request.target, ctx.csrf_token));
+}
+
+fn handleSettingsModelsPage(ctx: WebContext) !void {
+    try sendOwnedHtml(ctx, try models_page.renderModelsPage(ctx.allocator, ctx.repo, ctx.request.target, ctx.csrf_token));
+}
+
+fn handleSettingsModelsPost(ctx: WebContext) !void {
+    try models_page.handleModelsPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body, ctx.csrf_token);
 }
 
 fn handleLabelsPage(ctx: WebContext) !void {
@@ -918,6 +975,8 @@ const code_js = @embedFile("web/code.js");
 const pdf_js = @embedFile("web/pdf.js");
 const projects_js = @embedFile("web/projects.js");
 const markdown_js = @embedFile("web/markdown.js");
+const dictation_js = @embedFile("web/dictation.js");
+const dictation_worker_js = @embedFile("web/dictation.worker.js");
 const pdfjs_mjs = @embedFile("web/vendor/pdfjs/build/pdf.mjs");
 const pdfjs_worker_mjs = @embedFile("web/vendor/pdfjs/build/pdf.worker.mjs");
 const marked_js = @embedFile("web/vendor/marked/marked.umd.min.js");
@@ -1071,6 +1130,32 @@ test "web code sync requires trusted same-origin post headers" {
             "action=exchange",
     );
     try std.testing.expect(!isSameOriginPost(missing_origin));
+}
+
+test "live mode post redirects only to same-origin referer targets" {
+    const same_origin = try parseHttpRequest(
+        "POST /live-mode HTTP/1.1\r\n" ++
+            "Host: 127.0.0.1:12655\r\n" ++
+            "Referer: http://localhost:12655/issues?state=open#top\r\n" ++
+            "Content-Length: 12\r\n" ++
+            "\r\n" ++
+            "enabled=true",
+    );
+    const target = try sameOriginRefererTargetOwned(std.testing.allocator, same_origin, "/");
+    defer std.testing.allocator.free(target);
+    try std.testing.expectEqualStrings("/issues?state=open#top", target);
+
+    const cross_origin = try parseHttpRequest(
+        "POST /live-mode HTTP/1.1\r\n" ++
+            "Host: 127.0.0.1:12655\r\n" ++
+            "Referer: http://example.test/issues\r\n" ++
+            "Content-Length: 12\r\n" ++
+            "\r\n" ++
+            "enabled=true",
+    );
+    const fallback = try sameOriginRefererTargetOwned(std.testing.allocator, cross_origin, "/");
+    defer std.testing.allocator.free(fallback);
+    try std.testing.expectEqualStrings("/", fallback);
 }
 
 test "web CSRF validation requires same-origin POST metadata" {
@@ -1355,6 +1440,11 @@ test "web PDF preview assets are routed" {
     try expectStaticRoute("/pdf.js", "application/javascript", false);
     try expectStaticRoute("/vendor/pdfjs/build/pdf.mjs", "application/javascript", false);
     try expectStaticRoute("/vendor/pdfjs/build/pdf.worker.mjs", "application/javascript", false);
+}
+
+test "web dictation assets are routed" {
+    try expectStaticRoute("/dictation.js", "application/javascript", false);
+    try expectStaticRoute("/dictation.worker.js", "application/javascript", false);
 }
 
 fn expectStaticRoute(path: []const u8, content_type: []const u8, binary: bool) !void {

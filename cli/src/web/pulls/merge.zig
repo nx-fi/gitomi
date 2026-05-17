@@ -811,6 +811,7 @@ test "legacy GitHub pull refs are not treated as writable branch targets" {
         .config_path = try allocator.dupe(u8, ""),
         .index_path = try allocator.dupe(u8, ""),
         .cursors_path = try allocator.dupe(u8, ""),
+        .settings_path = try allocator.dupe(u8, ""),
     };
     defer repo.deinit();
 

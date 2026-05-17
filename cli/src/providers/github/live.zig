@@ -34,6 +34,13 @@ const max_export_events_per_tick = 50;
 const min_error_backoff_ms: u64 = 1000;
 const max_error_backoff_ms: u64 = 60_000;
 var live_mutex = std.Thread.Mutex{};
+var runtime_available = std.atomic.Value(bool).init(false);
+var runtime_active = std.atomic.Value(bool).init(false);
+
+pub const RuntimeStatus = struct {
+    available: bool = false,
+    active: bool = false,
+};
 
 pub const Options = struct {
     repo: RepoSlug,
@@ -79,6 +86,33 @@ const LiveLock = struct {
         live_mutex.unlock();
     }
 };
+
+pub fn runtimeStatus() RuntimeStatus {
+    return .{
+        .available = runtime_available.load(.acquire),
+        .active = runtime_active.load(.acquire),
+    };
+}
+
+pub fn setRuntimeActive(active: bool) bool {
+    if (!runtime_available.load(.acquire)) return false;
+    runtime_active.store(active, .release);
+    return true;
+}
+
+fn enableRuntimeControl(active: bool) void {
+    runtime_active.store(active, .release);
+    runtime_available.store(true, .release);
+}
+
+fn disableRuntimeControl() void {
+    runtime_active.store(false, .release);
+    runtime_available.store(false, .release);
+}
+
+fn isRuntimeActive() bool {
+    return runtime_active.load(.acquire);
+}
 
 pub fn cmdLive(allocator: Allocator, args: []const []const u8) !void {
     var repo_arg: ?RepoSlug = null;
@@ -201,6 +235,8 @@ pub fn cmdLive(allocator: Allocator, args: []const []const u8) !void {
 
 pub fn runForeground(allocator: Allocator, options: Options) !void {
     try validateOptions("gt github live", options);
+    enableRuntimeControl(true);
+    errdefer disableRuntimeControl();
     try prepareLive(allocator, options);
 
     const server_options = zwf.ServerOptions{
@@ -227,6 +263,8 @@ pub fn startDaemon(allocator: Allocator, options: Options) !void {
     }
     try validateOptions("gt github live", options);
 
+    enableRuntimeControl(true);
+    errdefer disableRuntimeControl();
     try prepareLive(allocator, options);
 
     const server_options = zwf.ServerOptions{
@@ -315,6 +353,10 @@ fn liveTickLoop(allocator: Allocator, options: Options) void {
     var delay_ms = options.interval_ms;
     while (true) {
         sleepMs(delay_ms);
+        if (!isRuntimeActive()) {
+            delay_ms = options.interval_ms;
+            continue;
+        }
         runLiveTick(allocator, options) catch |err| {
             const next_delay = nextBackoffMs(@max(delay_ms, baseBackoffMs(options.interval_ms)));
             if (!errors.isReported(err)) {
@@ -418,6 +460,10 @@ fn handleConnection(allocator: Allocator, app_context: LiveAppContext, stream: s
         return;
     }
     if (!try authenticateWebhookRequest(allocator, stream, app_context.options, request)) return;
+    if (!isRuntimeActive()) {
+        try sendPlain(allocator, stream, 202, "Accepted", "live mode off\n");
+        return;
+    }
 
     const event_name = request.headerValue("x-github-event") orelse {
         try sendPlain(allocator, stream, 400, "Bad Request", "Missing X-GitHub-Event\n");

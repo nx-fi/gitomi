@@ -277,6 +277,8 @@ fn requiredIndexTablesExist(db: *SqliteDb) bool {
     defer project_views.deinit();
     var label_definitions = db.prepare("SELECT id, position FROM label_definitions LIMIT 0") catch return false;
     defer label_definitions.deinit();
+    var work_item_search = db.prepare("SELECT object_id FROM work_item_search LIMIT 0") catch return false;
+    defer work_item_search.deinit();
     return true;
 }
 
@@ -496,11 +498,62 @@ fn rebuildIndexFromScratch(
 
     try projectIndexedEvents(allocator, &db);
     try rebuildDerivedCommitReferences(allocator, &db, refs_raw);
+    try rebuildWorkItemSearchIndex(&db);
 
     try db.exec("COMMIT");
     committed = true;
 
     return stats;
+}
+
+fn rebuildWorkItemSearchIndex(db: *SqliteDb) !void {
+    try db.exec(
+        \\DELETE FROM work_item_search_docs;
+        \\INSERT INTO work_item_search_docs(object_kind, object_id, title, body, comments, labels, metadata)
+        \\SELECT
+        \\  'issue',
+        \\  i.id,
+        \\  i.title,
+        \\  i.body,
+        \\  ifnull((
+        \\    SELECT group_concat(c.body, char(10))
+        \\    FROM comments c
+        \\    WHERE c.parent_kind = 'issue'
+        \\      AND c.parent_id = i.id
+        \\      AND c.redacted = 0
+        \\  ), ''),
+        \\  ifnull(replace((SELECT group_concat(DISTINCT il.label) FROM issue_labels il WHERE il.issue_id = i.id), ',', ' '), ''),
+        \\  trim(ifnull(m.source_author, '') || ' ' || ifnull(m.source_identity, '') || ' ' ||
+        \\       ifnull(m.source_email, '') || ' ' || ifnull(m.milestone, '') || ' ' ||
+        \\       ifnull(m.issue_type, '') || ' ' || ifnull(m.priority, '') || ' ' ||
+        \\       ifnull(m.status, ''))
+        \\FROM issues i
+        \\LEFT JOIN issue_metadata m ON m.issue_id = i.id;
+        \\INSERT INTO work_item_search_docs(object_kind, object_id, title, body, comments, labels, metadata)
+        \\SELECT
+        \\  'pull',
+        \\  p.id,
+        \\  p.title,
+        \\  p.body,
+        \\  ifnull((
+        \\    SELECT group_concat(c.body, char(10))
+        \\    FROM comments c
+        \\    WHERE c.parent_kind = 'pull'
+        \\      AND c.parent_id = p.id
+        \\      AND c.redacted = 0
+        \\  ), ''),
+        \\  trim(
+        \\    ifnull(replace((SELECT group_concat(DISTINCT pl.label) FROM pull_labels pl WHERE pl.pull_id = p.id), ',', ' '), '') || ' ' ||
+        \\    ifnull(replace((SELECT group_concat(DISTINCT pa.assignee) FROM pull_assignees pa WHERE pa.pull_id = p.id), ',', ' '), '') || ' ' ||
+        \\    ifnull(replace((SELECT group_concat(DISTINCT pr.reviewer) FROM pull_reviewers pr WHERE pr.pull_id = p.id), ',', ' '), '')
+        \\  ),
+        \\  trim(p.base_ref || ' ' || p.head_ref || ' ' ||
+        \\       ifnull(pm.source_author, '') || ' ' || ifnull(pm.source_identity, '') || ' ' ||
+        \\       ifnull(pm.source_email, ''))
+        \\FROM pulls p
+        \\LEFT JOIN pull_metadata pm ON pm.pull_id = p.id;
+        \\INSERT INTO work_item_search(work_item_search) VALUES('rebuild');
+    );
 }
 
 fn dropIndexSchemaTables(db: *SqliteDb) !void {
@@ -534,6 +587,8 @@ fn dropIndexSchemaTables(db: *SqliteDb) !void {
         \\DROP TABLE IF EXISTS comments;
         \\DROP TABLE IF EXISTS reactions;
         \\DROP TABLE IF EXISTS commit_references;
+        \\DROP TABLE IF EXISTS work_item_search;
+        \\DROP TABLE IF EXISTS work_item_search_docs;
         \\DROP TABLE IF EXISTS legacy_aliases;
         \\DROP TABLE IF EXISTS acl_roles;
         \\DROP TABLE IF EXISTS acl_role_events;
