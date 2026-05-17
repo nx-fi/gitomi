@@ -5,10 +5,10 @@ const index = @import("../index.zig");
 const json_writer = @import("../json_writer.zig");
 const repo_mod = @import("../repo.zig");
 const util = @import("../util.zig");
-const avatars = @import("avatars.zig");
-const html = @import("html.zig");
-const response = @import("response.zig");
-const time = @import("time.zig");
+const avatars = @import("shared/avatars.zig");
+const html = @import("shared/html.zig");
+const response = @import("shared/response.zig");
+const time = @import("shared/time.zig");
 
 const Allocator = std.mem.Allocator;
 const CliError = errors.CliError;

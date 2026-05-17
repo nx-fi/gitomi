@@ -1,5 +1,5 @@
 const std = @import("std");
-const zwf_response = @import("../zwf/response.zig");
+const zwf_response = @import("../../zwf/response.zig");
 
 const Allocator = std.mem.Allocator;
 

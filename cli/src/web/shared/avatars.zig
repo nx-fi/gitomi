@@ -1,6 +1,6 @@
 const std = @import("std");
 const html = @import("html.zig");
-const nouns_assets = @import("vendor/nouns-assets/image_data.zig");
+const nouns_assets = @import("../vendor/nouns-assets/image_data.zig");
 
 const Allocator = std.mem.Allocator;
 
