@@ -519,11 +519,11 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     try appendCodeBlameSwitch(&buf, allocator, ref, path, false);
     if (preview_kind) |kind| try appendPreviewViewTabs(&buf, allocator, ref, path, kind, source_selected);
     try appendBlobMetrics(&buf, allocator, size, text_content, sloc_counts);
-    if (show_symbols_panel) try appendSymbolsToggleButton(&buf, allocator);
-    if (show_markdown_outline) try appendMarkdownOutlineToggleButton(&buf, allocator);
     try appendCodeActionLink(&buf, allocator, "Raw", rawHref(ref, path), "icon-file-code");
     if (text_content != null) try appendCopyButton(&buf, allocator, ref, path);
     try appendCodeActionLink(&buf, allocator, "History", commitsHref(ref, path), "icon-history");
+    if (show_symbols_panel) try appendSymbolsToggleButton(&buf, allocator);
+    if (show_markdown_outline) try appendMarkdownOutlineToggleButton(&buf, allocator);
     try appendCodePanelToolbarEnd(&buf, allocator);
 
     try appendCommitBar(&buf, allocator, &reference_resolver, summary_opt);
@@ -691,13 +691,13 @@ fn appendCopyButton(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const 
 
 fn appendSymbolsToggleButton(buf: *std.ArrayList(u8), allocator: Allocator) !void {
     try appendTemplate(buf, allocator,
-        \\<button class="button secondary code-action symbols-toggle" type="button" data-symbols-toggle aria-controls="code-symbols-sidebar" aria-expanded="true" title="Hide symbols panel" aria-label="Hide symbols panel"><span class="button-icon icon-symbols" aria-hidden="true"></span><span class="button-label" data-button-label>Hide symbols</span></button>
+        \\<button class="button secondary code-action code-side-panel-toggle symbols-toggle" type="button" data-symbols-toggle aria-controls="code-symbols-sidebar" aria-expanded="true" title="Hide symbols panel" aria-label="Hide symbols panel"><span class="button-icon icon-symbols" aria-hidden="true"></span><span class="button-label" data-button-label>Hide symbols</span></button>
     , .{});
 }
 
 fn appendMarkdownOutlineToggleButton(buf: *std.ArrayList(u8), allocator: Allocator) !void {
     try appendTemplate(buf, allocator,
-        \\<button class="button secondary code-action markdown-outline-toggle" type="button" data-markdown-outline-toggle aria-controls="markdown-outline-sidebar" aria-expanded="true" title="Hide outline" aria-label="Hide outline"><span class="button-icon icon-outline" aria-hidden="true"></span><span class="button-label" data-button-label>Outline</span></button>
+        \\<button class="button secondary code-action code-side-panel-toggle markdown-outline-toggle" type="button" data-markdown-outline-toggle aria-controls="markdown-outline-sidebar" aria-expanded="true" title="Hide outline" aria-label="Hide outline"><span class="button-icon icon-outline" aria-hidden="true"></span><span class="button-label" data-button-label>Outline</span></button>
     , .{});
 }
 
@@ -779,6 +779,21 @@ fn appendCodeLayoutStartWithPanels(
     try appendTemplate(buf, allocator,
         \\<div class="code-main">
     , .{});
+    if (active_path.len != 0) {
+        try appendTemplate(buf, allocator,
+            \\  <div class="code-main-resizer code-main-resizer-left tree-resizer" data-tree-resizer aria-hidden="true"></div>
+        , .{});
+    }
+    if (has_symbols) {
+        try appendTemplate(buf, allocator,
+            \\  <div class="code-main-resizer code-main-resizer-right symbols-resizer" data-symbols-resizer aria-hidden="true"></div>
+        , .{});
+    }
+    if (has_markdown_outline) {
+        try appendTemplate(buf, allocator,
+            \\  <div class="code-main-resizer code-main-resizer-right markdown-outline-resizer" data-markdown-outline-resizer aria-hidden="true"></div>
+        , .{});
+    }
 }
 
 fn appendCodeLayoutEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
@@ -834,46 +849,61 @@ fn appendCodePanelEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
 
 fn appendCodeSymbolsSidebar(buf: *std.ArrayList(u8), allocator: Allocator, symbols: []const code_symbols.Symbol) !void {
     try appendTemplate(buf, allocator,
-        \\<aside id="code-symbols-sidebar" class="panel symbols-sidebar" aria-label="Symbols" data-symbols-sidebar>
-        \\  <div class="symbols-head">Symbols</div>
-        \\  <nav class="symbols-nav">
+        \\<aside id="code-symbols-sidebar" class="panel code-side-panel symbols-sidebar" aria-label="Symbols" data-symbols-sidebar>
+        \\  <div class="code-side-panel-head symbols-head"><h2>Symbols</h2><button class="code-side-panel-close symbols-close" type="button" data-symbols-close aria-label="Hide symbols panel">&times;</button></div>
+        \\  <label class="code-side-panel-search symbols-search" aria-label="Filter symbols"><span class="button-icon icon-filter" aria-hidden="true"></span><input type="search" data-symbols-filter placeholder="Filter symbols" autocomplete="off" spellcheck="false"></label>
+        \\  <nav class="code-side-panel-nav symbols-nav" data-symbols-list>
     , .{});
     if (symbols.len == 0) {
         try appendTemplate(buf, allocator,
             \\<div class="symbols-empty">No symbols found</div>
         , .{});
     } else {
-        for (symbols) |symbol| {
-            try appendCodeSymbolLink(buf, allocator, symbol);
+        for (symbols, 0..) |symbol, index| {
+            const has_children = index + 1 < symbols.len and symbols[index + 1].depth > symbol.depth;
+            try appendCodeSymbolRow(buf, allocator, symbol, index, has_children);
         }
     }
     try appendTemplate(buf, allocator,
         \\  </nav>
-        \\  <div class="symbols-resizer" data-symbols-resizer aria-hidden="true"></div>
         \\</aside>
     , .{});
 }
 
 fn appendMarkdownOutlineSidebar(buf: *std.ArrayList(u8), allocator: Allocator) !void {
     try appendTemplate(buf, allocator,
-        \\<aside id="markdown-outline-sidebar" class="panel markdown-outline-sidebar" aria-label="Outline" data-markdown-outline-panel>
-        \\  <div class="markdown-outline-head"><h2>Outline</h2><button class="markdown-outline-close" type="button" data-markdown-outline-close aria-label="Hide outline">&times;</button></div>
-        \\  <label class="markdown-outline-search" aria-label="Filter headings"><span class="button-icon icon-filter" aria-hidden="true"></span><input type="search" data-markdown-outline-filter placeholder="Filter headings" autocomplete="off" spellcheck="false"></label>
-        \\  <nav class="markdown-outline-nav" data-markdown-outline-list></nav>
-        \\  <div class="markdown-outline-resizer" data-markdown-outline-resizer aria-hidden="true"></div>
+        \\<aside id="markdown-outline-sidebar" class="panel code-side-panel markdown-outline-sidebar" aria-label="Outline" data-markdown-outline-panel>
+        \\  <div class="code-side-panel-head markdown-outline-head"><h2>Outline</h2><button class="code-side-panel-close markdown-outline-close" type="button" data-markdown-outline-close aria-label="Hide outline">&times;</button></div>
+        \\  <label class="code-side-panel-search markdown-outline-search" aria-label="Filter headings"><span class="button-icon icon-filter" aria-hidden="true"></span><input type="search" data-markdown-outline-filter placeholder="Filter headings" autocomplete="off" spellcheck="false"></label>
+        \\  <nav class="code-side-panel-nav markdown-outline-nav" data-markdown-outline-list></nav>
         \\</aside>
     , .{});
 }
 
-fn appendCodeSymbolLink(buf: *std.ArrayList(u8), allocator: Allocator, symbol: code_symbols.Symbol) !void {
+fn appendCodeSymbolRow(buf: *std.ArrayList(u8), allocator: Allocator, symbol: code_symbols.Symbol, index: usize, has_children: bool) !void {
     try appendTemplate(buf, allocator,
-        \\<a class="symbol-link" href="#L{line_no}" title="{name}" style="--depth: {depth}">
+        \\<div class="symbol-tree-row" data-symbol-row data-symbol-index="{index}" data-symbol-depth="{depth}" style="--depth: {depth}">
+    , .{
+        .index = index,
+        .depth = symbol.depth,
+    });
+    if (has_children) {
+        try appendTemplate(buf, allocator,
+            \\  <button class="symbol-tree-toggle" type="button" data-symbol-toggle aria-expanded="true" aria-label="Collapse symbol children" title="Collapse symbol children"></button>
+        , .{});
+    } else {
+        try appendTemplate(buf, allocator,
+            \\  <span class="symbol-tree-spacer" aria-hidden="true"></span>
+        , .{});
+    }
+    try appendTemplate(buf, allocator,
+        \\<a class="code-side-panel-link symbol-link" href="#L{line_no}" title="{name}">
         \\  <span class="symbol-kind">{kind}</span><span class="symbol-name">{name}</span><span class="symbol-line">L{line_no}</span>
         \\</a>
+        \\</div>
     , .{
         .line_no = symbol.line_no,
         .name = symbol.name,
-        .depth = symbol.depth,
         .kind = symbol.kind.label(),
     });
 }
@@ -913,7 +943,6 @@ fn appendTreeSidebar(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, 
 
     try appendTemplate(buf, allocator,
         \\  </nav>
-        \\  <div class="tree-resizer" data-tree-resizer aria-hidden="true"></div>
         \\</aside>
     , .{});
 }

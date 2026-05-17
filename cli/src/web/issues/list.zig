@@ -189,7 +189,7 @@ fn appendIssuesToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filters: I
     try buf.appendSlice(allocator,
         \\  </form>
         \\  <div class="issues-toolbar-actions">
-        \\    <button class="button secondary issue-tool-button" type="button" disabled><span class="button-icon icon-labels" aria-hidden="true"></span><span>Labels</span></button>
+        \\    <a class="button secondary issue-tool-button" href="/settings/labels"><span class="button-icon icon-labels" aria-hidden="true"></span><span>Labels</span></a>
         \\    <a class="button secondary issue-tool-button" href="/projects#milestones"><span class="button-icon icon-milestones" aria-hidden="true"></span><span>Milestones</span></a>
         \\    <a class="button primary" href="/new-issue">New issue</a>
         \\  </div>
@@ -809,6 +809,21 @@ test "issue list SQL includes selected filters" {
     try std.testing.expect(std.mem.indexOf(u8, sql, "issue_labels") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "issue_assignees") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "ORDER BY i.state_occurred_at DESC") != null);
+}
+
+test "issues toolbar links labels to settings labels" {
+    var filters = IssueFilters{
+        .allocator = std.testing.allocator,
+        .state = .open,
+    };
+    defer filters.deinit();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    try appendIssuesToolbar(&buf, std.testing.allocator, filters);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/settings/labels\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<span>Labels</span></a>") != null);
 }
 
 test "issue filter hrefs preserve and clear parameters" {

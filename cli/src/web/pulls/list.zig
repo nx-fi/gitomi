@@ -180,7 +180,7 @@ fn appendPullsToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filters: Pu
         \\    <input type="search" name="q" value="{query}" aria-label="Search pull requests">
         \\  </form>
         \\  <div class="issues-toolbar-actions">
-        \\    <button class="button secondary issue-tool-button" type="button" disabled><span class="button-icon icon-labels" aria-hidden="true"></span><span>Labels</span></button>
+        \\    <a class="button secondary issue-tool-button" href="/settings/labels"><span class="button-icon icon-labels" aria-hidden="true"></span><span>Labels</span></a>
         \\    <button class="button secondary issue-tool-button" type="button" disabled><span class="button-icon icon-reviewers" aria-hidden="true"></span><span>Reviewers</span></button>
         \\    <a class="button primary" href="/new-pull">New pull request</a>
         \\  </div>
@@ -658,4 +658,18 @@ fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const
         return try issues_page.percentDecodeForm(allocator, raw_value);
     }
     return null;
+}
+
+test "pulls toolbar links labels to settings labels" {
+    var filters = PullFilters{
+        .state = .open,
+    };
+    defer pullFiltersDeinit(std.testing.allocator, &filters);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    try appendPullsToolbar(&buf, std.testing.allocator, filters);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/settings/labels\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<span>Labels</span></a>") != null);
 }
