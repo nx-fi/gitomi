@@ -1446,22 +1446,22 @@ main.page-projects:has(.project-overview-page) {
   white-space: nowrap;
 }
 .issue-row-priority-p0 {
-  background: #e05d44;
-  border-color: #e05d44;
+  background: var(--danger-600);
+  border-color: var(--danger-600);
 }
 .issue-row-priority-p1 {
-  color: #1f1f1f;
-  background: #d9901a;
-  border-color: #d9901a;
+  color: #fff;
+  background: var(--sg-color-data-9);
+  border-color: var(--sg-color-data-9);
 }
 .issue-row-priority-p2 {
   color: #1f1f1f;
-  background: #dfb317;
-  border-color: #dfb317;
+  background: var(--warning-200);
+  border-color: var(--warning-200);
 }
 .issue-row-priority-p3,
 .issue-row-priority-none {
-  --issue-row-priority-p3-bg: color-mix(in oklch, var(--muted) 22%, var(--panel));
+  --issue-row-priority-p3-bg: color-mix(in oklch, var(--neutral-500) 22%, var(--panel));
   color: var(--text);
   background: var(--issue-row-priority-p3-bg);
   border-color: var(--issue-row-priority-p3-bg);
@@ -5327,9 +5327,9 @@ main.page-projects:has(.project-overview-page) {
   font-weight: 800;
   white-space: nowrap;
 }
-.project-priority-chip.tone-p0 { background: color-mix(in oklch, var(--danger) 16%, var(--panel)); border-color: color-mix(in oklch, var(--danger) 38%, var(--border)); }
-.project-priority-chip.tone-p1 { background: color-mix(in oklch, #bf8700 16%, var(--panel)); border-color: color-mix(in oklch, #bf8700 38%, var(--border)); }
-.project-priority-chip.tone-p2 { background: color-mix(in oklch, var(--blue) 12%, var(--panel)); }
+.project-priority-chip.tone-p0 { background: color-mix(in oklch, var(--danger-600) 16%, var(--panel)); border-color: color-mix(in oklch, var(--danger-600) 38%, var(--border)); }
+.project-priority-chip.tone-p1 { background: color-mix(in oklch, var(--sg-color-data-9) 16%, var(--panel)); border-color: color-mix(in oklch, var(--sg-color-data-9) 38%, var(--border)); }
+.project-priority-chip.tone-p2 { background: color-mix(in oklch, var(--warning-200) 14%, var(--panel)); border-color: color-mix(in oklch, var(--warning-200) 34%, var(--border)); }
 .project-priority-chip.tone-p3,
 .project-priority-chip.tone-none { background: color-mix(in oklch, var(--muted) 12%, var(--panel)); }
 .project-status-chip.tone-draft { background: color-mix(in oklch, var(--muted) 10%, var(--panel)); }
