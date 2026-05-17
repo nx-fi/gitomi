@@ -23,7 +23,7 @@ const loadConfig = repo_mod.loadConfig;
 const default_web_shortcut_leader = "Space";
 const default_web_shortcut_keys = "A S D F J K L E R U I O W Q P Z X C V B N M G H Y T";
 const default_web_shortcut_timeout_ms: u64 = 900;
-const asset_version = "20260517-issue-state-align";
+const asset_version = "20260517-label-order-task-progress-back-nav-colors";
 
 const WebStats = struct {
     inbox_refs: usize = 0,
@@ -961,11 +961,13 @@ pub fn markdownTaskSummary(markdown: []const u8) MarkdownTaskSummary {
 pub fn appendMarkdownTaskProgress(buf: *std.ArrayList(u8), allocator: Allocator, summary: MarkdownTaskSummary) !void {
     if (!summary.hasTasks()) return;
 
+    const progress_degrees = markdownTaskProgressDegrees(summary);
     try appendTemplate(buf, allocator,
-        \\<span class="issue-task-progress" title="{done} of {total} tasks done"><span class="issue-task-progress-icon" aria-hidden="true"></span>
+        \\<span class="issue-task-progress" title="{done} of {total} tasks done" style="--issue-task-progress: {progress_degrees}deg"><span class="issue-task-progress-icon" aria-hidden="true"></span>
     , .{
         .done = summary.done,
         .total = summary.total,
+        .progress_degrees = progress_degrees,
     });
     if (summary.done == summary.total) {
         try appendTemplate(buf, allocator, "{total} {task_word} done", .{
@@ -980,6 +982,12 @@ pub fn appendMarkdownTaskProgress(buf: *std.ArrayList(u8), allocator: Allocator,
         });
     }
     try buf.appendSlice(allocator, "</span>");
+}
+
+fn markdownTaskProgressDegrees(summary: MarkdownTaskSummary) usize {
+    if (summary.total == 0) return 0;
+    const done = @min(summary.done, summary.total);
+    return (done * 360 + summary.total / 2) / summary.total;
 }
 
 fn markdownFenceMarker(line: []const u8) ?MarkdownFenceMarker {
@@ -1334,6 +1342,8 @@ pub fn appendPaginationNav(
     previous_href: ?[]const u8,
     next_href: ?[]const u8,
 ) !void {
+    if (previous_href == null and next_href == null) return;
+
     try appendTemplate(buf, allocator,
         \\<nav class="pagination" aria-label="{aria_label}">
         \\  <span class="pagination-summary">{summary}</span>
@@ -1342,22 +1352,18 @@ pub fn appendPaginationNav(
         .aria_label = aria_label,
         .summary = summary,
     });
-    try appendPaginationAction(buf, allocator, "Previous", previous_href);
-    try appendPaginationAction(buf, allocator, "Next", next_href);
+    if (previous_href) |href| try appendPaginationAction(buf, allocator, "Previous", href);
+    if (next_href) |href| try appendPaginationAction(buf, allocator, "Next", href);
     try buf.appendSlice(allocator,
         \\  </span>
         \\</nav>
     );
 }
 
-fn appendPaginationAction(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, href: ?[]const u8) !void {
-    if (href) |value| {
-        try buf.appendSlice(allocator, "<a class=\"button secondary pagination-link\" href=\"");
-        try buf.appendSlice(allocator, value);
-        try appendTemplate(buf, allocator, "\">{label}</a>", .{ .label = label });
-    } else {
-        try appendTemplate(buf, allocator, "<span class=\"button secondary pagination-link disabled\" aria-disabled=\"true\">{label}</span>", .{ .label = label });
-    }
+fn appendPaginationAction(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, href: []const u8) !void {
+    try buf.appendSlice(allocator, "<a class=\"button secondary pagination-link\" href=\"");
+    try buf.appendSlice(allocator, href);
+    try appendTemplate(buf, allocator, "\">{label}</a>", .{ .label = label });
 }
 
 pub fn paginationSummaryOwned(allocator: Allocator, pagination: Pagination, shown: usize, total: ?usize) ![]u8 {
@@ -1474,6 +1480,20 @@ test "markdownTaskSummary counts tasks outside fenced code blocks" {
     try std.testing.expectEqual(@as(usize, 2), summary.done);
 }
 
+test "appendMarkdownTaskProgress renders proportional CSS progress" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendMarkdownTaskProgress(&buf, std.testing.allocator, .{ .done = 3, .total = 4 });
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "style=\"--issue-task-progress: 270deg\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, ">3 of 4 tasks<") != null);
+
+    buf.clearRetainingCapacity();
+    try appendMarkdownTaskProgress(&buf, std.testing.allocator, .{ .done = 4, .total = 4 });
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "style=\"--issue-task-progress: 360deg\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, ">4 tasks done<") != null);
+}
+
 test "web template supports typed href classes and formatters" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
@@ -1500,6 +1520,35 @@ test "web pagination query parsing and params clamp values" {
     try appendQueryParam(&buf, std.testing.allocator, &first, "state", "open");
     try appendPaginationQueryParams(&buf, std.testing.allocator, &first, pagination, 4, 25);
     try std.testing.expectEqualStrings("?state=open&amp;page=4&amp;per_page=100", buf.items);
+}
+
+test "web pagination nav renders only available actions" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendPaginationNav(&buf, std.testing.allocator, "Issue pages", "Showing 1-25", null, null);
+    try std.testing.expectEqualStrings("", buf.items);
+
+    buf.clearRetainingCapacity();
+    try appendPaginationNav(&buf, std.testing.allocator, "Issue pages", "Showing 1-25", null, "/issues?page=2");
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Previous") == null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Next") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues?page=2\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "pagination-link disabled") == null);
+
+    buf.clearRetainingCapacity();
+    try appendPaginationNav(&buf, std.testing.allocator, "Issue pages", "Showing 51-75", "/issues?page=2", null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Previous") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Next") == null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues?page=2\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "pagination-link disabled") == null);
+
+    buf.clearRetainingCapacity();
+    try appendPaginationNav(&buf, std.testing.allocator, "Issue pages", "Showing 26-50", "/issues", "/issues?page=3");
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Previous") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Next") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues?page=3\"") != null);
 }
 
 test "web detail back button renders accessible icon link" {

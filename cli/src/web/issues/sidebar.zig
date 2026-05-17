@@ -115,18 +115,28 @@ fn appendIssueSidebarLabels(buf: *std.ArrayList(u8), allocator: Allocator, db: *
     try appendIssueSidebarEditableSectionStart(buf, allocator, "Labels", "Apply labels to this issue");
     try appendIssueSidebarLabelsMenu(buf, allocator, db, raw_ref, issue_id);
     try appendIssueSidebarEditableSectionBodyStart(buf, allocator);
-    var stmt = try db.prepare("SELECT DISTINCT label FROM issue_labels WHERE issue_id = ? ORDER BY label");
+    var stmt = try db.prepare(
+        \\SELECT selected.label, COALESCE(ld.color, '')
+        \\FROM (SELECT DISTINCT label FROM issue_labels WHERE issue_id = ?) AS selected
+        \\LEFT JOIN label_definitions ld ON ld.name = selected.label
+        \\ORDER BY CASE WHEN ld.id IS NULL THEN 1 ELSE 0 END,
+        \\         ld.position,
+        \\         lower(selected.label),
+        \\         selected.label
+    );
     defer stmt.deinit();
     try stmt.bindText(1, issue_id);
     var shown = false;
     while (try stmt.step()) {
         const label = try stmt.columnTextDup(allocator, 0);
         defer allocator.free(label);
+        const color = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(color);
         if (!shown) {
             try buf.appendSlice(allocator, "<div class=\"issue-sidebar-labels\">");
             shown = true;
         }
-        try appendIssueSidebarLabel(buf, allocator, label);
+        try appendIssueSidebarLabel(buf, allocator, label, color);
     }
     if (shown) {
         try buf.appendSlice(allocator, "</div>");
@@ -363,14 +373,24 @@ fn appendIssueSidebarAssigneeMenu(buf: *std.ArrayList(u8), allocator: Allocator,
 fn appendIssueSidebarLabelsMenu(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, raw_ref: []const u8, issue_id: []const u8) !void {
     try appendIssueSidebarSingleInputForm(buf, allocator, raw_ref, "add-label", "value", "Add label", "Filter labels");
     try appendIssueSidebarMenuGroupStart(buf, allocator, "Selected labels");
-    var selected = try db.prepare("SELECT DISTINCT label FROM issue_labels WHERE issue_id = ? ORDER BY lower(label), label");
+    var selected = try db.prepare(
+        \\SELECT selected.label, COALESCE(ld.color, '')
+        \\FROM (SELECT DISTINCT label FROM issue_labels WHERE issue_id = ?) AS selected
+        \\LEFT JOIN label_definitions ld ON ld.name = selected.label
+        \\ORDER BY CASE WHEN ld.id IS NULL THEN 1 ELSE 0 END,
+        \\         ld.position,
+        \\         lower(selected.label),
+        \\         selected.label
+    );
     defer selected.deinit();
     try selected.bindText(1, issue_id);
     var shown = false;
     while (try selected.step()) {
         const label = try selected.columnTextDup(allocator, 0);
         defer allocator.free(label);
-        try appendIssueSidebarLabelActionRow(buf, allocator, raw_ref, "remove-label", label, true);
+        const color = try selected.columnTextDup(allocator, 1);
+        defer allocator.free(color);
+        try appendIssueSidebarLabelActionRow(buf, allocator, raw_ref, "remove-label", label, color, true);
         shown = true;
     }
     if (!shown) try appendIssueSidebarMenuEmpty(buf, allocator, "No labels selected.");
@@ -378,10 +398,21 @@ fn appendIssueSidebarLabelsMenu(buf: *std.ArrayList(u8), allocator: Allocator, d
 
     try appendIssueSidebarMenuGroupStart(buf, allocator, "Suggestions");
     var suggestions = try db.prepare(
-        \\SELECT DISTINCT label
-        \\FROM issue_labels
-        \\WHERE label NOT IN (SELECT label FROM issue_labels WHERE issue_id = ?)
-        \\ORDER BY lower(label), label
+        \\WITH label_names AS (
+        \\  SELECT name AS label FROM label_definitions
+        \\  UNION
+        \\  SELECT label FROM issue_labels
+        \\  UNION
+        \\  SELECT label FROM pull_labels
+        \\)
+        \\SELECT label_names.label, COALESCE(ld.color, '')
+        \\FROM label_names
+        \\LEFT JOIN label_definitions ld ON ld.name = label_names.label
+        \\WHERE label_names.label NOT IN (SELECT label FROM issue_labels WHERE issue_id = ?)
+        \\ORDER BY CASE WHEN ld.id IS NULL THEN 1 ELSE 0 END,
+        \\         ld.position,
+        \\         lower(label_names.label),
+        \\         label_names.label
         \\LIMIT 24
     );
     defer suggestions.deinit();
@@ -390,7 +421,9 @@ fn appendIssueSidebarLabelsMenu(buf: *std.ArrayList(u8), allocator: Allocator, d
     while (try suggestions.step()) {
         const label = try suggestions.columnTextDup(allocator, 0);
         defer allocator.free(label);
-        try appendIssueSidebarLabelActionRow(buf, allocator, raw_ref, "add-label", label, false);
+        const color = try suggestions.columnTextDup(allocator, 1);
+        defer allocator.free(color);
+        try appendIssueSidebarLabelActionRow(buf, allocator, raw_ref, "add-label", label, color, false);
         shown = true;
     }
     if (!shown) try appendIssueSidebarMenuEmpty(buf, allocator, "No label suggestions.");
@@ -575,9 +608,9 @@ fn appendIssueSidebarPerson(buf: *std.ArrayList(u8), allocator: Allocator, name:
     try buf.appendSlice(allocator, "</div>");
 }
 
-fn appendIssueSidebarLabel(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8) !void {
+fn appendIssueSidebarLabel(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, color: []const u8) !void {
     try buf.appendSlice(allocator, "<span class=\"issue-sidebar-token\">");
-    try appendIssueLabel(buf, allocator, label);
+    try appendIssueLabel(buf, allocator, label, color);
     try buf.appendSlice(allocator, "</span>");
 }
 
@@ -654,10 +687,11 @@ fn appendIssueSidebarLabelActionRow(
     raw_ref: []const u8,
     action: []const u8,
     label: []const u8,
+    color: []const u8,
     selected: bool,
 ) !void {
     try appendIssueSidebarValueActionFormStart(buf, allocator, raw_ref, action, "value", label, label, selected);
-    try appendIssueLabel(buf, allocator, label);
+    try appendIssueLabel(buf, allocator, label, color);
     try buf.appendSlice(allocator, "</button></form>");
 }
 
@@ -1012,13 +1046,31 @@ fn appendIssueAvatar(buf: *std.ArrayList(u8), allocator: Allocator, name: []cons
     try shared.appendAvatar(buf, allocator, name, extra_class);
 }
 
-fn appendIssueLabel(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8) !void {
+fn appendIssueLabel(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, color: []const u8) !void {
+    if (validHexColor(color)) {
+        try appendTemplate(buf, allocator,
+            \\<span class="issue-label label-custom" style="--label-color: {color}">{label}</span>
+        , .{
+            .color = color,
+            .label = label,
+        });
+        return;
+    }
+
     try appendTemplate(buf, allocator,
         \\<span class="issue-label {kind}">{label}</span>
     , .{
         .kind = issueLabelKind(label),
         .label = label,
     });
+}
+
+fn validHexColor(value: []const u8) bool {
+    if (value.len != 7 or value[0] != '#') return false;
+    for (value[1..]) |c| {
+        if (!std.ascii.isHex(c)) return false;
+    }
+    return true;
 }
 
 fn issueLabelKind(label: []const u8) []const u8 {

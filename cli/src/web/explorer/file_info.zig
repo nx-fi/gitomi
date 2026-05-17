@@ -216,6 +216,8 @@ const base_suffix_devicons = [_]DeviconMapping{
     .{ .key = ".fsproj", .class = "devicon-dot-net-plain" },
     .{ .key = ".gradle", .class = "devicon-gradle-original" },
     .{ .key = ".gradle.kts", .class = "devicon-gradle-original" },
+    .{ .key = ".htm", .class = "devicon-html5-plain" },
+    .{ .key = ".html", .class = "devicon-html5-plain" },
     .{ .key = ".ipynb", .class = "devicon-jupyter-plain" },
     .{ .key = ".nomad", .class = "devicon-nomad-original" },
     .{ .key = ".nomad.hcl", .class = "devicon-nomad-original" },

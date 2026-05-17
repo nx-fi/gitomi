@@ -39,7 +39,7 @@ pub fn renderLabelsPage(allocator: Allocator, repo: Repo, csrf_token: []const u8
 
     try appendShellStart(&buf, allocator, repo, "Labels", "labels");
     try shared.appendSettingsLayoutStart(&buf, allocator, "labels");
-    try appendLabelsHeader(&buf, allocator);
+    try appendLabelsHeader(&buf, allocator, csrf_token);
     try appendLabelsToolbar(&buf, allocator);
     try appendLabelDialog(&buf, allocator, csrf_token);
     try appendLabelsListStart(&buf, allocator, label_count);
@@ -74,7 +74,10 @@ pub fn renderLabelsPage(allocator: Allocator, repo: Repo, csrf_token: []const u8
         \\FROM label_names
         \\LEFT JOIN label_definitions ON label_definitions.name = label_names.label
         \\LEFT JOIN usage_totals ON usage_totals.label = label_names.label
-        \\ORDER BY lower(label_names.label), label_names.label
+        \\ORDER BY CASE WHEN label_definitions.id IS NULL THEN 1 ELSE 0 END,
+        \\         label_definitions.position,
+        \\         lower(label_names.label),
+        \\         label_names.label
     );
     defer stmt.deinit();
 
@@ -90,7 +93,7 @@ pub fn renderLabelsPage(allocator: Allocator, repo: Repo, csrf_token: []const u8
         defer allocator.free(color);
         const issue_count = @as(usize, @intCast(stmt.columnInt64(4)));
         const pull_count = @as(usize, @intCast(stmt.columnInt64(5)));
-        try appendLabelRow(&buf, allocator, label, label_id, description, color, issue_count, pull_count, csrf_token);
+        try appendLabelRow(&buf, allocator, label, label_id, description, color, issue_count, pull_count, shown, csrf_token);
         shown += 1;
     }
 
@@ -147,9 +150,21 @@ pub fn handleLabelsPost(allocator: Allocator, repo: Repo, stream: std.net.Stream
             try sendPlainResponse(allocator, stream, 409, "Conflict", "Label already exists\n");
             return;
         }
+        const position = try nextLabelPosition(&db);
 
-        writeLabelCreatedEvent(allocator, new_label, description, color) catch {
+        writeLabelCreatedEvent(allocator, new_label, description, color, position) catch {
             try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not create label\n");
+            return;
+        };
+        try sendRedirect(allocator, stream, "/labels");
+        return;
+    }
+
+    if (std.mem.eql(u8, action, "reorder")) {
+        const order_owned = (try formValueOwned(allocator, form_body, "order")) orelse try allocator.dupe(u8, "");
+        defer allocator.free(order_owned);
+        reorderLabels(allocator, repo, order_owned) catch {
+            try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not reorder labels\n");
             return;
         };
         try sendRedirect(allocator, stream, "/labels");
@@ -204,7 +219,8 @@ pub fn handleLabelsPost(allocator: Allocator, repo: Repo, stream: std.net.Stream
                 };
             }
         } else {
-            writeLabelCreatedEvent(allocator, new_label, description, color) catch {
+            const position = try nextLabelPosition(&db);
+            writeLabelCreatedEvent(allocator, new_label, description, color, position) catch {
                 try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update label\n");
                 return;
             };
@@ -243,6 +259,7 @@ const LabelDefinition = struct {
     id: []u8,
     description: []u8,
     color: []u8,
+    position: i64,
 
     fn deinit(self: *LabelDefinition, allocator: Allocator) void {
         allocator.free(self.id);
@@ -252,7 +269,7 @@ const LabelDefinition = struct {
 };
 
 fn loadLabelDefinitionByName(allocator: Allocator, db: *SqliteDb, label: []const u8) !?LabelDefinition {
-    var stmt = try db.prepare("SELECT id, description, color FROM label_definitions WHERE name = ?");
+    var stmt = try db.prepare("SELECT id, description, color, position FROM label_definitions WHERE name = ?");
     defer stmt.deinit();
     try stmt.bindText(1, label);
     if (!(try stmt.step())) return null;
@@ -260,6 +277,7 @@ fn loadLabelDefinitionByName(allocator: Allocator, db: *SqliteDb, label: []const
         .id = try stmt.columnTextDup(allocator, 0),
         .description = try stmt.columnTextDup(allocator, 1),
         .color = try stmt.columnTextDup(allocator, 2),
+        .position = stmt.columnInt64(3),
     };
 }
 
@@ -281,7 +299,14 @@ fn labelNameExists(db: *SqliteDb, label: []const u8) !bool {
     return try stmt.step();
 }
 
-fn writeLabelCreatedEvent(allocator: Allocator, name: []const u8, description: []const u8, color: []const u8) !void {
+fn nextLabelPosition(db: *SqliteDb) !i64 {
+    var stmt = try db.prepare("SELECT COALESCE(MAX(position), -1) + 1 FROM label_definitions");
+    defer stmt.deinit();
+    if (!(try stmt.step())) return 0;
+    return stmt.columnInt64(0);
+}
+
+fn writeLabelCreatedEvent(allocator: Allocator, name: []const u8, description: []const u8, color: []const u8, position: i64) !void {
     var writer = try EventWriter.init(allocator, "gt label create");
     defer writer.deinit();
 
@@ -306,6 +331,7 @@ fn writeLabelCreatedEvent(allocator: Allocator, name: []const u8, description: [
         name,
         description,
         color,
+        position,
     );
     defer allocator.free(event_body);
 
@@ -345,6 +371,55 @@ fn writeLabelUpdatedEvent(allocator: Allocator, label_id: []const u8, update: ev
     defer allocator.free(subject);
     const commit_oid = try writer.write("gt label", subject, event_body);
     defer allocator.free(commit_oid);
+}
+
+fn reorderLabels(allocator: Allocator, repo: Repo, order_body: []const u8) !void {
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
+    var seen = std.StringHashMap(void).init(allocator);
+    defer {
+        var keys = seen.keyIterator();
+        while (keys.next()) |key| allocator.free(key.*);
+        seen.deinit();
+    }
+
+    var position: i64 = 0;
+    var lines = std.mem.splitScalar(u8, order_body, '\n');
+    while (lines.next()) |raw_label| {
+        const label = std.mem.trim(u8, raw_label, " \t\r\n");
+        if (label.len == 0) continue;
+        if (!(try rememberLabelForReorder(allocator, &seen, label))) continue;
+        try reorderSingleLabel(allocator, &db, label, position);
+        position += 1;
+    }
+}
+
+fn rememberLabelForReorder(allocator: Allocator, seen: *std.StringHashMap(void), label: []const u8) !bool {
+    if (seen.contains(label)) return false;
+    const key = try allocator.dupe(u8, label);
+    errdefer allocator.free(key);
+    const entry = try seen.getOrPut(key);
+    if (entry.found_existing) {
+        allocator.free(key);
+        return false;
+    }
+    entry.value_ptr.* = {};
+    return true;
+}
+
+fn reorderSingleLabel(allocator: Allocator, db: *SqliteDb, label: []const u8, position: i64) !void {
+    var definition = try loadLabelDefinitionByName(allocator, db, label);
+    defer if (definition) |*value| value.deinit(allocator);
+
+    if (definition) |existing| {
+        if (existing.position == position) return;
+        try writeLabelUpdatedEvent(allocator, existing.id, .{ .position = position });
+        return;
+    }
+
+    const color = defaultLabelColor(label);
+    try writeLabelCreatedEvent(allocator, label, "", color, position);
 }
 
 fn writeLabelDeletedEvent(allocator: Allocator, label_id: []const u8) !void {
@@ -474,14 +549,14 @@ fn countLabels(db: *SqliteDb) !usize {
     return @as(usize, @intCast(stmt.columnInt64(0)));
 }
 
-fn appendLabelsHeader(buf: *std.ArrayList(u8), allocator: Allocator) !void {
-    try buf.appendSlice(allocator,
-        \\<section class="labels-page" data-labels-page>
+fn appendLabelsHeader(buf: *std.ArrayList(u8), allocator: Allocator, csrf_token: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<section class="labels-page" data-labels-page data-label-csrf-field="{csrf_field}" data-label-csrf="{csrf}">
         \\  <header class="labels-page-head">
         \\    <h1>Labels</h1>
         \\    <button class="button primary labels-new-button" type="button" data-label-new-toggle>New label</button>
         \\  </header>
-    );
+    , .{ .csrf_field = zwf.csrf.field_name, .csrf = csrf_token });
 }
 
 fn appendLabelDialog(buf: *std.ArrayList(u8), allocator: Allocator, csrf_token: []const u8) !void {
@@ -517,9 +592,10 @@ fn appendLabelsToolbar(buf: *std.ArrayList(u8), allocator: Allocator) !void {
         \\  <div class="labels-toolbar">
         \\    <label class="labels-search"><span class="button-icon icon-search" aria-hidden="true"></span><input type="search" placeholder="Search all labels" aria-label="Search all labels" data-label-search></label>
         \\    <details class="issues-filter-menu labels-sort-menu" data-popover-menu>
-        \\      <summary>Sort: <span data-label-sort-label>Name</span></summary>
+        \\      <summary>Sort: <span data-label-sort-label>Custom order</span></summary>
         \\      <div class="issues-filter-popover labels-sort-popover" role="menu">
-        \\        <button class="issues-filter-option selected" type="button" role="menuitem" data-label-sort="name"><span>Name</span></button>
+        \\        <button class="issues-filter-option selected" type="button" role="menuitem" data-label-sort="manual"><span>Custom order</span></button>
+        \\        <button class="issues-filter-option" type="button" role="menuitem" data-label-sort="name"><span>Name</span></button>
         \\        <button class="issues-filter-option" type="button" role="menuitem" data-label-sort="usage"><span>Most used</span></button>
         \\      </div>
         \\    </details>
@@ -549,6 +625,7 @@ fn appendLabelRow(
     color: []const u8,
     issue_count: usize,
     pull_count: usize,
+    order: usize,
     csrf_token: []const u8,
 ) !void {
     const total_count = issue_count + pull_count;
@@ -557,7 +634,8 @@ fn appendLabelRow(
     const effective_description = if (description.len == 0) summary else description;
     const effective_color = if (validHexColor(color)) color else defaultLabelColor(label);
     try appendTemplate(buf, allocator,
-        \\<article class="labels-list-row" data-label-row data-label-name="{label}" data-label-id="{label_id}" data-label-description="{description}" data-label-color="{color}" data-label-total="{total_count}" data-label-search-text="{label} {description} {summary}">
+        \\<article class="labels-list-row" data-label-row data-label-name="{label}" data-label-id="{label_id}" data-label-description="{description}" data-label-color="{color}" data-label-total="{total_count}" data-label-order="{order}" data-label-search-text="{label} {description} {summary}">
+        \\  <button class="labels-drag-handle" type="button" draggable="true" aria-label="Reorder {label}" title="Reorder label" data-label-drag-handle></button>
         \\  <div class="labels-row-main">
     , .{
         .label = label,
@@ -565,6 +643,7 @@ fn appendLabelRow(
         .description = description,
         .color = effective_color,
         .total_count = total_count,
+        .order = order,
         .summary = summary,
     });
     try appendLabelChip(buf, allocator, label, effective_color);
