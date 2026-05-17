@@ -362,7 +362,7 @@ pub fn admitStagedInboxRef(
         }
 
         if (try isAncestor(allocator, old_oid, staged_oid)) {
-            const admitted = validateInboxRange(allocator, staged_ref, old_oid, empty_tree, genesis_oid, expected_repo_id) catch |err| {
+            const admitted = validateInboxRange(allocator, staged_ref, local_ref, old_oid, empty_tree, genesis_oid, expected_repo_id) catch |err| {
                 if (errors.isUserError(err)) {
                     try quarantineStagedRef(allocator, staging_prefix, staged_ref, staged_oid);
                     return;
@@ -385,7 +385,7 @@ pub fn admitStagedInboxRef(
         return;
     }
 
-    const admitted = validateInboxRange(allocator, staged_ref, null, empty_tree, genesis_oid, expected_repo_id) catch |err| {
+    const admitted = validateInboxRange(allocator, staged_ref, local_ref, null, empty_tree, genesis_oid, expected_repo_id) catch |err| {
         if (errors.isUserError(err)) {
             try quarantineStagedRef(allocator, staging_prefix, staged_ref, staged_oid);
             return;
@@ -426,12 +426,19 @@ pub fn localRefFromStaged(allocator: Allocator, staging_prefix: []const u8, stag
         try eprint("gt sync: refusing to admit non-inbox staged ref {s}\n", .{staged_ref});
         return CliError.UserError;
     }
-    return std.fmt.allocPrint(allocator, "refs/gitomi/{s}", .{suffix});
+    const local_ref = try std.fmt.allocPrint(allocator, "refs/gitomi/{s}", .{suffix});
+    errdefer allocator.free(local_ref);
+    if (inbox_commit.parseRefIdentity(local_ref) == null) {
+        try eprint("gt sync: refusing to admit malformed inbox ref {s}\n", .{staged_ref});
+        return CliError.UserError;
+    }
+    return local_ref;
 }
 
 pub fn validateInboxRange(
     allocator: Allocator,
     ref: []const u8,
+    expected_actor_ref: []const u8,
     local_base: ?[]const u8,
     empty_tree: []const u8,
     genesis_oid: []const u8,
@@ -439,6 +446,10 @@ pub fn validateInboxRange(
 ) !usize {
     const log = try inboxCommitLog(allocator, ref, local_base, genesis_oid);
     defer allocator.free(log);
+    const expected_identity = inbox_commit.parseRefIdentity(expected_actor_ref) orelse {
+        try eprint("gt sync: malformed inbox ref {s}\n", .{expected_actor_ref});
+        return CliError.UserError;
+    };
 
     var count: usize = 0;
     var expected_first_parent: ?[]const u8 = if (local_base) |base| base else genesis_oid;
@@ -460,6 +471,7 @@ pub fn validateInboxRange(
         }
         var envelope = try validateInboxRecord(allocator, record, expected_first_parent, empty_tree);
         defer envelope.deinit();
+        try validateEnvelopeActorMatchesRef(record.commit, ref, envelope, expected_identity);
         try validateEnvelopeRepoId(record.commit, ref, envelope.repo_id, expected_repo_id);
         if (try auth_verifier.checkAndRemember(.{
             .ref = ref,
@@ -468,7 +480,7 @@ pub fn validateInboxRange(
             .subject = record.subject,
             .body = record.body,
         }, envelope)) |reason| {
-            try eprint("gt sync: rejecting {s} on {s}: signing key is not authorized for actor {s}/{s}: {s}\n", .{ record.commit, ref, envelope.actor_principal, envelope.actor_device, reason });
+            try eprint("gt sync: rejecting {s} on {s}: actor {s}/{s}: {s}\n", .{ record.commit, ref, envelope.actor_principal, envelope.actor_device, reason });
             return CliError.UserError;
         }
         try rememberActorSeq(&actor_seqs, record.commit, ref, envelope.actor_principal, envelope.actor_device, envelope.seq);
@@ -476,6 +488,24 @@ pub fn validateInboxRange(
         count += 1;
     }
     return count;
+}
+
+fn validateEnvelopeActorMatchesRef(
+    commit: []const u8,
+    ref: []const u8,
+    envelope: event_mod.ValidatedEnvelope,
+    expected_identity: inbox_commit.RefIdentity,
+) !void {
+    if (inbox_commit.actorMatchesRefIdentity(expected_identity, envelope.actor_principal, envelope.actor_device)) return;
+    try eprint("gt sync: rejecting {s} on {s}: actor {s}/{s} does not match inbox ref {s}/{s}\n", .{
+        commit,
+        ref,
+        envelope.actor_principal,
+        envelope.actor_device,
+        expected_identity.principal,
+        expected_identity.device,
+    });
+    return CliError.UserError;
 }
 
 fn validateEnvelopeRepoId(commit: []const u8, ref: []const u8, repo_id: []const u8, expected_repo_id: []const u8) !void {
@@ -674,6 +704,14 @@ test "staged ref mapping rejects outside and non-inbox refs" {
             "refs/gitomi/staging/origin/genesis",
         ),
     );
+    try std.testing.expectError(
+        CliError.UserError,
+        localRefFromStaged(
+            std.testing.allocator,
+            "refs/gitomi/staging/origin",
+            "refs/gitomi/staging/origin/inbox/alice/laptop/extra",
+        ),
+    );
 }
 
 test "envelope repo id validation rejects foreign repositories" {
@@ -692,6 +730,36 @@ test "envelope repo id validation rejects foreign repositories" {
             "018f0000-0000-7000-8000-000000000001",
         ),
     );
+}
+
+test "envelope actor validation rejects mismatched inbox refs" {
+    const allocator = std.testing.allocator;
+    var envelope = event_mod.ValidatedEnvelope{
+        .allocator = allocator,
+        .repo_id = try allocator.dupe(u8, "018f0000-0000-7000-8000-000000000001"),
+        .event_uuid = try allocator.dupe(u8, "018f0000-0000-7000-8000-000000000002"),
+        .event_type = try allocator.dupe(u8, "issue.opened"),
+        .object_kind = try allocator.dupe(u8, "issue"),
+        .object_id = try allocator.dupe(u8, "018f0000-0000-7000-8000-000000000003"),
+        .idempotency_key = try allocator.dupe(u8, "018f0000-0000-7000-8000-000000000004"),
+        .actor_principal = try allocator.dupe(u8, "bob"),
+        .actor_device = try allocator.dupe(u8, "phone"),
+        .seq = 1,
+        .occurred_at = try allocator.dupe(u8, "2026-05-13T18:30:59Z"),
+    };
+    defer envelope.deinit();
+
+    const identity = inbox_commit.parseRefIdentity("refs/gitomi/inbox/alice/laptop").?;
+    try std.testing.expectError(
+        CliError.UserError,
+        validateEnvelopeActorMatchesRef("commit-1", "refs/gitomi/staging/origin/inbox/alice/laptop", envelope, identity),
+    );
+
+    allocator.free(envelope.actor_principal);
+    allocator.free(envelope.actor_device);
+    envelope.actor_principal = try allocator.dupe(u8, "alice");
+    envelope.actor_device = try allocator.dupe(u8, "laptop");
+    try validateEnvelopeActorMatchesRef("commit-2", "refs/gitomi/staging/origin/inbox/alice/laptop", envelope, identity);
 }
 
 test "first parent validation accepts expected history shapes" {

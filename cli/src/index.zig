@@ -1143,6 +1143,8 @@ fn indexRefEvents(
     });
     defer allocator.free(log);
 
+    const ref_identity = inbox_commit.parseRefIdentity(ref) orelse return 0;
+
     var count: usize = 0;
     var expected_first_parent: ?[]const u8 = if (base) |base_oid| base_oid else genesis_oid;
     var records = std.mem.splitScalar(u8, log, 0x1e);
@@ -1162,6 +1164,7 @@ fn indexRefEvents(
 
         var envelope = parseValidatedEnvelope(allocator, record.body) catch continue;
         defer envelope.deinit();
+        if (!inbox_commit.actorMatchesRefIdentity(ref_identity, envelope.actor_principal, envelope.actor_device)) continue;
         if (!(try admission.accept(envelope))) continue;
 
         try insertValidatedIndexedEvent(event_stmt, ref, record.commit, record.tree, record.subject, record.body, envelope);

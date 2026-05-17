@@ -2,6 +2,7 @@ const std = @import("std");
 
 const event_mod = @import("../event.zig");
 const git = @import("../git.zig");
+const index_schema = @import("schema.zig");
 const json_writer = @import("../json_writer.zig");
 const ordering = @import("projection_ordering.zig");
 const sqlite_db = @import("sqlite_db.zig");
@@ -23,14 +24,73 @@ const max_projected_reaction_emojis: usize = 64;
 const max_projected_reaction_actors: usize = 1024;
 
 fn creationEventWins(db: *SqliteDb, event_type: []const u8, object_id: []const u8, event_hash: []const u8) !bool {
-    var stmt = try db.prepare("SELECT event_hash FROM events WHERE event_type = ? AND object_id = ? ORDER BY event_hash DESC LIMIT 1");
+    var stmt = try db.prepare(
+        \\SELECT event_hash
+        \\FROM events
+        \\WHERE event_type = ?
+        \\  AND object_id = ?
+        \\  AND domain_status = 'accepted'
+        \\ORDER BY ordinal
+        \\LIMIT 1
+    );
     defer stmt.deinit();
     try stmt.bindText(1, event_type);
     try stmt.bindText(2, object_id);
-    if (!(try stmt.step())) return false;
+    if (!(try stmt.step())) return true;
     const winner = try stmt.columnTextDup(db.allocator, 0);
     defer db.allocator.free(winner);
     return std.mem.eql(u8, winner, event_hash);
+}
+
+fn acceptedCreationInFrontier(
+    allocator: Allocator,
+    db: *SqliteDb,
+    event_type: []const u8,
+    object_id: []const u8,
+    before_event_hash: ?[]const u8,
+) !bool {
+    var stmt = try db.prepare(
+        \\SELECT event_hash
+        \\FROM events
+        \\WHERE event_type = ?
+        \\  AND object_id = ?
+        \\  AND domain_status = 'accepted'
+        \\ORDER BY event_hash DESC
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, event_type);
+    try stmt.bindText(2, object_id);
+    while (try stmt.step()) {
+        const creation_hash = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(creation_hash);
+        if (try eventInFrontier(allocator, creation_hash, before_event_hash)) return true;
+    }
+    return false;
+}
+
+fn acceptedCreationHashInFrontier(
+    allocator: Allocator,
+    db: *SqliteDb,
+    event_type: []const u8,
+    object_id: []const u8,
+    creation_hash: []const u8,
+    before_event_hash: ?[]const u8,
+) !bool {
+    var stmt = try db.prepare(
+        \\SELECT 1
+        \\FROM events
+        \\WHERE event_type = ?
+        \\  AND object_id = ?
+        \\  AND event_hash = ?
+        \\  AND domain_status = 'accepted'
+        \\LIMIT 1
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, event_type);
+    try stmt.bindText(2, object_id);
+    try stmt.bindText(3, creation_hash);
+    if (!(try stmt.step())) return false;
+    return try eventInFrontier(allocator, creation_hash, before_event_hash);
 }
 
 pub fn applyIssueProjection(allocator: Allocator, db: *SqliteDb, event_hash: []const u8, envelope: ValidatedEnvelope, body: []const u8) !?[]const u8 {
@@ -74,7 +134,7 @@ pub fn applyIssueProjection(allocator: Allocator, db: *SqliteDb, event_hash: []c
         return try issueCollectionLimitRejection(db, envelope.object_id);
     }
 
-    if (!(try issueExists(db, envelope.object_id))) return "object_not_created";
+    if (!(try acceptedCreationInFrontier(allocator, db, "issue.opened", envelope.object_id, event_hash))) return "object_not_created";
 
     if (std.mem.eql(u8, envelope.event_type, "issue.updated")) {
         if (try applyIssueUpdated(allocator, db, payload, event_hash, envelope)) |reason| return reason;
@@ -316,13 +376,6 @@ fn insertLegacyAliasFromEnvelope(db: *SqliteDb, object_kind: []const u8, object_
     try stmt.bindText(2, object_id);
     try stmt.bindInt64(3, number);
     try stmt.stepDone();
-}
-
-fn issueExists(db: *SqliteDb, issue_id: []const u8) !bool {
-    var stmt = try db.prepare("SELECT 1 FROM issues WHERE id = ?");
-    defer stmt.deinit();
-    try stmt.bindText(1, issue_id);
-    return try stmt.step();
 }
 
 fn updateIssueScalar(
@@ -582,7 +635,7 @@ pub fn applyProjectProjection(allocator: Allocator, db: *SqliteDb, event_hash: [
         return try projectColumnLimitRejection(db, envelope.object_id);
     }
 
-    if (!(try projectExists(db, envelope.object_id))) return "object_not_created";
+    if (!(try acceptedCreationInFrontier(allocator, db, "project.created", envelope.object_id, event_hash))) return "object_not_created";
 
     if (std.mem.eql(u8, envelope.event_type, "project.updated")) {
         if (event_mod.jsonString(payload.get("name"))) |name| {
@@ -653,7 +706,7 @@ pub fn applyMilestoneProjection(allocator: Allocator, db: *SqliteDb, event_hash:
         return null;
     }
 
-    if (!(try milestoneExists(db, envelope.object_id))) return "object_not_created";
+    if (!(try acceptedCreationInFrontier(allocator, db, "milestone.created", envelope.object_id, event_hash))) return "object_not_created";
 
     if (std.mem.eql(u8, envelope.event_type, "milestone.updated")) {
         if (event_mod.jsonString(payload.get("title"))) |title| {
@@ -700,7 +753,7 @@ pub fn applyLabelProjection(allocator: Allocator, db: *SqliteDb, event_hash: []c
         return null;
     }
 
-    if (!(try labelDefinitionExists(db, envelope.object_id))) return "object_not_created";
+    if (!(try acceptedCreationInFrontier(allocator, db, "label.created", envelope.object_id, event_hash))) return "object_not_created";
 
     if (std.mem.eql(u8, envelope.event_type, "label.updated")) {
         if (event_mod.jsonString(payload.get("name"))) |name| {
@@ -1911,7 +1964,7 @@ pub fn applyPullProjection(allocator: Allocator, db: *SqliteDb, event_hash: []co
         return try pullCollectionLimitRejection(db, envelope.object_id);
     }
 
-    if (!(try pullExists(db, envelope.object_id))) return "object_not_created";
+    if (!(try acceptedCreationInFrontier(allocator, db, "pull.opened", envelope.object_id, event_hash))) return "object_not_created";
 
     if (std.mem.eql(u8, envelope.event_type, "pull.updated")) {
         if (try applyPullUpdated(allocator, db, payload, event_hash, envelope)) |reason| return reason;
@@ -2052,13 +2105,6 @@ fn insertPullOpened(
     try stmt.bindText(26, envelope.actor_principal);
     try stmt.bindText(27, envelope.actor_device);
     try stmt.stepDone();
-}
-
-fn pullExists(db: *SqliteDb, pull_id: []const u8) !bool {
-    var stmt = try db.prepare("SELECT 1 FROM pulls WHERE id = ?");
-    defer stmt.deinit();
-    try stmt.bindText(1, pull_id);
-    return try stmt.step();
 }
 
 fn updatePullScalar(
@@ -2237,9 +2283,9 @@ pub fn applyCommentProjection(allocator: Allocator, db: *SqliteDb, event_hash: [
         const parent_kind = event_mod.jsonString(payload.get("parent_kind")) orelse return "invalid_event_envelope";
         const parent_id = event_mod.jsonString(payload.get("parent_id")) orelse return "invalid_event_envelope";
         if (std.mem.eql(u8, parent_kind, "issue")) {
-            if (!(try issueExists(db, parent_id))) return "parent_not_created";
+            if (!(try acceptedCreationInFrontier(allocator, db, "issue.opened", parent_id, event_hash))) return "parent_not_created";
         } else if (std.mem.eql(u8, parent_kind, "pull")) {
-            if (!(try pullExists(db, parent_id))) return "parent_not_created";
+            if (!(try acceptedCreationInFrontier(allocator, db, "pull.opened", parent_id, event_hash))) return "parent_not_created";
         }
         const comment_body = event_mod.jsonString(payload.get("body")) orelse return "invalid_event_envelope";
         const source_author = event_mod.jsonString(payload.get("source_author")) orelse "";
@@ -2247,23 +2293,24 @@ pub fn applyCommentProjection(allocator: Allocator, db: *SqliteDb, event_hash: [
         const reply_parent_id = try commentReplyParentId(allocator, db, event_mod.jsonString(payload.get("reply_parent_id")) orelse "", reply_parent_hash);
         defer allocator.free(reply_parent_id);
         if (reply_parent_hash.len != 0 and reply_parent_id.len == 0) return "parent_not_created";
+        if (reply_parent_id.len != 0 and !(try acceptedCreationInFrontier(allocator, db, "comment.added", reply_parent_id, event_hash))) return "parent_not_created";
         if (reply_parent_id.len != 0 and !(try commentInParent(db, reply_parent_id, parent_kind, parent_id))) return "parent_not_created";
-        if (reply_parent_id.len != 0 and reply_parent_hash.len != 0 and !(try commentCreationHashMatches(db, reply_parent_id, reply_parent_hash))) return "parent_not_created";
+        if (reply_parent_id.len != 0 and reply_parent_hash.len != 0 and !(try acceptedCreationHashInFrontier(allocator, db, "comment.added", reply_parent_id, reply_parent_hash, event_hash))) return "parent_not_created";
         try insertCommentAdded(db, event_hash, envelope, parent_kind, parent_id, comment_body, source_author, reply_parent_id, reply_parent_hash);
     } else if (std.mem.eql(u8, envelope.event_type, "comment.body_set")) {
-        if (!(try commentExists(db, envelope.object_id))) return "object_not_created";
+        if (!(try acceptedCreationInFrontier(allocator, db, "comment.added", envelope.object_id, event_hash))) return "object_not_created";
         const comment_body = event_mod.jsonString(payload.get("body")) orelse return "invalid_event_envelope";
         if (try updateCommentBody(allocator, db, envelope.object_id, comment_body, event_hash, envelope)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "comment.redacted")) {
-        if (!(try commentExists(db, envelope.object_id))) return "object_not_created";
+        if (!(try acceptedCreationInFrontier(allocator, db, "comment.added", envelope.object_id, event_hash))) return "object_not_created";
         try redactComment(allocator, db, envelope.object_id, event_hash, envelope);
     } else if (std.mem.eql(u8, envelope.event_type, "comment.reaction_added")) {
-        if (!(try commentExists(db, envelope.object_id))) return "object_not_created";
+        if (!(try acceptedCreationInFrontier(allocator, db, "comment.added", envelope.object_id, event_hash))) return "object_not_created";
         const emoji = event_mod.jsonString(payload.get("emoji")) orelse return "invalid_event_envelope";
         try insertReaction(db, "comment", envelope.object_id, emoji, envelope.actor_principal, event_hash, envelope.occurred_at);
         if (try reactionLimitRejection(db, "comment", envelope.object_id)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "comment.reaction_removed")) {
-        if (!(try commentExists(db, envelope.object_id))) return "object_not_created";
+        if (!(try acceptedCreationInFrontier(allocator, db, "comment.added", envelope.object_id, event_hash))) return "object_not_created";
         const emoji = event_mod.jsonString(payload.get("emoji")) orelse return "invalid_event_envelope";
         try deleteReaction(allocator, db, "comment", envelope.object_id, emoji, envelope.actor_principal, event_hash, payload);
     }
@@ -2329,35 +2376,12 @@ fn commentReplyParentId(allocator: Allocator, db: *SqliteDb, payload_parent_id: 
     return try stmt.columnTextDup(allocator, 0);
 }
 
-fn commentExists(db: *SqliteDb, comment_id: []const u8) !bool {
-    var stmt = try db.prepare("SELECT 1 FROM comments WHERE id = ?");
-    defer stmt.deinit();
-    try stmt.bindText(1, comment_id);
-    return try stmt.step();
-}
-
 fn commentInParent(db: *SqliteDb, comment_id: []const u8, parent_kind: []const u8, parent_id: []const u8) !bool {
     var stmt = try db.prepare("SELECT 1 FROM comments WHERE id = ? AND parent_kind = ? AND parent_id = ?");
     defer stmt.deinit();
     try stmt.bindText(1, comment_id);
     try stmt.bindText(2, parent_kind);
     try stmt.bindText(3, parent_id);
-    return try stmt.step();
-}
-
-fn commentCreationHashMatches(db: *SqliteDb, comment_id: []const u8, event_hash: []const u8) !bool {
-    var stmt = try db.prepare(
-        \\SELECT 1
-        \\FROM events
-        \\WHERE object_id = ?
-        \\  AND event_type = 'comment.added'
-        \\  AND event_hash = ?
-        \\  AND domain_status = 'accepted'
-        \\LIMIT 1
-    );
-    defer stmt.deinit();
-    try stmt.bindText(1, comment_id);
-    try stmt.bindText(2, event_hash);
     return try stmt.step();
 }
 
@@ -2510,4 +2534,148 @@ fn reactionCountExceeds(db: *SqliteDb, comptime sql_text: []const u8, object_kin
     try stmt.bindText(2, object_id);
     if (!(try stmt.step())) return false;
     return stmt.columnInt64(0) > @as(i64, @intCast(max_count));
+}
+
+test "creation duplicate winner ignores rejected creation events" {
+    const allocator = std.testing.allocator;
+    var db = try SqliteDb.open(allocator, ":memory:", sqlite_db.sqlite.SQLITE_OPEN_READWRITE | sqlite_db.sqlite.SQLITE_OPEN_CREATE, true);
+    defer db.deinit();
+    try index_schema.createIndexSchema(&db);
+
+    try insertTestEvent(&db, "z-rejected", "issue.opened", "issue", "issue-1", "rejected");
+    try insertTestEvent(&db, "a-current", "issue.opened", "issue", "issue-1", "pending");
+
+    try std.testing.expect(try creationEventWins(&db, "issue.opened", "issue-1", "a-current"));
+
+    try insertTestEvent(&db, "accepted-winner", "issue.opened", "issue", "issue-2", "accepted");
+    try insertTestEvent(&db, "pending-loser", "issue.opened", "issue", "issue-2", "pending");
+    try std.testing.expect(!(try creationEventWins(&db, "issue.opened", "issue-2", "pending-loser")));
+}
+
+test "issue updates require an accepted creation event in frontier" {
+    const allocator = std.testing.allocator;
+    var db = try SqliteDb.open(allocator, ":memory:", sqlite_db.sqlite.SQLITE_OPEN_READWRITE | sqlite_db.sqlite.SQLITE_OPEN_CREATE, true);
+    defer db.deinit();
+    try index_schema.createIndexSchema(&db);
+    try insertProjectedIssue(&db, "issue-1", "alice");
+
+    var envelope = try testEnvelope(allocator, "issue.title_set", "issue", "issue-1", "alice", "laptop");
+    defer envelope.deinit();
+    const body =
+        \\{
+        \\  "payload": {
+        \\    "title": "New title"
+        \\  },
+        \\  "legacy": {}
+        \\}
+    ;
+
+    const rejected = try applyIssueProjection(allocator, &db, "edit-event", envelope, body);
+    try std.testing.expect(rejected != null);
+    try std.testing.expectEqualStrings("object_not_created", rejected.?);
+    try expectIssueTitle(allocator, &db, "issue-1", "Old title");
+
+    try insertTestEvent(&db, "", "issue.opened", "issue", "issue-1", "accepted");
+    const accepted = try applyIssueProjection(allocator, &db, "edit-event", envelope, body);
+    try std.testing.expect(accepted == null);
+    try expectIssueTitle(allocator, &db, "issue-1", "New title");
+}
+
+fn testEnvelope(
+    allocator: Allocator,
+    event_type: []const u8,
+    object_kind: []const u8,
+    object_id: []const u8,
+    actor_principal: []const u8,
+    actor_device: []const u8,
+) !ValidatedEnvelope {
+    return .{
+        .allocator = allocator,
+        .repo_id = try allocator.dupe(u8, "repo"),
+        .event_uuid = try allocator.dupe(u8, "018f0000-0000-7000-8000-000000000000"),
+        .event_type = try allocator.dupe(u8, event_type),
+        .object_kind = try allocator.dupe(u8, object_kind),
+        .object_id = try allocator.dupe(u8, object_id),
+        .idempotency_key = try allocator.dupe(u8, "idem"),
+        .actor_principal = try allocator.dupe(u8, actor_principal),
+        .actor_device = try allocator.dupe(u8, actor_device),
+        .seq = 1,
+        .occurred_at = try allocator.dupe(u8, "2026-05-16T00:00:00Z"),
+    };
+}
+
+fn insertTestEvent(
+    db: *SqliteDb,
+    event_hash: []const u8,
+    event_type: []const u8,
+    object_kind: []const u8,
+    object_id: []const u8,
+    domain_status: []const u8,
+) !void {
+    var stmt = try db.prepare(
+        \\INSERT INTO events(
+        \\  ref, "commit", event_hash, tree, subject, body, empty_tree, valid_json,
+        \\  event_type, object_kind, object_id, actor_principal, actor_device, seq, occurred_at,
+        \\  domain_status, rejection_reason
+        \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, "refs/gitomi/inbox/alice/laptop");
+    try stmt.bindText(2, event_hash);
+    try stmt.bindText(3, event_hash);
+    try stmt.bindText(4, "");
+    try stmt.bindText(5, event_type);
+    try stmt.bindText(6, "{}");
+    try stmt.bindInt(7, 0);
+    try stmt.bindInt(8, 1);
+    try stmt.bindText(9, event_type);
+    try stmt.bindText(10, object_kind);
+    try stmt.bindText(11, object_id);
+    try stmt.bindText(12, "alice");
+    try stmt.bindText(13, "laptop");
+    try stmt.bindInt64(14, 1);
+    try stmt.bindText(15, "2026-05-16T00:00:00Z");
+    try stmt.bindText(16, domain_status);
+    try stmt.bindText(17, "");
+    try stmt.stepDone();
+}
+
+fn insertProjectedIssue(db: *SqliteDb, issue_id: []const u8, author: []const u8) !void {
+    var stmt = try db.prepare(
+        \\INSERT INTO issues(
+        \\  id,
+        \\  title, title_occurred_at, title_actor_principal, title_event_hash,
+        \\  body, body_occurred_at, body_actor_principal, body_event_hash,
+        \\  state, state_occurred_at, state_actor_principal, state_event_hash,
+        \\  opened_at, author_principal, author_device
+        \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    try stmt.bindText(2, "Old title");
+    try stmt.bindText(3, "2026-05-16T00:00:00Z");
+    try stmt.bindText(4, author);
+    try stmt.bindText(5, "");
+    try stmt.bindText(6, "");
+    try stmt.bindText(7, "2026-05-16T00:00:00Z");
+    try stmt.bindText(8, author);
+    try stmt.bindText(9, "");
+    try stmt.bindText(10, "open");
+    try stmt.bindText(11, "2026-05-16T00:00:00Z");
+    try stmt.bindText(12, author);
+    try stmt.bindText(13, "");
+    try stmt.bindText(14, "2026-05-16T00:00:00Z");
+    try stmt.bindText(15, author);
+    try stmt.bindText(16, "laptop");
+    try stmt.stepDone();
+}
+
+fn expectIssueTitle(allocator: Allocator, db: *SqliteDb, issue_id: []const u8, expected: []const u8) !void {
+    var stmt = try db.prepare("SELECT title FROM issues WHERE id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    try std.testing.expect(try stmt.step());
+    const title = try stmt.columnTextDup(allocator, 0);
+    defer allocator.free(title);
+    try std.testing.expectEqualStrings(expected, title);
 }

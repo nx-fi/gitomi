@@ -103,6 +103,29 @@ fn orderEventHashesTopologically(allocator: Allocator, event_hashes: *std.ArrayL
         count += 1;
     }
     @memcpy(event_hashes.items, ordered);
+    try orderConcurrentEventHashesByHashDescending(allocator, event_hashes.items);
+}
+
+fn orderConcurrentEventHashesByHashDescending(allocator: Allocator, event_hashes: [][]u8) !void {
+    if (event_hashes.len < 2) return;
+
+    var index: usize = 1;
+    while (index < event_hashes.len) : (index += 1) {
+        var swap_index = index;
+        while (swap_index > 0 and try eventShouldSortBefore(allocator, event_hashes[swap_index], event_hashes[swap_index - 1])) {
+            std.mem.swap([]u8, &event_hashes[swap_index], &event_hashes[swap_index - 1]);
+            swap_index -= 1;
+        }
+    }
+}
+
+fn eventShouldSortBefore(allocator: Allocator, candidate: []const u8, current: []const u8) !bool {
+    if (std.mem.eql(u8, candidate, current)) return false;
+    if (candidate.len != 0 and current.len != 0) {
+        if (try git.isAncestor(allocator, candidate, current)) return true;
+        if (try git.isAncestor(allocator, current, candidate)) return false;
+    }
+    return std.mem.order(u8, candidate, current) == .gt;
 }
 
 fn eventBodyByHash(allocator: Allocator, db: *SqliteDb, event_hash: []const u8) ![]u8 {
@@ -597,13 +620,10 @@ pub fn projectStoredEvent(allocator: Allocator, db: *SqliteDb, event_hash: []con
     }
 }
 
-pub fn signingKeyBindingRejection(allocator: Allocator, db: *SqliteDb, event_hash: []const u8, envelope: ValidatedEnvelope) !?[]const u8 {
-    if ((try accessModeFromDb(db)) == .open) return null;
+pub fn signingKeyBindingRejection(allocator: Allocator, db: *SqliteDb, event_hash: []const u8, envelope: ValidatedEnvelope, body: ?[]const u8) !?[]const u8 {
+    const access_mode = try accessModeFromDb(db);
 
-    const role = try aclRoleAtAuthFrontier(allocator, db, envelope.actor_principal, event_hash);
-    if (role) |value| {
-        allocator.free(value);
-        const expected_fingerprint = (try identityDeviceFingerprintAtAuthFrontier(allocator, db, envelope.actor_principal, envelope.actor_device, event_hash)) orelse return "unauthorized_device";
+    if (try identityDeviceFingerprintAtAuthFrontier(allocator, db, envelope.actor_principal, envelope.actor_device, event_hash)) |expected_fingerprint| {
         defer allocator.free(expected_fingerprint);
         const signer_fingerprint = (try git.verifiedCommitSigningKeyFingerprint(allocator, event_hash)) orelse return "signing_key_mismatch";
         defer allocator.free(signer_fingerprint);
@@ -611,23 +631,69 @@ pub fn signingKeyBindingRejection(allocator: Allocator, db: *SqliteDb, event_has
         return null;
     }
 
-    if (!githubImportDelegatesEvent(envelope.event_type)) return null;
+    const role = try aclRoleAtAuthFrontier(allocator, db, envelope.actor_principal, event_hash);
+    if (role) |value| {
+        allocator.free(value);
+        return "unauthorized_device";
+    }
 
-    const delegated_fingerprint = (try delegationFingerprintAtAuthFrontier(
-        allocator,
-        db,
-        envelope.actor_principal,
-        envelope.actor_device,
-        "github.import",
-        event_hash,
-    )) orelse return null;
-    defer allocator.free(delegated_fingerprint);
+    if (githubImportDelegatesEvent(envelope.event_type)) {
+        if (try delegationFingerprintAtAuthFrontier(
+            allocator,
+            db,
+            envelope.actor_principal,
+            envelope.actor_device,
+            "github.import",
+            event_hash,
+        )) |delegated_fingerprint| {
+            defer allocator.free(delegated_fingerprint);
+            const signer_fingerprint = (try git.verifiedCommitSigningKeyFingerprint(allocator, event_hash)) orelse return "signing_key_mismatch";
+            defer allocator.free(signer_fingerprint);
+            if (!std.mem.eql(u8, delegated_fingerprint, signer_fingerprint)) return "signing_key_mismatch";
+            return null;
+        }
+    }
+
+    if (access_mode == .open) {
+        return try openSelfRegistrationRejection(allocator, event_hash, envelope, body);
+    }
+
+    return null;
+}
+
+fn openSelfRegistrationRejection(allocator: Allocator, event_hash: []const u8, envelope: ValidatedEnvelope, body: ?[]const u8) !?[]const u8 {
+    if (!std.mem.eql(u8, envelope.event_type, "identity.device_added")) return "unauthorized_device";
+    const expected_fingerprint = (try selfRegistrationFingerprint(allocator, envelope, body orelse return "unauthorized_device")) orelse return "unauthorized_device";
+    defer allocator.free(expected_fingerprint);
 
     const signer_fingerprint = (try git.verifiedCommitSigningKeyFingerprint(allocator, event_hash)) orelse return "signing_key_mismatch";
     defer allocator.free(signer_fingerprint);
-
-    if (!std.mem.eql(u8, delegated_fingerprint, signer_fingerprint)) return "signing_key_mismatch";
+    if (!std.mem.eql(u8, expected_fingerprint, signer_fingerprint)) return "signing_key_mismatch";
     return null;
+}
+
+pub fn selfRegistrationFingerprint(allocator: Allocator, envelope: ValidatedEnvelope, body: []const u8) !?[]u8 {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return null;
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return null,
+    };
+    const payload = switch (root.get("payload") orelse return null) {
+        .object => |object| object,
+        else => return null,
+    };
+    const principal = event_mod.jsonString(payload.get("principal")) orelse return null;
+    const device = event_mod.jsonString(payload.get("device")) orelse return null;
+    if (!std.mem.eql(u8, principal, envelope.actor_principal) or !std.mem.eql(u8, device, envelope.actor_device)) return null;
+
+    const signing_key = switch (payload.get("signing_key") orelse return null) {
+        .object => |object| object,
+        else => return null,
+    };
+    const fingerprint = event_mod.jsonString(signing_key.get("fingerprint")) orelse return null;
+    if (fingerprint.len == 0) return null;
+    return try allocator.dupe(u8, fingerprint);
 }
 
 fn seedGenesisAuthorization(allocator: Allocator, db: *SqliteDb) !void {
@@ -656,8 +722,11 @@ pub fn authorizationRejection(allocator: Allocator, db: *SqliteDb, event_hash: ?
         .object => |object| object,
         else => return "invalid_event_envelope",
     };
+    if (event_hash) |hash| {
+        if (try signingKeyBindingRejection(allocator, db, hash, envelope, body)) |reason| return reason;
+    }
     if ((try accessModeFromDb(db)) == .open) {
-        return try eventAuthorizationRejection(allocator, db, "owner", envelope, payload);
+        return try eventAuthorizationRejection(allocator, db, "owner", envelope, payload, event_hash);
     }
 
     const role = if (event_hash) |hash|
@@ -666,17 +735,11 @@ pub fn authorizationRejection(allocator: Allocator, db: *SqliteDb, event_hash: ?
         try currentRole(allocator, db, envelope.actor_principal);
     if (role) |value| {
         defer allocator.free(value);
-        if (event_hash) |hash| {
-            const expected_fingerprint = (try identityDeviceFingerprintAtAuthFrontier(allocator, db, envelope.actor_principal, envelope.actor_device, hash)) orelse return "unauthorized_device";
-            defer allocator.free(expected_fingerprint);
-            const signer_fingerprint = (try git.verifiedCommitSigningKeyFingerprint(allocator, hash)) orelse return "signing_key_mismatch";
-            defer allocator.free(signer_fingerprint);
-            if (!std.mem.eql(u8, expected_fingerprint, signer_fingerprint)) return "signing_key_mismatch";
-        } else if (!(try currentDeviceActive(db, envelope.actor_principal, envelope.actor_device))) {
+        if (event_hash == null and !(try currentDeviceActive(db, envelope.actor_principal, envelope.actor_device))) {
             return "unauthorized_device";
         }
 
-        if (try eventAuthorizationRejection(allocator, db, value, envelope, payload)) |reason| return reason;
+        if (try eventAuthorizationRejection(allocator, db, value, envelope, payload, event_hash)) |reason| return reason;
         return null;
     }
 
@@ -714,6 +777,7 @@ fn eventAuthorizationRejection(
     role: []const u8,
     envelope: ValidatedEnvelope,
     payload: std.json.ObjectMap,
+    event_hash: ?[]const u8,
 ) !?[]const u8 {
     if (std.mem.eql(u8, envelope.event_type, "issue.opened")) {
         if (!roleAtLeast(role, "reporter")) return "insufficient_role";
@@ -724,7 +788,7 @@ fn eventAuthorizationRejection(
         return null;
     }
     if (std.mem.eql(u8, envelope.event_type, "issue.updated")) {
-        if (payloadHasAny(payload, &.{ "title", "body", "state", "priority", "status" }) and !(try canEditObject(allocator, db, role, envelope.actor_principal, "issue", envelope.object_id))) return "insufficient_role";
+        if (payloadHasAny(payload, &.{ "title", "body", "state", "priority", "status" }) and !(try canEditObject(allocator, db, role, envelope.actor_principal, "issue", envelope.object_id, event_hash))) return "insufficient_role";
         if (payloadHasAny(payload, &.{"milestone"}) and !roleAtLeast(role, "maintainer")) return "insufficient_role";
         if (payloadContainsNonEmptyArray(payload, "projects") and !roleAtLeast(role, "maintainer")) return "insufficient_role";
         if (payloadContainsNonEmptyArray(payload, "labels_added") or payloadContainsNonEmptyArray(payload, "labels_removed")) {
@@ -741,7 +805,7 @@ fn eventAuthorizationRejection(
         std.mem.eql(u8, envelope.event_type, "issue.priority_set") or
         std.mem.eql(u8, envelope.event_type, "issue.status_set"))
     {
-        return if (try canEditObject(allocator, db, role, envelope.actor_principal, "issue", envelope.object_id)) null else "insufficient_role";
+        return if (try canEditObject(allocator, db, role, envelope.actor_principal, "issue", envelope.object_id, event_hash)) null else "insufficient_role";
     }
     if (std.mem.eql(u8, envelope.event_type, "issue.label_added") or std.mem.eql(u8, envelope.event_type, "issue.label_removed")) {
         return if (roleAtLeast(role, "maintainer")) null else "insufficient_role";
@@ -771,7 +835,7 @@ fn eventAuthorizationRejection(
         return null;
     }
     if (std.mem.eql(u8, envelope.event_type, "pull.updated")) {
-        if (payloadHasAny(payload, &.{ "title", "body", "state", "base_ref", "head_ref" }) and !(try canEditObject(allocator, db, role, envelope.actor_principal, "pull", envelope.object_id))) return "insufficient_role";
+        if (payloadHasAny(payload, &.{ "title", "body", "state", "base_ref", "head_ref" }) and !(try canEditObject(allocator, db, role, envelope.actor_principal, "pull", envelope.object_id, event_hash))) return "insufficient_role";
         if (payloadContainsNonEmptyArray(payload, "labels_added") or payloadContainsNonEmptyArray(payload, "labels_removed")) {
             if (!roleAtLeast(role, "maintainer")) return "insufficient_role";
         }
@@ -789,7 +853,7 @@ fn eventAuthorizationRejection(
         std.mem.eql(u8, envelope.event_type, "pull.base_set") or
         std.mem.eql(u8, envelope.event_type, "pull.head_set"))
     {
-        return if (try canEditObject(allocator, db, role, envelope.actor_principal, "pull", envelope.object_id)) null else "insufficient_role";
+        return if (try canEditObject(allocator, db, role, envelope.actor_principal, "pull", envelope.object_id, event_hash)) null else "insufficient_role";
     }
     if (std.mem.eql(u8, envelope.event_type, "pull.label_added") or std.mem.eql(u8, envelope.event_type, "pull.label_removed") or
         std.mem.eql(u8, envelope.event_type, "pull.assignee_added") or std.mem.eql(u8, envelope.event_type, "pull.assignee_removed") or
@@ -821,10 +885,10 @@ fn eventAuthorizationRejection(
         return if (roleAtLeast(role, "reporter")) null else "insufficient_role";
     }
     if (std.mem.eql(u8, envelope.event_type, "comment.body_set")) {
-        return if (try canEditObject(allocator, db, role, envelope.actor_principal, "comment", envelope.object_id)) null else "insufficient_role";
+        return if (try canEditObject(allocator, db, role, envelope.actor_principal, "comment", envelope.object_id, event_hash)) null else "insufficient_role";
     }
     if (std.mem.eql(u8, envelope.event_type, "comment.redacted")) {
-        return if (try canRedactComment(allocator, db, role, envelope.actor_principal, envelope.object_id)) null else "insufficient_role";
+        return if (try canRedactComment(allocator, db, role, envelope.actor_principal, envelope.object_id, event_hash)) null else "insufficient_role";
     }
     if (std.mem.eql(u8, envelope.event_type, "comment.reaction_added") or
         std.mem.eql(u8, envelope.event_type, "comment.reaction_removed"))
@@ -885,7 +949,7 @@ fn delegationAuthorizationRejection(
     return null;
 }
 
-fn githubImportDelegatesEvent(event_type: []const u8) bool {
+pub fn githubImportDelegatesEvent(event_type: []const u8) bool {
     return std.mem.eql(u8, event_type, "issue.opened") or
         std.mem.eql(u8, event_type, "issue.updated") or
         std.mem.eql(u8, event_type, "issue.title_set") or
@@ -935,36 +999,49 @@ fn roleAtLeast(actual: []const u8, required: []const u8) bool {
     return event_mod.roleAtLeast(actual, required);
 }
 
-fn canEditObject(allocator: Allocator, db: *SqliteDb, role: []const u8, actor: []const u8, kind: []const u8, object_id: []const u8) !bool {
+fn canEditObject(allocator: Allocator, db: *SqliteDb, role: []const u8, actor: []const u8, kind: []const u8, object_id: []const u8, before_event_hash: ?[]const u8) !bool {
     if (roleAtLeast(role, "maintainer")) return true;
     if (!roleAtLeast(role, "contributor")) return false;
-    const author = try objectAuthor(allocator, db, kind, object_id);
+    const author = try objectAuthorAtFrontier(allocator, db, kind, object_id, before_event_hash);
     defer if (author) |value| allocator.free(value);
     return author != null and std.mem.eql(u8, author.?, actor);
 }
 
-fn canRedactComment(allocator: Allocator, db: *SqliteDb, role: []const u8, actor: []const u8, comment_id: []const u8) !bool {
+fn canRedactComment(allocator: Allocator, db: *SqliteDb, role: []const u8, actor: []const u8, comment_id: []const u8, before_event_hash: ?[]const u8) !bool {
     if (roleAtLeast(role, "maintainer")) return true;
     if (!roleAtLeast(role, "contributor")) return false;
-    const author = try objectAuthor(allocator, db, "comment", comment_id);
+    const author = try objectAuthorAtFrontier(allocator, db, "comment", comment_id, before_event_hash);
     defer if (author) |value| allocator.free(value);
     return author != null and std.mem.eql(u8, author.?, actor);
 }
 
-fn objectAuthor(allocator: Allocator, db: *SqliteDb, kind: []const u8, object_id: []const u8) !?[]u8 {
-    const sql_text = if (std.mem.eql(u8, kind, "issue"))
-        "SELECT author_principal FROM issues WHERE id = ?"
-    else if (std.mem.eql(u8, kind, "pull"))
-        "SELECT author_principal FROM pulls WHERE id = ?"
-    else if (std.mem.eql(u8, kind, "comment"))
-        "SELECT author_principal FROM comments WHERE id = ?"
-    else
-        return null;
-    var stmt = try db.prepare(sql_text);
+fn objectAuthorAtFrontier(allocator: Allocator, db: *SqliteDb, kind: []const u8, object_id: []const u8, before_event_hash: ?[]const u8) !?[]u8 {
+    const creation_event_type = creationEventTypeForObjectKind(kind) orelse return null;
+    var stmt = try db.prepare(
+        \\SELECT event_hash, actor_principal
+        \\FROM events
+        \\WHERE event_type = ?
+        \\  AND object_id = ?
+        \\  AND domain_status = 'accepted'
+        \\ORDER BY event_hash DESC
+    );
     defer stmt.deinit();
-    try stmt.bindText(1, object_id);
-    if (!(try stmt.step())) return null;
-    return try stmt.columnTextDup(allocator, 0);
+    try stmt.bindText(1, creation_event_type);
+    try stmt.bindText(2, object_id);
+    while (try stmt.step()) {
+        const creation_hash = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(creation_hash);
+        if (!(try eventInAuthFrontier(allocator, creation_hash, before_event_hash))) continue;
+        return try stmt.columnTextDup(allocator, 1);
+    }
+    return null;
+}
+
+fn creationEventTypeForObjectKind(kind: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, kind, "issue")) return "issue.opened";
+    if (std.mem.eql(u8, kind, "pull")) return "pull.opened";
+    if (std.mem.eql(u8, kind, "comment")) return "comment.added";
+    return null;
 }
 
 pub fn currentRole(allocator: Allocator, db: *SqliteDb, principal: []const u8) !?[]u8 {
@@ -981,6 +1058,15 @@ pub fn currentDeviceActive(db: *SqliteDb, principal: []const u8, device: []const
     try stmt.bindText(1, principal);
     try stmt.bindText(2, device);
     return try stmt.step();
+}
+
+pub fn currentDeviceFingerprint(allocator: Allocator, db: *SqliteDb, principal: []const u8, device: []const u8) !?[]u8 {
+    var stmt = try db.prepare("SELECT key_fingerprint FROM identity_devices WHERE principal = ? AND device = ? AND revoked_event_hash IS NULL");
+    defer stmt.deinit();
+    try stmt.bindText(1, principal);
+    try stmt.bindText(2, device);
+    if (!(try stmt.step())) return null;
+    return try stmt.columnTextDup(allocator, 0);
 }
 
 fn markDomainAccepted(db: *SqliteDb, event_hash: []const u8) !void {
@@ -1031,7 +1117,7 @@ fn applyAclProjection(allocator: Allocator, db: *SqliteDb, event_hash: []const u
         defer allocator.free(existing_role);
         if (!std.mem.eql(u8, existing_role, role)) return "role_mismatch";
         if (std.mem.eql(u8, principal, envelope.actor_principal) and std.mem.eql(u8, role, "owner")) {
-            const owners = try countCurrentOwners(db);
+            const owners = try countOwnersAtFrontier(allocator, db, event_hash);
             if (owners <= 1) return "last_owner";
         }
         try insertAclHistory(db, principal, role, event_hash, envelope.event_type);
@@ -1253,6 +1339,21 @@ pub fn countCurrentOwners(db: *SqliteDb) !usize {
     if (!(try stmt.step())) return 0;
     const count = stmt.columnInt64(0);
     return if (count <= 0) 0 else @as(usize, @intCast(count));
+}
+
+fn countOwnersAtFrontier(allocator: Allocator, db: *SqliteDb, event_hash: []const u8) !usize {
+    var stmt = try db.prepare("SELECT DISTINCT principal FROM acl_role_events");
+    defer stmt.deinit();
+
+    var count: usize = 0;
+    while (try stmt.step()) {
+        const principal = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(principal);
+        const role = try aclRoleAtFrontier(allocator, db, principal, event_hash);
+        defer if (role) |value| allocator.free(value);
+        if (role != null and std.mem.eql(u8, role.?, "owner")) count += 1;
+    }
+    return count;
 }
 
 fn upsertDelegation(
@@ -1790,13 +1891,63 @@ fn testEnvelopeForEventType(allocator: Allocator, event_type: []const u8) !Valid
     return testEnvelopeForObjectEventType(allocator, event_type, "pull", "pull-1");
 }
 
+test "open access still requires actor device binding" {
+    const allocator = std.testing.allocator;
+    var db = try SqliteDb.open(allocator, ":memory:", sqlite_db.sqlite.SQLITE_OPEN_READWRITE | sqlite_db.sqlite.SQLITE_OPEN_CREATE, true);
+    defer db.deinit();
+    try index_schema.createIndexSchema(&db);
+    try db.exec("INSERT INTO meta(key, value) VALUES ('access_mode', 'open')");
+
+    var envelope = try testEnvelopeForObjectEventType(allocator, "issue.opened", "issue", "018f0000-0000-7000-8000-000000000100");
+    defer envelope.deinit();
+
+    const rejection = try authorizationRejection(allocator, &db, "fake-event-hash", envelope, "{\"payload\":{\"title\":\"Smoke\"}}");
+    try std.testing.expect(rejection != null);
+    try std.testing.expectEqualStrings("unauthorized_device", rejection.?);
+}
+
+test "open access self-registration fingerprint requires matching actor" {
+    const allocator = std.testing.allocator;
+    var envelope = try testEnvelopeForObjectEventType(allocator, "identity.device_added", "identity", "identity-1");
+    defer envelope.deinit();
+
+    const body =
+        \\{
+        \\  "payload": {
+        \\    "principal": "alice",
+        \\    "device": "laptop",
+        \\    "signing_key": {
+        \\      "fingerprint": "SHA256:alice",
+        \\      "public_key": "ssh-ed25519 AAAA"
+        \\    }
+        \\  }
+        \\}
+    ;
+    const fingerprint = (try selfRegistrationFingerprint(allocator, envelope, body)) orelse return error.TestExpectedEqual;
+    defer allocator.free(fingerprint);
+    try std.testing.expectEqualStrings("SHA256:alice", fingerprint);
+
+    const mismatched_body =
+        \\{
+        \\  "payload": {
+        \\    "principal": "bob",
+        \\    "device": "laptop",
+        \\    "signing_key": {
+        \\      "fingerprint": "SHA256:bob",
+        \\      "public_key": "ssh-ed25519 AAAA"
+        \\    }
+        \\  }
+        \\}
+    ;
+    try std.testing.expect((try selfRegistrationFingerprint(allocator, envelope, mismatched_body)) == null);
+}
+
 test "project field key collision is domain rejected" {
     const allocator = std.testing.allocator;
     var db = try SqliteDb.open(allocator, ":memory:", sqlite_db.sqlite.SQLITE_OPEN_READWRITE | sqlite_db.sqlite.SQLITE_OPEN_CREATE, true);
     defer db.deinit();
     try index_schema.createIndexSchema(&db);
     try db.exec(
-        \\INSERT INTO meta(key, value) VALUES ('access_mode', 'open');
         \\INSERT INTO projects(
         \\  id, name, slug, name_occurred_at, name_actor_principal, name_event_hash,
         \\  description, description_occurred_at, description_actor_principal, description_event_hash,
@@ -1808,6 +1959,16 @@ test "project field key collision is domain rejected" {
         \\  '', '2026-05-16T00:00:00Z', 'alice', '',
         \\  'open', '2026-05-16T00:00:00Z', 'alice', '',
         \\  '2026-05-16T00:00:00Z', 'alice', 'laptop'
+        \\);
+        \\INSERT INTO events(
+        \\  ref, "commit", event_hash, tree, subject, body, empty_tree, valid_json,
+        \\  event_type, object_kind, object_id, actor_principal, actor_device, seq, occurred_at,
+        \\  domain_status, rejection_reason
+        \\) VALUES (
+        \\  'refs/gitomi/inbox/alice/laptop', '', '', '', 'project.created',
+        \\  '{}', 1, 1, 'project.created', 'project',
+        \\  '018f0000-0000-7000-8000-000000000100', 'alice', 'laptop', 1,
+        \\  '2026-05-16T00:00:00Z', 'accepted', ''
         \\);
         \\INSERT INTO project_fields(
         \\  id, project_id, key, name, field_type, position, required, default_value_json,
@@ -1857,11 +2018,11 @@ test "project field key collision is domain rejected" {
         \\  }
         \\}
     ;
-    try insertPendingTestEvent(&db, "update-event", body);
-
-    try projectStoredEvent(allocator, &db, "update-event", body, false);
-
-    try expectDomainRejection(allocator, &db, "update-event", "duplicate_project_field_key");
+    var envelope = try parseValidatedEnvelope(allocator, body);
+    defer envelope.deinit();
+    const rejection = try projection_objects.applyProjectProjection(allocator, &db, "update-event", envelope, body);
+    try std.testing.expect(rejection != null);
+    try std.testing.expectEqualStrings("duplicate_project_field_key", rejection.?);
     try expectProjectFieldKey(allocator, &db, "018f0000-0000-7000-8000-000000000101", "priority");
 }
 
@@ -1939,8 +2100,8 @@ test "pull opened metadata collections require maintainer role" {
     var db = try SqliteDb.open(allocator, ":memory:", sqlite_db.sqlite.SQLITE_OPEN_READWRITE | sqlite_db.sqlite.SQLITE_OPEN_CREATE, true);
     defer db.deinit();
 
-    try std.testing.expectEqualStrings("insufficient_role", (try eventAuthorizationRejection(allocator, &db, "contributor", envelope, payload)).?);
-    try std.testing.expect((try eventAuthorizationRejection(allocator, &db, "maintainer", envelope, payload)) == null);
+    try std.testing.expectEqualStrings("insufficient_role", (try eventAuthorizationRejection(allocator, &db, "contributor", envelope, payload, null)).?);
+    try std.testing.expect((try eventAuthorizationRejection(allocator, &db, "maintainer", envelope, payload, null)) == null);
 }
 
 test "pull opened without metadata collections remains contributor allowed" {
@@ -1965,7 +2126,53 @@ test "pull opened without metadata collections remains contributor allowed" {
     var db = try SqliteDb.open(allocator, ":memory:", sqlite_db.sqlite.SQLITE_OPEN_READWRITE | sqlite_db.sqlite.SQLITE_OPEN_CREATE, true);
     defer db.deinit();
 
-    try std.testing.expect((try eventAuthorizationRejection(allocator, &db, "contributor", envelope, payload)) == null);
+    try std.testing.expect((try eventAuthorizationRejection(allocator, &db, "contributor", envelope, payload, null)) == null);
+}
+
+test "own object authorization uses accepted creation events, not projection rows" {
+    const allocator = std.testing.allocator;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator,
+        \\{
+        \\  "title": "Updated"
+        \\}
+    , .{});
+    defer parsed.deinit();
+    const payload = switch (parsed.value) {
+        .object => |object| object,
+        else => unreachable,
+    };
+
+    var db = try SqliteDb.open(allocator, ":memory:", sqlite_db.sqlite.SQLITE_OPEN_READWRITE | sqlite_db.sqlite.SQLITE_OPEN_CREATE, true);
+    defer db.deinit();
+    try index_schema.createIndexSchema(&db);
+    try db.exec(
+        \\INSERT INTO issues(
+        \\  id,
+        \\  title, title_occurred_at, title_actor_principal, title_event_hash,
+        \\  body, body_occurred_at, body_actor_principal, body_event_hash,
+        \\  state, state_occurred_at, state_actor_principal, state_event_hash,
+        \\  opened_at, author_principal, author_device
+        \\) VALUES (
+        \\  'issue-1',
+        \\  'Old', '2026-05-16T00:00:00Z', 'alice', '',
+        \\  '', '2026-05-16T00:00:00Z', 'alice', '',
+        \\  'open', '2026-05-16T00:00:00Z', 'alice', '',
+        \\  '2026-05-16T00:00:00Z', 'alice', 'laptop'
+        \\);
+    );
+
+    var envelope = try testEnvelopeForObjectEventType(allocator, "issue.title_set", "issue", "issue-1");
+    defer envelope.deinit();
+    try std.testing.expectEqualStrings("insufficient_role", (try eventAuthorizationRejection(allocator, &db, "contributor", envelope, payload, null)).?);
+
+    try insertAcceptedCreationEvent(&db, "", "issue.opened", "issue", "issue-1", "alice", "laptop");
+    try std.testing.expect((try eventAuthorizationRejection(allocator, &db, "contributor", envelope, payload, null)) == null);
+
+    var bob_envelope = try testEnvelopeForObjectEventType(allocator, "issue.title_set", "issue", "issue-1");
+    defer bob_envelope.deinit();
+    allocator.free(bob_envelope.actor_principal);
+    bob_envelope.actor_principal = try allocator.dupe(u8, "bob");
+    try std.testing.expectEqualStrings("insufficient_role", (try eventAuthorizationRejection(allocator, &db, "contributor", bob_envelope, payload, null)).?);
 }
 
 test "issue project field updates require maintainer role" {
@@ -1992,9 +2199,46 @@ test "issue project field updates require maintainer role" {
     inline for (.{ "issue.project_field_set", "issue.project_field_cleared" }) |event_type| {
         const envelope = try testEnvelopeForObjectEventType(allocator, event_type, "issue", "issue-1");
         defer envelope.deinit();
-        try std.testing.expectEqualStrings("insufficient_role", (try eventAuthorizationRejection(allocator, &db, "contributor", envelope, payload)).?);
-        try std.testing.expect((try eventAuthorizationRejection(allocator, &db, "maintainer", envelope, payload)) == null);
+        try std.testing.expectEqualStrings("insufficient_role", (try eventAuthorizationRejection(allocator, &db, "contributor", envelope, payload, null)).?);
+        try std.testing.expect((try eventAuthorizationRejection(allocator, &db, "maintainer", envelope, payload, null)) == null);
     }
+}
+
+fn insertAcceptedCreationEvent(
+    db: *SqliteDb,
+    event_hash: []const u8,
+    event_type: []const u8,
+    object_kind: []const u8,
+    object_id: []const u8,
+    actor_principal: []const u8,
+    actor_device: []const u8,
+) !void {
+    var stmt = try db.prepare(
+        \\INSERT INTO events(
+        \\  ref, "commit", event_hash, tree, subject, body, empty_tree, valid_json,
+        \\  event_type, object_kind, object_id, actor_principal, actor_device, seq, occurred_at,
+        \\  domain_status, rejection_reason
+        \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, "refs/gitomi/inbox/alice/laptop");
+    try stmt.bindText(2, event_hash);
+    try stmt.bindText(3, event_hash);
+    try stmt.bindText(4, "");
+    try stmt.bindText(5, event_type);
+    try stmt.bindText(6, "{}");
+    try stmt.bindInt(7, 0);
+    try stmt.bindInt(8, 1);
+    try stmt.bindText(9, event_type);
+    try stmt.bindText(10, object_kind);
+    try stmt.bindText(11, object_id);
+    try stmt.bindText(12, actor_principal);
+    try stmt.bindText(13, actor_device);
+    try stmt.bindInt64(14, 1);
+    try stmt.bindText(15, "2026-05-16T00:00:00Z");
+    try stmt.bindText(16, "accepted");
+    try stmt.bindText(17, "");
+    try stmt.stepDone();
 }
 
 test "data commit reference parser extracts unique typed hash and legacy refs" {
