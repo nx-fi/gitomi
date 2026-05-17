@@ -769,20 +769,18 @@ fn sortRefRows(rows: []RefRow, sort: RefSort) void {
 }
 
 fn branchAwareRefOrder(lhs: RefRow, rhs: RefRow) std.math.Order {
-    const lhs_key = refSortKey(lhs.ref);
-    const rhs_key = refSortKey(rhs.ref);
-    const key_order = std.mem.order(u8, lhs_key, rhs_key);
-    if (key_order != .eq) return key_order;
+    const lhs_branch = branchPairName(lhs.ref);
+    const rhs_branch = branchPairName(rhs.ref);
+    if (lhs_branch != null and rhs_branch != null) {
+        const key_order = std.mem.order(u8, lhs_branch.?, rhs_branch.?);
+        if (key_order != .eq) return key_order;
 
-    const lhs_rank = refPairRank(lhs.ref);
-    const rhs_rank = refPairRank(rhs.ref);
-    if (lhs_rank != rhs_rank) return if (lhs_rank < rhs_rank) .lt else .gt;
+        const lhs_rank = refPairRank(lhs.ref);
+        const rhs_rank = refPairRank(rhs.ref);
+        if (lhs_rank != rhs_rank) return if (lhs_rank < rhs_rank) .lt else .gt;
+    }
 
     return std.mem.order(u8, lhs.ref, rhs.ref);
-}
-
-fn refSortKey(ref: []const u8) []const u8 {
-    return branchPairName(ref) orelse ref;
 }
 
 fn refPairRank(ref: []const u8) u8 {

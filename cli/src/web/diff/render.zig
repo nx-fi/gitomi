@@ -202,7 +202,7 @@ test "web diff renderer renders line classes" {
     try append(
         &buf,
         std.testing.allocator,
-        "diff --git a/a.zig b/a.zig\n@@ -1 +1 @@\n-old\n+new\n",
+        "diff --git a/a.zig b/a.zig\n@@ -2 +2 @@\n-old\n+new\n",
         .{
             .empty_message = "This commit does not contain a patch to display.",
             .expand = .{ .commit_hash = "abc123", .context = 3 },
@@ -212,9 +212,9 @@ test "web diff renderer renders line classes" {
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "diff-row hunk") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "diff-row del") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "diff-row add") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "diff-num old\">1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "diff-num new\">1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "diff-num old\">2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "diff-num new\">2") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "id=\"diff-file-0\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-diff-row data-diff-kind=\"del\" data-diff-old=\"1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-diff-row data-diff-kind=\"del\" data-diff-old=\"2\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-diff-expand href=\"/commit?sha=abc123&amp;context=12#diff-file-0\"") != null);
 }

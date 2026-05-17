@@ -106,6 +106,11 @@
     return Number.isFinite(value) ? value : 0;
   }
 
+  function labelRowOrder(row) {
+    const value = Number(row.dataset.labelOrder || "0");
+    return Number.isFinite(value) ? value : 0;
+  }
+
   function initLabelsPage() {
     document.querySelectorAll("[data-labels-page]").forEach(function (page) {
       if (page.dataset.labelsReady === "yes") return;
@@ -119,6 +124,8 @@
       const sortLabel = page.querySelector("[data-label-sort-label]");
       const sortButtons = Array.from(page.querySelectorAll("[data-label-sort]"));
       const rows = Array.from(page.querySelectorAll("[data-label-row]"));
+      const csrfField = page.dataset.labelCsrfField || "_csrf";
+      const csrfToken = page.dataset.labelCsrf || "";
       const dialog = page.querySelector("[data-label-dialog]");
       const dialogTitle = dialog ? dialog.querySelector("[data-label-dialog-title]") : null;
       const dialogAction = dialog ? dialog.querySelector("[data-label-dialog-action]") : null;
@@ -129,7 +136,8 @@
       const dialogPreview = dialog ? dialog.querySelector("[data-label-dialog-preview]") : null;
       const dialogSubmit = dialog ? dialog.querySelector("[data-label-dialog-submit]") : null;
       const labelColors = ["#0075ca", "#d73a4a", "#a2eeef", "#7057ff", "#008672", "#e4e669", "#d876e3", "#b60205", "#0e8a16", "#fbca04", "#5319e7", "#cfd3d7"];
-      let sortMode = "name";
+      let sortMode = "manual";
+      let draggedRow = null;
 
       function setSelectedSort() {
         sortButtons.forEach(function (button) {
@@ -141,6 +149,10 @@
       }
 
       function compareRows(left, right) {
+        if (sortMode === "manual") {
+          const orderDiff = labelRowOrder(left) - labelRowOrder(right);
+          if (orderDiff !== 0) return orderDiff;
+        }
         if (sortMode === "usage") {
           const usageDiff = labelRowTotal(right) - labelRowTotal(left);
           if (usageDiff !== 0) return usageDiff;
@@ -148,8 +160,19 @@
         return labelRowName(left).localeCompare(labelRowName(right));
       }
 
+      function labelSearchQuery() {
+        return search ? search.value.trim().toLocaleLowerCase() : "";
+      }
+
+      function updateDragHandles(query) {
+        rows.forEach(function (row) {
+          const handle = row.querySelector("[data-label-drag-handle]");
+          if (handle) handle.draggable = query.length === 0;
+        });
+      }
+
       function applyLabelsView() {
-        const query = search ? search.value.trim().toLocaleLowerCase() : "";
+        const query = labelSearchQuery();
         const visibleRows = [];
         rows.forEach(function (row) {
           const text = (row.dataset.labelSearchText || "").toLocaleLowerCase();
@@ -163,6 +186,42 @@
         if (visibleCount) visibleCount.textContent = String(visibleRows.length);
         if (countWord) countWord.textContent = visibleRows.length === 1 ? "label" : "labels";
         if (empty) empty.hidden = rows.length === 0 || visibleRows.length !== 0;
+        updateDragHandles(query);
+      }
+
+      function setManualSort() {
+        sortMode = "manual";
+        setSelectedSort();
+      }
+
+      function updateLabelOrderFromDom() {
+        if (!list) return;
+        Array.from(list.querySelectorAll("[data-label-row]")).forEach(function (row, index) {
+          row.dataset.labelOrder = String(index);
+        });
+      }
+
+      function persistLabelOrder() {
+        if (!list || !window.fetch || !csrfToken) return;
+        const params = new URLSearchParams();
+        params.set(csrfField, csrfToken);
+        params.set("action", "reorder");
+        params.set("order", Array.from(list.querySelectorAll("[data-label-row]")).map(function (row) {
+          return row.dataset.labelName || "";
+        }).filter(Boolean).join("\n"));
+        fetch("/labels", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: params.toString()
+        }).catch(function () {});
+      }
+
+      function moveDraggedRow(targetRow, clientY) {
+        if (!list || !draggedRow || !targetRow || targetRow === draggedRow) return;
+        const rect = targetRow.getBoundingClientRect();
+        const after = clientY > rect.top + rect.height / 2;
+        list.insertBefore(draggedRow, after ? targetRow.nextSibling : targetRow);
       }
 
       function normalizedColor(value) {
@@ -253,6 +312,47 @@
         }
       });
 
+      page.addEventListener("dragstart", function (event) {
+        const handle = event.target.closest("[data-label-drag-handle]");
+        if (!handle || !page.contains(handle) || labelSearchQuery().length !== 0) {
+          event.preventDefault();
+          return;
+        }
+        draggedRow = handle.closest("[data-label-row]");
+        if (!draggedRow) return;
+        setManualSort();
+        draggedRow.classList.add("is-dragging");
+        if (event.dataTransfer) {
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", draggedRow.dataset.labelName || "");
+        }
+      });
+
+      page.addEventListener("dragover", function (event) {
+        if (!draggedRow) return;
+        const targetRow = event.target.closest("[data-label-row]");
+        if (!targetRow || !page.contains(targetRow) || targetRow.hidden) return;
+        event.preventDefault();
+        moveDraggedRow(targetRow, event.clientY);
+      });
+
+      page.addEventListener("drop", function (event) {
+        if (!draggedRow) return;
+        event.preventDefault();
+        updateLabelOrderFromDom();
+        persistLabelOrder();
+        draggedRow.classList.remove("is-dragging");
+        draggedRow = null;
+      });
+
+      page.addEventListener("dragend", function () {
+        if (!draggedRow) return;
+        updateLabelOrderFromDom();
+        persistLabelOrder();
+        draggedRow.classList.remove("is-dragging");
+        draggedRow = null;
+      });
+
       if (dialogName) dialogName.addEventListener("input", setDialogPreview);
       if (dialogColor) dialogColor.addEventListener("input", setDialogPreview);
       page.addEventListener("keydown", function (event) {
@@ -267,7 +367,7 @@
       }
       sortButtons.forEach(function (button) {
         button.addEventListener("click", function () {
-          sortMode = button.dataset.labelSort || "name";
+          sortMode = button.dataset.labelSort || "manual";
           setSelectedSort();
           applyLabelsView();
           const menu = button.closest("details");

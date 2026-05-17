@@ -21,13 +21,14 @@ pub fn append(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issu
     while (try stmt.step()) {
         const row = try work_items.timelineEventFromStmt(allocator, &stmt);
         defer row.deinit(allocator);
-        try appendEvent(buf, allocator, row.event_type, row.actor_principal, row.occurred_at, row.body, row.event_hash);
+        try appendEvent(buf, allocator, db, row.event_type, row.actor_principal, row.occurred_at, row.body, row.event_hash);
     }
 }
 
 fn appendEvent(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
+    db: *SqliteDb,
     event_type: []const u8,
     actor: []const u8,
     occurred_at: []const u8,
@@ -45,7 +46,7 @@ fn appendEvent(
         .actor = actor,
     });
     try buf.append(allocator, ' ');
-    try appendMessage(buf, allocator, event_type, body);
+    try appendMessage(buf, allocator, db, event_type, body);
     try buf.append(allocator, ' ');
     try appendRelativeTime(buf, allocator, occurred_at);
     try buf.appendSlice(allocator, "</div></div>");
@@ -73,6 +74,7 @@ fn eventIcon(event_type: []const u8, body: []const u8) []const u8 {
 fn appendMessage(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
+    db: *SqliteDb,
     event_type: []const u8,
     body: []const u8,
 ) !void {
@@ -106,10 +108,10 @@ fn appendMessage(
         });
     } else if (std.mem.eql(u8, event_type, "issue.label_added")) {
         try buf.appendSlice(allocator, "added ");
-        try appendLabel(buf, allocator, event_mod.jsonString(payload.get("label")) orelse "label");
+        try appendLabel(buf, allocator, db, event_mod.jsonString(payload.get("label")) orelse "label");
     } else if (std.mem.eql(u8, event_type, "issue.label_removed")) {
         try buf.appendSlice(allocator, "removed ");
-        try appendLabel(buf, allocator, event_mod.jsonString(payload.get("label")) orelse "label");
+        try appendLabel(buf, allocator, db, event_mod.jsonString(payload.get("label")) orelse "label");
     } else if (std.mem.eql(u8, event_type, "issue.assignee_added")) {
         try appendTemplate(buf, allocator, "assigned <span class=\"issue-event-value\">{assignee}</span>", .{
             .assignee = event_mod.jsonString(payload.get("assignee")) orelse "someone",
@@ -131,7 +133,7 @@ fn appendMessage(
             .column = event_mod.jsonString(payload.get("column")) orelse "",
         });
     } else if (std.mem.eql(u8, event_type, "issue.updated")) {
-        try appendUpdatedMessage(buf, allocator, payload);
+        try appendUpdatedMessage(buf, allocator, db, payload);
     } else {
         try appendTemplate(buf, allocator, "recorded <code>{event_type}</code>", .{ .event_type = event_type });
     }
@@ -191,7 +193,7 @@ fn appendProjectMessage(
     try buf.appendSlice(allocator, "</span>");
 }
 
-fn appendUpdatedMessage(buf: *std.ArrayList(u8), allocator: Allocator, payload: std.json.ObjectMap) !void {
+fn appendUpdatedMessage(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, payload: std.json.ObjectMap) !void {
     if (event_mod.jsonString(payload.get("state"))) |state| {
         try appendStateMessage(buf, allocator, state);
     } else if (event_mod.jsonString(payload.get("milestone"))) |milestone| {
@@ -204,10 +206,10 @@ fn appendUpdatedMessage(buf: *std.ArrayList(u8), allocator: Allocator, payload: 
         try appendTemplate(buf, allocator, "set status to <span class=\"issue-event-value\">{status}</span>", .{ .status = status });
     } else if (firstStringFromJsonArray(payload, "labels_added")) |label| {
         try buf.appendSlice(allocator, "added ");
-        try appendLabel(buf, allocator, label);
+        try appendLabel(buf, allocator, db, label);
     } else if (firstStringFromJsonArray(payload, "labels_removed")) |label| {
         try buf.appendSlice(allocator, "removed ");
-        try appendLabel(buf, allocator, label);
+        try appendLabel(buf, allocator, db, label);
     } else if (firstStringFromJsonArray(payload, "assignees_added")) |assignee| {
         try appendTemplate(buf, allocator, "assigned <span class=\"issue-event-value\">{assignee}</span>", .{ .assignee = assignee });
     } else if (firstStringFromJsonArray(payload, "assignees_removed")) |assignee| {
@@ -261,13 +263,41 @@ fn firstProjectFromJsonArray(payload: std.json.ObjectMap, key: []const u8) ?Issu
     return null;
 }
 
-fn appendLabel(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8) !void {
+fn appendLabel(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, label: []const u8) !void {
+    const color = try labelColorOwned(allocator, db, label);
+    defer allocator.free(color);
+    if (validHexColor(color)) {
+        try appendTemplate(buf, allocator,
+            \\<span class="issue-label label-custom" style="--label-color: {color}">{label}</span>
+        , .{
+            .color = color,
+            .label = label,
+        });
+        return;
+    }
+
     try appendTemplate(buf, allocator,
         \\<span class="issue-label {kind}">{label}</span>
     , .{
         .kind = labelKind(label),
         .label = label,
     });
+}
+
+fn labelColorOwned(allocator: Allocator, db: *SqliteDb, label: []const u8) ![]u8 {
+    var stmt = try db.prepare("SELECT color FROM label_definitions WHERE name = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, label);
+    if (!(try stmt.step())) return try allocator.dupe(u8, "");
+    return try stmt.columnTextDup(allocator, 0);
+}
+
+fn validHexColor(value: []const u8) bool {
+    if (value.len != 7 or value[0] != '#') return false;
+    for (value[1..]) |c| {
+        if (!std.ascii.isHex(c)) return false;
+    }
+    return true;
 }
 
 fn labelKind(label: []const u8) []const u8 {

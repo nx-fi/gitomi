@@ -703,20 +703,20 @@ test "web commits renders diff line classes" {
         std.testing.allocator,
         "abc123",
         3,
-        "diff --git a/a.zig b/a.zig\n@@ -1 +1 @@\n-old\n+new\n",
+        "diff --git a/a.zig b/a.zig\n@@ -2 +2 @@\n-old\n+new\n",
     );
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "diff-file") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "diff-row hunk") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "diff-row del") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "diff-row add") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "diff-num old\">1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "diff-num new\">1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "diff-num old\">2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "diff-num new\">2") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "id=\"diff-file-0\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-diff-row data-diff-kind=\"del\" data-diff-old=\"1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-diff-row data-diff-kind=\"del\" data-diff-old=\"2\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-diff-expand href=\"/commit?sha=abc123&amp;context=12#diff-file-0\"") != null);
 }
 
-test "web commits row links subject to commit and code icon to tree" {
+test "web commits row links subject text to commit and references to work items" {
     const allocator = std.testing.allocator;
     var commit = CommitListEntry{
         .full_hash = try allocator.dupe(u8, "abc123def456"),
@@ -732,9 +732,11 @@ test "web commits row links subject to commit and code icon to tree" {
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
-    try appendCommitRow(&buf, allocator, commit);
+    var reference_resolver = shared.InternalReferenceResolver{ .allocator = allocator };
+    defer reference_resolver.deinit();
+    try appendCommitRow(&buf, allocator, &reference_resolver, commit);
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<a class=\"commit-title\" href=\"/commit?sha=abc123def456\">Fix #42 &lt;escape&gt;</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<span class=\"commit-title\"><a href=\"/commit?sha=abc123def456\">Fix </a><a href=\"/issues/42\">#42</a><a href=\"/commit?sha=abc123def456\"> &lt;escape&gt;</a></span>") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<a class=\"commit-icon-action\" href=\"/code?ref=abc123def456\" aria-label=\"Browse code at commit\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues/42\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues/42\"") != null);
 }

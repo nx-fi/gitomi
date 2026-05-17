@@ -769,7 +769,8 @@ pub fn applyLabelProjection(allocator: Allocator, db: *SqliteDb, event_hash: []c
         if (try labelNameInUse(db, name, null)) return "duplicate_label_name";
         const description = event_mod.jsonString(payload.get("description")) orelse "";
         const color = event_mod.jsonString(payload.get("color")) orelse "#6e7681";
-        try insertLabelCreated(db, event_hash, envelope, name, description, color);
+        const position = event_mod.jsonInteger(payload.get("position")) orelse 0;
+        try insertLabelCreated(db, event_hash, envelope, name, description, color, position);
         return null;
     }
 
@@ -786,6 +787,9 @@ pub fn applyLabelProjection(allocator: Allocator, db: *SqliteDb, event_hash: []c
         }
         if (event_mod.jsonString(payload.get("color"))) |color| {
             try updateLabelScalar(allocator, db, envelope.object_id, color, event_hash, envelope, "color", "color_occurred_at", "color_actor_principal", "color_event_hash");
+        }
+        if (event_mod.jsonInteger(payload.get("position"))) |position| {
+            try updateLabelIntegerScalar(allocator, db, envelope.object_id, position, event_hash, envelope, "position", "position_occurred_at", "position_actor_principal", "position_event_hash");
         }
     } else if (std.mem.eql(u8, envelope.event_type, "label.deleted")) {
         try deleteLabelDefinition(db, envelope.object_id);
@@ -868,15 +872,16 @@ fn updateProjectScalar(
     try update.stepDone();
 }
 
-fn insertLabelCreated(db: *SqliteDb, event_hash: []const u8, envelope: ValidatedEnvelope, name: []const u8, description: []const u8, color: []const u8) !void {
+fn insertLabelCreated(db: *SqliteDb, event_hash: []const u8, envelope: ValidatedEnvelope, name: []const u8, description: []const u8, color: []const u8, position: i64) !void {
     var stmt = try db.prepare(
         \\INSERT OR IGNORE INTO label_definitions(
         \\  id,
         \\  name, name_occurred_at, name_actor_principal, name_event_hash,
         \\  description, description_occurred_at, description_actor_principal, description_event_hash,
         \\  color, color_occurred_at, color_actor_principal, color_event_hash,
+        \\  position, position_occurred_at, position_actor_principal, position_event_hash,
         \\  created_at, author_principal, author_device
-        \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     );
     defer stmt.deinit();
     try stmt.bindText(1, envelope.object_id);
@@ -892,9 +897,13 @@ fn insertLabelCreated(db: *SqliteDb, event_hash: []const u8, envelope: Validated
     try stmt.bindText(11, envelope.occurred_at);
     try stmt.bindText(12, envelope.actor_principal);
     try stmt.bindText(13, event_hash);
-    try stmt.bindText(14, envelope.occurred_at);
-    try stmt.bindText(15, envelope.actor_principal);
-    try stmt.bindText(16, envelope.actor_device);
+    try stmt.bindInt64(14, position);
+    try stmt.bindText(15, envelope.occurred_at);
+    try stmt.bindText(16, envelope.actor_principal);
+    try stmt.bindText(17, event_hash);
+    try stmt.bindText(18, envelope.occurred_at);
+    try stmt.bindText(19, envelope.actor_principal);
+    try stmt.bindText(20, envelope.actor_device);
     try stmt.stepDone();
 }
 
@@ -949,6 +958,41 @@ fn updateLabelScalar(
     var update = try db.prepare("UPDATE label_definitions SET " ++ value_col ++ " = ?, " ++ occurred_at_col ++ " = ?, " ++ actor_col ++ " = ?, " ++ event_hash_col ++ " = ? WHERE id = ?");
     defer update.deinit();
     try update.bindText(1, value);
+    try update.bindText(2, envelope.occurred_at);
+    try update.bindText(3, envelope.actor_principal);
+    try update.bindText(4, event_hash);
+    try update.bindText(5, label_id);
+    try update.stepDone();
+}
+
+fn updateLabelIntegerScalar(
+    allocator: Allocator,
+    db: *SqliteDb,
+    label_id: []const u8,
+    value: i64,
+    event_hash: []const u8,
+    envelope: ValidatedEnvelope,
+    comptime value_col: []const u8,
+    comptime occurred_at_col: []const u8,
+    comptime actor_col: []const u8,
+    comptime event_hash_col: []const u8,
+) !void {
+    var select = try db.prepare("SELECT " ++ occurred_at_col ++ ", " ++ actor_col ++ ", " ++ event_hash_col ++ " FROM label_definitions WHERE id = ?");
+    defer select.deinit();
+    try select.bindText(1, label_id);
+    if (!(try select.step())) return;
+    const old_occurred_at = try select.columnTextDup(allocator, 0);
+    defer allocator.free(old_occurred_at);
+    const old_actor = try select.columnTextDup(allocator, 1);
+    defer allocator.free(old_actor);
+    const old_event_hash = try select.columnTextDup(allocator, 2);
+    defer allocator.free(old_event_hash);
+
+    if (!(try eventWins(allocator, event_hash, old_event_hash))) return;
+
+    var update = try db.prepare("UPDATE label_definitions SET " ++ value_col ++ " = ?, " ++ occurred_at_col ++ " = ?, " ++ actor_col ++ " = ?, " ++ event_hash_col ++ " = ? WHERE id = ?");
+    defer update.deinit();
+    try update.bindInt64(1, value);
     try update.bindText(2, envelope.occurred_at);
     try update.bindText(3, envelope.actor_principal);
     try update.bindText(4, event_hash);
