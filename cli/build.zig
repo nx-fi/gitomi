@@ -75,6 +75,7 @@ fn addSqlite(module: *std.Build.Module, sqlite_dep: *std.Build.Dependency) void 
         .file = sqlite_dep.path("sqlite3.c"),
         .flags = &.{
             "-DSQLITE_THREADSAFE=1",
+            "-DSQLITE_ENABLE_FTS5",
             "-DSQLITE_OMIT_LOAD_EXTENSION",
             "-DSQLITE_DQS=0",
             "-DSQLITE_DEFAULT_MEMSTATUS=0",

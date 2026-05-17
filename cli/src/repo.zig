@@ -45,6 +45,7 @@ pub const Repo = struct {
     config_path: []u8,
     index_path: []u8,
     cursors_path: []u8,
+    settings_path: []u8,
 
     pub fn deinit(self: *Repo) void {
         self.allocator.free(self.root);
@@ -53,6 +54,7 @@ pub const Repo = struct {
         self.allocator.free(self.config_path);
         self.allocator.free(self.index_path);
         self.allocator.free(self.cursors_path);
+        self.allocator.free(self.settings_path);
     }
 };
 
@@ -135,6 +137,8 @@ pub fn discoverRepo(allocator: Allocator) !Repo {
     errdefer allocator.free(index_path);
     const cursors_path = try std.fs.path.join(allocator, &.{ gitomi_dir, "cursors.sqlite" });
     errdefer allocator.free(cursors_path);
+    const settings_path = try std.fs.path.join(allocator, &.{ gitomi_dir, "settings.sqlite" });
+    errdefer allocator.free(settings_path);
 
     return .{
         .allocator = allocator,
@@ -144,6 +148,7 @@ pub fn discoverRepo(allocator: Allocator) !Repo {
         .config_path = config_path,
         .index_path = index_path,
         .cursors_path = cursors_path,
+        .settings_path = settings_path,
     };
 }
 

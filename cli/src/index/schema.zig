@@ -1,3 +1,4 @@
+const std = @import("std");
 const sqlite_db = @import("sqlite_db.zig");
 
 const SqliteDb = sqlite_db.SqliteDb;
@@ -397,6 +398,30 @@ pub fn createIndexSchema(db: *SqliteDb) !void {
         \\  PRIMARY KEY(commit_oid, object_kind, object_id)
         \\);
         \\CREATE INDEX commit_references_object_idx ON commit_references(object_kind, object_id, commit_oid);
+        \\CREATE TABLE work_item_search_docs (
+        \\  rowid INTEGER PRIMARY KEY,
+        \\  object_kind TEXT NOT NULL,
+        \\  object_id TEXT NOT NULL,
+        \\  title TEXT NOT NULL,
+        \\  body TEXT NOT NULL,
+        \\  comments TEXT NOT NULL,
+        \\  labels TEXT NOT NULL,
+        \\  metadata TEXT NOT NULL,
+        \\  UNIQUE(object_kind, object_id)
+        \\);
+        \\CREATE VIRTUAL TABLE work_item_search USING fts5(
+        \\  object_kind UNINDEXED,
+        \\  object_id UNINDEXED,
+        \\  title,
+        \\  body,
+        \\  comments,
+        \\  labels,
+        \\  metadata,
+        \\  content='work_item_search_docs',
+        \\  content_rowid='rowid',
+        \\  tokenize='unicode61',
+        \\  prefix='2 3'
+        \\);
         \\CREATE TABLE legacy_aliases (
         \\  provider TEXT NOT NULL,
         \\  object_kind TEXT NOT NULL,
@@ -463,4 +488,27 @@ pub fn createIndexSchema(db: *SqliteDb) !void {
         \\);
         \\CREATE INDEX identity_device_events_device_idx ON identity_device_events(principal, device);
     );
+}
+
+test "index schema creates searchable work item FTS table" {
+    var db = try SqliteDb.openWithOptions(std.testing.allocator, ":memory:", sqlite_db.sqlite.SQLITE_OPEN_READWRITE | sqlite_db.sqlite.SQLITE_OPEN_CREATE, true, .{ .enable_wal = false });
+    defer db.deinit();
+
+    try createIndexSchema(&db);
+    try db.exec(
+        \\INSERT INTO work_item_search_docs(object_kind, object_id, title, body, comments, labels, metadata)
+        \\VALUES ('issue', 'issue-1', 'Hello local models', 'Body', '', 'ai', 'p1');
+        \\INSERT INTO work_item_search(work_item_search) VALUES('rebuild');
+    );
+
+    var stmt = try db.prepare(
+        \\SELECT object_id
+        \\FROM work_item_search
+        \\WHERE work_item_search MATCH 'local'
+    );
+    defer stmt.deinit();
+    try std.testing.expect(try stmt.step());
+    const object_id = try stmt.columnTextDup(std.testing.allocator, 0);
+    defer std.testing.allocator.free(object_id);
+    try std.testing.expectEqualStrings("issue-1", object_id);
 }

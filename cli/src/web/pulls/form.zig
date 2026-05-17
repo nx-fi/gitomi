@@ -38,7 +38,18 @@ pub fn renderPullForm(
         \\  <form method="post" action="/pulls" class="issue-form">
         \\    <input type="hidden" name="csrf_token" value="{csrf_token}">
         \\    <label>Title<input name="title" value="{title_value}" autofocus required></label>
-        \\    <label>Body<textarea name="body" rows="8">{body_value}</textarea></label>
+        \\    <label>Body</label>
+    , .{
+        .csrf_token = csrf_token,
+        .title_value = title_value,
+    });
+    try shared.appendMarkdownEditor(&buf, allocator, .{
+        .rows = 8,
+        .placeholder = "Describe the pull request",
+        .value = body_value,
+        .required = false,
+    });
+    try appendTemplate(&buf, allocator,
         \\    <div class="grid two">
         \\      <label>Base ref<input name="base" value="{base_value}" placeholder="main" required></label>
         \\      <label>Head ref<input name="head" value="{head_value}" placeholder="feature-branch" required></label>
@@ -51,9 +62,6 @@ pub fn renderPullForm(
         \\  </form>
         \\</section>
     , .{
-        .csrf_token = csrf_token,
-        .title_value = title_value,
-        .body_value = body_value,
         .base_value = base_value,
         .head_value = head_value,
         .draft_checked = if (draft) " checked" else "",

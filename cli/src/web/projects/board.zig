@@ -130,9 +130,6 @@ fn appendProjectColumn(
         \\            <input type="hidden" name="project" value="{project}">
         \\            <input type="hidden" name="view" value="{view}">
         \\            <label>Title<input name="title" required></label>
-        \\            <label>Body<textarea name="body" rows="4"></textarea></label>
-        \\            <div class="grid two">
-        \\              <label>Priority<select name="priority">
     , .{
         .tone = tone,
         .project = project,
@@ -142,6 +139,15 @@ fn appendProjectColumn(
         .count = count,
         .note = note,
     });
+    try shared.appendMarkdownEditor(buf, allocator, .{
+        .rows = 4,
+        .placeholder = "Describe the issue",
+        .required = false,
+    });
+    try buf.appendSlice(allocator,
+        \\            <div class="grid two">
+        \\              <label>Priority<select name="priority">
+    );
     try appendProjectPriorityOptions(buf, allocator, context.defaults.priority);
     try buf.appendSlice(allocator,
         \\              </select></label>

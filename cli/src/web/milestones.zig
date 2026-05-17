@@ -215,14 +215,19 @@ fn renderMilestoneForm(
         \\">
         \\  <input type="hidden" name="action" value="{action}">
         \\  <label>Title<input name="title" value="{title_value}" required autofocus></label>
-        \\  <label>Description<textarea name="description" rows="5">{description_value}</textarea></label>
-        \\  <label>Due date<input name="due_at" value="{due_at_value}" placeholder="2026-06-30"></label>
     , .{
         .action = if (editing) "update" else "create",
         .title_value = title_value,
-        .description_value = description_value,
-        .due_at_value = due_at_value,
     });
+    try shared.appendDictationTextarea(&buf, allocator, .{
+        .label = "Description",
+        .name = "description",
+        .rows = 5,
+        .value = description_value,
+    });
+    try appendTemplate(&buf, allocator,
+        \\  <label>Due date<input name="due_at" value="{due_at_value}" placeholder="2026-06-30"></label>
+    , .{ .due_at_value = due_at_value });
     if (editing) {
         try buf.appendSlice(allocator, "<label>State<select name=\"state\">");
         try appendStateOption(&buf, allocator, "open", state_value);

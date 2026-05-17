@@ -1,6 +1,7 @@
 const std = @import("std");
 const errors = @import("../errors.zig");
 const git = @import("../git.zig");
+const github_live = @import("../providers/github/live.zig");
 const index = @import("../index.zig");
 const json_writer = @import("../json_writer.zig");
 const repo_mod = @import("../repo.zig");
@@ -23,7 +24,7 @@ const loadConfig = repo_mod.loadConfig;
 const default_web_shortcut_leader = "Space";
 const default_web_shortcut_keys = "A S D F J K L E R U I O W Q P Z X C V B N M G H Y T";
 const default_web_shortcut_timeout_ms: u64 = 900;
-const asset_version = "20260517-label-order-task-progress-back-nav-colors-identity-avatars-project-select-rbac-role";
+const asset_version = "20260517-topbar-sync-live-mode-dictation";
 
 const WebStats = struct {
     inbox_refs: usize = 0,
@@ -727,6 +728,8 @@ fn appendShellStartWithOptions(
         \\  </nav>
         \\  <div class="topbar-actions">
     );
+    try appendLiveModeControl(buf, allocator, github_live.runtimeStatus());
+    try appendTopbarSyncMenu(buf, allocator);
     try appendTemplate(buf, allocator,
         \\  <button class="theme-toggle" type="button" data-theme-toggle aria-pressed="false" aria-label="Toggle dark mode" title="Toggle dark mode">
         \\    <span class="button-icon theme-toggle-icon theme-toggle-icon-light icon-sun" aria-hidden="true"></span>
@@ -750,6 +753,53 @@ fn appendShellStartWithOptions(
             \\</section>
         );
     }
+}
+
+fn appendTopbarSyncMenu(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try appendTemplate(buf, allocator,
+        \\<details class="topbar-sync-menu" data-popover-menu>
+        \\  <summary class="topbar-sync-button" title="Sync Gitomi refs with origin"><span class="button-icon icon-sync" aria-hidden="true"></span><span class="topbar-sync-label">Sync refs</span><span class="root-caret" aria-hidden="true"></span></summary>
+        \\  <form class="root-action-popover root-sync-popover topbar-sync-popover" method="post" action="/code/sync" role="menu">
+        \\    <button type="submit" name="action" value="exchange" role="menuitem">Exchange Gitomi refs</button>
+        \\    <button type="submit" name="action" value="import" role="menuitem">Import remote Gitomi refs</button>
+        \\    <button type="submit" name="action" value="publish" role="menuitem">Publish local Gitomi refs</button>
+        \\    <button type="submit" name="action" value="prune" role="menuitem">Prune deleted remote branches</button>
+        \\  </form>
+        \\</details>
+    , .{});
+}
+
+fn appendLiveModeControl(buf: *std.ArrayList(u8), allocator: Allocator, status: github_live.RuntimeStatus) !void {
+    if (!status.available) {
+        try appendTemplate(buf, allocator,
+            \\<span class="live-mode-control unavailable" title="Start gt web with --live to enable live mode" aria-label="Live mode unavailable">
+            \\  <span class="live-mode-dot" aria-hidden="true"></span>
+            \\  <span class="live-mode-label">Live</span>
+            \\  <span class="live-mode-track" aria-hidden="true"><span class="live-mode-thumb"></span></span>
+            \\</span>
+        , .{});
+        return;
+    }
+
+    const next_value = if (status.active) "false" else "true";
+    const pressed = if (status.active) "true" else "false";
+    const state_class = if (status.active) "active" else "inactive";
+    const title = if (status.active) "Turn live mode off" else "Turn live mode on";
+    try appendTemplate(buf, allocator,
+        \\<form class="live-mode-control {state_class}" method="post" action="/live-mode" title="{title}">
+        \\  <input type="hidden" name="enabled" value="{next_value}">
+        \\  <button class="live-mode-switch" type="submit" aria-pressed="{pressed}" aria-label="{title}">
+        \\    <span class="live-mode-dot" aria-hidden="true"></span>
+        \\    <span class="live-mode-label">Live</span>
+        \\    <span class="live-mode-track" aria-hidden="true"><span class="live-mode-thumb"></span></span>
+        \\  </button>
+        \\</form>
+    , .{
+        .state_class = state_class,
+        .title = title,
+        .next_value = next_value,
+        .pressed = pressed,
+    });
 }
 
 fn appendUserMenu(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, cfg: Config, load_user_role: bool) !void {
@@ -959,6 +1009,7 @@ pub fn appendShellEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
         \\<script src="/vendor/katex/auto-render.min.js"></script>
         \\<script src="/vendor/mermaid/mermaid.min.js"></script>
         \\<script src="/markdown.js?v={asset_version}"></script>
+        \\<script src="/dictation.js?v={asset_version}"></script>
         \\<script src="/vendor/hljs/all-languages.min.js"></script>
         \\<script src="/highlight/zig.js?v={asset_version}"></script>
         \\<script src="/highlight/solidity.js?v={asset_version}"></script>
@@ -1015,7 +1066,7 @@ fn appendSettingsNavLink(buf: *std.ArrayList(u8), allocator: Allocator, active: 
 }
 
 fn isSettingsActive(active: []const u8) bool {
-    return std.mem.eql(u8, active, "events") or std.mem.eql(u8, active, "labels") or std.mem.eql(u8, active, "access");
+    return std.mem.eql(u8, active, "models") or std.mem.eql(u8, active, "events") or std.mem.eql(u8, active, "labels") or std.mem.eql(u8, active, "access");
 }
 
 pub fn appendSettingsLayoutStart(buf: *std.ArrayList(u8), allocator: Allocator, active: []const u8) !void {
@@ -1024,6 +1075,7 @@ pub fn appendSettingsLayoutStart(buf: *std.ArrayList(u8), allocator: Allocator, 
         \\  <aside class="project-page-sidebar settings-page-sidebar">
         \\    <nav class="project-page-tabs settings-page-tabs" aria-label="Settings sections">
     );
+    try appendSettingsTab(buf, allocator, active, "models", "/settings/models", "icon-models", "AI Models");
     try appendSettingsTab(buf, allocator, active, "events", "/events", "icon-history", "Activity");
     try appendSettingsTab(buf, allocator, active, "labels", "/labels", "icon-labels", "Labels");
     try appendSettingsTab(buf, allocator, active, "access", "/access", "icon-users", "Access");
@@ -1085,6 +1137,16 @@ pub const MarkdownEditorOptions = struct {
     placeholder: []const u8 = "Leave a comment",
     value: []const u8 = "",
     required: bool = true,
+    dictation: bool = true,
+};
+
+pub const DictationTextareaOptions = struct {
+    label: []const u8,
+    name: []const u8,
+    rows: usize,
+    value: []const u8 = "",
+    placeholder: []const u8 = "",
+    required: bool = false,
 };
 
 pub const MarkdownSourceOptions = struct {
@@ -1265,6 +1327,15 @@ pub fn appendMarkdownEditor(buf: *std.ArrayList(u8), allocator: Allocator, optio
         \\        <span class="markdown-editor-divider" aria-hidden="true"></span>
         \\        <button type="button" data-markdown-action="mention" aria-label="Mention" title="Mention">@</button>
         \\        <button type="button" data-markdown-action="reference" aria-label="Issue reference" title="Issue reference">#</button>
+    , .{});
+    if (options.dictation) {
+        try appendTemplate(buf, allocator,
+            \\        <span class="markdown-editor-divider" aria-hidden="true"></span>
+            \\        <button class="dictation-toggle" type="button" data-dictation-toggle aria-label="Start dictation" title="Start dictation"><span class="md-icon md-icon-mic" aria-hidden="true"></span></button>
+            \\        <span class="dictation-status" data-dictation-status hidden></span>
+        , .{});
+    }
+    try appendTemplate(buf, allocator,
         \\      </div>
         \\      <textarea name="{name}" rows="{rows}" placeholder="{placeholder}"
     , .{
@@ -1273,10 +1344,33 @@ pub fn appendMarkdownEditor(buf: *std.ArrayList(u8), allocator: Allocator, optio
         .placeholder = options.placeholder,
     });
     if (options.required) try buf.appendSlice(allocator, " required");
+    if (options.dictation) try buf.appendSlice(allocator, " data-dictation-input");
     try appendTemplate(buf, allocator,
         \\ data-markdown-input>{value}</textarea>
         \\      <div class="markdown-editor-preview markdown-body" data-markdown-preview hidden></div>
         \\    </div>
+    , .{ .value = options.value });
+}
+
+pub fn appendDictationTextarea(buf: *std.ArrayList(u8), allocator: Allocator, options: DictationTextareaOptions) !void {
+    try appendTemplate(buf, allocator,
+        \\  <label>{label}</label>
+        \\  <div class="text-block-editor" data-text-block-editor>
+        \\    <div class="text-block-toolbar">
+        \\      <button class="dictation-toggle" type="button" data-dictation-toggle aria-label="Start dictation" title="Start dictation"><span class="md-icon md-icon-mic" aria-hidden="true"></span></button>
+        \\      <span class="dictation-status" data-dictation-status hidden></span>
+        \\    </div>
+        \\    <textarea name="{name}" rows="{rows}" placeholder="{placeholder}" data-dictation-input
+    , .{
+        .label = options.label,
+        .name = options.name,
+        .rows = options.rows,
+        .placeholder = options.placeholder,
+    });
+    if (options.required) try buf.appendSlice(allocator, " required");
+    try appendTemplate(buf, allocator,
+        \\>{value}</textarea>
+        \\  </div>
     , .{ .value = options.value });
 }
 

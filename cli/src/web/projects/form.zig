@@ -507,18 +507,23 @@ fn appendProjectConfigForm(
         \\    <input type="hidden" name="template" value="{template_id}">
         \\    <input type="hidden" name="project_id" value="{project_id}">
         \\    <label>Name<input name="name" value="{name_value}" autofocus required></label>
-        \\    <label>Description<textarea name="description" rows="4">{description_value}</textarea></label>
-        \\    <label>Status values<input name="columns" value="{columns_value}" placeholder="Draft, Todo, WIP, Review, Done, Failed"></label>
-        \\    <div class="project-column-chips" aria-label="Template status values">
     , .{
         .title = selected_template.title,
         .description = selected_template.description,
         .template_id = selected_template.id,
         .project_id = project_id,
         .name_value = name_value,
-        .description_value = description_value,
-        .columns_value = columns_value,
     });
+    try shared.appendDictationTextarea(buf, allocator, .{
+        .label = "Description",
+        .name = "description",
+        .rows = 4,
+        .value = description_value,
+    });
+    try appendTemplate(buf, allocator,
+        \\    <label>Status values<input name="columns" value="{columns_value}" placeholder="Draft, Todo, WIP, Review, Done, Failed"></label>
+        \\    <div class="project-column-chips" aria-label="Template status values">
+    , .{ .columns_value = columns_value });
     try appendColumnChips(buf, allocator, columns_value);
     try buf.appendSlice(allocator,
         \\    </div>
