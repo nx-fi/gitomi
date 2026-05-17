@@ -38,7 +38,7 @@ pub fn sendResponse(
         .{ status, reason, content_type },
     );
     try appendContentLengthIfAllowed(&headers, allocator, status, body.len);
-    try headers.appendSlice(allocator, "Connection: close\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n");
+    try headers.appendSlice(allocator, "Connection: close\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: same-origin\r\n");
     try headers.appendSlice(allocator, extra_headers orelse "");
     try headers.appendSlice(allocator, "\r\n");
     try stream.writeAll(headers.items);
@@ -63,7 +63,7 @@ pub fn sendBinaryResponse(
         .{ status, reason, content_type },
     );
     try appendContentLengthIfAllowed(&headers, allocator, status, body.len);
-    try headers.appendSlice(allocator, "Connection: close\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n");
+    try headers.appendSlice(allocator, "Connection: close\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: same-origin\r\n");
     try headers.appendSlice(allocator, extra_headers orelse "");
     try headers.appendSlice(allocator, "\r\n");
     try stream.writeAll(headers.items);
