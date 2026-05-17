@@ -17,6 +17,8 @@ const eprint = io.eprint;
 
 pub const default_api_url = "https://api.github.com";
 pub const max_github_json = 32 * 1024 * 1024;
+const github_api_retries = 3;
+const retry_base_delay_ns = 500 * std.time.ns_per_ms;
 pub const gh_current_repo = RepoSlug{
     .owner = "OWNER",
     .name = "REPO",
@@ -73,54 +75,71 @@ pub const GitHubClient = struct {
 
         const url = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.api_url, path });
         defer self.allocator.free(url);
-        const auth_header = if (self.token) |token|
-            try std.fmt.allocPrint(self.allocator, "Authorization: Bearer {s}", .{token})
-        else
-            null;
-        defer if (auth_header) |value| self.allocator.free(value);
 
-        var argv: std.ArrayList([]const u8) = .empty;
-        defer argv.deinit(self.allocator);
-        try argv.appendSlice(self.allocator, &.{
-            "curl",
-            "-fsSL",
-            "-X",
-            method,
-            "-H",
-            "Accept: application/vnd.github+json",
-            "-H",
-            "X-GitHub-Api-Version: 2022-11-28",
-            "-H",
-            "User-Agent: gitomi/0.1.0",
-        });
-        if (auth_header) |value| {
-            try argv.append(self.allocator, "-H");
-            try argv.append(self.allocator, value);
-        }
-        if (body != null) {
-            try argv.append(self.allocator, "-H");
-            try argv.append(self.allocator, "Content-Type: application/json");
-            try argv.append(self.allocator, "--data-binary");
-            try argv.append(self.allocator, "@-");
-        }
-        try argv.append(self.allocator, url);
+        var attempt: usize = 0;
+        while (true) : (attempt += 1) {
+            const config_path = try self.writeCurlConfig(method, url, body != null);
+            defer self.allocator.free(config_path);
+            defer std.fs.deleteFileAbsolute(config_path) catch {};
 
-        var result = try git.runCommand(self.allocator, argv.items, body, max_github_json);
-        if (result.exitCode() == 0) {
-            const stdout = result.stdout;
-            self.allocator.free(result.stderr);
-            return stdout;
-        }
+            var result = try git.runCommand(self.allocator, &.{
+                "curl",
+                "-sS",
+                "--config",
+                config_path,
+                "--write-out",
+                "\n%{http_code}",
+            }, body, max_github_json);
 
-        defer result.deinit();
-        const stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
-        if (options.not_found_as_null and githubRequestStderrIsNotFound(stderr)) return null;
-        if (stderr.len != 0) {
-            try eprint("gt github: GitHub API request failed: {s}\n", .{stderr});
-        } else {
-            try eprint("gt github: GitHub API request failed\n", .{});
+            if (result.exitCode() == 0) {
+                if (parseCurlHttpResponse(self.allocator, result.stdout)) |response| {
+                    defer self.allocator.free(response.body);
+                    if (response.status >= 200 and response.status < 300) {
+                        const body_owned = try self.allocator.dupe(u8, response.body);
+                        result.deinit();
+                        return body_owned;
+                    }
+                    if (options.not_found_as_null and response.status == 404) {
+                        result.deinit();
+                        return null;
+                    }
+                    if (isRetryableHttpStatus(response.status) and attempt + 1 < github_api_retries) {
+                        result.deinit();
+                        sleepBeforeRetry(attempt);
+                        continue;
+                    }
+                    const response_body = std.mem.trim(u8, response.body, " \t\r\n");
+                    if (response_body.len != 0) {
+                        try eprint("gt github: GitHub API request failed with HTTP {d}: {s}\n", .{ response.status, response_body });
+                    } else {
+                        try eprint("gt github: GitHub API request failed with HTTP {d}\n", .{response.status});
+                    }
+                    result.deinit();
+                    return CliError.UserError;
+                } else |err| {
+                    result.deinit();
+                    return err;
+                }
+            }
+
+            const stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
+            if (attempt + 1 < github_api_retries) {
+                result.deinit();
+                sleepBeforeRetry(attempt);
+                continue;
+            }
+            if (options.not_found_as_null and githubRequestStderrIsNotFound(stderr)) {
+                result.deinit();
+                return null;
+            }
+            if (stderr.len != 0) {
+                try eprint("gt github: GitHub API request failed: {s}\n", .{stderr});
+            } else {
+                try eprint("gt github: GitHub API request failed\n", .{});
+            }
+            result.deinit();
+            return CliError.UserError;
         }
-        return CliError.UserError;
     }
 
     pub fn requestGh(self: GitHubClient, method: []const u8, path: []const u8, body: ?[]const u8) ![]u8 {
@@ -147,22 +166,29 @@ pub const GitHubClient = struct {
         }
         try argv.append(self.allocator, endpoint);
 
-        var result = try git.runCommand(self.allocator, argv.items, body, max_github_json);
-        if (result.exitCode() == 0) {
-            const stdout = result.stdout;
-            self.allocator.free(result.stderr);
-            return stdout;
-        }
+        var attempt: usize = 0;
+        while (true) : (attempt += 1) {
+            var result = try git.runCommand(self.allocator, argv.items, body, max_github_json);
+            if (result.exitCode() == 0) {
+                const stdout = result.stdout;
+                self.allocator.free(result.stderr);
+                return stdout;
+            }
 
-        defer result.deinit();
-        const stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
-        if (options.not_found_as_null and githubRequestStderrIsNotFound(stderr)) return null;
-        if (stderr.len != 0) {
-            try eprint("gt github: gh api request failed: {s}\n", .{stderr});
-        } else {
-            try eprint("gt github: gh api request failed\n", .{});
+            defer result.deinit();
+            const stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
+            if (options.not_found_as_null and githubRequestStderrIsNotFound(stderr)) return null;
+            if (isRetryableGithubError(stderr) and attempt + 1 < github_api_retries) {
+                sleepBeforeRetry(attempt);
+                continue;
+            }
+            if (stderr.len != 0) {
+                try eprint("gt github: gh api request failed: {s}\n", .{stderr});
+            } else {
+                try eprint("gt github: gh api request failed\n", .{});
+            }
+            return CliError.UserError;
         }
-        return CliError.UserError;
     }
 
     pub fn repoPath(self: GitHubClient, allocator: Allocator, suffix: []const u8) ![]u8 {
@@ -171,7 +197,83 @@ pub const GitHubClient = struct {
         }
         return std.fmt.allocPrint(allocator, "/repos/{s}{s}", .{ self.repo.slug, suffix });
     }
+
+    fn writeCurlConfig(self: GitHubClient, method: []const u8, url: []const u8, has_body: bool) ![]u8 {
+        const id = try util.newUuidV7(self.allocator);
+        defer self.allocator.free(id);
+        const path = try std.fmt.allocPrint(self.allocator, "/tmp/gitomi-curl-{s}.cfg", .{id});
+        errdefer self.allocator.free(path);
+
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(self.allocator);
+        try appendCurlConfigOption(&buf, self.allocator, "request", method);
+        try appendCurlConfigOption(&buf, self.allocator, "header", "Accept: application/vnd.github+json");
+        try appendCurlConfigOption(&buf, self.allocator, "header", "X-GitHub-Api-Version: 2022-11-28");
+        try appendCurlConfigOption(&buf, self.allocator, "header", "User-Agent: gitomi/0.1.0");
+        if (self.token) |token| {
+            const auth = try std.fmt.allocPrint(self.allocator, "Authorization: Bearer {s}", .{token});
+            defer self.allocator.free(auth);
+            try appendCurlConfigOption(&buf, self.allocator, "header", auth);
+        }
+        if (has_body) {
+            try appendCurlConfigOption(&buf, self.allocator, "header", "Content-Type: application/json");
+            try appendCurlConfigOption(&buf, self.allocator, "data-binary", "@-");
+        }
+        try appendCurlConfigOption(&buf, self.allocator, "url", url);
+
+        var file = try std.fs.createFileAbsolute(path, .{ .mode = 0o600 });
+        errdefer std.fs.deleteFileAbsolute(path) catch {};
+        defer file.close();
+        try file.writeAll(buf.items);
+        try file.sync();
+        return path;
+    }
 };
+
+fn appendCurlConfigOption(buf: *std.ArrayList(u8), allocator: Allocator, key: []const u8, value: []const u8) !void {
+    try buf.appendSlice(allocator, key);
+    try buf.appendSlice(allocator, " = \"");
+    for (value) |c| {
+        switch (c) {
+            '"' => try buf.appendSlice(allocator, "\\\""),
+            '\\' => try buf.appendSlice(allocator, "\\\\"),
+            '\n' => try buf.appendSlice(allocator, "\\n"),
+            '\r' => try buf.appendSlice(allocator, "\\r"),
+            '\t' => try buf.appendSlice(allocator, "\\t"),
+            else => try buf.append(allocator, c),
+        }
+    }
+    try buf.appendSlice(allocator, "\"\n");
+}
+
+const HttpResponse = struct {
+    body: []u8,
+    status: u16,
+};
+
+fn parseCurlHttpResponse(allocator: Allocator, stdout: []const u8) !HttpResponse {
+    const marker = std.mem.lastIndexOfScalar(u8, stdout, '\n') orelse return CliError.UserError;
+    const raw_status = std.mem.trim(u8, stdout[marker + 1 ..], " \t\r\n");
+    if (raw_status.len != 3) return CliError.UserError;
+    const status = std.fmt.parseUnsigned(u16, raw_status, 10) catch return CliError.UserError;
+    const body = try allocator.dupe(u8, stdout[0..marker]);
+    return .{ .body = body, .status = status };
+}
+
+fn isRetryableHttpStatus(status: u16) bool {
+    return status == 429 or (status >= 500 and status <= 599);
+}
+
+fn isRetryableGithubError(stderr: []const u8) bool {
+    return std.mem.indexOf(u8, stderr, "HTTP 429") != null or
+        std.mem.indexOf(u8, stderr, "HTTP 5") != null or
+        std.ascii.indexOfIgnoreCase(stderr, "rate limit") != null;
+}
+
+fn sleepBeforeRetry(attempt: usize) void {
+    const multiplier = @as(u64, 1) << @intCast(@min(attempt, 4));
+    std.Thread.sleep(retry_base_delay_ns * multiplier);
+}
 
 pub fn githubTokenFromEnv(allocator: Allocator) !?[]u8 {
     return std.process.getEnvVarOwned(allocator, "GITHUB_TOKEN") catch |err| switch (err) {
@@ -181,6 +283,39 @@ pub fn githubTokenFromEnv(allocator: Allocator) !?[]u8 {
         },
         else => return err,
     };
+}
+
+pub fn secretFromEnv(allocator: Allocator, command: []const u8, env_name: []const u8) ![]u8 {
+    const value = std.process.getEnvVarOwned(allocator, env_name) catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => {
+            try eprint("{s}: environment variable {s} is not set\n", .{ command, env_name });
+            return CliError.MissingArgument;
+        },
+        else => return err,
+    };
+    errdefer allocator.free(value);
+    if (std.mem.trim(u8, value, " \t\r\n").len == 0) {
+        try eprint("{s}: environment variable {s} must not be empty\n", .{ command, env_name });
+        return CliError.MissingArgument;
+    }
+    return value;
+}
+
+pub fn secretFromFile(allocator: Allocator, command: []const u8, path: []const u8) ![]u8 {
+    const bytes = std.fs.cwd().readFileAlloc(allocator, path, 64 * 1024) catch |err| switch (err) {
+        error.FileNotFound => {
+            try eprint("{s}: secret file {s} was not found\n", .{ command, path });
+            return CliError.MissingArgument;
+        },
+        else => return err,
+    };
+    defer allocator.free(bytes);
+    const trimmed = std.mem.trim(u8, bytes, " \t\r\n");
+    if (trimmed.len == 0) {
+        try eprint("{s}: secret file {s} must not be empty\n", .{ command, path });
+        return CliError.MissingArgument;
+    }
+    return try allocator.dupe(u8, trimmed);
 }
 
 pub fn githubRequestStderrIsNotFound(stderr: []const u8) bool {

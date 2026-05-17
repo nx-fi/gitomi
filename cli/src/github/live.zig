@@ -27,6 +27,10 @@ pub const default_path = "/github/webhook";
 pub const default_interval_ms: u64 = 5000;
 const import_bot_principal = "import-bot";
 const import_bot_device = "github";
+const max_delivery_log_bytes = 64 * 1024 * 1024;
+const max_delivery_id_bytes = 128;
+const max_export_events_per_tick = 50;
+var live_mutex = std.Thread.Mutex{};
 
 pub const Options = struct {
     repo: RepoSlug,
@@ -63,6 +67,15 @@ const LiveAppContext = struct {
     options: Options,
 };
 
+const LiveLock = struct {
+    file: std.fs.File,
+
+    fn deinit(self: *LiveLock) void {
+        self.file.close();
+        live_mutex.unlock();
+    }
+};
+
 pub fn cmdLive(allocator: Allocator, args: []const []const u8) !void {
     var repo_arg: ?RepoSlug = null;
     var resolved_repo: ?ResolvedRepo = null;
@@ -73,6 +86,8 @@ pub fn cmdLive(allocator: Allocator, args: []const []const u8) !void {
     var path: []const u8 = default_path;
     var webhook_url: ?[]const u8 = null;
     var secret: ?[]const u8 = null;
+    var secret_source_owned: ?[]u8 = null;
+    defer if (secret_source_owned) |value| allocator.free(value);
     var remote: []const u8 = "origin";
     var interval_ms: u64 = default_interval_ms;
     var once = false;
@@ -103,7 +118,21 @@ pub fn cmdLive(allocator: Allocator, args: []const []const u8) !void {
         } else if (std.mem.eql(u8, arg, "--webhook-url")) {
             webhook_url = try util.requireValue(args, &i, "--webhook-url");
         } else if (std.mem.eql(u8, arg, "--secret")) {
-            secret = try util.requireValue(args, &i, "--secret");
+            _ = try util.requireValue(args, &i, "--secret");
+            try eprint("gt github live: --secret exposes credentials in process lists; use --secret-env or --secret-file\n", .{});
+            return CliError.InvalidArgument;
+        } else if (std.mem.eql(u8, arg, "--secret-env")) {
+            const env_name = try util.requireValue(args, &i, "--secret-env");
+            if (secret_source_owned) |value| allocator.free(value);
+            secret_source_owned = null;
+            secret_source_owned = try common.secretFromEnv(allocator, "gt github live", env_name);
+            secret = secret_source_owned;
+        } else if (std.mem.eql(u8, arg, "--secret-file")) {
+            const path_arg = try util.requireValue(args, &i, "--secret-file");
+            if (secret_source_owned) |value| allocator.free(value);
+            secret_source_owned = null;
+            secret_source_owned = try common.secretFromFile(allocator, "gt github live", path_arg);
+            secret = secret_source_owned;
         } else if (std.mem.eql(u8, arg, "--remote")) {
             remote = try util.requireValue(args, &i, "--remote");
         } else if (std.mem.eql(u8, arg, "--interval-ms")) {
@@ -262,6 +291,9 @@ fn runLiveTick(allocator: Allocator, options: Options) !void {
     var repo = try repo_mod.discoverRepo(allocator);
     defer repo.deinit();
 
+    var live_lock = if (!options.dry_run) try acquireLiveLock(allocator, repo, options.repo) else null;
+    defer if (live_lock) |*lock| lock.deinit();
+
     if (options.git_sync and !options.dry_run) {
         sync_mod.syncPull(allocator, options.remote) catch |err| {
             if (!errors.isUserError(err)) return err;
@@ -282,6 +314,7 @@ fn runLiveTick(allocator: Allocator, options: Options) !void {
         .after_ordinal = state.last_export_ordinal,
         .skip_actor_principal = options.bot_principal,
         .skip_actor_device = options.bot_device,
+        .max_events = max_export_events_per_tick,
         .quiet = true,
     });
     if (export_result.max_ordinal > state.last_export_ordinal) {
@@ -336,6 +369,23 @@ fn handleConnection(allocator: Allocator, app_context: LiveAppContext, stream: s
     };
     if (!try validateWebhookRepository(allocator, stream, app_context.options.repo, request.body)) return;
 
+    var repo = try repo_mod.discoverRepo(allocator);
+    defer repo.deinit();
+
+    var live_lock = if (!app_context.options.dry_run) try acquireLiveLock(allocator, repo, app_context.options.repo) else null;
+    defer if (live_lock) |*lock| lock.deinit();
+
+    const delivery_id: ?[]const u8 = if (!app_context.options.dry_run) blk: {
+        const state = try loadState(allocator, repo, app_context.options.repo);
+        if (!try validateWebhookHookId(allocator, stream, state, request)) return;
+        const id = (try checkedWebhookDeliveryId(allocator, stream, request)) orelse return;
+        if (try deliveryAlreadyProcessed(allocator, repo, app_context.options.repo, id)) {
+            try sendPlain(allocator, stream, 200, "OK", "ok duplicate\n");
+            return;
+        }
+        break :blk id;
+    } else null;
+
     if (std.mem.eql(u8, event_name, "push")) {
         if (app_context.options.git_sync and !app_context.options.dry_run) {
             sync_mod.syncPull(allocator, app_context.options.remote) catch |err| {
@@ -343,6 +393,7 @@ fn handleConnection(allocator: Allocator, app_context: LiveAppContext, stream: s
                 if (!errors.isReported(err)) try eprint("gt github live: push webhook sync failed: {s}\n", .{@errorName(err)});
             };
         }
+        if (delivery_id) |id| try recordWebhookDelivery(allocator, repo, app_context.options.repo, id);
         try sendPlain(allocator, stream, 200, "OK", "ok\n");
         return;
     }
@@ -351,12 +402,13 @@ fn handleConnection(allocator: Allocator, app_context: LiveAppContext, stream: s
         return;
     }
 
+    const map_path = try liveMapPath(allocator, repo, app_context.options.repo);
+    defer allocator.free(map_path);
     const stats = try importer.importWebhookPayload(allocator, event_name, request.body, .{
         .bot_principal = app_context.options.bot_principal,
         .bot_device = app_context.options.bot_device,
+        .map_file = map_path,
     });
-    var repo = try repo_mod.discoverRepo(allocator);
-    defer repo.deinit();
     try index.ensureIndex(allocator, repo);
     if (app_context.options.git_sync and !app_context.options.dry_run) {
         sync_mod.syncPush(allocator, app_context.options.remote) catch |err| {
@@ -364,6 +416,7 @@ fn handleConnection(allocator: Allocator, app_context: LiveAppContext, stream: s
             if (!errors.isReported(err)) try eprint("gt github live: webhook sync push failed: {s}\n", .{@errorName(err)});
         };
     }
+    if (delivery_id) |id| try recordWebhookDelivery(allocator, repo, app_context.options.repo, id);
 
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(allocator);
@@ -375,18 +428,24 @@ fn ensureWebhook(allocator: Allocator, options: Options) !void {
     var repo = try repo_mod.discoverRepo(allocator);
     defer repo.deinit();
 
+    var live_lock = if (!options.dry_run) try acquireLiveLock(allocator, repo, options.repo) else null;
+    defer if (live_lock) |*lock| lock.deinit();
+
     var state = try loadState(allocator, repo, options.repo);
     if (state.webhook_id != null) return;
 
-    const body = try webhookCreateBody(allocator, options);
-    defer allocator.free(body);
     const path = try std.fmt.allocPrint(allocator, "/repos/{s}/hooks", .{options.repo.slug});
     defer allocator.free(path);
 
     if (options.dry_run) {
+        const body = try webhookCreateBody(allocator, options, true);
+        defer allocator.free(body);
         try out("POST {s} {s}\n", .{ path, body });
         return;
     }
+
+    const body = try webhookCreateBody(allocator, options, false);
+    defer allocator.free(body);
 
     const client = GitHubClient{
         .allocator = allocator,
@@ -405,9 +464,9 @@ fn ensureWebhook(allocator: Allocator, options: Options) !void {
     try out("github live: subscribed webhook id {d}\n", .{state.webhook_id.?});
 }
 
-fn webhookCreateBody(allocator: Allocator, options: Options) ![]u8 {
+fn webhookCreateBody(allocator: Allocator, options: Options, redact_secret: bool) ![]u8 {
     const secret = nonEmptySecret(options.secret) orelse {
-        try eprint("gt github live: --secret is required when creating a GitHub webhook subscription\n", .{});
+        try eprint("gt github live: --secret-env or --secret-file is required when creating a GitHub webhook subscription\n", .{});
         return CliError.MissingArgument;
     };
 
@@ -417,7 +476,7 @@ fn webhookCreateBody(allocator: Allocator, options: Options) ![]u8 {
     try appendJsonFieldString(&buf, allocator, "url", options.webhook_url.?, true);
     try appendJsonFieldString(&buf, allocator, "content_type", "json", true);
     try appendJsonFieldString(&buf, allocator, "insecure_ssl", "0", true);
-    try appendJsonFieldString(&buf, allocator, "secret", secret, false);
+    try appendJsonFieldString(&buf, allocator, "secret", if (redact_secret) "[redacted]" else secret, false);
     try buf.appendSlice(allocator, "}}");
     return try buf.toOwnedSlice(allocator);
 }
@@ -430,11 +489,17 @@ fn loadState(allocator: Allocator, repo: repo_mod.Repo, slug: RepoSlug) !LiveSta
         else => return err,
     };
     defer allocator.free(bytes);
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch return .{};
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch {
+        try eprint("gt github live: live state {s} is not valid JSON\n", .{path});
+        return CliError.UserError;
+    };
     defer parsed.deinit();
     const root = switch (parsed.value) {
         .object => |object| object,
-        else => return .{},
+        else => {
+            try eprint("gt github live: live state {s} must contain a JSON object\n", .{path});
+            return CliError.UserError;
+        },
     };
     return .{
         .last_export_ordinal = common.jsonInteger(root.get("last_export_ordinal")) orelse 0,
@@ -446,17 +511,123 @@ fn saveState(allocator: Allocator, repo: repo_mod.Repo, slug: RepoSlug, state: L
     const path = try statePath(allocator, repo, slug);
     defer allocator.free(path);
     if (std.fs.path.dirname(path)) |dir| try std.fs.cwd().makePath(dir);
-    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-    defer file.close();
+    var bytes: []u8 = undefined;
     if (state.webhook_id) |hook_id| {
-        const bytes = try std.fmt.allocPrint(allocator, "{{\"last_export_ordinal\":{d},\"webhook_id\":{d}}}\n", .{ state.last_export_ordinal, hook_id });
-        defer allocator.free(bytes);
-        try file.writeAll(bytes);
+        bytes = try std.fmt.allocPrint(allocator, "{{\"last_export_ordinal\":{d},\"webhook_id\":{d}}}\n", .{ state.last_export_ordinal, hook_id });
     } else {
-        const bytes = try std.fmt.allocPrint(allocator, "{{\"last_export_ordinal\":{d},\"webhook_id\":null}}\n", .{state.last_export_ordinal});
-        defer allocator.free(bytes);
-        try file.writeAll(bytes);
+        bytes = try std.fmt.allocPrint(allocator, "{{\"last_export_ordinal\":{d},\"webhook_id\":null}}\n", .{state.last_export_ordinal});
     }
+    defer allocator.free(bytes);
+    try writeFileAtomic(allocator, path, bytes);
+}
+
+fn writeFileAtomic(allocator: Allocator, path: []const u8, bytes: []const u8) !void {
+    const id = try util.newUuidV7(allocator);
+    defer allocator.free(id);
+    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp.{s}", .{ path, id });
+    defer allocator.free(tmp_path);
+    errdefer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+    var file = try std.fs.cwd().createFile(tmp_path, .{ .truncate = true, .mode = 0o600 });
+    var closed = false;
+    defer if (!closed) file.close();
+    try file.writeAll(bytes);
+    try file.sync();
+    file.close();
+    closed = true;
+    try std.fs.cwd().rename(tmp_path, path);
+}
+
+fn acquireLiveLock(allocator: Allocator, repo: repo_mod.Repo, slug: RepoSlug) !LiveLock {
+    live_mutex.lock();
+    errdefer live_mutex.unlock();
+
+    const dir = try githubLiveDir(allocator, repo, slug);
+    defer allocator.free(dir);
+    try std.fs.cwd().makePath(dir);
+    const path = try std.fs.path.join(allocator, &.{ dir, "live.lock" });
+    defer allocator.free(path);
+    return .{
+        .file = try std.fs.cwd().createFile(path, .{
+            .read = true,
+            .truncate = false,
+            .lock = .exclusive,
+        }),
+    };
+}
+
+fn validateWebhookHookId(
+    allocator: Allocator,
+    stream: std.net.Stream,
+    state: LiveState,
+    request: zwf.Request,
+) !bool {
+    const expected = state.webhook_id orelse return true;
+    const raw = request.headerValue("x-github-hook-id") orelse {
+        try sendPlain(allocator, stream, 403, "Forbidden", "Missing X-GitHub-Hook-ID\n");
+        return false;
+    };
+    const actual = std.fmt.parseInt(i64, raw, 10) catch {
+        try sendPlain(allocator, stream, 403, "Forbidden", "Invalid X-GitHub-Hook-ID\n");
+        return false;
+    };
+    if (actual != expected) {
+        try sendPlain(allocator, stream, 403, "Forbidden", "Webhook hook id mismatch\n");
+        return false;
+    }
+    return true;
+}
+
+fn checkedWebhookDeliveryId(allocator: Allocator, stream: std.net.Stream, request: zwf.Request) !?[]const u8 {
+    const delivery_id = request.headerValue("x-github-delivery") orelse {
+        try sendPlain(allocator, stream, 400, "Bad Request", "Missing X-GitHub-Delivery\n");
+        return null;
+    };
+    if (!isValidDeliveryId(delivery_id)) {
+        try sendPlain(allocator, stream, 400, "Bad Request", "Invalid X-GitHub-Delivery\n");
+        return null;
+    }
+    return delivery_id;
+}
+
+fn isValidDeliveryId(delivery_id: []const u8) bool {
+    if (delivery_id.len == 0 or delivery_id.len > max_delivery_id_bytes) return false;
+    for (delivery_id) |c| {
+        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == ':') continue;
+        return false;
+    }
+    return true;
+}
+
+fn deliveryAlreadyProcessed(allocator: Allocator, repo: repo_mod.Repo, slug: RepoSlug, delivery_id: []const u8) !bool {
+    const path = try deliveryLogPath(allocator, repo, slug);
+    defer allocator.free(path);
+    const bytes = std.fs.cwd().readFileAlloc(allocator, path, max_delivery_log_bytes) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer allocator.free(bytes);
+
+    var lines = std.mem.tokenizeScalar(u8, bytes, '\n');
+    while (lines.next()) |line_raw| {
+        const line = std.mem.trim(u8, line_raw, " \t\r\n");
+        if (std.mem.eql(u8, line, delivery_id)) return true;
+    }
+    return false;
+}
+
+fn recordWebhookDelivery(allocator: Allocator, repo: repo_mod.Repo, slug: RepoSlug, delivery_id: []const u8) !void {
+    const path = try deliveryLogPath(allocator, repo, slug);
+    defer allocator.free(path);
+    if (std.fs.path.dirname(path)) |dir| try std.fs.cwd().makePath(dir);
+    var file = std.fs.cwd().openFile(path, .{ .mode = .write_only }) catch |err| switch (err) {
+        error.FileNotFound => try std.fs.cwd().createFile(path, .{}),
+        else => return err,
+    };
+    defer file.close();
+    try file.seekFromEnd(0);
+    try file.writeAll(delivery_id);
+    try file.writeAll("\n");
 }
 
 fn statePath(allocator: Allocator, repo: repo_mod.Repo, slug: RepoSlug) ![]u8 {
@@ -469,6 +640,12 @@ fn liveMapPath(allocator: Allocator, repo: repo_mod.Repo, slug: RepoSlug) ![]u8 
     const dir = try githubLiveDir(allocator, repo, slug);
     defer allocator.free(dir);
     return try std.fs.path.join(allocator, &.{ dir, "map.jsonl" });
+}
+
+fn deliveryLogPath(allocator: Allocator, repo: repo_mod.Repo, slug: RepoSlug) ![]u8 {
+    const dir = try githubLiveDir(allocator, repo, slug);
+    defer allocator.free(dir);
+    return try std.fs.path.join(allocator, &.{ dir, "deliveries.log" });
 }
 
 fn githubLiveDir(allocator: Allocator, repo: repo_mod.Repo, slug: RepoSlug) ![]u8 {
@@ -515,15 +692,15 @@ pub fn validateSecretPolicy(
 ) !void {
     if (nonEmptySecret(secret) != null) return;
     if (secret != null) {
-        try eprint("{s}: --secret must not be empty\n", .{command});
+        try eprint("{s}: webhook secret must not be empty\n", .{command});
         return CliError.MissingArgument;
     }
     if (subscribe) {
-        try eprint("{s}: --secret is required when creating a GitHub webhook subscription\n", .{command});
+        try eprint("{s}: --secret-env or --secret-file is required when creating a GitHub webhook subscription\n", .{command});
         return CliError.MissingArgument;
     }
     if (!dry_run) {
-        try eprint("{s}: --secret is required for non-dry-run webhook imports\n", .{command});
+        try eprint("{s}: --secret-env or --secret-file is required for non-dry-run webhook imports\n", .{command});
         return CliError.MissingArgument;
     }
 }
@@ -619,14 +796,23 @@ test "github live webhook body requires secret" {
         .repo = slug,
         .webhook_url = "https://example.test/github",
         .secret = "s3",
-    });
+    }, false);
     defer std.testing.allocator.free(body);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"secret\":\"s3\"") != null);
+
+    const redacted = try webhookCreateBody(std.testing.allocator, .{
+        .repo = slug,
+        .webhook_url = "https://example.test/github",
+        .secret = "s3",
+    }, true);
+    defer std.testing.allocator.free(redacted);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "\"secret\":\"[redacted]\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "\"secret\":\"s3\"") == null);
 
     try std.testing.expectError(CliError.MissingArgument, webhookCreateBody(std.testing.allocator, .{
         .repo = slug,
         .webhook_url = "https://example.test/github",
-    }));
+    }, false));
 }
 
 test "github live requires secret for subscriptions and mutating imports" {
@@ -673,4 +859,12 @@ test "github live verifies sha256 webhook signatures" {
         "sha256=b82fcb791acec57859b989b430a826488ce2e479fdf92326bd0a2e8375a42ba4",
     ));
     try std.testing.expect(!verifyWebhookSignature("secret", "payload", "sha256=bad"));
+}
+
+test "github live validates delivery ids before replay tracking" {
+    try std.testing.expect(isValidDeliveryId("f3b8b2cc-8a8f-4cc8-a31b-2f611f93df43"));
+    try std.testing.expect(isValidDeliveryId("hook:1234_delivery.1"));
+    try std.testing.expect(!isValidDeliveryId(""));
+    try std.testing.expect(!isValidDeliveryId("bad\nid"));
+    try std.testing.expect(!isValidDeliveryId("bad/id"));
 }

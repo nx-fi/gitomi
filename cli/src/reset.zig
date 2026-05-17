@@ -19,6 +19,11 @@ const Options = struct {
     yes: bool = false,
 };
 
+const RemoteGitomiRef = struct {
+    ref: []u8,
+    oid: []u8,
+};
+
 pub fn cmdClearOrReset(allocator: Allocator, args: []const []const u8, command_name: []const u8) !void {
     const options = try parseOptions(args, command_name);
 
@@ -146,7 +151,7 @@ fn resetLocalState(allocator: Allocator, repo: repo_mod.Repo, command_name: []co
 
 fn clearRemoteRefs(allocator: Allocator, command_name: []const u8, remote: []const u8, yes: bool) !void {
     const refs = try listRemoteGitomiRefs(allocator, remote);
-    defer git.freeStringList(allocator, refs);
+    defer freeRemoteGitomiRefs(allocator, refs);
 
     if (refs.len == 0) {
         try io.out("no remote Gitomi refs at {s}\n", .{remote});
@@ -165,12 +170,14 @@ fn clearRemoteRefs(allocator: Allocator, command_name: []const u8, remote: []con
         try requireConfirmation(allocator, command_name, phrase);
     }
 
-    for (refs) |ref| {
-        const refspec = try std.fmt.allocPrint(allocator, ":{s}", .{ref});
+    for (refs) |item| {
+        const refspec = try std.fmt.allocPrint(allocator, ":{s}", .{item.ref});
         defer allocator.free(refspec);
-        const deleted = try git.gitChecked(allocator, &.{ "push", remote, refspec });
+        const lease = try std.fmt.allocPrint(allocator, "--force-with-lease={s}:{s}", .{ item.ref, item.oid });
+        defer allocator.free(lease);
+        const deleted = try git.gitChecked(allocator, &.{ "push", lease, remote, refspec });
         allocator.free(deleted);
-        try io.out("deleted {s} from {s}\n", .{ ref, remote });
+        try io.out("deleted {s} from {s}\n", .{ item.ref, remote });
     }
 
     try io.out("{s}: deleted {d} remote Gitomi ref{s} from {s}\n", .{
@@ -181,7 +188,7 @@ fn clearRemoteRefs(allocator: Allocator, command_name: []const u8, remote: []con
     });
 }
 
-fn listRemoteGitomiRefs(allocator: Allocator, remote: []const u8) ![][]u8 {
+fn listRemoteGitomiRefs(allocator: Allocator, remote: []const u8) ![]RemoteGitomiRef {
     var argv = [_][]const u8{ "git", "ls-remote", "--refs", remote };
     var result = try git.runCommand(allocator, &argv, null, git.max_git_output);
     defer result.deinit();
@@ -196,9 +203,12 @@ fn listRemoteGitomiRefs(allocator: Allocator, remote: []const u8) ![][]u8 {
         return CliError.GitFailed;
     }
 
-    var refs: std.ArrayList([]u8) = .empty;
+    var refs: std.ArrayList(RemoteGitomiRef) = .empty;
     errdefer {
-        for (refs.items) |ref| allocator.free(ref);
+        for (refs.items) |item| {
+            allocator.free(item.ref);
+            allocator.free(item.oid);
+        }
         refs.deinit(allocator);
     }
 
@@ -208,14 +218,30 @@ fn listRemoteGitomiRefs(allocator: Allocator, remote: []const u8) ![][]u8 {
         if (line.len == 0) continue;
 
         var fields = std.mem.tokenizeAny(u8, line, " \t");
-        _ = fields.next() orelse continue;
+        const oid = fields.next() orelse continue;
         const ref = fields.next() orelse continue;
         if (!std.mem.startsWith(u8, ref, "refs/gitomi/")) continue;
-        try refs.append(allocator, try allocator.dupe(u8, ref));
+        const ref_copy = try allocator.dupe(u8, ref);
+        errdefer allocator.free(ref_copy);
+        const oid_copy = try allocator.dupe(u8, oid);
+        errdefer allocator.free(oid_copy);
+        const item = RemoteGitomiRef{
+            .ref = ref_copy,
+            .oid = oid_copy,
+        };
+        try refs.append(allocator, item);
     }
 
-    std.mem.sort([]u8, refs.items, {}, stringLessThan);
+    std.mem.sort(RemoteGitomiRef, refs.items, {}, remoteGitomiRefLessThan);
     return try refs.toOwnedSlice(allocator);
+}
+
+fn freeRemoteGitomiRefs(allocator: Allocator, refs: []RemoteGitomiRef) void {
+    for (refs) |item| {
+        allocator.free(item.ref);
+        allocator.free(item.oid);
+    }
+    allocator.free(refs);
 }
 
 fn requireConfirmation(allocator: Allocator, command_name: []const u8, phrase: []const u8) !void {
@@ -248,6 +274,6 @@ fn readStdinLine(allocator: Allocator, max_bytes: usize) ![]u8 {
     return try line.toOwnedSlice(allocator);
 }
 
-fn stringLessThan(_: void, a: []u8, b: []u8) bool {
-    return std.mem.lessThan(u8, a, b);
+fn remoteGitomiRefLessThan(_: void, a: RemoteGitomiRef, b: RemoteGitomiRef) bool {
+    return std.mem.lessThan(u8, a.ref, b.ref);
 }

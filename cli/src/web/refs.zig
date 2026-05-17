@@ -95,6 +95,7 @@ const RefScope = struct {
 const RefRow = struct {
     ref: []const u8,
     oid: []const u8,
+    oid_short: []const u8,
     updated: []const u8,
     updated_timestamp: i64,
     scope: RefScope,
@@ -103,6 +104,12 @@ const RefRow = struct {
 pub fn renderRefsPage(allocator: Allocator, repo: Repo, target: []const u8, csrf_token: []const u8) ![]u8 {
     const flash: ?Flash = if (hasQueryToken(target, "sync=ok"))
         .{ .kind = .success, .message = "Sync completed against origin." }
+    else if (hasQueryToken(target, "delete=local-ok"))
+        .{ .kind = .success, .message = "Local branch deleted." }
+    else if (hasQueryToken(target, "delete=tracking-ok"))
+        .{ .kind = .success, .message = "Remote tracking ref forgotten." }
+    else if (hasQueryToken(target, "delete=origin-ok"))
+        .{ .kind = .success, .message = "Remote branch delete pushed to origin." }
     else
         null;
     const pagination = try shared.paginationFromTarget(allocator, target, refs_default_page_size, refs_max_page_size);
@@ -130,12 +137,114 @@ pub fn handleRefsSyncPost(allocator: Allocator, repo: Repo, stream: std.net.Stre
     try sendRedirect(allocator, stream, "/refs?sync=ok");
 }
 
+pub fn handleRefsDeletePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8, csrf_token: []const u8) !void {
+    const csrf_ok = formValueEquals(allocator, form_body, "csrf_token", csrf_token) catch |err| switch (err) {
+        error.InvalidFormEncoding => false,
+        else => return err,
+    };
+    if (!csrf_ok) {
+        try sendPlainResponse(allocator, stream, 403, "Forbidden", "Forbidden\n");
+        return;
+    }
+
+    const action_owned = (try issues_page.formValueOwned(allocator, form_body, "action")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(action_owned);
+    const ref_owned = (try issues_page.formValueOwned(allocator, form_body, "ref")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(ref_owned);
+    const oid_owned = (try issues_page.formValueOwned(allocator, form_body, "oid")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(oid_owned);
+
+    const redirect_token = applyRefsDeleteAction(allocator, action_owned, ref_owned, oid_owned) catch |err| {
+        try sendRefsDeleteFailure(allocator, repo, stream, err, csrf_token);
+        return;
+    };
+
+    const location = try std.fmt.allocPrint(allocator, "/refs?type=branches&delete={s}", .{redirect_token});
+    defer allocator.free(location);
+    try sendRedirect(allocator, stream, location);
+}
+
 fn sendSyncFailure(allocator: Allocator, repo: Repo, stream: std.net.Stream, err: anyerror, csrf_token: []const u8) !void {
     const message = try std.fmt.allocPrint(allocator, "Sync failed: {s}. Check that origin is reachable and the Gitomi refs are valid.", .{@errorName(err)});
     defer allocator.free(message);
     const body = try renderRefsPageWithFlash(allocator, repo, .{ .kind = .failure, .message = message }, .{}, .{ .per_page = refs_default_page_size }, csrf_token);
     defer allocator.free(body);
     try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", body, null);
+}
+
+fn sendRefsDeleteFailure(allocator: Allocator, repo: Repo, stream: std.net.Stream, err: anyerror, csrf_token: []const u8) !void {
+    const message = try std.fmt.allocPrint(allocator, "Branch delete failed: {s}. Refresh refs and check that the branch still exists.", .{@errorName(err)});
+    defer allocator.free(message);
+    const body = try renderRefsPageWithFlash(allocator, repo, .{ .kind = .failure, .message = message }, .{ .kind = .branches }, .{ .per_page = refs_default_page_size }, csrf_token);
+    defer allocator.free(body);
+    try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", body, null);
+}
+
+fn applyRefsDeleteAction(allocator: Allocator, action: []const u8, ref: []const u8, oid: []const u8) ![]const u8 {
+    if (std.mem.eql(u8, action, "delete-local")) {
+        try deleteLocalBranchRef(allocator, ref, oid);
+        return "local-ok";
+    }
+    if (std.mem.eql(u8, action, "forget-tracking")) {
+        try deleteRemoteTrackingRef(allocator, ref, oid);
+        return "tracking-ok";
+    }
+    if (std.mem.eql(u8, action, "delete-origin")) {
+        try deleteRemoteBranchOnOrigin(allocator, ref, oid);
+        return "origin-ok";
+    }
+    return error.InvalidRefDeleteAction;
+}
+
+fn deleteLocalBranchRef(allocator: Allocator, ref: []const u8, oid: []const u8) !void {
+    try validateLocalBranchRef(ref);
+    try validateExpectedOid(oid);
+    const output = try gitChecked(allocator, &.{ "update-ref", "-d", ref, oid });
+    allocator.free(output);
+}
+
+fn deleteRemoteTrackingRef(allocator: Allocator, ref: []const u8, oid: []const u8) !void {
+    try validateOriginTrackingRef(ref);
+    try validateExpectedOid(oid);
+    const output = try gitChecked(allocator, &.{ "update-ref", "-d", ref, oid });
+    allocator.free(output);
+}
+
+fn deleteRemoteBranchOnOrigin(allocator: Allocator, ref: []const u8, oid: []const u8) !void {
+    try validateOriginTrackingRef(ref);
+    try validateExpectedOid(oid);
+    const branch = originTrackingBranchName(ref) orelse return error.InvalidRemoteTrackingRef;
+    const refspec = try std.fmt.allocPrint(allocator, ":{s}", .{branch});
+    defer allocator.free(refspec);
+    const lease = try std.fmt.allocPrint(allocator, "--force-with-lease=refs/heads/{s}:{s}", .{ branch, oid });
+    defer allocator.free(lease);
+    const output = try gitChecked(allocator, &.{ "push", lease, "origin", refspec });
+    allocator.free(output);
+}
+
+fn validateLocalBranchRef(ref: []const u8) !void {
+    if (!std.mem.startsWith(u8, ref, "refs/heads/")) return error.InvalidLocalBranchRef;
+    if (ref.len == "refs/heads/".len) return error.InvalidLocalBranchRef;
+    if (std.mem.endsWith(u8, ref, "/HEAD")) return error.InvalidLocalBranchRef;
+}
+
+fn validateOriginTrackingRef(ref: []const u8) !void {
+    if (originTrackingBranchName(ref) == null) return error.InvalidRemoteTrackingRef;
+}
+
+fn originTrackingBranchName(ref: []const u8) ?[]const u8 {
+    const prefix = "refs/remotes/origin/";
+    if (!std.mem.startsWith(u8, ref, prefix)) return null;
+    const branch = ref[prefix.len..];
+    if (branch.len == 0 or std.mem.eql(u8, branch, "HEAD") or std.mem.endsWith(u8, branch, "/HEAD")) return null;
+    return branch;
+}
+
+fn validateExpectedOid(oid: []const u8) !void {
+    if (oid.len == 0) return error.InvalidExpectedOid;
+    for (oid) |c| {
+        if (!std.ascii.isHex(c)) return error.InvalidExpectedOid;
+    }
 }
 
 fn renderRefsPageWithFlash(allocator: Allocator, repo: Repo, flash: ?Flash, query: RefQuery, pagination: shared.Pagination, csrf_token: []const u8) ![]u8 {
@@ -160,7 +269,7 @@ fn renderRefsPageWithFlash(allocator: Allocator, repo: Repo, flash: ?Flash, quer
     const refs = gitChecked(allocator, &.{
         "for-each-ref",
         "--sort=refname",
-        "--format=%(refname)%09%(objectname:short)%09%(creatordate:unix)%09%(creatordate:relative)",
+        "--format=%(refname)%09%(objectname)%09%(objectname:short)%09%(creatordate:unix)%09%(creatordate:relative)",
         "refs/heads",
         "refs/remotes",
         "refs/tags",
@@ -186,6 +295,7 @@ fn renderRefsPageWithFlash(allocator: Allocator, repo: Repo, flash: ?Flash, quer
     try appendSortHeader(&buf, allocator, query, .ref, "Ref");
     try buf.appendSlice(allocator, "<th>Object</th>");
     try appendSortHeader(&buf, allocator, query, .updated, "Updated");
+    try buf.appendSlice(allocator, "<th class=\"refs-actions-th\">Actions</th>");
     try buf.appendSlice(allocator,
         \\</tr></thead>
         \\      <tbody>
@@ -198,21 +308,12 @@ fn renderRefsPageWithFlash(allocator: Allocator, repo: Repo, flash: ?Flash, quer
         matched += 1;
         if (matched <= pagination.offset()) continue;
         if (shown >= pagination.per_page) break;
-        try appendTemplate(&buf, allocator,
-            \\<tr><td><span class="ref-scope ref-scope-{class}">{scope}</span><span class="ref-scope-detail">{detail}</span></td><td><code>{ref}</code></td><td><code>{oid}</code></td><td>{updated}</td></tr>
-        , .{
-            .class = row.scope.class,
-            .scope = row.scope.label,
-            .detail = row.scope.detail,
-            .ref = row.ref,
-            .oid = row.oid,
-            .updated = row.updated,
-        });
+        try appendRefRow(&buf, allocator, rows, row, csrf_token);
         shown += 1;
     }
 
     if (shown == 0) {
-        try appendEmptyCell(&buf, allocator, 4, if (pagination.page > 1) "No refs on this page." else if (query.kind == .all and query.location == .all) "No refs found." else "No matching refs found.");
+        try appendEmptyCell(&buf, allocator, 5, if (pagination.page > 1) "No refs on this page." else if (query.kind == .all and query.location == .all) "No refs found." else "No matching refs found.");
     }
 
     try buf.appendSlice(allocator,
@@ -279,6 +380,74 @@ fn appendRefsHeader(buf: *std.ArrayList(u8), allocator: Allocator, csrf_token: [
         \\  </form>
         \\</div>
     , .{ .csrf_token = csrf_token });
+}
+
+fn appendRefRow(buf: *std.ArrayList(u8), allocator: Allocator, rows: []const RefRow, row: RefRow, csrf_token: []const u8) !void {
+    const diverged = branchHasDivergedPair(rows, row);
+    try appendTemplate(buf, allocator,
+        \\<tr{classes}><td><span class="ref-scope ref-scope-{class}">{scope}</span><span class="ref-scope-detail">{detail}</span></td><td class="refs-ref-cell">
+    , .{
+        .classes = shared.classAttr("", &.{shared.class("refs-row-diverged", diverged)}),
+        .class = row.scope.class,
+        .scope = row.scope.label,
+        .detail = row.scope.detail,
+    });
+    try appendRefNameCell(buf, allocator, row);
+    if (diverged) {
+        try appendTemplate(buf, allocator, "<span class=\"refs-diverged-badge\" title=\"Matching local and origin tracking refs point at different commits\">Diverged</span>", .{});
+    }
+    try appendTemplate(buf, allocator,
+        \\</td><td><code>{oid}</code></td><td>{updated}</td><td class="refs-actions-cell">
+    , .{
+        .oid = row.oid_short,
+        .updated = row.updated,
+    });
+    try appendRefActions(buf, allocator, row, csrf_token);
+    try appendTemplate(buf, allocator, "</td></tr>", .{});
+}
+
+fn appendRefNameCell(buf: *std.ArrayList(u8), allocator: Allocator, row: RefRow) !void {
+    const browse_ref = codeBrowseRef(row.ref) orelse {
+        try appendTemplate(buf, allocator, "<code>{ref}</code>", .{ .ref = row.ref });
+        return;
+    };
+    try appendTemplate(buf, allocator, "<a class=\"refs-ref-link\" href=\"/code?ref=", .{});
+    try shared.appendUrlEncoded(buf, allocator, browse_ref);
+    try appendTemplate(buf, allocator, "\"><code>{ref}</code></a>", .{ .ref = row.ref });
+}
+
+fn appendRefActions(buf: *std.ArrayList(u8), allocator: Allocator, row: RefRow, csrf_token: []const u8) !void {
+    if (std.mem.startsWith(u8, row.ref, "refs/heads/")) {
+        try appendRefDeleteForm(buf, allocator, row, csrf_token, "delete-local", "Delete local", "Delete local branch");
+        return;
+    }
+    if (originTrackingBranchName(row.ref) != null) {
+        try appendRefDeleteForm(buf, allocator, row, csrf_token, "forget-tracking", "Forget", "Forget remote tracking ref");
+        try appendRefDeleteForm(buf, allocator, row, csrf_token, "delete-origin", "Delete on origin", "Delete branch from origin");
+        return;
+    }
+    try appendTemplate(buf, allocator, "<span class=\"refs-no-action\">-</span>", .{});
+}
+
+fn appendRefDeleteForm(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    row: RefRow,
+    csrf_token: []const u8,
+    action: []const u8,
+    label: []const u8,
+    title: []const u8,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<form method="post" action="/refs/delete" class="refs-delete-form"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="action" value="{action}"><input type="hidden" name="ref" value="{ref}"><input type="hidden" name="oid" value="{oid}"><button class="button secondary refs-delete-button" type="submit" title="{title}">{label}</button></form>
+    , .{
+        .csrf_token = csrf_token,
+        .action = action,
+        .ref = row.ref,
+        .oid = row.oid,
+        .title = title,
+        .label = label,
+    });
 }
 
 fn formValueEquals(allocator: Allocator, body: []const u8, wanted_key: []const u8, wanted_value: []const u8) !bool {
@@ -552,11 +721,13 @@ fn parseRefRows(allocator: Allocator, refs: []const u8) ![]RefRow {
         var cols = std.mem.splitScalar(u8, line, '\t');
         const ref = cols.next() orelse "";
         const oid = cols.next() orelse "";
+        const oid_short = cols.next() orelse shortOid(oid);
         const updated_unix = cols.next() orelse "";
         const updated = cols.next() orelse "";
         try rows.append(allocator, .{
             .ref = ref,
             .oid = oid,
+            .oid_short = oid_short,
             .updated = updated,
             .updated_timestamp = parseRefTimestamp(updated_unix),
             .scope = classifyRef(ref),
@@ -577,7 +748,7 @@ fn sortRefRows(rows: []RefRow, sort: RefSort) void {
         fn lessThan(active_sort: RefSort, lhs: RefRow, rhs: RefRow) bool {
             switch (active_sort.field) {
                 .ref => {
-                    const ref_order = std.mem.order(u8, lhs.ref, rhs.ref);
+                    const ref_order = branchAwareRefOrder(lhs, rhs);
                     if (ref_order != .eq) return switch (active_sort.direction) {
                         .asc => ref_order == .lt,
                         .desc => ref_order == .gt,
@@ -592,9 +763,76 @@ fn sortRefRows(rows: []RefRow, sort: RefSort) void {
                     }
                 },
             }
-            return std.mem.order(u8, lhs.ref, rhs.ref) == .lt;
+            return branchAwareRefOrder(lhs, rhs) == .lt;
         }
     }.lessThan);
+}
+
+fn branchAwareRefOrder(lhs: RefRow, rhs: RefRow) std.math.Order {
+    const lhs_key = refSortKey(lhs.ref);
+    const rhs_key = refSortKey(rhs.ref);
+    const key_order = std.mem.order(u8, lhs_key, rhs_key);
+    if (key_order != .eq) return key_order;
+
+    const lhs_rank = refPairRank(lhs.ref);
+    const rhs_rank = refPairRank(rhs.ref);
+    if (lhs_rank != rhs_rank) return if (lhs_rank < rhs_rank) .lt else .gt;
+
+    return std.mem.order(u8, lhs.ref, rhs.ref);
+}
+
+fn refSortKey(ref: []const u8) []const u8 {
+    return branchPairName(ref) orelse ref;
+}
+
+fn refPairRank(ref: []const u8) u8 {
+    if (std.mem.startsWith(u8, ref, "refs/heads/")) return 0;
+    if (originTrackingBranchName(ref) != null) return 1;
+    return 2;
+}
+
+fn branchPairName(ref: []const u8) ?[]const u8 {
+    if (std.mem.startsWith(u8, ref, "refs/heads/")) {
+        const branch = ref["refs/heads/".len..];
+        if (branch.len == 0) return null;
+        return branch;
+    }
+    return originTrackingBranchName(ref);
+}
+
+fn codeBrowseRef(ref: []const u8) ?[]const u8 {
+    if (std.mem.startsWith(u8, ref, "refs/heads/")) return ref["refs/heads/".len..];
+    if (originTrackingBranchName(ref) != null) return ref["refs/remotes/".len..];
+    return null;
+}
+
+fn branchHasDivergedPair(rows: []const RefRow, row: RefRow) bool {
+    const branch = branchPairName(row.ref) orelse return false;
+    const local_oid = findBranchOid(rows, branch, .local);
+    const remote_oid = findBranchOid(rows, branch, .remote);
+    if (local_oid == null or remote_oid == null) return false;
+    return !std.mem.eql(u8, local_oid.?, remote_oid.?);
+}
+
+const BranchPairSide = enum {
+    local,
+    remote,
+};
+
+fn findBranchOid(rows: []const RefRow, branch: []const u8, side: BranchPairSide) ?[]const u8 {
+    for (rows) |row| {
+        const row_branch = branchPairName(row.ref) orelse continue;
+        if (!std.mem.eql(u8, row_branch, branch)) continue;
+        switch (side) {
+            .local => if (std.mem.startsWith(u8, row.ref, "refs/heads/")) return row.oid,
+            .remote => if (originTrackingBranchName(row.ref) != null) return row.oid,
+        }
+    }
+    return null;
+}
+
+fn shortOid(oid: []const u8) []const u8 {
+    return oid[0..@min(oid.len, 7)];
 }
 
 fn countRefsByLocation(rows: []const RefRow, kind: RefKindFilter) RefLocationCounts {
@@ -749,10 +987,10 @@ test "web refs counts refs by kind" {
 test "web refs filters locations and sorts materialized rows" {
     const rows = try parseRefRows(
         std.testing.allocator,
-        "refs/gitomi/snapshots/a\t111\t30\t30 seconds ago\n" ++
-            "refs/heads/main\t222\t20\t20 seconds ago\n" ++
-            "refs/remotes/origin/main\t333\t40\t40 seconds ago\n" ++
-            "refs/gitomi/inbox/alice/laptop\t444\t10\t10 seconds ago\n",
+        "refs/gitomi/snapshots/a\t1111111111111111111111111111111111111111\t1111111\t30\t30 seconds ago\n" ++
+            "refs/heads/main\t2222222222222222222222222222222222222222\t2222222\t20\t20 seconds ago\n" ++
+            "refs/remotes/origin/main\t3333333333333333333333333333333333333333\t3333333\t40\t40 seconds ago\n" ++
+            "refs/gitomi/inbox/alice/laptop\t4444444444444444444444444444444444444444\t4444444\t10\t10 seconds ago\n",
     );
     defer std.testing.allocator.free(rows);
 
@@ -771,6 +1009,26 @@ test "web refs filters locations and sorts materialized rows" {
 
     sortRefRows(rows, .{ .field = .ref, .direction = .desc });
     try std.testing.expectEqualStrings("refs/remotes/origin/main", rows[0].ref);
+}
+
+test "web refs pairs local and origin tracking branches" {
+    const rows = try parseRefRows(
+        std.testing.allocator,
+        "refs/heads/beta\t1111111111111111111111111111111111111111\t1111111\t10\t10 seconds ago\n" ++
+            "refs/remotes/origin/alpha\t2222222222222222222222222222222222222222\t2222222\t10\t10 seconds ago\n" ++
+            "refs/heads/alpha\t3333333333333333333333333333333333333333\t3333333\t10\t10 seconds ago\n" ++
+            "refs/remotes/origin/beta\t1111111111111111111111111111111111111111\t1111111\t10\t10 seconds ago\n",
+    );
+    defer std.testing.allocator.free(rows);
+
+    sortRefRows(rows, .{ .field = .ref, .direction = .asc });
+    try std.testing.expectEqualStrings("refs/heads/alpha", rows[0].ref);
+    try std.testing.expectEqualStrings("refs/remotes/origin/alpha", rows[1].ref);
+    try std.testing.expectEqualStrings("refs/heads/beta", rows[2].ref);
+    try std.testing.expectEqualStrings("refs/remotes/origin/beta", rows[3].ref);
+    try std.testing.expect(branchHasDivergedPair(rows, rows[0]));
+    try std.testing.expect(!branchHasDivergedPair(rows, rows[2]));
+    try std.testing.expectEqualStrings("origin/alpha", codeBrowseRef(rows[1].ref).?);
 }
 
 test "web refs href preserves filters and sort" {
@@ -792,4 +1050,14 @@ test "refs sync csrf form validation" {
     try std.testing.expect(try formValueEquals(allocator, "other=1&csrf_token=abc%20123", "csrf_token", "abc 123"));
     try std.testing.expect(!(try formValueEquals(allocator, "csrf_token=wrong", "csrf_token", "abc123")));
     try std.testing.expect(!(try formValueEquals(allocator, "other=abc123", "csrf_token", "abc123")));
+}
+
+test "refs delete validates branch ref scopes" {
+    try validateLocalBranchRef("refs/heads/main");
+    try validateOriginTrackingRef("refs/remotes/origin/main");
+    try validateExpectedOid("abcdef123456");
+    try std.testing.expectEqualStrings("feature/x", originTrackingBranchName("refs/remotes/origin/feature/x").?);
+    try std.testing.expectError(error.InvalidLocalBranchRef, validateLocalBranchRef("refs/remotes/origin/main"));
+    try std.testing.expectError(error.InvalidRemoteTrackingRef, validateOriginTrackingRef("refs/remotes/upstream/main"));
+    try std.testing.expectError(error.InvalidExpectedOid, validateExpectedOid("not-an-oid"));
 }

@@ -116,6 +116,7 @@ const routes = [_]Route{
     Route.get("/events", handleEventsPage),
     Route.get("/refs", handleRefsPage),
     Route.post("/refs/sync", handleRefsSyncPost),
+    Route.post("/refs/delete", handleRefsDeletePost),
     Route.get("/worktrees", handleWorktreesPage),
     Route.get("/new-issue", handleNewIssuePage),
     Route.get("/new-pull", handleNewPullPage),
@@ -608,6 +609,10 @@ fn handleRefsPage(ctx: WebContext) !void {
 
 fn handleRefsSyncPost(ctx: WebContext) !void {
     try refs_page.handleRefsSyncPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body, ctx.csrf_token);
+}
+
+fn handleRefsDeletePost(ctx: WebContext) !void {
+    try refs_page.handleRefsDeletePost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body, ctx.csrf_token);
 }
 
 fn handleWorktreesPage(ctx: WebContext) !void {

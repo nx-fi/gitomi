@@ -509,7 +509,7 @@ fn pushRemoteBranchWithLease(allocator: Allocator, repo: Repo, target: RemoteBra
     defer allocator.free(lease);
     const refspec = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ new_oid, target.remote_ref });
     defer allocator.free(refspec);
-    const push_output = gitCheckedAt(allocator, repo.root, &.{ "push", target.remote, lease, refspec }, git.max_git_output) catch |err| switch (err) {
+    const push_output = gitCheckedAt(allocator, repo.root, &.{ "push", lease, target.remote, refspec }, git.max_git_output) catch |err| switch (err) {
         error.GitFailed => return error.RemoteBranchUpdateFailed,
         else => return err,
     };
@@ -518,10 +518,14 @@ fn pushRemoteBranchWithLease(allocator: Allocator, repo: Repo, target: RemoteBra
 
 fn cleanupTempWorktree(allocator: Allocator, repo_root: []const u8, tmp_worktree: []const u8, worktree_created: *bool) void {
     if (worktree_created.*) {
-        var remove_result = gitRunAt(allocator, repo_root, &.{ "worktree", "remove", "--force", tmp_worktree }, 1024 * 1024) catch null;
+        var remove_result = gitRunAt(allocator, repo_root, &.{ "worktree", "remove", tmp_worktree }, 1024 * 1024) catch null;
         if (remove_result) |*result| result.deinit();
     }
     std.fs.deleteTreeAbsolute(tmp_worktree) catch {};
+    if (worktree_created.*) {
+        var prune_result = gitRunAt(allocator, repo_root, &.{ "worktree", "prune" }, 1024 * 1024) catch null;
+        if (prune_result) |*result| result.deinit();
+    }
 }
 
 pub fn mergeErrorMessage(err: anyerror) ?[]const u8 {
@@ -555,10 +559,14 @@ pub fn commitConflictResolution(
     var worktree_created = false;
     defer {
         if (worktree_created) {
-            var remove_result = gitRunAt(allocator, repo.root, &.{ "worktree", "remove", "--force", tmp_worktree }, 1024 * 1024) catch null;
+            var remove_result = gitRunAt(allocator, repo.root, &.{ "worktree", "remove", tmp_worktree }, 1024 * 1024) catch null;
             if (remove_result) |*result| result.deinit();
         }
         std.fs.deleteTreeAbsolute(tmp_worktree) catch {};
+        if (worktree_created) {
+            var prune_result = gitRunAt(allocator, repo.root, &.{ "worktree", "prune" }, 1024 * 1024) catch null;
+            if (prune_result) |*result| result.deinit();
+        }
     }
 
     const worktree_add_raw = try gitCheckedAt(allocator, repo.root, &.{ "worktree", "add", "--detach", tmp_worktree, snapshot.expected_head_oid }, git.max_git_output);

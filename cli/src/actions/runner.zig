@@ -90,17 +90,11 @@ pub fn executeWorkflow(
     };
     allocator.free(added);
 
-    defer {
-        if (git.gitChecked(allocator, &.{ "worktree", "remove", "--force", worktree_path })) |removed| {
-            allocator.free(removed);
-        } else |_| {}
-    }
+    defer cleanupTemporaryWorktree(allocator, worktree_path);
 
     var workflow_worktree_path: ?[]u8 = null;
     defer if (workflow_worktree_path) |path| {
-        if (git.gitChecked(allocator, &.{ "worktree", "remove", "--force", path })) |removed| {
-            allocator.free(removed);
-        } else |_| {}
+        cleanupTemporaryWorktree(allocator, path);
         allocator.free(path);
     };
     const workflow_tree = if (std.mem.eql(u8, targets.workflow.target_oid, targets.code.target_oid))
@@ -139,6 +133,18 @@ pub fn executeWorkflow(
         if (!errors.isReported(err)) try io.eprint("gt actions: failed to write run diagnostics: {s}\n", .{@errorName(err)});
     }
     return result;
+}
+
+fn cleanupTemporaryWorktree(allocator: Allocator, path: []const u8) void {
+    if (git.gitChecked(allocator, &.{ "worktree", "remove", path })) |removed| {
+        allocator.free(removed);
+        return;
+    } else |_| {}
+
+    std.fs.deleteTreeAbsolute(path) catch {};
+    if (git.gitChecked(allocator, &.{ "worktree", "prune" })) |pruned| {
+        allocator.free(pruned);
+    } else |_| {}
 }
 
 pub fn executeGithubActionsWorkflow(
