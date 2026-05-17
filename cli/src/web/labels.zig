@@ -26,6 +26,46 @@ const sqlite = index.sqlite;
 const newUuidV7 = util.newUuidV7;
 const rfc3339Now = util.rfc3339Now;
 
+const label_rows_sql =
+    \\WITH label_names AS (
+    \\  SELECT name AS label FROM label_definitions
+    \\  UNION
+    \\  SELECT label FROM issue_labels
+    \\  UNION
+    \\  SELECT label FROM pull_labels
+    \\),
+    \\usage_totals AS (
+    \\  SELECT label, SUM(issue_count) AS issue_count, SUM(pull_count) AS pull_count
+    \\  FROM (
+    \\    SELECT il.label, COUNT(DISTINCT il.issue_id) AS issue_count, 0 AS pull_count
+    \\    FROM issue_labels il
+    \\    JOIN issues i ON i.id = il.issue_id
+    \\    WHERE i.state = 'open'
+    \\    GROUP BY il.label
+    \\    UNION ALL
+    \\    SELECT pl.label, 0 AS issue_count, COUNT(DISTINCT pl.pull_id) AS pull_count
+    \\    FROM pull_labels pl
+    \\    JOIN pulls p ON p.id = pl.pull_id
+    \\    WHERE p.state = 'open'
+    \\    GROUP BY pl.label
+    \\  )
+    \\  GROUP BY label
+    \\)
+    \\SELECT label_names.label,
+    \\       COALESCE(label_definitions.id, ''),
+    \\       COALESCE(label_definitions.description, ''),
+    \\       COALESCE(label_definitions.color, ''),
+    \\       COALESCE(usage_totals.issue_count, 0),
+    \\       COALESCE(usage_totals.pull_count, 0)
+    \\FROM label_names
+    \\LEFT JOIN label_definitions ON label_definitions.name = label_names.label
+    \\LEFT JOIN usage_totals ON usage_totals.label = label_names.label
+    \\ORDER BY CASE WHEN label_definitions.id IS NULL THEN 1 ELSE 0 END,
+    \\         label_definitions.position,
+    \\         lower(label_names.label),
+    \\         label_names.label
+;
+
 pub fn renderLabelsPage(allocator: Allocator, repo: Repo, csrf_token: []const u8) ![]u8 {
     if (try shared.renderIndexingPageIfStale(allocator, repo, "Labels", "labels", "/labels")) |body| return body;
     try index.ensureIndex(allocator, repo);
@@ -44,41 +84,7 @@ pub fn renderLabelsPage(allocator: Allocator, repo: Repo, csrf_token: []const u8
     try appendLabelDialog(&buf, allocator, csrf_token);
     try appendLabelsListStart(&buf, allocator, label_count);
 
-    var stmt = try db.prepare(
-        \\WITH label_names AS (
-        \\  SELECT name AS label FROM label_definitions
-        \\  UNION
-        \\  SELECT label FROM issue_labels
-        \\  UNION
-        \\  SELECT label FROM pull_labels
-        \\),
-        \\usage_totals AS (
-        \\  SELECT label, SUM(issue_count) AS issue_count, SUM(pull_count) AS pull_count
-        \\  FROM (
-        \\    SELECT label, COUNT(DISTINCT issue_id) AS issue_count, 0 AS pull_count
-        \\    FROM issue_labels
-        \\    GROUP BY label
-        \\    UNION ALL
-        \\    SELECT label, 0 AS issue_count, COUNT(DISTINCT pull_id) AS pull_count
-        \\    FROM pull_labels
-        \\    GROUP BY label
-        \\  )
-        \\  GROUP BY label
-        \\)
-        \\SELECT label_names.label,
-        \\       COALESCE(label_definitions.id, ''),
-        \\       COALESCE(label_definitions.description, ''),
-        \\       COALESCE(label_definitions.color, ''),
-        \\       COALESCE(usage_totals.issue_count, 0),
-        \\       COALESCE(usage_totals.pull_count, 0)
-        \\FROM label_names
-        \\LEFT JOIN label_definitions ON label_definitions.name = label_names.label
-        \\LEFT JOIN usage_totals ON usage_totals.label = label_names.label
-        \\ORDER BY CASE WHEN label_definitions.id IS NULL THEN 1 ELSE 0 END,
-        \\         label_definitions.position,
-        \\         lower(label_names.label),
-        \\         label_names.label
-    );
+    var stmt = try db.prepare(label_rows_sql);
     defer stmt.deinit();
 
     var shown: usize = 0;
@@ -653,13 +659,8 @@ fn appendLabelRow(
         \\  <div class="labels-row-links">
     , .{ .description = effective_description });
     try appendIssueLink(buf, allocator, label, issue_count);
-    try appendTemplate(buf, allocator,
-        \\    <span>{pull_count} {pull_label}</span>
-        \\  </div>
-    , .{
-        .pull_count = groupedUnsigned(@intCast(pull_count)),
-        .pull_label = if (pull_count == 1) "pull request" else "pull requests",
-    });
+    try appendPullLink(buf, allocator, label, pull_count);
+    try buf.appendSlice(allocator, "  </div>");
     try appendLabelActionMenu(buf, allocator, label, csrf_token);
     try buf.appendSlice(allocator, "</article>");
 }
@@ -667,7 +668,7 @@ fn appendLabelRow(
 fn labelUsageSummaryOwned(allocator: Allocator, issue_count: usize, pull_count: usize) ![]u8 {
     return std.fmt.allocPrint(
         allocator,
-        "Used by {d} {s} and {d} {s}",
+        "Used by {d} open {s} and {d} open {s}",
         .{
             issue_count,
             if (issue_count == 1) "issue" else "issues",
@@ -679,17 +680,33 @@ fn labelUsageSummaryOwned(allocator: Allocator, issue_count: usize, pull_count: 
 
 fn appendIssueLink(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, issue_count: usize) !void {
     if (issue_count == 0) {
-        try buf.appendSlice(allocator, "<span>0 issues</span>");
+        try buf.appendSlice(allocator, "<span>0 open issues</span>");
         return;
     }
 
-    try buf.appendSlice(allocator, "<a href=\"/issues?state=all&amp;label=");
+    try buf.appendSlice(allocator, "<a href=\"/issues?state=open&amp;label=");
     try appendUrlEncoded(buf, allocator, label);
     try appendTemplate(buf, allocator,
-        \\">{issue_count} {issue_label}</a>
+        \\">{issue_count} open {issue_label}</a>
     , .{
         .issue_count = groupedUnsigned(@intCast(issue_count)),
         .issue_label = if (issue_count == 1) "issue" else "issues",
+    });
+}
+
+fn appendPullLink(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, pull_count: usize) !void {
+    if (pull_count == 0) {
+        try buf.appendSlice(allocator, "<span>0 open pull requests</span>");
+        return;
+    }
+
+    try buf.appendSlice(allocator, "<a href=\"/pulls?state=open&amp;label=");
+    try appendUrlEncoded(buf, allocator, label);
+    try appendTemplate(buf, allocator,
+        \\">{pull_count} open {pull_label}</a>
+    , .{
+        .pull_count = groupedUnsigned(@intCast(pull_count)),
+        .pull_label = if (pull_count == 1) "pull request" else "pull requests",
     });
 }
 
@@ -785,4 +802,59 @@ test "label delete form includes csrf token" {
 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "name=\"_csrf\" value=\"token-123\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "name=\"label\" value=\"bug\"") != null);
+}
+
+test "labels page usage counts only open issues and pulls" {
+    const allocator = std.testing.allocator;
+    var db = try SqliteDb.openWithOptions(allocator, ":memory:", sqlite.SQLITE_OPEN_READWRITE | sqlite.SQLITE_OPEN_CREATE, true, .{ .enable_wal = false });
+    defer db.deinit();
+
+    try db.exec(
+        \\CREATE TABLE label_definitions(id TEXT, name TEXT, description TEXT, color TEXT, position INTEGER);
+        \\CREATE TABLE issues(id TEXT PRIMARY KEY, state TEXT NOT NULL);
+        \\CREATE TABLE issue_labels(issue_id TEXT NOT NULL, label TEXT NOT NULL);
+        \\CREATE TABLE pulls(id TEXT PRIMARY KEY, state TEXT NOT NULL);
+        \\CREATE TABLE pull_labels(pull_id TEXT NOT NULL, label TEXT NOT NULL);
+        \\INSERT INTO label_definitions(id, name, description, color, position) VALUES ('label-1', 'bug', '', '#ff0000', 0);
+        \\INSERT INTO label_definitions(id, name, description, color, position) VALUES ('label-2', 'history', '', '#00ff00', 1);
+        \\INSERT INTO issues(id, state) VALUES ('issue-open', 'open');
+        \\INSERT INTO issues(id, state) VALUES ('issue-closed', 'closed');
+        \\INSERT INTO issue_labels(issue_id, label) VALUES ('issue-open', 'bug');
+        \\INSERT INTO issue_labels(issue_id, label) VALUES ('issue-closed', 'bug');
+        \\INSERT INTO issue_labels(issue_id, label) VALUES ('issue-closed', 'history');
+        \\INSERT INTO pulls(id, state) VALUES ('pull-open', 'open');
+        \\INSERT INTO pulls(id, state) VALUES ('pull-merged', 'merged');
+        \\INSERT INTO pulls(id, state) VALUES ('pull-closed', 'closed');
+        \\INSERT INTO pull_labels(pull_id, label) VALUES ('pull-open', 'bug');
+        \\INSERT INTO pull_labels(pull_id, label) VALUES ('pull-merged', 'bug');
+        \\INSERT INTO pull_labels(pull_id, label) VALUES ('pull-closed', 'bug');
+        \\INSERT INTO pull_labels(pull_id, label) VALUES ('pull-merged', 'history');
+    );
+
+    var stmt = try db.prepare(label_rows_sql);
+    defer stmt.deinit();
+
+    try std.testing.expect(try stmt.step());
+    const bug_label = try stmt.columnTextDup(allocator, 0);
+    defer allocator.free(bug_label);
+    try std.testing.expectEqualStrings("bug", bug_label);
+    try std.testing.expectEqual(@as(i64, 1), stmt.columnInt64(4));
+    try std.testing.expectEqual(@as(i64, 1), stmt.columnInt64(5));
+
+    try std.testing.expect(try stmt.step());
+    const history_label = try stmt.columnTextDup(allocator, 0);
+    defer allocator.free(history_label);
+    try std.testing.expectEqualStrings("history", history_label);
+    try std.testing.expectEqual(@as(i64, 0), stmt.columnInt64(4));
+    try std.testing.expectEqual(@as(i64, 0), stmt.columnInt64(5));
+}
+
+test "label pull link targets open pull label filter" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendPullLink(&buf, std.testing.allocator, "needs review", 2);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "/pulls?state=open&amp;label=needs%20review") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "2 open pull requests") != null);
 }
