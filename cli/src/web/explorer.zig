@@ -431,7 +431,7 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
             try appendRootCodeToolbar(&buf, allocator, ref, branches, worktrees, branch_count, tag_count, worktree_count);
             if (sync_flash) |flash| try appendCodeSyncFlash(&buf, allocator, flash);
             try appendRootCodePanelStart(&buf, allocator);
-            try appendRootCommitBar(&buf, allocator, &reference_resolver, ref, summary_opt, null);
+            try appendRootCommitBar(&buf, allocator, ref, summary_opt, null);
             try appendRootTreeListing(&buf, allocator, ref, entries);
             try appendCodePanelEnd(&buf, allocator);
         } else {
@@ -1103,7 +1103,6 @@ fn appendRootCodePanelStart(buf: *std.ArrayList(u8), allocator: Allocator) !void
 fn appendRootCommitBar(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
-    reference_resolver: *shared.InternalReferenceResolver,
     ref: []const u8,
     summary_opt: ?CommitSummary,
     commit_count: ?usize,
@@ -1113,17 +1112,12 @@ fn appendRootCommitBar(
         try shared.appendAvatar(buf, allocator, summary.author, "root-commit-avatar");
         const commit_href = commitHref(summary.full_hash);
         try appendTemplate(buf, allocator,
-            \\<div class="root-commit-main"><span class="root-commit-author">{author}</span><span class="root-commit-message" title="{subject}">
-        , .{
-            .author = summary.author,
-            .subject = summary.subject,
-        });
-        try shared.appendInternalReferenceLinkedTextWithDefaultHref(buf, allocator, reference_resolver, summary.subject, commit_href);
-        try appendTemplate(buf, allocator,
-            \\</span></div>
+            \\<div class="root-commit-main"><span class="root-commit-author">{author}</span><a class="root-commit-message" href="{href}" title="{subject}">{subject}</a></div>
             \\<div class="root-commit-meta"><a class="root-commit-hash" href="{href}">{hash}</a><span>{relative}</span></div>
         , .{
+            .author = summary.author,
             .href = commit_href,
+            .subject = summary.subject,
             .hash = summary.hash,
             .relative = summary.relative,
         });

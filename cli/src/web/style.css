@@ -7033,6 +7033,7 @@ main.page-code:has(.root-code-toolbar) .repo-actions {
 }
 .root-commit-author {
   color: var(--text);
+  cursor: default;
   font-weight: 600;
   white-space: nowrap;
 }
@@ -7050,6 +7051,14 @@ main.page-code:has(.root-code-toolbar) .repo-actions {
 .root-commit-message a,
 .root-file-commit a {
   color: inherit;
+}
+a.root-commit-message,
+a.root-file-commit,
+.root-file-name,
+.file-name,
+.file-commit > a:only-child {
+  justify-self: start;
+  width: fit-content;
 }
 .root-commit-message:hover,
 .root-commit-message a:hover,
@@ -7114,7 +7123,6 @@ a.root-file-commit:hover,
   display: none;
 }
 .root-file-name {
-  justify-self: stretch;
   max-width: 100%;
   min-width: 0;
   overflow: hidden;
@@ -8208,7 +8216,6 @@ a.root-file-commit:hover,
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  justify-self: stretch;
   max-width: 100%;
   min-width: 0;
   overflow: hidden;
@@ -8234,7 +8241,7 @@ a.root-file-commit:hover,
   color: inherit;
 }
 .file-commit > a:only-child {
-  display: block;
+  display: inline-block;
   max-width: 100%;
 }
 .file-commit a:hover {

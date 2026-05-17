@@ -281,6 +281,18 @@ pub fn lookupMappedObjectId(allocator: Allocator, map_file: []const u8, kind: []
     const lock_file = try acquireMapLock(allocator, map_file);
     defer lock_file.close();
 
+    return try lookupMappedObjectIdUnlocked(allocator, map_file, kind, number);
+}
+
+pub fn recordMappedObjectId(allocator: Allocator, map_file: []const u8, kind: []const u8, id: []const u8, number: i64) !void {
+    const lock_file = try acquireMapLock(allocator, map_file);
+    defer lock_file.close();
+
+    if (try mappingExistsUnlocked(allocator, map_file, kind, id, number)) return;
+    try appendMappingLine(allocator, map_file, kind, id, number);
+}
+
+fn lookupMappedObjectIdUnlocked(allocator: Allocator, map_file: []const u8, kind: []const u8, number: i64) !?[]u8 {
     const bytes = std.fs.cwd().readFileAlloc(allocator, map_file, 8 * 1024 * 1024) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return err,
@@ -305,14 +317,86 @@ pub fn lookupMappedObjectId(allocator: Allocator, map_file: []const u8, kind: []
                 return CliError.UserError;
             },
         };
-        const mapped_kind = event_mod.jsonString(root.get("kind")) orelse continue;
+        const mapped_kind = event_mod.jsonString(root.get("kind")) orelse {
+            try eprint("gt github: map file {s} line {d} is missing kind\n", .{ map_file, line_number });
+            return CliError.UserError;
+        };
+        const mapped_number = jsonInteger(root.get("number")) orelse {
+            try eprint("gt github: map file {s} line {d} is missing number\n", .{ map_file, line_number });
+            return CliError.UserError;
+        };
+        const id = event_mod.jsonString(root.get("id")) orelse {
+            try eprint("gt github: map file {s} line {d} is missing id\n", .{ map_file, line_number });
+            return CliError.UserError;
+        };
         if (!std.mem.eql(u8, mapped_kind, kind)) continue;
-        const mapped_number = jsonInteger(root.get("number")) orelse continue;
         if (mapped_number != number) continue;
-        const id = event_mod.jsonString(root.get("id")) orelse continue;
         return try allocator.dupe(u8, id);
     }
     return null;
+}
+
+fn mappingExistsUnlocked(allocator: Allocator, map_file: []const u8, kind: []const u8, id: []const u8, number: i64) !bool {
+    const bytes = std.fs.cwd().readFileAlloc(allocator, map_file, 8 * 1024 * 1024) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer allocator.free(bytes);
+
+    var lines = std.mem.tokenizeScalar(u8, bytes, '\n');
+    var line_number: usize = 0;
+    while (lines.next()) |line_raw| {
+        line_number += 1;
+        const line = std.mem.trim(u8, line_raw, " \t\r\n");
+        if (line.len == 0) continue;
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch {
+            try eprint("gt github: map file {s} has an invalid JSON line at {d}; refusing to risk duplicate GitHub creates\n", .{ map_file, line_number });
+            return CliError.UserError;
+        };
+        defer parsed.deinit();
+        const root = switch (parsed.value) {
+            .object => |object| object,
+            else => {
+                try eprint("gt github: map file {s} line {d} must be a JSON object\n", .{ map_file, line_number });
+                return CliError.UserError;
+            },
+        };
+        const mapped_kind = event_mod.jsonString(root.get("kind")) orelse {
+            try eprint("gt github: map file {s} line {d} is missing kind\n", .{ map_file, line_number });
+            return CliError.UserError;
+        };
+        const mapped_id = event_mod.jsonString(root.get("id")) orelse {
+            try eprint("gt github: map file {s} line {d} is missing id\n", .{ map_file, line_number });
+            return CliError.UserError;
+        };
+        const mapped_number = jsonInteger(root.get("number")) orelse {
+            try eprint("gt github: map file {s} line {d} is missing number\n", .{ map_file, line_number });
+            return CliError.UserError;
+        };
+        if (!std.mem.eql(u8, mapped_kind, kind)) continue;
+        if (std.mem.eql(u8, mapped_id, id) or mapped_number == number) return true;
+    }
+    return false;
+}
+
+fn appendMappingLine(allocator: Allocator, map_file: []const u8, kind: []const u8, id: []const u8, number: i64) !void {
+    if (std.fs.path.dirname(map_file)) |dir| try std.fs.cwd().makePath(dir);
+    var file = std.fs.cwd().openFile(map_file, .{ .mode = .write_only }) catch |err| switch (err) {
+        error.FileNotFound => try std.fs.cwd().createFile(map_file, .{ .mode = 0o600 }),
+        else => return err,
+    };
+    defer file.close();
+    try file.seekFromEnd(0);
+
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(allocator);
+    try line.append(allocator, '{');
+    try appendJsonFieldString(&line, allocator, "kind", kind, true);
+    try appendJsonFieldString(&line, allocator, "id", id, true);
+    try json_writer.appendJsonFieldInteger(&line, allocator, "number", number, false);
+    try line.appendSlice(allocator, "}\n");
+    try file.writeAll(line.items);
+    try file.sync();
 }
 
 pub fn exportToGithub(allocator: Allocator, options: ExportOptions) !ExportResult {
