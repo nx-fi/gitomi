@@ -7,6 +7,7 @@ const diff_render = @import("../diff/render.zig");
 const issues_page = @import("../issues.zig");
 const merge_editor = @import("merge_editor.zig");
 const pulls_list = @import("list.zig");
+const pull_sidebar = @import("sidebar.zig");
 const pull = @import("../../pr.zig");
 const reaction_mod = @import("../../reaction.zig");
 const repo_mod = @import("../../repo.zig");
@@ -21,7 +22,6 @@ const SqliteDb = index.SqliteDb;
 const appendEmptyState = shared.appendEmptyState;
 const appendHref = shared.appendHref;
 const appendPill = shared.appendPill;
-const appendSectionHead = shared.appendSectionHead;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
 const appendRelativeTime = shared.appendRelativeTime;
@@ -189,7 +189,7 @@ fn renderPullDetailPageWithMergeError(allocator: Allocator, repo: Repo, raw_ref:
         .files => try appendPullFiles(&buf, allocator, repo, detail, raw_ref),
     }
     try buf.appendSlice(allocator, "</div><aside class=\"issue-meta-sidebar pull-sidebar\">");
-    try appendPullSidebar(&buf, allocator, repo, &db, detail, pull_ref);
+    try pull_sidebar.append(&buf, allocator, repo, &db, detail, pull_ref);
     try buf.appendSlice(allocator, "</aside></div></section>");
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
@@ -584,176 +584,6 @@ fn appendPullCollectionFact(buf: *std.ArrayList(u8), allocator: Allocator, db: *
     }
     if (!shown) try buf.appendSlice(allocator, "<span class=\"muted\">None</span>");
     try buf.appendSlice(allocator, "</dd></div>");
-}
-
-fn appendPullSidebar(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, db: *SqliteDb, detail: PullDetail, pull_ref: []const u8) !void {
-    try appendPullSidebarPeopleSection(buf, allocator, db, "Reviewers", "Manage reviewers", "SELECT DISTINCT reviewer FROM pull_reviewers WHERE pull_id = ? ORDER BY reviewer", detail.id, "No reviewers");
-    try appendPullSidebarPeopleSection(buf, allocator, db, "Assignees", "Manage assignees", "SELECT DISTINCT assignee FROM pull_assignees WHERE pull_id = ? ORDER BY assignee", detail.id, "No one assigned");
-    try appendPullSidebarLabels(buf, allocator, db, detail.id);
-    try appendPullSidebarEmptySection(buf, allocator, "Projects", "Manage projects", "No projects");
-    try appendPullSidebarEmptySection(buf, allocator, "Milestone", "Set milestone", "No milestone");
-    try appendPullSidebarDevelopment(buf, allocator, repo, detail, pull_ref);
-    try appendPullSidebarNotifications(buf, allocator);
-    try appendPullSidebarParticipants(buf, allocator, db, detail);
-}
-
-fn appendPullSidebarSectionStart(buf: *std.ArrayList(u8), allocator: Allocator, title: []const u8, menu_label: []const u8) !void {
-    try appendTemplate(buf, allocator,
-        \\<section class="issue-sidebar-section"><div class="issue-sidebar-heading"><h2>{title}</h2><button class="pull-sidebar-gear" type="button" disabled aria-label="{menu_label}" title="{menu_label}"><span class="issue-sidebar-menu-icon" aria-hidden="true"></span></button></div>
-    , .{
-        .title = title,
-        .menu_label = menu_label,
-    });
-}
-
-fn appendPullSidebarSectionEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
-    try buf.appendSlice(allocator, "</section>");
-}
-
-fn appendPullSidebarPeopleSection(
-    buf: *std.ArrayList(u8),
-    allocator: Allocator,
-    db: *SqliteDb,
-    title: []const u8,
-    menu_label: []const u8,
-    comptime sql_text: []const u8,
-    pull_id: []const u8,
-    empty_text: []const u8,
-) !void {
-    try appendPullSidebarSectionStart(buf, allocator, title, menu_label);
-    var stmt = try db.prepare(sql_text);
-    defer stmt.deinit();
-    try stmt.bindText(1, pull_id);
-    var shown = false;
-    while (try stmt.step()) {
-        const person = try stmt.columnTextDup(allocator, 0);
-        defer allocator.free(person);
-        try appendPullSidebarPerson(buf, allocator, person);
-        shown = true;
-    }
-    if (!shown) try appendTemplate(buf, allocator, "<p class=\"issue-sidebar-empty\">{empty_text}</p>", .{ .empty_text = empty_text });
-    try appendPullSidebarSectionEnd(buf, allocator);
-}
-
-fn appendPullSidebarLabels(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, pull_id: []const u8) !void {
-    try appendPullSidebarSectionStart(buf, allocator, "Labels", "Manage labels");
-    var stmt = try db.prepare("SELECT DISTINCT label FROM pull_labels WHERE pull_id = ? ORDER BY label");
-    defer stmt.deinit();
-    try stmt.bindText(1, pull_id);
-    var shown = false;
-    while (try stmt.step()) {
-        const label = try stmt.columnTextDup(allocator, 0);
-        defer allocator.free(label);
-        if (!shown) {
-            try buf.appendSlice(allocator, "<div class=\"issue-sidebar-labels\">");
-            shown = true;
-        }
-        try appendLabel(buf, allocator, label);
-    }
-    if (shown) {
-        try buf.appendSlice(allocator, "</div>");
-    } else {
-        try buf.appendSlice(allocator, "<p class=\"issue-sidebar-empty\">None yet</p>");
-    }
-    try appendPullSidebarSectionEnd(buf, allocator);
-}
-
-fn appendPullSidebarEmptySection(buf: *std.ArrayList(u8), allocator: Allocator, title: []const u8, menu_label: []const u8, empty_text: []const u8) !void {
-    try appendPullSidebarSectionStart(buf, allocator, title, menu_label);
-    try appendTemplate(buf, allocator, "<p class=\"issue-sidebar-empty\">{empty_text}</p>", .{ .empty_text = empty_text });
-    try appendPullSidebarSectionEnd(buf, allocator);
-}
-
-fn appendPullSidebarDevelopment(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, detail: PullDetail, pull_ref: []const u8) !void {
-    try appendPullSidebarSectionStart(buf, allocator, "Development", "Link development");
-    try buf.appendSlice(allocator,
-        \\<p class="issue-sidebar-empty">Successfully merging this pull request may close linked issues.</p>
-        \\<div class="pull-sidebar-branches"><span><strong>Base</strong>
-    );
-    try appendPullBranchLink(buf, allocator, detail.base_ref);
-    try buf.appendSlice(allocator, "</span><span><strong>Head</strong>");
-    try appendPullBranchLink(buf, allocator, detail.head_ref);
-    try buf.appendSlice(allocator, "</span></div>");
-    if (detail.merge_oid.len != 0) {
-        try appendTemplate(buf, allocator,
-            \\<a class="issue-sidebar-link-row" href="{href}"><span class="issue-sidebar-row-kind">merge</span><code>{short_oid}</code></a>
-        , .{
-            .href = commitHref(detail.merge_oid),
-            .short_oid = detail.merge_oid[0..@min(detail.merge_oid.len, 12)],
-        });
-    }
-    if (detail.target_oid.len != 0) {
-        try appendTemplate(buf, allocator,
-            \\<a class="issue-sidebar-link-row" href="{href}"><span class="issue-sidebar-row-kind">target</span><code>{short_oid}</code></a>
-        , .{
-            .href = commitHref(detail.target_oid),
-            .short_oid = detail.target_oid[0..@min(detail.target_oid.len, 12)],
-        });
-    }
-    if (detail.merge_oid.len != 0 or detail.target_oid.len != 0) {
-        try buf.appendSlice(allocator, "<p class=\"pull-sidebar-note\">");
-        try appendLocalMergeCheck(buf, allocator, repo, detail);
-        try buf.appendSlice(allocator, "</p>");
-    }
-    try appendTemplate(buf, allocator, "<p class=\"pull-sidebar-note\"><a href=\"/pulls/{pull_ref}\">/pulls/{pull_ref}</a></p>", .{ .pull_ref = pull_ref });
-    try appendPullSidebarSectionEnd(buf, allocator);
-}
-
-fn appendPullSidebarNotifications(buf: *std.ArrayList(u8), allocator: Allocator) !void {
-    try appendPullSidebarSectionStart(buf, allocator, "Notifications", "Customize notifications");
-    try buf.appendSlice(allocator,
-        \\<button class="button secondary issue-sidebar-full-button" type="button" disabled>Subscribe</button>
-        \\<p class="issue-sidebar-empty">You're receiving notifications because you modified this pull request.</p>
-    );
-    try appendPullSidebarSectionEnd(buf, allocator);
-}
-
-fn appendPullSidebarParticipants(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, detail: PullDetail) !void {
-    try appendPullSidebarSectionStart(buf, allocator, "Participants", "Manage participants");
-    try buf.appendSlice(allocator, "<div class=\"issue-participants\">");
-    var seen = std.StringHashMap(void).init(allocator);
-    defer {
-        var keys = seen.keyIterator();
-        while (keys.next()) |key| allocator.free(key.*);
-        seen.deinit();
-    }
-    try appendPullSidebarParticipant(buf, allocator, &seen, pullDisplayAuthor(detail));
-    try appendPullSidebarParticipantQuery(buf, allocator, db, &seen, "SELECT DISTINCT assignee FROM pull_assignees WHERE pull_id = ? ORDER BY assignee", detail.id);
-    try appendPullSidebarParticipantQuery(buf, allocator, db, &seen, "SELECT DISTINCT reviewer FROM pull_reviewers WHERE pull_id = ? ORDER BY reviewer", detail.id);
-    try buf.appendSlice(allocator, "</div>");
-    try appendPullSidebarSectionEnd(buf, allocator);
-}
-
-fn appendPullSidebarParticipantQuery(
-    buf: *std.ArrayList(u8),
-    allocator: Allocator,
-    db: *SqliteDb,
-    seen: *std.StringHashMap(void),
-    comptime sql_text: []const u8,
-    pull_id: []const u8,
-) !void {
-    var stmt = try db.prepare(sql_text);
-    defer stmt.deinit();
-    try stmt.bindText(1, pull_id);
-    while (try stmt.step()) {
-        const person = try stmt.columnTextDup(allocator, 0);
-        defer allocator.free(person);
-        try appendPullSidebarParticipant(buf, allocator, seen, person);
-    }
-}
-
-fn appendPullSidebarParticipant(buf: *std.ArrayList(u8), allocator: Allocator, seen: *std.StringHashMap(void), person: []const u8) !void {
-    if (person.len == 0 or seen.contains(person)) return;
-    const key = try allocator.dupe(u8, person);
-    errdefer allocator.free(key);
-    try seen.put(key, {});
-    try appendAvatar(buf, allocator, person, "");
-}
-
-fn appendPullSidebarPerson(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8) !void {
-    try buf.appendSlice(allocator, "<div class=\"issue-sidebar-person\">");
-    try appendAvatar(buf, allocator, name, "");
-    try appendTemplate(buf, allocator, "<span>{name}</span></div>", .{ .name = name });
 }
 
 fn appendPullConversation(
@@ -1693,114 +1523,6 @@ fn mergeMethodCommitPhrase(allocator: Allocator, count: ?usize) ![]u8 {
         return std.fmt.allocPrint(allocator, "The {d} {s}", .{ value, commitWord(value) });
     }
     return allocator.dupe(u8, "The commits");
-}
-
-pub fn renderPullForm(
-    allocator: Allocator,
-    repo: Repo,
-    csrf_token: []const u8,
-    error_message: ?[]const u8,
-    title_value: []const u8,
-    body_value: []const u8,
-    base_value: []const u8,
-    head_value: []const u8,
-    draft: bool,
-) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-
-    try appendShellStart(&buf, allocator, repo, "New Pull Request", "pulls");
-    try buf.appendSlice(allocator, "<section class=\"panel form-panel\">");
-    try appendSectionHead(&buf, allocator, "Pull requests", "New Pull Request", null);
-    if (error_message) |message| {
-        try appendTemplate(&buf, allocator, "<div class=\"flash error\">{message}</div>", .{ .message = message });
-    }
-    try appendTemplate(&buf, allocator,
-        \\  <form method="post" action="/pulls" class="issue-form">
-        \\    <input type="hidden" name="csrf_token" value="{csrf_token}">
-        \\    <label>Title<input name="title" value="{title_value}" autofocus required></label>
-        \\    <label>Body<textarea name="body" rows="8">{body_value}</textarea></label>
-        \\    <div class="grid two">
-        \\      <label>Base ref<input name="base" value="{base_value}" placeholder="main" required></label>
-        \\      <label>Head ref<input name="head" value="{head_value}" placeholder="feature-branch" required></label>
-        \\    </div>
-        \\    <label class="checkbox-label"><input type="checkbox" name="draft" value="1"{draft_checked}> Draft</label>
-        \\    <div class="form-actions">
-        \\      <a class="button secondary" href="/pulls">Cancel</a>
-        \\      <button class="button primary" type="submit">Create pull request</button>
-        \\    </div>
-        \\  </form>
-        \\</section>
-    , .{
-        .csrf_token = csrf_token,
-        .title_value = title_value,
-        .body_value = body_value,
-        .base_value = base_value,
-        .head_value = head_value,
-        .draft_checked = if (draft) " checked" else "",
-    });
-    try appendShellEnd(&buf, allocator);
-    return buf.toOwnedSlice(allocator);
-}
-
-pub fn handlePullPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, csrf_token: []const u8, form_body: []const u8) !void {
-    const submitted_token = try issues_page.formValueOwned(allocator, form_body, "csrf_token");
-    defer if (submitted_token) |value| allocator.free(value);
-    if (submitted_token == null or !std.mem.eql(u8, submitted_token.?, csrf_token)) {
-        try sendPlainResponse(allocator, stream, 403, "Forbidden", "Invalid CSRF token\n");
-        return;
-    }
-
-    const title_owned = (try issues_page.formValueOwned(allocator, form_body, "title")) orelse try allocator.dupe(u8, "");
-    defer allocator.free(title_owned);
-    const body_owned = (try issues_page.formValueOwned(allocator, form_body, "body")) orelse try allocator.dupe(u8, "");
-    defer allocator.free(body_owned);
-    const base_owned = (try issues_page.formValueOwned(allocator, form_body, "base")) orelse try allocator.dupe(u8, "");
-    defer allocator.free(base_owned);
-    const head_owned = (try issues_page.formValueOwned(allocator, form_body, "head")) orelse try allocator.dupe(u8, "");
-    defer allocator.free(head_owned);
-    const draft_value = try issues_page.formValueOwned(allocator, form_body, "draft");
-    defer if (draft_value) |value| allocator.free(value);
-    const draft = draft_value != null;
-
-    const title = std.mem.trim(u8, title_owned, " \t\r\n");
-    const base_ref = std.mem.trim(u8, base_owned, " \t\r\n");
-    const head_ref = std.mem.trim(u8, head_owned, " \t\r\n");
-    if (title.len == 0 or base_ref.len == 0 or head_ref.len == 0) {
-        const body = try renderPullForm(
-            allocator,
-            repo,
-            csrf_token,
-            "Title, base ref, and head ref are required.",
-            title_owned,
-            body_owned,
-            base_owned,
-            head_owned,
-            draft,
-        );
-        defer allocator.free(body);
-        try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", body, null);
-        return;
-    }
-
-    pull.createPullOpenedEvent(allocator, title, body_owned, base_ref, head_ref, draft) catch {
-        const body = try renderPullForm(
-            allocator,
-            repo,
-            csrf_token,
-            "Could not create the pull request. Check that Gitomi is initialized and Git commit signing is configured.",
-            title_owned,
-            body_owned,
-            base_owned,
-            head_owned,
-            draft,
-        );
-        defer allocator.free(body);
-        try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", body, null);
-        return;
-    };
-
-    try sendRedirect(allocator, stream, "/pulls");
 }
 
 pub fn handlePullConflictPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
