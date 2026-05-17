@@ -18,6 +18,7 @@ const out = io.out;
 const eprint = io.eprint;
 const RepoSlug = common.RepoSlug;
 const GitHubClient = common.GitHubClient;
+const ApiMode = common.ApiMode;
 const default_api_url = common.default_api_url;
 const parseRepoSlug = common.parseRepoSlug;
 const githubTokenFromEnv = common.githubTokenFromEnv;
@@ -45,6 +46,7 @@ pub const ExportOptions = struct {
     skip_actor_device: ?[]const u8 = null,
     max_events: usize = 0,
     quiet: bool = false,
+    mode: ApiMode = .graphql,
 };
 
 pub const ExportResult = struct {
@@ -63,6 +65,7 @@ pub fn cmdExport(allocator: Allocator, args: []const []const u8) !void {
     var map_file_arg: ?[]const u8 = null;
     var reuse_legacy = false;
     var use_gh = false;
+    var mode: ApiMode = .graphql;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -95,6 +98,10 @@ pub fn cmdExport(allocator: Allocator, args: []const []const u8) !void {
             reuse_legacy = true;
         } else if (std.mem.eql(u8, arg, "--use-gh")) {
             use_gh = true;
+        } else if (std.mem.eql(u8, arg, "--rest")) {
+            mode = .rest;
+        } else if (std.mem.eql(u8, arg, "--graphql")) {
+            mode = .graphql;
         } else {
             try eprint("gt github export: unknown option '{s}'\n", .{arg});
             return CliError.UserError;
@@ -125,6 +132,7 @@ pub fn cmdExport(allocator: Allocator, args: []const []const u8) !void {
         .map_file = map_file_arg,
         .reuse_legacy = reuse_legacy,
         .use_gh = use_gh,
+        .mode = mode,
     };
     _ = try exportToGithub(allocator, options);
 }
@@ -469,6 +477,338 @@ pub fn exportToGithub(allocator: Allocator, options: ExportOptions) !ExportResul
     return result;
 }
 
+const graphql_repository_id_query =
+    \\query GitomiRepositoryId($owner: String!, $name: String!) {
+    \\  repository(owner: $owner, name: $name) { id }
+    \\}
+;
+
+const graphql_issue_id_query =
+    \\query GitomiIssueId($owner: String!, $name: String!, $number: Int!) {
+    \\  repository(owner: $owner, name: $name) { issue(number: $number) { id } }
+    \\}
+;
+
+const graphql_pull_id_query =
+    \\query GitomiPullId($owner: String!, $name: String!, $number: Int!) {
+    \\  repository(owner: $owner, name: $name) { pullRequest(number: $number) { id } }
+    \\}
+;
+
+const graphql_create_issue_mutation =
+    \\mutation GitomiCreateIssue($input: CreateIssueInput!) {
+    \\  createIssue(input: $input) { issue { number } }
+    \\}
+;
+
+const graphql_update_issue_mutation =
+    \\mutation GitomiUpdateIssue($input: UpdateIssueInput!) {
+    \\  updateIssue(input: $input) { issue { number } }
+    \\}
+;
+
+const graphql_create_pull_mutation =
+    \\mutation GitomiCreatePullRequest($input: CreatePullRequestInput!) {
+    \\  createPullRequest(input: $input) { pullRequest { number } }
+    \\}
+;
+
+const graphql_update_pull_mutation =
+    \\mutation GitomiUpdatePullRequest($input: UpdatePullRequestInput!) {
+    \\  updatePullRequest(input: $input) { pullRequest { number } }
+    \\}
+;
+
+const graphql_merge_pull_mutation =
+    \\mutation GitomiMergePullRequest($input: MergePullRequestInput!) {
+    \\  mergePullRequest(input: $input) { pullRequest { number } }
+    \\}
+;
+
+const graphql_add_comment_mutation =
+    \\mutation GitomiAddComment($input: AddCommentInput!) {
+    \\  addComment(input: $input) { commentEdge { node { ... on IssueComment { databaseId } } } }
+    \\}
+;
+
+fn createIssueGraphql(allocator: Allocator, client: GitHubClient, payload: std.json.ObjectMap) !?i64 {
+    const repo_id = try fetchRepositoryNodeId(allocator, client);
+    defer allocator.free(repo_id);
+    const input = try githubIssueCreateGraphqlInput(allocator, repo_id, payload);
+    defer allocator.free(input);
+    const body = try graphqlBodyWithInput(allocator, graphql_create_issue_mutation, input);
+    defer allocator.free(body);
+    const raw = try client.graphqlRequest(body);
+    defer allocator.free(raw);
+    if (client.dry_run) return null;
+    var parsed = try parseGraphqlResponse(allocator, raw, "gt github export");
+    defer parsed.deinit();
+    const data = graphqlData(parsed.value) orelse return CliError.UserError;
+    const result = jsonObject(data.get("createIssue")) orelse return CliError.UserError;
+    const issue = jsonObject(result.get("issue")) orelse return CliError.UserError;
+    return jsonInteger(issue.get("number")) orelse return CliError.UserError;
+}
+
+fn updateIssueGraphql(allocator: Allocator, client: GitHubClient, number: i64, payload: std.json.ObjectMap) !void {
+    const issue_id = try fetchIssueNodeId(allocator, client, number);
+    defer allocator.free(issue_id);
+    const input = try githubIssueUpdateGraphqlInput(allocator, issue_id, payload);
+    defer allocator.free(input);
+    const body = try graphqlBodyWithInput(allocator, graphql_update_issue_mutation, input);
+    defer allocator.free(body);
+    const raw = try client.graphqlRequest(body);
+    defer allocator.free(raw);
+    if (client.dry_run) return;
+    var parsed = try parseGraphqlResponse(allocator, raw, "gt github export");
+    defer parsed.deinit();
+}
+
+fn createPullGraphql(allocator: Allocator, client: GitHubClient, payload: std.json.ObjectMap) !?i64 {
+    const repo_id = try fetchRepositoryNodeId(allocator, client);
+    defer allocator.free(repo_id);
+    const input = try githubPullCreateGraphqlInput(allocator, repo_id, payload);
+    defer allocator.free(input);
+    const body = try graphqlBodyWithInput(allocator, graphql_create_pull_mutation, input);
+    defer allocator.free(body);
+    const raw = try client.graphqlRequest(body);
+    defer allocator.free(raw);
+    if (client.dry_run) return null;
+    var parsed = try parseGraphqlResponse(allocator, raw, "gt github export");
+    defer parsed.deinit();
+    const data = graphqlData(parsed.value) orelse return CliError.UserError;
+    const result = jsonObject(data.get("createPullRequest")) orelse return CliError.UserError;
+    const pull = jsonObject(result.get("pullRequest")) orelse return CliError.UserError;
+    return jsonInteger(pull.get("number")) orelse return CliError.UserError;
+}
+
+fn updatePullGraphql(allocator: Allocator, client: GitHubClient, number: i64, payload: std.json.ObjectMap) !void {
+    const pull_id = try fetchPullNodeId(allocator, client, number);
+    defer allocator.free(pull_id);
+    const input = try githubPullUpdateGraphqlInput(allocator, pull_id, payload);
+    defer allocator.free(input);
+    const body = try graphqlBodyWithInput(allocator, graphql_update_pull_mutation, input);
+    defer allocator.free(body);
+    const raw = try client.graphqlRequest(body);
+    defer allocator.free(raw);
+    if (client.dry_run) return;
+    var parsed = try parseGraphqlResponse(allocator, raw, "gt github export");
+    defer parsed.deinit();
+}
+
+fn mergePullGraphql(allocator: Allocator, client: GitHubClient, number: i64) !void {
+    const pull_id = try fetchPullNodeId(allocator, client, number);
+    defer allocator.free(pull_id);
+    var input: std.ArrayList(u8) = .empty;
+    defer input.deinit(allocator);
+    try input.append(allocator, '{');
+    try appendJsonFieldString(&input, allocator, "pullRequestId", pull_id, false);
+    try input.append(allocator, '}');
+    const body = try graphqlBodyWithInput(allocator, graphql_merge_pull_mutation, input.items);
+    defer allocator.free(body);
+    const raw = try client.graphqlRequest(body);
+    defer allocator.free(raw);
+    if (client.dry_run) return;
+    var parsed = try parseGraphqlResponse(allocator, raw, "gt github export");
+    defer parsed.deinit();
+}
+
+fn addCommentGraphql(allocator: Allocator, client: GitHubClient, parent_kind: []const u8, parent_number: i64, body_text: []const u8) !?i64 {
+    const subject_id = if (std.mem.eql(u8, parent_kind, "pull"))
+        try fetchPullNodeId(allocator, client, parent_number)
+    else
+        try fetchIssueNodeId(allocator, client, parent_number);
+    defer allocator.free(subject_id);
+
+    var input: std.ArrayList(u8) = .empty;
+    defer input.deinit(allocator);
+    try input.append(allocator, '{');
+    try appendJsonFieldString(&input, allocator, "subjectId", subject_id, true);
+    try appendJsonFieldString(&input, allocator, "body", body_text, false);
+    try input.append(allocator, '}');
+
+    const body = try graphqlBodyWithInput(allocator, graphql_add_comment_mutation, input.items);
+    defer allocator.free(body);
+    const raw = try client.graphqlRequest(body);
+    defer allocator.free(raw);
+    if (client.dry_run) return null;
+    var parsed = try parseGraphqlResponse(allocator, raw, "gt github export");
+    defer parsed.deinit();
+    const data = graphqlData(parsed.value) orelse return CliError.UserError;
+    const result = jsonObject(data.get("addComment")) orelse return CliError.UserError;
+    const edge = jsonObject(result.get("commentEdge")) orelse return CliError.UserError;
+    const node = jsonObject(edge.get("node")) orelse return CliError.UserError;
+    return jsonInteger(node.get("databaseId")) orelse return CliError.UserError;
+}
+
+fn fetchRepositoryNodeId(allocator: Allocator, client: GitHubClient) ![]u8 {
+    if (client.dry_run) return allocator.dupe(u8, "REPOSITORY_ID");
+    const body = try graphqlRepoVariablesBody(allocator, graphql_repository_id_query, client.repo, null);
+    defer allocator.free(body);
+    const raw = try client.graphqlRequest(body);
+    defer allocator.free(raw);
+    var parsed = try parseGraphqlResponse(allocator, raw, "gt github export");
+    defer parsed.deinit();
+    const data = graphqlData(parsed.value) orelse return CliError.UserError;
+    const repository = jsonObject(data.get("repository")) orelse return CliError.UserError;
+    const id = event_mod.jsonString(repository.get("id")) orelse return CliError.UserError;
+    return try allocator.dupe(u8, id);
+}
+
+fn fetchIssueNodeId(allocator: Allocator, client: GitHubClient, number: i64) ![]u8 {
+    if (client.dry_run) return allocator.dupe(u8, "ISSUE_NODE_ID");
+    const body = try graphqlRepoVariablesBody(allocator, graphql_issue_id_query, client.repo, number);
+    defer allocator.free(body);
+    const raw = try client.graphqlRequest(body);
+    defer allocator.free(raw);
+    var parsed = try parseGraphqlResponse(allocator, raw, "gt github export");
+    defer parsed.deinit();
+    const data = graphqlData(parsed.value) orelse return CliError.UserError;
+    const repository = jsonObject(data.get("repository")) orelse return CliError.UserError;
+    const issue = jsonObject(repository.get("issue")) orelse return CliError.UserError;
+    const id = event_mod.jsonString(issue.get("id")) orelse return CliError.UserError;
+    return try allocator.dupe(u8, id);
+}
+
+fn fetchPullNodeId(allocator: Allocator, client: GitHubClient, number: i64) ![]u8 {
+    if (client.dry_run) return allocator.dupe(u8, "PULL_REQUEST_NODE_ID");
+    const body = try graphqlRepoVariablesBody(allocator, graphql_pull_id_query, client.repo, number);
+    defer allocator.free(body);
+    const raw = try client.graphqlRequest(body);
+    defer allocator.free(raw);
+    var parsed = try parseGraphqlResponse(allocator, raw, "gt github export");
+    defer parsed.deinit();
+    const data = graphqlData(parsed.value) orelse return CliError.UserError;
+    const repository = jsonObject(data.get("repository")) orelse return CliError.UserError;
+    const pull = jsonObject(repository.get("pullRequest")) orelse return CliError.UserError;
+    const id = event_mod.jsonString(pull.get("id")) orelse return CliError.UserError;
+    return try allocator.dupe(u8, id);
+}
+
+fn githubIssueCreateGraphqlInput(allocator: Allocator, repo_id: []const u8, payload: std.json.ObjectMap) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var first = true;
+    try buf.append(allocator, '{');
+    try appendStringField(&buf, allocator, &first, "repositoryId", repo_id);
+    try appendStringField(&buf, allocator, &first, "title", event_mod.jsonString(payload.get("title")) orelse "(untitled)");
+    if (event_mod.jsonString(payload.get("body"))) |body| try appendStringField(&buf, allocator, &first, "body", body);
+    try buf.append(allocator, '}');
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn githubIssueUpdateGraphqlInput(allocator: Allocator, issue_id: []const u8, payload: std.json.ObjectMap) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var first = true;
+    try buf.append(allocator, '{');
+    try appendStringField(&buf, allocator, &first, "id", issue_id);
+    if (event_mod.jsonString(payload.get("title"))) |value| try appendStringField(&buf, allocator, &first, "title", value);
+    if (event_mod.jsonString(payload.get("body"))) |value| try appendStringField(&buf, allocator, &first, "body", value);
+    if (event_mod.jsonString(payload.get("state"))) |value| try appendStringField(&buf, allocator, &first, "state", githubStateEnum(value));
+    try buf.append(allocator, '}');
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn githubPullCreateGraphqlInput(allocator: Allocator, repo_id: []const u8, payload: std.json.ObjectMap) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var first = true;
+    try buf.append(allocator, '{');
+    try appendStringField(&buf, allocator, &first, "repositoryId", repo_id);
+    try appendStringField(&buf, allocator, &first, "title", event_mod.jsonString(payload.get("title")) orelse "(untitled)");
+    if (event_mod.jsonString(payload.get("body"))) |body| try appendStringField(&buf, allocator, &first, "body", body);
+    try appendStringField(&buf, allocator, &first, "baseRefName", event_mod.jsonString(payload.get("base_ref")) orelse "main");
+    try appendStringField(&buf, allocator, &first, "headRefName", event_mod.jsonString(payload.get("head_ref")) orelse "unknown");
+    if (jsonBool(payload.get("draft"))) |draft| try appendBoolField(&buf, allocator, &first, "draft", draft);
+    try buf.append(allocator, '}');
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn githubPullUpdateGraphqlInput(allocator: Allocator, pull_id: []const u8, payload: std.json.ObjectMap) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var first = true;
+    try buf.append(allocator, '{');
+    try appendStringField(&buf, allocator, &first, "pullRequestId", pull_id);
+    if (event_mod.jsonString(payload.get("title"))) |value| try appendStringField(&buf, allocator, &first, "title", value);
+    if (event_mod.jsonString(payload.get("body"))) |value| try appendStringField(&buf, allocator, &first, "body", value);
+    if (event_mod.jsonString(payload.get("state"))) |value| try appendStringField(&buf, allocator, &first, "state", githubStateEnum(value));
+    if (event_mod.jsonString(payload.get("base_ref"))) |value| try appendStringField(&buf, allocator, &first, "baseRefName", value);
+    try buf.append(allocator, '}');
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn githubStateEnum(value: []const u8) []const u8 {
+    if (std.ascii.eqlIgnoreCase(value, "closed")) return "CLOSED";
+    return "OPEN";
+}
+
+fn graphqlRepoVariablesBody(allocator: Allocator, query: []const u8, repo: RepoSlug, number: ?i64) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.append(allocator, '{');
+    try appendJsonFieldString(&buf, allocator, "query", query, true);
+    try buf.appendSlice(allocator, "\"variables\":{");
+    try appendJsonFieldString(&buf, allocator, "owner", repo.owner, true);
+    try appendJsonFieldString(&buf, allocator, "name", repo.name, number != null);
+    if (number) |value| try json_writer.appendJsonFieldInteger(&buf, allocator, "number", value, false);
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn graphqlBodyWithInput(allocator: Allocator, query: []const u8, input: []const u8) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.append(allocator, '{');
+    try appendJsonFieldString(&buf, allocator, "query", query, true);
+    try buf.appendSlice(allocator, "\"variables\":{\"input\":");
+    try buf.appendSlice(allocator, input);
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn parseGraphqlResponse(allocator: Allocator, raw: []const u8, command: []const u8) !std.json.Parsed(std.json.Value) {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch {
+        try eprint("{s}: GraphQL response must contain JSON\n", .{command});
+        return CliError.InvalidArgument;
+    };
+    errdefer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => {
+            try eprint("{s}: GraphQL response must contain a JSON object\n", .{command});
+            return CliError.InvalidArgument;
+        },
+    };
+    if (jsonArray(root.get("errors"))) |errors_array| {
+        if (errors_array.items.len != 0) {
+            if (errors_array.items[0] == .object) {
+                const message = event_mod.jsonString(errors_array.items[0].object.get("message")) orelse "unknown GraphQL error";
+                try eprint("{s}: GraphQL request failed: {s}\n", .{ command, message });
+            } else {
+                try eprint("{s}: GraphQL request failed\n", .{command});
+            }
+            return CliError.UserError;
+        }
+    }
+    return parsed;
+}
+
+fn graphqlData(value: std.json.Value) ?std.json.ObjectMap {
+    const root = switch (value) {
+        .object => |object| object,
+        else => return null,
+    };
+    return jsonObject(root.get("data"));
+}
+
+fn jsonObject(value: ?std.json.Value) ?std.json.ObjectMap {
+    return switch (value orelse return null) {
+        .object => |object| object,
+        else => null,
+    };
+}
+
 fn exportEvent(
     allocator: Allocator,
     client: GitHubClient,
@@ -497,7 +837,7 @@ fn exportEvent(
         return try exportPullEvent(allocator, client, mappings, options, event_type, object_id, root, payload);
     }
     if (std.mem.startsWith(u8, event_type, "comment.") and std.mem.eql(u8, object_kind, "comment")) {
-        return try exportCommentEvent(allocator, client, mappings, event_type, object_id, payload);
+        return try exportCommentEvent(allocator, client, mappings, options, event_type, object_id, payload);
     }
     return false;
 }
@@ -520,14 +860,22 @@ fn exportIssueEvent(
                 return false;
             }
         }
-        const request_body = try githubIssueCreateBody(allocator, payload);
-        defer allocator.free(request_body);
-        const path = try client.repoPath(allocator, "/issues");
-        defer allocator.free(path);
-        const raw = try client.request("POST", path, request_body);
-        defer allocator.free(raw);
-        const number = if (client.dry_run) try mappings.putSynthetic("issue", issue_id) else parseResponseNumber(allocator, raw, "number") orelse return CliError.UserError;
+        const number = if (options.mode == .graphql)
+            if (try createIssueGraphql(allocator, client, payload)) |created_number| created_number else try mappings.putSynthetic("issue", issue_id)
+        else blk: {
+            const request_body = try githubIssueCreateBody(allocator, payload);
+            defer allocator.free(request_body);
+            const path = try client.repoPath(allocator, "/issues");
+            defer allocator.free(path);
+            const raw = try client.request("POST", path, request_body);
+            defer allocator.free(raw);
+            break :blk if (client.dry_run) try mappings.putSynthetic("issue", issue_id) else parseResponseNumber(allocator, raw, "number") orelse return CliError.UserError;
+        };
         if (!client.dry_run) try mappings.put("issue", issue_id, number);
+        if (options.mode == .graphql) {
+            try replayStringArrayLabels(allocator, client, number, payload.get("labels"), true);
+            try replayStringArrayAssignees(allocator, client, number, payload.get("assignees"), true);
+        }
         return true;
     }
 
@@ -536,10 +884,14 @@ fn exportIssueEvent(
         var changed = false;
         if (try githubIssuePatchBody(allocator, payload)) |request_body| {
             defer allocator.free(request_body);
-            const path = try std.fmt.allocPrint(allocator, "/repos/{s}/issues/{d}", .{ client.repo.slug, number });
-            defer allocator.free(path);
-            const raw = try client.request("PATCH", path, request_body);
-            allocator.free(raw);
+            if (options.mode == .graphql) {
+                try updateIssueGraphql(allocator, client, number, payload);
+            } else {
+                const path = try std.fmt.allocPrint(allocator, "/repos/{s}/issues/{d}", .{ client.repo.slug, number });
+                defer allocator.free(path);
+                const raw = try client.request("PATCH", path, request_body);
+                allocator.free(raw);
+            }
             changed = true;
         }
         try replayLabels(allocator, client, number, payload, "labels_added", "labels_removed");
@@ -549,10 +901,14 @@ fn exportIssueEvent(
     if (std.mem.eql(u8, event_type, "issue.title_set") or std.mem.eql(u8, event_type, "issue.body_set") or std.mem.eql(u8, event_type, "issue.state_set")) {
         const request_body = try githubSinglePatchBody(allocator, payload);
         defer allocator.free(request_body);
-        const path = try std.fmt.allocPrint(allocator, "/repos/{s}/issues/{d}", .{ client.repo.slug, number });
-        defer allocator.free(path);
-        const raw = try client.request("PATCH", path, request_body);
-        allocator.free(raw);
+        if (options.mode == .graphql) {
+            try updateIssueGraphql(allocator, client, number, payload);
+        } else {
+            const path = try std.fmt.allocPrint(allocator, "/repos/{s}/issues/{d}", .{ client.repo.slug, number });
+            defer allocator.free(path);
+            const raw = try client.request("PATCH", path, request_body);
+            allocator.free(raw);
+        }
         return true;
     }
     if (std.mem.eql(u8, event_type, "issue.label_added")) {
@@ -592,13 +948,17 @@ fn exportPullEvent(
                 return false;
             }
         }
-        const request_body = try githubPullCreateBody(allocator, payload);
-        defer allocator.free(request_body);
-        const path = try client.repoPath(allocator, "/pulls");
-        defer allocator.free(path);
-        const raw = try client.request("POST", path, request_body);
-        defer allocator.free(raw);
-        const number = if (client.dry_run) try mappings.putSynthetic("pull", pull_id) else parseResponseNumber(allocator, raw, "number") orelse return CliError.UserError;
+        const number = if (options.mode == .graphql)
+            if (try createPullGraphql(allocator, client, payload)) |created_number| created_number else try mappings.putSynthetic("pull", pull_id)
+        else blk: {
+            const request_body = try githubPullCreateBody(allocator, payload);
+            defer allocator.free(request_body);
+            const path = try client.repoPath(allocator, "/pulls");
+            defer allocator.free(path);
+            const raw = try client.request("POST", path, request_body);
+            defer allocator.free(raw);
+            break :blk if (client.dry_run) try mappings.putSynthetic("pull", pull_id) else parseResponseNumber(allocator, raw, "number") orelse return CliError.UserError;
+        };
         if (!client.dry_run) try mappings.put("pull", pull_id, number);
         return true;
     }
@@ -608,10 +968,14 @@ fn exportPullEvent(
         var changed = false;
         if (try githubPullPatchBody(allocator, payload)) |request_body| {
             defer allocator.free(request_body);
-            const path = try std.fmt.allocPrint(allocator, "/repos/{s}/pulls/{d}", .{ client.repo.slug, number });
-            defer allocator.free(path);
-            const raw = try client.request("PATCH", path, request_body);
-            allocator.free(raw);
+            if (options.mode == .graphql) {
+                try updatePullGraphql(allocator, client, number, payload);
+            } else {
+                const path = try std.fmt.allocPrint(allocator, "/repos/{s}/pulls/{d}", .{ client.repo.slug, number });
+                defer allocator.free(path);
+                const raw = try client.request("PATCH", path, request_body);
+                allocator.free(raw);
+            }
             changed = true;
         }
         try replayLabels(allocator, client, number, payload, "labels_added", "labels_removed");
@@ -620,19 +984,27 @@ fn exportPullEvent(
         return changed;
     }
     if (std.mem.eql(u8, event_type, "pull.merged")) {
-        const path = try std.fmt.allocPrint(allocator, "/repos/{s}/pulls/{d}/merge", .{ client.repo.slug, number });
-        defer allocator.free(path);
-        const raw = try client.request("PUT", path, "{}");
-        allocator.free(raw);
+        if (options.mode == .graphql) {
+            try mergePullGraphql(allocator, client, number);
+        } else {
+            const path = try std.fmt.allocPrint(allocator, "/repos/{s}/pulls/{d}/merge", .{ client.repo.slug, number });
+            defer allocator.free(path);
+            const raw = try client.request("PUT", path, "{}");
+            allocator.free(raw);
+        }
         return true;
     }
     if (std.mem.eql(u8, event_type, "pull.title_set") or std.mem.eql(u8, event_type, "pull.body_set") or std.mem.eql(u8, event_type, "pull.state_set") or std.mem.eql(u8, event_type, "pull.base_set")) {
         const request_body = try githubSinglePatchBody(allocator, payload);
         defer allocator.free(request_body);
-        const path = try std.fmt.allocPrint(allocator, "/repos/{s}/pulls/{d}", .{ client.repo.slug, number });
-        defer allocator.free(path);
-        const raw = try client.request("PATCH", path, request_body);
-        allocator.free(raw);
+        if (options.mode == .graphql) {
+            try updatePullGraphql(allocator, client, number, payload);
+        } else {
+            const path = try std.fmt.allocPrint(allocator, "/repos/{s}/pulls/{d}", .{ client.repo.slug, number });
+            defer allocator.free(path);
+            const raw = try client.request("PATCH", path, request_body);
+            allocator.free(raw);
+        }
         return true;
     }
     if (std.mem.eql(u8, event_type, "pull.label_added")) {
@@ -666,6 +1038,7 @@ fn exportCommentEvent(
     allocator: Allocator,
     client: GitHubClient,
     mappings: *MappingStore,
+    options: ExportOptions,
     event_type: []const u8,
     comment_id: []const u8,
     payload: std.json.ObjectMap,
@@ -675,13 +1048,17 @@ fn exportCommentEvent(
         const parent_kind = event_mod.jsonString(payload.get("parent_kind")) orelse return false;
         const parent_id = event_mod.jsonString(payload.get("parent_id")) orelse return false;
         const parent_number = (try mappings.get(parent_kind, parent_id)) orelse return false;
-        const request_body = try githubCommentBody(allocator, event_mod.jsonString(payload.get("body")) orelse "");
-        defer allocator.free(request_body);
-        const path = try std.fmt.allocPrint(allocator, "/repos/{s}/issues/{d}/comments", .{ client.repo.slug, parent_number });
-        defer allocator.free(path);
-        const raw = try client.request("POST", path, request_body);
-        defer allocator.free(raw);
-        const comment_number = if (client.dry_run) try mappings.putSynthetic("comment", comment_id) else parseResponseNumber(allocator, raw, "id") orelse return CliError.UserError;
+        const comment_number = if (options.mode == .graphql)
+            if (try addCommentGraphql(allocator, client, parent_kind, parent_number, event_mod.jsonString(payload.get("body")) orelse "")) |created_number| created_number else try mappings.putSynthetic("comment", comment_id)
+        else blk: {
+            const request_body = try githubCommentBody(allocator, event_mod.jsonString(payload.get("body")) orelse "");
+            defer allocator.free(request_body);
+            const path = try std.fmt.allocPrint(allocator, "/repos/{s}/issues/{d}/comments", .{ client.repo.slug, parent_number });
+            defer allocator.free(path);
+            const raw = try client.request("POST", path, request_body);
+            defer allocator.free(raw);
+            break :blk if (client.dry_run) try mappings.putSynthetic("comment", comment_id) else parseResponseNumber(allocator, raw, "id") orelse return CliError.UserError;
+        };
         if (!client.dry_run) try mappings.put("comment", comment_id, comment_number);
         return true;
     }

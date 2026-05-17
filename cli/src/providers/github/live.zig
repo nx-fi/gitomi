@@ -15,6 +15,7 @@ const importer = @import("importer.zig");
 
 const Allocator = std.mem.Allocator;
 const CliError = errors.CliError;
+const ApiMode = common.ApiMode;
 const GitHubClient = common.GitHubClient;
 const RepoSlug = common.RepoSlug;
 const appendJsonFieldString = json_writer.appendJsonFieldString;
@@ -49,6 +50,7 @@ pub const Options = struct {
     git_sync: bool = true,
     bot_principal: []const u8 = import_bot_principal,
     bot_device: []const u8 = import_bot_device,
+    mode: ApiMode = .graphql,
 };
 
 const LiveState = struct {
@@ -98,6 +100,7 @@ pub fn cmdLive(allocator: Allocator, args: []const []const u8) !void {
     var git_sync = true;
     var bot_principal: []const u8 = import_bot_principal;
     var bot_device: []const u8 = import_bot_device;
+    var mode: ApiMode = .graphql;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -154,6 +157,10 @@ pub fn cmdLive(allocator: Allocator, args: []const []const u8) !void {
             bot_principal = try util.requireValue(args, &i, "--import-bot");
         } else if (std.mem.eql(u8, arg, "--device")) {
             bot_device = try util.requireValue(args, &i, "--device");
+        } else if (std.mem.eql(u8, arg, "--rest")) {
+            mode = .rest;
+        } else if (std.mem.eql(u8, arg, "--graphql")) {
+            mode = .graphql;
         } else {
             try eprint("gt github live: unknown option '{s}'\n", .{arg});
             return CliError.UserError;
@@ -186,6 +193,7 @@ pub fn cmdLive(allocator: Allocator, args: []const []const u8) !void {
         .git_sync = git_sync,
         .bot_principal = bot_principal,
         .bot_device = bot_device,
+        .mode = mode,
     };
 
     try runForeground(allocator, options);
@@ -363,6 +371,7 @@ fn runLiveTick(allocator: Allocator, options: Options) !void {
         .skip_actor_device = options.bot_device,
         .max_events = max_export_events_per_tick,
         .quiet = true,
+        .mode = options.mode,
     });
     if (export_result.max_ordinal > state.last_export_ordinal) {
         state.last_export_ordinal = export_result.max_ordinal;

@@ -98,14 +98,14 @@ gt actions daemon [--once] [--replay] [--interval-ms N] [--dry-run] [--act PATH]
 gt runs prune [--dry-run] [--max-age-days N] [--max-count N] [--max-bytes N]
 gt sync [--remote REMOTE] [--pull-only|--push-only]
 gt github import [--repo OWNER/REPO] [--token-env NAME|--token-file PATH] [--from-file PATH] [--no-comments] [--no-projects] [--rest|--graphql]
-gt github export --repo OWNER/REPO [--token-env NAME|--token-file PATH|--use-gh] [--dry-run] [--map-file PATH] [--reuse-legacy]
+gt github export --repo OWNER/REPO [--token-env NAME|--token-file PATH|--use-gh] [--dry-run] [--map-file PATH] [--reuse-legacy] [--rest|--graphql]
 gt github sync [--repo OWNER/REPO] [--token-env NAME|--token-file PATH|--use-gh] [--remote REMOTE] [--interval-ms N] [--max-pages N] [--dry-run] [--no-git-sync] [--rest|--graphql]
-gt github live [--repo OWNER/REPO] --webhook-url URL (--secret-env NAME|--secret-file PATH) [--host 127.0.0.1] [--port 12656] [--path /github/webhook] [--remote REMOTE] [--interval-ms N] [--once] [--no-subscribe] [--dry-run] [--no-git-sync]
+gt github live [--repo OWNER/REPO] --webhook-url URL (--secret-env NAME|--secret-file PATH) [--host 127.0.0.1] [--port 12656] [--path /github/webhook] [--remote REMOTE] [--interval-ms N] [--once] [--no-subscribe] [--dry-run] [--no-git-sync] [--rest|--graphql]
 gt gitlab import [--project GROUP/PROJECT] [--token-env NAME|--token-file PATH] [--from-file PATH] [--no-comments]
 gt gitlab export --project GROUP/PROJECT [--token-env NAME|--token-file PATH] [--dry-run] [--map-file PATH] [--reuse-legacy]
 gt gitlab sync --project GROUP/PROJECT [--token-env NAME|--token-file PATH] [--remote REMOTE] [--interval-ms N] [--max-pages N] [--dry-run] [--no-git-sync]
 gt web [--local] [--host 127.0.0.1] [--port 12655] [--once]
-gt web --live [--host 127.0.0.1] [--port 12655] [--repo OWNER/REPO] [--webhook-url URL] (--secret-env NAME|--secret-file PATH) [--live-host 127.0.0.1] [--live-port 12656] [--live-path /github/webhook] [--remote REMOTE] [--interval-ms N] [--no-subscribe] [--dry-run] [--no-git-sync]
+gt web --live [--host 127.0.0.1] [--port 12655] [--repo OWNER/REPO] [--webhook-url URL] (--secret-env NAME|--secret-file PATH) [--live-host 127.0.0.1] [--live-port 12656] [--live-path /github/webhook] [--remote REMOTE] [--interval-ms N] [--no-subscribe] [--dry-run] [--no-git-sync] [--rest|--graphql]
 ```
 
 `gt init` writes a signed genesis manifest to `refs/gitomi/genesis`, including
@@ -237,29 +237,33 @@ a fixture JSON object with `issues`, `pulls`, and optional `comments` fields,
 then writes signed import events through a delegated `import-bot/github` actor.
 The current maintainer or owner emits an `acl.delegation_granted` event that
 binds the bot to the signing key used for the import. With no API or fixture
-options, it shells out to local `gh api` and lets `gh` choose the repository and
-credentials from the current Git checkout. Imported
+options, it shells out to local `gh` for repository and credential discovery
+from the current Git checkout. Imported
 issue and pull numbers are preserved as `legacy.github_issue_number` and
 `legacy.github_pull_number`, are materialized in the local index, and can be
 used as `#123`, `gh#123`, or `github:123` references. A later import skips
 issues and pulls whose GitHub number is already present locally. Imported
 issues also retain GitHub authors, labels/tags, milestones, and project column
 placements; pass `--no-projects` to skip GitHub project-card discovery.
+GraphQL is the default API mode; pass `--rest` for the older REST importer.
 
 `gt github export` replays accepted Gitomi issue, pull, and comment transitions
 through the GitHub API. It stores the Gitomi UUID to GitHub number mapping in
 `.git/gitomi/github/<owner>/<repo>/map.jsonl`; use `--dry-run` to print the API
 requests without network writes, `--use-gh` to route writes through the local
 GitHub CLI credentials, or `--reuse-legacy` when exporting back to the same
-GitHub repository that was imported.
+GitHub repository that was imported. GraphQL is the default API mode for core
+issue, pull, and comment create/update operations, with REST still used for
+name-based label/assignee/reviewer deltas and comment edits that require
+database-number mappings; pass `--rest` to force the older REST replay path.
 
 `gt github sync` performs a polling two-way API sync: optional Gitomi `gt sync`
 pull, GitHub import, GitHub export of local accepted events since the last sync,
 and optional Gitomi `gt sync` push. It defaults to `--graphql`, batching issue
-and pull pages with nested fields through GitHub's GraphQL API; pass `--rest` to
-use the older REST importer. State and mappings live under
-`.git/gitomi/github/<owner>/<repo>/`; pass `--no-git-sync` to skip surrounding
-Git transport steps.
+and pull pages with nested fields through GitHub's GraphQL API and using the
+GraphQL export path by default; pass `--rest` to use the older REST path. State
+and mappings live under `.git/gitomi/github/<owner>/<repo>/`; pass
+`--no-git-sync` to skip surrounding Git transport steps.
 
 `gt github live` runs the normal local Gitomi workflow with a two-way GitHub
 bridge. It subscribes the current repository to a GitHub webhook through
@@ -270,9 +274,11 @@ GitHub through the GitHub CLI. Live state and the export map are stored under
 `.git/gitomi/github/<owner>/<repo>/`; use `--no-subscribe` when the webhook
 already exists, `--once` for one webhook request plus one export pass, or
 `--no-git-sync` to skip the surrounding Gitomi `gt sync` pull/push steps. Live
-webhook imports require `--secret-env` or `--secret-file` so GitHub deliveries are authenticated with
-`X-Hub-Signature-256`; use the same secret when configuring an existing hook with
-`--no-subscribe`.
+uses webhook payloads for incoming GitHub changes and defaults its periodic
+outbound export pass to GraphQL; pass `--rest` to force REST export. Live
+webhook imports require `--secret-env` or `--secret-file` so GitHub deliveries
+are authenticated with `X-Hub-Signature-256`; use the same secret when
+configuring an existing hook with `--no-subscribe`.
 
 `gt gitlab import` reads GitLab issues and merge requests from the GitLab REST
 API, or a fixture JSON object with `issues`, `merge_requests`/`pulls`, and
@@ -299,9 +305,10 @@ binds to loopback on port 12655 by default, retrying nearby random ports if that
 port is occupied. `--local` is the default mode. `--live` starts the web UI and a
 GitHub live sync daemon in the same process; the web UI remains loopback-only,
 while the live webhook listener uses `--live-host`, `--live-port`, and
-`--live-path`, requires `--webhook-url` unless `--no-subscribe` is used, and
-requires `--secret-env` or `--secret-file` for authenticated webhook deliveries. It
-opens on a committed-tree code explorer, also serves
+`--live-path`, defaults its outbound GitHub export pass to GraphQL, accepts
+`--rest` to force REST export, requires `--webhook-url` unless `--no-subscribe`
+is used, and requires `--secret-env` or `--secret-file` for authenticated
+webhook deliveries. It opens on a committed-tree code explorer, also serves
 overview/issues/projects/workflows/events/refs pages, and can create signed issue
 events and workflow run requests through the same storage path as the CLI. The
 projects page renders kanban boards from signed project and issue placement

@@ -67,6 +67,8 @@ pub const IssueListRow = struct {
     opened_at: []u8,
     state_at: []u8,
     milestone: []u8,
+    issue_type: []u8,
+    priority: []u8,
     comment_count: usize,
     legacy_number: i64,
     body: []u8,
@@ -79,6 +81,8 @@ pub const IssueListRow = struct {
         allocator.free(self.opened_at);
         allocator.free(self.state_at);
         allocator.free(self.milestone);
+        allocator.free(self.issue_type);
+        allocator.free(self.priority);
         allocator.free(self.body);
     }
 };
@@ -700,6 +704,7 @@ pub fn issueListSql(allocator: Allocator, filters: IssueListOptions) ![]u8 {
         \\SELECT i.id, i.title, i.state,
         \\       COALESCE(NULLIF(m.source_author, ''), i.author_principal),
         \\       i.opened_at, i.state_occurred_at, COALESCE(m.milestone, ''),
+        \\       COALESCE(m.issue_type, ''), COALESCE(m.priority, ''),
         \\       (SELECT COUNT(*) FROM comments c WHERE c.parent_kind = 'issue' AND c.parent_id = i.id),
         \\       COALESCE(a.number, 0), i.body
         \\FROM issues i
@@ -804,9 +809,11 @@ pub fn issueListRowFromStmt(allocator: Allocator, stmt: *SqliteStmt) !IssueListR
         .opened_at = try stmt.columnTextDup(allocator, 4),
         .state_at = try stmt.columnTextDup(allocator, 5),
         .milestone = try stmt.columnTextDup(allocator, 6),
-        .comment_count = @as(usize, @intCast(stmt.columnInt64(7))),
-        .legacy_number = stmt.columnInt64(8),
-        .body = try stmt.columnTextDup(allocator, 9),
+        .issue_type = try stmt.columnTextDup(allocator, 7),
+        .priority = try stmt.columnTextDup(allocator, 8),
+        .comment_count = @as(usize, @intCast(stmt.columnInt64(9))),
+        .legacy_number = stmt.columnInt64(10),
+        .body = try stmt.columnTextDup(allocator, 11),
     };
 }
 
@@ -1293,6 +1300,8 @@ fn appendIssueListRowJson(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sq
     try appendJsonFieldString(buf, allocator, "state_at", row.state_at, true);
     if (row.legacy_number > 0) try appendJsonFieldInteger(buf, allocator, "legacy_github_issue_number", row.legacy_number, true);
     if (row.milestone.len != 0) try appendJsonFieldString(buf, allocator, "milestone", row.milestone, true);
+    if (row.issue_type.len != 0) try appendJsonFieldString(buf, allocator, "type", row.issue_type, true);
+    if (row.priority.len != 0) try appendJsonFieldString(buf, allocator, "priority", row.priority, true);
     try appendJsonFieldInteger(buf, allocator, "comment_count", @intCast(row.comment_count), true);
     try appendStringArrayFieldFromQuery(buf, allocator, db, "labels", "SELECT DISTINCT label FROM issue_labels WHERE issue_id = ? ORDER BY label", row.id, true);
     try appendStringArrayFieldFromQuery(buf, allocator, db, "assignees", "SELECT DISTINCT assignee FROM issue_assignees WHERE issue_id = ? ORDER BY assignee", row.id, true);

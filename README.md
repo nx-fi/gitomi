@@ -130,8 +130,8 @@ Run a two-way live bridge through the GitHub CLI and a local webhook receiver:
 gt github live --repo OWNER/REPO --webhook-url https://example.test/github/webhook --secret-env WEBHOOK_SECRET
 ```
 
-Or poll GitHub for two-way API sync. GraphQL is the default mode; pass `--rest`
-to use the REST importer:
+Or poll GitHub for two-way API sync. GraphQL is the default API mode for
+GitHub import/export/sync/live; pass `--rest` to use the older REST paths:
 
 ```sh
 gt github sync --repo OWNER/REPO

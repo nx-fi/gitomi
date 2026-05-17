@@ -59,7 +59,7 @@ pub const ImportOptions = struct {
     bot_device: []const u8 = import_bot_device,
     max_pages: usize = 10,
     use_gh: bool = false,
-    mode: ApiMode = .rest,
+    mode: ApiMode = .graphql,
     map_file: ?[]const u8 = null,
 };
 
@@ -67,6 +67,8 @@ pub fn cmdImport(allocator: Allocator, args: []const []const u8) !void {
     var options = ImportOptions{};
     var token_source_owned: ?[]u8 = null;
     defer if (token_source_owned) |value| allocator.free(value);
+    var resolved_repo_owned: ?[]u8 = null;
+    defer if (resolved_repo_owned) |value| allocator.free(value);
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -120,8 +122,13 @@ pub fn cmdImport(allocator: Allocator, args: []const []const u8) !void {
 
     if (options.repo == null and options.from_file == null) {
         if (options.token_arg == null and std.mem.eql(u8, options.api_url, default_api_url)) {
-            options.repo = gh_current_repo;
             options.use_gh = true;
+            if (options.mode == .graphql) {
+                resolved_repo_owned = try resolveCurrentRepo(allocator);
+                options.repo = try parseRepoSlug(resolved_repo_owned.?);
+            } else {
+                options.repo = gh_current_repo;
+            }
         } else {
             try eprint("gt github import: --repo or --from-file is required\n", .{});
             return CliError.MissingArgument;
@@ -410,6 +417,21 @@ fn importFixtureComments(
     const comments = jsonArray(comments_root.get(key)) orelse return;
     try eprint("gt github import: importing {d} fixture comment{s} for {s} #{d}\n", .{ comments.items.len, if (comments.items.len == 1) "" else "s", parent_kind, number });
     try importCommentsArray(allocator, writer, parent_kind, parent_id, comments, null, stats);
+}
+
+fn resolveCurrentRepo(allocator: Allocator) ![]u8 {
+    var result = try git.runCommand(allocator, &.{ "gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner" }, null, 512 * 1024);
+    defer result.deinit();
+    if (result.exitCode() != 0) {
+        const stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
+        if (stderr.len != 0) {
+            try eprint("gt github import: failed to resolve current GitHub repository with gh: {s}\n", .{stderr});
+        } else {
+            try eprint("gt github import: failed to resolve current GitHub repository with gh\n", .{});
+        }
+        return CliError.UserError;
+    }
+    return try util.trimOwned(allocator, result.stdout);
 }
 
 pub fn importFromApi(allocator: Allocator, client: GitHubClient, options: ImportOptions, stats: *ImportStats) !void {

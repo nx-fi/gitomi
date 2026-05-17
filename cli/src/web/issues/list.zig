@@ -80,7 +80,7 @@ pub fn renderIssuesPage(allocator: Allocator, repo: Repo, target: []const u8) ![
         const row = try work_items.issueListRowFromStmt(allocator, &stmt);
         defer row.deinit(allocator);
         const task_summary = shared.markdownTaskSummary(row.body);
-        try appendIssueListRow(&buf, allocator, &db, &legacy_links, row.id, row.title, row.state, row.author, row.opened_at, row.state_at, row.milestone, row.comment_count, task_summary);
+        try appendIssueListRow(&buf, allocator, &db, &legacy_links, row.id, row.title, row.state, row.author, row.opened_at, row.state_at, row.milestone, row.issue_type, row.priority, row.comment_count, task_summary);
         shown += 1;
     }
 
@@ -500,6 +500,8 @@ fn appendIssueListRow(
     opened_at: []const u8,
     state_at: []const u8,
     milestone: []const u8,
+    issue_type: []const u8,
+    priority: []const u8,
     comment_count: usize,
     task_summary: shared.MarkdownTaskSummary,
 ) !void {
@@ -518,6 +520,8 @@ fn appendIssueListRow(
         .href = issueHref(issue_ref),
         .title = title,
     });
+    try appendIssueRowType(buf, allocator, issue_type);
+    try appendIssueRowPriority(buf, allocator, priority);
     try appendIssueRowLabels(buf, allocator, db, id);
     try buf.appendSlice(allocator, "</div><p class=\"issue-row-meta\">");
     try shared.appendIssueReferenceLink(buf, allocator, issue_ref);
@@ -578,6 +582,26 @@ fn appendIssueRowLabels(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqli
     if (shown) try buf.appendSlice(allocator, "</span>");
 }
 
+fn appendIssueRowType(buf: *std.ArrayList(u8), allocator: Allocator, issue_type: []const u8) !void {
+    if (issue_type.len == 0) return;
+    try appendTemplate(buf, allocator,
+        \\<span class="issue-row-type issue-row-type-{kind}" title="Type: {label}" aria-label="Type: {label}"><span class="issue-type-dot issue-type-{kind}" aria-hidden="true"></span>{label}</span>
+    , .{
+        .kind = issue_type,
+        .label = issueTypeLabel(issue_type),
+    });
+}
+
+fn appendIssueRowPriority(buf: *std.ArrayList(u8), allocator: Allocator, priority: []const u8) !void {
+    if (priority.len == 0) return;
+    try appendTemplate(buf, allocator,
+        \\<span class="issue-row-priority issue-row-priority-{tone}" title="Priority: {priority}" aria-label="Priority: {priority}">{priority}</span>
+    , .{
+        .tone = priorityTone(priority),
+        .priority = priority,
+    });
+}
+
 fn appendIssueLabel(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8) !void {
     try appendTemplate(buf, allocator,
         \\<span class="issue-label {kind}">{label}</span>
@@ -610,6 +634,21 @@ fn issueSortLabel(sort: IssueSort) []const u8 {
         .oldest => "Oldest",
         .updated => "Recently updated",
     };
+}
+
+fn issueTypeLabel(issue_type: []const u8) []const u8 {
+    if (std.mem.eql(u8, issue_type, "bug")) return "Bug";
+    if (std.mem.eql(u8, issue_type, "feature")) return "Feature";
+    if (std.mem.eql(u8, issue_type, "task")) return "Task";
+    return issue_type;
+}
+
+fn priorityTone(priority: []const u8) []const u8 {
+    if (std.mem.eql(u8, priority, "P0")) return "p0";
+    if (std.mem.eql(u8, priority, "P1")) return "p1";
+    if (std.mem.eql(u8, priority, "P2")) return "p2";
+    if (std.mem.eql(u8, priority, "P3")) return "p3";
+    return "none";
 }
 
 fn issueLabelKind(label: []const u8) []const u8 {
