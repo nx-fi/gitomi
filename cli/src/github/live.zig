@@ -30,6 +30,8 @@ const import_bot_device = "github";
 const max_delivery_log_bytes = 64 * 1024 * 1024;
 const max_delivery_id_bytes = 128;
 const max_export_events_per_tick = 50;
+const min_error_backoff_ms: u64 = 1000;
+const max_error_backoff_ms: u64 = 60_000;
 var live_mutex = std.Thread.Mutex{};
 
 pub const Options = struct {
@@ -265,26 +267,71 @@ fn startTickLoop(allocator: Allocator, options: Options) !void {
 }
 
 fn serveLiveServerThread(allocator: Allocator, options: Options, server: *std.net.Server, server_options: zwf.ServerOptions) void {
-    defer {
-        server.deinit();
-        allocator.destroy(server);
+    var next_server: ?*std.net.Server = server;
+    var backoff_ms: u64 = min_error_backoff_ms;
+    while (true) {
+        const server_ptr = next_server orelse blk: {
+            const fresh = allocator.create(std.net.Server) catch |err| {
+                eprint("gt github live: webhook server restart allocation failed: {s}\n", .{@errorName(err)}) catch {};
+                sleepMs(backoff_ms);
+                backoff_ms = nextBackoffMs(backoff_ms);
+                continue;
+            };
+            fresh.* = listenLiveServer(options, server_options) catch |err| {
+                allocator.destroy(fresh);
+                if (!errors.isReported(err)) {
+                    eprint("gt github live: webhook server restart failed: {s}\n", .{@errorName(err)}) catch {};
+                }
+                sleepMs(backoff_ms);
+                backoff_ms = nextBackoffMs(backoff_ms);
+                continue;
+            };
+            eprint("gt github live: webhook server restarted\n", .{}) catch {};
+            break :blk fresh;
+        };
+        next_server = null;
+
+        zwf.server.serveConnections(LiveAppContext, allocator, .{ .options = options }, server_ptr, server_options, handleConnectionLogged) catch |err| {
+            if (!errors.isReported(err)) {
+                eprint("gt github live: webhook server failed: {s}; restarting in {d}ms\n", .{ @errorName(err), backoff_ms }) catch {};
+            }
+        };
+        server_ptr.deinit();
+        allocator.destroy(server_ptr);
+        sleepMs(backoff_ms);
+        backoff_ms = nextBackoffMs(backoff_ms);
     }
-    zwf.server.serveConnections(LiveAppContext, allocator, .{ .options = options }, server, server_options, handleConnectionLogged) catch |err| {
-        if (!errors.isReported(err)) {
-            eprint("gt github live: webhook server failed: {s}\n", .{@errorName(err)}) catch {};
-        }
-    };
 }
 
 fn liveTickLoop(allocator: Allocator, options: Options) void {
+    var delay_ms = options.interval_ms;
     while (true) {
-        std.Thread.sleep(options.interval_ms * std.time.ns_per_ms);
+        sleepMs(delay_ms);
         runLiveTick(allocator, options) catch |err| {
+            const next_delay = nextBackoffMs(@max(delay_ms, baseBackoffMs(options.interval_ms)));
             if (!errors.isReported(err)) {
-                eprint("gt github live: sync tick failed: {s}\n", .{@errorName(err)}) catch {};
+                eprint("gt github live: sync tick failed: {s}; retrying in {d}ms\n", .{ @errorName(err), next_delay }) catch {};
             }
+            delay_ms = next_delay;
+            continue;
         };
+        delay_ms = options.interval_ms;
     }
+}
+
+fn baseBackoffMs(interval_ms: u64) u64 {
+    return @max(interval_ms, min_error_backoff_ms);
+}
+
+fn nextBackoffMs(current_ms: u64) u64 {
+    const base = @max(current_ms, min_error_backoff_ms);
+    const doubled = std.math.mul(u64, base, 2) catch max_error_backoff_ms;
+    return @min(doubled, max_error_backoff_ms);
+}
+
+fn sleepMs(ms: u64) void {
+    const ns = std.math.mul(u64, ms, std.time.ns_per_ms) catch std.math.maxInt(u64);
+    std.Thread.sleep(ns);
 }
 
 fn runLiveTick(allocator: Allocator, options: Options) !void {
@@ -296,8 +343,8 @@ fn runLiveTick(allocator: Allocator, options: Options) !void {
 
     if (options.git_sync and !options.dry_run) {
         sync_mod.syncPull(allocator, options.remote) catch |err| {
-            if (!errors.isUserError(err)) return err;
             if (!errors.isReported(err)) try eprint("gt github live: sync pull failed: {s}\n", .{@errorName(err)});
+            return err;
         };
     }
     try index.ensureIndex(allocator, repo);
@@ -327,8 +374,8 @@ fn runLiveTick(allocator: Allocator, options: Options) !void {
 
     if (options.git_sync and !options.dry_run) {
         sync_mod.syncPush(allocator, options.remote) catch |err| {
-            if (!errors.isUserError(err)) return err;
             if (!errors.isReported(err)) try eprint("gt github live: sync push failed: {s}\n", .{@errorName(err)});
+            return err;
         };
     }
 }
@@ -389,8 +436,9 @@ fn handleConnection(allocator: Allocator, app_context: LiveAppContext, stream: s
     if (std.mem.eql(u8, event_name, "push")) {
         if (app_context.options.git_sync and !app_context.options.dry_run) {
             sync_mod.syncPull(allocator, app_context.options.remote) catch |err| {
-                if (!errors.isUserError(err)) return err;
                 if (!errors.isReported(err)) try eprint("gt github live: push webhook sync failed: {s}\n", .{@errorName(err)});
+                try sendPlain(allocator, stream, 503, "Service Unavailable", "sync pull failed\n");
+                return;
             };
         }
         if (delivery_id) |id| try recordWebhookDelivery(allocator, repo, app_context.options.repo, id);
@@ -431,21 +479,16 @@ fn ensureWebhook(allocator: Allocator, options: Options) !void {
     var live_lock = if (!options.dry_run) try acquireLiveLock(allocator, repo, options.repo) else null;
     defer if (live_lock) |*lock| lock.deinit();
 
-    var state = try loadState(allocator, repo, options.repo);
-    if (state.webhook_id != null) return;
-
-    const path = try std.fmt.allocPrint(allocator, "/repos/{s}/hooks", .{options.repo.slug});
-    defer allocator.free(path);
+    const hooks_path = try std.fmt.allocPrint(allocator, "/repos/{s}/hooks", .{options.repo.slug});
+    defer allocator.free(hooks_path);
 
     if (options.dry_run) {
         const body = try webhookCreateBody(allocator, options, true);
         defer allocator.free(body);
-        try out("POST {s} {s}\n", .{ path, body });
+        try out("GET {s}?per_page=100\n", .{hooks_path});
+        try out("POST {s} {s}\n", .{ hooks_path, body });
         return;
     }
-
-    const body = try webhookCreateBody(allocator, options, false);
-    defer allocator.free(body);
 
     const client = GitHubClient{
         .allocator = allocator,
@@ -454,7 +497,29 @@ fn ensureWebhook(allocator: Allocator, options: Options) !void {
         .token = null,
         .use_gh = true,
     };
-    const raw = try client.request("POST", path, body);
+
+    var state = try loadState(allocator, repo, options.repo);
+    if (state.webhook_id) |hook_id| {
+        if (try fetchRemoteWebhook(allocator, client, options, hook_id)) |remote| {
+            if (remote.needs_update) try updateRemoteWebhook(allocator, client, options, remote.id);
+            state.webhook_id = remote.id;
+            try saveState(allocator, repo, options.repo, state);
+            return;
+        }
+        state.webhook_id = null;
+    }
+
+    if (try findExistingRemoteWebhook(allocator, client, options)) |remote| {
+        if (remote.needs_update) try updateRemoteWebhook(allocator, client, options, remote.id);
+        state.webhook_id = remote.id;
+        try saveState(allocator, repo, options.repo, state);
+        try out("github live: using webhook id {d}\n", .{remote.id});
+        return;
+    }
+
+    const body = try webhookCreateBody(allocator, options, false);
+    defer allocator.free(body);
+    const raw = try client.request("POST", hooks_path, body);
     defer allocator.free(raw);
     state.webhook_id = common.parseResponseNumber(allocator, raw, "id") orelse {
         try eprint("gt github live: GitHub hook create response did not contain id\n", .{});
@@ -462,6 +527,116 @@ fn ensureWebhook(allocator: Allocator, options: Options) !void {
     };
     try saveState(allocator, repo, options.repo, state);
     try out("github live: subscribed webhook id {d}\n", .{state.webhook_id.?});
+}
+
+const RemoteWebhook = struct {
+    id: i64,
+    needs_update: bool,
+};
+
+fn fetchRemoteWebhook(allocator: Allocator, client: GitHubClient, options: Options, hook_id: i64) !?RemoteWebhook {
+    const path = try std.fmt.allocPrint(allocator, "/repos/{s}/hooks/{d}", .{ options.repo.slug, hook_id });
+    defer allocator.free(path);
+    const raw = (try client.requestAllowNotFound("GET", path, null)) orelse return null;
+    defer allocator.free(raw);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return null,
+    };
+    return .{
+        .id = common.jsonInteger(root.get("id")) orelse hook_id,
+        .needs_update = remoteWebhookNeedsUpdate(root, options),
+    };
+}
+
+fn findExistingRemoteWebhook(allocator: Allocator, client: GitHubClient, options: Options) !?RemoteWebhook {
+    const path = try std.fmt.allocPrint(allocator, "/repos/{s}/hooks?per_page=100", .{options.repo.slug});
+    defer allocator.free(path);
+    const raw = try client.request("GET", path, null);
+    defer allocator.free(raw);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{});
+    defer parsed.deinit();
+    const hooks = switch (parsed.value) {
+        .array => |array| array,
+        else => return null,
+    };
+
+    var selected: ?RemoteWebhook = null;
+    for (hooks.items) |item| {
+        const root = switch (item) {
+            .object => |object| object,
+            else => continue,
+        };
+        if (!remoteWebhookUrlMatches(root, options)) continue;
+        const id = common.jsonInteger(root.get("id")) orelse continue;
+        const candidate = RemoteWebhook{
+            .id = id,
+            .needs_update = remoteWebhookNeedsUpdate(root, options),
+        };
+        selected = candidate;
+        if (!candidate.needs_update) break;
+    }
+    return selected;
+}
+
+fn updateRemoteWebhook(allocator: Allocator, client: GitHubClient, options: Options, hook_id: i64) !void {
+    const path = try std.fmt.allocPrint(allocator, "/repos/{s}/hooks/{d}", .{ options.repo.slug, hook_id });
+    defer allocator.free(path);
+    const body = try webhookUpdateBody(allocator, options, false);
+    defer allocator.free(body);
+    const raw = try client.request("PATCH", path, body);
+    allocator.free(raw);
+    try out("github live: updated webhook id {d}\n", .{hook_id});
+}
+
+fn remoteWebhookNeedsUpdate(root: std.json.ObjectMap, options: Options) bool {
+    if ((common.jsonBool(root.get("active")) orelse false) != true) return true;
+    if (!remoteWebhookEventsMatch(root.get("events"))) return true;
+
+    const config = jsonObject(root.get("config")) orelse return true;
+    const expected_url = options.webhook_url orelse return true;
+    const url = event_mod.jsonString(config.get("url")) orelse return true;
+    if (!std.mem.eql(u8, url, expected_url)) return true;
+    const content_type = event_mod.jsonString(config.get("content_type")) orelse return true;
+    if (!std.mem.eql(u8, content_type, "json")) return true;
+    const insecure_ssl = event_mod.jsonString(config.get("insecure_ssl")) orelse return true;
+    if (!std.mem.eql(u8, insecure_ssl, "0")) return true;
+    return false;
+}
+
+fn remoteWebhookUrlMatches(root: std.json.ObjectMap, options: Options) bool {
+    const expected_url = options.webhook_url orelse return false;
+    const config = jsonObject(root.get("config")) orelse return false;
+    const url = event_mod.jsonString(config.get("url")) orelse return false;
+    return std.mem.eql(u8, url, expected_url);
+}
+
+fn remoteWebhookEventsMatch(value: ?std.json.Value) bool {
+    const events = common.jsonArray(value) orelse return false;
+    const expected = [_][]const u8{ "issues", "pull_request", "issue_comment", "push" };
+    if (events.items.len != expected.len) return false;
+    for (expected) |event_name| {
+        var found = false;
+        for (events.items) |item| {
+            const actual = event_mod.jsonString(item) orelse return false;
+            if (std.mem.eql(u8, actual, event_name)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+fn jsonObject(value: ?std.json.Value) ?std.json.ObjectMap {
+    const actual = value orelse return null;
+    return switch (actual) {
+        .object => |object| object,
+        else => null,
+    };
 }
 
 fn webhookCreateBody(allocator: Allocator, options: Options, redact_secret: bool) ![]u8 {
@@ -473,6 +648,23 @@ fn webhookCreateBody(allocator: Allocator, options: Options, redact_secret: bool
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     try buf.appendSlice(allocator, "{\"name\":\"web\",\"active\":true,\"events\":[\"issues\",\"pull_request\",\"issue_comment\",\"push\"],\"config\":{");
+    try appendJsonFieldString(&buf, allocator, "url", options.webhook_url.?, true);
+    try appendJsonFieldString(&buf, allocator, "content_type", "json", true);
+    try appendJsonFieldString(&buf, allocator, "insecure_ssl", "0", true);
+    try appendJsonFieldString(&buf, allocator, "secret", if (redact_secret) "[redacted]" else secret, false);
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn webhookUpdateBody(allocator: Allocator, options: Options, redact_secret: bool) ![]u8 {
+    const secret = nonEmptySecret(options.secret) orelse {
+        try eprint("gt github live: --secret-env or --secret-file is required when updating a GitHub webhook subscription\n", .{});
+        return CliError.MissingArgument;
+    };
+
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.appendSlice(allocator, "{\"active\":true,\"events\":[\"issues\",\"pull_request\",\"issue_comment\",\"push\"],\"config\":{");
     try appendJsonFieldString(&buf, allocator, "url", options.webhook_url.?, true);
     try appendJsonFieldString(&buf, allocator, "content_type", "json", true);
     try appendJsonFieldString(&buf, allocator, "insecure_ssl", "0", true);
@@ -813,6 +1005,41 @@ test "github live webhook body requires secret" {
         .repo = slug,
         .webhook_url = "https://example.test/github",
     }, false));
+}
+
+test "github live webhook update body redacts secret" {
+    const slug = try common.parseRepoSlug("owner/repo");
+    const body = try webhookUpdateBody(std.testing.allocator, .{
+        .repo = slug,
+        .webhook_url = "https://example.test/github",
+        .secret = "s3",
+    }, true);
+    defer std.testing.allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"secret\":\"[redacted]\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"secret\":\"s3\"") == null);
+}
+
+test "github live detects stale remote webhook configuration" {
+    const slug = try common.parseRepoSlug("owner/repo");
+    const options = Options{
+        .repo = slug,
+        .webhook_url = "https://example.test/github",
+        .secret = "s3",
+    };
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{"id":42,"active":true,"events":["issues","pull_request","issue_comment","push"],"config":{"url":"https://example.test/github","content_type":"json","insecure_ssl":"0"}}
+    , .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try std.testing.expect(!remoteWebhookNeedsUpdate(root, options));
+    try std.testing.expect(remoteWebhookUrlMatches(root, options));
+
+    var stale = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{"id":42,"active":true,"events":["issues"],"config":{"url":"https://example.test/github","content_type":"json","insecure_ssl":"0"}}
+    , .{});
+    defer stale.deinit();
+    try std.testing.expect(remoteWebhookNeedsUpdate(stale.value.object, options));
 }
 
 test "github live requires secret for subscriptions and mutating imports" {

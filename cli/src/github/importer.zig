@@ -220,7 +220,6 @@ pub fn importWebhookPayload(allocator: Allocator, event_name: []const u8, payloa
 
     if (std.mem.eql(u8, event_name, "issue_comment")) {
         const action = event_mod.jsonString(root.get("action")) orelse "";
-        if (!std.mem.eql(u8, action, "created")) return stats;
         const issue = switch (root.get("issue") orelse return stats) {
             .object => |object| object,
             else => return stats,
@@ -229,7 +228,13 @@ pub fn importWebhookPayload(allocator: Allocator, event_name: []const u8, payloa
             .object => |object| object,
             else => return stats,
         };
-        try importWebhookIssueComment(allocator, issue, comment, options, &stats);
+        if (std.mem.eql(u8, action, "created")) {
+            try importWebhookIssueComment(allocator, issue, comment, options, &stats);
+        } else if (std.mem.eql(u8, action, "edited")) {
+            try importWebhookIssueCommentEdited(allocator, comment, options, &stats);
+        } else if (std.mem.eql(u8, action, "deleted")) {
+            try importWebhookIssueCommentDeleted(allocator, comment, options, &stats);
+        }
         return stats;
     }
 
@@ -586,6 +591,68 @@ fn importWebhookIssueComment(
     try comments.append(.{ .object = comment });
     try importCommentsArray(allocator, &writer, parent_kind, parent_id, comments, options.map_file, stats);
     try writer.commitStaged();
+}
+
+fn importWebhookIssueCommentEdited(
+    allocator: Allocator,
+    comment: std.json.ObjectMap,
+    options: WebhookImportOptions,
+    stats: *ImportStats,
+) !void {
+    const comment_id = (try mappedWebhookObjectId(allocator, options.map_file, "comment", comment)) orelse return;
+    defer allocator.free(comment_id);
+
+    var repo = try repo_mod.discoverRepo(allocator);
+    defer repo.deinit();
+    try index.ensureIndex(allocator, repo);
+    var db = try index.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
+    const current = (try localCommentState(allocator, &db, comment_id)) orelse return;
+    defer current.deinit(allocator);
+    if (current.redacted) return;
+
+    const body = try githubSizedString(allocator, event_mod.jsonString(comment.get("body")), "", git.max_payload_text_bytes);
+    defer allocator.free(body);
+    if (std.mem.eql(u8, current.body, body)) return;
+
+    const occurred_at = try githubTimestampOrNow(allocator, firstJsonValue(comment.get("updated_at"), comment.get("created_at")));
+    defer allocator.free(occurred_at);
+
+    var writer = try EventWriter.initForActor(allocator, "gt github live", options.bot_principal, options.bot_device);
+    defer writer.deinit();
+    try writeImportedCommentBodySet(allocator, &writer, comment_id, occurred_at, body);
+    try writer.commitStaged();
+    stats.comments += 1;
+}
+
+fn importWebhookIssueCommentDeleted(
+    allocator: Allocator,
+    comment: std.json.ObjectMap,
+    options: WebhookImportOptions,
+    stats: *ImportStats,
+) !void {
+    const comment_id = (try mappedWebhookObjectId(allocator, options.map_file, "comment", comment)) orelse return;
+    defer allocator.free(comment_id);
+
+    var repo = try repo_mod.discoverRepo(allocator);
+    defer repo.deinit();
+    try index.ensureIndex(allocator, repo);
+    var db = try index.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
+    const current = (try localCommentState(allocator, &db, comment_id)) orelse return;
+    defer current.deinit(allocator);
+    if (current.redacted) return;
+
+    const occurred_at = try githubTimestampOrNow(allocator, firstJsonValue(comment.get("updated_at"), comment.get("created_at")));
+    defer allocator.free(occurred_at);
+
+    var writer = try EventWriter.initForActor(allocator, "gt github live", options.bot_principal, options.bot_device);
+    defer writer.deinit();
+    try writeImportedCommentRedacted(allocator, &writer, comment_id, occurred_at, "deleted on GitHub");
+    try writer.commitStaged();
+    stats.comments += 1;
 }
 
 fn importClassicProjects(allocator: Allocator, client: GitHubClient, options: ImportOptions, stats: *ImportStats) !void {
@@ -1209,15 +1276,20 @@ fn importCommentsArrayWithContext(
             reply.parent_id orelse "",
             reply.parent_hash orelse "",
         );
+        var written_moved = false;
+        errdefer if (!written_moved) written.deinit(allocator);
         imported += 1;
         if (jsonInteger(item.object.get("id"))) |github_id| {
+            if (map_file) |path| try exporter.recordMappedObjectId(allocator, path, "comment", written.id, github_id);
             const entry = try comment_refs.getOrPut(github_id);
             if (entry.found_existing) {
                 entry.value_ptr.deinit(allocator);
             }
             entry.value_ptr.* = written;
+            written_moved = true;
         } else {
             written.deinit(allocator);
+            written_moved = true;
         }
         if (imported % 10 == 0) {
             var parent_ref_buf: [util.short_object_ref_len]u8 = undefined;
@@ -1275,6 +1347,26 @@ fn importedCommentExists(db: *index.SqliteDb, parent_kind: []const u8, parent_id
     try stmt.bindText(3, created_at);
     try stmt.bindText(4, body);
     return try stmt.step();
+}
+
+const LocalCommentState = struct {
+    body: []u8,
+    redacted: bool,
+
+    fn deinit(self: LocalCommentState, allocator: Allocator) void {
+        allocator.free(self.body);
+    }
+};
+
+fn localCommentState(allocator: Allocator, db: *index.SqliteDb, comment_id: []const u8) !?LocalCommentState {
+    var stmt = try db.prepare("SELECT body, redacted FROM comments WHERE id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, comment_id);
+    if (!try stmt.step()) return null;
+    return .{
+        .body = try stmt.columnTextDup(allocator, 0),
+        .redacted = stmt.columnInt64(1) != 0,
+    };
 }
 
 fn writeImportedIssueOpened(
@@ -1550,4 +1642,66 @@ fn writeImportedCommentAdded(
     };
     comment_id = null;
     return result;
+}
+
+fn writeImportedCommentBodySet(
+    allocator: Allocator,
+    writer: *EventWriter,
+    comment_id: []const u8,
+    occurred_at: []const u8,
+    body_text: []const u8,
+) !void {
+    const event_uuid = try util.newUuidV7(allocator);
+    defer allocator.free(event_uuid);
+    const idem = try util.newUuidV7(allocator);
+    defer allocator.free(idem);
+    const body = try event_mod.buildCommentBodySetJson(
+        allocator,
+        writer.cfg,
+        writer.nextSeq(),
+        comment_id,
+        event_uuid,
+        idem,
+        occurred_at,
+        writer.stagedEventParents(),
+        body_text,
+    );
+    defer allocator.free(body);
+    var comment_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const comment_ref = util.shortObjectRef(&comment_ref_buf, comment_id);
+    const subject = try std.fmt.allocPrint(allocator, "comment.body_set #{s} GitHub sync", .{comment_ref});
+    defer allocator.free(subject);
+    const commit = try writer.stage("gt github import", subject, body);
+    allocator.free(commit);
+}
+
+fn writeImportedCommentRedacted(
+    allocator: Allocator,
+    writer: *EventWriter,
+    comment_id: []const u8,
+    occurred_at: []const u8,
+    reason: []const u8,
+) !void {
+    const event_uuid = try util.newUuidV7(allocator);
+    defer allocator.free(event_uuid);
+    const idem = try util.newUuidV7(allocator);
+    defer allocator.free(idem);
+    const body = try event_mod.buildCommentRedactedJson(
+        allocator,
+        writer.cfg,
+        writer.nextSeq(),
+        comment_id,
+        event_uuid,
+        idem,
+        occurred_at,
+        writer.stagedEventParents(),
+        reason,
+    );
+    defer allocator.free(body);
+    var comment_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const comment_ref = util.shortObjectRef(&comment_ref_buf, comment_id);
+    const subject = try std.fmt.allocPrint(allocator, "comment.redacted #{s} GitHub sync", .{comment_ref});
+    defer allocator.free(subject);
+    const commit = try writer.stage("gt github import", subject, body);
+    allocator.free(commit);
 }
