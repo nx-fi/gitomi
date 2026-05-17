@@ -281,14 +281,15 @@ fn printUsage() !void {
         \\  gt actions daemon [--once] [--replay] [--interval-ms N] [--dry-run] [--act PATH] [--agent-runner PATH] [-- ACT_ARGS...]
         \\  gt runs prune [--dry-run] [--max-age-days N] [--max-count N] [--max-bytes N]
         \\  gt sync [--remote REMOTE] [--pull-only|--push-only]
-        \\  gt github import [--repo OWNER/REPO] [--token-env NAME|--token-file PATH] [--from-file PATH] [--no-comments] [--no-projects]
-        \\  gt github export --repo OWNER/REPO [--token-env NAME|--token-file PATH|--use-gh] [--dry-run] [--map-file PATH] [--reuse-legacy]
-        \\  gt github live [--repo OWNER/REPO] --webhook-url URL (--secret-env NAME|--secret-file PATH) [--host 127.0.0.1] [--port 12656] [--path /github/webhook] [--remote REMOTE] [--interval-ms N] [--once] [--no-subscribe] [--dry-run] [--no-git-sync]
+        \\  gt github import [--repo OWNER/REPO] [--token-env NAME|--token-file PATH] [--from-file PATH] [--no-comments] [--no-projects] [--rest|--graphql]
+        \\  gt github export --repo OWNER/REPO [--token-env NAME|--token-file PATH|--use-gh] [--dry-run] [--map-file PATH] [--reuse-legacy] [--rest|--graphql]
+        \\  gt github sync [--repo OWNER/REPO] [--token-env NAME|--token-file PATH|--use-gh] [--remote REMOTE] [--interval-ms N] [--max-pages N] [--dry-run] [--no-git-sync] [--rest|--graphql]
+        \\  gt github live [--repo OWNER/REPO] --webhook-url URL (--secret-env NAME|--secret-file PATH) [--host 127.0.0.1] [--port 12656] [--path /github/webhook] [--remote REMOTE] [--interval-ms N] [--once] [--no-subscribe] [--dry-run] [--no-git-sync] [--rest|--graphql]
         \\  gt gitlab import [--project GROUP/PROJECT] [--token-env NAME|--token-file PATH] [--from-file PATH] [--no-comments]
         \\  gt gitlab export --project GROUP/PROJECT [--token-env NAME|--token-file PATH] [--dry-run] [--map-file PATH] [--reuse-legacy]
         \\  gt gitlab sync --project GROUP/PROJECT [--token-env NAME|--token-file PATH] [--remote REMOTE] [--interval-ms N] [--max-pages N] [--dry-run] [--no-git-sync]
         \\  gt web [--local] [--host 127.0.0.1] [--port 12655] [--once]
-        \\  gt web --live [--host 127.0.0.1] [--port 12655] [--repo OWNER/REPO] [--webhook-url URL] (--secret-env NAME|--secret-file PATH) [--live-host 127.0.0.1] [--live-port 12656] [--live-path /github/webhook] [--remote REMOTE] [--interval-ms N] [--no-subscribe] [--dry-run] [--no-git-sync]
+        \\  gt web --live [--host 127.0.0.1] [--port 12655] [--repo OWNER/REPO] [--webhook-url URL] (--secret-env NAME|--secret-file PATH) [--live-host 127.0.0.1] [--live-port 12656] [--live-path /github/webhook] [--remote REMOTE] [--interval-ms N] [--no-subscribe] [--dry-run] [--no-git-sync] [--rest|--graphql]
         \\
         \\Gitomi stores local state in .git/gitomi and signed events in refs/gitomi/inbox/*.
         \\
@@ -1072,6 +1073,7 @@ fn cmdWeb(allocator: Allocator, args: []const []const u8) !void {
     var live_git_sync = true;
     var live_bot_principal: []const u8 = "import-bot";
     var live_bot_device: []const u8 = "github";
+    var live_mode: github_common.ApiMode = .graphql;
     var live_option_seen = false;
 
     var i: usize = 0;
@@ -1167,6 +1169,12 @@ fn cmdWeb(allocator: Allocator, args: []const []const u8) !void {
         } else if (std.mem.eql(u8, arg, "--device")) {
             live_option_seen = true;
             live_bot_device = try util.requireValue(args, &i, "--device");
+        } else if (std.mem.eql(u8, arg, "--rest")) {
+            live_option_seen = true;
+            live_mode = .rest;
+        } else if (std.mem.eql(u8, arg, "--graphql")) {
+            live_option_seen = true;
+            live_mode = .graphql;
         } else {
             try io.eprint("gt web: unknown option '{s}'\n", .{arg});
             return CliError.InvalidArgument;
@@ -1215,6 +1223,7 @@ fn cmdWeb(allocator: Allocator, args: []const []const u8) !void {
             .git_sync = live_git_sync,
             .bot_principal = live_bot_principal,
             .bot_device = live_bot_device,
+            .mode = live_mode,
         });
     }
 

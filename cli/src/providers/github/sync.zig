@@ -226,6 +226,7 @@ fn runSyncOnce(allocator: Allocator, options: Options) !void {
         .skip_actor_device = options.bot_device,
         .max_events = 100,
         .quiet = true,
+        .mode = options.mode,
     });
     if (export_result.max_ordinal > state.last_export_ordinal) {
         state.last_export_ordinal = export_result.max_ordinal;
