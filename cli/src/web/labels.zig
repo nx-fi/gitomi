@@ -67,7 +67,7 @@ const label_rows_sql =
 ;
 
 pub fn renderLabelsPage(allocator: Allocator, repo: Repo, csrf_token: []const u8) ![]u8 {
-    if (try shared.renderIndexingPageIfStale(allocator, repo, "Labels", "labels", "/labels")) |body| return body;
+    if (try shared.renderIndexingPageIfStale(allocator, repo, "Labels", "labels", "/settings/labels")) |body| return body;
     try index.ensureIndex(allocator, repo);
 
     var buf: std.ArrayList(u8) = .empty;
@@ -162,7 +162,7 @@ pub fn handleLabelsPost(allocator: Allocator, repo: Repo, stream: std.net.Stream
             try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not create label\n");
             return;
         };
-        try sendRedirect(allocator, stream, "/labels");
+        try sendRedirect(allocator, stream, "/settings/labels");
         return;
     }
 
@@ -173,7 +173,7 @@ pub fn handleLabelsPost(allocator: Allocator, repo: Repo, stream: std.net.Stream
             try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not reorder labels\n");
             return;
         };
-        try sendRedirect(allocator, stream, "/labels");
+        try sendRedirect(allocator, stream, "/settings/labels");
         return;
     }
 
@@ -258,7 +258,7 @@ pub fn handleLabelsPost(allocator: Allocator, repo: Repo, stream: std.net.Stream
         return;
     }
 
-    try sendRedirect(allocator, stream, "/labels");
+    try sendRedirect(allocator, stream, "/settings/labels");
 }
 
 const LabelDefinition = struct {
@@ -569,7 +569,7 @@ fn appendLabelDialog(buf: *std.ArrayList(u8), allocator: Allocator, csrf_token: 
     try appendTemplate(buf, allocator,
         \\  <div class="labels-dialog-backdrop" data-label-dialog hidden>
         \\    <div class="labels-dialog" role="dialog" aria-modal="true" aria-labelledby="label-dialog-title">
-        \\      <form method="post" action="/labels" data-label-dialog-form>
+        \\      <form method="post" action="/settings/labels" data-label-dialog-form>
         \\        <header class="labels-dialog-head">
         \\          <h2 id="label-dialog-title" data-label-dialog-title>New label</h2>
         \\          <button class="labels-dialog-close" type="button" aria-label="Close" data-label-dialog-close>x</button>
@@ -716,7 +716,7 @@ fn appendLabelActionMenu(buf: *std.ArrayList(u8), allocator: Allocator, label: [
         \\  <summary class="issue-kebab-button" aria-label="Label actions" title="Label actions"></summary>
         \\  <div class="issue-action-popover labels-row-popover" role="menu">
         \\    <button type="button" role="menuitem" data-label-edit-toggle>Edit label</button>
-        \\    <form method="post" action="/labels"><input type="hidden" name="{csrf_field}" value="{csrf}"><input type="hidden" name="action" value="delete"><input type="hidden" name="label" value="{label}"><button type="submit" role="menuitem">Delete label</button></form>
+        \\    <form method="post" action="/settings/labels"><input type="hidden" name="{csrf_field}" value="{csrf}"><input type="hidden" name="action" value="delete"><input type="hidden" name="label" value="{label}"><button type="submit" role="menuitem">Delete label</button></form>
         \\  </div>
         \\</details>
     , .{ .csrf_field = zwf.csrf.field_name, .csrf = csrf_token, .label = label });

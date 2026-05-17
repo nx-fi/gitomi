@@ -159,8 +159,8 @@
 
   function initTreeResize(sidebar) {
     if (sidebar.dataset.treeResizeReady === "yes") return;
-    const handle = sidebar.querySelector("[data-tree-resizer]");
     const layout = sidebar.closest(".code-layout");
+    const handle = layout ? layout.querySelector("[data-tree-resizer]") : null;
     if (!handle || !layout) return;
     sidebar.dataset.treeResizeReady = "yes";
 

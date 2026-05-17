@@ -114,6 +114,8 @@ const routes = [_]Route{
     Route.get("/settings", handleSettingsPage),
     Route.get("/settings/models", handleSettingsModelsPage),
     Route.post("/settings/models", handleSettingsModelsPost),
+    Route.get("/settings/labels", handleLabelsPage),
+    Route.post("/settings/labels", handleLabelsPost),
     Route.get("/labels", handleLabelsPage),
     Route.post("/labels", handleLabelsPost),
     Route.get("/workflows", handleActionsPage),

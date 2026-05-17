@@ -3,8 +3,8 @@
 
   const symbolsStorageKey = "gitomi.symbolsPanel";
   const symbolsWidthKey = "gitomi.symbolsPanelWidth";
-  const minSymbolsWidth = 180;
-  const maxSymbolsWidth = 480;
+  const minSymbolsWidth = 300;
+  const maxSymbolsWidth = 640;
   let rightPanelOffsetResizeBound = false;
 
   function clamp(value, min, max) {
@@ -56,17 +56,17 @@
   function setSymbolsVisible(layout, sidebar, button, visible, persist) {
     layout.classList.toggle("symbols-collapsed", !visible);
     sidebar.hidden = !visible;
-    button.setAttribute("aria-expanded", String(visible));
-    setButtonState(button, visible ? "Hide symbols" : "Show symbols");
-    button.setAttribute("aria-label", visible ? "Hide symbols panel" : "Show symbols panel");
-    button.title = visible ? "Hide symbols panel" : "Show symbols panel";
+    if (button) {
+      button.setAttribute("aria-expanded", String(visible));
+      setButtonState(button, visible ? "Hide symbols" : "Show symbols");
+      button.setAttribute("aria-label", visible ? "Hide symbols panel" : "Show symbols panel");
+      button.title = visible ? "Hide symbols panel" : "Show symbols panel";
+    }
     if (persist) storeSymbolsVisible(visible);
   }
 
   function syncRightPanelOffset(layout) {
-    const pathbar = layout.querySelector(".code-pathbar");
-    const offset = pathbar ? Math.ceil(pathbar.getBoundingClientRect().height) : 0;
-    layout.style.setProperty("--right-panel-offset", `${offset}px`);
+    layout.style.setProperty("--right-panel-offset", "0px");
   }
 
   function syncRightPanelOffsets() {
@@ -86,6 +86,8 @@
     const sidebar = sidebarId ? document.getElementById(sidebarId) : document.querySelector("[data-symbols-sidebar]");
     const layout = button.closest(".code-layout") || document.querySelector(".code-layout.has-symbols");
     if (!sidebar || !layout) return;
+    if (button.dataset.symbolsToggleReady === "yes") return;
+    button.dataset.symbolsToggleReady = "yes";
 
     setSymbolsVisible(layout, sidebar, button, storedSymbolsVisible(), false);
     button.addEventListener("click", function () {
@@ -93,10 +95,112 @@
     });
   }
 
-  function initSymbolsResize(sidebar) {
-    const handle = sidebar.querySelector("[data-symbols-resizer]");
+  function symbolRows(sidebar) {
+    return Array.prototype.slice.call(sidebar.querySelectorAll("[data-symbol-row]"));
+  }
+
+  function symbolRowDepth(row) {
+    const depth = Number(row.dataset.symbolDepth);
+    return Number.isFinite(depth) ? depth : 0;
+  }
+
+  function applySymbolTreeVisibility(sidebar, ignoreCollapsed) {
+    let collapsedDepth = null;
+    symbolRows(sidebar).forEach(function (row) {
+      const depth = symbolRowDepth(row);
+      if (collapsedDepth !== null && depth <= collapsedDepth) collapsedDepth = null;
+
+      const filtered = row.dataset.symbolFilterHidden === "true";
+      const collapsed = collapsedDepth !== null;
+      row.hidden = filtered || (!ignoreCollapsed && collapsed);
+
+      if (!filtered && !ignoreCollapsed && row.dataset.symbolCollapsed === "true") {
+        collapsedDepth = depth;
+      }
+    });
+  }
+
+  function filterSymbols(sidebar, query) {
+    const value = String(query || "").trim().toLowerCase();
+    const rows = symbolRows(sidebar);
+    if (value === "") {
+      rows.forEach(function (row) {
+        row.dataset.symbolFilterHidden = "false";
+      });
+      applySymbolTreeVisibility(sidebar, false);
+      return;
+    }
+
+    const visible = new Set();
+    rows.forEach(function (row, index) {
+      if ((row.textContent || "").toLowerCase().indexOf(value) === -1) return;
+      visible.add(row);
+      let parentDepth = symbolRowDepth(row);
+      for (let previous = index - 1; previous >= 0 && parentDepth > 0; previous -= 1) {
+        const candidate = rows[previous];
+        const candidateDepth = symbolRowDepth(candidate);
+        if (candidateDepth < parentDepth) {
+          visible.add(candidate);
+          parentDepth = candidateDepth;
+        }
+      }
+    });
+
+    rows.forEach(function (row) {
+      row.dataset.symbolFilterHidden = visible.has(row) ? "false" : "true";
+    });
+    applySymbolTreeVisibility(sidebar, true);
+  }
+
+  function initSymbolTree(sidebar) {
+    sidebar.querySelectorAll("[data-symbol-toggle]").forEach(function (toggle) {
+      if (toggle.dataset.symbolToggleReady === "yes") return;
+      toggle.dataset.symbolToggleReady = "yes";
+      toggle.addEventListener("click", function () {
+        const row = toggle.closest("[data-symbol-row]");
+        if (!row) return;
+        const expanded = toggle.getAttribute("aria-expanded") !== "false";
+        const nextExpanded = !expanded;
+        toggle.setAttribute("aria-expanded", String(nextExpanded));
+        toggle.setAttribute("aria-label", nextExpanded ? "Collapse symbol children" : "Expand symbol children");
+        toggle.title = nextExpanded ? "Collapse symbol children" : "Expand symbol children";
+        row.dataset.symbolCollapsed = nextExpanded ? "false" : "true";
+        const input = sidebar.querySelector("[data-symbols-filter]");
+        applySymbolTreeVisibility(sidebar, input && String(input.value || "").trim() !== "");
+      });
+    });
+  }
+
+  function initSymbolsPanel(sidebar) {
     const layout = sidebar.closest(".code-layout") || document.querySelector(".code-layout.has-symbols");
+    const button = layout ? layout.querySelector("[data-symbols-toggle]") : null;
+    const input = sidebar.querySelector("[data-symbols-filter]");
+    const close = sidebar.querySelector("[data-symbols-close]");
+
+    initSymbolTree(sidebar);
+    filterSymbols(sidebar, input ? input.value : "");
+    initSymbolsResize(sidebar);
+    if (sidebar.dataset.symbolsPanelReady === "yes") return;
+    sidebar.dataset.symbolsPanelReady = "yes";
+
+    if (input) {
+      input.addEventListener("input", function () {
+        filterSymbols(sidebar, input.value);
+      });
+    }
+    if (close && layout) {
+      close.addEventListener("click", function () {
+        setSymbolsVisible(layout, sidebar, button, false, true);
+      });
+    }
+  }
+
+  function initSymbolsResize(sidebar) {
+    const layout = sidebar.closest(".code-layout") || document.querySelector(".code-layout.has-symbols");
+    const handle = layout ? layout.querySelector("[data-symbols-resizer]") : null;
     if (!handle || !layout) return;
+    if (sidebar.dataset.symbolsResizeReady === "yes") return;
+    sidebar.dataset.symbolsResizeReady = "yes";
 
     try {
       const stored = Number(window.localStorage.getItem(symbolsWidthKey));
@@ -562,7 +666,7 @@
 
   function initSymbolsToggles() {
     document.querySelectorAll("[data-symbols-toggle]").forEach(initSymbolsToggle);
-    document.querySelectorAll("[data-symbols-sidebar]").forEach(initSymbolsResize);
+    document.querySelectorAll("[data-symbols-sidebar]").forEach(initSymbolsPanel);
   }
 
   function syncRootSidebarScroll(sidebar) {

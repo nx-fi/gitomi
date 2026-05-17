@@ -23,17 +23,17 @@ pub const SymbolKind = enum {
 
     pub fn label(self: SymbolKind) []const u8 {
         return switch (self) {
-            .symbol => "Symbol",
-            .module => "Module",
-            .class => "Class",
-            .function => "Function",
-            .method => "Method",
-            .property => "Property",
-            .field => "Field",
-            .variable => "Variable",
-            .constant => "Constant",
-            .type => "Type",
-            .test_case => "Test",
+            .symbol => "sym",
+            .module => "mod",
+            .class => "class",
+            .function => "func",
+            .method => "meth",
+            .property => "prop",
+            .field => "field",
+            .variable => "var",
+            .constant => "const",
+            .type => "type",
+            .test_case => "test",
         };
     }
 };

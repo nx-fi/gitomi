@@ -1117,7 +1117,7 @@
     container.innerHTML = "";
     headings.forEach(function (heading) {
       const link = document.createElement("a");
-      link.className = "markdown-outline-link";
+      link.className = "code-side-panel-link markdown-outline-link";
       link.href = "#" + heading.id;
       link.textContent = heading.text;
       link.style.setProperty("--depth", String(heading.depth));
@@ -1150,8 +1150,8 @@
   }
 
   function initMarkdownOutlineResize(panel) {
-    const handle = panel.querySelector("[data-markdown-outline-resizer]");
     const layout = panel.closest(".code-layout");
+    const handle = layout ? layout.querySelector("[data-markdown-outline-resizer]") : null;
     if (!handle || !layout || panel.dataset.markdownOutlineResizeReady === "yes") return;
     panel.dataset.markdownOutlineResizeReady = "yes";
 
