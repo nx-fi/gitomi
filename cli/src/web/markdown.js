@@ -1582,6 +1582,12 @@
     if (hash) current.value = hash;
   }
 
+  function projectMarkdownSubmitter(event, form) {
+    if (event.submitter) return event.submitter;
+    const active = document.activeElement;
+    return active && form.contains(active) ? active : null;
+  }
+
   function resetProjectMarkdownForm(form) {
     form.reset();
     form.querySelectorAll("details[open]").forEach(function (details) {
@@ -1605,6 +1611,9 @@
         if (!form.querySelector("[data-project-current-hash]")) return;
         if (!window.crypto || !window.crypto.subtle || typeof TextEncoder === "undefined") return;
         event.preventDefault();
+        if (typeof window.gitomiLockSubmitControls === "function") {
+          window.gitomiLockSubmitControls(form, projectMarkdownSubmitter(event, form));
+        }
         updateProjectMarkdownCurrentHash(form).finally(function () {
           form.dataset.projectHashSubmitting = "yes";
           if (typeof form.requestSubmit === "function") {

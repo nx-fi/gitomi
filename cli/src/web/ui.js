@@ -161,6 +161,11 @@
     });
   }
 
+  window.gitomiLockSubmitControls = function (form, submitter) {
+    if (!(form instanceof HTMLFormElement)) return;
+    lockSubmitControls(form, submitter);
+  };
+
   function ensureSubmitterShadow(form, submitter) {
     if (!submitter || !submitter.name || submitter.tagName === "INPUT" && submitter.type === "image") return null;
     const shadow = document.createElement("input");

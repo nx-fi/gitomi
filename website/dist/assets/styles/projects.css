@@ -789,6 +789,14 @@
   font-weight: 800;
   cursor: pointer;
 }
+.project-markdown-actions button[type="submit"]:disabled,
+.project-markdown-actions button[type="submit"]:disabled:hover {
+  color: var(--muted);
+  background: var(--button-secondary-bg);
+  border-color: var(--border);
+  cursor: default;
+  opacity: 0.62;
+}
 .project-markdown-cancel {
   min-height: 34px;
   padding: 0 12px;
