@@ -92,6 +92,7 @@ pub fn renderProjectWorkspace(
     db: *SqliteDb,
     project: []const u8,
     view_ref: []const u8,
+    target: []const u8,
 ) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -121,7 +122,7 @@ pub fn renderProjectWorkspace(
     defer allocator.free(current_principal);
 
     switch (active_view.layout) {
-        .table => try project_table.appendProjectTable(&buf, allocator, db, project, &active_view, current_principal),
+        .table => try project_table.appendProjectTable(&buf, allocator, db, project, &active_view, current_principal, target),
         .board => try project_board.appendProjectBoard(&buf, allocator, db, project, &active_view, current_principal),
         .roadmap => try project_roadmap.appendProjectRoadmap(&buf, allocator, db, project, &active_view, current_principal),
         .issues => try project_issues.appendProjectIssues(&buf, allocator, db, project, &active_view, current_principal),

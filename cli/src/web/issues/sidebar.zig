@@ -5,6 +5,7 @@ const index = @import("../../index.zig");
 const issue = @import("../../issue.zig");
 const issue_form = @import("form.zig");
 const issue_relationships = @import("relationships.zig");
+const milestone_mod = @import("../../milestone.zig");
 const project_issue_render = @import("../projects/issue_render.zig");
 const project_views = @import("../projects/views.zig");
 const repo_mod = @import("../../repo.zig");
@@ -21,6 +22,7 @@ const createIssueProjectEvent = issue.createIssueProjectEvent;
 const createIssueRelationshipEvent = issue.createIssueRelationshipEvent;
 const createIssueStringEvent = issue.createIssueStringEvent;
 const createSubIssueOpenedWithMetadataEventResult = issue.createSubIssueOpenedWithMetadataEventResult;
+const ensureMilestoneCreatedForTitle = milestone_mod.ensureMilestoneCreatedForTitle;
 const ensureIndex = index.ensureIndex;
 const isIssuePriority = cmd_common.isIssuePriority;
 const isIssueStatus = cmd_common.isIssueStatus;
@@ -1287,6 +1289,12 @@ pub fn handleIssueSidebarPost(allocator: Allocator, repo: Repo, stream: std.net.
         const milestone_owned = (try formValueOwned(allocator, form_body, "milestone")) orelse try allocator.dupe(u8, "");
         defer allocator.free(milestone_owned);
         const milestone = std.mem.trim(u8, milestone_owned, " \t\r\n");
+        if (milestone.len != 0) {
+            ensureMilestoneCreatedForTitle(allocator, repo, milestone) catch {
+                try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not create milestone\n");
+                return;
+            };
+        }
         if (!(try writeSidebarStringEventOrFail(allocator, stream, issue_id, "issue.milestone_set", "milestone", milestone))) return;
     } else if (std.mem.eql(u8, action, "clear-milestone")) {
         if (!(try writeSidebarStringEventOrFail(allocator, stream, issue_id, "issue.milestone_set", "milestone", ""))) return;

@@ -536,6 +536,13 @@
     grid-template-columns: 38px 26px minmax(0, 1fr);
     padding: 12px 10px 12px 0;
   }
+  .project-issue-list-row.issue-list-row {
+    grid-template-columns: 38px minmax(0, 1fr);
+  }
+  .project-issue-list-row .issue-row-content,
+  .project-issue-list-row .issue-row-side {
+    grid-column: 2;
+  }
   .milestones-list-head {
     grid-template-columns: minmax(0, 1fr);
     padding-left: 10px;
@@ -777,4 +784,3 @@
     gap: 3px;
   }
 }
-

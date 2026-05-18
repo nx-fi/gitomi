@@ -5,11 +5,13 @@ const event_mod = @import("event.zig");
 const event_writer_mod = @import("event_writer.zig");
 const index = @import("index.zig");
 const io = @import("io.zig");
+const repo_mod = @import("repo.zig");
 const util = @import("util.zig");
 
 const Allocator = std.mem.Allocator;
 const CliError = errors.CliError;
 const EventWriter = event_writer_mod.EventWriter;
+const Repo = repo_mod.Repo;
 const milestone = @This();
 const out = io.out;
 const isIssueState = cmd_common.isIssueState;
@@ -60,6 +62,79 @@ pub fn createMilestoneCreatedEvent(
     try out("  id:     {s}\n", .{milestone_id});
     try out("  commit: {s}\n", .{commit_oid});
     try out("  ref:    {s}\n", .{writer.inbox_ref});
+}
+
+pub fn ensureMilestoneCreatedForTitle(
+    allocator: Allocator,
+    repo: Repo,
+    title: []const u8,
+) !void {
+    const trimmed = std.mem.trim(u8, title, " \t\r\n");
+    if (trimmed.len == 0) return;
+    if (try milestoneTitleExists(allocator, repo, trimmed)) return;
+    try createMilestoneCreatedEvent(allocator, trimmed, "", "");
+}
+
+pub fn ensureMilestoneCreatedForTitleStaged(
+    allocator: Allocator,
+    writer: *EventWriter,
+    title: []const u8,
+    description: []const u8,
+    due_at: []const u8,
+    occurred_at: []const u8,
+    command_context: []const u8,
+) !void {
+    const trimmed = std.mem.trim(u8, title, " \t\r\n");
+    if (trimmed.len == 0) return;
+    if (try milestoneTitleExists(allocator, writer.repo, trimmed)) return;
+    try stageMilestoneCreatedEvent(allocator, writer, trimmed, description, due_at, occurred_at, command_context);
+}
+
+pub fn milestoneTitleExists(allocator: Allocator, repo: Repo, title: []const u8) !bool {
+    try index.ensureIndex(allocator, repo);
+    var db = try index.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    var stmt = try db.prepare("SELECT 1 FROM milestones WHERE title = ? LIMIT 1");
+    defer stmt.deinit();
+    try stmt.bindText(1, title);
+    return try stmt.step();
+}
+
+fn stageMilestoneCreatedEvent(
+    allocator: Allocator,
+    writer: *EventWriter,
+    title: []const u8,
+    description: []const u8,
+    due_at: []const u8,
+    occurred_at: []const u8,
+    command_context: []const u8,
+) !void {
+    const milestone_id = try newUuidV7(allocator);
+    defer allocator.free(milestone_id);
+    const event_uuid = try newUuidV7(allocator);
+    defer allocator.free(event_uuid);
+    const idem = try newUuidV7(allocator);
+    defer allocator.free(idem);
+
+    const event_body = try event_mod.buildMilestoneCreatedJson(
+        allocator,
+        writer.cfg,
+        writer.nextSeq(),
+        milestone_id,
+        event_uuid,
+        idem,
+        occurred_at,
+        writer.stagedEventParents(),
+        title,
+        description,
+        due_at,
+    );
+    defer allocator.free(event_body);
+
+    const subject = try std.fmt.allocPrint(allocator, "milestone.created ^{s} {s}", .{ milestone_id[0..7], title });
+    defer allocator.free(subject);
+    const commit_oid = try writer.stage(command_context, subject, event_body);
+    allocator.free(commit_oid);
 }
 
 pub fn createMilestoneUpdatedEvent(

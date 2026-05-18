@@ -1445,7 +1445,7 @@ fn appendProjectMilestoneRow(
 
 fn appendProjectPropertiesPanel(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, summary: *const ProjectSummary, metrics: *const ProjectMetrics) !void {
     try buf.appendSlice(allocator,
-        \\<section class="project-overview-side-panel">
+        \\<section class="project-overview-side-panel project-properties-panel">
         \\  <div class="project-overview-side-panel-head"><h2>Properties</h2></div>
         \\  <dl class="project-overview-side-properties">
     );
@@ -1462,8 +1462,7 @@ fn appendProjectPropertiesPanel(buf: *std.ArrayList(u8), allocator: Allocator, d
     defer allocator.free(start_label);
     const end_label = if (summary.end_at.len != 0) try dateLabelOwned(allocator, summary.end_at) else try allocator.dupe(u8, "No end date");
     defer allocator.free(end_label);
-    try appendProjectDateProperty(buf, allocator, summary, "Start date", "Start date", "set-start-date", "start_at", summary.start_at, start_label, "No start date", "", summary.end_at);
-    try appendProjectDateProperty(buf, allocator, summary, "End date", "End date", "set-end-date", "end_at", summary.end_at, end_label, "No end date", summary.start_at, "");
+    try appendProjectDateRangeProperty(buf, allocator, summary, start_label, end_label);
     try appendProjectLabelsProperty(buf, allocator, db, summary, metrics);
     try buf.appendSlice(allocator,
         \\  </dl>
@@ -1659,11 +1658,28 @@ fn appendProjectPeopleProperty(
     try appendProjectPropertyMenuEnd(buf, allocator);
 }
 
-fn appendProjectDateProperty(
+fn appendProjectDateRangeProperty(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
     summary: *const ProjectSummary,
-    label: []const u8,
+    start_label: []const u8,
+    end_label: []const u8,
+) !void {
+    try buf.appendSlice(allocator,
+        \\<div class="project-overview-date-range-row">
+        \\  <dt>Dates</dt>
+        \\  <dd class="project-property-date-range-links">
+    );
+    try appendProjectDatePickerMenu(buf, allocator, summary, "Start date", "set-start-date", "start_at", summary.start_at, start_label, "No start date", "", summary.end_at);
+    try buf.appendSlice(allocator, "<span class=\"project-property-date-separator\" aria-hidden=\"true\">-</span>");
+    try appendProjectDatePickerMenu(buf, allocator, summary, "End date", "set-end-date", "end_at", summary.end_at, end_label, "No end date", summary.start_at, "");
+    try buf.appendSlice(allocator, "</dd></div>");
+}
+
+fn appendProjectDatePickerMenu(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    summary: *const ProjectSummary,
     menu_label: []const u8,
     action: []const u8,
     input_name: []const u8,
@@ -1673,7 +1689,12 @@ fn appendProjectDateProperty(
     invalid_until: []const u8,
     invalid_from: []const u8,
 ) !void {
-    try appendProjectPropertyMenuStart(buf, allocator, label, "icon-calendar", menu_label, display_value);
+    try appendTemplate(buf, allocator,
+        \\<details class="project-property-menu project-property-date-menu" data-popover-menu data-issue-sidebar-menu><summary class="project-property-date-link" aria-label="{menu_label}" title="{menu_label}"><span>{display_value}</span></summary><div class="issue-sidebar-popover project-property-popover" role="dialog" aria-label="{menu_label}"><div class="issue-sidebar-popover-title">{menu_label}</div>
+    , .{
+        .menu_label = menu_label,
+        .display_value = display_value,
+    });
     try buf.appendSlice(allocator, "<form class=\"project-property-date-form project-property-date-picker-form\" method=\"post\" action=\"/projects/properties\">");
     try appendProjectHiddenFields(buf, allocator, summary);
     try appendTemplate(buf, allocator,
@@ -1692,9 +1713,7 @@ fn appendProjectDateProperty(
     if (invalid_from.len != 0) {
         try appendTemplate(buf, allocator, " data-date-picker-invalid-from=\"{invalid_from}\"", .{ .invalid_from = invalid_from });
     }
-    try buf.appendSlice(allocator, ">");
-    try buf.appendSlice(allocator, "</form>");
-    try appendProjectPropertyMenuEnd(buf, allocator);
+    try buf.appendSlice(allocator, "></form></div></details>");
 }
 
 fn appendProjectLabelsProperty(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, summary: *const ProjectSummary, metrics: *const ProjectMetrics) !void {
@@ -2167,14 +2186,6 @@ fn repositoryOwnerLabel(repo: Repo) []const u8 {
     return std.fs.path.basename(repo.root);
 }
 
-fn projectDatesLabelOwned(allocator: Allocator, summary: *const ProjectSummary) ![]u8 {
-    const start_label = if (summary.start_at.len != 0) try dateLabelOwned(allocator, summary.start_at) else try allocator.dupe(u8, "No start date");
-    defer allocator.free(start_label);
-    const end_label = if (summary.end_at.len != 0) try dateLabelOwned(allocator, summary.end_at) else try allocator.dupe(u8, "No end date");
-    defer allocator.free(end_label);
-    return std.fmt.allocPrint(allocator, "{s} + {s}", .{ start_label, end_label });
-}
-
 fn projectTargetDateLabelOwned(allocator: Allocator, summary: *const ProjectSummary) ![]u8 {
     if (summary.end_at.len == 0) return allocator.dupe(u8, "No target date");
     return dateLabelWithOrdinalOwned(allocator, summary.end_at);
@@ -2353,7 +2364,9 @@ test "project activity href scopes settings activity to project" {
     try std.testing.expectEqualStrings("/events?project=Release%20Plan", buf.items);
 }
 
-test "project dates label uses start plus end" {
+test "project date row renders two individual date pickers" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
     var summary = ProjectSummary{
         .id = try std.testing.allocator.dupe(u8, "p1"),
         .name = try std.testing.allocator.dupe(u8, "Release"),
@@ -2369,8 +2382,13 @@ test "project dates label uses start plus end" {
     };
     defer summary.deinit(std.testing.allocator);
 
-    const label = try projectDatesLabelOwned(std.testing.allocator, &summary);
-    defer std.testing.allocator.free(label);
+    try appendProjectDateRangeProperty(&buf, std.testing.allocator, &summary, "May 17", "May 28");
 
-    try std.testing.expectEqualStrings("May 17 + May 28", label);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "project-property-date-range-links") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, ">May 17</span>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, ">May 28</span>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "value=\"set-start-date\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "value=\"set-end-date\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-date-picker-autosubmit=\"yes\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "value=\"set-dates\"") == null);
 }

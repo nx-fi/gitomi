@@ -6,6 +6,7 @@ const git = @import("../../git.zig");
 const index = @import("../../index.zig");
 const io = @import("../../io.zig");
 const json_writer = @import("../../json_writer.zig");
+const milestone_mod = @import("../../milestone.zig");
 const repo_mod = @import("../../repo.zig");
 const util = @import("../../util.zig");
 const common = @import("common.zig");
@@ -42,6 +43,7 @@ const jsonBool = common.jsonBool;
 const jsonInteger = common.jsonInteger;
 const firstJsonValue3 = common.firstJsonValue3;
 const githubStateEquals = common.githubStateEquals;
+const ensureMilestoneCreatedForTitleStaged = milestone_mod.ensureMilestoneCreatedForTitleStaged;
 
 const import_bot_principal = "import-bot";
 const import_bot_device = "github";
@@ -1340,6 +1342,7 @@ fn importIssueObject(
     const issue_id = try util.newUuidV7(allocator);
     errdefer allocator.free(issue_id);
     try eprint("gt github import: importing issue #{d}\n", .{number});
+    try ensureMilestoneCreatedForTitleStaged(allocator, writer, milestone, "", "", occurred_at, "gt github import");
     try writeImportedIssueOpened(allocator, writer, issue_id, @intCast(number), occurred_at, title, body, labels, assignees, source_identity, milestone, projects);
     stats.issues += 1;
 
@@ -1512,6 +1515,10 @@ fn syncExistingIssueObject(
     defer label_diff.deinit();
     var assignee_diff = try diffStringLists(allocator, assignees, current.assignees);
     defer assignee_diff.deinit();
+    const occurred_at = try githubTimestampOrNow(allocator, firstJsonValue3(issue.get("updated_at"), issue.get("updatedAt"), firstJsonValue(issue.get("created_at"), issue.get("createdAt"))));
+    defer allocator.free(occurred_at);
+
+    try ensureMilestoneCreatedForTitleStaged(allocator, writer, milestone, "", "", occurred_at, "gt github import");
 
     const update = event_mod.IssueUpdate{
         .title = if (!std.mem.eql(u8, title, current.title)) title else null,
@@ -1525,8 +1532,6 @@ fn syncExistingIssueObject(
     };
     if (!update.hasChanges()) return;
 
-    const occurred_at = try githubTimestampOrNow(allocator, firstJsonValue3(issue.get("updated_at"), issue.get("updatedAt"), firstJsonValue(issue.get("created_at"), issue.get("createdAt"))));
-    defer allocator.free(occurred_at);
     try writeImportedIssueUpdated(allocator, writer, issue_id, occurred_at, update);
 }
 

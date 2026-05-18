@@ -24,7 +24,7 @@ pub fn renderProjectsPage(allocator: Allocator, repo: Repo, target: []const u8) 
     defer db.deinit();
 
     if (project_query) |project| {
-        return workspace.renderProjectWorkspace(allocator, repo, &db, project, view_query orelse "");
+        return workspace.renderProjectWorkspace(allocator, repo, &db, project, view_query orelse "", target);
     }
 
     return list.renderProjectIndex(allocator, repo, &db);

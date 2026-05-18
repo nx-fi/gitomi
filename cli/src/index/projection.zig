@@ -987,6 +987,7 @@ pub fn importDelegatesEvent(event_type: []const u8) bool {
         std.mem.eql(u8, event_type, "issue.priority_set") or
         std.mem.eql(u8, event_type, "issue.status_set") or
         std.mem.eql(u8, event_type, "issue.project_added") or
+        std.mem.eql(u8, event_type, "milestone.created") or
         std.mem.eql(u8, event_type, "pull.opened") or
         std.mem.eql(u8, event_type, "pull.updated") or
         std.mem.eql(u8, event_type, "pull.title_set") or
@@ -1004,6 +1005,10 @@ pub fn importDelegatesEvent(event_type: []const u8) bool {
         std.mem.eql(u8, event_type, "comment.added") or
         std.mem.eql(u8, event_type, "comment.body_set") or
         std.mem.eql(u8, event_type, "comment.redacted");
+}
+
+test "import delegation includes milestone creation" {
+    try std.testing.expect(importDelegatesEvent("milestone.created"));
 }
 
 fn payloadHasAny(payload: std.json.ObjectMap, keys: []const []const u8) bool {

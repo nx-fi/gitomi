@@ -5,6 +5,7 @@ const errors = @import("../../errors.zig");
 const git = @import("../../git.zig");
 const index = @import("../../index.zig");
 const io = @import("../../io.zig");
+const milestone_mod = @import("../../milestone.zig");
 const repo_mod = @import("../../repo.zig");
 const util = @import("../../util.zig");
 const common = @import("common.zig");
@@ -27,6 +28,7 @@ const firstJsonValue = common.firstJsonValue;
 const timestampOrNow = common.timestampOrNow;
 const sizedString = common.sizedString;
 const subject = common.subject;
+const ensureMilestoneCreatedForTitleStaged = milestone_mod.ensureMilestoneCreatedForTitleStaged;
 
 const import_bot_principal = "import-bot";
 const import_bot_device = "gitlab";
@@ -437,6 +439,7 @@ fn importIssueObject(allocator: Allocator, writer: *EventWriter, issue: std.json
     const comment_count = common.optionalUnsignedField(issue, &.{ "user_notes_count", "comments", "comment_count" });
 
     try eprint("gt gitlab import: importing issue #{d}\n", .{number});
+    try ensureMilestoneCreatedForTitleStaged(allocator, writer, milestone, "", "", occurred_at, "gt gitlab import");
     try writeImportedIssueOpened(allocator, writer, issue_id, @intCast(number), occurred_at, title, body, labels, assignees, source_author, milestone);
     if (gitlabIssueState(issue)) |state| {
         if (std.mem.eql(u8, state, "closed")) {
@@ -538,6 +541,10 @@ fn syncExistingIssue(allocator: Allocator, writer: *EventWriter, issue_id: []con
     defer current.deinit(allocator);
     const desired = try desiredIssueState(allocator, issue);
     defer desired.deinit(allocator);
+    const occurred_at = try timestampOrNow(allocator, firstJsonValue(issue.get("updated_at"), issue.get("created_at")));
+    defer allocator.free(occurred_at);
+    try ensureMilestoneCreatedForTitleStaged(allocator, writer, desired.milestone, "", "", occurred_at, "gt gitlab import");
+
     var update = event_mod.IssueUpdate{
         .title = if (!std.mem.eql(u8, current.title, desired.title)) desired.title else null,
         .body = if (!std.mem.eql(u8, current.body, desired.body)) desired.body else null,
@@ -553,8 +560,6 @@ fn syncExistingIssue(allocator: Allocator, writer: *EventWriter, issue_id: []con
     defer allocator.free(update.assignees_added);
     defer allocator.free(update.assignees_removed);
     if (!update.hasChanges()) return;
-    const occurred_at = try timestampOrNow(allocator, firstJsonValue(issue.get("updated_at"), issue.get("created_at")));
-    defer allocator.free(occurred_at);
     try writeImportedIssueUpdated(allocator, writer, issue_id, occurred_at, update);
     stats.issues += 1;
 }

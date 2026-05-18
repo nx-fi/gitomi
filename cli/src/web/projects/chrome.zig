@@ -91,9 +91,7 @@ pub fn appendProjectWorkspaceChromeStart(
         .title_label = active_view.title,
         .project = project,
     });
-    try buf.appendSlice(allocator, "<a class=\"button secondary project-issues-link\" href=\"/issues?project=");
-    try shared.appendUrlEncoded(buf, allocator, project);
-    try buf.appendSlice(allocator, "\">Open issues</a></div>");
+    try buf.appendSlice(allocator, "</div>");
     try appendProjectViewTabs(buf, allocator, db, project, active_view, issue_count);
     try appendProjectItemActions(buf, allocator, db, project, active_view);
     try appendProjectIssueSearchIndex(buf, allocator, db);

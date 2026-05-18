@@ -158,8 +158,22 @@ fn milestoneSortFromTarget(allocator: Allocator, target: []const u8) !MilestoneS
 fn loadMilestoneCounts(allocator: Allocator, db: *SqliteDb) !MilestoneCounts {
     var counts: MilestoneCounts = .{};
     var stmt = try db.prepare(
+        \\WITH milestone_rows AS (
+        \\  SELECT state
+        \\  FROM milestones
+        \\  UNION ALL
+        \\  SELECT 'open' AS state
+        \\  FROM issue_metadata im
+        \\  WHERE im.milestone <> ''
+        \\    AND NOT EXISTS (
+        \\      SELECT 1
+        \\      FROM milestones m
+        \\      WHERE m.title = im.milestone
+        \\    )
+        \\  GROUP BY im.milestone
+        \\)
         \\SELECT state, COUNT(*)
-        \\FROM milestones
+        \\FROM milestone_rows
         \\GROUP BY state
     );
     defer stmt.deinit();
@@ -208,7 +222,8 @@ fn appendMilestonesSummaryPage(buf: *std.ArrayList(u8), allocator: Allocator, db
         defer allocator.free(state);
         const issue_count = @as(usize, @intCast(stmt.columnInt64(5)));
         const closed_count = @as(usize, @intCast(stmt.columnInt64(6)));
-        try appendMilestoneSummaryRow(buf, allocator, id, title, description, due_at, state, issue_count, closed_count);
+        const implicit = stmt.columnInt64(7) != 0;
+        try appendMilestoneSummaryRow(buf, allocator, id, title, description, due_at, state, issue_count, closed_count, implicit);
         shown += 1;
     }
 
@@ -293,7 +308,7 @@ fn appendMilestonesHref(buf: *std.ArrayList(u8), allocator: Allocator, filters: 
 
 fn prepareMilestoneSummaryStmt(allocator: Allocator, db: *SqliteDb, filters: MilestoneFilters) !index.SqliteStmt {
     const sql_text = try std.fmt.allocPrint(allocator,
-        \\WITH milestone_rows AS (
+        \\WITH explicit_milestones AS (
         \\  SELECT m.id, m.title, m.description, m.due_at, m.state,
         \\         (SELECT COUNT(*)
         \\          FROM issue_metadata im
@@ -303,10 +318,32 @@ fn prepareMilestoneSummaryStmt(allocator: Allocator, db: *SqliteDb, filters: Mil
         \\          FROM issue_metadata im
         \\          JOIN issues i ON i.id = im.issue_id
         \\          WHERE im.milestone = m.title AND i.state = 'closed') AS closed_count,
-        \\         max(m.created_at, m.title_occurred_at, m.description_occurred_at, m.due_at_occurred_at, m.state_occurred_at) AS activity_at
+        \\         max(m.created_at, m.title_occurred_at, m.description_occurred_at, m.due_at_occurred_at, m.state_occurred_at) AS activity_at,
+        \\         0 AS implicit
         \\  FROM milestones m
+        \\),
+        \\implicit_milestones AS (
+        \\  SELECT '' AS id, im.milestone AS title, '' AS description, '' AS due_at, 'open' AS state,
+        \\         COUNT(*) AS issue_count,
+        \\         SUM(CASE WHEN i.state = 'closed' THEN 1 ELSE 0 END) AS closed_count,
+        \\         MAX(CASE WHEN i.state = 'closed' THEN i.state_occurred_at ELSE i.opened_at END) AS activity_at,
+        \\         1 AS implicit
+        \\  FROM issue_metadata im
+        \\  JOIN issues i ON i.id = im.issue_id
+        \\  WHERE im.milestone <> ''
+        \\    AND NOT EXISTS (
+        \\      SELECT 1
+        \\      FROM milestones m
+        \\      WHERE m.title = im.milestone
+        \\    )
+        \\  GROUP BY im.milestone
+        \\),
+        \\milestone_rows AS (
+        \\  SELECT * FROM explicit_milestones
+        \\  UNION ALL
+        \\  SELECT * FROM implicit_milestones
         \\)
-        \\SELECT id, title, description, due_at, state, issue_count, closed_count
+        \\SELECT id, title, description, due_at, state, issue_count, closed_count, implicit
         \\FROM milestone_rows
         \\WHERE state = ?
         \\ORDER BY {s}
@@ -325,20 +362,30 @@ fn appendMilestoneSummaryRow(
     state: []const u8,
     issue_count: usize,
     closed_count: usize,
+    implicit: bool,
 ) !void {
     var ref_buf: [milestone_ref_len]u8 = undefined;
-    const milestone_ref = milestoneDisplayRef(&ref_buf, id);
+    const milestone_ref = if (implicit) "" else milestoneDisplayRef(&ref_buf, id);
     const open_count = issue_count - @min(issue_count, closed_count);
     const progress = milestoneProgressPercent(closed_count, issue_count);
     try appendTemplate(buf, allocator,
         \\<article class="issue-list-row milestone-list-row is-{state}">
         \\  <div class="issue-row-content milestone-row-main">
-        \\    <div class="issue-row-title-line"><span class="issue-milestone-icon" aria-hidden="true"></span><a class="issue-row-title" href="/milestones/{milestone_ref}">{title}</a><code>#{milestone_ref}</code></div>
+        \\    <div class="issue-row-title-line"><span class="issue-milestone-icon" aria-hidden="true"></span>
     , .{
         .state = state,
-        .title = title,
-        .milestone_ref = milestone_ref,
     });
+    if (implicit) {
+        try buf.appendSlice(allocator, "<a class=\"issue-row-title\" href=\"/issues?milestone=");
+        try shared.appendUrlEncoded(buf, allocator, title);
+        try appendTemplate(buf, allocator, "\">{title}</a>", .{ .title = title });
+    } else {
+        try appendTemplate(buf, allocator, "<a class=\"issue-row-title\" href=\"/milestones/{milestone_ref}\">{title}</a><code>#{milestone_ref}</code>", .{
+            .title = title,
+            .milestone_ref = milestone_ref,
+        });
+    }
+    try buf.appendSlice(allocator, "</div>");
     try buf.appendSlice(allocator, "<p class=\"issue-row-meta milestone-row-meta\">");
     if (due_at.len == 0) {
         try buf.appendSlice(allocator, "No due date");
@@ -370,7 +417,7 @@ fn appendMilestoneSummaryRow(
         .open_count = open_count,
         .closed_count = closed_count,
     });
-    try appendMilestoneActionMenu(buf, allocator, milestone_ref, title, state);
+    if (!implicit) try appendMilestoneActionMenu(buf, allocator, milestone_ref, title, state);
     try buf.appendSlice(allocator,
         \\  </div>
         \\</article>
@@ -948,22 +995,48 @@ pub fn appendMilestonesPanel(buf: *std.ArrayList(u8), allocator: Allocator, db: 
     );
 
     var stmt = try db.prepare(
-        \\SELECT m.id, m.title, m.description, m.due_at, m.state,
-        \\       (SELECT COUNT(*)
-        \\        FROM issue_metadata im
-        \\        JOIN issues i ON i.id = im.issue_id
-        \\        WHERE im.milestone = m.title) AS issue_count,
-        \\       (SELECT COUNT(*)
-        \\        FROM issue_metadata im
-        \\        JOIN issues i ON i.id = im.issue_id
-        \\        WHERE im.milestone = m.title AND i.state = 'closed') AS closed_count
-        \\FROM milestones m
+        \\WITH explicit_milestones AS (
+        \\  SELECT m.id, m.title, m.description, m.due_at, m.state,
+        \\         (SELECT COUNT(*)
+        \\          FROM issue_metadata im
+        \\          JOIN issues i ON i.id = im.issue_id
+        \\          WHERE im.milestone = m.title) AS issue_count,
+        \\         (SELECT COUNT(*)
+        \\          FROM issue_metadata im
+        \\          JOIN issues i ON i.id = im.issue_id
+        \\          WHERE im.milestone = m.title AND i.state = 'closed') AS closed_count,
+        \\         0 AS implicit
+        \\  FROM milestones m
+        \\),
+        \\implicit_milestones AS (
+        \\  SELECT '' AS id, im.milestone AS title, '' AS description, '' AS due_at, 'open' AS state,
+        \\         COUNT(*) AS issue_count,
+        \\         SUM(CASE WHEN i.state = 'closed' THEN 1 ELSE 0 END) AS closed_count,
+        \\         1 AS implicit
+        \\  FROM issue_metadata im
+        \\  JOIN issues i ON i.id = im.issue_id
+        \\  WHERE im.milestone <> ''
+        \\    AND NOT EXISTS (
+        \\      SELECT 1
+        \\      FROM milestones m
+        \\      WHERE m.title = im.milestone
+        \\    )
+        \\  GROUP BY im.milestone
+        \\),
+        \\milestone_rows AS (
+        \\  SELECT * FROM explicit_milestones
+        \\  UNION ALL
+        \\  SELECT * FROM implicit_milestones
+        \\)
+        \\SELECT id, title, description, due_at, state, issue_count, closed_count, implicit
+        \\FROM milestone_rows
         \\ORDER BY
-        \\  CASE m.state WHEN 'open' THEN 0 ELSE 1 END,
-        \\  CASE WHEN m.due_at = '' THEN 1 ELSE 0 END,
-        \\  m.due_at,
-        \\  lower(m.title),
-        \\  m.id
+        \\  CASE state WHEN 'open' THEN 0 ELSE 1 END,
+        \\  CASE WHEN due_at = '' THEN 1 ELSE 0 END,
+        \\  due_at,
+        \\  lower(title),
+        \\  title,
+        \\  id
     );
     defer stmt.deinit();
 
@@ -981,7 +1054,8 @@ pub fn appendMilestonesPanel(buf: *std.ArrayList(u8), allocator: Allocator, db: 
         defer allocator.free(state);
         const issue_count = @as(usize, @intCast(stmt.columnInt64(5)));
         const closed_count = @as(usize, @intCast(stmt.columnInt64(6)));
-        try appendMilestoneRow(buf, allocator, id, title, description, due_at, state, issue_count, closed_count);
+        const implicit = stmt.columnInt64(7) != 0;
+        try appendMilestoneRow(buf, allocator, id, title, description, due_at, state, issue_count, closed_count, implicit);
         shown += 1;
     }
     if (shown == 0) {
@@ -1006,15 +1080,23 @@ fn appendMilestoneRow(
     state: []const u8,
     issue_count: usize,
     closed_count: usize,
+    implicit: bool,
 ) !void {
     var ref_buf: [milestone_ref_len]u8 = undefined;
-    const milestone_ref = milestoneDisplayRef(&ref_buf, id);
-    try appendTemplate(buf, allocator,
-        \\<tr><td><div class="milestone-title-cell"><span class="issue-milestone-icon" aria-hidden="true"></span><div><a class="milestone-title-link" href="/milestones/{milestone_ref}"><strong>{title}</strong></a><code>#{milestone_ref}</code>
-    , .{
-        .milestone_ref = milestone_ref,
-        .title = title,
-    });
+    const milestone_ref = if (implicit) "" else milestoneDisplayRef(&ref_buf, id);
+    try buf.appendSlice(allocator, "<tr><td><div class=\"milestone-title-cell\"><span class=\"issue-milestone-icon\" aria-hidden=\"true\"></span><div>");
+    if (implicit) {
+        try buf.appendSlice(allocator, "<a class=\"milestone-title-link\" href=\"/issues?milestone=");
+        try shared.appendUrlEncoded(buf, allocator, title);
+        try appendTemplate(buf, allocator, "\"><strong>{title}</strong></a>", .{ .title = title });
+    } else {
+        try appendTemplate(buf, allocator,
+            \\<a class="milestone-title-link" href="/milestones/{milestone_ref}"><strong>{title}</strong></a><code>#{milestone_ref}</code>
+        , .{
+            .milestone_ref = milestone_ref,
+            .title = title,
+        });
+    }
     if (description.len != 0) {
         try appendTemplate(buf, allocator, "<p class=\"muted\">{description}</p>", .{ .description = description });
     }
@@ -1033,7 +1115,7 @@ fn appendMilestoneRow(
     try buf.appendSlice(allocator, "</td><td>");
     try appendStatePill(buf, allocator, state);
     try buf.appendSlice(allocator, "</td><td><div class=\"milestone-actions\">");
-    try appendMilestoneActionMenu(buf, allocator, milestone_ref, title, state);
+    if (!implicit) try appendMilestoneActionMenu(buf, allocator, milestone_ref, title, state);
     try buf.appendSlice(allocator, "</div></td></tr>");
 }
 
@@ -1405,4 +1487,71 @@ fn renderMilestoneNotFound(allocator: Allocator, repo: Repo, raw_ref: []const u8
     try shared.appendEmptyState(&buf, allocator, "Milestone not found.", detail);
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
+}
+
+test "milestone summary includes issue-only milestone assignments" {
+    const allocator = std.testing.allocator;
+    var db = try SqliteDb.openWithOptions(allocator, ":memory:", sqlite.SQLITE_OPEN_READWRITE | sqlite.SQLITE_OPEN_CREATE, true, .{ .enable_wal = false });
+    defer db.deinit();
+    try index.createIndexSchema(&db);
+    try db.exec(
+        \\INSERT INTO milestones(
+        \\  id,
+        \\  title, title_occurred_at, title_actor_principal, title_event_hash,
+        \\  description, description_occurred_at, description_actor_principal, description_event_hash,
+        \\  due_at, due_at_occurred_at, due_at_actor_principal, due_at_event_hash,
+        \\  state, state_occurred_at, state_actor_principal, state_event_hash,
+        \\  created_at, author_principal, author_device
+        \\) VALUES (
+        \\  'milestone-explicit',
+        \\  'Explicit', '2026-05-18T00:00:00Z', 'alice', 'hash-explicit-title',
+        \\  '', '2026-05-18T00:00:00Z', 'alice', 'hash-explicit-description',
+        \\  '', '2026-05-18T00:00:00Z', 'alice', 'hash-explicit-due',
+        \\  'open', '2026-05-18T00:00:00Z', 'alice', 'hash-explicit-state',
+        \\  '2026-05-18T00:00:00Z', 'alice', 'laptop'
+        \\);
+        \\INSERT INTO issues(
+        \\  id,
+        \\  title, title_occurred_at, title_actor_principal, title_event_hash,
+        \\  body, body_occurred_at, body_actor_principal, body_event_hash,
+        \\  state, state_occurred_at, state_actor_principal, state_event_hash,
+        \\  opened_at, author_principal, author_device
+        \\) VALUES
+        \\  ('issue-explicit',
+        \\   'Explicit issue', '2026-05-18T00:00:00Z', 'alice', 'hash-issue-explicit-title',
+        \\   '', '2026-05-18T00:00:00Z', 'alice', 'hash-issue-explicit-body',
+        \\   'open', '2026-05-18T00:00:00Z', 'alice', 'hash-issue-explicit-state',
+        \\   '2026-05-18T00:00:00Z', 'alice', 'laptop'),
+        \\  ('issue-implicit',
+        \\   'Implicit issue', '2026-05-18T00:01:00Z', 'alice', 'hash-issue-implicit-title',
+        \\   '', '2026-05-18T00:01:00Z', 'alice', 'hash-issue-implicit-body',
+        \\   'open', '2026-05-18T00:01:00Z', 'alice', 'hash-issue-implicit-state',
+        \\   '2026-05-18T00:01:00Z', 'alice', 'laptop');
+        \\INSERT INTO issue_metadata(
+        \\  issue_id, source_author, source_identity, source_email, source_avatar_url, milestone,
+        \\  issue_type, issue_type_occurred_at, issue_type_actor_principal, issue_type_event_hash,
+        \\  priority, priority_occurred_at, priority_actor_principal, priority_event_hash,
+        \\  status, status_occurred_at, status_actor_principal, status_event_hash
+        \\) VALUES
+        \\  ('issue-explicit', '', '', '', '', 'Explicit',
+        \\   '', '', '', '',
+        \\   '', '', '', '',
+        \\   '', '', '', ''),
+        \\  ('issue-implicit', '', '', '', '', 'Implicit',
+        \\   '', '', '', '',
+        \\   '', '', '', '',
+        \\   '', '', '', '');
+    );
+
+    const counts = try loadMilestoneCounts(allocator, &db);
+    try std.testing.expectEqual(@as(usize, 2), counts.open);
+    try std.testing.expectEqual(@as(usize, 0), counts.closed);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try appendMilestonesSummaryPage(&buf, allocator, &db, .{ .state = .open, .sort = .updated }, counts);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, ">Explicit</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, ">Implicit</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues?milestone=Implicit\"") != null);
 }
