@@ -22,6 +22,7 @@ test {
     _ = @import("rbac.zig");
     _ = @import("actions.zig");
     _ = @import("runs.zig");
+    _ = @import("quarantine.zig");
     _ = @import("sync.zig");
     _ = @import("fsck.zig");
     _ = @import("providers.zig");

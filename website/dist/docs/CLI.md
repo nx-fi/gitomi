@@ -37,6 +37,11 @@ gt fsck
 gt index rebuild|status
 gt index snapshots prune [--dry-run] [--max-count N] [--max-bytes N] [--max-tree-bytes N]
 gt refs
+gt quarantine list
+gt quarantine inspect REF
+gt quarantine adopt REF [--replace-local] [--keep] [--yes]
+gt quarantine restore-local-to-remote REF [--remote REMOTE] [--keep] [--yes]
+gt quarantine drop REF [--yes]
 gt clear local [--yes]
 gt clear remote [--remote REMOTE] [--yes]
 gt reset local [--yes]
@@ -171,6 +176,16 @@ locally replicated inbox refs for other principals or devices. Sync does not
 publish local cache or diagnostic namespaces such as
 `refs/gitomi/staging/*`, `refs/gitomi/quarantine/*`, `refs/gitomi/snapshots/*`,
 or `refs/gitomi/runs/*`.
+
+`gt quarantine list` and `gt quarantine inspect REF` show staged inbox heads that
+sync refused to admit. `gt quarantine adopt REF` validates the quarantined inbox
+chain and installs it as the local authoritative inbox ref; if that would replace
+a divergent local head, pass `--replace-local`. `gt quarantine
+restore-local-to-remote REF` pushes the current local inbox head back to the
+remote with `--force-with-lease` pinned to the quarantined head, which is the
+intended recovery path when the remote was accidentally rewritten. `gt
+quarantine drop REF` deletes a diagnostic quarantine ref after the operator has
+chosen a recovery path.
 
 `gt fsck` verifies authoritative inbox refs for ref-safe names, empty-tree event
 commits, native Git signatures, signing-key bindings to actor identities, v1

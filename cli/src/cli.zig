@@ -13,6 +13,7 @@ const io = @import("io.zig");
 const issue = @import("issue.zig");
 const milestone = @import("milestone.zig");
 const project = @import("project.zig");
+const quarantine = @import("quarantine.zig");
 const pr_mod = @import("pr.zig");
 const providers = @import("providers.zig");
 const rbac = @import("rbac.zig");
@@ -47,6 +48,7 @@ const command_dispatch = std.StaticStringMap(Command).initComptime(.{
     .{ "fsck", Command{ .handler = runFsck, .command_name = "gt fsck" } },
     .{ "index", Command{ .handler = runIndex, .command_name = "gt index" } },
     .{ "refs", Command{ .handler = runRefs, .command_name = "gt refs" } },
+    .{ "quarantine", Command{ .handler = runQuarantine, .command_name = "gt quarantine" } },
     .{ "clear", Command{ .handler = runClearOrReset, .command_name = "gt clear" } },
     .{ "reset", Command{ .handler = runClearOrReset, .command_name = "gt reset" } },
     .{ "events", Command{ .handler = runEvents, .command_name = "gt events" } },
@@ -154,6 +156,10 @@ fn runRefs(allocator: Allocator, _: []const []const u8, _: []const u8) !void {
     try cmdRefs(allocator);
 }
 
+fn runQuarantine(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
+    try quarantine.cmdQuarantine(allocator, args);
+}
+
 fn runClearOrReset(allocator: Allocator, args: []const []const u8, command_name: []const u8) !void {
     try reset.cmdClearOrReset(allocator, args, command_name);
 }
@@ -215,6 +221,11 @@ fn printUsage() !void {
         \\  gt index rebuild|status
         \\  gt index snapshots prune [--dry-run] [--max-count N] [--max-bytes N] [--max-tree-bytes N]
         \\  gt refs
+        \\  gt quarantine list
+        \\  gt quarantine inspect REF
+        \\  gt quarantine adopt REF [--replace-local] [--keep] [--yes]
+        \\  gt quarantine restore-local-to-remote REF [--remote REMOTE] [--keep] [--yes]
+        \\  gt quarantine drop REF [--yes]
         \\  gt clear local [--yes]
         \\  gt clear remote [--remote REMOTE] [--yes]
         \\  gt reset local [--yes]
