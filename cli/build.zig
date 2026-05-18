@@ -81,6 +81,10 @@ fn addSqlite(module: *std.Build.Module, sqlite_dep: *std.Build.Dependency) void 
             "-DSQLITE_DEFAULT_MEMSTATUS=0",
         },
     });
+    module.addCSourceFile(.{
+        .file = .{ .src_path = .{ .owner = module.owner, .sub_path = "src/index/sqlite_helpers.c" } },
+        .flags = &.{},
+    });
 }
 
 fn addTreeSitter(
