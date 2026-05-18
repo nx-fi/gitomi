@@ -711,18 +711,29 @@ fn appendShellStartWithOptions(
         \\  <meta name="viewport" content="width=device-width, initial-scale=1">
         \\  <script>
         \\    (function () {
+        \\      var assetVersion =
+    );
+    try appendJsonString(buf, allocator, asset_version);
+    try buf.appendSlice(allocator,
+        \\;
         \\      try {
-        \\        var stored = localStorage.getItem("gitomi.theme");
-        \\        var custom_mode = localStorage.getItem("gitomi.theme.customMode") === "dark" ? "dark" : "light";
-        \\        var system = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-        \\        var modes = { light: "light", dark: "dark", capucine: "light", custom: custom_mode };
-        \\        var theme = Object.prototype.hasOwnProperty.call(modes, stored) ? stored : system;
+        \\        var storedTheme = localStorage.getItem("gitomi.theme");
+        \\        var storedMode = localStorage.getItem("gitomi.themeMode");
+        \\        var legacyMode = storedTheme === "light" || storedTheme === "dark" ? storedTheme : null;
+        \\        var legacyCustomMode = localStorage.getItem("gitomi.theme.customMode");
+        \\        var systemMode = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        \\        var theme = storedTheme === "capucine" ? "capucine" : "gitomi";
+        \\        var mode = storedMode === "light" || storedMode === "dark" ? storedMode :
+        \\          legacyMode || (legacyCustomMode === "light" || legacyCustomMode === "dark" ? legacyCustomMode : systemMode);
         \\        document.documentElement.dataset.theme = theme;
-        \\        document.documentElement.dataset.themeMode = modes[theme];
-        \\        document.documentElement.style.colorScheme = modes[theme];
+        \\        document.documentElement.dataset.themeMode = mode;
+        \\        document.documentElement.style.colorScheme = mode;
+        \\        window.gitomiThemeAssetVersion = assetVersion;
+        \\        document.write('<link id="gitomi-theme-stylesheet" rel="stylesheet" data-theme-stylesheet href="/themes/' + theme + '.css?v=' + encodeURIComponent(assetVersion) + '">');
         \\      } catch (_) {
-        \\        document.documentElement.dataset.theme = "light";
+        \\        document.documentElement.dataset.theme = "gitomi";
         \\        document.documentElement.dataset.themeMode = "light";
+        \\        document.write('<link id="gitomi-theme-stylesheet" rel="stylesheet" data-theme-stylesheet href="/themes/gitomi.css?v=' + encodeURIComponent(assetVersion) + '">');
         \\      }
         \\    }());
         \\  </script>

@@ -18,10 +18,8 @@ const ThemeChoice = struct {
 };
 
 const theme_choices = [_]ThemeChoice{
-    .{ .id = "light", .label = "Light", .note = "Default", .swatch_class = "theme-swatch-light" },
-    .{ .id = "dark", .label = "Dark", .note = "Default", .swatch_class = "theme-swatch-dark" },
+    .{ .id = "gitomi", .label = "Gitomi", .note = "Default", .swatch_class = "theme-swatch-gitomi" },
     .{ .id = "capucine", .label = "Capucine", .note = "Square", .swatch_class = "theme-swatch-capucine" },
-    .{ .id = "custom", .label = "Custom", .note = "CSS tokens", .swatch_class = "theme-swatch-custom" },
 };
 
 pub fn renderThemePage(allocator: Allocator, repo: Repo) ![]u8 {
@@ -66,15 +64,11 @@ fn appendCustomThemeEditor(buf: *std.ArrayList(u8), allocator: Allocator) !void 
         \\<section class="theme-custom-card">
         \\  <div class="theme-custom-head">
         \\    <div>
-        \\      <h2>Custom Theme</h2>
+        \\      <h2>Token Overrides</h2>
         \\    </div>
-        \\    <label class="theme-custom-mode">Mode<select data-theme-custom-mode>
-        \\      <option value="light">Light</option>
-        \\      <option value="dark">Dark</option>
-        \\    </select></label>
         \\  </div>
         \\  <label class="theme-custom-css-label" for="theme-custom-css">Semantic token CSS</label>
-        \\  <textarea id="theme-custom-css" data-theme-custom-css spellcheck="false" rows="14" placeholder=":root[data-theme=&quot;custom&quot;] {
+        \\  <textarea id="theme-custom-css" data-theme-custom-css spellcheck="false" rows="14" placeholder=":root[data-theme=&quot;gitomi&quot;][data-theme-mode=&quot;light&quot;] {
         \\  --surface-page: #101418;
         \\  --surface-panel: #151b20;
         \\  --text-default: #eef5f3;
@@ -82,8 +76,8 @@ fn appendCustomThemeEditor(buf: *std.ArrayList(u8), allocator: Allocator) !void 
         \\  --radius-md: 0px;
         \\}"></textarea>
         \\  <div class="theme-custom-actions">
-        \\    <button class="button primary" type="button" data-theme-save-custom>Save custom theme</button>
-        \\    <button class="button secondary" type="button" data-theme-reset-custom>Reset custom CSS</button>
+        \\    <button class="button primary" type="button" data-theme-save-custom>Save overrides</button>
+        \\    <button class="button secondary" type="button" data-theme-reset-custom>Reset overrides</button>
         \\  </div>
         \\</section>
     );

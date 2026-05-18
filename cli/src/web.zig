@@ -55,6 +55,8 @@ const Route = WebRouter.Route;
 
 const routes = [_]Route{
     Route.static("/style.css", "text/css", web_css),
+    Route.static("/themes/gitomi.css", "text/css", gitomi_theme_css),
+    Route.static("/themes/capucine.css", "text/css", capucine_theme_css),
     Route.static("/logo.svg", "image/svg+xml", logo_svg),
     Route.static("/theme.js", "application/javascript", theme_js),
     Route.static("/ui.js", "application/javascript", ui_js),
@@ -977,6 +979,8 @@ pub fn isLoopbackHost(host: []const u8) bool {
 }
 
 const web_css = @embedFile("web/style.css");
+const gitomi_theme_css = @embedFile("web/themes/gitomi.css");
+const capucine_theme_css = @embedFile("web/themes/capucine.css");
 const logo_svg = @embedFile("web/logo.svg");
 const theme_js = @embedFile("web/theme.js");
 const ui_js = @embedFile("web/ui.js");
@@ -1449,6 +1453,11 @@ test "web PDF preview assets are routed" {
     try expectStaticRoute("/pdf.js", "application/javascript", false);
     try expectStaticRoute("/vendor/pdfjs/build/pdf.mjs", "application/javascript", false);
     try expectStaticRoute("/vendor/pdfjs/build/pdf.worker.mjs", "application/javascript", false);
+}
+
+test "web theme stylesheets are routed" {
+    try expectStaticRoute("/themes/gitomi.css", "text/css", false);
+    try expectStaticRoute("/themes/capucine.css", "text/css", false);
 }
 
 fn expectStaticRoute(path: []const u8, content_type: []const u8, binary: bool) !void {
