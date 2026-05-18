@@ -80,6 +80,7 @@ const DiffCommentSide = work_items.DiffCommentSide;
 const DiffCommentContext = work_items.DiffCommentContext;
 
 pub const renderPullsPage = pulls_list.renderPullsPage;
+pub const handlePullBulkPost = pulls_list.handlePullBulkPost;
 
 fn pullDetailTabFromTarget(allocator: Allocator, target: []const u8) !PullDetailTab {
     const tab_value = try queryValueOwned(allocator, target, "tab");

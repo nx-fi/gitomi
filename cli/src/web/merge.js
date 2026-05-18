@@ -193,6 +193,23 @@
     selection.addRange(range);
   }
 
+  function dispatchTextInput(element, inputType, data) {
+    let event;
+    if (typeof InputEvent === "function") {
+      try {
+        event = new InputEvent("input", {
+          bubbles: true,
+          data: data,
+          inputType: inputType
+        });
+      } catch (_) {
+        event = null;
+      }
+    }
+    if (!event) event = new Event("input", { bubbles: true });
+    element.dispatchEvent(event);
+  }
+
   function textSelectionOffsets(element) {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) {
@@ -242,6 +259,43 @@
     next.appendChild(number);
     next.appendChild(code);
     return next;
+  }
+
+  function insertTextAtSelection(code, text) {
+    const row = code.closest("[data-merge-line]");
+    if (!row || row.classList.contains("merge-marker") || row.dataset.mergeDeleted === "true") return false;
+
+    const normalized = text.replace(/\r\n?/g, "\n");
+    const value = code.textContent;
+    const offsets = textSelectionOffsets(code);
+    const before = value.slice(0, offsets.start);
+    const after = value.slice(offsets.end);
+    const lines = normalized.split("\n");
+
+    code.textContent = before + lines[0];
+    updateLineState(row);
+
+    if (lines.length === 1) {
+      setCaret(code, before.length + normalized.length);
+      dispatchTextInput(code, "insertFromPaste", normalized);
+      return true;
+    }
+
+    let previous = row;
+    let lastCode = code;
+    for (let index = 1; index < lines.length; index += 1) {
+      const isLast = index === lines.length - 1;
+      const inserted = cloneEditableRow(row, lines[index] + (isLast ? after : ""));
+      previous.parentNode.insertBefore(inserted, previous.nextSibling);
+      updateLineState(inserted);
+      previous = inserted;
+      lastCode = inserted.querySelector("[data-merge-line-text]") || lastCode;
+    }
+
+    lastCode.focus();
+    setCaret(lastCode, lines[lines.length - 1].length);
+    dispatchTextInput(code, "insertFromPaste", normalized);
+    return true;
   }
 
   function splitLineAtSelection(code) {
@@ -449,7 +503,7 @@
       const text = event.clipboardData ? event.clipboardData.getData("text/plain") : "";
       if (!text) return;
       event.preventDefault();
-      document.execCommand("insertText", false, text);
+      insertTextAtSelection(target, text);
     });
 
     form.addEventListener("submit", (event) => {

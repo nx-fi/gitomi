@@ -712,6 +712,73 @@
     });
   }
 
+  function initIssueBulkSelection(root) {
+    const scope = root || document;
+    scope.querySelectorAll("[data-issue-bulk-form]").forEach(function (form) {
+      if (form.dataset.issueBulkReady === "yes") return;
+      form.dataset.issueBulkReady = "yes";
+
+      const panel = form.closest(".issues-panel, .pulls-panel") || document;
+      const header = panel.querySelector("[data-issue-list-header]");
+      const count = form.querySelector("[data-issue-bulk-count]");
+      const selectAll = form.querySelector("[data-issue-select-all]");
+      const checkboxes = Array.from(panel.querySelectorAll("[data-issue-select]"));
+
+      function selectedCheckboxes() {
+        return checkboxes.filter(function (checkbox) {
+          return checkbox.checked && !checkbox.disabled;
+        });
+      }
+
+      function updateBulkState() {
+        const selected = selectedCheckboxes();
+        const selectedCount = selected.length;
+        form.hidden = selectedCount === 0;
+        if (header) header.hidden = selectedCount !== 0;
+        if (count) {
+          count.textContent = selectedCount === 1
+            ? "1 of " + checkboxes.length + " selected"
+            : selectedCount + " of " + checkboxes.length + " selected";
+        }
+        if (selectAll) {
+          selectAll.disabled = checkboxes.length === 0;
+          selectAll.checked = selectedCount > 0 && selectedCount === checkboxes.length;
+          selectAll.indeterminate = selectedCount > 0 && selectedCount < checkboxes.length;
+        }
+        checkboxes.forEach(function (checkbox) {
+          const row = checkbox.closest(".issue-list-row");
+          if (row) row.classList.toggle("is-selected", checkbox.checked);
+        });
+        form.querySelectorAll("[data-issue-bulk-action]").forEach(function (button) {
+          if (button.dataset.gitomiSubmitLock === "yes") return;
+          button.disabled = selectedCount === 0;
+        });
+      }
+
+      checkboxes.forEach(function (checkbox) {
+        checkbox.addEventListener("change", updateBulkState);
+      });
+
+      if (selectAll) {
+        selectAll.addEventListener("change", function () {
+          checkboxes.forEach(function (checkbox) {
+            if (!checkbox.disabled) checkbox.checked = selectAll.checked;
+          });
+          updateBulkState();
+        });
+      }
+
+      form.addEventListener("submit", function (event) {
+        if (selectedCheckboxes().length !== 0) return;
+        event.preventDefault();
+        notify("Select at least one item.", "error");
+        updateBulkState();
+      });
+
+      updateBulkState();
+    });
+  }
+
   function normalizePickerValue(value) {
     return String(value || "").replace(/\s+/g, " ").trim();
   }
@@ -939,59 +1006,12 @@
     });
   }
 
-  const githubAvatarChecks = new Map();
-
-  function equalBuffers(left, right) {
-    if (!left || !right || left.byteLength !== right.byteLength) return false;
-    const a = new Uint8Array(left);
-    const b = new Uint8Array(right);
-    for (let i = 0; i < a.length; i += 1) {
-      if (a[i] !== b[i]) return false;
-    }
-    return true;
-  }
-
-  function fetchAvatarBytes(url) {
-    if (!window.fetch || !url) return Promise.resolve(null);
-    return fetch(url, {
-      cache: "force-cache",
-      credentials: "omit",
-      mode: "cors",
-      redirect: "follow"
-    }).then(function (response) {
-      if (!response.ok) return null;
-      return response.arrayBuffer();
-    }).catch(function () {
-      return null;
-    });
-  }
-
-  function githubIdenticonUrl(login) {
-    return "https://github.com/identicons/" + encodeURIComponent(login) + ".png?size=80";
-  }
-
   function githubAvatarIsCustom(img) {
     const login = img.dataset.avatarGithubLogin || "";
-    if (!login) return Promise.resolve(false);
+    if (!login) return false;
 
     const src = img.currentSrc || img.src || "";
-    if (/\/identicons\//i.test(src)) return Promise.resolve(false);
-
-    const key = login.toLocaleLowerCase() + "\n" + src;
-    if (githubAvatarChecks.has(key)) return githubAvatarChecks.get(key);
-
-    const check = Promise.all([
-      fetchAvatarBytes(src),
-      fetchAvatarBytes(githubIdenticonUrl(login))
-    ]).then(function (buffers) {
-      const avatar = buffers[0];
-      const identicon = buffers[1];
-      if (!avatar) return true;
-      if (!identicon) return true;
-      return !equalBuffers(avatar, identicon);
-    });
-    githubAvatarChecks.set(key, check);
-    return check;
+    return !/\/identicons\//i.test(src);
   }
 
   function activateAvatarCandidate(container, img) {
@@ -1021,10 +1041,8 @@
         return;
       }
       if (img.dataset.avatarSource === "github") {
-        githubAvatarIsCustom(img).then(function (custom) {
-          if (custom) activateAvatarCandidate(container, img);
-          else next();
-        });
+        if (githubAvatarIsCustom(img)) activateAvatarCandidate(container, img);
+        else next();
         return;
       }
       activateAvatarCandidate(container, img);
@@ -1133,6 +1151,7 @@
     initNavStats();
     initHistoryBackButtons();
     initLabelsPage();
+    initIssueBulkSelection(document);
     initIssueFormPickers(document);
     initPullMergeMethodMenus();
     initAvatars(document);
@@ -1142,6 +1161,7 @@
   document.addEventListener("gitomi:partial-refresh", function (event) {
     const detail = event.detail || {};
     initIssueFormPickers(detail.root || document);
+    initIssueBulkSelection(detail.root || document);
     initAvatars(detail.root || document);
   });
 

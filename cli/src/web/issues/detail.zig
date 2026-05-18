@@ -39,6 +39,7 @@ const sendResponse = shared.sendResponse;
 const sqlite = index.sqlite;
 
 pub const renderIssuesPage = issues_list.renderIssuesPage;
+pub const handleIssueBulkPost = issues_list.handleIssueBulkPost;
 const formValueOwned = issue_form.formValueOwned;
 const queryValueOwned = issue_form.queryValueOwned;
 

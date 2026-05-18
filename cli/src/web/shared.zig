@@ -24,7 +24,7 @@ const loadConfig = repo_mod.loadConfig;
 const default_web_shortcut_leader = "Space";
 const default_web_shortcut_keys = "A S D F J K L E R U I O W Q P Z X C V B N M G H Y T";
 const default_web_shortcut_timeout_ms: u64 = 900;
-const asset_version = "20260518-unified-layout";
+const asset_version = "20260519-fuzzy-search";
 
 const WebStats = struct {
     inbox_refs: usize = 0,
@@ -1298,6 +1298,7 @@ pub fn appendShellEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
         \\<script src="/theme.js?v={asset_version}"></script>
         \\<script src="/ui.js?v={asset_version}"></script>
         \\<script src="/shortcuts.js?v={asset_version}"></script>
+        \\<script src="/fuzzy-search.js?v={asset_version}"></script>
         \\<script src="/tree.js?v={asset_version}"></script>
         \\<script src="/code.js?v={asset_version}"></script>
         \\<script src="/pdf.js?v={asset_version}"></script>

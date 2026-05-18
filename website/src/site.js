@@ -2,6 +2,18 @@
   "use strict";
 
   const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const typewriterObservers = [];
+
+  function getCopyText(code) {
+    const clone = code.cloneNode(true);
+    clone.querySelectorAll(".prompt, [data-copy-exclude]").forEach((node) => node.remove());
+
+    return (clone.textContent || "")
+      .split(/\r?\n/)
+      .map((line) => line.replace(/^\s*[$#>]\s+/, "").trim())
+      .join("\n")
+      .trim();
+  }
 
   function initCopyButtons() {
     document.querySelectorAll("[data-copy-command]").forEach((button) => {
@@ -15,7 +27,7 @@
         button.classList.add("is-copied");
 
         try {
-          await navigator.clipboard.writeText(code.textContent || "");
+          await navigator.clipboard.writeText(getCopyText(code));
         } finally {
           window.setTimeout(() => {
             button.setAttribute("aria-label", previousLabel);
@@ -43,9 +55,44 @@
       let wordIndex = Math.max(words.indexOf(initialWord), 0);
       let charIndex = words[wordIndex].length;
       let deleting = false;
+      let timeoutId = 0;
+      let isDocumentVisible = !document.hidden;
+      let isTargetVisible = true;
       target.textContent = words[wordIndex];
 
+      function isNearViewport() {
+        const rect = target.getBoundingClientRect();
+        return rect.bottom >= -120 && rect.top <= window.innerHeight + 120;
+      }
+
+      function isActive() {
+        return isDocumentVisible && isTargetVisible;
+      }
+
+      function clearTimer() {
+        if (!timeoutId) return;
+        window.clearTimeout(timeoutId);
+        timeoutId = 0;
+      }
+
+      function schedule(delay) {
+        clearTimer();
+        if (!isActive()) return;
+        timeoutId = window.setTimeout(tick, delay);
+      }
+
+      function syncTimer(delay) {
+        if (isActive()) {
+          if (!timeoutId) schedule(delay);
+        } else {
+          clearTimer();
+        }
+      }
+
       function tick() {
+        timeoutId = 0;
+        if (!isActive()) return;
+
         const word = words[wordIndex];
         let delay = 58;
 
@@ -66,10 +113,25 @@
           delay = 1200;
         }
 
-        window.setTimeout(tick, delay);
+        schedule(delay);
       }
 
-      window.setTimeout(tick, 900);
+      if ("IntersectionObserver" in window) {
+        isTargetVisible = isNearViewport();
+        const observer = new IntersectionObserver((entries) => {
+          isTargetVisible = entries.some((entry) => entry.isIntersecting || entry.intersectionRatio > 0);
+          syncTimer(180);
+        }, { rootMargin: "120px 0px" });
+        observer.observe(target);
+        typewriterObservers.push(observer);
+      }
+
+      document.addEventListener("visibilitychange", () => {
+        isDocumentVisible = !document.hidden;
+        syncTimer(240);
+      });
+
+      schedule(900);
     });
   }
 
@@ -120,6 +182,7 @@
       brand.style.setProperty("--brand-left", `${left.toFixed(2)}px`);
       brand.style.setProperty("--brand-scale", scale.toFixed(3));
       brand.classList.toggle("is-docked", progress > 0.92);
+      brand.classList.toggle("is-interpolating", progress > 0.02 && progress < 0.92);
       ticking = false;
     }
 

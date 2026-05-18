@@ -153,7 +153,7 @@ pub fn appendEditor(
         \\      </div>
         \\    </div>
         \\    <div class="merge-editor-actions">
-        \\      <div class="merge-editor-progress" aria-live="polite">
+        \\      <div class="merge-editor-progress" role="status" aria-live="polite" aria-atomic="true">
         \\        <span class="merge-editor-count" data-merge-progress>0 of {total_conflicts} conflicts resolved</span>
         \\        <span class="merge-editor-progress-bar" aria-hidden="true"><span data-merge-progress-bar></span></span>
         \\      </div>
@@ -815,6 +815,7 @@ test "merge conflict editor form includes csrf token and expected oids" {
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "name=\"expected_base_oid\" value=\"1111111111111111111111111111111111111111\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "name=\"expected_head_oid\" value=\"2222222222222222222222222222222222222222\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "action=\"/pulls/1/conflicts\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "class=\"merge-editor-progress\" role=\"status\" aria-live=\"polite\" aria-atomic=\"true\"") != null);
 }
 
 test "merge editor rejects symlink tree entries" {

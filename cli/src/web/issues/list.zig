@@ -1,9 +1,13 @@
 const std = @import("std");
+const cmd_common = @import("../../cmd_common.zig");
 const index = @import("../../index.zig");
+const issue = @import("../../issue.zig");
+const issue_form = @import("form.zig");
 const repo_mod = @import("../../repo.zig");
 const shared = @import("../shared.zig");
 const util = @import("../../util.zig");
 const work_items = @import("../../work_items.zig");
+const zwf = @import("../../zwf.zig");
 
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
@@ -15,8 +19,14 @@ const appendSectionHead = shared.appendSectionHead;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
 const appendTemplate = shared.appendTemplate;
+const createIssueProjectEvent = issue.createIssueProjectEvent;
+const createIssueStringEvent = issue.createIssueStringEvent;
 const issueHref = shared.issueHref;
 const literalHref = shared.literalHref;
+const formValueOwned = issue_form.formValueOwned;
+const isIssueType = cmd_common.isIssueType;
+const sendPlainResponse = shared.sendPlainResponse;
+const sendRedirect = shared.sendRedirect;
 const sqlite = index.sqlite;
 
 const IssueStateFilter = work_items.IssueStateFilter;
@@ -35,6 +45,13 @@ const IssueFilterKind = enum {
     assignee,
 };
 
+const IssueBulkOptionKind = enum {
+    label,
+    assignee,
+    project,
+    milestone,
+};
+
 const IssueHrefOverride = struct {
     state: ?IssueStateFilter = null,
     sort: ?IssueSort = null,
@@ -44,7 +61,7 @@ const IssueHrefOverride = struct {
     per_page: ?usize = null,
 };
 
-pub fn renderIssuesPage(allocator: Allocator, repo: Repo, target: []const u8) ![]u8 {
+pub fn renderIssuesPage(allocator: Allocator, repo: Repo, target: []const u8, csrf_token: []const u8) ![]u8 {
     if (try shared.renderIndexingPageIfStale(allocator, repo, "Issues", "issues", target)) |body| return body;
     try index.ensureIndex(allocator, repo);
 
@@ -75,6 +92,7 @@ pub fn renderIssuesPage(allocator: Allocator, repo: Repo, target: []const u8) ![
     });
     try appendIssuesToolbar(&buf, allocator, &db, filters);
     try appendIssuesListHeader(&buf, allocator, filters, counts);
+    try appendIssueBulkForm(&buf, allocator, &db, target, csrf_token);
 
     var stmt = try work_items.prepareIssueListStmt(allocator, &db, filters);
     defer stmt.deinit();
@@ -219,7 +237,7 @@ fn appendIssuesToolbar(buf: *std.ArrayList(u8), allocator: Allocator, db: ?*Sqli
 
 fn appendIssuesListHeader(buf: *std.ArrayList(u8), allocator: Allocator, filters: IssueFilters, counts: IssueCounts) !void {
     try buf.appendSlice(allocator,
-        \\<header class="issues-list-head">
+        \\<header class="issues-list-head" data-issue-list-header>
         \\  <nav class="issues-state-tabs" aria-label="Issue state">
     );
     try appendIssueStateTab(buf, allocator, "Open", counts.open, .open, filters, "issue-open-icon");
@@ -228,6 +246,104 @@ fn appendIssuesListHeader(buf: *std.ArrayList(u8), allocator: Allocator, filters
         \\  </nav>
         \\</header>
     );
+}
+
+fn appendIssueBulkForm(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, return_to: []const u8, csrf_token: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<form id="issue-bulk-form" class="issue-bulk-form" method="post" action="/issues/bulk" data-issue-bulk-form hidden>
+        \\  <input type="hidden" name="{csrf_field}" value="{csrf_token}">
+        \\  <input type="hidden" name="return_to" value="{return_to}">
+        \\  <div class="issue-bulk-bar">
+        \\    <label class="issue-bulk-select-all" title="Select all visible issues"><input type="checkbox" data-issue-select-all aria-label="Select all visible issues"><span class="issue-checkbox-box" aria-hidden="true"></span></label>
+        \\    <strong class="issue-bulk-count" data-issue-bulk-count>0 selected</strong>
+        \\    <div class="issue-bulk-actions" aria-label="Bulk issue actions">
+    , .{
+        .csrf_field = zwf.csrf.field_name,
+        .csrf_token = csrf_token,
+        .return_to = return_to,
+    });
+    try appendIssueBulkMarkMenu(buf, allocator);
+    try appendIssueBulkOptionMenu(buf, allocator, db, "Label", "icon-labels", .label, "No labels");
+    try appendIssueBulkOptionMenu(buf, allocator, db, "Assign", "icon-users", .assignee, "No assignees");
+    try appendIssueBulkOptionMenu(buf, allocator, db, "Project", "icon-projects", .project, "No projects");
+    try appendIssueBulkOptionMenu(buf, allocator, db, "Milestone", "icon-milestones", .milestone, "No milestones");
+    try appendIssueBulkTypeMenu(buf, allocator);
+    try buf.appendSlice(allocator,
+        \\    </div>
+        \\  </div>
+        \\</form>
+    );
+}
+
+fn appendIssueBulkMarkMenu(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try appendIssueBulkMenuStart(buf, allocator, "Mark as", "icon-check");
+    try appendIssueBulkActionButton(buf, allocator, "state:open", "Open");
+    try appendIssueBulkActionButton(buf, allocator, "state:closed", "Closed");
+    try appendIssueBulkMenuEnd(buf, allocator);
+}
+
+fn appendIssueBulkTypeMenu(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try appendIssueBulkMenuStart(buf, allocator, "Issue type", "icon-issues");
+    try appendIssueBulkActionButton(buf, allocator, "type:set:bug", "Bug");
+    try appendIssueBulkActionButton(buf, allocator, "type:set:feature", "Feature");
+    try appendIssueBulkActionButton(buf, allocator, "type:set:task", "Task");
+    try appendIssueBulkMenuEnd(buf, allocator);
+}
+
+fn appendIssueBulkOptionMenu(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    label: []const u8,
+    icon_class: []const u8,
+    kind: IssueBulkOptionKind,
+    empty_label: []const u8,
+) !void {
+    try appendIssueBulkMenuStart(buf, allocator, label, icon_class);
+    if (kind == .milestone) {
+        try appendIssueBulkActionButton(buf, allocator, "milestone:clear", "No milestone");
+    }
+
+    var stmt = try db.prepare(issueBulkOptionsSql(kind));
+    defer stmt.deinit();
+
+    var shown = false;
+    while (try stmt.step()) {
+        const value = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(value);
+        const action = try issueBulkActionOwned(allocator, kind, value);
+        defer allocator.free(action);
+        try appendIssueBulkActionButton(buf, allocator, action, value);
+        shown = true;
+    }
+    if (!shown and kind != .milestone) {
+        try appendTemplate(buf, allocator,
+            \\<span class="issue-bulk-empty">{label}</span>
+        , .{ .label = empty_label });
+    }
+    try appendIssueBulkMenuEnd(buf, allocator);
+}
+
+fn appendIssueBulkMenuStart(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, icon_class: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<details class="issues-filter-menu issue-bulk-menu" data-popover-menu><summary><span class="button-icon {icon_class}" aria-hidden="true"></span><span>{label}</span></summary><div class="issues-filter-popover issue-bulk-popover" role="menu">
+    , .{
+        .icon_class = icon_class,
+        .label = label,
+    });
+}
+
+fn appendIssueBulkMenuEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try buf.appendSlice(allocator, "</div></details>");
+}
+
+fn appendIssueBulkActionButton(buf: *std.ArrayList(u8), allocator: Allocator, action: []const u8, label: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<button class="issues-filter-option issue-bulk-option" type="submit" name="action" value="{action}" role="menuitem" data-issue-bulk-action><span>{label}</span></button>
+    , .{
+        .action = action,
+        .label = label,
+    });
 }
 
 fn appendHiddenIssueSearchFilters(buf: *std.ArrayList(u8), allocator: Allocator, filters: IssueFilters) !void {
@@ -566,6 +682,74 @@ fn issueFilterOptionsSql(kind: IssueFilterKind) []const u8 {
     };
 }
 
+fn issueBulkOptionsSql(kind: IssueBulkOptionKind) []const u8 {
+    return switch (kind) {
+        .label =>
+        \\SELECT label
+        \\FROM (
+        \\  SELECT name AS label FROM label_definitions
+        \\  UNION
+        \\  SELECT label FROM issue_labels
+        \\  UNION
+        \\  SELECT label FROM pull_labels
+        \\)
+        \\WHERE label <> ''
+        \\ORDER BY lower(label), label
+        \\LIMIT 80
+        ,
+        .assignee =>
+        \\SELECT assignee
+        \\FROM (
+        \\  SELECT assignee AS assignee FROM issue_assignees
+        \\  UNION
+        \\  SELECT assignee FROM pull_assignees
+        \\  UNION
+        \\  SELECT COALESCE(NULLIF(m.source_author, ''), NULLIF(si.display_name, ''), i.author_principal) AS assignee
+        \\  FROM issues i
+        \\  LEFT JOIN issue_metadata m ON m.issue_id = i.id
+        \\  LEFT JOIN identities si ON si.id = m.source_identity
+        \\  UNION
+        \\  SELECT COALESCE(NULLIF(display_name, ''), NULLIF(email, ''), id) AS assignee FROM identities
+        \\)
+        \\WHERE assignee <> ''
+        \\ORDER BY lower(assignee), assignee
+        \\LIMIT 80
+        ,
+        .project =>
+        \\SELECT project
+        \\FROM (
+        \\  SELECT name AS project FROM projects
+        \\  UNION
+        \\  SELECT project FROM issue_projects
+        \\)
+        \\WHERE project <> ''
+        \\ORDER BY lower(project), project
+        \\LIMIT 80
+        ,
+        .milestone =>
+        \\SELECT milestone
+        \\FROM (
+        \\  SELECT title AS milestone FROM milestones WHERE state <> 'closed'
+        \\  UNION
+        \\  SELECT milestone FROM issue_metadata WHERE milestone <> ''
+        \\)
+        \\WHERE milestone <> ''
+        \\ORDER BY lower(milestone), milestone
+        \\LIMIT 80
+        ,
+    };
+}
+
+fn issueBulkActionOwned(allocator: Allocator, kind: IssueBulkOptionKind, value: []const u8) ![]u8 {
+    const prefix: []const u8 = switch (kind) {
+        .label => "label:add:",
+        .assignee => "assignee:add:",
+        .project => "project:add:",
+        .milestone => "milestone:set:",
+    };
+    return std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, value });
+}
+
 fn appendIssuesHref(buf: *std.ArrayList(u8), allocator: Allocator, filters: IssueFilters, override: IssueHrefOverride) !void {
     try buf.appendSlice(allocator, "/issues");
     var first = true;
@@ -650,11 +834,14 @@ fn appendIssueListRow(
     const issue_ref = util.shortObjectRef(&issue_ref_buf, id);
     const closed = std.mem.eql(u8, state, "closed");
     try appendTemplate(buf, allocator,
-        \\<article class="issue-list-row is-{state}">
+        \\<article class="issue-list-row issue-list-selectable-row is-{state}">
+        \\  <label class="issue-select-cell" title="Select issue #{issue_ref}"><input type="checkbox" name="issue" value="{id}" form="issue-bulk-form" data-issue-select aria-label="Select issue #{issue_ref}"><span class="issue-checkbox-box" aria-hidden="true"></span></label>
         \\  <div class="issue-state-cell"><span class="issue-state-icon {state}" title="{state}" aria-label="{state}"></span></div>
         \\  <div class="issue-row-content">
         \\    <div class="issue-row-title-line"><a class="issue-row-title" href="{href}">{title}</a>
     , .{
+        .issue_ref = issue_ref,
+        .id = id,
         .state = state,
         .href = issueHref(issue_ref),
         .title = title,
@@ -922,6 +1109,185 @@ fn hexValue(c: u8) ?u8 {
         'A'...'F' => c - 'A' + 10,
         else => null,
     };
+}
+
+pub fn handleIssueBulkPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
+    try index.ensureIndex(allocator, repo);
+
+    const action_owned = (try formValueOwned(allocator, form_body, "action")) orelse {
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Missing bulk action\n");
+        return;
+    };
+    defer allocator.free(action_owned);
+    const action = std.mem.trim(u8, action_owned, " \t\r\n");
+
+    var refs = try formValuesOwned(allocator, form_body, "issue");
+    defer freeStringList(allocator, &refs);
+    if (refs.items.len == 0) {
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Select at least one issue\n");
+        return;
+    }
+
+    var issue_ids: std.ArrayList([]u8) = .empty;
+    defer freeStringList(allocator, &issue_ids);
+    for (refs.items) |raw_ref_owned| {
+        const raw_ref = std.mem.trim(u8, raw_ref_owned, " \t\r\n");
+        if (raw_ref.len == 0) continue;
+        const issue_id = index.resolveIssueId(allocator, repo, raw_ref) catch {
+            try sendPlainResponse(allocator, stream, 404, "Not Found", "Issue not found\n");
+            return;
+        };
+        try issue_ids.append(allocator, issue_id);
+    }
+    if (issue_ids.items.len == 0) {
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Select at least one issue\n");
+        return;
+    }
+
+    for (issue_ids.items) |issue_id| {
+        if (!(try applyIssueBulkAction(allocator, repo, stream, issue_id, action))) return;
+    }
+
+    const location = try issueBulkReturnTargetOwned(allocator, form_body);
+    defer allocator.free(location);
+    try sendRedirect(allocator, stream, location);
+}
+
+fn applyIssueBulkAction(allocator: Allocator, repo: Repo, stream: std.net.Stream, issue_id: []const u8, action: []const u8) !bool {
+    if (std.mem.eql(u8, action, "state:open")) {
+        return writeBulkStringEventOrFail(allocator, stream, issue_id, "issue.state_set", "state", "open");
+    }
+    if (std.mem.eql(u8, action, "state:closed")) {
+        return writeBulkStringEventOrFail(allocator, stream, issue_id, "issue.state_set", "state", "closed");
+    }
+    if (std.mem.eql(u8, action, "milestone:clear")) {
+        return writeBulkStringEventOrFail(allocator, stream, issue_id, "issue.milestone_set", "milestone", "");
+    }
+    if (bulkActionValue(action, "label:add:")) |label| {
+        if (label.len == 0) return sendBulkValidationError(allocator, stream, "Label is required\n");
+        return writeBulkStringEventOrFail(allocator, stream, issue_id, "issue.label_added", "label", label);
+    }
+    if (bulkActionValue(action, "assignee:add:")) |assignee| {
+        if (assignee.len == 0) return sendBulkValidationError(allocator, stream, "Assignee is required\n");
+        return writeBulkStringEventOrFail(allocator, stream, issue_id, "issue.assignee_added", "assignee", assignee);
+    }
+    if (bulkActionValue(action, "milestone:set:")) |milestone| {
+        if (milestone.len == 0) return writeBulkStringEventOrFail(allocator, stream, issue_id, "issue.milestone_set", "milestone", "");
+        return writeBulkStringEventOrFail(allocator, stream, issue_id, "issue.milestone_set", "milestone", milestone);
+    }
+    if (bulkActionValue(action, "type:set:")) |issue_type| {
+        if (!isIssueType(issue_type)) return sendBulkValidationError(allocator, stream, "Type must be bug, feature, or task\n");
+        return writeBulkStringEventOrFail(allocator, stream, issue_id, "issue.type_set", "type", issue_type);
+    }
+    if (bulkActionValue(action, "project:add:")) |project| {
+        if (project.len == 0) return sendBulkValidationError(allocator, stream, "Project is required\n");
+        replaceBulkIssueProjectPlacement(allocator, repo, issue_id, project, "Draft") catch {
+            try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update issue project placement\n");
+            return false;
+        };
+        return true;
+    }
+
+    return sendBulkValidationError(allocator, stream, "Unknown bulk action\n");
+}
+
+fn bulkActionValue(action: []const u8, prefix: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, action, prefix)) return null;
+    return std.mem.trim(u8, action[prefix.len..], " \t\r\n");
+}
+
+fn sendBulkValidationError(allocator: Allocator, stream: std.net.Stream, message: []const u8) !bool {
+    try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", message);
+    return false;
+}
+
+fn writeBulkStringEventOrFail(
+    allocator: Allocator,
+    stream: std.net.Stream,
+    issue_id: []const u8,
+    event_type: []const u8,
+    payload_key: []const u8,
+    value: []const u8,
+) !bool {
+    createIssueStringEvent(allocator, issue_id, event_type, payload_key, value) catch {
+        try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update selected issues\n");
+        return false;
+    };
+    return true;
+}
+
+fn replaceBulkIssueProjectPlacement(allocator: Allocator, repo: Repo, issue_id: []const u8, project: []const u8, column: []const u8) !void {
+    var existing = try loadBulkIssueProjectColumns(allocator, repo, issue_id, project);
+    defer freeStringList(allocator, &existing);
+
+    if (existing.items.len == 1 and std.mem.eql(u8, existing.items[0], column)) return;
+
+    for (existing.items) |existing_column| {
+        try createIssueProjectEvent(allocator, issue_id, project, existing_column, null, null, false);
+    }
+    try createIssueProjectEvent(allocator, issue_id, project, column, null, null, true);
+}
+
+fn loadBulkIssueProjectColumns(allocator: Allocator, repo: Repo, issue_id: []const u8, project: []const u8) !std.ArrayList([]u8) {
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    var stmt = try db.prepare(
+        \\SELECT DISTINCT column_name
+        \\FROM issue_projects
+        \\WHERE issue_id = ? AND project = ?
+        \\ORDER BY column_name
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, issue_id);
+    try stmt.bindText(2, project);
+
+    var columns: std.ArrayList([]u8) = .empty;
+    errdefer freeStringList(allocator, &columns);
+    while (try stmt.step()) {
+        try columns.append(allocator, try stmt.columnTextDup(allocator, 0));
+    }
+    return columns;
+}
+
+fn formValuesOwned(allocator: Allocator, body: []const u8, wanted_key: []const u8) !std.ArrayList([]u8) {
+    var values: std.ArrayList([]u8) = .empty;
+    errdefer freeStringList(allocator, &values);
+
+    var pairs = std.mem.splitScalar(u8, body, '&');
+    while (pairs.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
+        const raw_key = pair[0..eq];
+        const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
+        const key = try percentDecodeForm(allocator, raw_key);
+        defer allocator.free(key);
+        if (!std.mem.eql(u8, key, wanted_key)) continue;
+        const value = try percentDecodeForm(allocator, raw_value);
+        errdefer allocator.free(value);
+        try values.append(allocator, value);
+    }
+
+    return values;
+}
+
+fn freeStringList(allocator: Allocator, values: *std.ArrayList([]u8)) void {
+    for (values.items) |value| allocator.free(value);
+    values.deinit(allocator);
+}
+
+fn issueBulkReturnTargetOwned(allocator: Allocator, form_body: []const u8) ![]u8 {
+    const owned = (try formValueOwned(allocator, form_body, "return_to")) orelse return allocator.dupe(u8, "/issues");
+    defer allocator.free(owned);
+    const value = std.mem.trim(u8, owned, " \t\r\n");
+    if (!isSafeIssuesReturnTarget(value)) return allocator.dupe(u8, "/issues");
+    return allocator.dupe(u8, value);
+}
+
+fn isSafeIssuesReturnTarget(value: []const u8) bool {
+    if (std.mem.indexOfAny(u8, value, "\r\n") != null) return false;
+    if (std.mem.eql(u8, value, "/issues")) return true;
+    if (std.mem.startsWith(u8, value, "/issues?")) return true;
+    if (std.mem.startsWith(u8, value, "/issues/")) return true;
+    return false;
 }
 
 test "issue list SQL includes selected filters" {

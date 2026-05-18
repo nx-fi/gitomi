@@ -85,6 +85,7 @@ const routes = [_]Route{
     Route.static("/ui.js", "application/javascript", ui_js),
     Route.static("/shortcuts.js", "application/javascript", shortcuts_js),
     Route.static("/not-found.js", "application/javascript", not_found_js),
+    Route.static("/fuzzy-search.js", "application/javascript", fuzzy_search_js),
     Route.static("/tree.js", "application/javascript", tree_js),
     Route.static("/code.js", "application/javascript", code_js),
     Route.static("/pdf.js", "application/javascript", pdf_js),
@@ -116,6 +117,7 @@ const routes = [_]Route{
     Route.get("/issues/:ref/edit", handleIssueEditPage),
     Route.get("/issues/:ref", handleIssueDetailPage),
     Route.post("/issues", handleIssuePost),
+    Route.post("/issues/bulk", handleIssueBulkPost),
     Route.post("/issues/:ref/:action", handleIssueActionPost),
     Route.get("/pulls", handlePullsPage),
     Route.get("/prs", handlePullsPage),
@@ -124,6 +126,8 @@ const routes = [_]Route{
     Route.get("/pulls/:ref", handlePullDetailPage),
     Route.get("/prs/:ref", handlePullDetailPage),
     Route.post("/pulls", handlePullPost),
+    Route.post("/pulls/bulk", handlePullBulkPost),
+    Route.post("/prs/bulk", handlePullBulkPost),
     Route.post("/pulls/:ref/:action", handlePullActionPost),
     Route.post("/prs/:ref/:action", handlePullActionPost),
     Route.get("/projects", handleProjectsPage),
@@ -528,7 +532,7 @@ fn handleInboxReadPost(ctx: WebContext) !void {
 }
 
 fn handleIssuesPage(ctx: WebContext) !void {
-    try sendOwnedHtml(ctx, try issues_page.renderIssuesPage(ctx.allocator, ctx.repo, ctx.request.target));
+    try sendOwnedHtml(ctx, try issues_page.renderIssuesPage(ctx.allocator, ctx.repo, ctx.request.target, ctx.csrf_token));
 }
 
 fn handleIssueEditPage(ctx: WebContext) !void {
@@ -575,8 +579,13 @@ fn handleIssueActionPost(ctx: WebContext) !void {
     }
 }
 
+fn handleIssueBulkPost(ctx: WebContext) !void {
+    if (!try requireCsrfToken(ctx)) return;
+    try issues_page.handleIssueBulkPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
+}
+
 fn handlePullsPage(ctx: WebContext) !void {
-    try sendOwnedHtml(ctx, try pulls_page.renderPullsPage(ctx.allocator, ctx.repo, ctx.request.target));
+    try sendOwnedHtml(ctx, try pulls_page.renderPullsPage(ctx.allocator, ctx.repo, ctx.request.target, ctx.csrf_token));
 }
 
 fn handlePullConflictsPage(ctx: WebContext) !void {
@@ -631,6 +640,11 @@ fn handlePullActionPost(ctx: WebContext) !void {
     } else {
         try sendPlainNotFound(ctx);
     }
+}
+
+fn handlePullBulkPost(ctx: WebContext) !void {
+    if (!try requireCsrfToken(ctx)) return;
+    try pulls_page.handlePullBulkPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
 }
 
 fn handleProjectsPage(ctx: WebContext) !void {
@@ -1153,6 +1167,7 @@ const theme_js = @embedFile("web/theme.js");
 const ui_js = @embedFile("web/ui.js");
 const shortcuts_js = @embedFile("web/shortcuts.js");
 const not_found_js = @embedFile("web/not_found.js");
+const fuzzy_search_js = @embedFile("web/fuzzy_search.js");
 const tree_js = @embedFile("web/tree.js");
 const code_js = @embedFile("web/code.js");
 const pdf_js = @embedFile("web/pdf.js");
@@ -1727,6 +1742,10 @@ test "web PDF preview assets are routed" {
     try expectStaticRoute("/pdf.js", "application/javascript", false);
     try expectStaticRoute("/vendor/pdfjs/build/pdf.mjs", "application/javascript", false);
     try expectStaticRoute("/vendor/pdfjs/build/pdf.worker.mjs", "application/javascript", false);
+}
+
+test "web fuzzy search asset is routed" {
+    try expectStaticRoute("/fuzzy-search.js", "application/javascript", false);
 }
 
 test "web theme stylesheets are routed" {

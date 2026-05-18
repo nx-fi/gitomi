@@ -215,6 +215,79 @@
   min-height: 44px;
   background: var(--panel);
 }
+.issue-bulk-form {
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+.issue-bulk-form[hidden] {
+  display: none;
+}
+.issue-bulk-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: 44px;
+  padding: 0 14px;
+}
+.issue-bulk-count {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.issue-bulk-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+  margin-left: auto;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.issue-bulk-actions::-webkit-scrollbar {
+  display: none;
+}
+.issue-bulk-menu {
+  min-width: max-content;
+}
+.issue-bulk-menu summary {
+  min-height: 34px;
+  padding: 0 10px;
+  color: var(--text);
+  background: var(--button-secondary-bg);
+  border: 1px solid var(--border-strong);
+}
+.issue-bulk-menu[open] summary,
+.issue-bulk-menu summary:hover {
+  background: var(--button-secondary-hover-bg);
+  border-color: var(--border-strong);
+}
+.issue-bulk-popover {
+  min-width: 190px;
+  max-height: 300px;
+}
+.issue-bulk-option {
+  width: 100%;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  appearance: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.issue-bulk-option:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+.issue-bulk-empty {
+  display: block;
+  padding: 10px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
 .issues-state-tabs {
   display: flex;
   align-items: center;
@@ -447,6 +520,73 @@
 }
 .issue-list-row:hover {
   background: var(--table-row-highlight);
+}
+.issue-list-selectable-row {
+  grid-template-columns: 44px 30px minmax(0, 1fr) auto;
+  padding-left: 0;
+}
+.issue-list-row.is-selected,
+.issue-list-row.is-selected:hover {
+  background: color-mix(in oklch, var(--brand) 13%, var(--panel));
+}
+.issue-select-cell,
+.issue-bulk-select-all {
+  position: relative;
+  display: grid;
+  place-items: start center;
+  min-width: 0;
+  padding-top: 2px;
+  cursor: pointer;
+}
+.issue-select-cell input,
+.issue-bulk-select-all input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.issue-checkbox-box {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  color: var(--text-on-accent);
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-sizing: border-box;
+}
+.issue-select-cell:hover .issue-checkbox-box,
+.issue-bulk-select-all:hover .issue-checkbox-box,
+.issue-select-cell input:focus-visible + .issue-checkbox-box,
+.issue-bulk-select-all input:focus-visible + .issue-checkbox-box {
+  border-color: var(--brand);
+  outline: 2px solid color-mix(in oklch, var(--brand) 24%, transparent);
+  outline-offset: 1px;
+}
+.issue-select-cell input:checked + .issue-checkbox-box,
+.issue-bulk-select-all input:checked + .issue-checkbox-box,
+.issue-bulk-select-all input:indeterminate + .issue-checkbox-box {
+  background: var(--brand);
+  border-color: var(--brand);
+}
+.issue-select-cell input:checked + .issue-checkbox-box::before,
+.issue-bulk-select-all input:checked + .issue-checkbox-box::before {
+  content: "";
+  width: 8px;
+  height: 4px;
+  border-bottom: 2px solid currentColor;
+  border-left: 2px solid currentColor;
+  transform: translateY(-1px) rotate(-45deg);
+}
+.issue-bulk-select-all input:indeterminate + .issue-checkbox-box::before {
+  content: "";
+  width: 9px;
+  height: 2px;
+  background: currentColor;
+  border-radius: var(--radius-pill);
 }
 .pagination {
   display: flex;
@@ -787,4 +927,25 @@
 }
 .nouns-avatar.has-external-avatar .nouns-avatar-svg {
   opacity: 0;
+}
+@media (max-width: 760px) {
+  .issue-bulk-bar {
+    flex-wrap: wrap;
+    gap: 10px 12px;
+    padding: 10px 12px;
+  }
+  .issue-bulk-actions {
+    width: 100%;
+    justify-content: flex-start;
+    margin-left: 0;
+  }
+  .issue-list-selectable-row {
+    grid-template-columns: 38px 26px minmax(0, 1fr);
+  }
+  .issue-list-selectable-row .issue-row-side {
+    grid-column: 3;
+    justify-content: flex-start;
+    padding-left: 0;
+    margin-top: 8px;
+  }
 }

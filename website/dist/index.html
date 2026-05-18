@@ -11,12 +11,13 @@
   <link rel="stylesheet" href="./assets/site.css">
 </head>
 <body class="site-shell">
+  <a class="skip-link" href="#top">Skip to content</a>
   <div class="ambient-grid" aria-hidden="true"></div>
   <div class="corner-actions" aria-label="Site actions">
     <a class="github-link" href="https://github.com/nx-fi/gitomi" target="_blank" rel="noreferrer" aria-label="GitHub repository"></a>
   </div>
 
-  <main id="top" class="site-main">
+  <main id="top" class="site-main" tabindex="-1">
     <svg class="flow-line" viewBox="0 0 1440 4300" preserveAspectRatio="none" aria-hidden="true">
       <defs>
         <linearGradient id="flow-line-green" x1="0" y1="0" x2="0" y2="1">
@@ -164,7 +165,7 @@
             <span></span>
             <strong>alice@repo</strong>
           </div>
-          <pre><code><span class="prompt">$</span> <span data-typewriter data-words="gt issue open --title own-the-workflow|git fetch origin refs/gitomi/*|gt web --offline-ready">gt issue open --title own-the-workflow</span><span class="typing-caret"></span>
+          <pre><code><span class="prompt" aria-hidden="true">$</span> <span data-typewriter data-words="gt issue open --title own-the-workflow|git fetch origin refs/gitomi/*|gt web --offline-ready">gt issue open --title own-the-workflow</span><span class="typing-caret"></span>
 <span class="ok">accepted</span> event 9f2a1c4 projected locally
 <span class="muted">sync</span> ordinary git transport ready</code></pre>
         </div>
@@ -232,9 +233,9 @@
             <span></span>
             <strong>git transport</strong>
           </div>
-          <pre><code><span class="prompt">$</span> git fetch origin 'refs/gitomi/*:refs/gitomi/staging/*'
+          <pre><code><span class="prompt" aria-hidden="true">$</span> git fetch origin 'refs/gitomi/*:refs/gitomi/staging/*'
 <span class="ok">remote</span> 42 project events received
-<span class="prompt">$</span> gt sync --admit
+<span class="prompt" aria-hidden="true">$</span> gt sync --admit
 <span class="ok">accepted</span> signatures, RBAC, chains
 <span class="muted">projection</span> issues + PRs + boards rebuilt</code></pre>
           <div class="sync-feed">

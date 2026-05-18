@@ -2347,6 +2347,7 @@
   padding: 4px 10px;
 }
 .kanban-board {
+  position: relative;
   display: grid;
   grid-auto-columns: minmax(288px, 1fr);
   grid-auto-flow: column;
@@ -2685,9 +2686,49 @@
 .kanban-board.is-updating {
   cursor: progress;
 }
+.kanban-board-status {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 40;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 12px 0 10px;
+  color: var(--text);
+  background: color-mix(in oklch, var(--panel) 94%, var(--blue));
+  border: 1px solid color-mix(in oklch, var(--blue) 32%, var(--border));
+  border-radius: var(--radius-pill);
+  box-shadow: var(--shadow-float);
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1;
+  pointer-events: none;
+}
+.kanban-board-status[hidden] {
+  display: none;
+}
+.kanban-board-spinner {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  border: 2px solid color-mix(in oklch, var(--blue) 24%, var(--border));
+  border-top-color: var(--blue);
+  border-radius: 50%;
+  animation: kanban-board-spin 780ms linear infinite;
+}
 .kanban-board.is-updating .kanban-card {
   pointer-events: none;
   opacity: 0.72;
+}
+@keyframes kanban-board-spin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .kanban-board-spinner {
+    animation-duration: 1600ms;
+  }
 }
 .kanban-card-head {
   display: flex;

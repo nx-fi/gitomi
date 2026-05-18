@@ -72,6 +72,35 @@ body.site-shell::after {
   text-decoration: none;
 }
 
+.site-shell :where(a, button):focus-visible {
+  outline: 3px solid var(--site-amber);
+  outline-offset: 3px;
+}
+
+.skip-link {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  z-index: 100;
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 0 12px;
+  color: var(--site-green-ink);
+  background: var(--site-amber);
+  border: 1px solid color-mix(in oklch, var(--site-amber) 70%, #ffffff);
+  border-radius: 8px;
+  font-weight: 850;
+  text-decoration: none;
+  transform: translateY(calc(-100% - 18px));
+  transition: transform 160ms ease;
+}
+
+.skip-link:focus,
+.skip-link:focus-visible {
+  transform: translateY(0);
+}
+
 .site-shell code {
   color: var(--site-green);
   background: color-mix(in oklch, var(--site-green) 9%, transparent);
@@ -82,6 +111,10 @@ body.site-shell::after {
   position: relative;
   width: min(1440px, calc(100vw - 40px));
   margin: 0 auto;
+}
+
+.site-main:focus {
+  outline: none;
 }
 
 .flow-line {
@@ -160,6 +193,15 @@ body.site-shell::after {
   color: var(--site-green);
   background: var(--site-panel-strong);
   border-color: var(--site-border-strong);
+}
+
+.github-link:focus-visible,
+.site-shell .button:focus-visible,
+.command-copy:focus-visible {
+  border-color: var(--site-amber);
+  box-shadow:
+    0 0 0 3px var(--site-bg),
+    0 0 0 6px color-mix(in oklch, var(--site-amber) 84%, transparent);
 }
 
 .site-shell .button {
@@ -256,6 +298,10 @@ body.site-shell::after {
 
 .hero-brand.is-docked {
   text-shadow: 0 0 22px color-mix(in oklch, var(--site-green) 22%, transparent);
+}
+
+.hero-brand.is-interpolating {
+  pointer-events: none;
 }
 
 .pain-line,
@@ -762,6 +808,10 @@ body.site-shell::after {
 .prompt,
 .ok {
   color: var(--site-green);
+}
+
+.prompt {
+  user-select: none;
 }
 
 .muted {
@@ -1850,6 +1900,7 @@ body.site-shell::after {
   }
 
   .site-shell .button,
+  .skip-link,
   .sim-button,
   .projection-bars span {
     transition: none;

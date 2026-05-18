@@ -8,6 +8,7 @@ pub const renderIssueEditPage = detail.renderIssueEditPage;
 pub const appendIssueActionMenu = detail.appendIssueActionMenu;
 pub const appendNotificationSubscriptionButton = detail.appendNotificationSubscriptionButton;
 pub const handleIssueSidebarPost = sidebar.handleIssueSidebarPost;
+pub const handleIssueBulkPost = detail.handleIssueBulkPost;
 pub const handleIssueEditPost = detail.handleIssueEditPost;
 pub const handleIssueChecklistPost = detail.handleIssueChecklistPost;
 pub const handleIssueCommentPost = detail.handleIssueCommentPost;

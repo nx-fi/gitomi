@@ -4,6 +4,10 @@
   const dropzoneSelector = "[data-project-dropzone]";
   const datePickerSelector = "input[data-date-picker]";
   const maxIssueSearchResults = 30;
+  const fuzzySearch = window.gitomiFuzzySearch;
+  const searchTokens = fuzzySearch.searchTokens;
+  const rankedSearchItems = fuzzySearch.rankedSearchItems;
+  const appendHighlightedText = fuzzySearch.appendHighlightedText;
   let activeCard = null;
   let activeOrigin = null;
   let activeDropped = false;
@@ -11,6 +15,17 @@
 
   function closestColumn(target) {
     return target instanceof Element ? target.closest(columnSelector) : null;
+  }
+
+  function scopedQuery(root, selector) {
+    const scope = root || document;
+    const nodes = [];
+    if (scope instanceof Element && scope.matches(selector)) nodes.push(scope);
+    if (!scope || typeof scope.querySelectorAll !== "function") return nodes;
+    scope.querySelectorAll(selector).forEach(function (node) {
+      nodes.push(node);
+    });
+    return nodes;
   }
 
   function clearDropTargets() {
@@ -21,7 +36,117 @@
 
   function setBoardBusy(card, busy) {
     const board = card && card.closest(".kanban-board");
-    if (board) board.classList.toggle("is-updating", busy);
+    if (!board) return;
+    board.classList.toggle("is-updating", busy);
+    if (busy) {
+      board.setAttribute("aria-busy", "true");
+      const status = ensureBoardStatus(board);
+      status.hidden = false;
+    } else {
+      board.removeAttribute("aria-busy");
+      const status = board.querySelector(".kanban-board-status");
+      if (status) status.hidden = true;
+    }
+  }
+
+  function ensureBoardStatus(board) {
+    let status = board.querySelector(".kanban-board-status");
+    if (status) return status;
+    status = document.createElement("div");
+    status.className = "kanban-board-status";
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+
+    const spinner = document.createElement("span");
+    spinner.className = "kanban-board-spinner";
+    spinner.setAttribute("aria-hidden", "true");
+
+    const text = document.createElement("span");
+    text.className = "kanban-board-status-text";
+    text.textContent = "Moving issue...";
+
+    status.appendChild(spinner);
+    status.appendChild(text);
+    board.appendChild(status);
+    return status;
+  }
+
+  function notifyMoveError(message) {
+    const text = String(message || "Could not move issue").replace(/\s+/g, " ").trim() || "Could not move issue";
+    if (typeof window.gitomiNotify === "function") {
+      window.gitomiNotify(text, "error");
+    } else if (window.console && typeof window.console.error === "function") {
+      window.console.error(text);
+    }
+  }
+
+  function notifyPartialRefresh(root) {
+    document.dispatchEvent(new CustomEvent("gitomi:partial-refresh", {
+      detail: { root: root || document },
+    }));
+  }
+
+  function columnFromDropzone(dropzone) {
+    return dropzone && dropzone.closest ? dropzone.closest(columnSelector) : null;
+  }
+
+  function columnStatusLabel(column) {
+    const title = column && column.querySelector(".kanban-column-title h2");
+    return title && title.textContent.trim() || column && column.getAttribute("data-column") || "None";
+  }
+
+  function toneClass(node) {
+    if (!node || !node.classList) return "";
+    return Array.from(node.classList).find(function (name) {
+      return /^tone-/.test(name);
+    }) || "";
+  }
+
+  function setStatusChip(card, column) {
+    const chip = card.querySelector(".project-status-chip");
+    if (!chip) return;
+    Array.from(chip.classList).forEach(function (name) {
+      if (/^tone-/.test(name)) chip.classList.remove(name);
+    });
+    const tone = toneClass(column);
+    if (tone) chip.classList.add(tone);
+
+    let dot = chip.querySelector(".kanban-status-dot");
+    if (!dot) {
+      dot = document.createElement("span");
+      dot.className = "kanban-status-dot";
+      dot.setAttribute("aria-hidden", "true");
+    }
+    chip.textContent = "";
+    chip.appendChild(dot);
+    chip.appendChild(document.createTextNode(columnStatusLabel(column)));
+  }
+
+  function syncColumnState(column) {
+    if (!column) return;
+    const dropzone = column.querySelector(dropzoneSelector);
+    if (!dropzone) return;
+    const count = dropzone.querySelectorAll(cardSelector).length;
+    const countNode = column.querySelector(".kanban-count");
+    if (countNode) countNode.textContent = String(count);
+    dropzone.querySelectorAll(".kanban-empty-drop").forEach(function (empty) {
+      empty.remove();
+    });
+    if (count === 0) {
+      const empty = document.createElement("div");
+      empty.className = "kanban-empty-drop";
+      empty.textContent = "No issues";
+      dropzone.appendChild(empty);
+    }
+  }
+
+  function commitMove(card, targetColumn, origin) {
+    card.setAttribute("data-column", targetColumn.getAttribute("data-column") || "");
+    setStatusChip(card, targetColumn);
+    syncColumnState(columnFromDropzone(origin && origin.parent));
+    syncColumnState(targetColumn);
+    setBoardBusy(card, false);
+    notifyPartialRefresh(targetColumn.closest(".kanban-board") || card);
   }
 
   function restoreCard(card, origin) {
@@ -66,6 +191,8 @@
     if (fromColumn === toColumn) return;
     if (!project || !issue || !toColumn) {
       restoreCard(card, origin);
+      syncColumnState(columnFromDropzone(origin && origin.parent));
+      syncColumnState(targetColumn);
       return;
     }
 
@@ -86,9 +213,10 @@
       headers: {
         "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
       },
+      gitomiSuppressErrorNotification: true,
     }).then(function (response) {
       if (response.ok) {
-        window.location.reload();
+        commitMove(card, targetColumn, origin);
         return;
       }
       return response.text().then(function (message) {
@@ -96,7 +224,9 @@
       });
     }).catch(function (error) {
       restoreCard(card, origin);
-      window.alert(error && error.message ? error.message : "Could not move issue");
+      syncColumnState(columnFromDropzone(origin && origin.parent));
+      syncColumnState(targetColumn);
+      notifyMoveError(error && error.message ? error.message : "Could not move issue");
       setBoardBusy(card, false);
     });
   }
@@ -160,75 +290,6 @@
     });
   }
 
-  function searchTokens(value) {
-    return value.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  }
-
-  function fuzzyScore(text, token) {
-    if (token === "") return 0;
-    if (text === token) return 0;
-    if (text.startsWith(token)) return 20 + text.length - token.length;
-
-    const exactIndex = text.indexOf(token);
-    if (exactIndex !== -1) return 45 + exactIndex * 2 + text.length - token.length;
-    if (token.length > text.length) return null;
-
-    let first = -1;
-    let last = -1;
-    let tokenIndex = 0;
-    for (let i = 0; i < text.length && tokenIndex < token.length; i += 1) {
-      if (text.charCodeAt(i) === token.charCodeAt(tokenIndex)) {
-        if (first === -1) first = i;
-        last = i;
-        tokenIndex += 1;
-      }
-    }
-    if (tokenIndex !== token.length) return null;
-
-    const spread = last - first + 1 - token.length;
-    return 90 + first * 3 + spread * 5 + text.length;
-  }
-
-  function scoreSearchItem(item, tokens) {
-    if (tokens.length === 0) return null;
-    let score = 0;
-    tokens.forEach(function (token) {
-      if (score === null) return;
-      const nameScore = fuzzyScore(item.searchName, token);
-      const pathScore = fuzzyScore(item.searchPath, token);
-      if (nameScore === null && pathScore === null) {
-        score = null;
-      } else {
-        score += Math.min(
-          nameScore === null ? Number.POSITIVE_INFINITY : nameScore,
-          pathScore === null ? Number.POSITIVE_INFINITY : pathScore + 12,
-        );
-      }
-    });
-    return score;
-  }
-
-  function rankedSearchItems(items, tokens, limit) {
-    if (tokens.length === 0) {
-      return items.slice(0, limit).map(function (item) {
-        return { item: item, score: 0 };
-      });
-    }
-    return items
-      .map(function (item) {
-        return { item: item, score: scoreSearchItem(item, tokens) };
-      })
-      .filter(function (result) {
-        return result.score !== null;
-      })
-      .sort(function (a, b) {
-        return a.score - b.score ||
-          a.item.searchPath.length - b.item.searchPath.length ||
-          a.item.searchPath.localeCompare(b.item.searchPath);
-      })
-      .slice(0, limit);
-  }
-
   function appendSearchField(parts, name, value) {
     if (!value) return;
     parts.push(value);
@@ -236,40 +297,6 @@
     value.trim().split(/\s+/).filter(Boolean).forEach(function (part) {
       parts.push(name + ":" + part);
     });
-  }
-
-  function appendHighlightedText(parent, text, tokens) {
-    const lower = text.toLowerCase();
-    const ranges = [];
-
-    tokens.forEach(function (token) {
-      if (!token) return;
-      let start = lower.indexOf(token);
-      while (start !== -1) {
-        ranges.push({ start: start, end: start + token.length });
-        start = lower.indexOf(token, start + token.length);
-      }
-    });
-
-    ranges.sort(function (a, b) {
-      return a.start - b.start || b.end - a.end;
-    });
-
-    let cursor = 0;
-    ranges.forEach(function (range) {
-      if (range.start < cursor) return;
-      if (range.start > cursor) {
-        parent.appendChild(document.createTextNode(text.slice(cursor, range.start)));
-      }
-      const mark = document.createElement("mark");
-      mark.textContent = text.slice(range.start, range.end);
-      parent.appendChild(mark);
-      cursor = range.end;
-    });
-
-    if (cursor < text.length) {
-      parent.appendChild(document.createTextNode(text.slice(cursor)));
-    }
   }
 
   function issueSearchItems() {
@@ -466,7 +493,7 @@
           return selected.indexOf(item.ref) === -1;
         });
       }
-      results = rankedSearchItems(items, tokens, maxIssueSearchResults);
+      results = rankedSearchItems(items, tokens, maxIssueSearchResults, { includeEmpty: true });
       menu.textContent = "";
 
       if (results.length === 0) {
@@ -622,8 +649,8 @@
     });
   }
 
-  function initProjectIndexTabs() {
-    document.querySelectorAll("[data-project-index-tabs]").forEach(function (root) {
+  function initProjectIndexTabs(root) {
+    scopedQuery(root, "[data-project-index-tabs]").forEach(function (root) {
       if (root.dataset.projectIndexTabsReady === "yes") return;
       root.dataset.projectIndexTabsReady = "yes";
 
@@ -1025,8 +1052,8 @@
     if (inline) render();
   }
 
-  function initDatePickers() {
-    document.querySelectorAll(datePickerSelector).forEach(initDatePicker);
+  function initDatePickers(root) {
+    scopedQuery(root, datePickerSelector).forEach(initDatePicker);
     if (document.body.dataset.datePickerDismissReady === "yes") return;
     document.body.dataset.datePickerDismissReady = "yes";
     window.addEventListener("pointerdown", function (event) {
@@ -1043,18 +1070,26 @@
     }, true);
   }
 
-  function initProjects() {
-    initProjectIndexTabs();
-    initDatePickers();
-    document.querySelectorAll("[data-project-issue-search]").forEach(initIssueSearchMenu);
-    document.querySelectorAll("[data-project-update-health-menu]").forEach(initProjectUpdateHealthMenu);
-    document.querySelectorAll("[data-project-choice-menu]").forEach(initProjectChoiceMenu);
-    document.querySelectorAll(cardSelector).forEach(initCard);
-    document.querySelectorAll(columnSelector).forEach(initColumn);
+  function initProjects(root) {
+    const scope = root || document;
+    initProjectIndexTabs(scope);
+    initDatePickers(scope);
+    scopedQuery(scope, "[data-project-issue-search]").forEach(initIssueSearchMenu);
+    scopedQuery(scope, "[data-project-update-health-menu]").forEach(initProjectUpdateHealthMenu);
+    scopedQuery(scope, "[data-project-choice-menu]").forEach(initProjectChoiceMenu);
+    scopedQuery(scope, cardSelector).forEach(initCard);
+    scopedQuery(scope, columnSelector).forEach(initColumn);
   }
 
+  document.addEventListener("gitomi:partial-refresh", function (event) {
+    const detail = event.detail || {};
+    initProjects(detail.root || document);
+  });
+
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", initProjects);
+    document.addEventListener("DOMContentLoaded", function () {
+      initProjects();
+    });
   } else {
     initProjects();
   }

@@ -1,10 +1,12 @@
 const std = @import("std");
 const index = @import("../../index.zig");
+const pull = @import("../../pr.zig");
 const repo_mod = @import("../../repo.zig");
 const util = @import("../../util.zig");
 const work_items = @import("../../work_items.zig");
 const issues_page = @import("../issues.zig");
 const shared = @import("../shared.zig");
+const zwf = @import("../../zwf.zig");
 
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
@@ -16,8 +18,12 @@ const appendSectionHead = shared.appendSectionHead;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
 const appendTemplate = shared.appendTemplate;
+const createPullStringEvent = pull.createPullStringEvent;
 const literalHref = shared.literalHref;
 const pullHref = shared.pullHref;
+const formValueOwned = issues_page.formValueOwned;
+const sendPlainResponse = shared.sendPlainResponse;
+const sendRedirect = shared.sendRedirect;
 const sqlite = index.sqlite;
 
 const PullStateFilter = work_items.PullStateFilter;
@@ -35,6 +41,12 @@ const PullFilterKind = enum {
     assignee,
 };
 
+const PullBulkOptionKind = enum {
+    label,
+    assignee,
+    reviewer,
+};
+
 const PullHrefOverride = struct {
     state: ?PullStateFilter = null,
     sort: ?PullSort = null,
@@ -44,7 +56,7 @@ const PullHrefOverride = struct {
     per_page: ?usize = null,
 };
 
-pub fn renderPullsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]u8 {
+pub fn renderPullsPage(allocator: Allocator, repo: Repo, target: []const u8, csrf_token: []const u8) ![]u8 {
     if (try shared.renderIndexingPageIfStale(allocator, repo, "Pull Requests", "pulls", target)) |body| return body;
     try index.ensureIndex(allocator, repo);
 
@@ -74,6 +86,7 @@ pub fn renderPullsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]
     });
     try appendPullsToolbar(&buf, allocator, &db, filters);
     try appendPullsListHeader(&buf, allocator, filters, counts);
+    try appendPullBulkForm(&buf, allocator, &db, target, csrf_token);
 
     var stmt = try work_items.preparePullListStmt(allocator, &db, filters);
     defer stmt.deinit();
@@ -214,7 +227,7 @@ fn appendPullsToolbar(buf: *std.ArrayList(u8), allocator: Allocator, db: ?*Sqlit
 
 fn appendPullsListHeader(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters, counts: PullCounts) !void {
     try buf.appendSlice(allocator,
-        \\<header class="pulls-list-head issues-list-head">
+        \\<header class="pulls-list-head issues-list-head" data-issue-list-header>
         \\  <nav class="issues-state-tabs" aria-label="Pull request state">
     );
     try appendPullStateTab(buf, allocator, "Open", counts.open, .open, filters, pullStateIconClass(.open));
@@ -224,6 +237,91 @@ fn appendPullsListHeader(buf: *std.ArrayList(u8), allocator: Allocator, filters:
         \\  </nav>
         \\</header>
     );
+}
+
+fn appendPullBulkForm(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, return_to: []const u8, csrf_token: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<form id="pull-bulk-form" class="issue-bulk-form" method="post" action="/pulls/bulk" data-issue-bulk-form hidden>
+        \\  <input type="hidden" name="{csrf_field}" value="{csrf_token}">
+        \\  <input type="hidden" name="return_to" value="{return_to}">
+        \\  <div class="issue-bulk-bar">
+        \\    <label class="issue-bulk-select-all" title="Select all visible pull requests"><input type="checkbox" data-issue-select-all aria-label="Select all visible pull requests"><span class="issue-checkbox-box" aria-hidden="true"></span></label>
+        \\    <strong class="issue-bulk-count" data-issue-bulk-count>0 selected</strong>
+        \\    <div class="issue-bulk-actions" aria-label="Bulk pull request actions">
+    , .{
+        .csrf_field = zwf.csrf.field_name,
+        .csrf_token = csrf_token,
+        .return_to = return_to,
+    });
+    try appendPullBulkMarkMenu(buf, allocator);
+    try appendPullBulkOptionMenu(buf, allocator, db, "Label", "icon-labels", .label, "No labels");
+    try appendPullBulkOptionMenu(buf, allocator, db, "Assign", "icon-users", .assignee, "No assignees");
+    try appendPullBulkOptionMenu(buf, allocator, db, "Reviewer", "icon-reviewers", .reviewer, "No reviewers");
+    try buf.appendSlice(allocator,
+        \\    </div>
+        \\  </div>
+        \\</form>
+    );
+}
+
+fn appendPullBulkMarkMenu(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try appendPullBulkMenuStart(buf, allocator, "Mark as", "icon-check");
+    try appendPullBulkActionButton(buf, allocator, "state:open", "Open");
+    try appendPullBulkActionButton(buf, allocator, "state:closed", "Closed");
+    try appendPullBulkMenuEnd(buf, allocator);
+}
+
+fn appendPullBulkOptionMenu(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    label: []const u8,
+    icon_class: []const u8,
+    kind: PullBulkOptionKind,
+    empty_label: []const u8,
+) !void {
+    try appendPullBulkMenuStart(buf, allocator, label, icon_class);
+
+    var stmt = try db.prepare(pullBulkOptionsSql(kind));
+    defer stmt.deinit();
+
+    var shown = false;
+    while (try stmt.step()) {
+        const value = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(value);
+        const action = try pullBulkActionOwned(allocator, kind, value);
+        defer allocator.free(action);
+        try appendPullBulkActionButton(buf, allocator, action, value);
+        shown = true;
+    }
+    if (!shown) {
+        try appendTemplate(buf, allocator,
+            \\<span class="issue-bulk-empty">{label}</span>
+        , .{ .label = empty_label });
+    }
+    try appendPullBulkMenuEnd(buf, allocator);
+}
+
+fn appendPullBulkMenuStart(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, icon_class: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<details class="issues-filter-menu issue-bulk-menu" data-popover-menu><summary><span class="button-icon {icon_class}" aria-hidden="true"></span><span>{label}</span></summary><div class="issues-filter-popover issue-bulk-popover" role="menu">
+    , .{
+        .icon_class = icon_class,
+        .label = label,
+    });
+}
+
+fn appendPullBulkMenuEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try buf.appendSlice(allocator, "</div></details>");
+}
+
+fn appendPullBulkActionButton(buf: *std.ArrayList(u8), allocator: Allocator, action: []const u8, label: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<button class="issues-filter-option issue-bulk-option" type="submit" name="action" value="{action}" role="menuitem" data-issue-bulk-action><span>{label}</span></button>
+    , .{
+        .action = action,
+        .label = label,
+    });
 }
 
 fn appendHiddenPullSearchFilters(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters) !void {
@@ -571,6 +669,56 @@ fn pullFilterOptionsSql(kind: PullFilterKind) []const u8 {
     };
 }
 
+fn pullBulkOptionsSql(kind: PullBulkOptionKind) []const u8 {
+    return switch (kind) {
+        .label =>
+        \\SELECT label
+        \\FROM (
+        \\  SELECT name AS label FROM label_definitions
+        \\  UNION
+        \\  SELECT label FROM pull_labels
+        \\  UNION
+        \\  SELECT label FROM issue_labels
+        \\)
+        \\WHERE label <> ''
+        \\ORDER BY lower(label), label
+        \\LIMIT 80
+        ,
+        .assignee, .reviewer =>
+        \\SELECT person
+        \\FROM (
+        \\  SELECT assignee AS person FROM pull_assignees
+        \\  UNION
+        \\  SELECT reviewer AS person FROM pull_reviewers
+        \\  UNION
+        \\  SELECT COALESCE(NULLIF(pm.source_author, ''), NULLIF(sp.display_name, ''), p.author_principal) AS person
+        \\  FROM pulls p
+        \\  LEFT JOIN pull_metadata pm ON pm.pull_id = p.id
+        \\  LEFT JOIN identities sp ON sp.id = pm.source_identity
+        \\  UNION
+        \\  SELECT COALESCE(NULLIF(im.source_author, ''), NULLIF(si.display_name, ''), i.author_principal) AS person
+        \\  FROM issues i
+        \\  LEFT JOIN issue_metadata im ON im.issue_id = i.id
+        \\  LEFT JOIN identities si ON si.id = im.source_identity
+        \\  UNION
+        \\  SELECT COALESCE(NULLIF(display_name, ''), NULLIF(email, ''), id) AS person FROM identities
+        \\)
+        \\WHERE person <> ''
+        \\ORDER BY lower(person), person
+        \\LIMIT 80
+        ,
+    };
+}
+
+fn pullBulkActionOwned(allocator: Allocator, kind: PullBulkOptionKind, value: []const u8) ![]u8 {
+    const prefix: []const u8 = switch (kind) {
+        .label => "label:add:",
+        .assignee => "assignee:add:",
+        .reviewer => "reviewer:add:",
+    };
+    return std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, value });
+}
+
 fn appendPullsHref(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters, override: PullHrefOverride) !void {
     try buf.appendSlice(allocator, "/pulls");
     var first = true;
@@ -656,11 +804,14 @@ fn appendPullListRow(
     var pull_ref_buf: [util.short_object_ref_len]u8 = undefined;
     const pull_ref = util.shortObjectRef(&pull_ref_buf, id);
     try appendTemplate(buf, allocator,
-        \\<article class="pull-list-row issue-list-row is-{state}">
+        \\<article class="pull-list-row issue-list-row issue-list-selectable-row is-{state}">
+        \\  <label class="issue-select-cell" title="Select pull request #{pull_ref}"><input type="checkbox" name="pull" value="{id}" form="pull-bulk-form" data-issue-select aria-label="Select pull request #{pull_ref}"><span class="issue-checkbox-box" aria-hidden="true"></span></label>
         \\  <div class="issue-state-cell"><span class="issue-state-icon pull-state-icon {state}" title="{state}" aria-label="{state}"></span></div>
         \\  <div class="issue-row-content">
         \\    <div class="issue-row-title-line"><a class="issue-row-title" href="{href}">{title}</a>
     , .{
+        .pull_ref = pull_ref,
+        .id = id,
         .state = state,
         .href = pullHref(pull_ref),
         .title = title,
@@ -802,6 +953,137 @@ fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const
         return try issues_page.percentDecodeForm(allocator, raw_value);
     }
     return null;
+}
+
+pub fn handlePullBulkPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
+    try index.ensureIndex(allocator, repo);
+
+    const action_owned = (try formValueOwned(allocator, form_body, "action")) orelse {
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Missing bulk action\n");
+        return;
+    };
+    defer allocator.free(action_owned);
+    const action = std.mem.trim(u8, action_owned, " \t\r\n");
+
+    var refs = try formValuesOwned(allocator, form_body, "pull");
+    defer freeStringList(allocator, &refs);
+    if (refs.items.len == 0) {
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Select at least one pull request\n");
+        return;
+    }
+
+    var pull_ids: std.ArrayList([]u8) = .empty;
+    defer freeStringList(allocator, &pull_ids);
+    for (refs.items) |raw_ref_owned| {
+        const raw_ref = std.mem.trim(u8, raw_ref_owned, " \t\r\n");
+        if (raw_ref.len == 0) continue;
+        const pull_id = index.resolvePullId(allocator, repo, raw_ref) catch {
+            try sendPlainResponse(allocator, stream, 404, "Not Found", "Pull request not found\n");
+            return;
+        };
+        try pull_ids.append(allocator, pull_id);
+    }
+    if (pull_ids.items.len == 0) {
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Select at least one pull request\n");
+        return;
+    }
+
+    for (pull_ids.items) |pull_id| {
+        if (!(try applyPullBulkAction(allocator, stream, pull_id, action))) return;
+    }
+
+    const location = try pullBulkReturnTargetOwned(allocator, form_body);
+    defer allocator.free(location);
+    try sendRedirect(allocator, stream, location);
+}
+
+fn applyPullBulkAction(allocator: Allocator, stream: std.net.Stream, pull_id: []const u8, action: []const u8) !bool {
+    if (std.mem.eql(u8, action, "state:open")) {
+        return writeBulkStringEventOrFail(allocator, stream, pull_id, "pull.state_set", "state", "open");
+    }
+    if (std.mem.eql(u8, action, "state:closed")) {
+        return writeBulkStringEventOrFail(allocator, stream, pull_id, "pull.state_set", "state", "closed");
+    }
+    if (bulkActionValue(action, "label:add:")) |label| {
+        if (label.len == 0) return sendBulkValidationError(allocator, stream, "Label is required\n");
+        return writeBulkStringEventOrFail(allocator, stream, pull_id, "pull.label_added", "label", label);
+    }
+    if (bulkActionValue(action, "assignee:add:")) |assignee| {
+        if (assignee.len == 0) return sendBulkValidationError(allocator, stream, "Assignee is required\n");
+        return writeBulkStringEventOrFail(allocator, stream, pull_id, "pull.assignee_added", "assignee", assignee);
+    }
+    if (bulkActionValue(action, "reviewer:add:")) |reviewer| {
+        if (reviewer.len == 0) return sendBulkValidationError(allocator, stream, "Reviewer is required\n");
+        return writeBulkStringEventOrFail(allocator, stream, pull_id, "pull.reviewer_added", "reviewer", reviewer);
+    }
+
+    return sendBulkValidationError(allocator, stream, "Unknown bulk action\n");
+}
+
+fn bulkActionValue(action: []const u8, prefix: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, action, prefix)) return null;
+    return std.mem.trim(u8, action[prefix.len..], " \t\r\n");
+}
+
+fn sendBulkValidationError(allocator: Allocator, stream: std.net.Stream, message: []const u8) !bool {
+    try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", message);
+    return false;
+}
+
+fn writeBulkStringEventOrFail(
+    allocator: Allocator,
+    stream: std.net.Stream,
+    pull_id: []const u8,
+    event_type: []const u8,
+    payload_key: []const u8,
+    value: []const u8,
+) !bool {
+    createPullStringEvent(allocator, pull_id, event_type, payload_key, value) catch {
+        try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update selected pull requests\n");
+        return false;
+    };
+    return true;
+}
+
+fn formValuesOwned(allocator: Allocator, body: []const u8, wanted_key: []const u8) !std.ArrayList([]u8) {
+    var values: std.ArrayList([]u8) = .empty;
+    errdefer freeStringList(allocator, &values);
+
+    var pairs = std.mem.splitScalar(u8, body, '&');
+    while (pairs.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
+        const raw_key = pair[0..eq];
+        const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
+        const key = try issues_page.percentDecodeForm(allocator, raw_key);
+        defer allocator.free(key);
+        if (!std.mem.eql(u8, key, wanted_key)) continue;
+        const value = try issues_page.percentDecodeForm(allocator, raw_value);
+        errdefer allocator.free(value);
+        try values.append(allocator, value);
+    }
+
+    return values;
+}
+
+fn freeStringList(allocator: Allocator, values: *std.ArrayList([]u8)) void {
+    for (values.items) |value| allocator.free(value);
+    values.deinit(allocator);
+}
+
+fn pullBulkReturnTargetOwned(allocator: Allocator, form_body: []const u8) ![]u8 {
+    const owned = (try formValueOwned(allocator, form_body, "return_to")) orelse return allocator.dupe(u8, "/pulls");
+    defer allocator.free(owned);
+    const value = std.mem.trim(u8, owned, " \t\r\n");
+    if (!isSafePullsReturnTarget(value)) return allocator.dupe(u8, "/pulls");
+    return allocator.dupe(u8, value);
+}
+
+fn isSafePullsReturnTarget(value: []const u8) bool {
+    if (std.mem.indexOfAny(u8, value, "\r\n") != null) return false;
+    if (std.mem.eql(u8, value, "/pulls") or std.mem.eql(u8, value, "/prs")) return true;
+    if (std.mem.startsWith(u8, value, "/pulls?") or std.mem.startsWith(u8, value, "/prs?")) return true;
+    if (std.mem.startsWith(u8, value, "/pulls/") or std.mem.startsWith(u8, value, "/prs/")) return true;
+    return false;
 }
 
 test "pulls toolbar renders search form" {
