@@ -610,9 +610,10 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!optionalStringArrayWithin(payload, "milestones_added", git.max_payload_collection_items, git.max_payload_ref_bytes)) return "project.updated payload.milestones_added exceeds v1 collection limits";
         if (!optionalStringArray(payload, "milestones_removed")) return "project.updated payload.milestones_removed must be an array of strings";
         if (!optionalStringArrayWithin(payload, "milestones_removed", git.max_payload_collection_items, git.max_payload_ref_bytes)) return "project.updated payload.milestones_removed exceeds v1 collection limits";
+        if (!optionalProjectUpdateHealth(payload, "update_health")) return "project.updated payload.update_health must be on_track, at_risk, or off_track";
         if (!optionalString(payload, "update_body")) return "project.updated payload.update_body must be a string";
         if (!optionalStringWithin(payload, "update_body", git.max_payload_text_bytes)) return "project.updated payload.update_body exceeds v1 text size limit";
-        if (!hasAnyKey(payload, &.{ "name", "description", "state", "status", "priority", "start_at", "end_at", "leads_added", "leads_removed", "members_added", "members_removed", "labels_added", "labels_removed", "milestones_added", "milestones_removed", "update_body" })) return "project.updated payload must contain at least one update field";
+        if (!hasAnyKey(payload, &.{ "name", "description", "state", "status", "priority", "start_at", "end_at", "leads_added", "leads_removed", "members_added", "members_removed", "labels_added", "labels_removed", "milestones_added", "milestones_removed", "update_health", "update_body" })) return "project.updated payload must contain at least one update field";
         return null;
     }
     if (std.mem.eql(u8, event_type, "project.column_added") or std.mem.eql(u8, event_type, "project.column_removed")) {
@@ -1046,6 +1047,18 @@ fn hasProjectStatus(object: std.json.ObjectMap, key: []const u8) bool {
         std.mem.eql(u8, value, "In Progress") or
         std.mem.eql(u8, value, "Completed") or
         std.mem.eql(u8, value, "Canceled");
+}
+
+fn optionalProjectUpdateHealth(object: std.json.ObjectMap, key: []const u8) bool {
+    if (object.get(key) == null) return true;
+    return hasProjectUpdateHealth(object, key);
+}
+
+fn hasProjectUpdateHealth(object: std.json.ObjectMap, key: []const u8) bool {
+    const value = jsonString(object.get(key)) orelse return false;
+    return std.mem.eql(u8, value, "on_track") or
+        std.mem.eql(u8, value, "at_risk") or
+        std.mem.eql(u8, value, "off_track");
 }
 
 fn hasIssueRelationshipKind(object: std.json.ObjectMap, key: []const u8) bool {

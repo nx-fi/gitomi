@@ -93,8 +93,8 @@ pub fn renderEventsPage(allocator: Allocator, repo: Repo, target: []const u8) ![
     try appendActivityControls(&buf, allocator, &db, filters, pagination);
     try buf.appendSlice(allocator,
         \\  <div class="table-wrap">
-        \\    <table>
-        \\      <thead><tr><th>Event</th><th>Object</th><th>Actor</th><th>Commit</th><th>Ref</th></tr></thead>
+        \\    <table class="activity-table">
+        \\      <thead><tr><th>Event</th><th>Object</th><th>Actor</th><th>Commit</th><th>Ref</th><th class="activity-payload-th">Payload</th></tr></thead>
         \\      <tbody>
     );
 
@@ -122,7 +122,7 @@ pub fn renderEventsPage(allocator: Allocator, repo: Repo, target: []const u8) ![
             "No events match these filters."
         else
             "No Gitomi events found.";
-        try appendEmptyCell(&buf, allocator, 5, empty_message);
+        try appendEmptyCell(&buf, allocator, 6, empty_message);
     }
 
     try buf.appendSlice(allocator,
@@ -603,11 +603,49 @@ fn appendEventTableRow(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sqlit
         try appendTemplate(buf, allocator, "/{actor_device}", .{ .actor_device = event.actor_device });
     }
     try appendTemplate(buf, allocator,
-        \\</td><td><code>{commit}</code></td><td><code>{ref}</code></td></tr>
+        \\</td><td><code>{commit}</code></td><td><code>{ref}</code></td>
     , .{
         .commit = event.commit[0..@min(event.commit.len, 12)],
         .ref = event.ref,
     });
+    try appendEventPayloadCell(buf, allocator, event);
+    try buf.appendSlice(allocator, "</tr>");
+}
+
+fn appendEventPayloadCell(buf: *std.ArrayList(u8), allocator: Allocator, event: IndexedEvent) !void {
+    const payload_json = try eventPayloadJsonOwned(allocator, event);
+    defer allocator.free(payload_json);
+
+    try buf.appendSlice(allocator,
+        \\<td class="activity-payload-cell"><details class="activity-payload-menu" data-popover-menu>
+        \\  <summary class="activity-payload-trigger" aria-label="Show payload" title="Show payload"><span class="button-icon icon-file-code" aria-hidden="true"></span></summary>
+        \\  <div class="activity-payload-popover" role="dialog" aria-label="Payload"><pre><code>
+    );
+    try appendHtml(buf, allocator, payload_json);
+    try buf.appendSlice(allocator,
+        \\</code></pre></div>
+        \\</details></td>
+    );
+}
+
+fn eventPayloadJsonOwned(allocator: Allocator, event: IndexedEvent) ![]u8 {
+    if (!event.valid_json) return try allocator.dupe(u8, event.body);
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, event.body, .{}) catch {
+        return try allocator.dupe(u8, "Payload unavailable");
+    };
+    defer parsed.deinit();
+
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return try allocator.dupe(u8, "Payload unavailable"),
+    };
+    const payload = root.get("payload") orelse return try allocator.dupe(u8, "{}");
+
+    var out: std.io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    try std.json.Stringify.value(payload, .{ .whitespace = .indent_2 }, &out.writer);
+    return try out.toOwnedSlice();
 }
 
 fn appendEventObjectCell(
@@ -791,4 +829,34 @@ test "activity object cell links comment refs only to their parent object anchor
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "#comment-") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"><code>#") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "\">comment <code>#") == null);
+}
+
+test "activity payload cell renders parsed payload" {
+    const event = IndexedEvent{
+        .ref = "refs/gitomi/events/test",
+        .commit = "0123456789abcdef",
+        .event_hash = "hash",
+        .tree = "tree",
+        .subject = "subject",
+        .empty_tree = false,
+        .valid_json = true,
+        .event_type = "issue.updated",
+        .object_kind = "issue",
+        .object_id = "018f0000-0000-7000-8000-000000000005",
+        .actor_principal = "alice",
+        .actor_device = "laptop",
+        .seq = 1,
+        .occurred_at = "2026-05-18T00:00:00Z",
+        .domain_status = "accepted",
+        .rejection_reason = "",
+        .body = "{\"payload\":{\"title\":\"New title\",\"body\":\"<actual>\"}}",
+    };
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    try appendEventPayloadCell(&buf, std.testing.allocator, event);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "activity-payload-trigger") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "&lt;actual&gt;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "New title") != null);
 }

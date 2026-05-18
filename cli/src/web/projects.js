@@ -641,11 +641,11 @@
     });
   }
 
-  function initProjectStatusMenu(menu) {
-    if (menu.dataset.projectStatusMenuReady === "yes") return;
-    menu.dataset.projectStatusMenuReady = "yes";
+  function initProjectUpdateHealthMenu(menu) {
+    if (menu.dataset.projectUpdateHealthMenuReady === "yes") return;
+    menu.dataset.projectUpdateHealthMenuReady = "yes";
 
-    menu.querySelectorAll("input[type='radio'][name='status']").forEach(function (input) {
+    menu.querySelectorAll("input[type='radio'][name='update_health']").forEach(function (input) {
       input.addEventListener("change", function () {
         menu.open = false;
         const summary = menu.querySelector("summary");
@@ -1047,7 +1047,7 @@
     initProjectIndexTabs();
     initDatePickers();
     document.querySelectorAll("[data-project-issue-search]").forEach(initIssueSearchMenu);
-    document.querySelectorAll("[data-project-status-menu]").forEach(initProjectStatusMenu);
+    document.querySelectorAll("[data-project-update-health-menu]").forEach(initProjectUpdateHealthMenu);
     document.querySelectorAll("[data-project-choice-menu]").forEach(initProjectChoiceMenu);
     document.querySelectorAll(cardSelector).forEach(initCard);
     document.querySelectorAll(columnSelector).forEach(initColumn);

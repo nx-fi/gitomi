@@ -19,6 +19,7 @@ const appendRelativeTime = shared.appendRelativeTime;
 const appendTemplate = shared.appendTemplate;
 const isIssuePriority = cmd_common.isIssuePriority;
 const isProjectStatus = cmd_common.isProjectStatus;
+const isProjectUpdateHealth = cmd_common.isProjectUpdateHealth;
 const sendPlainResponse = shared.sendPlainResponse;
 const sendRedirect = shared.sendRedirect;
 const percentDecodeForm = issues_page.percentDecodeForm;
@@ -77,13 +78,13 @@ const ProjectMetrics = struct {
 
 const ProjectUpdateNote = struct {
     body: []u8,
-    status: []u8,
+    health: []u8,
     occurred_at: []u8,
     actor: []u8,
 
     fn deinit(self: *ProjectUpdateNote, allocator: Allocator) void {
         allocator.free(self.body);
-        allocator.free(self.status);
+        allocator.free(self.health);
         allocator.free(self.occurred_at);
         allocator.free(self.actor);
     }
@@ -197,23 +198,24 @@ pub fn handleProjectPropertiesPost(allocator: Allocator, repo: Repo, stream: std
         }
         if (!(try writeProjectUpdateOrFail(allocator, stream, project_id, .{ .description = description_owned }))) return;
     } else if (std.mem.eql(u8, action_owned, "add-update")) {
-        const status_owned = try requiredProjectFormValue(allocator, stream, form_body, "status", "Status is required\n");
-        const status = status_owned orelse return;
-        defer allocator.free(status);
-        if (!isProjectStatus(status)) {
-            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Status must be Backlog, Planned, In Progress, Completed, or Canceled\n");
+        const health_owned = try requiredProjectFormValue(allocator, stream, form_body, "update_health", "Update health is required\n");
+        const health = health_owned orelse return;
+        defer allocator.free(health);
+        if (!isProjectUpdateHealth(health)) {
+            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Update health must be on_track, at_risk, or off_track\n");
             return;
         }
+        const update_health = cmd_common.canonicalProjectUpdateHealth(health);
         const body_owned = (try formValueOwned(allocator, form_body, "update_body")) orelse try allocator.dupe(u8, "");
         defer allocator.free(body_owned);
         const trimmed_body = std.mem.trim(u8, body_owned, " \t\r\n");
         const effective_body: []const u8 = if (trimmed_body.len == 0) "" else body_owned;
-        if (try projectFormHashUnchanged(allocator, form_body, "project-update", status, effective_body)) {
+        if (try projectFormHashUnchanged(allocator, form_body, "project-update", update_health, effective_body)) {
             try redirectProjectOverview(allocator, stream, project_name_owned, project_ref);
             return;
         }
         const update_body: ?[]const u8 = if (effective_body.len == 0) null else effective_body;
-        if (!(try writeProjectUpdateOrFail(allocator, stream, project_id, .{ .status = status, .update_body = update_body }))) return;
+        if (!(try writeProjectUpdateOrFail(allocator, stream, project_id, .{ .update_health = update_health, .update_body = update_body }))) return;
     } else if (std.mem.eql(u8, action_owned, "add-milestones")) {
         var milestone_refs = try formValuesOwned(allocator, form_body, "milestone");
         defer freeStringList(allocator, &milestone_refs);
@@ -419,21 +421,21 @@ fn projectOverviewLocationOwned(allocator: Allocator, project_name: []const u8, 
     return location.toOwnedSlice(allocator);
 }
 
-fn projectFormHashUnchanged(allocator: Allocator, form_body: []const u8, kind: []const u8, status: []const u8, body: []const u8) !bool {
+fn projectFormHashUnchanged(allocator: Allocator, form_body: []const u8, kind: []const u8, marker: []const u8, body: []const u8) !bool {
     const previous_hash = try formTrimmedOwned(allocator, form_body, "previous_hash");
     defer allocator.free(previous_hash);
     if (previous_hash.len == 0) return false;
-    const submitted_hash = try projectContentHashOwned(allocator, kind, status, body);
+    const submitted_hash = try projectContentHashOwned(allocator, kind, marker, body);
     defer allocator.free(submitted_hash);
     return std.mem.eql(u8, previous_hash, submitted_hash);
 }
 
-fn projectContentHashOwned(allocator: Allocator, kind: []const u8, status: []const u8, body: []const u8) ![]u8 {
+fn projectContentHashOwned(allocator: Allocator, kind: []const u8, marker: []const u8, body: []const u8) ![]u8 {
     var source: std.ArrayList(u8) = .empty;
     defer source.deinit(allocator);
     try source.appendSlice(allocator, kind);
     try source.append(allocator, 0);
-    try source.appendSlice(allocator, status);
+    try source.appendSlice(allocator, marker);
     try source.append(allocator, 0);
     try source.appendSlice(allocator, body);
     return try util.sha256Hex(allocator, source.items);
@@ -602,11 +604,11 @@ fn loadLatestProjectUpdateNote(allocator: Allocator, db: *SqliteDb, summary: *co
             else => continue,
         };
         const update_body = event_mod.jsonString(payload.get("update_body"));
-        const status = event_mod.jsonString(payload.get("status"));
-        if (update_body == null and status == null) continue;
+        const health = projectUpdateHealthValue(event_mod.jsonString(payload.get("update_health")) orelse "");
+        if (update_body == null and health.len == 0) continue;
         return .{
             .body = try allocator.dupe(u8, update_body orelse ""),
-            .status = try allocator.dupe(u8, status orelse ""),
+            .health = try allocator.dupe(u8, health),
             .occurred_at = try allocator.dupe(u8, occurred_at),
             .actor = try allocator.dupe(u8, actor),
         };
@@ -618,7 +620,7 @@ fn loadLatestProjectUpdateNote(allocator: Allocator, db: *SqliteDb, summary: *co
 fn emptyProjectUpdateNote(allocator: Allocator) !ProjectUpdateNote {
     return .{
         .body = try allocator.dupe(u8, ""),
-        .status = try allocator.dupe(u8, ""),
+        .health = try allocator.dupe(u8, ""),
         .occurred_at = try allocator.dupe(u8, ""),
         .actor = try allocator.dupe(u8, ""),
     };
@@ -919,8 +921,9 @@ fn appendProjectResourceLink(
 }
 
 fn appendProjectUpdateSection(buf: *std.ArrayList(u8), allocator: Allocator, summary: *const ProjectSummary, note: *const ProjectUpdateNote) !void {
-    const effective_status = projectLifecycleStatusValue(if (note.status.len != 0) note.status else summary.status);
-    const status_tone = projectLifecycleStatusTone(effective_status);
+    const note_has_update = projectUpdateNoteHasUpdate(note);
+    const selected_health = projectUpdateHealthValue(if (note.health.len != 0) note.health else cmd_common.default_project_update_health);
+    const health_tone = projectUpdateHealthTone(selected_health);
     try buf.appendSlice(allocator,
         \\<section class="project-overview-section project-markdown-section project-update-section">
         \\  <details class="project-markdown-edit project-update-edit">
@@ -928,11 +931,11 @@ fn appendProjectUpdateSection(buf: *std.ArrayList(u8), allocator: Allocator, sum
         \\    <form class="project-markdown-form" method="post" action="/projects/properties" data-project-markdown-form data-project-content-kind="project-update">
     );
     try appendProjectHiddenFields(buf, allocator, summary);
-    try appendProjectHashFields(buf, allocator, "project-update", effective_status, note.body);
+    try appendProjectHashFields(buf, allocator, "project-update", selected_health, note.body);
     try buf.appendSlice(allocator,
         \\      <input type="hidden" name="action" value="add-update">
     );
-    try appendProjectStatusSelect(buf, allocator, effective_status);
+    try appendProjectUpdateHealthSelect(buf, allocator, selected_health);
     try shared.appendMarkdownEditor(buf, allocator, .{
         .name = "update_body",
         .rows = 6,
@@ -945,11 +948,11 @@ fn appendProjectUpdateSection(buf: *std.ArrayList(u8), allocator: Allocator, sum
         \\    </form>
         \\  </details>
         \\  <div class="project-overview-section-title project-update-section-title"><h2>Latest update</h2></div>
-        \\  <article class="project-update-card project-markdown-preview tone-{status_tone}">
+        \\  <article class="project-update-card project-markdown-preview tone-{health_tone}">
         \\    <header class="project-update-card-head">
         \\      <div class="project-update-card-meta">
-    , .{ .status_tone = status_tone });
-    try appendProjectLifecycleStatusChip(buf, allocator, effective_status);
+    , .{ .health_tone = health_tone });
+    if (note.health.len != 0) try appendProjectUpdateHealthChip(buf, allocator, note.health);
     if (note.actor.len != 0) {
         try project_issue_render.appendIssueAvatar(buf, allocator, note.actor, "project-update-avatar");
         try appendTemplate(buf, allocator, "<strong>{actor}</strong>", .{ .actor = note.actor });
@@ -967,7 +970,11 @@ fn appendProjectUpdateSection(buf: *std.ArrayList(u8), allocator: Allocator, sum
         \\    <div class="project-update-body markdown-body">
     );
     if (note.body.len == 0) {
-        try buf.appendSlice(allocator, "<p class=\"project-markdown-empty\">No update yet.</p>");
+        if (note_has_update) {
+            try buf.appendSlice(allocator, "<p class=\"project-markdown-empty\">No update details.</p>");
+        } else {
+            try buf.appendSlice(allocator, "<p class=\"project-markdown-empty\">No update yet.</p>");
+        }
     } else {
         try shared.appendMarkdownSource(buf, allocator, note.body, .{});
     }
@@ -1019,36 +1026,40 @@ fn appendProjectDescription(buf: *std.ArrayList(u8), allocator: Allocator, summa
     );
 }
 
-fn appendProjectStatusSelect(buf: *std.ArrayList(u8), allocator: Allocator, selected_status: []const u8) !void {
-    const selected_project_status = projectLifecycleStatusValue(selected_status);
+fn projectUpdateNoteHasUpdate(note: *const ProjectUpdateNote) bool {
+    return note.body.len != 0 or note.health.len != 0 or note.occurred_at.len != 0 or note.actor.len != 0;
+}
+
+fn appendProjectUpdateHealthSelect(buf: *std.ArrayList(u8), allocator: Allocator, selected_health: []const u8) !void {
+    const selected_update_health = projectUpdateHealthValue(selected_health);
     try buf.appendSlice(allocator,
-        \\<details class="project-update-status-menu" data-popover-menu data-project-status-menu>
-        \\  <summary class="project-update-status-control" aria-label="Change status">
+        \\<details class="project-update-health-menu" data-popover-menu data-project-update-health-menu>
+        \\  <summary class="project-update-health-control" aria-label="Change update health">
     );
-    for (cmd_common.project_status_values) |status| {
+    for (cmd_common.project_update_health_values) |health| {
         try appendTemplate(buf, allocator,
-            \\<span class="project-update-status-selected project-update-status-selected-{class}">
-        , .{ .class = projectUpdateStatusValueClass(status) });
-        try appendProjectLifecycleStatusTriggerChip(buf, allocator, status, "project-update-status-trigger-chip", "project-update-status-chevron");
+            \\<span class="project-update-health-selected project-update-health-selected-{class}">
+        , .{ .class = projectUpdateHealthValueClass(health) });
+        try appendProjectUpdateHealthTriggerChip(buf, allocator, health);
         try buf.appendSlice(allocator, "</span>");
     }
     try buf.appendSlice(allocator,
         \\  </summary>
-        \\  <div class="project-update-status-options" role="radiogroup" aria-label="Status">
+        \\  <div class="project-update-health-options" role="radiogroup" aria-label="Update health">
     );
-    for (cmd_common.project_status_values) |status| {
+    for (cmd_common.project_update_health_values) |health| {
         try appendTemplate(buf, allocator,
-            \\<label class="project-update-status-option tone-{tone}">
-            \\  <input type="radio" name="status" value="{status}" required
+            \\<label class="project-update-health-option tone-{tone}">
+            \\  <input type="radio" name="update_health" value="{health}" required
         , .{
-            .tone = projectLifecycleStatusTone(status),
-            .status = status,
+            .tone = projectUpdateHealthTone(health),
+            .health = health,
         });
-        if (std.mem.eql(u8, selected_project_status, status)) try buf.appendSlice(allocator, " checked");
+        if (std.mem.eql(u8, selected_update_health, health)) try buf.appendSlice(allocator, " checked");
         try buf.appendSlice(allocator, ">");
-        try appendProjectLifecycleStatusChip(buf, allocator, status);
+        try appendProjectUpdateHealthChip(buf, allocator, health);
         try buf.appendSlice(allocator,
-            \\  <span class="project-update-status-check" aria-hidden="true"></span>
+            \\  <span class="project-update-health-check" aria-hidden="true"></span>
             \\</label>
         );
     }
@@ -1058,13 +1069,44 @@ fn appendProjectStatusSelect(buf: *std.ArrayList(u8), allocator: Allocator, sele
     );
 }
 
-fn projectUpdateStatusValueClass(value: []const u8) []const u8 {
-    const status = projectLifecycleStatusValue(value);
-    if (std.mem.eql(u8, status, "Backlog")) return "backlog";
-    if (std.mem.eql(u8, status, "Planned")) return "planned";
-    if (std.mem.eql(u8, status, "Completed")) return "completed";
-    if (std.mem.eql(u8, status, "Canceled")) return "canceled";
-    return "progress";
+fn appendProjectUpdateHealthChip(buf: *std.ArrayList(u8), allocator: Allocator, health: []const u8) !void {
+    const update_health = projectUpdateHealthValue(health);
+    try appendTemplate(buf, allocator,
+        \\<span class="project-update-health-chip tone-{tone}"><span class="project-update-health-mark" aria-hidden="true"></span>{health}</span>
+    , .{
+        .tone = projectUpdateHealthTone(update_health),
+        .health = projectUpdateHealthLabel(update_health),
+    });
+}
+
+fn appendProjectUpdateHealthTriggerChip(buf: *std.ArrayList(u8), allocator: Allocator, health: []const u8) !void {
+    const update_health = projectUpdateHealthValue(health);
+    try appendTemplate(buf, allocator,
+        \\<span class="project-update-health-chip project-update-health-trigger-chip tone-{tone}"><span class="project-update-health-mark" aria-hidden="true"></span>{health}<span class="project-update-health-chevron" aria-hidden="true"></span></span>
+    , .{
+        .tone = projectUpdateHealthTone(update_health),
+        .health = projectUpdateHealthLabel(update_health),
+    });
+}
+
+fn projectUpdateHealthValue(value: []const u8) []const u8 {
+    return cmd_common.canonicalProjectUpdateHealth(value);
+}
+
+fn projectUpdateHealthLabel(value: []const u8) []const u8 {
+    return cmd_common.projectUpdateHealthLabel(value);
+}
+
+fn projectUpdateHealthValueClass(value: []const u8) []const u8 {
+    const health = projectUpdateHealthValue(value);
+    if (std.mem.eql(u8, health, "on_track")) return "on-track";
+    if (std.mem.eql(u8, health, "at_risk")) return "at-risk";
+    if (std.mem.eql(u8, health, "off_track")) return "off-track";
+    return "none";
+}
+
+fn projectUpdateHealthTone(value: []const u8) []const u8 {
+    return projectUpdateHealthValueClass(value);
 }
 
 fn appendProjectLifecycleStatusChip(buf: *std.ArrayList(u8), allocator: Allocator, status: []const u8) !void {
@@ -2259,6 +2301,38 @@ test "project overview header renders plain project name" {
 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<h1>Release &amp; Plan</h1>") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<h1>@Release") == null);
+}
+
+test "project latest update renders update health instead of lifecycle status" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    var summary = ProjectSummary{
+        .id = try std.testing.allocator.dupe(u8, "p1"),
+        .name = try std.testing.allocator.dupe(u8, "Release"),
+        .description = try std.testing.allocator.dupe(u8, ""),
+        .state = try std.testing.allocator.dupe(u8, "open"),
+        .status = try std.testing.allocator.dupe(u8, cmd_common.default_project_status),
+        .status_occurred_at = try std.testing.allocator.dupe(u8, ""),
+        .priority = try std.testing.allocator.dupe(u8, ""),
+        .start_at = try std.testing.allocator.dupe(u8, ""),
+        .end_at = try std.testing.allocator.dupe(u8, ""),
+        .created_at = try std.testing.allocator.dupe(u8, ""),
+        .author_principal = try std.testing.allocator.dupe(u8, ""),
+    };
+    defer summary.deinit(std.testing.allocator);
+    var note = ProjectUpdateNote{
+        .body = try std.testing.allocator.dupe(u8, "Needs attention"),
+        .health = try std.testing.allocator.dupe(u8, "at_risk"),
+        .occurred_at = try std.testing.allocator.dupe(u8, ""),
+        .actor = try std.testing.allocator.dupe(u8, ""),
+    };
+    defer note.deinit(std.testing.allocator);
+
+    try appendProjectUpdateSection(&buf, std.testing.allocator, &summary, &note);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "At risk") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "name=\"update_health\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Planned") == null);
 }
 
 test "project issues tab stays in project workspace" {

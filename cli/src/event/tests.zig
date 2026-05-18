@@ -10,6 +10,7 @@ const event_schema = model.event_schema;
 const IssueProjectPlacement = model.IssueProjectPlacement;
 const buildIssueOpenedJson = builders.buildIssueOpenedJson;
 const buildIssueUpdatedJson = builders.buildIssueUpdatedJson;
+const buildProjectUpdatedJson = builders.buildProjectUpdatedJson;
 const buildPullMergedJsonWithMetadata = builders.buildPullMergedJsonWithMetadata;
 const validateEventEnvelope = validation.validateEventEnvelope;
 const parseValidatedEnvelope = validation.parseValidatedEnvelope;
@@ -156,6 +157,40 @@ test "issue updated event json supports milestone and projects" {
     const project = payload.get("projects").?.array.items[0].object;
     try std.testing.expectEqualStrings("Roadmap", project.get("project").?.string);
     try std.testing.expectEqualStrings("Doing", project.get("column").?.string);
+}
+
+test "project updated event json supports update health" {
+    var cfg = Config{
+        .allocator = std.testing.allocator,
+        .repo_id = try std.testing.allocator.dupe(u8, "018f0000-0000-7000-8000-000000000001"),
+        .principal = try std.testing.allocator.dupe(u8, "alice"),
+        .device = try std.testing.allocator.dupe(u8, "laptop"),
+        .seq = 0,
+    };
+    defer cfg.deinit();
+
+    const body = try buildProjectUpdatedJson(
+        std.testing.allocator,
+        cfg,
+        1,
+        "018f0000-0000-7000-8000-000000000005",
+        "018f0000-0000-7000-8000-000000000002",
+        "018f0000-0000-7000-8000-000000000003",
+        "2026-05-13T18:30:59Z",
+        .{},
+        .{ .update_health = "at_risk", .update_body = "Needs attention" },
+    );
+    defer std.testing.allocator.free(body);
+
+    var envelope = try parseValidatedEnvelope(std.testing.allocator, body);
+    defer envelope.deinit();
+    try std.testing.expectEqualStrings("project.updated", envelope.event_type);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+    defer parsed.deinit();
+    const payload = parsed.value.object.get("payload").?.object;
+    try std.testing.expectEqualStrings("at_risk", payload.get("update_health").?.string);
+    try std.testing.expectEqualStrings("Needs attention", payload.get("update_body").?.string);
 }
 
 test "validated envelope rejects oversized payload fields and arrays" {

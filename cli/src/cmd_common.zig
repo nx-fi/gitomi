@@ -397,6 +397,8 @@ pub fn isIssueStatus(value: []const u8) bool {
 
 pub const default_project_status = "Planned";
 pub const project_status_values = [_][]const u8{ "Backlog", "Planned", "In Progress", "Completed", "Canceled" };
+pub const default_project_update_health = "on_track";
+pub const project_update_health_values = [_][]const u8{ "on_track", "at_risk", "off_track" };
 
 pub fn isProjectStatus(value: []const u8) bool {
     for (project_status_values) |status| {
@@ -416,6 +418,25 @@ pub fn canonicalProjectStatus(value: []const u8) []const u8 {
     if (std.mem.eql(u8, value, "Done")) return "Completed";
     if (std.mem.eql(u8, value, "Failed")) return "Canceled";
     return value;
+}
+
+pub fn isProjectUpdateHealth(value: []const u8) bool {
+    return canonicalProjectUpdateHealth(value).len != 0;
+}
+
+pub fn canonicalProjectUpdateHealth(value: []const u8) []const u8 {
+    if (std.mem.eql(u8, value, "on_track") or std.mem.eql(u8, value, "on-track") or std.ascii.eqlIgnoreCase(value, "On Track")) return "on_track";
+    if (std.mem.eql(u8, value, "at_risk") or std.mem.eql(u8, value, "at-risk") or std.ascii.eqlIgnoreCase(value, "At Risk")) return "at_risk";
+    if (std.mem.eql(u8, value, "off_track") or std.mem.eql(u8, value, "off-track") or std.ascii.eqlIgnoreCase(value, "Off Track")) return "off_track";
+    return "";
+}
+
+pub fn projectUpdateHealthLabel(value: []const u8) []const u8 {
+    const health = canonicalProjectUpdateHealth(value);
+    if (std.mem.eql(u8, health, "on_track")) return "On track";
+    if (std.mem.eql(u8, health, "at_risk")) return "At risk";
+    if (std.mem.eql(u8, health, "off_track")) return "Off track";
+    return "No health";
 }
 
 pub fn isProjectState(value: []const u8) bool {

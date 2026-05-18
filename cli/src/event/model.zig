@@ -153,6 +153,7 @@ pub const ProjectUpdate = struct {
     labels_removed: []const []const u8 = &.{},
     milestones_added: []const []const u8 = &.{},
     milestones_removed: []const []const u8 = &.{},
+    update_health: ?[]const u8 = null,
     update_body: ?[]const u8 = null,
 
     pub fn hasChanges(self: ProjectUpdate) bool {
@@ -171,6 +172,7 @@ pub const ProjectUpdate = struct {
             self.labels_removed.len != 0 or
             self.milestones_added.len != 0 or
             self.milestones_removed.len != 0 or
+            self.update_health != null or
             self.update_body != null;
     }
 };

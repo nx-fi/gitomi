@@ -808,12 +808,12 @@
   margin: 0;
   color: var(--muted);
 }
-.project-update-status-menu {
+.project-update-health-menu {
   position: relative;
   width: fit-content;
   max-width: 100%;
 }
-.project-update-status-control {
+.project-update-health-control {
   display: inline-flex;
   align-items: center;
   max-width: 100%;
@@ -825,32 +825,30 @@
   cursor: pointer;
   list-style: none;
 }
-.project-update-status-control::-webkit-details-marker {
+.project-update-health-control::-webkit-details-marker {
   display: none;
 }
-.project-update-status-control:focus-visible {
+.project-update-health-control:focus-visible {
   outline: 2px solid color-mix(in oklch, var(--brand) 55%, transparent);
   outline-offset: 2px;
 }
-.project-update-status-control:hover .project-update-status-trigger-chip,
-.project-update-status-menu[open] .project-update-status-trigger-chip {
+.project-update-health-control:hover .project-update-health-trigger-chip,
+.project-update-health-menu[open] .project-update-health-trigger-chip {
   box-shadow: inset 0 0 0 1px color-mix(in oklch, currentColor 32%, transparent);
 }
-.project-update-status-selected {
+.project-update-health-selected {
   display: none;
   min-width: 0;
 }
-.project-update-status-menu:has(input[value="Backlog"]:checked) .project-update-status-selected-backlog,
-.project-update-status-menu:has(input[value="Planned"]:checked) .project-update-status-selected-planned,
-.project-update-status-menu:has(input[value="In Progress"]:checked) .project-update-status-selected-progress,
-.project-update-status-menu:has(input[value="Completed"]:checked) .project-update-status-selected-completed,
-.project-update-status-menu:has(input[value="Canceled"]:checked) .project-update-status-selected-canceled {
+.project-update-health-menu:has(input[value="on_track"]:checked) .project-update-health-selected-on-track,
+.project-update-health-menu:has(input[value="at_risk"]:checked) .project-update-health-selected-at-risk,
+.project-update-health-menu:has(input[value="off_track"]:checked) .project-update-health-selected-off-track {
   display: inline-flex;
 }
-.project-update-status-trigger-chip {
+.project-update-health-trigger-chip {
   padding-right: 9px;
 }
-.project-update-status-chevron {
+.project-update-health-chevron {
   width: 7px;
   height: 7px;
   margin-left: 1px;
@@ -861,10 +859,10 @@
   opacity: 0.82;
   transform: translateY(-2px) rotate(45deg);
 }
-.project-update-status-menu[open] .project-update-status-chevron {
+.project-update-health-menu[open] .project-update-health-chevron {
   transform: translateY(2px) rotate(225deg);
 }
-.project-update-status-options {
+.project-update-health-options {
   position: absolute;
   top: calc(100% + 6px);
   left: 0;
@@ -879,7 +877,7 @@
   border-radius: var(--radius-lg);
   box-shadow: var(--dropdown-shadow);
 }
-.project-update-status-option {
+.project-update-health-option {
   position: relative;
   display: flex;
   align-items: center;
@@ -890,15 +888,15 @@
   border-radius: var(--radius-md);
   cursor: pointer;
 }
-.project-update-status-option:hover,
-.project-update-status-option:has(input:focus-visible) {
+.project-update-health-option:hover,
+.project-update-health-option:has(input:focus-visible) {
   background: var(--dropdown-hover-bg);
 }
-.project-update-status-option:has(input:focus-visible) {
+.project-update-health-option:has(input:focus-visible) {
   outline: 2px solid color-mix(in oklch, var(--brand) 45%, transparent);
   outline-offset: 1px;
 }
-.project-update-status-option input {
+.project-update-health-option input {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -907,7 +905,7 @@
   opacity: 0;
   cursor: pointer;
 }
-.project-update-status-check {
+.project-update-health-check {
   position: relative;
   display: inline-grid;
   place-items: center;
@@ -918,11 +916,11 @@
   border: 2px solid transparent;
   border-radius: 50%;
 }
-.project-update-status-option:has(input:checked) .project-update-status-check {
+.project-update-health-option:has(input:checked) .project-update-health-check {
   color: var(--brand);
   border-color: color-mix(in oklch, var(--brand) 32%, transparent);
 }
-.project-update-status-option:has(input:checked) .project-update-status-check::before {
+.project-update-health-option:has(input:checked) .project-update-health-check::before {
   content: "";
   width: 7px;
   height: 4px;
@@ -994,7 +992,7 @@
   min-width: 0;
 }
 .project-update-card-meta > strong,
-.project-update-card-meta > span:not(.project-lifecycle-status-chip):not(.issue-avatar) {
+.project-update-card-meta > span:not(.project-update-health-chip):not(.project-lifecycle-status-chip):not(.issue-avatar) {
   min-width: 0;
   color: var(--muted);
   font-size: 13px;
@@ -1007,6 +1005,68 @@
   width: 24px;
   height: 24px;
   font-size: 11px;
+}
+.project-update-health-chip {
+  --project-update-health-bg: var(--subtle);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  padding: 0 10px;
+  color: var(--text);
+  background: var(--project-update-health-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  font-size: 13px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.project-update-health-chip.tone-on-track {
+  --project-update-health-bg: color-mix(in oklch, var(--green) 13%, var(--panel));
+  color: var(--green);
+  border-color: color-mix(in oklch, var(--green) 34%, var(--border));
+}
+.project-update-health-chip.tone-at-risk {
+  --project-update-health-bg: color-mix(in oklch, var(--tone-warning) 13%, var(--panel));
+  color: var(--tone-warning);
+  border-color: color-mix(in oklch, var(--tone-warning) 38%, var(--border));
+}
+.project-update-health-chip.tone-off-track {
+  --project-update-health-bg: color-mix(in oklch, var(--danger) 13%, var(--panel));
+  color: var(--danger);
+  border-color: color-mix(in oklch, var(--danger) 36%, var(--border));
+}
+.project-update-health-mark {
+  position: relative;
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  color: currentColor;
+  background: currentColor;
+  border-radius: 50%;
+}
+.project-update-health-chip.tone-at-risk .project-update-health-mark {
+  width: 12px;
+  height: 12px;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+  border-radius: 0;
+}
+.project-update-health-chip.tone-off-track .project-update-health-mark::before,
+.project-update-health-chip.tone-off-track .project-update-health-mark::after {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 4px;
+  width: 6px;
+  height: 2px;
+  background: var(--project-update-health-bg);
+  border-radius: 999px;
+}
+.project-update-health-chip.tone-off-track .project-update-health-mark::before {
+  transform: rotate(45deg);
+}
+.project-update-health-chip.tone-off-track .project-update-health-mark::after {
+  transform: rotate(-45deg);
 }
 .project-lifecycle-status-chip {
   --project-lifecycle-status-bg: var(--subtle);

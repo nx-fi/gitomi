@@ -693,7 +693,7 @@ fn handleAccessPage(ctx: WebContext) !void {
 }
 
 fn handleSettingsPage(ctx: WebContext) !void {
-    try sendOwnedHtml(ctx, try theme_settings_page.renderThemePage(ctx.allocator, ctx.repo));
+    try sendRedirectReplacingPath(ctx, "/settings", "/events", false);
 }
 
 fn handleSettingsThemePage(ctx: WebContext) !void {
