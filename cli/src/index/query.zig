@@ -712,6 +712,8 @@ pub fn resolveMilestoneId(allocator: Allocator, repo: Repo, raw_ref: []const u8)
     const typed_uuid_ref = std.mem.startsWith(u8, trimmed, "milestone:");
     const value = if (typed_uuid_ref)
         trimmed["milestone:".len..]
+    else if (std.mem.startsWith(u8, trimmed, "#"))
+        trimmed[1..]
     else if (std.mem.startsWith(u8, trimmed, "^"))
         trimmed[1..]
     else
@@ -729,7 +731,17 @@ pub fn resolveMilestoneId(allocator: Allocator, repo: Repo, raw_ref: []const u8)
         return CliError.InvalidReference;
     }
 
-    if (isUuidPrefix(value)) {
+    if (util.looksLikeUuid(value)) {
+        if (try lookupExactObjectIdInDb(allocator, &db, "milestones", value)) |id| return id;
+        try eprint("gt milestone: no milestone matches {s}\n", .{value});
+        return CliError.NotFound;
+    }
+
+    if (!typed_uuid_ref and util.isObjectRefPrefix(value)) {
+        if (try lookupObjectIdByHashRefInDb(allocator, &db, "milestones", "milestone", value)) |id| return id;
+    }
+
+    if (typed_uuid_ref or isUuidPrefix(value)) {
         const pattern = try std.fmt.allocPrint(allocator, "{s}%", .{value});
         defer allocator.free(pattern);
         var stmt = try db.prepare("SELECT id FROM milestones WHERE id LIKE ? ORDER BY id LIMIT 2");

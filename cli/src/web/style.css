@@ -726,6 +726,15 @@ main.page-projects:has(.project-overview-page) {
 .activity-list small {
   color: var(--muted);
 }
+.activity-panel {
+  overflow: visible;
+}
+.activity-toolbar {
+  padding: 16px 18px 0;
+}
+.activity-filter-menus {
+  padding: 0;
+}
 .list { min-height: 92px; }
 .issues-toolbar {
   display: grid;
@@ -3392,7 +3401,7 @@ main.page-projects:has(.project-overview-page) {
   border-radius: var(--radius-md);
   font: inherit;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 400;
   cursor: pointer;
 }
 .issue-sidebar-add-form button {
@@ -3616,6 +3625,35 @@ main.page-projects:has(.project-overview-page) {
 .issue-sidebar-link-choice {
   grid-template-columns: 22px minmax(0, auto) minmax(0, 1fr);
 }
+.issue-sidebar-issue-choice {
+  grid-template-columns: 22px 18px minmax(0, 1fr) auto;
+}
+.issue-sidebar-choice-ref {
+  justify-self: end;
+}
+.issue-sidebar-issue-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  color: var(--muted);
+  border: 2px solid currentColor;
+  border-radius: 50%;
+}
+.issue-sidebar-issue-icon.is-open {
+  color: var(--green);
+}
+.issue-sidebar-issue-icon.is-closed {
+  color: var(--tone-merged);
+}
+.issue-sidebar-issue-icon.is-closed::before {
+  content: "";
+  width: 7px;
+  height: 4px;
+  border-bottom: 2px solid currentColor;
+  border-left: 2px solid currentColor;
+  transform: translateY(-1px) rotate(-45deg);
+}
 .issue-sidebar-command-list {
   display: grid;
   padding: 8px 0;
@@ -3661,6 +3699,14 @@ main.page-projects:has(.project-overview-page) {
   padding: 0;
   color: var(--muted);
   line-height: 1;
+}
+.issue-meta-sidebar :is(input:not([type="hidden"]), select, textarea) {
+  background-color: var(--bg);
+}
+.issue-meta-sidebar :is(button, .button, [role="button"]),
+.issue-meta-sidebar .issue-sidebar-picker-primary,
+.issue-meta-sidebar .issue-relationship-remove-form button {
+  font-weight: 400;
 }
 .issue-sidebar-add-form button:hover,
 .issue-sidebar-remove-form button:hover {
@@ -3762,7 +3808,7 @@ main.page-projects:has(.project-overview-page) {
   border: 0;
   border-radius: var(--radius-md);
   font-size: 14px;
-  font-weight: 800;
+  font-weight: 400;
   line-height: 1;
   cursor: pointer;
 }
@@ -4379,14 +4425,18 @@ main.page-projects:has(.project-overview-page) {
 }
 .project-overview-page {
   min-width: 0;
+  overflow: hidden;
 }
 .project-overview-head {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
   gap: 24px;
-  width: min(760px, 100%);
-  margin: 42px auto 18px;
+  width: 100%;
+  margin: 0;
+  padding: 28px 26px;
+  background: var(--titlebar-bg);
+  border-bottom: 1px solid var(--border);
 }
 .project-overview-title {
   display: flex;
@@ -4400,7 +4450,7 @@ main.page-projects:has(.project-overview-page) {
 .project-overview-title h1 {
   margin: 5px 0 4px;
   overflow-wrap: anywhere;
-  font-size: 28px;
+  font-size: 32px;
   line-height: 1.15;
 }
 .project-overview-title p:not(.eyebrow) {
@@ -4459,8 +4509,9 @@ main.page-projects:has(.project-overview-page) {
   justify-content: space-between;
   gap: 14px;
   min-width: 0;
-  margin: 0 0 24px;
-  padding: 0 2px;
+  margin: 0;
+  padding: 0 26px;
+  background: var(--panel);
   border-bottom: 1px solid var(--border);
 }
 .project-overview-primary-tabs,
@@ -4513,17 +4564,18 @@ main.page-projects:has(.project-overview-page) {
 }
 .project-overview-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 330px);
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 360px);
   gap: 28px;
   align-items: start;
+  padding: 26px 28px 28px;
 }
 .project-overview-main {
   display: grid;
   gap: 26px;
-  width: min(760px, 100%);
-  justify-self: center;
+  width: 100%;
+  justify-self: stretch;
   min-width: 0;
-  padding-bottom: 48px;
+  padding-bottom: 0;
 }
 .project-overview-sidebar {
   position: sticky;
@@ -4709,14 +4761,39 @@ main.page-projects:has(.project-overview-page) {
   justify-content: space-between;
   gap: 12px;
 }
+.project-overview-section-title > div,
+.project-overview-side-panel-head > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.project-overview-section-meta,
+.project-overview-side-kicker {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
 .project-overview-add {
   display: inline-grid;
   place-items: center;
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
   color: var(--muted);
-  font-size: 18px;
-  font-weight: 500;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+}
+.project-overview-add:hover {
+  color: var(--text);
+  background: var(--button-secondary-bg);
+  border-color: var(--border);
+  text-decoration: none;
+}
+.project-overview-add .project-add-icon {
+  width: 14px;
+  height: 14px;
 }
 .project-overview-resource-links {
   display: flex;
@@ -4786,6 +4863,16 @@ main.page-projects:has(.project-overview-page) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.project-overview-milestone-row a {
+  min-width: 0;
+  color: var(--text);
+}
+.project-overview-milestone-row a:hover {
+  color: var(--link-hover-color);
+}
+.project-overview-milestone-row.is-complete > .button-icon {
+  color: var(--green);
 }
 .project-overview-milestone-row div > span {
   display: block;
@@ -6159,6 +6246,13 @@ body.has-modal {
   display: block;
   margin-bottom: 3px;
 }
+.milestone-title-link {
+  color: var(--text);
+}
+.milestone-title-link:hover {
+  color: var(--link-hover-color);
+  text-decoration: none;
+}
 .milestone-title-cell code {
   color: var(--muted);
 }
@@ -6252,6 +6346,85 @@ body.has-modal {
 .milestone-row-actions {
   display: flex;
   justify-content: flex-end;
+  min-width: 0;
+}
+.milestone-detail-page,
+.milestone-form-page {
+  display: grid;
+  gap: 18px;
+}
+.milestone-detail-head {
+  padding-top: 4px;
+}
+.milestone-detail-actions {
+  align-items: center;
+}
+.milestone-state-form {
+  display: inline-flex;
+  margin: 0;
+}
+.milestone-detail-meta {
+  gap: 8px 10px;
+}
+.milestone-detail-description {
+  padding: 14px 0 2px;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+}
+.milestone-detail-progress {
+  display: grid;
+  gap: 8px;
+}
+.milestone-detail-progress-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 14px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 600;
+}
+.milestone-detail-progress-line strong {
+  color: var(--text);
+}
+.milestone-detail-issues {
+  margin-top: 12px;
+}
+.milestone-detail-issues-head {
+  grid-template-columns: 44px auto minmax(0, 1fr);
+}
+.milestone-detail-issue-row .issue-row-side {
+  min-height: 1px;
+}
+.milestone-form-page {
+  gap: 0;
+}
+.milestone-form-head {
+  padding: 0 0 14px;
+  border-bottom: 1px solid var(--border);
+}
+.milestone-form-head h1 {
+  margin: 0;
+  font-size: 28px;
+  line-height: 1.2;
+}
+.milestone-form {
+  gap: 20px;
+  padding: 24px 0;
+  border-bottom: 1px solid var(--border);
+}
+.milestone-form textarea {
+  min-height: 188px;
+  font-family: inherit;
+}
+.milestone-form-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 24px;
+}
+.milestone-form-state-slot {
   min-width: 0;
 }
 .milestone-progress {
@@ -12080,6 +12253,26 @@ input[type="reset"]:hover,
     align-items: stretch;
     flex-direction: column;
   }
+  .milestone-detail-actions,
+  .milestone-form-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .milestone-detail-actions {
+    justify-content: flex-start;
+  }
+  .milestone-state-form,
+  .milestone-state-form .button,
+  .milestone-form-footer .form-actions,
+  .milestone-form-footer .button {
+    width: 100%;
+  }
+  .milestone-form-footer .form-actions {
+    display: grid;
+  }
+  .milestone-detail-issues-head {
+    grid-template-columns: 38px minmax(0, 1fr);
+  }
   .project-create-layout,
   .project-page-layout {
     grid-template-columns: 1fr;
@@ -12133,13 +12326,14 @@ input[type="reset"]:hover,
     flex-direction: column;
   }
   .project-overview-head {
-    margin-top: 20px;
+    padding: 22px 18px;
   }
   .project-overview-head-stats {
     justify-content: flex-start;
   }
   .project-overview-layout {
     grid-template-columns: 1fr;
+    padding: 18px 16px 20px;
   }
   .project-overview-main {
     width: 100%;

@@ -24,7 +24,7 @@ const loadConfig = repo_mod.loadConfig;
 const default_web_shortcut_leader = "Space";
 const default_web_shortcut_keys = "A S D F J K L E R U I O W Q P Z X C V B N M G H Y T";
 const default_web_shortcut_timeout_ms: u64 = 900;
-const asset_version = "20260518-theme-system";
+const asset_version = "20260518-project-milestones";
 
 const WebStats = struct {
     inbox_refs: usize = 0,
@@ -1239,9 +1239,9 @@ pub fn appendSettingsLayoutStart(buf: *std.ArrayList(u8), allocator: Allocator, 
         \\  <aside class="project-page-sidebar settings-page-sidebar">
         \\    <nav class="project-page-tabs settings-page-tabs" aria-label="Settings sections">
     );
-    try appendSettingsTab(buf, allocator, active, "theme", "/settings/theme", "icon-theme", "Theme");
     try appendSettingsTab(buf, allocator, active, "events", "/events", "icon-history", "Activity");
     try appendSettingsTab(buf, allocator, active, "labels", "/settings/labels", "icon-labels", "Labels");
+    try appendSettingsTab(buf, allocator, active, "theme", "/settings/theme", "icon-theme", "Theme");
     try appendSettingsTab(buf, allocator, active, "models", "/settings/models", "icon-models", "AI Models");
     try appendSettingsTab(buf, allocator, active, "access", "/access", "icon-users", "Access");
     try buf.appendSlice(allocator,

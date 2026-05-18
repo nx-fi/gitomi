@@ -264,7 +264,7 @@ fn appendIssueSidebarMilestone(buf: *std.ArrayList(u8), allocator: Allocator, db
 
 fn appendIssueSidebarRelationships(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, raw_ref: []const u8, issue_id: []const u8, body: []const u8) !void {
     try appendIssueSidebarEditableSectionStart(buf, allocator, "Relationships", "Add relationship");
-    try appendIssueSidebarRelationshipsMenu(buf, allocator, raw_ref);
+    try appendIssueSidebarRelationshipsMenu(buf, allocator, db, raw_ref, issue_id);
     try appendIssueSidebarEditableSectionBodyStart(buf, allocator);
     var relationships: std.ArrayList(RelationshipItem) = .empty;
     defer {
@@ -578,13 +578,55 @@ fn appendIssueSidebarStatusMenu(buf: *std.ArrayList(u8), allocator: Allocator, r
     try appendIssueSidebarMenuGroupEnd(buf, allocator);
 }
 
-fn appendIssueSidebarRelationshipsMenu(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8) !void {
-    try appendIssueSidebarSingleInputForm(buf, allocator, raw_ref, "add-parent", "target", "Add parent", "Parent issue ref");
+fn appendIssueSidebarRelationshipsMenu(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, raw_ref: []const u8, issue_id: []const u8) !void {
+    try appendIssueSidebarMenuFilter(buf, allocator, "Search issues");
+    try appendIssueSidebarRelationshipIssueGroup(buf, allocator, db, raw_ref, issue_id, "Set parent issue", "add-parent", "Set parent");
     try appendIssueSidebarSingleInputForm(buf, allocator, raw_ref, "create-sub-issue", "title", "Create sub-issue", "Sub-issue title");
-    try appendIssueSidebarSingleInputForm(buf, allocator, raw_ref, "add-sub-issue", "target", "Add sub-issue", "Sub-issue ref");
-    try appendIssueSidebarSingleInputForm(buf, allocator, raw_ref, "add-blocked-by", "target", "Mark blocked by", "Blocking issue ref");
-    try appendIssueSidebarSingleInputForm(buf, allocator, raw_ref, "add-blocking", "target", "Mark as blocking", "Blocked issue ref");
+    try appendIssueSidebarRelationshipIssueGroup(buf, allocator, db, raw_ref, issue_id, "Add sub-issue", "add-sub-issue", "Add sub-issue");
+    try appendIssueSidebarRelationshipIssueGroup(buf, allocator, db, raw_ref, issue_id, "Mark current issue as blocked by", "add-blocked-by", "Mark blocked by");
+    try appendIssueSidebarRelationshipIssueGroup(buf, allocator, db, raw_ref, issue_id, "Mark current issue as blocking", "add-blocking", "Mark as blocking");
     try appendIssueSidebarSingleInputForm(buf, allocator, raw_ref, "add-concurrent-group", "group", "Add to group", "Concurrent group");
+}
+
+fn appendIssueSidebarRelationshipIssueGroup(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    raw_ref: []const u8,
+    current_issue_id: []const u8,
+    title: []const u8,
+    action: []const u8,
+    button_label: []const u8,
+) !void {
+    try appendIssueSidebarMenuGroupStart(buf, allocator, title);
+    var stmt = try db.prepare(
+        \\SELECT i.id, i.title, i.state, COALESCE(a.number, 0)
+        \\FROM issues i
+        \\LEFT JOIN legacy_aliases a
+        \\  ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
+        \\WHERE i.id <> ?
+        \\ORDER BY CASE i.state WHEN 'open' THEN 0 ELSE 1 END,
+        \\         i.opened_at DESC,
+        \\         i.id
+        \\LIMIT 40
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, current_issue_id);
+
+    var shown = false;
+    while (try stmt.step()) {
+        const target_id = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(target_id);
+        const target_title = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(target_title);
+        const state = try stmt.columnTextDup(allocator, 2);
+        defer allocator.free(state);
+        const legacy_number = stmt.columnInt64(3);
+        try appendIssueSidebarIssueRelationshipChoice(buf, allocator, raw_ref, action, target_id, target_title, state, legacy_number, button_label);
+        shown = true;
+    }
+    if (!shown) try appendIssueSidebarMenuEmpty(buf, allocator, "No other issues.");
+    try appendIssueSidebarMenuGroupEnd(buf, allocator);
 }
 
 fn appendIssueSidebarDevelopmentMenu(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb) !void {
@@ -1010,6 +1052,45 @@ fn appendIssueSidebarPullChoice(buf: *std.ArrayList(u8), allocator: Allocator, p
         .title = title,
         .number_text = number_text,
     });
+}
+
+fn appendIssueSidebarIssueRelationshipChoice(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    raw_ref: []const u8,
+    action: []const u8,
+    target_id: []const u8,
+    title: []const u8,
+    state: []const u8,
+    legacy_number: i64,
+    button_label: []const u8,
+) !void {
+    var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const issue_ref = util.shortObjectRef(&issue_ref_buf, target_id);
+    const number_text = try issueNumberText(allocator, issue_ref, legacy_number);
+    defer allocator.free(number_text);
+
+    try buf.appendSlice(allocator, "<form class=\"issue-sidebar-picker-form issue-sidebar-relationship-choice-form\" method=\"post\" action=\"");
+    try appendIssueSidebarAction(buf, allocator, raw_ref);
+    try appendTemplate(buf, allocator,
+        \\"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="action" value="{action}"><input type="hidden" name="target" value="{target_id}"><button class="issue-sidebar-picker-row issue-sidebar-issue-choice" type="submit" data-sidebar-filter-text="{title} {number_text}" aria-label="{button_label} {title} {number_text}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span><span class="{icon_classes}" aria-hidden="true"></span><span class="issue-sidebar-picker-text"><span class="issue-sidebar-picker-primary">{title}</span></span><span class="issue-sidebar-picker-secondary issue-sidebar-choice-ref">{number_text}</span></button></form>
+    , .{
+        .csrf_token = issueSidebarCsrfToken(),
+        .action = action,
+        .target_id = target_id,
+        .title = title,
+        .number_text = number_text,
+        .button_label = button_label,
+        .icon_classes = shared.classes("issue-sidebar-issue-icon", &.{
+            shared.class("is-open", std.mem.eql(u8, state, "open")),
+            shared.class("is-closed", std.mem.eql(u8, state, "closed")),
+        }),
+    });
+}
+
+fn issueNumberText(allocator: Allocator, issue_ref: []const u8, legacy_number: i64) ![]u8 {
+    if (legacy_number > 0) return try std.fmt.allocPrint(allocator, "#{d}", .{legacy_number});
+    return try std.fmt.allocPrint(allocator, "#{s}", .{issue_ref});
 }
 
 fn pullNumberText(allocator: Allocator, pull_ref: []const u8, legacy_number: i64) ![]u8 {

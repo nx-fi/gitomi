@@ -65,6 +65,7 @@ const ProjectMetrics = struct {
     member_count: usize = 0,
     label_count: usize = 0,
     milestone_count: usize = 0,
+    closed_milestone_count: usize = 0,
     field_count: usize = 0,
     view_count: usize = 0,
 };
@@ -81,24 +82,21 @@ pub fn appendProjectOverview(
     defer summary.deinit(allocator);
     const metrics = try loadProjectMetrics(allocator, db, &summary);
 
-    try buf.appendSlice(allocator, "<section class=\"project-overview-page\">");
+    try buf.appendSlice(allocator, "<section class=\"panel project-overview-page\">");
     try appendProjectOverviewHeader(buf, allocator, &summary, &metrics);
     try appendProjectPageTabs(buf, allocator, project, .overview, metrics.issue_count);
     try buf.appendSlice(allocator,
         \\<div class="project-overview-layout">
         \\  <div class="project-overview-main">
     );
-    try appendProjectInlineProperties(buf, allocator, db, &summary, &metrics);
-    try appendProjectResources(buf, allocator, project);
-    try appendProjectUpdateBox(buf, allocator);
     try appendProjectDescription(buf, allocator, &summary);
-    try appendProjectMilestones(buf, allocator, db, project, .main);
+    try appendProjectMilestones(buf, allocator, db, project, &metrics, .main);
     try buf.appendSlice(allocator,
         \\  </div>
         \\  <aside class="project-overview-sidebar">
     );
     try appendProjectPropertiesPanel(buf, allocator, db, &summary, &metrics);
-    try appendProjectMilestones(buf, allocator, db, project, .sidebar);
+    try appendProjectMilestones(buf, allocator, db, project, &metrics, .sidebar);
     try appendProjectActivityPanel(buf, allocator, db, &summary, project);
     try buf.appendSlice(allocator,
         \\  </aside>
@@ -119,7 +117,7 @@ pub fn appendProjectActivityView(
     defer summary.deinit(allocator);
     const metrics = try loadProjectMetrics(allocator, db, &summary);
 
-    try buf.appendSlice(allocator, "<section class=\"project-overview-page project-activity-page\">");
+    try buf.appendSlice(allocator, "<section class=\"panel project-overview-page project-activity-page\">");
     try appendProjectOverviewHeader(buf, allocator, &summary, &metrics);
     try appendProjectPageTabs(buf, allocator, project, .activity, metrics.issue_count);
     try buf.appendSlice(allocator,
@@ -132,7 +130,7 @@ pub fn appendProjectActivityView(
         \\  <aside class="project-overview-sidebar">
     );
     try appendProjectPropertiesPanel(buf, allocator, db, &summary, &metrics);
-    try appendProjectMilestones(buf, allocator, db, project, .sidebar);
+    try appendProjectMilestones(buf, allocator, db, project, &metrics, .sidebar);
     try buf.appendSlice(allocator,
         \\  </aside>
         \\</div>
@@ -342,6 +340,7 @@ fn loadProjectMetrics(allocator: Allocator, db: *SqliteDb, summary: *const Proje
     _ = allocator;
     var metrics = ProjectMetrics{};
     try loadProjectIssueCounts(db, summary.name, &metrics);
+    try loadProjectMilestoneCounts(db, summary.name, &metrics);
     try loadProjectPropertyCounts(db, summary.id, &metrics);
     if (summary.id.len != 0) {
         metrics.field_count = try countProjectRows(db, "project_fields", summary.id, "state != 'removed'");
@@ -371,11 +370,9 @@ fn loadProjectIssueCounts(db: *SqliteDb, project: []const u8, metrics: *ProjectM
         \\  COUNT(DISTINCT i.id),
         \\  COUNT(DISTINCT CASE WHEN i.state = 'open' THEN i.id END),
         \\  COUNT(DISTINCT CASE WHEN i.state = 'closed' THEN i.id END),
-        \\  COUNT(DISTINCT NULLIF(im.milestone, '')),
         \\  COUNT(DISTINCT c.id)
         \\FROM project_items p
         \\JOIN issues i ON i.id = p.issue_id
-        \\LEFT JOIN issue_metadata im ON im.issue_id = i.id
         \\LEFT JOIN comments c ON c.parent_kind = 'issue' AND c.parent_id = i.id
     ));
     defer stmt.deinit();
@@ -384,8 +381,30 @@ fn loadProjectIssueCounts(db: *SqliteDb, project: []const u8, metrics: *ProjectM
     metrics.issue_count = @intCast(stmt.columnInt64(0));
     metrics.open_issue_count = @intCast(stmt.columnInt64(1));
     metrics.closed_issue_count = @intCast(stmt.columnInt64(2));
-    metrics.milestone_count = @intCast(stmt.columnInt64(3));
-    metrics.comment_count = @intCast(stmt.columnInt64(4));
+    metrics.comment_count = @intCast(stmt.columnInt64(3));
+}
+
+fn loadProjectMilestoneCounts(db: *SqliteDb, project: []const u8, metrics: *ProjectMetrics) !void {
+    var stmt = try db.prepare(projectItemsCte(
+        \\,
+        \\project_milestones AS (
+        \\  SELECT lower(im.milestone) AS milestone_key,
+        \\         COUNT(DISTINCT i.id) AS issue_count,
+        \\         COUNT(DISTINCT CASE WHEN i.state = 'closed' THEN i.id END) AS closed_count
+        \\  FROM project_items p
+        \\  JOIN issues i ON i.id = p.issue_id
+        \\  JOIN issue_metadata im ON im.issue_id = i.id AND im.milestone <> ''
+        \\  GROUP BY lower(im.milestone)
+        \\)
+        \\SELECT COUNT(*),
+        \\       COUNT(CASE WHEN issue_count > 0 AND closed_count >= issue_count THEN 1 END)
+        \\FROM project_milestones
+    ));
+    defer stmt.deinit();
+    try bindProjectNameTwice(&stmt, project);
+    if (!(try stmt.step())) return;
+    metrics.milestone_count = @intCast(stmt.columnInt64(0));
+    metrics.closed_milestone_count = @intCast(stmt.columnInt64(1));
 }
 
 fn loadProjectPropertyCounts(db: *SqliteDb, project_id: []const u8, metrics: *ProjectMetrics) !void {
@@ -408,6 +427,8 @@ fn bindProjectNameTwice(stmt: *index.SqliteStmt, project: []const u8) !void {
 }
 
 fn appendProjectOverviewHeader(buf: *std.ArrayList(u8), allocator: Allocator, summary: *const ProjectSummary, metrics: *const ProjectMetrics) !void {
+    const completion_label = try projectCompletionLabelOwned(allocator, metrics);
+    defer allocator.free(completion_label);
     try appendTemplate(buf, allocator,
         \\<header class="project-overview-head">
         \\  <div class="project-overview-title">
@@ -425,15 +446,26 @@ fn appendProjectOverviewHeader(buf: *std.ArrayList(u8), allocator: Allocator, su
         \\    </div>
         \\  </div>
         \\  <div class="project-overview-head-stats" aria-label="Project issue summary">
+        \\    <span><strong>{completion_label}</strong></span>
         \\    <span><strong>{issue_count}</strong> issues</span>
         \\    <span><strong>{open_count}</strong> open</span>
         \\    <span><strong>{closed_count}</strong> closed</span>
         \\  </div>
         \\</header>
     , .{
+        .completion_label = completion_label,
         .issue_count = metrics.issue_count,
         .open_count = metrics.open_issue_count,
         .closed_count = metrics.closed_issue_count,
+    });
+}
+
+fn projectCompletionLabelOwned(allocator: Allocator, metrics: *const ProjectMetrics) ![]u8 {
+    if (metrics.milestone_count == 0) return allocator.dupe(u8, "No milestones");
+    if (metrics.closed_milestone_count >= metrics.milestone_count) return allocator.dupe(u8, "Complete");
+    return std.fmt.allocPrint(allocator, "{d}/{d} milestones done", .{
+        metrics.closed_milestone_count,
+        metrics.milestone_count,
     });
 }
 
@@ -689,17 +721,39 @@ fn appendProjectMilestones(
     allocator: Allocator,
     db: *SqliteDb,
     project: []const u8,
+    metrics: *const ProjectMetrics,
     placement: MilestonePlacement,
 ) !void {
+    const completion_label = try projectCompletionLabelOwned(allocator, metrics);
+    defer allocator.free(completion_label);
     switch (placement) {
         .main => try buf.appendSlice(allocator,
             \\<section class="project-overview-section project-overview-milestones-main">
-            \\  <h2>Milestones</h2>
-            \\  <div class="project-overview-milestone-list">
+            \\  <div class="project-overview-section-title">
+            \\    <div><h2>Milestones</h2><p class="project-overview-section-meta">
         ),
         .sidebar => try buf.appendSlice(allocator,
             \\<section class="project-overview-side-panel project-overview-milestones-side">
-            \\  <div class="project-overview-side-panel-head"><h2>Milestones</h2></div>
+            \\  <div class="project-overview-side-panel-head"><div><h2>Milestones</h2><span class="project-overview-side-kicker">
+        ),
+    }
+    try shared.appendHtml(buf, allocator, completion_label);
+    switch (placement) {
+        .main => try buf.appendSlice(allocator,
+            \\</p></div>
+        ),
+        .sidebar => try buf.appendSlice(allocator,
+            \\</span></div>
+        ),
+    }
+    try appendProjectMilestoneAddLink(buf, allocator);
+    switch (placement) {
+        .main => try buf.appendSlice(allocator,
+            \\  </div>
+            \\  <div class="project-overview-milestone-list">
+        ),
+        .sidebar => try buf.appendSlice(allocator,
+            \\  </div>
             \\  <div class="project-overview-milestone-list">
         ),
     }
@@ -708,16 +762,17 @@ fn appendProjectMilestones(
         \\SELECT
         \\  im.milestone,
         \\  COUNT(DISTINCT i.id),
-        \\  COALESCE(SUM(CASE WHEN i.state = 'closed' THEN 1 ELSE 0 END), 0),
-        \\  COALESCE(m.due_at, '')
+        \\  COUNT(DISTINCT CASE WHEN i.state = 'closed' THEN i.id END),
+        \\  COALESCE(MIN(NULLIF(m.due_at, '')), ''),
+        \\  COALESCE(MIN(m.id), '')
         \\FROM project_items p
         \\JOIN issues i ON i.id = p.issue_id
         \\JOIN issue_metadata im ON im.issue_id = i.id AND im.milestone <> ''
         \\LEFT JOIN milestones m ON lower(m.title) = lower(im.milestone)
-        \\GROUP BY im.milestone, m.due_at
+        \\GROUP BY lower(im.milestone), im.milestone
         \\ORDER BY
-        \\  CASE WHEN COALESCE(m.due_at, '') = '' THEN 1 ELSE 0 END,
-        \\  m.due_at,
+        \\  CASE WHEN COALESCE(MIN(NULLIF(m.due_at, '')), '') = '' THEN 1 ELSE 0 END,
+        \\  COALESCE(MIN(NULLIF(m.due_at, '')), ''),
         \\  lower(im.milestone),
         \\  im.milestone
         \\LIMIT 6
@@ -733,7 +788,9 @@ fn appendProjectMilestones(
         const closed: usize = @intCast(stmt.columnInt64(2));
         const due_at = try stmt.columnTextDup(allocator, 3);
         defer allocator.free(due_at);
-        try appendProjectMilestoneRow(buf, allocator, title, total, closed, due_at, placement);
+        const milestone_id = try stmt.columnTextDup(allocator, 4);
+        defer allocator.free(milestone_id);
+        try appendProjectMilestoneRow(buf, allocator, title, milestone_id, total, closed, due_at, placement);
         shown += 1;
     }
     if (shown == 0) {
@@ -742,24 +799,48 @@ fn appendProjectMilestones(
     try buf.appendSlice(allocator, "</div></section>");
 }
 
+fn appendProjectMilestoneAddLink(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try buf.appendSlice(allocator,
+        \\<a class="project-overview-add" href="/new-milestone" aria-label="New milestone" title="New milestone"><span class="project-add-icon" aria-hidden="true"></span></a>
+    );
+}
+
 fn appendProjectMilestoneRow(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
     title: []const u8,
+    milestone_id: []const u8,
     total: usize,
     closed: usize,
     due_at: []const u8,
     placement: MilestonePlacement,
 ) !void {
     const progress = if (total == 0) 0 else (closed * 100) / total;
+    const complete = total != 0 and closed >= total;
     try appendTemplate(buf, allocator,
-        \\<article class="project-overview-milestone-row">
+        \\<article class="{classes}">
         \\  <span class="button-icon icon-milestones" aria-hidden="true"></span>
         \\  <div>
-        \\    <strong>{title}</strong>
+    , .{
+        .classes = shared.classes("project-overview-milestone-row", &.{shared.class("is-complete", complete)}),
+    });
+    if (milestone_id.len != 0) {
+        var ref_buf: [8]u8 = undefined;
+        const milestone_ref = util.objectRefPrefix(ref_buf[0..], milestone_id);
+        try appendTemplate(buf, allocator,
+            \\    <a href="/milestones/{milestone_ref}"><strong>{title}</strong></a>
+        , .{
+            .milestone_ref = milestone_ref,
+            .title = title,
+        });
+    } else {
+        try appendTemplate(buf, allocator,
+            \\    <strong>{title}</strong>
+        , .{ .title = title });
+    }
+    try appendTemplate(buf, allocator,
         \\    <span>{closed}/{total} issues
     , .{
-        .title = title,
         .closed = closed,
         .total = total,
     });

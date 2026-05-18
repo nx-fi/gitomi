@@ -108,6 +108,7 @@ const routes = [_]Route{
     Route.post("/projects/items", handleProjectItemPost),
     Route.get("/milestones", handleMilestonesPage),
     Route.get("/milestones/:ref/edit", handleMilestoneEditPage),
+    Route.get("/milestones/:ref", handleMilestoneDetailPage),
     Route.get("/new-milestone", handleNewMilestonePage),
     Route.post("/milestones", handleMilestonePost),
     Route.post("/milestones/:ref", handleMilestoneRefPost),
@@ -584,6 +585,14 @@ fn handleProjectPropertiesPost(ctx: WebContext) !void {
 
 fn handleMilestonesPage(ctx: WebContext) !void {
     try sendOwnedHtml(ctx, try milestones_page.renderMilestonesPage(ctx.allocator, ctx.repo, ctx.request.target));
+}
+
+fn handleMilestoneDetailPage(ctx: WebContext) !void {
+    const milestone_ref = ctx.request.param("ref") orelse {
+        try sendPlainNotFound(ctx);
+        return;
+    };
+    try sendOwnedHtml(ctx, try milestones_page.renderMilestoneDetailPage(ctx.allocator, ctx.repo, milestone_ref, ctx.request.target));
 }
 
 fn handleMilestoneEditPage(ctx: WebContext) !void {
