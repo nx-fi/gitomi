@@ -578,6 +578,9 @@ fn handlePullActionPost(ctx: WebContext) !void {
         try pulls_page.handlePullChecklistPost(ctx.allocator, ctx.repo, ctx.stream, pull_ref, ctx.request.body);
     } else if (std.mem.eql(u8, action, "comments")) {
         try pulls_page.handlePullCommentPost(ctx.allocator, ctx.repo, ctx.stream, pull_ref, ctx.request.body);
+    } else if (std.mem.eql(u8, action, "sidebar")) {
+        if (!try requireCsrfToken(ctx)) return;
+        try pulls_page.handlePullSidebarPost(ctx.allocator, ctx.repo, ctx.stream, pull_ref, ctx.csrf_token, ctx.request.body);
     } else {
         try sendPlainNotFound(ctx);
     }

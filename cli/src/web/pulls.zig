@@ -10,3 +10,4 @@ pub const handlePullConflictPost = detail.handlePullConflictPost;
 pub const handlePullMergePost = detail.handlePullMergePost;
 pub const handlePullChecklistPost = detail.handlePullChecklistPost;
 pub const handlePullCommentPost = detail.handlePullCommentPost;
+pub const handlePullSidebarPost = detail.handlePullSidebarPost;

@@ -136,7 +136,7 @@ fn renderPullDetailPageWithMergeError(allocator: Allocator, repo: Repo, raw_ref:
         .files => try pull_git_tabs.appendFiles(&buf, allocator, repo, detail, raw_ref),
     }
     try buf.appendSlice(allocator, "</div><aside class=\"issue-meta-sidebar pull-sidebar\">");
-    try pull_sidebar.append(&buf, allocator, repo, &db, detail, pull_ref);
+    try pull_sidebar.append(&buf, allocator, repo, &db, detail, pull_ref, csrf_token);
     try buf.appendSlice(allocator, "</aside></div></section>");
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
@@ -1142,6 +1142,10 @@ pub fn handlePullCommentPost(allocator: Allocator, repo: Repo, stream: std.net.S
     const location = try std.fmt.allocPrint(allocator, "/pulls/{s}", .{raw_ref});
     defer allocator.free(location);
     try sendRedirect(allocator, stream, location);
+}
+
+pub fn handlePullSidebarPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, csrf_token: []const u8, form_body: []const u8) !void {
+    try pull_sidebar.handlePullSidebarPost(allocator, repo, stream, raw_ref, csrf_token, form_body);
 }
 
 fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const u8) !?[]u8 {

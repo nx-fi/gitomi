@@ -214,6 +214,7 @@ fn appendProjectViewTabs(
         .table => .table,
         .board => .board,
         .roadmap => .roadmap,
+        .issues => .issues,
     };
     try project_overview.appendProjectPageTabs(buf, allocator, project, active_tab, issue_count);
 }
@@ -231,7 +232,34 @@ fn appendProjectItemActions(
     );
     try appendTemplate(buf, allocator,
         \\  <details class="project-action-menu" data-popover-menu>
-        \\    <summary class="button primary" aria-expanded="false"><span class="project-add-icon" aria-hidden="true"></span>New issue</summary>
+        \\    <summary class="button primary" aria-expanded="false"><span class="project-link-icon" aria-hidden="true"></span>Add issue</summary>
+        \\    <div class="project-action-popover project-action-popover-narrow">
+        \\      <form class="project-item-form" method="post" action="/projects/items">
+        \\        <input type="hidden" name="action" value="add-existing">
+        \\        <input type="hidden" name="project" value="{project}">
+        \\        <input type="hidden" name="view" value="{view}">
+        \\        <div class="project-issue-search-wrap tree-search-wrap">
+        \\          <label class="tree-search-label project-issue-search-label"><span>Issue</span><input class="tree-search-input" name="issue" placeholder="Search issues or paste a ref" autocomplete="off" spellcheck="false" data-project-issue-search required></label>
+        \\        </div>
+        \\        <label>Priority<select name="priority">
+    , .{
+        .project = project,
+        .view = active_view.ref,
+    });
+    try appendProjectPriorityOptions(buf, allocator, if (defaults.priority_explicit) defaults.priority else "");
+    try buf.appendSlice(allocator,
+        \\        </select></label>
+        \\        <label>Status<select name="column">
+    );
+    try appendProjectColumnOptions(buf, allocator, db, project, if (defaults.status_explicit) defaults.status else null);
+    try appendTemplate(buf, allocator,
+        \\        </select></label>
+        \\        <div class="form-actions"><button class="button primary" type="submit">Add issue</button></div>
+        \\      </form>
+        \\    </div>
+        \\  </details>
+        \\  <details class="project-action-menu" data-popover-menu>
+        \\    <summary class="button secondary" aria-expanded="false"><span class="project-add-icon" aria-hidden="true"></span>New issue</summary>
         \\    <div class="project-action-popover">
         \\      <form class="project-item-form" method="post" action="/projects/items">
         \\        <input type="hidden" name="action" value="create-issue">
@@ -252,49 +280,22 @@ fn appendProjectItemActions(
         \\          <label>Priority<select name="priority">
     );
     try appendProjectPriorityOptions(buf, allocator, defaults.priority);
-    try buf.appendSlice(allocator,
+    try appendTemplate(buf, allocator,
         \\          </select></label>
         \\          <label>Status<select name="column">
-    );
+    , .{});
     try appendProjectColumnOptions(buf, allocator, db, project, defaults.status);
     try appendTemplate(buf, allocator,
         \\          </select></label>
         \\        </div>
         \\        <label>Labels<input name="labels" placeholder="bug, docs"></label>
         \\        <label>Assignees<input name="assignees" placeholder="alice, bob"></label>
-        \\        <div class="form-actions"><button class="button primary" type="submit">Create issue</button></div>
-        \\      </form>
-        \\    </div>
-        \\  </details>
-        \\  <details class="project-action-menu" data-popover-menu>
-        \\    <summary class="button secondary" aria-expanded="false"><span class="project-link-icon" aria-hidden="true"></span>Add existing</summary>
-        \\    <div class="project-action-popover project-action-popover-narrow">
-        \\      <form class="project-item-form" method="post" action="/projects/items">
-        \\        <input type="hidden" name="action" value="add-existing">
-        \\        <input type="hidden" name="project" value="{project}">
-        \\        <input type="hidden" name="view" value="{view}">
-        \\        <div class="project-issue-search-wrap tree-search-wrap">
-        \\          <label class="tree-search-label project-issue-search-label"><span>Issue</span><input class="tree-search-input" name="issue" placeholder="Search issues or paste a ref" autocomplete="off" spellcheck="false" data-project-issue-search required></label>
-        \\        </div>
-        \\        <label>Priority<select name="priority">
-    , .{
-        .project = project,
-        .view = active_view.ref,
-    });
-    try appendProjectPriorityOptions(buf, allocator, if (defaults.priority_explicit) defaults.priority else "");
-    try buf.appendSlice(allocator,
-        \\        </select></label>
-        \\        <label>Status<select name="column">
-    );
-    try appendProjectColumnOptions(buf, allocator, db, project, if (defaults.status_explicit) defaults.status else null);
-    try buf.appendSlice(allocator,
-        \\        </select></label>
-        \\        <div class="form-actions"><button class="button primary" type="submit">Add issue</button></div>
+        \\        <div class="form-actions"><button class="button secondary" type="submit">Create issue</button></div>
         \\      </form>
         \\    </div>
         \\  </details>
         \\</div>
-    );
+    , .{});
 }
 
 fn appendProjectViewTab(

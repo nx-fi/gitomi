@@ -43,6 +43,7 @@ const event_search_columns = [_][]const u8{
 const ActivityFilters = struct {
     allocator: Allocator,
     q: ?[]u8 = null,
+    project: ?[]u8 = null,
     event_type: ?[]u8 = null,
     object_kind: ?[]u8 = null,
     actor: ?[]u8 = null,
@@ -50,6 +51,7 @@ const ActivityFilters = struct {
 
     fn deinit(self: *ActivityFilters) void {
         if (self.q) |value| self.allocator.free(value);
+        if (self.project) |value| self.allocator.free(value);
         if (self.event_type) |value| self.allocator.free(value);
         if (self.object_kind) |value| self.allocator.free(value);
         if (self.actor) |value| self.allocator.free(value);
@@ -141,6 +143,7 @@ fn activityFiltersFromTarget(allocator: Allocator, target: []const u8) !Activity
     var filters = ActivityFilters{ .allocator = allocator };
     errdefer filters.deinit();
     filters.q = try queryTextFilterOwned(allocator, target, "q");
+    filters.project = try queryTextFilterOwned(allocator, target, "project");
     filters.event_type = try queryTextFilterOwned(allocator, target, "type");
     filters.object_kind = try queryTextFilterOwned(allocator, target, "kind");
     filters.actor = try queryTextFilterOwned(allocator, target, "actor");
@@ -163,6 +166,7 @@ fn queryTextFilterOwned(allocator: Allocator, target: []const u8, name: []const 
 
 fn hasActivityFilters(filters: ActivityFilters) bool {
     return filters.q != null or
+        filters.project != null or
         filters.event_type != null or
         filters.object_kind != null or
         filters.actor != null or
@@ -209,6 +213,22 @@ fn appendEventsWhere(buf: *std.ArrayList(u8), allocator: Allocator, filters: Act
         try appendWhereJoin(buf, allocator, &has_where);
         try appendEventSearchCondition(buf, allocator);
     }
+    if (filters.project != null) {
+        try appendWhereJoin(buf, allocator, &has_where);
+        try buf.appendSlice(allocator,
+            \\(
+            \\  (object_kind = 'project' AND object_id IN (SELECT id FROM projects WHERE name = ?))
+            \\  OR (object_kind = 'issue' AND object_id IN (
+            \\    SELECT issue_id FROM issue_projects WHERE project = ?
+            \\    UNION
+            \\    SELECT pm.issue_id
+            \\    FROM project_memberships pm
+            \\    JOIN projects p ON p.id = pm.project_id
+            \\    WHERE p.name = ?
+            \\  ))
+            \\)
+        );
+    }
     try appendExactEventFilter(buf, allocator, &has_where, "event_type", filters.event_type);
     try appendExactEventFilter(buf, allocator, &has_where, "object_kind", filters.object_kind);
     try appendExactEventFilter(buf, allocator, &has_where, "actor_principal", filters.actor);
@@ -246,6 +266,14 @@ fn bindEventFilters(allocator: Allocator, stmt: *index.SqliteStmt, filters: Acti
             try stmt.bindText(bind_index, pattern);
             bind_index += 1;
         }
+    }
+    if (filters.project) |value| {
+        try stmt.bindText(bind_index, value);
+        bind_index += 1;
+        try stmt.bindText(bind_index, value);
+        bind_index += 1;
+        try stmt.bindText(bind_index, value);
+        bind_index += 1;
     }
     if (filters.event_type) |value| {
         try stmt.bindText(bind_index, value);
@@ -297,6 +325,7 @@ fn appendEventsHref(buf: *std.ArrayList(u8), allocator: Allocator, filters: Acti
     try buf.appendSlice(allocator, "/events");
     var first = true;
     if (activityHrefValue(filters, override, "q")) |value| try shared.appendQueryParam(buf, allocator, &first, "q", value);
+    if (activityHrefValue(filters, override, "project")) |value| try shared.appendQueryParam(buf, allocator, &first, "project", value);
     if (activityHrefValue(filters, override, "type")) |value| try shared.appendQueryParam(buf, allocator, &first, "type", value);
     if (activityHrefValue(filters, override, "kind")) |value| try shared.appendQueryParam(buf, allocator, &first, "kind", value);
     if (activityHrefValue(filters, override, "actor")) |value| try shared.appendQueryParam(buf, allocator, &first, "actor", value);
@@ -315,6 +344,7 @@ fn activityHrefValue(filters: ActivityFilters, override: ActivityHrefOverride, n
         if (std.mem.eql(u8, param, name)) return override.param_value;
     }
     if (std.mem.eql(u8, name, "q")) return filters.q;
+    if (std.mem.eql(u8, name, "project")) return filters.project;
     if (std.mem.eql(u8, name, "type")) return filters.event_type;
     if (std.mem.eql(u8, name, "kind")) return filters.object_kind;
     if (std.mem.eql(u8, name, "actor")) return filters.actor;
@@ -337,6 +367,7 @@ fn appendActivityControls(
     , .{
         .query = filters.q orelse "",
     });
+    try appendHiddenActivityFilter(buf, allocator, "project", filters.project);
     try appendHiddenActivityFilter(buf, allocator, "type", filters.event_type);
     try appendHiddenActivityFilter(buf, allocator, "kind", filters.object_kind);
     try appendHiddenActivityFilter(buf, allocator, "actor", filters.actor);
@@ -701,6 +732,36 @@ test "activity object cell links issue object refs only" {
     try std.testing.expect(std.mem.startsWith(u8, buf.items, "<td>issue <a href=\"/issues/"));
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"><code>#") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "\">issue <code>#") == null);
+}
+
+test "activity href preserves project filter" {
+    var filters = ActivityFilters{
+        .allocator = std.testing.allocator,
+        .project = try std.testing.allocator.dupe(u8, "Release Plan"),
+        .event_type = try std.testing.allocator.dupe(u8, "issue.updated"),
+    };
+    defer filters.deinit();
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendEventsHref(&buf, std.testing.allocator, filters, .{});
+
+    try std.testing.expectEqualStrings("/events?project=Release%20Plan&amp;type=issue.updated", buf.items);
+}
+
+test "activity project filter includes project and linked issue events" {
+    var filters = ActivityFilters{
+        .allocator = std.testing.allocator,
+        .project = try std.testing.allocator.dupe(u8, "Release Plan"),
+    };
+    defer filters.deinit();
+
+    const sql = try eventsCountSqlOwned(std.testing.allocator, filters);
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expect(std.mem.indexOf(u8, sql, "object_kind = 'project'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "issue_projects WHERE project = ?") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "project_memberships") != null);
 }
 
 test "activity object cell links comment refs only to their parent object anchor" {

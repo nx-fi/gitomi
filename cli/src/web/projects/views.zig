@@ -7,6 +7,7 @@ pub const ProjectView = enum {
     table,
     board,
     roadmap,
+    issues,
 };
 
 pub const ProjectGroupField = enum {
@@ -119,11 +120,12 @@ pub const current_iteration_view_config =
 pub fn projectViewFromValue(value: []const u8) ProjectView {
     if (std.mem.eql(u8, value, "table")) return .table;
     if (std.mem.eql(u8, value, "roadmap")) return .roadmap;
+    if (std.mem.eql(u8, value, "issues")) return .issues;
     return .board;
 }
 
 pub fn isProjectViewValue(value: []const u8) bool {
-    return std.mem.eql(u8, value, "table") or std.mem.eql(u8, value, "board") or std.mem.eql(u8, value, "roadmap");
+    return std.mem.eql(u8, value, "table") or std.mem.eql(u8, value, "board") or std.mem.eql(u8, value, "roadmap") or std.mem.eql(u8, value, "issues");
 }
 
 pub fn projectViewValue(view: ProjectView) []const u8 {
@@ -131,6 +133,7 @@ pub fn projectViewValue(view: ProjectView) []const u8 {
         .table => "table",
         .board => "board",
         .roadmap => "roadmap",
+        .issues => "issues",
     };
 }
 
@@ -139,6 +142,7 @@ pub fn projectViewTitle(view: ProjectView) []const u8 {
         .table => "Table",
         .board => "Board",
         .roadmap => "Roadmap",
+        .issues => "Issues",
     };
 }
 
@@ -147,6 +151,7 @@ pub fn projectViewIconClass(view: ProjectView) []const u8 {
         .table => "project-view-table-icon",
         .board => "project-view-board-icon",
         .roadmap => "project-view-roadmap-icon",
+        .issues => "button-icon icon-issues",
     };
 }
 

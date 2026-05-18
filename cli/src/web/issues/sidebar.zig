@@ -1,5 +1,6 @@
 const std = @import("std");
 const cmd_common = @import("../../cmd_common.zig");
+const development_links = @import("../development_links.zig");
 const index = @import("../../index.zig");
 const issue = @import("../../issue.zig");
 const issue_form = @import("form.zig");
@@ -121,7 +122,7 @@ pub fn append(
     try appendIssueSidebarProjects(buf, allocator, db, raw_ref, issue_id);
     try appendIssueSidebarMilestone(buf, allocator, db, raw_ref, milestone);
     try appendIssueSidebarRelationships(buf, allocator, db, raw_ref, issue_id, body);
-    try appendIssueSidebarDevelopment(buf, allocator, db, issue_id);
+    try appendIssueSidebarDevelopment(buf, allocator, db, issue_id, body);
     try appendIssueSidebarNotifications(buf, allocator);
     try appendIssueSidebarParticipants(buf, allocator, db, issue_id, author);
 }
@@ -304,10 +305,18 @@ fn appendIssueSidebarRelationships(buf: *std.ArrayList(u8), allocator: Allocator
     try appendIssueSidebarSectionEnd(buf, allocator);
 }
 
-fn appendIssueSidebarDevelopment(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8) !void {
+fn appendIssueSidebarDevelopment(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, issue_id: []const u8, body: []const u8) !void {
     try appendIssueSidebarEditableSectionStart(buf, allocator, "Development", "Link development");
     try appendIssueSidebarDevelopmentMenu(buf, allocator, db);
     try appendIssueSidebarEditableSectionBodyStart(buf, allocator);
+    var links: std.ArrayList(development_links.DevelopmentLink) = .empty;
+    defer development_links.freeLinks(allocator, &links);
+    try development_links.collectForIssue(allocator, db, issue_id, body, &links);
+    var shown = false;
+    for (links.items) |link| {
+        try development_links.appendLinkRow(buf, allocator, link);
+        shown = true;
+    }
     var stmt = try db.prepare(
         \\SELECT commit_oid
         \\FROM commit_references
@@ -317,7 +326,6 @@ fn appendIssueSidebarDevelopment(buf: *std.ArrayList(u8), allocator: Allocator, 
     );
     defer stmt.deinit();
     try stmt.bindText(1, issue_id);
-    var shown = false;
     while (try stmt.step()) {
         const commit_oid = try stmt.columnTextDup(allocator, 0);
         defer allocator.free(commit_oid);

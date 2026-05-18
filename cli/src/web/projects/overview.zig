@@ -27,6 +27,7 @@ pub const ProjectPageTab = enum {
     table,
     board,
     roadmap,
+    issues,
     activity,
 };
 
@@ -185,6 +186,10 @@ pub fn handleProjectPropertiesPost(allocator: Allocator, repo: Repo, stream: std
     if (std.mem.eql(u8, action_owned, "save-description")) {
         const description_owned = (try formValueOwned(allocator, form_body, "description")) orelse try allocator.dupe(u8, "");
         defer allocator.free(description_owned);
+        if (try projectFormHashUnchanged(allocator, form_body, "project-description", "", description_owned)) {
+            try redirectProjectOverview(allocator, stream, project_name_owned, project_ref);
+            return;
+        }
         if (!(try writeProjectUpdateOrFail(allocator, stream, project_id, .{ .description = description_owned }))) return;
     } else if (std.mem.eql(u8, action_owned, "add-update")) {
         const status_owned = try requiredProjectFormValue(allocator, stream, form_body, "status", "Status is required\n");
@@ -197,15 +202,18 @@ pub fn handleProjectPropertiesPost(allocator: Allocator, repo: Repo, stream: std
         const body_owned = (try formValueOwned(allocator, form_body, "update_body")) orelse try allocator.dupe(u8, "");
         defer allocator.free(body_owned);
         const trimmed_body = std.mem.trim(u8, body_owned, " \t\r\n");
-        const update_body: ?[]const u8 = if (trimmed_body.len == 0) null else body_owned;
+        const effective_body: []const u8 = if (trimmed_body.len == 0) "" else body_owned;
+        if (try projectFormHashUnchanged(allocator, form_body, "project-update", status, effective_body)) {
+            try redirectProjectOverview(allocator, stream, project_name_owned, project_ref);
+            return;
+        }
+        const update_body: ?[]const u8 = if (effective_body.len == 0) null else effective_body;
         if (!(try writeProjectUpdateOrFail(allocator, stream, project_id, .{ .status = status, .update_body = update_body }))) return;
     } else if (std.mem.eql(u8, action_owned, "add-milestones")) {
         var milestone_refs = try formValuesOwned(allocator, form_body, "milestone");
         defer freeStringList(allocator, &milestone_refs);
         if (milestone_refs.items.len == 0) {
-            const location = try projectOverviewLocationOwned(allocator, project_name_owned, project_ref);
-            defer allocator.free(location);
-            try sendRedirect(allocator, stream, location);
+            try redirectProjectOverview(allocator, stream, project_name_owned, project_ref);
             return;
         }
         var milestone_ids: std.ArrayList([]const u8) = .empty;
@@ -312,9 +320,7 @@ pub fn handleProjectPropertiesPost(allocator: Allocator, repo: Repo, stream: std
         return;
     }
 
-    const location = try projectOverviewLocationOwned(allocator, project_name_owned, project_ref);
-    defer allocator.free(location);
-    try sendRedirect(allocator, stream, location);
+    try redirectProjectOverview(allocator, stream, project_name_owned, project_ref);
 }
 
 fn formTrimmedOwned(allocator: Allocator, form_body: []const u8, wanted_key: []const u8) ![]u8 {
@@ -379,6 +385,12 @@ fn writeProjectUpdateOrFail(allocator: Allocator, stream: std.net.Stream, projec
     return true;
 }
 
+fn redirectProjectOverview(allocator: Allocator, stream: std.net.Stream, project_name: []const u8, fallback_ref: []const u8) !void {
+    const location = try projectOverviewLocationOwned(allocator, project_name, fallback_ref);
+    defer allocator.free(location);
+    try sendRedirect(allocator, stream, location);
+}
+
 fn projectOverviewLocationOwned(allocator: Allocator, project_name: []const u8, fallback_ref: []const u8) ![]u8 {
     var location: std.ArrayList(u8) = .empty;
     errdefer location.deinit(allocator);
@@ -389,6 +401,26 @@ fn projectOverviewLocationOwned(allocator: Allocator, project_name: []const u8, 
         try shared.appendUrlEncoded(&location, allocator, fallback_ref);
     }
     return location.toOwnedSlice(allocator);
+}
+
+fn projectFormHashUnchanged(allocator: Allocator, form_body: []const u8, kind: []const u8, status: []const u8, body: []const u8) !bool {
+    const previous_hash = try formTrimmedOwned(allocator, form_body, "previous_hash");
+    defer allocator.free(previous_hash);
+    if (previous_hash.len == 0) return false;
+    const submitted_hash = try projectContentHashOwned(allocator, kind, status, body);
+    defer allocator.free(submitted_hash);
+    return std.mem.eql(u8, previous_hash, submitted_hash);
+}
+
+fn projectContentHashOwned(allocator: Allocator, kind: []const u8, status: []const u8, body: []const u8) ![]u8 {
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(allocator);
+    try source.appendSlice(allocator, kind);
+    try source.append(allocator, 0);
+    try source.appendSlice(allocator, status);
+    try source.append(allocator, 0);
+    try source.appendSlice(allocator, body);
+    return try util.sha256Hex(allocator, source.items);
 }
 
 fn isProjectDateValue(value: []const u8) bool {
@@ -642,10 +674,9 @@ pub fn appendProjectPageTabs(
     try appendProjectPageTab(buf, allocator, project, active, .table, "Table", "project-view-table-icon", project_views.projectViewValue(.table));
     try appendProjectPageTab(buf, allocator, project, active, .board, "Board", "project-view-board-icon", project_views.projectViewValue(.board));
     try appendProjectPageTab(buf, allocator, project, active, .roadmap, "Roadmap", "project-view-roadmap-icon", project_views.projectViewValue(.roadmap));
+    try appendProjectPageTab(buf, allocator, project, active, .issues, "Issues", "button-icon icon-issues", project_views.projectViewValue(.issues));
     try appendProjectPageTab(buf, allocator, project, active, .activity, "Activity", "button-icon icon-history", "activity");
-    try buf.appendSlice(allocator, "<a class=\"project-overview-tab\" href=\"/issues?project=");
-    try shared.appendUrlEncoded(buf, allocator, project);
-    try appendTemplate(buf, allocator, "\">Issues <span class=\"issue-count-badge\">{issue_count}</span></a>", .{ .issue_count = issue_count });
+    _ = issue_count;
     try buf.appendSlice(allocator,
         \\  </nav>
         \\</div>
@@ -850,9 +881,10 @@ fn appendProjectUpdateSection(buf: *std.ArrayList(u8), allocator: Allocator, sum
         \\  <div class="project-overview-section-title"><h2>Update</h2></div>
         \\  <details class="project-markdown-edit">
         \\    <summary class="button secondary">Edit update</summary>
-        \\    <form class="project-markdown-form" method="post" action="/projects/properties">
+        \\    <form class="project-markdown-form" method="post" action="/projects/properties" data-project-markdown-form data-project-content-kind="project-update">
     );
     try appendProjectHiddenFields(buf, allocator, summary);
+    try appendProjectHashFields(buf, allocator, "project-update", effective_status, note.body);
     try buf.appendSlice(allocator,
         \\      <input type="hidden" name="action" value="add-update">
         \\      <label class="project-update-status-field">Status
@@ -867,7 +899,7 @@ fn appendProjectUpdateSection(buf: *std.ArrayList(u8), allocator: Allocator, sum
         .required = false,
     });
     try buf.appendSlice(allocator,
-        \\      <div class="project-markdown-actions"><button type="submit">Save update</button></div>
+        \\      <div class="project-markdown-actions"><button class="project-markdown-cancel" type="button" data-project-markdown-cancel>Cancel</button><button type="submit">Save update</button></div>
         \\    </form>
         \\  </details>
         \\  <div class="project-markdown-preview markdown-body">
@@ -897,10 +929,11 @@ fn appendProjectDescription(buf: *std.ArrayList(u8), allocator: Allocator, summa
         \\  <div class="project-overview-section-title"><h2>Description</h2></div>
         \\  <details class="project-markdown-edit">
         \\    <summary class="button secondary">Edit description</summary>
-        \\    <form class="project-markdown-form" method="post" action="/projects/properties">
+        \\    <form class="project-markdown-form" method="post" action="/projects/properties" data-project-markdown-form data-project-content-kind="project-description">
     );
     try appendProjectHiddenFields(buf, allocator, summary);
     try buf.appendSlice(allocator, "<input type=\"hidden\" name=\"action\" value=\"save-description\">");
+    try appendProjectHashFields(buf, allocator, "project-description", "", summary.description);
     try shared.appendMarkdownEditor(buf, allocator, .{
         .name = "description",
         .rows = 8,
@@ -909,7 +942,7 @@ fn appendProjectDescription(buf: *std.ArrayList(u8), allocator: Allocator, summa
         .required = false,
     });
     try buf.appendSlice(allocator,
-        \\      <div class="project-markdown-actions"><button type="submit">Save description</button></div>
+        \\      <div class="project-markdown-actions"><button class="project-markdown-cancel" type="button" data-project-markdown-cancel>Cancel</button><button type="submit">Save description</button></div>
         \\    </form>
         \\  </details>
         \\  <div class="project-overview-description project-markdown-preview markdown-body">
@@ -933,6 +966,14 @@ fn appendProjectStatusSelect(buf: *std.ArrayList(u8), allocator: Allocator, sele
         try appendTemplate(buf, allocator, ">{label}</option>", .{ .label = statusLabel(status) });
     }
     try buf.appendSlice(allocator, "</select>");
+}
+
+fn appendProjectHashFields(buf: *std.ArrayList(u8), allocator: Allocator, kind: []const u8, status: []const u8, body: []const u8) !void {
+    const hash = try projectContentHashOwned(allocator, kind, status, body);
+    defer allocator.free(hash);
+    try appendTemplate(buf, allocator,
+        \\<input type="hidden" name="previous_hash" value="{hash}" data-project-previous-hash><input type="hidden" name="current_hash" value="{hash}" data-project-current-hash>
+    , .{ .hash = hash });
 }
 
 const MilestonePlacement = enum {
@@ -1654,7 +1695,11 @@ fn issueLabelKind(label: []const u8) []const u8 {
 fn appendProjectActivityMain(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, summary: *const ProjectSummary, project: []const u8) !void {
     try buf.appendSlice(allocator,
         \\<section class="project-overview-section project-overview-activity-main">
-        \\  <div class="project-overview-section-title"><h2>Activity</h2><a class="button secondary" href="/events">See all</a></div>
+        \\  <div class="project-overview-section-title"><h2>Activity</h2><a class="button secondary" href="
+    );
+    try appendProjectActivityHref(buf, allocator, project);
+    try buf.appendSlice(allocator,
+        \\">See all</a></div>
         \\  <div class="project-overview-activity-list">
     );
     try appendProjectActivityItems(buf, allocator, db, summary, project, 24);
@@ -1667,7 +1712,11 @@ fn appendProjectActivityMain(buf: *std.ArrayList(u8), allocator: Allocator, db: 
 fn appendProjectActivityPanel(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, summary: *const ProjectSummary, project: []const u8) !void {
     try buf.appendSlice(allocator,
         \\<section id="project-activity" class="project-overview-side-panel project-overview-activity">
-        \\  <div class="project-overview-side-panel-head"><h2>Activity</h2><a href="/events">See all</a></div>
+        \\  <div class="project-overview-side-panel-head"><h2>Activity</h2><a href="
+    );
+    try appendProjectActivityHref(buf, allocator, project);
+    try buf.appendSlice(allocator,
+        \\">See all</a></div>
         \\  <div class="project-overview-activity-list">
     );
     try appendProjectActivityItems(buf, allocator, db, summary, project, 4);
@@ -1675,6 +1724,11 @@ fn appendProjectActivityPanel(buf: *std.ArrayList(u8), allocator: Allocator, db:
         \\  </div>
         \\</section>
     );
+}
+
+fn appendProjectActivityHref(buf: *std.ArrayList(u8), allocator: Allocator, project: []const u8) !void {
+    try buf.appendSlice(allocator, "/events?project=");
+    try shared.appendUrlEncoded(buf, allocator, project);
 }
 
 fn appendProjectActivityItems(
@@ -1959,6 +2013,25 @@ test "project overview header renders plain project name" {
 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<h1>Release &amp; Plan</h1>") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<h1>@Release") == null);
+}
+
+test "project issues tab stays in project workspace" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendProjectPageTabs(&buf, std.testing.allocator, "Release Plan", .overview, 3);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/projects?project=Release%20Plan&amp;view=issues\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues?project=") == null);
+}
+
+test "project activity href scopes settings activity to project" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendProjectActivityHref(&buf, std.testing.allocator, "Release Plan");
+
+    try std.testing.expectEqualStrings("/events?project=Release%20Plan", buf.items);
 }
 
 test "project dates label uses start plus end" {

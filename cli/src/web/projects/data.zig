@@ -173,6 +173,7 @@ pub fn projectFieldStringValue(allocator: Allocator, db: *SqliteDb, project: []c
 
 pub fn resolveActiveProjectView(allocator: Allocator, db: *SqliteDb, project: []const u8, view_ref: []const u8) !ActiveProjectView {
     if (view_ref.len != 0) {
+        if (std.mem.eql(u8, view_ref, projectViewValue(.issues))) return activeBuiltinProjectView(allocator, .issues);
         if (try loadSavedProjectViewByRef(allocator, db, project, view_ref)) |saved| return saved;
         if (isProjectViewValue(view_ref)) {
             const requested = projectViewFromValue(view_ref);

@@ -8,6 +8,7 @@ const project_groups = @import("groups.zig");
 const project_issue_render = @import("issue_render.zig");
 const project_overview = @import("overview.zig");
 const project_board = @import("board.zig");
+const project_issues = @import("issues.zig");
 const project_roadmap = @import("roadmap.zig");
 const project_table = @import("table.zig");
 const project_views = @import("views.zig");
@@ -123,6 +124,7 @@ pub fn renderProjectWorkspace(
         .table => try project_table.appendProjectTable(&buf, allocator, db, project, &active_view, current_principal),
         .board => try project_board.appendProjectBoard(&buf, allocator, db, project, &active_view, current_principal),
         .roadmap => try project_roadmap.appendProjectRoadmap(&buf, allocator, db, project, &active_view, current_principal),
+        .issues => try project_issues.appendProjectIssues(&buf, allocator, db, project, &active_view, current_principal),
     }
 
     try appendShellEnd(&buf, allocator);

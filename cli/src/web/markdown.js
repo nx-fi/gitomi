@@ -1552,6 +1552,74 @@
     });
   }
 
+  function projectMarkdownHashPayload(form) {
+    const kind = form.dataset.projectContentKind || "";
+    const statusInput = form.querySelector("[name='status']");
+    const textarea = form.querySelector("[data-markdown-input]");
+    const status = statusInput ? String(statusInput.value || "") : "";
+    let body = textarea ? String(textarea.value || "") : "";
+    if (kind === "project-update" && !body.trim()) body = "";
+    return kind + "\u0000" + status + "\u0000" + body;
+  }
+
+  function hexFromArrayBuffer(buffer) {
+    return Array.from(new Uint8Array(buffer)).map(function (byte) {
+      return byte.toString(16).padStart(2, "0");
+    }).join("");
+  }
+
+  async function sha256HexText(value) {
+    if (!window.crypto || !window.crypto.subtle || typeof TextEncoder === "undefined") return "";
+    const digest = await window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+    return hexFromArrayBuffer(digest);
+  }
+
+  async function updateProjectMarkdownCurrentHash(form) {
+    const current = form.querySelector("[data-project-current-hash]");
+    if (!current) return;
+    const hash = await sha256HexText(projectMarkdownHashPayload(form));
+    if (hash) current.value = hash;
+  }
+
+  function resetProjectMarkdownForm(form) {
+    form.reset();
+    const previous = form.querySelector("[data-project-previous-hash]");
+    const current = form.querySelector("[data-project-current-hash]");
+    if (previous && current) current.value = previous.value || "";
+    form.querySelectorAll("[data-markdown-editor]").forEach(function (editor) {
+      const preview = editor.querySelector("[data-markdown-preview]");
+      if (preview && !preview.hidden) renderMarkdownPreview(editor);
+    });
+  }
+
+  function initProjectMarkdownForms() {
+    document.querySelectorAll("[data-project-markdown-form]").forEach(function (form) {
+      if (form.dataset.projectMarkdownFormReady === "yes") return;
+      form.dataset.projectMarkdownFormReady = "yes";
+      form.addEventListener("submit", function (event) {
+        if (form.dataset.projectHashSubmitting === "yes") return;
+        if (!form.querySelector("[data-project-current-hash]")) return;
+        if (!window.crypto || !window.crypto.subtle || typeof TextEncoder === "undefined") return;
+        event.preventDefault();
+        updateProjectMarkdownCurrentHash(form).finally(function () {
+          form.dataset.projectHashSubmitting = "yes";
+          if (typeof form.requestSubmit === "function") {
+            form.requestSubmit();
+          } else {
+            form.submit();
+          }
+        });
+      });
+      form.querySelectorAll("[data-project-markdown-cancel]").forEach(function (button) {
+        button.addEventListener("click", function () {
+          resetProjectMarkdownForm(form);
+          const details = form.closest("details");
+          if (details) details.open = false;
+        });
+      });
+    });
+  }
+
   function renderMarkdownEnhancements() {
     renderMarkdownSourceBlocks();
     renderMath(document);
@@ -1563,6 +1631,7 @@
     initIssueActionMenus();
     initIssueSidebarMenus();
     initMarkdownEditors();
+    initProjectMarkdownForms();
   }
 
   document.addEventListener("gitomi:partial-refresh", renderMarkdownEnhancements);

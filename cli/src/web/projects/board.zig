@@ -126,6 +126,17 @@ fn appendProjectColumn(
         \\        <summary aria-label="Add issue to {title}" title="Add issue"><span class="kanban-column-add" aria-hidden="true"></span></summary>
         \\        <div class="kanban-column-popover">
         \\          <form class="project-item-form project-column-issue-form" method="post" action="/projects/items">
+        \\            <input type="hidden" name="action" value="add-existing">
+        \\            <input type="hidden" name="project" value="{project}">
+        \\            <input type="hidden" name="column" value="{column}">
+        \\            <input type="hidden" name="priority" value="{existing_priority}">
+        \\            <input type="hidden" name="view" value="{view}">
+        \\            <div class="project-issue-search-wrap tree-search-wrap">
+        \\              <label class="tree-search-label project-issue-search-label"><span>Issue</span><input class="tree-search-input" name="issue" placeholder="Search issues or paste a ref" aria-label="Issue" autocomplete="off" spellcheck="false" data-project-issue-search required></label>
+        \\            </div>
+        \\            <div class="form-actions"><button class="button primary" type="submit">Add issue</button></div>
+        \\          </form>
+        \\          <form class="project-item-form project-column-existing-form" method="post" action="/projects/items">
         \\            <input type="hidden" name="action" value="create-issue">
         \\            <input type="hidden" name="project" value="{project}">
         \\            <input type="hidden" name="view" value="{view}">
@@ -134,6 +145,7 @@ fn appendProjectColumn(
         .tone = tone,
         .project = project,
         .column = column,
+        .existing_priority = if (context.defaults.priority_explicit) context.defaults.priority else "",
         .view = context.view_ref,
         .title = title,
         .count = count,
@@ -159,18 +171,7 @@ fn appendProjectColumn(
         \\            </div>
         \\            <label>Labels<input name="labels" placeholder="bug, docs"></label>
         \\            <label>Assignees<input name="assignees" placeholder="alice, bob"></label>
-        \\            <div class="form-actions"><button class="button primary" type="submit">Create issue</button></div>
-        \\          </form>
-        \\          <form class="project-item-form project-column-existing-form" method="post" action="/projects/items">
-        \\            <input type="hidden" name="action" value="add-existing">
-        \\            <input type="hidden" name="project" value="{project}">
-        \\            <input type="hidden" name="column" value="{column}">
-        \\            <input type="hidden" name="priority" value="{existing_priority}">
-        \\            <input type="hidden" name="view" value="{view}">
-        \\            <div class="project-issue-search-wrap tree-search-wrap">
-        \\              <label class="tree-search-label project-issue-search-label"><span>Issue</span><input class="tree-search-input" name="issue" placeholder="Search issues or paste a ref" aria-label="Issue" autocomplete="off" spellcheck="false" data-project-issue-search required></label>
-        \\            </div>
-        \\            <div class="form-actions"><button class="button secondary" type="submit">Add issue</button></div>
+        \\            <div class="form-actions"><button class="button secondary" type="submit">Create issue</button></div>
         \\          </form>
         \\        </div>
         \\      </details>
@@ -181,7 +182,6 @@ fn appendProjectColumn(
     , .{
         .project = project,
         .column = column,
-        .existing_priority = if (context.defaults.priority_explicit) context.defaults.priority else "",
         .view = context.view_ref,
         .note = note,
     });

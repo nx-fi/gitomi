@@ -814,9 +814,10 @@
 }
 .project-markdown-actions {
   display: flex;
+  gap: 8px;
   justify-content: flex-start;
 }
-.project-markdown-actions button,
+.project-markdown-actions button[type="submit"],
 .project-milestone-check-actions button {
   min-height: 34px;
   padding: 0 12px;
@@ -828,6 +829,21 @@
   font-size: 12px;
   font-weight: 800;
   cursor: pointer;
+}
+.project-markdown-cancel {
+  min-height: 34px;
+  padding: 0 12px;
+  color: var(--text);
+  background: var(--button-secondary-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.project-markdown-cancel:hover {
+  background: var(--button-secondary-hover-bg);
 }
 .project-markdown-empty {
   margin: 0;
