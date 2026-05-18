@@ -760,8 +760,11 @@ pub fn authorizationRejection(allocator: Allocator, db: *SqliteDb, event_hash: ?
     if (event_hash) |hash| {
         if (try signingKeyBindingRejection(allocator, db, hash, envelope, body)) |reason| return reason;
     }
+    if (hasGitHubLegacyAlias(envelope.event_type, root)) {
+        if (try legacyAliasAuthorizationRejection(allocator, db, envelope, event_hash, "github.import")) |reason| return reason;
+    }
     if (hasGitLabLegacyAlias(envelope.event_type, root)) {
-        if (try gitlabLegacyAliasAuthorizationRejection(allocator, db, envelope, event_hash)) |reason| return reason;
+        if (try legacyAliasAuthorizationRejection(allocator, db, envelope, event_hash, "gitlab.import")) |reason| return reason;
     }
     if ((try accessModeFromDb(db)) == .open) {
         return try eventAuthorizationRejection(allocator, db, "owner", envelope, payload, event_hash);
@@ -1057,7 +1060,13 @@ test "import delegation includes milestone creation" {
     try std.testing.expect(importDelegatesEvent("milestone.created"));
 }
 
-fn gitlabLegacyAliasAuthorizationRejection(allocator: Allocator, db: *SqliteDb, envelope: ValidatedEnvelope, event_hash: ?[]const u8) !?[]const u8 {
+fn legacyAliasAuthorizationRejection(
+    allocator: Allocator,
+    db: *SqliteDb,
+    envelope: ValidatedEnvelope,
+    event_hash: ?[]const u8,
+    capability: []const u8,
+) !?[]const u8 {
     const hash = event_hash orelse return "unauthorized_legacy_alias";
     if (!importDelegatesEvent(envelope.event_type)) return "unauthorized_legacy_alias";
 
@@ -1066,7 +1075,7 @@ fn gitlabLegacyAliasAuthorizationRejection(allocator: Allocator, db: *SqliteDb, 
         db,
         envelope.actor_principal,
         envelope.actor_device,
-        "gitlab.import",
+        capability,
         hash,
     )) orelse return "unauthorized_legacy_alias";
     defer allocator.free(delegated_fingerprint);
@@ -1075,6 +1084,16 @@ fn gitlabLegacyAliasAuthorizationRejection(allocator: Allocator, db: *SqliteDb, 
     defer allocator.free(signer_fingerprint);
     if (!std.mem.eql(u8, delegated_fingerprint, signer_fingerprint)) return "signing_key_mismatch";
     return null;
+}
+
+fn hasGitHubLegacyAlias(event_type: []const u8, root: std.json.ObjectMap) bool {
+    const legacy = switch (root.get("legacy") orelse return false) {
+        .object => |object| object,
+        else => return false,
+    };
+    if (std.mem.startsWith(u8, event_type, "issue.")) return legacyPositiveInteger(legacy, "github_issue_number");
+    if (std.mem.startsWith(u8, event_type, "pull.")) return legacyPositiveInteger(legacy, "github_pull_number");
+    return false;
 }
 
 fn hasGitLabLegacyAlias(event_type: []const u8, root: std.json.ObjectMap) bool {
@@ -2056,7 +2075,7 @@ test "open access still requires actor device binding" {
     try std.testing.expectEqualStrings("unauthorized_device", rejection.?);
 }
 
-test "role authorization rejects GitLab legacy aliases on work item events" {
+test "role authorization rejects provider legacy aliases on work item events" {
     const allocator = std.testing.allocator;
     var db = try SqliteDb.open(allocator, ":memory:", sqlite_db.sqlite.SQLITE_OPEN_READWRITE | sqlite_db.sqlite.SQLITE_OPEN_CREATE, true);
     defer db.deinit();
@@ -2083,17 +2102,37 @@ test "role authorization rejects GitLab legacy aliases on work item events" {
     defer issue_envelope.deinit();
     try std.testing.expectEqualStrings("unauthorized_legacy_alias", (try authorizationRejection(allocator, &db, null, issue_envelope, issue_body)).?);
 
+    const issue_update_body =
+        \\{
+        \\  "$schema": "urn:gitomi:event:v1",
+        \\  "repo_id": "018f0000-0000-7000-8000-000000000001",
+        \\  "event_uuid": "018f0000-0000-7000-8000-000000000107",
+        \\  "event_type": "issue.updated",
+        \\  "object": {"kind": "issue", "id": "018f0000-0000-7000-8000-000000000100"},
+        \\  "idempotency_key": "018f0000-0000-7000-8000-000000000108",
+        \\  "actor": {"principal": "alice", "device": "laptop"},
+        \\  "seq": 2,
+        \\  "occurred_at": "2026-05-16T00:00:02Z",
+        \\  "parent_hashes": {"log": "", "anchor": "", "causal": [], "related": []},
+        \\  "legacy": {"github_issue_number": 31337},
+        \\  "payload": {}
+        \\}
+    ;
+    var issue_update_envelope = try parseValidatedEnvelope(allocator, issue_update_body);
+    defer issue_update_envelope.deinit();
+    try std.testing.expectEqualStrings("unauthorized_legacy_alias", (try authorizationRejection(allocator, &db, null, issue_update_envelope, issue_update_body)).?);
+
     const pull_body =
         \\{
         \\  "$schema": "urn:gitomi:event:v1",
         \\  "repo_id": "018f0000-0000-7000-8000-000000000001",
-        \\  "event_uuid": "018f0000-0000-7000-8000-000000000105",
+        \\  "event_uuid": "018f0000-0000-7000-8000-000000000109",
         \\  "event_type": "pull.opened",
         \\  "object": {"kind": "pull", "id": "018f0000-0000-7000-8000-000000000101"},
-        \\  "idempotency_key": "018f0000-0000-7000-8000-000000000106",
+        \\  "idempotency_key": "018f0000-0000-7000-8000-00000000010a",
         \\  "actor": {"principal": "alice", "device": "laptop"},
-        \\  "seq": 2,
-        \\  "occurred_at": "2026-05-16T00:00:02Z",
+        \\  "seq": 3,
+        \\  "occurred_at": "2026-05-16T00:00:03Z",
         \\  "parent_hashes": {"log": "", "anchor": "", "causal": [], "related": []},
         \\  "legacy": {"gitlab_merge_request_iid": 77},
         \\  "payload": {"title": "Forged", "body": "", "state": "open", "base_ref": "main", "head_ref": "feature"}
@@ -2102,6 +2141,26 @@ test "role authorization rejects GitLab legacy aliases on work item events" {
     var pull_envelope = try parseValidatedEnvelope(allocator, pull_body);
     defer pull_envelope.deinit();
     try std.testing.expectEqualStrings("unauthorized_legacy_alias", (try authorizationRejection(allocator, &db, null, pull_envelope, pull_body)).?);
+
+    const pull_update_body =
+        \\{
+        \\  "$schema": "urn:gitomi:event:v1",
+        \\  "repo_id": "018f0000-0000-7000-8000-000000000001",
+        \\  "event_uuid": "018f0000-0000-7000-8000-00000000010b",
+        \\  "event_type": "pull.updated",
+        \\  "object": {"kind": "pull", "id": "018f0000-0000-7000-8000-000000000101"},
+        \\  "idempotency_key": "018f0000-0000-7000-8000-00000000010c",
+        \\  "actor": {"principal": "alice", "device": "laptop"},
+        \\  "seq": 4,
+        \\  "occurred_at": "2026-05-16T00:00:04Z",
+        \\  "parent_hashes": {"log": "", "anchor": "", "causal": [], "related": []},
+        \\  "legacy": {"github_pull_number": 31338},
+        \\  "payload": {}
+        \\}
+    ;
+    var pull_update_envelope = try parseValidatedEnvelope(allocator, pull_update_body);
+    defer pull_update_envelope.deinit();
+    try std.testing.expectEqualStrings("unauthorized_legacy_alias", (try authorizationRejection(allocator, &db, null, pull_update_envelope, pull_update_body)).?);
 }
 
 test "open access self-registration fingerprint requires matching actor" {

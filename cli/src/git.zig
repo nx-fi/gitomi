@@ -292,8 +292,8 @@ fn openPgpSigningKeyFingerprintFromVerifyOutput(allocator: Allocator, output: []
     var lines = std.mem.tokenizeScalar(u8, output, '\n');
     while (lines.next()) |line| {
         const marker = "[GNUPG:] VALIDSIG ";
-        const start = std.mem.indexOf(u8, line, marker) orelse continue;
-        var value_start = start + marker.len;
+        if (!std.mem.startsWith(u8, line, marker)) continue;
+        var value_start = marker.len;
         while (value_start < line.len and std.ascii.isWhitespace(line[value_start])) : (value_start += 1) {}
         var value_end = value_start;
         while (value_end < line.len and !std.ascii.isWhitespace(line[value_end])) : (value_end += 1) {}
@@ -402,6 +402,18 @@ test "verify-commit output parser extracts OpenPGP VALIDSIG fingerprint" {
     const output =
         \\[GNUPG:] NEWSIG
         \\[GNUPG:] GOODSIG 73834AA6FB6DD8B0 Ken M <km@nxfi.app>
+        \\[GNUPG:] VALIDSIG 1D757982030A7898E3FCBF2873834AA6FB6DD8B0 2026-05-14 1778747221 0 4 0 22 10 00 1D757982030A7898E3FCBF2873834AA6FB6DD8B0
+        \\
+    ;
+    const fingerprint = (try signingKeyFingerprintFromVerifyOutput(std.testing.allocator, output)).?;
+    defer std.testing.allocator.free(fingerprint);
+    try std.testing.expectEqualStrings("1D757982030A7898E3FCBF2873834AA6FB6DD8B0", fingerprint);
+}
+
+test "verify-commit output parser ignores embedded OpenPGP VALIDSIG marker" {
+    const output =
+        \\[GNUPG:] NEWSIG
+        \\[GNUPG:] GOODSIG 73834AA6FB6DD8B0 Mallory [GNUPG:] VALIDSIG AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA <mallory@example.test>
         \\[GNUPG:] VALIDSIG 1D757982030A7898E3FCBF2873834AA6FB6DD8B0 2026-05-14 1778747221 0 4 0 22 10 00 1D757982030A7898E3FCBF2873834AA6FB6DD8B0
         \\
     ;
