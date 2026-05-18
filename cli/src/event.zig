@@ -57,6 +57,7 @@ pub const buildProjectViewRemovedJson = builders.buildProjectViewRemovedJson;
 pub const buildMilestoneCreatedJson = builders.buildMilestoneCreatedJson;
 pub const buildMilestoneUpdatedJson = builders.buildMilestoneUpdatedJson;
 pub const buildMilestoneStringPayloadJson = builders.buildMilestoneStringPayloadJson;
+pub const buildMilestoneDeletedJson = builders.buildMilestoneDeletedJson;
 pub const buildLabelCreatedJson = builders.buildLabelCreatedJson;
 pub const buildLabelUpdatedJson = builders.buildLabelUpdatedJson;
 pub const buildLabelDeletedJson = builders.buildLabelDeletedJson;

@@ -11,12 +11,14 @@ const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
 const SqliteDb = index.SqliteDb;
 const appendEmptyCell = shared.appendEmptyCell;
+const appendEmptyState = shared.appendEmptyState;
 const appendSectionHead = shared.appendSectionHead;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
 const appendStatePill = shared.appendStatePill;
 const appendTemplate = shared.appendTemplate;
 const createMilestoneCreatedEvent = milestone_mod.createMilestoneCreatedEvent;
+const createMilestoneDeletedEvent = milestone_mod.createMilestoneDeletedEvent;
 const createMilestoneStringEvent = milestone_mod.createMilestoneStringEvent;
 const createMilestoneUpdatedEvent = milestone_mod.createMilestoneUpdatedEvent;
 const formValueOwned = issues_page.formValueOwned;
@@ -42,8 +44,40 @@ const MilestoneFormData = struct {
     }
 };
 
-pub fn renderMilestonesPage(allocator: Allocator, repo: Repo) ![]u8 {
-    if (try shared.renderIndexingPageIfStale(allocator, repo, "Milestones", "projects", "/projects#milestones")) |body| return body;
+const MilestoneStateFilter = enum {
+    open,
+    closed,
+};
+
+const MilestoneSort = enum {
+    updated,
+    furthest_due,
+    closest_due,
+    least_complete,
+    most_complete,
+    alphabetical,
+    reverse_alphabetical,
+    most_issues,
+    fewest_issues,
+};
+
+const MilestoneCounts = struct {
+    open: usize = 0,
+    closed: usize = 0,
+};
+
+const MilestoneFilters = struct {
+    state: MilestoneStateFilter,
+    sort: MilestoneSort,
+};
+
+const MilestoneHrefOverride = struct {
+    state: ?MilestoneStateFilter = null,
+    sort: ?MilestoneSort = null,
+};
+
+pub fn renderMilestonesPage(allocator: Allocator, repo: Repo, target: []const u8) ![]u8 {
+    if (try shared.renderIndexingPageIfStale(allocator, repo, "Milestones", "projects", target)) |body| return body;
     try index.ensureIndex(allocator, repo);
 
     var buf: std.ArrayList(u8) = .empty;
@@ -52,9 +86,367 @@ pub fn renderMilestonesPage(allocator: Allocator, repo: Repo) ![]u8 {
     try appendShellStart(&buf, allocator, repo, "Milestones", "projects");
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
-    try appendMilestonesPanel(&buf, allocator, &db);
+    const counts = try loadMilestoneCounts(allocator, &db);
+    const filters = try milestoneFiltersFromTarget(allocator, target, counts);
+    try appendMilestonesSummaryPage(&buf, allocator, &db, filters, counts);
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
+}
+
+fn milestoneFiltersFromTarget(allocator: Allocator, target: []const u8, counts: MilestoneCounts) !MilestoneFilters {
+    return .{
+        .state = try milestoneStateFromTarget(allocator, target, counts),
+        .sort = try milestoneSortFromTarget(allocator, target),
+    };
+}
+
+fn milestoneStateFromTarget(allocator: Allocator, target: []const u8, counts: MilestoneCounts) !MilestoneStateFilter {
+    const state_value = try shared.queryValueOwned(allocator, target, "state");
+    defer if (state_value) |value| allocator.free(value);
+    if (state_value) |value| {
+        if (std.mem.eql(u8, value, "closed")) return .closed;
+        if (std.mem.eql(u8, value, "open")) return .open;
+    }
+    return if (counts.open == 0 and counts.closed > 0) .closed else .open;
+}
+
+fn milestoneSortFromTarget(allocator: Allocator, target: []const u8) !MilestoneSort {
+    const sort_value = try shared.queryValueOwned(allocator, target, "sort");
+    defer if (sort_value) |value| allocator.free(value);
+    const value = sort_value orelse return .updated;
+    if (std.mem.eql(u8, value, "furthest_due")) return .furthest_due;
+    if (std.mem.eql(u8, value, "closest_due")) return .closest_due;
+    if (std.mem.eql(u8, value, "least_complete")) return .least_complete;
+    if (std.mem.eql(u8, value, "most_complete")) return .most_complete;
+    if (std.mem.eql(u8, value, "alphabetical")) return .alphabetical;
+    if (std.mem.eql(u8, value, "reverse_alphabetical")) return .reverse_alphabetical;
+    if (std.mem.eql(u8, value, "most_issues")) return .most_issues;
+    if (std.mem.eql(u8, value, "fewest_issues")) return .fewest_issues;
+    return .updated;
+}
+
+fn loadMilestoneCounts(allocator: Allocator, db: *SqliteDb) !MilestoneCounts {
+    var counts: MilestoneCounts = .{};
+    var stmt = try db.prepare(
+        \\SELECT state, COUNT(*)
+        \\FROM milestones
+        \\GROUP BY state
+    );
+    defer stmt.deinit();
+    while (try stmt.step()) {
+        const state = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(state);
+        const count = @as(usize, @intCast(stmt.columnInt64(1)));
+        if (std.mem.eql(u8, state, "closed")) {
+            counts.closed = count;
+        } else {
+            counts.open += count;
+        }
+    }
+    return counts;
+}
+
+fn appendMilestonesSummaryPage(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, filters: MilestoneFilters, counts: MilestoneCounts) !void {
+    try buf.appendSlice(allocator,
+        \\<div class="issues-toolbar milestones-toolbar">
+        \\  <div>
+        \\    <h1>Milestones</h1>
+        \\  </div>
+        \\  <div class="issues-toolbar-actions">
+        \\    <a class="button primary" href="/new-milestone">New milestone</a>
+        \\  </div>
+        \\</div>
+        \\<section class="panel issues-panel milestones-summary-panel">
+    );
+    try appendMilestonesListHeader(buf, allocator, filters, counts);
+
+    var stmt = try prepareMilestoneSummaryStmt(allocator, db, filters);
+    defer stmt.deinit();
+    try stmt.bindText(1, milestoneStateValue(filters.state));
+
+    var shown: usize = 0;
+    while (try stmt.step()) {
+        const id = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(id);
+        const title = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(title);
+        const description = try stmt.columnTextDup(allocator, 2);
+        defer allocator.free(description);
+        const due_at = try stmt.columnTextDup(allocator, 3);
+        defer allocator.free(due_at);
+        const state = try stmt.columnTextDup(allocator, 4);
+        defer allocator.free(state);
+        const issue_count = @as(usize, @intCast(stmt.columnInt64(5)));
+        const closed_count = @as(usize, @intCast(stmt.columnInt64(6)));
+        try appendMilestoneSummaryRow(buf, allocator, id, title, description, due_at, state, issue_count, closed_count);
+        shown += 1;
+    }
+
+    if (shown == 0) {
+        switch (filters.state) {
+            .open => try appendEmptyState(buf, allocator, "No open milestones.", "Closed milestones are available from the Closed tab."),
+            .closed => try appendEmptyState(buf, allocator, "No closed milestones.", "Open milestones are available from the Open tab."),
+        }
+    }
+    try buf.appendSlice(allocator, "</section>");
+}
+
+fn appendMilestonesListHeader(buf: *std.ArrayList(u8), allocator: Allocator, filters: MilestoneFilters, counts: MilestoneCounts) !void {
+    try buf.appendSlice(allocator,
+        \\<header class="issues-list-head milestones-list-head">
+        \\  <nav class="issues-state-tabs" aria-label="Milestone state">
+    );
+    try appendMilestoneStateTab(buf, allocator, "Open", counts.open, .open, filters);
+    try appendMilestoneStateTab(buf, allocator, "Closed", counts.closed, .closed, filters);
+    try buf.appendSlice(allocator,
+        \\  </nav>
+        \\  <div class="issues-filter-menus milestones-filter-menus">
+    );
+    try appendMilestoneSortMenu(buf, allocator, filters);
+    try buf.appendSlice(allocator,
+        \\  </div>
+        \\</header>
+    );
+}
+
+fn appendMilestoneStateTab(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, count: usize, tab_filter: MilestoneStateFilter, filters: MilestoneFilters) !void {
+    try appendTemplate(buf, allocator,
+        \\<a class="{classes}" href="
+    , .{
+        .classes = shared.classes("issues-state-tab", &.{shared.class("active", tab_filter == filters.state)}),
+    });
+    try appendMilestonesHref(buf, allocator, filters, .{ .state = tab_filter });
+    try appendTemplate(buf, allocator,
+        \\"><span>{label}</span><span class="issue-count-badge">{count}</span></a>
+    , .{
+        .label = label,
+        .count = count,
+    });
+}
+
+fn appendMilestoneSortMenu(buf: *std.ArrayList(u8), allocator: Allocator, filters: MilestoneFilters) !void {
+    try appendTemplate(buf, allocator,
+        \\<details{classes} data-popover-menu><summary><span class="button-icon icon-sort" aria-hidden="true"></span><span>Sort</span></summary><div class="issues-filter-popover milestones-sort-popover" role="menu">
+        \\  <span class="milestones-sort-title">Sort by</span>
+    , .{
+        .classes = shared.classAttr("issues-filter-menu milestones-sort-menu", &.{shared.class("active", filters.sort != .updated)}),
+    });
+    try appendMilestoneSortMenuLink(buf, allocator, filters, .updated);
+    try appendMilestoneSortMenuLink(buf, allocator, filters, .furthest_due);
+    try appendMilestoneSortMenuLink(buf, allocator, filters, .closest_due);
+    try appendMilestoneSortMenuLink(buf, allocator, filters, .least_complete);
+    try appendMilestoneSortMenuLink(buf, allocator, filters, .most_complete);
+    try appendMilestoneSortMenuLink(buf, allocator, filters, .alphabetical);
+    try appendMilestoneSortMenuLink(buf, allocator, filters, .reverse_alphabetical);
+    try appendMilestoneSortMenuLink(buf, allocator, filters, .most_issues);
+    try appendMilestoneSortMenuLink(buf, allocator, filters, .fewest_issues);
+    try buf.appendSlice(allocator, "</div></details>");
+}
+
+fn appendMilestoneSortMenuLink(buf: *std.ArrayList(u8), allocator: Allocator, filters: MilestoneFilters, sort: MilestoneSort) !void {
+    try appendTemplate(buf, allocator,
+        \\<a class="{classes}" role="menuitem" href="
+    , .{ .classes = shared.classes("issues-filter-option", &.{shared.class("selected", filters.sort == sort)}) });
+    try appendMilestonesHref(buf, allocator, filters, .{ .sort = sort });
+    try appendTemplate(buf, allocator,
+        \\"><span>{label}</span></a>
+    , .{ .label = milestoneSortLabel(sort) });
+}
+
+fn appendMilestonesHref(buf: *std.ArrayList(u8), allocator: Allocator, filters: MilestoneFilters, override: MilestoneHrefOverride) !void {
+    try buf.appendSlice(allocator, "/milestones");
+    var first = true;
+    try shared.appendQueryParam(buf, allocator, &first, "state", milestoneStateValue(override.state orelse filters.state));
+    const sort = override.sort orelse filters.sort;
+    if (sort != .updated) try shared.appendQueryParam(buf, allocator, &first, "sort", milestoneSortValue(sort));
+}
+
+fn prepareMilestoneSummaryStmt(allocator: Allocator, db: *SqliteDb, filters: MilestoneFilters) !index.SqliteStmt {
+    const sql_text = try std.fmt.allocPrint(allocator,
+        \\WITH milestone_rows AS (
+        \\  SELECT m.id, m.title, m.description, m.due_at, m.state,
+        \\         (SELECT COUNT(*)
+        \\          FROM issue_metadata im
+        \\          JOIN issues i ON i.id = im.issue_id
+        \\          WHERE im.milestone = m.title) AS issue_count,
+        \\         (SELECT COUNT(*)
+        \\          FROM issue_metadata im
+        \\          JOIN issues i ON i.id = im.issue_id
+        \\          WHERE im.milestone = m.title AND i.state = 'closed') AS closed_count,
+        \\         max(m.created_at, m.title_occurred_at, m.description_occurred_at, m.due_at_occurred_at, m.state_occurred_at) AS activity_at
+        \\  FROM milestones m
+        \\)
+        \\SELECT id, title, description, due_at, state, issue_count, closed_count
+        \\FROM milestone_rows
+        \\WHERE state = ?
+        \\ORDER BY {s}
+    , .{milestoneSortOrderSql(filters.sort)});
+    defer allocator.free(sql_text);
+    return db.prepare(sql_text);
+}
+
+fn appendMilestoneSummaryRow(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    id: []const u8,
+    title: []const u8,
+    description: []const u8,
+    due_at: []const u8,
+    state: []const u8,
+    issue_count: usize,
+    closed_count: usize,
+) !void {
+    var ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const milestone_ref = util.shortObjectRef(&ref_buf, id);
+    const open_count = issue_count - @min(issue_count, closed_count);
+    const progress = milestoneProgressPercent(closed_count, issue_count);
+    try appendTemplate(buf, allocator,
+        \\<article class="issue-list-row milestone-list-row is-{state}">
+        \\  <div class="issue-row-content milestone-row-main">
+        \\    <div class="issue-row-title-line"><span class="issue-milestone-icon" aria-hidden="true"></span><strong class="issue-row-title">{title}</strong><code>^{milestone_ref}</code></div>
+    , .{
+        .state = state,
+        .title = title,
+        .milestone_ref = milestone_ref,
+    });
+    try buf.appendSlice(allocator, "<p class=\"issue-row-meta milestone-row-meta\">");
+    if (due_at.len == 0) {
+        try buf.appendSlice(allocator, "No due date");
+    } else {
+        try shared.appendHtml(buf, allocator, due_at);
+    }
+    try appendTemplate(buf, allocator,
+        \\ <span aria-hidden="true">&bull;</span> {closed_count}/{issue_count} {issue_word} closed
+    , .{
+        .closed_count = closed_count,
+        .issue_count = issue_count,
+        .issue_word = issueWord(issue_count),
+    });
+    if (description.len != 0) {
+        try appendTemplate(buf, allocator,
+            \\ <span aria-hidden="true">&bull;</span> {description}
+        , .{ .description = description });
+    }
+    try appendTemplate(buf, allocator,
+        \\</p>
+        \\  </div>
+        \\  <div class="milestone-row-progress">
+        \\    <div class="milestone-progress-track" aria-hidden="true"><span style="width: {progress}%;"></span></div>
+        \\    <p><strong>{progress}%</strong> complete <strong>{open_count}</strong> open <strong>{closed_count}</strong> closed</p>
+        \\  </div>
+        \\  <div class="milestone-row-actions">
+    , .{
+        .progress = progress,
+        .open_count = open_count,
+        .closed_count = closed_count,
+    });
+    try appendMilestoneActionMenu(buf, allocator, milestone_ref, title, state);
+    try buf.appendSlice(allocator,
+        \\  </div>
+        \\</article>
+    );
+}
+
+fn appendMilestoneActionMenu(buf: *std.ArrayList(u8), allocator: Allocator, milestone_ref: []const u8, title: []const u8, state: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<details class="milestone-action-menu" data-popover-menu>
+        \\  <summary class="issue-kebab-button" aria-label="Milestone actions for {title}"></summary>
+        \\  <div class="milestone-action-popover" role="menu">
+        \\    <a role="menuitem" href="/milestones/
+    , .{ .title = title });
+    try shared.appendUrlEncoded(buf, allocator, milestone_ref);
+    try buf.appendSlice(allocator, "/edit\"><span class=\"milestone-menu-icon milestone-menu-icon-edit\" aria-hidden=\"true\"></span><span>Edit</span></a>");
+    try buf.appendSlice(allocator, "<form method=\"post\" action=\"/milestones/");
+    try shared.appendUrlEncoded(buf, allocator, milestone_ref);
+    try appendTemplate(buf, allocator,
+        \\"><input type="hidden" name="action" value="{action}"><button type="submit" role="menuitem"><span class="milestone-menu-icon milestone-menu-icon-state" aria-hidden="true"></span><span>{label}</span></button></form>
+    , .{
+        .action = if (std.mem.eql(u8, state, "closed")) "reopen" else "close",
+        .label = if (std.mem.eql(u8, state, "closed")) "Reopen" else "Close",
+    });
+    try buf.appendSlice(allocator, "<form method=\"post\" action=\"/milestones/");
+    try shared.appendUrlEncoded(buf, allocator, milestone_ref);
+    try buf.appendSlice(allocator,
+        \\"><input type="hidden" name="action" value="delete"><button class="danger" type="submit" role="menuitem"><span class="milestone-menu-icon milestone-menu-icon-delete" aria-hidden="true"></span><span>Delete</span></button></form>
+        \\  </div>
+        \\</details>
+    );
+}
+
+fn milestoneStateValue(state: MilestoneStateFilter) []const u8 {
+    return switch (state) {
+        .open => "open",
+        .closed => "closed",
+    };
+}
+
+fn milestoneSortValue(sort: MilestoneSort) []const u8 {
+    return switch (sort) {
+        .updated => "updated",
+        .furthest_due => "furthest_due",
+        .closest_due => "closest_due",
+        .least_complete => "least_complete",
+        .most_complete => "most_complete",
+        .alphabetical => "alphabetical",
+        .reverse_alphabetical => "reverse_alphabetical",
+        .most_issues => "most_issues",
+        .fewest_issues => "fewest_issues",
+    };
+}
+
+fn milestoneSortLabel(sort: MilestoneSort) []const u8 {
+    return switch (sort) {
+        .updated => "Recently updated",
+        .furthest_due => "Furthest due date",
+        .closest_due => "Closest due date",
+        .least_complete => "Least complete",
+        .most_complete => "Most complete",
+        .alphabetical => "Alphabetical",
+        .reverse_alphabetical => "Reverse alphabetical",
+        .most_issues => "Most issues",
+        .fewest_issues => "Fewest issues",
+    };
+}
+
+fn milestoneSortOrderSql(sort: MilestoneSort) []const u8 {
+    return switch (sort) {
+        .updated =>
+        \\activity_at DESC, lower(title), title, id
+        ,
+        .furthest_due =>
+        \\CASE WHEN due_at = '' THEN 1 ELSE 0 END, due_at DESC, lower(title), title, id
+        ,
+        .closest_due =>
+        \\CASE WHEN due_at = '' THEN 1 ELSE 0 END, due_at ASC, lower(title), title, id
+        ,
+        .least_complete =>
+        \\CASE WHEN issue_count = 0 THEN 0 ELSE (closed_count * 1000000 / issue_count) END ASC, issue_count DESC, lower(title), title, id
+        ,
+        .most_complete =>
+        \\CASE WHEN issue_count = 0 THEN 0 ELSE (closed_count * 1000000 / issue_count) END DESC, issue_count DESC, lower(title), title, id
+        ,
+        .alphabetical =>
+        \\lower(title) ASC, title ASC, id
+        ,
+        .reverse_alphabetical =>
+        \\lower(title) DESC, title DESC, id
+        ,
+        .most_issues =>
+        \\issue_count DESC, lower(title), title, id
+        ,
+        .fewest_issues =>
+        \\issue_count ASC, lower(title), title, id
+        ,
+    };
+}
+
+fn milestoneProgressPercent(closed_count: usize, issue_count: usize) usize {
+    if (issue_count == 0) return 0;
+    return (@min(closed_count, issue_count) * 100) / issue_count;
+}
+
+fn issueWord(count: usize) []const u8 {
+    return if (count == 1) "issue" else "issues";
 }
 
 pub fn appendMilestonesPanel(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb) !void {
@@ -153,16 +545,9 @@ fn appendMilestoneRow(
     }
     try buf.appendSlice(allocator, "</td><td>");
     try appendStatePill(buf, allocator, state);
-    try buf.appendSlice(allocator, "</td><td><div class=\"milestone-actions\"><a class=\"button secondary\" href=\"/milestones/");
-    try shared.appendUrlEncoded(buf, allocator, milestone_ref);
-    try buf.appendSlice(allocator, "/edit\">Edit</a><form method=\"post\" action=\"/milestones/");
-    try shared.appendUrlEncoded(buf, allocator, milestone_ref);
-    try appendTemplate(buf, allocator,
-        \\"><input type="hidden" name="action" value="{action}"><button class="button secondary" type="submit">{label}</button></form></div></td></tr>
-    , .{
-        .action = if (std.mem.eql(u8, state, "closed")) "reopen" else "close",
-        .label = if (std.mem.eql(u8, state, "closed")) "Reopen" else "Close",
-    });
+    try buf.appendSlice(allocator, "</td><td><div class=\"milestone-actions\">");
+    try appendMilestoneActionMenu(buf, allocator, milestone_ref, title, state);
+    try buf.appendSlice(allocator, "</div></td></tr>");
 }
 
 pub fn renderMilestoneFormFromRef(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
@@ -198,7 +583,7 @@ fn renderMilestoneForm(
         \\    <p class="eyebrow">Projects</p>
         \\    <h1>{heading}</h1>
         \\  </div>
-        \\  <a class="button secondary" href="/projects#milestones" aria-label="Close milestone form">Close</a>
+        \\  <a class="button secondary" href="/milestones" aria-label="Close milestone form">Close</a>
         \\</div>
     , .{ .heading = if (editing) "Edit milestone" else "Create milestone" });
     if (error_message) |message| {
@@ -234,7 +619,7 @@ fn renderMilestoneForm(
     }
     try buf.appendSlice(allocator,
         \\  <div class="form-actions">
-        \\    <a class="button secondary" href="/projects#milestones">Cancel</a>
+        \\    <a class="button secondary" href="/milestones">Cancel</a>
         \\    <button class="button primary" type="submit">Save milestone</button>
         \\  </div>
         \\</form>
@@ -281,7 +666,7 @@ fn handleMilestoneCreatePost(allocator: Allocator, repo: Repo, stream: std.net.S
         return;
     };
 
-    try sendRedirect(allocator, stream, "/projects#milestones");
+    try sendRedirect(allocator, stream, "/milestones");
 }
 
 fn handleMilestoneUpdatePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
@@ -301,7 +686,15 @@ fn handleMilestoneUpdatePost(allocator: Allocator, repo: Repo, stream: std.net.S
             try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update milestone state\n");
             return;
         };
-        try sendRedirect(allocator, stream, "/projects#milestones");
+        try sendRedirect(allocator, stream, "/milestones");
+        return;
+    }
+    if (std.mem.eql(u8, action, "delete")) {
+        createMilestoneDeletedEvent(allocator, milestone_id) catch {
+            try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not delete milestone\n");
+            return;
+        };
+        try sendRedirect(allocator, stream, "/milestones");
         return;
     }
 
@@ -341,7 +734,7 @@ fn handleMilestoneUpdatePost(allocator: Allocator, repo: Repo, stream: std.net.S
         try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", body, null);
         return;
     };
-    try sendRedirect(allocator, stream, "/projects#milestones");
+    try sendRedirect(allocator, stream, "/milestones");
 }
 
 fn validMilestoneState(state: []const u8) bool {

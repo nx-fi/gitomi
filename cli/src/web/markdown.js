@@ -934,7 +934,7 @@
     window.mermaid.initialize({
       startOnLoad: false,
       securityLevel: "strict",
-      theme: document.documentElement.dataset.theme === "dark" ? "dark" : "default",
+      theme: document.documentElement.dataset.themeMode === "dark" ? "dark" : "default",
       flowchart: { htmlLabels: false, useMaxWidth: true },
       sequence: { useMaxWidth: true },
     });

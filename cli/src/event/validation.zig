@@ -722,6 +722,7 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!hasState(payload, "state", &.{ "open", "closed" })) return "milestone.state_set payload.state must be open or closed";
         return null;
     }
+    if (std.mem.eql(u8, event_type, "milestone.deleted")) return null;
 
     if (std.mem.eql(u8, event_type, "label.created")) {
         if (!hasString(payload, "name")) return "label.created payload.name must be a string";

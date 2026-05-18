@@ -35,6 +35,7 @@ const ProjectSummary = struct {
     description: []u8,
     state: []u8,
     status: []u8,
+    status_occurred_at: []u8,
     priority: []u8,
     start_at: []u8,
     end_at: []u8,
@@ -47,6 +48,7 @@ const ProjectSummary = struct {
         allocator.free(self.description);
         allocator.free(self.state);
         allocator.free(self.status);
+        allocator.free(self.status_occurred_at);
         allocator.free(self.priority);
         allocator.free(self.start_at);
         allocator.free(self.end_at);
@@ -297,7 +299,7 @@ fn isProjectDateValue(value: []const u8) bool {
 
 fn loadProjectSummary(allocator: Allocator, db: *SqliteDb, project: []const u8) !ProjectSummary {
     var stmt = try db.prepare(
-        \\SELECT id, name, description, state, status, priority, start_at, end_at, created_at, author_principal
+        \\SELECT id, name, description, state, status, status_occurred_at, priority, start_at, end_at, created_at, author_principal
         \\FROM projects
         \\WHERE name = ?
         \\ORDER BY created_at DESC, id DESC
@@ -312,11 +314,12 @@ fn loadProjectSummary(allocator: Allocator, db: *SqliteDb, project: []const u8) 
             .description = try stmt.columnTextDup(allocator, 2),
             .state = try stmt.columnTextDup(allocator, 3),
             .status = try stmt.columnTextDup(allocator, 4),
-            .priority = try stmt.columnTextDup(allocator, 5),
-            .start_at = try stmt.columnTextDup(allocator, 6),
-            .end_at = try stmt.columnTextDup(allocator, 7),
-            .created_at = try stmt.columnTextDup(allocator, 8),
-            .author_principal = try stmt.columnTextDup(allocator, 9),
+            .status_occurred_at = try stmt.columnTextDup(allocator, 5),
+            .priority = try stmt.columnTextDup(allocator, 6),
+            .start_at = try stmt.columnTextDup(allocator, 7),
+            .end_at = try stmt.columnTextDup(allocator, 8),
+            .created_at = try stmt.columnTextDup(allocator, 9),
+            .author_principal = try stmt.columnTextDup(allocator, 10),
         };
     }
 
@@ -326,6 +329,7 @@ fn loadProjectSummary(allocator: Allocator, db: *SqliteDb, project: []const u8) 
         .description = try allocator.dupe(u8, ""),
         .state = try allocator.dupe(u8, "open"),
         .status = try allocator.dupe(u8, "WIP"),
+        .status_occurred_at = try allocator.dupe(u8, ""),
         .priority = try allocator.dupe(u8, ""),
         .start_at = try allocator.dupe(u8, ""),
         .end_at = try allocator.dupe(u8, ""),
@@ -494,55 +498,122 @@ fn appendProjectPageTab(
 }
 
 fn appendProjectInlineProperties(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, summary: *const ProjectSummary, metrics: *const ProjectMetrics) !void {
-    try buf.appendSlice(allocator, "<section class=\"project-overview-properties-strip\" aria-label=\"Project properties\">");
-    try appendProjectProperty(buf, allocator, "Status", "project-overview-status-icon", statusLabel(summary.status), .{ .tone = project_issue_render.columnTone(summary.status) });
-    try appendProjectProperty(buf, allocator, "Priority", "project-overview-priority-icon", priorityLabel(summary.priority), .{ .tone = project_issue_render.priorityTone(summary.priority) });
+    const health_label = projectHealthLabel(summary.status, summary.state);
+    const health_tone = projectHealthTone(summary.status, summary.state);
+    const progress = projectProgressPercent(metrics);
     const leads_label = try projectCollectionPreviewOwned(allocator, db, "project_leads", "lead", summary.id, "No lead");
     defer allocator.free(leads_label);
-    try appendProjectProperty(buf, allocator, "Lead", "icon-users", leads_label, .{});
-    const date_label = try projectDatesLabelOwned(allocator, summary);
-    defer allocator.free(date_label);
-    try appendProjectProperty(buf, allocator, "Dates", "icon-calendar", date_label, .{});
-    const issues_label = try countLabelOwned(allocator, metrics.issue_count, "issue", "issues");
-    defer allocator.free(issues_label);
-    try appendProjectProperty(buf, allocator, "Issues", "icon-issues", issues_label, .{});
-    try buf.appendSlice(allocator, "</section>");
+    const target_label = try projectTargetDateLabelOwned(allocator, summary);
+    defer allocator.free(target_label);
+    try appendTemplate(buf, allocator,
+        \\<section class="panel project-summary-panel" aria-label="Project summary">
+        \\  <article class="project-summary-row issue-list-row tone-{health_tone}">
+        \\    <div class="issue-state-cell"><span class="project-summary-health-icon tone-{health_tone}" aria-hidden="true"></span></div>
+        \\    <div class="issue-row-content">
+        \\      <div class="issue-row-title-line project-summary-title-line"><span class="project-summary-kicker">Health</span><strong class="project-summary-health-value tone-{health_tone}">{health_label}
+    , .{
+        .health_tone = health_tone,
+        .health_label = health_label,
+    });
+    if (summary.status_occurred_at.len != 0) {
+        try buf.appendSlice(allocator, "<span aria-hidden=\"true\"> &middot; </span>");
+        try appendRelativeTime(buf, allocator, summary.status_occurred_at);
+    }
+    try buf.appendSlice(allocator,
+        \\</strong></div>
+        \\      <div class="project-summary-fields">
+    );
+    try appendProjectSummaryField(buf, allocator, "Priority", "project-overview-priority-icon", prioritySummaryLabel(summary.priority), project_issue_render.priorityTone(summary.priority));
+    try appendProjectSummaryField(buf, allocator, "Lead", "icon-users", leads_label, "");
+    try appendProjectSummaryField(buf, allocator, "Target date", "icon-calendar", target_label, "");
+    try appendProjectSummaryFieldValue(buf, allocator, "Issues", "icon-issues", metrics.issue_count, "");
+    try buf.appendSlice(allocator,
+        \\      </div>
+        \\    </div>
+        \\    <div class="issue-row-side project-summary-side">
+        \\      <span class="project-summary-side-label">Status</span>
+    );
+    try appendTemplate(buf, allocator,
+        \\      <strong class="project-summary-progress tone-{tone}" title="{closed_count} of {issue_count} issues closed"><span class="project-summary-progress-icon" aria-hidden="true"></span>{progress}%</strong>
+        \\    </div>
+        \\  </article>
+        \\</section>
+    , .{
+        .tone = projectProgressTone(metrics),
+        .closed_count = metrics.closed_issue_count,
+        .issue_count = metrics.issue_count,
+        .progress = progress,
+    });
 }
 
-const ProjectPropertyOptions = struct {
-    tone: []const u8 = "",
-};
-
-fn appendProjectProperty(
+fn appendProjectSummaryField(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
     label: []const u8,
     icon_class: []const u8,
     value: []const u8,
-    options: ProjectPropertyOptions,
+    tone: []const u8,
 ) !void {
     try appendTemplate(buf, allocator,
-        \\<div class="project-overview-property">
+        \\<div class="project-summary-field">
         \\  <span>{label}</span>
         \\  <strong class="{tone_class}"><span class="button-icon {icon_class}" aria-hidden="true"></span>{value}</strong>
         \\</div>
     , .{
         .label = label,
-        .tone_class = projectOverviewToneClass(options.tone),
+        .tone_class = projectSummaryValueClass(tone),
         .icon_class = icon_class,
         .value = value,
     });
 }
 
-fn projectOverviewToneClass(tone: []const u8) []const u8 {
-    if (std.mem.eql(u8, tone, "progress")) return "project-overview-property-value tone-progress";
-    if (std.mem.eql(u8, tone, "done")) return "project-overview-property-value tone-done";
-    if (std.mem.eql(u8, tone, "failed")) return "project-overview-property-value tone-failed";
-    if (std.mem.eql(u8, tone, "p0")) return "project-overview-property-value tone-p0";
-    if (std.mem.eql(u8, tone, "p1")) return "project-overview-property-value tone-p1";
-    if (std.mem.eql(u8, tone, "p2")) return "project-overview-property-value tone-p2";
-    if (std.mem.eql(u8, tone, "p3")) return "project-overview-property-value tone-p3";
-    return "project-overview-property-value";
+fn appendProjectSummaryFieldValue(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    label: []const u8,
+    icon_class: []const u8,
+    value: usize,
+    tone: []const u8,
+) !void {
+    const value_label = try std.fmt.allocPrint(allocator, "{d}", .{value});
+    defer allocator.free(value_label);
+    try appendProjectSummaryField(buf, allocator, label, icon_class, value_label, tone);
+}
+
+fn projectSummaryValueClass(tone: []const u8) []const u8 {
+    if (std.mem.eql(u8, tone, "progress")) return "project-summary-value tone-progress";
+    if (std.mem.eql(u8, tone, "done")) return "project-summary-value tone-done";
+    if (std.mem.eql(u8, tone, "failed")) return "project-summary-value tone-failed";
+    if (std.mem.eql(u8, tone, "p0")) return "project-summary-value tone-p0";
+    if (std.mem.eql(u8, tone, "p1")) return "project-summary-value tone-p1";
+    if (std.mem.eql(u8, tone, "p2")) return "project-summary-value tone-p2";
+    if (std.mem.eql(u8, tone, "p3")) return "project-summary-value tone-p3";
+    return "project-summary-value";
+}
+
+fn projectHealthLabel(status: []const u8, state: []const u8) []const u8 {
+    if (std.mem.eql(u8, state, "closed") or std.mem.eql(u8, status, "Done")) return "Complete";
+    if (std.mem.eql(u8, status, "Failed")) return "At risk";
+    if (status.len == 0 or std.mem.eql(u8, status, "Draft") or std.mem.eql(u8, status, "Todo")) return "Not started";
+    return "On track";
+}
+
+fn projectHealthTone(status: []const u8, state: []const u8) []const u8 {
+    if (std.mem.eql(u8, state, "closed") or std.mem.eql(u8, status, "Done")) return "done";
+    if (std.mem.eql(u8, status, "Failed")) return "failed";
+    if (status.len == 0 or std.mem.eql(u8, status, "Draft") or std.mem.eql(u8, status, "Todo")) return "todo";
+    return "progress";
+}
+
+fn projectProgressPercent(metrics: *const ProjectMetrics) usize {
+    if (metrics.issue_count == 0) return 0;
+    return (@min(metrics.closed_issue_count, metrics.issue_count) * 100) / metrics.issue_count;
+}
+
+fn projectProgressTone(metrics: *const ProjectMetrics) []const u8 {
+    if (metrics.issue_count != 0 and metrics.closed_issue_count >= metrics.issue_count) return "done";
+    if (metrics.closed_issue_count == 0) return "todo";
+    return "progress";
 }
 
 fn appendProjectResources(buf: *std.ArrayList(u8), allocator: Allocator, project: []const u8) !void {
@@ -1303,6 +1374,10 @@ fn priorityLabel(priority: []const u8) []const u8 {
     return if (priority.len == 0) "No priority" else priority;
 }
 
+fn prioritySummaryLabel(priority: []const u8) []const u8 {
+    return if (priority.len == 0) "---" else priority;
+}
+
 fn repositoryOwnerLabel(repo: Repo) []const u8 {
     if (std.fs.path.dirname(repo.root)) |parent| return std.fs.path.basename(parent);
     return std.fs.path.basename(repo.root);
@@ -1316,6 +1391,11 @@ fn projectDatesLabelOwned(allocator: Allocator, summary: *const ProjectSummary) 
     return std.fmt.allocPrint(allocator, "{s} + {s}", .{ start_label, end_label });
 }
 
+fn projectTargetDateLabelOwned(allocator: Allocator, summary: *const ProjectSummary) ![]u8 {
+    if (summary.end_at.len == 0) return allocator.dupe(u8, "No target date");
+    return dateLabelWithOrdinalOwned(allocator, summary.end_at);
+}
+
 fn projectCollectionPreviewOwned(
     allocator: Allocator,
     db: *SqliteDb,
@@ -1324,9 +1404,7 @@ fn projectCollectionPreviewOwned(
     project_id: []const u8,
     empty_label: []const u8,
 ) ![]u8 {
-    var stmt = try db.prepare(
-        "SELECT " ++ column ++ ", COUNT(*) OVER () FROM (SELECT DISTINCT " ++ column ++ " FROM " ++ table ++ " WHERE project_id = ? ORDER BY lower(" ++ column ++ "), " ++ column ++ ") LIMIT 2"
-    );
+    var stmt = try db.prepare("SELECT " ++ column ++ ", COUNT(*) OVER () FROM (SELECT DISTINCT " ++ column ++ " FROM " ++ table ++ " WHERE project_id = ? ORDER BY lower(" ++ column ++ "), " ++ column ++ ") LIMIT 2");
     defer stmt.deinit();
     try stmt.bindText(1, project_id);
     var values: [2][]u8 = undefined;
@@ -1355,6 +1433,27 @@ fn dateLabelOwned(allocator: Allocator, value: []const u8) ![]u8 {
         }
     }
     return allocator.dupe(u8, value);
+}
+
+fn dateLabelWithOrdinalOwned(allocator: Allocator, value: []const u8) ![]u8 {
+    if (value.len >= 10 and value[4] == '-' and value[7] == '-') {
+        const month = std.fmt.parseInt(u8, value[5..7], 10) catch 0;
+        const day = std.fmt.parseInt(u8, value[8..10], 10) catch 0;
+        if (month >= 1 and month <= 12 and day >= 1 and day <= 31) {
+            return std.fmt.allocPrint(allocator, "{s} {d}{s}", .{ monthNames()[month - 1], day, ordinalSuffix(day) });
+        }
+    }
+    return allocator.dupe(u8, value);
+}
+
+fn ordinalSuffix(day: u8) []const u8 {
+    if (day >= 11 and day <= 13) return "th";
+    return switch (day % 10) {
+        1 => "st",
+        2 => "nd",
+        3 => "rd",
+        else => "th",
+    };
 }
 
 fn monthNames() []const []const u8 {
@@ -1394,6 +1493,7 @@ test "project overview header renders plain project name" {
         .description = try std.testing.allocator.dupe(u8, ""),
         .state = try std.testing.allocator.dupe(u8, "open"),
         .status = try std.testing.allocator.dupe(u8, "WIP"),
+        .status_occurred_at = try std.testing.allocator.dupe(u8, ""),
         .priority = try std.testing.allocator.dupe(u8, ""),
         .start_at = try std.testing.allocator.dupe(u8, ""),
         .end_at = try std.testing.allocator.dupe(u8, ""),
@@ -1416,6 +1516,7 @@ test "project dates label uses start plus end" {
         .description = try std.testing.allocator.dupe(u8, ""),
         .state = try std.testing.allocator.dupe(u8, "open"),
         .status = try std.testing.allocator.dupe(u8, "WIP"),
+        .status_occurred_at = try std.testing.allocator.dupe(u8, ""),
         .priority = try std.testing.allocator.dupe(u8, ""),
         .start_at = try std.testing.allocator.dupe(u8, "2026-05-17"),
         .end_at = try std.testing.allocator.dupe(u8, "2026-05-28"),

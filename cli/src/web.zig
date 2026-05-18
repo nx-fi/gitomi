@@ -18,6 +18,7 @@ const pulls_page = @import("web/pulls.zig");
 const refs_page = @import("web/refs.zig");
 const repo_mod = @import("repo.zig");
 const shared = @import("web/shared.zig");
+const theme_settings_page = @import("web/theme_settings.zig");
 const worktrees_page = @import("web/worktrees.zig");
 const zwf = @import("zwf.zig");
 
@@ -112,6 +113,7 @@ const routes = [_]Route{
     Route.post("/access/roles", handleAccessRolePost),
     Route.post("/access/devices", handleAccessDevicePost),
     Route.get("/settings", handleSettingsPage),
+    Route.get("/settings/theme", handleSettingsThemePage),
     Route.get("/settings/models", handleSettingsModelsPage),
     Route.post("/settings/models", handleSettingsModelsPost),
     Route.get("/settings/labels", handleLabelsPage),
@@ -573,7 +575,7 @@ fn handleProjectPropertiesPost(ctx: WebContext) !void {
 }
 
 fn handleMilestonesPage(ctx: WebContext) !void {
-    try shared.sendRedirect(ctx.allocator, ctx.stream, "/projects#milestones");
+    try sendOwnedHtml(ctx, try milestones_page.renderMilestonesPage(ctx.allocator, ctx.repo, ctx.request.target));
 }
 
 fn handleMilestoneEditPage(ctx: WebContext) !void {
@@ -605,7 +607,11 @@ fn handleAccessPage(ctx: WebContext) !void {
 }
 
 fn handleSettingsPage(ctx: WebContext) !void {
-    try sendOwnedHtml(ctx, try models_page.renderModelsPage(ctx.allocator, ctx.repo, ctx.request.target, ctx.csrf_token));
+    try sendOwnedHtml(ctx, try theme_settings_page.renderThemePage(ctx.allocator, ctx.repo));
+}
+
+fn handleSettingsThemePage(ctx: WebContext) !void {
+    try sendOwnedHtml(ctx, try theme_settings_page.renderThemePage(ctx.allocator, ctx.repo));
 }
 
 fn handleSettingsModelsPage(ctx: WebContext) !void {

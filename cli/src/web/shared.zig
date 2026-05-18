@@ -24,7 +24,7 @@ const loadConfig = repo_mod.loadConfig;
 const default_web_shortcut_leader = "Space";
 const default_web_shortcut_keys = "A S D F J K L E R U I O W Q P Z X C V B N M G H Y T";
 const default_web_shortcut_timeout_ms: u64 = 900;
-const asset_version = "20260518-profile-menu-two-line";
+const asset_version = "20260518-theme-system";
 
 const WebStats = struct {
     inbox_refs: usize = 0,
@@ -494,6 +494,24 @@ fn appendShellStylesheets(buf: *std.ArrayList(u8), allocator: Allocator) !void {
     , .{ .asset_version = asset_version });
 }
 
+fn appendCustomThemeBootstrapScript(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try buf.appendSlice(allocator,
+        \\  <script>
+        \\    (function () {
+        \\      try {
+        \\        var css = localStorage.getItem("gitomi.theme.customCss");
+        \\        if (!css) return;
+        \\        var style = document.createElement("style");
+        \\        style.id = "gitomi-custom-theme-tokens";
+        \\        style.setAttribute("data-custom-theme-tokens", "");
+        \\        style.textContent = css;
+        \\        document.head.appendChild(style);
+        \\      } catch (_) {}
+        \\    }());
+        \\  </script>
+    );
+}
+
 fn appendInternalReferenceLink(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -695,10 +713,16 @@ fn appendShellStartWithOptions(
         \\    (function () {
         \\      try {
         \\        var stored = localStorage.getItem("gitomi.theme");
+        \\        var custom_mode = localStorage.getItem("gitomi.theme.customMode") === "dark" ? "dark" : "light";
         \\        var system = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-        \\        document.documentElement.dataset.theme = stored === "light" || stored === "dark" ? stored : system;
+        \\        var modes = { light: "light", dark: "dark", capucine: "light", custom: custom_mode };
+        \\        var theme = Object.prototype.hasOwnProperty.call(modes, stored) ? stored : system;
+        \\        document.documentElement.dataset.theme = theme;
+        \\        document.documentElement.dataset.themeMode = modes[theme];
+        \\        document.documentElement.style.colorScheme = modes[theme];
         \\      } catch (_) {
         \\        document.documentElement.dataset.theme = "light";
+        \\        document.documentElement.dataset.themeMode = "light";
         \\      }
         \\    }());
         \\  </script>
@@ -710,6 +734,7 @@ fn appendShellStartWithOptions(
         \\  <link rel="icon" href="/logo.svg" type="image/svg+xml">
     );
     try appendShellStylesheets(buf, allocator);
+    try appendCustomThemeBootstrapScript(buf, allocator);
     try appendShortcutConfigScript(buf, allocator, cfg_opt);
     try appendTemplate(buf, allocator,
         \\</head>
@@ -1065,7 +1090,7 @@ fn appendSettingsNavLink(buf: *std.ArrayList(u8), allocator: Allocator, active: 
 }
 
 fn isSettingsActive(active: []const u8) bool {
-    return std.mem.eql(u8, active, "models") or std.mem.eql(u8, active, "events") or std.mem.eql(u8, active, "labels") or std.mem.eql(u8, active, "access");
+    return std.mem.eql(u8, active, "theme") or std.mem.eql(u8, active, "models") or std.mem.eql(u8, active, "events") or std.mem.eql(u8, active, "labels") or std.mem.eql(u8, active, "access");
 }
 
 pub fn appendSettingsLayoutStart(buf: *std.ArrayList(u8), allocator: Allocator, active: []const u8) !void {
@@ -1074,6 +1099,7 @@ pub fn appendSettingsLayoutStart(buf: *std.ArrayList(u8), allocator: Allocator, 
         \\  <aside class="project-page-sidebar settings-page-sidebar">
         \\    <nav class="project-page-tabs settings-page-tabs" aria-label="Settings sections">
     );
+    try appendSettingsTab(buf, allocator, active, "theme", "/settings/theme", "icon-theme", "Theme");
     try appendSettingsTab(buf, allocator, active, "events", "/events", "icon-history", "Activity");
     try appendSettingsTab(buf, allocator, active, "labels", "/settings/labels", "icon-labels", "Labels");
     try appendSettingsTab(buf, allocator, active, "models", "/settings/models", "icon-models", "AI Models");

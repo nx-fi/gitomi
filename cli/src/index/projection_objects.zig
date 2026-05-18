@@ -1178,6 +1178,10 @@ pub fn applyMilestoneProjection(allocator: Allocator, db: *SqliteDb, event_hash:
     } else if (std.mem.eql(u8, envelope.event_type, "milestone.state_set")) {
         const state = event_mod.jsonString(payload.get("state")) orelse return "invalid_event_envelope";
         try updateMilestoneScalar(allocator, db, envelope.object_id, state, event_hash, envelope, "state", "state_occurred_at", "state_actor_principal", "state_event_hash");
+    } else if (std.mem.eql(u8, envelope.event_type, "milestone.deleted")) {
+        try deleteMilestone(db, envelope.object_id);
+    } else {
+        return "unknown_event_type";
     }
     return null;
 }
@@ -2424,6 +2428,13 @@ fn milestoneExists(db: *SqliteDb, milestone_id: []const u8) !bool {
     defer stmt.deinit();
     try stmt.bindText(1, milestone_id);
     return try stmt.step();
+}
+
+fn deleteMilestone(db: *SqliteDb, milestone_id: []const u8) !void {
+    var stmt = try db.prepare("DELETE FROM milestones WHERE id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, milestone_id);
+    try stmt.stepDone();
 }
 
 fn updateMilestoneScalar(

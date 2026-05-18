@@ -66,6 +66,7 @@ gt milestone list [--json]
 gt milestone create --title TITLE [--description TEXT] [--due DATE]
 gt milestone edit MILESTONE [--title TITLE] [--description TEXT] [--due DATE] [--state open|closed]
 gt milestone close|reopen MILESTONE
+gt milestone delete MILESTONE
 gt pr list [--json] [--view agent] [--state open|merged|closed|all] [--limit N]
 gt pr view PR [--json] [--view agent] [--include-diff]
 gt pr create --title TITLE --base BASE --head HEAD [--body BODY] [--draft]
@@ -140,7 +141,8 @@ When no columns are supplied it creates `Todo`, `In Progress`, and `Done`.
 `gt project add` and `gt project remove` place issue cards on or off a board
 column by writing signed issue placement events. `gt milestone create` creates
 named milestones, `gt milestone edit` updates title, description, due date, or
-state, and `gt milestone close` / `gt milestone reopen` change milestone state.
+state, `gt milestone close` / `gt milestone reopen` change milestone state, and
+`gt milestone delete` removes a milestone.
 `gt issue milestone` assigns or clears an issue milestone.
 
 `gt pr view` also accepts `show`, and `gt pr create` also accepts `open` and

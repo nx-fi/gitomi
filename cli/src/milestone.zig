@@ -146,9 +146,47 @@ pub fn createMilestoneStringEvent(
     try out("  ref:    {s}\n", .{writer.inbox_ref});
 }
 
+pub fn createMilestoneDeletedEvent(
+    allocator: Allocator,
+    milestone_id: []const u8,
+) !void {
+    var writer = try EventWriter.init(allocator, "gt milestone delete");
+    defer writer.deinit();
+
+    const event_uuid = try newUuidV7(allocator);
+    defer allocator.free(event_uuid);
+    const idem = try newUuidV7(allocator);
+    defer allocator.free(idem);
+    const occurred_at = try rfc3339Now(allocator);
+    defer allocator.free(occurred_at);
+    const event_parents = writer.eventParents();
+
+    const event_body = try event_mod.buildMilestoneDeletedJson(
+        allocator,
+        writer.cfg,
+        writer.nextSeq(),
+        milestone_id,
+        event_uuid,
+        idem,
+        occurred_at,
+        event_parents,
+    );
+    defer allocator.free(event_body);
+
+    const short_id = milestone_id[0..@min(milestone_id.len, 7)];
+    const subject = try std.fmt.allocPrint(allocator, "milestone.deleted ^{s}", .{short_id});
+    defer allocator.free(subject);
+    const commit_oid = try writer.write("gt milestone", subject, event_body);
+    defer allocator.free(commit_oid);
+
+    try out("milestone.deleted ^{s}\n", .{short_id});
+    try out("  commit: {s}\n", .{commit_oid});
+    try out("  ref:    {s}\n", .{writer.inbox_ref});
+}
+
 pub fn cmdMilestone(allocator: Allocator, args: []const []const u8) !void {
     if (args.len == 0) {
-        try io.eprint("gt milestone: expected subcommand 'list', 'create', 'edit', 'close', or 'reopen'\n", .{});
+        try io.eprint("gt milestone: expected subcommand 'list', 'create', 'edit', 'close', 'reopen', or 'delete'\n", .{});
         return CliError.UserError;
     }
 
@@ -249,6 +287,17 @@ pub fn cmdMilestone(allocator: Allocator, args: []const []const u8) !void {
         return;
     }
 
-    try io.eprint("gt milestone: expected subcommand 'list', 'create', 'edit', 'close', or 'reopen'\n", .{});
+    if (std.mem.eql(u8, args[0], "delete")) {
+        if (args.len != 2) {
+            try io.eprint("gt milestone delete: expected MILESTONE\n", .{});
+            return CliError.UserError;
+        }
+        const milestone_id = try command_repo.resolveMilestoneId(args[1]);
+        defer allocator.free(milestone_id);
+        try milestone.createMilestoneDeletedEvent(allocator, milestone_id);
+        return;
+    }
+
+    try io.eprint("gt milestone: expected subcommand 'list', 'create', 'edit', 'close', 'reopen', or 'delete'\n", .{});
     return CliError.UserError;
 }

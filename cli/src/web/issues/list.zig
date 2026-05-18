@@ -190,7 +190,7 @@ fn appendIssuesToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filters: I
         \\  </form>
         \\  <div class="issues-toolbar-actions">
         \\    <a class="button secondary issue-tool-button" href="/settings/labels"><span class="button-icon icon-labels" aria-hidden="true"></span><span>Labels</span></a>
-        \\    <a class="button secondary issue-tool-button" href="/projects#milestones"><span class="button-icon icon-milestones" aria-hidden="true"></span><span>Milestones</span></a>
+        \\    <a class="button secondary issue-tool-button" href="/milestones"><span class="button-icon icon-milestones" aria-hidden="true"></span><span>Milestones</span></a>
         \\    <a class="button primary" href="/new-issue">New issue</a>
         \\  </div>
         \\</div>

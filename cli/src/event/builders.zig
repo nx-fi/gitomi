@@ -785,6 +785,24 @@ pub fn buildMilestoneStringPayloadJson(
     return try buf.toOwnedSlice(allocator);
 }
 
+pub fn buildMilestoneDeletedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    milestone_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, milestone_id, event_uuid, idem, occurred_at, parents, "milestone.deleted", "milestone");
+    try buf.appendSlice(allocator, "\"payload\":{}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
 pub fn buildLabelCreatedJson(
     allocator: Allocator,
     cfg: Config,
