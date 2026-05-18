@@ -805,65 +805,57 @@
   margin: 0;
   color: var(--muted);
 }
-.project-update-status-field {
-  display: grid;
-  gap: 6px;
-  min-width: 0;
-  margin: 0;
-  padding: 0;
-  color: var(--muted);
-  border: 0;
-  font-size: 12px;
-  font-weight: 800;
-}
-.project-update-status-field legend {
-  padding: 0;
-}
 .project-update-status-menu {
   position: relative;
-  width: min(280px, 100%);
+  width: fit-content;
+  max-width: 100%;
 }
 .project-update-status-control {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  min-height: 38px;
-  padding: 4px 10px;
-  color: var(--text);
-  background: var(--dropdown-bg);
-  border: 1px solid var(--dropdown-border);
-  border-radius: var(--radius-md);
+  max-width: 100%;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-pill);
   cursor: pointer;
   list-style: none;
 }
 .project-update-status-control::-webkit-details-marker {
   display: none;
 }
-.project-update-status-menu[open] .project-update-status-control,
-.project-update-status-control:hover {
-  border-color: color-mix(in oklch, var(--dropdown-border) 76%, var(--text));
-}
 .project-update-status-control:focus-visible {
   outline: 2px solid color-mix(in oklch, var(--brand) 55%, transparent);
   outline-offset: 2px;
+}
+.project-update-status-control:hover .project-update-status-trigger-chip,
+.project-update-status-menu[open] .project-update-status-trigger-chip {
+  box-shadow: inset 0 0 0 1px color-mix(in oklch, currentColor 32%, transparent);
 }
 .project-update-status-selected {
   display: none;
   min-width: 0;
 }
-.project-update-status-menu:has(input[value="WIP"]:checked) .project-update-status-selected-wip,
-.project-update-status-menu:has(input[value="Review"]:checked) .project-update-status-selected-review,
-.project-update-status-menu:has(input[value="Failed"]:checked) .project-update-status-selected-failed {
+.project-update-status-menu:has(input[value="Backlog"]:checked) .project-update-status-selected-backlog,
+.project-update-status-menu:has(input[value="Planned"]:checked) .project-update-status-selected-planned,
+.project-update-status-menu:has(input[value="In Progress"]:checked) .project-update-status-selected-progress,
+.project-update-status-menu:has(input[value="Completed"]:checked) .project-update-status-selected-completed,
+.project-update-status-menu:has(input[value="Canceled"]:checked) .project-update-status-selected-canceled {
   display: inline-flex;
 }
+.project-update-status-trigger-chip {
+  padding-right: 9px;
+}
 .project-update-status-chevron {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
+  margin-left: 1px;
   flex: 0 0 auto;
   border-right: 2px solid currentColor;
   border-bottom: 2px solid currentColor;
-  color: var(--muted);
+  color: currentColor;
+  opacity: 0.82;
   transform: translateY(-2px) rotate(45deg);
 }
 .project-update-status-menu[open] .project-update-status-chevron {
@@ -876,8 +868,8 @@
   z-index: 35;
   display: grid;
   gap: 4px;
-  width: 100%;
-  min-width: 230px;
+  width: max-content;
+  min-width: 176px;
   padding: 6px;
   background: var(--dropdown-bg);
   border: 1px solid var(--dropdown-border);
@@ -999,7 +991,7 @@
   min-width: 0;
 }
 .project-update-card-meta > strong,
-.project-update-card-meta > span:not(.project-update-health-chip):not(.issue-avatar) {
+.project-update-card-meta > span:not(.project-lifecycle-status-chip):not(.issue-avatar) {
   min-width: 0;
   color: var(--muted);
   font-size: 13px;
@@ -1013,23 +1005,115 @@
   height: 24px;
   font-size: 11px;
 }
-.project-update-health-chip {
+.project-lifecycle-status-chip {
+  --project-lifecycle-status-bg: var(--subtle);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   min-height: 28px;
   padding: 0 10px;
+  color: var(--text);
+  background: var(--project-lifecycle-status-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
   font-size: 13px;
   font-weight: 800;
+  white-space: nowrap;
 }
-.project-update-health-chip.tone-progress {
-  color: var(--text-on-accent);
-  background: var(--green);
+.project-lifecycle-status-chip.tone-backlog {
+  --project-lifecycle-status-bg: color-mix(in oklch, var(--orange) 10%, var(--panel));
+  color: var(--orange);
+  border-color: color-mix(in oklch, var(--orange) 34%, var(--border));
 }
-.project-update-health-chip.tone-risk {
-  color: var(--text-on-warning);
-  background: var(--tone-warning);
+.project-lifecycle-status-chip.tone-planned {
+  --project-lifecycle-status-bg: color-mix(in oklch, var(--muted) 10%, var(--panel));
+  color: color-mix(in oklch, var(--text) 86%, var(--muted));
+  border-color: color-mix(in oklch, var(--muted) 32%, var(--border));
 }
-.project-update-health-chip.tone-failed {
-  color: var(--text-on-accent);
-  background: var(--red);
+.project-lifecycle-status-chip.tone-progress {
+  --project-lifecycle-status-bg: color-mix(in oklch, var(--tone-warning) 13%, var(--panel));
+  color: var(--tone-warning);
+  border-color: color-mix(in oklch, var(--tone-warning) 38%, var(--border));
+}
+.project-lifecycle-status-chip.tone-completed {
+  --project-lifecycle-status-bg: color-mix(in oklch, var(--blue) 12%, var(--panel));
+  color: var(--blue);
+  border-color: color-mix(in oklch, var(--blue) 38%, var(--border));
+}
+.project-lifecycle-status-chip.tone-canceled {
+  --project-lifecycle-status-bg: color-mix(in oklch, var(--muted) 14%, var(--panel));
+  color: var(--muted);
+  border-color: color-mix(in oklch, var(--muted) 34%, var(--border));
+}
+.project-lifecycle-status-mark {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  color: currentColor;
+}
+.project-lifecycle-status-chip.tone-backlog .project-lifecycle-status-mark {
+  border: 2px dotted currentColor;
+  border-radius: 50%;
+}
+.project-lifecycle-status-chip.tone-planned .project-lifecycle-status-mark,
+.project-lifecycle-status-chip.tone-progress .project-lifecycle-status-mark {
+  background: currentColor;
+  clip-path: polygon(50% 0, 92% 24%, 92% 76%, 50% 100%, 8% 76%, 8% 24%);
+}
+.project-lifecycle-status-chip.tone-planned .project-lifecycle-status-mark::before {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  background: var(--project-lifecycle-status-bg);
+  clip-path: inherit;
+}
+.project-lifecycle-status-chip.tone-progress .project-lifecycle-status-mark {
+  width: 10px;
+  height: 16px;
+}
+.project-lifecycle-status-chip.tone-progress .project-lifecycle-status-mark::before {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  background: var(--project-lifecycle-status-bg);
+  clip-path: inherit;
+}
+.project-lifecycle-status-chip.tone-completed .project-lifecycle-status-mark {
+  background: currentColor;
+  border-radius: 50%;
+}
+.project-lifecycle-status-chip.tone-completed .project-lifecycle-status-mark::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 3px;
+  width: 5px;
+  height: 8px;
+  border-right: 2px solid var(--project-lifecycle-status-bg);
+  border-bottom: 2px solid var(--project-lifecycle-status-bg);
+  transform: rotate(45deg);
+}
+.project-lifecycle-status-chip.tone-canceled .project-lifecycle-status-mark {
+  background: currentColor;
+  border-radius: 50%;
+}
+.project-lifecycle-status-chip.tone-canceled .project-lifecycle-status-mark::before,
+.project-lifecycle-status-chip.tone-canceled .project-lifecycle-status-mark::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 6px;
+  width: 8px;
+  height: 2px;
+  background: var(--project-lifecycle-status-bg);
+  border-radius: 999px;
+}
+.project-lifecycle-status-chip.tone-canceled .project-lifecycle-status-mark::before {
+  transform: rotate(45deg);
+}
+.project-lifecycle-status-chip.tone-canceled .project-lifecycle-status-mark::after {
+  transform: rotate(-45deg);
 }
 .project-update-body,
 .project-description-body {
@@ -1087,7 +1171,7 @@
   gap: 8px;
   margin-bottom: 8px;
 }
-.project-update-status-line > span:not(.project-status-chip) {
+.project-update-status-line > span:not(.project-status-chip):not(.project-lifecycle-status-chip) {
   color: var(--muted);
   font-size: 12px;
   font-weight: 700;
@@ -1380,21 +1464,59 @@
 .project-property-menu[open] summary {
   color: var(--topbar-active);
 }
+.project-property-chip-menu {
+  width: fit-content;
+  max-width: 100%;
+}
 .project-property-chip-menu summary {
-  justify-content: space-between;
-  width: 100%;
+  justify-content: flex-start;
+  width: fit-content;
+  max-width: 100%;
+  border-radius: var(--radius-pill);
 }
 .project-property-chip-menu summary > :first-child {
   flex: 0 0 auto;
 }
-.project-property-chip-menu summary > .project-property-menu-icon {
-  width: 16px;
-  min-width: 16px;
-  height: 16px;
+.project-property-chip-menu summary:hover .project-property-trigger-chip,
+.project-property-chip-menu[open] summary .project-property-trigger-chip,
+.project-property-chip-menu summary:hover .project-priority-trigger,
+.project-property-chip-menu[open] summary .project-priority-trigger,
+.project-property-chip-menu summary:hover .project-property-empty-trigger,
+.project-property-chip-menu[open] summary .project-property-empty-trigger {
+  box-shadow: inset 0 0 0 1px color-mix(in oklch, currentColor 28%, transparent);
+}
+.project-property-trigger-chip {
+  gap: 5px;
+  padding-right: 9px;
+}
+.project-priority-trigger,
+.project-property-empty-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  border-radius: var(--radius-pill);
+}
+.project-priority-trigger {
+  margin-left: 4px;
+  padding: 2px 3px 2px 0;
+}
+.project-priority-trigger .issue-row-priority {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+.project-property-chip-chevron {
+  width: 7px;
+  height: 7px;
   flex: 0 0 auto;
-  overflow: visible;
-  text-overflow: clip;
-  white-space: normal;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  color: currentColor;
+  opacity: 0.76;
+  transform: translateY(-2px) rotate(45deg);
+}
+.project-property-chip-menu[open] .project-property-chip-chevron {
+  transform: translateY(2px) rotate(225deg);
 }
 .project-property-empty {
   min-width: 0;
@@ -1627,6 +1749,7 @@
   border-radius: 50%;
 }
 .project-item-actions {
+  position: relative;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -1658,9 +1781,9 @@
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-elevated);
 }
-.project-action-menu:last-child .project-action-popover {
-  right: 0;
-  left: auto;
+.project-item-actions .project-action-menu:last-child .project-action-popover {
+  right: auto;
+  left: 0;
 }
 .project-action-popover-narrow {
   width: min(320px, calc(100vw - 32px));
@@ -2125,7 +2248,7 @@
   z-index: 35;
 }
 .project-issue-search-menu {
-  min-width: min(380px, calc(100vw - 48px));
+  min-width: 0;
 }
 .project-issue-search-result {
   width: 100%;
@@ -2150,6 +2273,21 @@
 }
 .project-column-mini-form .button {
   min-height: 34px;
+}
+
+@media (max-width: 700px) {
+  .project-item-actions .project-action-menu {
+    position: static;
+  }
+  .project-item-actions .project-action-popover {
+    top: calc(100% + 8px);
+    right: auto;
+    left: 14px;
+    width: min(420px, calc(100% - 28px));
+  }
+  .project-item-actions .project-action-popover-narrow {
+    width: min(320px, calc(100% - 28px));
+  }
 }
 .kanban-column-add {
   position: relative;

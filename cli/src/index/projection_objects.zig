@@ -23,7 +23,7 @@ const max_projected_project_milestones: usize = 256;
 const max_projected_project_fields: usize = 128;
 const max_projected_project_field_options: usize = 512;
 const max_projected_project_views: usize = 64;
-const default_project_status = "WIP";
+const default_project_status = "Planned";
 const max_projected_reaction_emojis: usize = 64;
 const max_projected_reaction_actors: usize = 1024;
 

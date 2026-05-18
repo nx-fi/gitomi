@@ -373,6 +373,8 @@ is used, and requires `--secret-env` or `--secret-file` for authenticated
 webhook deliveries. It opens on a committed-tree code explorer, also serves
 overview/issues/projects/workflows/events/refs pages, and can create signed issue
 events and workflow run requests through the same storage path as the CLI. The
+inbox menu shows recent notifications, and issue and pull request detail pages
+can subscribe or unsubscribe the current principal from notifications. The
 projects page renders kanban boards from signed project and issue placement
 events and can create new project boards. The web server is intended for local
 use only; Zig does not yet provide HTTP/2 server support, so Gitomi does not

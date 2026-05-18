@@ -2,10 +2,12 @@
   const cardSelector = "[data-project-card]";
   const columnSelector = "[data-project-column]";
   const dropzoneSelector = "[data-project-dropzone]";
+  const datePickerSelector = "input[data-date-picker]";
   const maxIssueSearchResults = 30;
   let activeCard = null;
   let activeOrigin = null;
   let activeDropped = false;
+  let activeDatePicker = null;
 
   function closestColumn(target) {
     return target instanceof Element ? target.closest(columnSelector) : null;
@@ -323,9 +325,89 @@
     input.setAttribute("aria-expanded", "false");
     input.setAttribute("role", "combobox");
 
+    const multi = input.hasAttribute("data-project-issue-multiple");
+    const multiRoot = multi ? input.closest("[data-project-issue-multi-search]") : null;
+    const tokenInput = multiRoot ? multiRoot.querySelector("[data-project-issue-token-input]") : null;
+    const selectedRoot = multiRoot ? multiRoot.querySelector("[data-project-selected-issues]") : null;
     let results = [];
     let activeIndex = -1;
     let renderFrame = 0;
+
+    function selectedIssueValues() {
+      if (!selectedRoot) return [];
+      return Array.from(selectedRoot.querySelectorAll("input[type='hidden'][name='issue']")).map(function (hidden) {
+        return hidden.value || "";
+      }).filter(Boolean);
+    }
+
+    function clearMultiValidity() {
+      input.setCustomValidity("");
+      if (tokenInput) tokenInput.classList.remove("is-invalid");
+    }
+
+    function updateMultiSearchState() {
+      if (!multi) return;
+      const hasSelection = selectedIssueValues().length > 0;
+      input.placeholder = hasSelection ? "Search another issue" : "Search issues or paste a ref";
+      if (tokenInput) tokenInput.classList.toggle("has-selection", hasSelection);
+      if (hasSelection) clearMultiValidity();
+    }
+
+    function addIssueToken(item) {
+      if (!multi || !selectedRoot || !item || !item.ref) return false;
+      if (selectedIssueValues().indexOf(item.ref) !== -1) {
+        clearMultiValidity();
+        return false;
+      }
+
+      const token = document.createElement("span");
+      token.className = "project-selected-issue";
+      token.dataset.issueRef = item.ref;
+
+      const hidden = document.createElement("input");
+      hidden.type = "hidden";
+      hidden.name = "issue";
+      hidden.value = item.ref;
+      token.appendChild(hidden);
+
+      const label = document.createElement("span");
+      label.className = "project-selected-issue-label";
+      label.textContent = item.name || item.ref;
+      token.appendChild(label);
+
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "project-selected-issue-remove";
+      remove.setAttribute("aria-label", "Remove " + item.ref);
+      const icon = document.createElement("span");
+      icon.setAttribute("aria-hidden", "true");
+      remove.appendChild(icon);
+      remove.addEventListener("click", function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        token.remove();
+        updateMultiSearchState();
+        setMenuOpen(false);
+      });
+      token.appendChild(remove);
+
+      selectedRoot.appendChild(token);
+      updateMultiSearchState();
+      return true;
+    }
+
+    function addPendingInputValue() {
+      if (!multi) return false;
+      const ref = input.value.trim();
+      if (!ref) return false;
+      const lower = ref.toLowerCase();
+      const match = issueSearchItems().find(function (item) {
+        return item.ref.toLowerCase() === lower || item.name.toLowerCase() === lower;
+      });
+      const added = addIssueToken(match || { ref: ref, name: ref, path: ref });
+      input.value = "";
+      return added;
+    }
 
     function setMenuOpen(open) {
       menu.hidden = !open;
@@ -352,6 +434,17 @@
 
     function selectResult(result) {
       if (!result) return;
+      if (multi) {
+        addIssueToken(result.item);
+        input.value = "";
+        if (renderFrame !== 0) {
+          window.cancelAnimationFrame(renderFrame);
+          renderFrame = 0;
+        }
+        setMenuOpen(false);
+        input.blur();
+        return;
+      }
       input.value = result.item.ref;
       input.dispatchEvent(new Event("input", { bubbles: true }));
       if (renderFrame !== 0) {
@@ -366,7 +459,14 @@
     function renderResults() {
       renderFrame = 0;
       const tokens = searchTokens(input.value);
-      results = rankedSearchItems(issueSearchItems(), tokens, maxIssueSearchResults);
+      let items = issueSearchItems();
+      if (multi) {
+        const selected = selectedIssueValues();
+        items = items.filter(function (item) {
+          return selected.indexOf(item.ref) === -1;
+        });
+      }
+      results = rankedSearchItems(items, tokens, maxIssueSearchResults);
       menu.textContent = "";
 
       if (results.length === 0) {
@@ -417,13 +517,32 @@
       renderResults();
     }
 
-    input.addEventListener("input", scheduleRender);
+    input.addEventListener("input", function () {
+      if (multi) clearMultiValidity();
+      scheduleRender();
+    });
     input.addEventListener("focus", function () {
       scheduleRender();
     });
+    if (tokenInput) {
+      tokenInput.addEventListener("click", function (event) {
+        if (event.target.closest(".project-selected-issue")) return;
+        input.focus();
+      });
+    }
     input.addEventListener("keydown", function (event) {
       if (event.key === "Escape") {
         setMenuOpen(false);
+        return;
+      }
+      if (multi && event.key === "Backspace" && input.value === "" && selectedRoot) {
+        const tokens = selectedRoot.querySelectorAll(".project-selected-issue");
+        const token = tokens[tokens.length - 1];
+        if (token) {
+          token.remove();
+          updateMultiSearchState();
+          scheduleRender();
+        }
         return;
       }
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -444,6 +563,21 @@
       }
     });
 
+    if (multi && input.form) {
+      input.form.addEventListener("submit", function (event) {
+        addPendingInputValue();
+        if (selectedIssueValues().length > 0) {
+          clearMultiValidity();
+          return;
+        }
+        event.preventDefault();
+        input.setCustomValidity("Select at least one issue");
+        if (tokenInput) tokenInput.classList.add("is-invalid");
+        input.reportValidity();
+      });
+      updateMultiSearchState();
+    }
+
     menu.addEventListener("mousemove", function (event) {
       const button = event.target.closest(".tree-search-result");
       if (!button || !menu.contains(button)) return;
@@ -452,10 +586,12 @@
     menu.addEventListener("click", function (event) {
       const button = event.target.closest(".tree-search-result");
       if (!button || !menu.contains(button)) return;
+      event.preventDefault();
       selectResult(results[Number(button.dataset.index)]);
     });
     document.addEventListener("click", function (event) {
       if (container.contains(event.target)) return;
+      if (event.composedPath && event.composedPath().indexOf(container) !== -1) return;
       setMenuOpen(false);
     });
   }
@@ -518,10 +654,372 @@
     });
   }
 
+  function initProjectChoiceMenu(menu) {
+    if (menu.dataset.projectChoiceMenuReady === "yes") return;
+    menu.dataset.projectChoiceMenuReady = "yes";
+
+    const selectedRoot = menu.querySelector("[data-project-choice-selected]");
+
+    function syncSelected(input) {
+      if (!selectedRoot || !input) return;
+      const option = input.closest(".project-choice-option");
+      const content = option ? option.querySelector("[data-project-choice-option-content]") : null;
+      if (!content) return;
+      selectedRoot.textContent = "";
+      Array.from(content.childNodes).forEach(function (node) {
+        selectedRoot.appendChild(node.cloneNode(true));
+      });
+    }
+
+    const checked = menu.querySelector("input[type='radio']:checked");
+    syncSelected(checked);
+
+    menu.querySelectorAll("input[type='radio']").forEach(function (input) {
+      input.addEventListener("change", function () {
+        syncSelected(input);
+        menu.open = false;
+        const summary = menu.querySelector("summary");
+        if (summary) summary.focus();
+      });
+    });
+  }
+
+  function padDatePart(value) {
+    return value < 10 ? "0" + value : String(value);
+  }
+
+  function dateKey(date) {
+    return date.getFullYear() + "-" + padDatePart(date.getMonth() + 1) + "-" + padDatePart(date.getDate());
+  }
+
+  function parseDateKey(value) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value || "");
+    if (!match) return null;
+    const year = Number(match[1]);
+    const month = Number(match[2]) - 1;
+    const day = Number(match[3]);
+    const date = new Date(year, month, day);
+    if (
+      date.getFullYear() !== year ||
+      date.getMonth() !== month ||
+      date.getDate() !== day
+    ) {
+      return null;
+    }
+    date.setHours(0, 0, 0, 0);
+    return date;
+  }
+
+  function todayDate() {
+    const date = new Date();
+    date.setHours(0, 0, 0, 0);
+    return date;
+  }
+
+  function monthStart(date) {
+    return new Date(date.getFullYear(), date.getMonth(), 1);
+  }
+
+  function addMonths(date, amount) {
+    return new Date(date.getFullYear(), date.getMonth() + amount, 1);
+  }
+
+  function monthGridStart(monthDate) {
+    const first = monthStart(monthDate);
+    const mondayOffset = (first.getDay() + 6) % 7;
+    return new Date(first.getFullYear(), first.getMonth(), 1 - mondayOffset);
+  }
+
+  function monthTitle(date) {
+    return new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" }).format(date);
+  }
+
+  function dateLabel(value, placeholder) {
+    const date = parseDateKey(value);
+    if (!date) return placeholder;
+    return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(date);
+  }
+
+  function closeActiveDatePicker(except) {
+    if (!activeDatePicker || activeDatePicker === except) return;
+    activeDatePicker.close();
+    activeDatePicker = null;
+  }
+
+  function initDatePicker(input) {
+    if (input.dataset.datePickerReady === "yes") return;
+    input.dataset.datePickerReady = "yes";
+
+    const inline = input.dataset.datePickerInline === "yes";
+    const autoSubmit = input.dataset.datePickerAutosubmit === "yes";
+    const placeholder = input.dataset.datePickerPlaceholder || "Select date";
+    const label = input.dataset.datePickerLabel || input.getAttribute("aria-label") || placeholder;
+    const canClear = input.dataset.datePickerClear !== "no" && !input.required;
+    const root = document.createElement("div");
+    const calendar = document.createElement("div");
+    const today = todayDate();
+    let viewMonth = monthStart(today);
+    let trigger = null;
+    let open = inline;
+
+    root.className = inline ? "date-picker date-picker-inline" : "date-picker";
+    calendar.className = inline ? "date-picker-calendar" : "date-picker-popover date-picker-calendar";
+    calendar.setAttribute("role", "dialog");
+    calendar.setAttribute("aria-label", label);
+    if (!inline) calendar.hidden = true;
+
+    input.classList.add("date-picker-native-input");
+    input.setAttribute("aria-hidden", "true");
+    input.tabIndex = -1;
+
+    if (!input.parentNode) return;
+    input.parentNode.insertBefore(root, input.nextSibling);
+
+    if (!inline) {
+      trigger = document.createElement("button");
+      trigger.type = "button";
+      trigger.className = "date-picker-trigger";
+      trigger.setAttribute("aria-haspopup", "dialog");
+      trigger.setAttribute("aria-expanded", "false");
+      trigger.textContent = dateLabel(input.value, placeholder);
+      root.appendChild(trigger);
+    }
+
+    root.appendChild(calendar);
+
+    function syncTrigger() {
+      if (!trigger) return;
+      trigger.textContent = dateLabel(input.value, placeholder);
+      trigger.classList.toggle("is-empty", !input.value);
+    }
+
+    function setInputValue(value) {
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      syncTrigger();
+      closePicker();
+      if (!autoSubmit && trigger) trigger.focus();
+      if (autoSubmit && input.form) {
+        if (typeof input.form.requestSubmit === "function") {
+          input.form.requestSubmit();
+        } else {
+          input.form.submit();
+        }
+      }
+    }
+
+    function closePicker() {
+      if (inline) return;
+      open = false;
+      calendar.hidden = true;
+      if (trigger) trigger.setAttribute("aria-expanded", "false");
+      if (activeDatePicker === api) activeDatePicker = null;
+    }
+
+    function openPicker() {
+      if (inline) return;
+      closeActiveDatePicker(api);
+      open = true;
+      activeDatePicker = api;
+      calendar.hidden = false;
+      if (trigger) trigger.setAttribute("aria-expanded", "true");
+      render();
+      const selected = calendar.querySelector(".date-picker-day.is-selected") ||
+        calendar.querySelector(".date-picker-day.is-today") ||
+        calendar.querySelector(".date-picker-day");
+      if (selected) selected.focus();
+    }
+
+    function renderMonth(monthDate) {
+      const month = monthDate.getMonth();
+      const selectedKey = input.value || "";
+      const todayKey = dateKey(today);
+      const section = document.createElement("section");
+      const title = document.createElement("h3");
+      const weekdays = document.createElement("div");
+      const days = document.createElement("div");
+      const gridStart = monthGridStart(monthDate);
+
+      section.className = "date-picker-month";
+      title.textContent = monthTitle(monthDate);
+      weekdays.className = "date-picker-weekdays";
+      ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].forEach(function (name) {
+        const weekday = document.createElement("span");
+        weekday.textContent = name;
+        weekdays.appendChild(weekday);
+      });
+      days.className = "date-picker-days";
+
+      for (let index = 0; index < 42; index += 1) {
+        const date = new Date(gridStart.getFullYear(), gridStart.getMonth(), gridStart.getDate() + index);
+        const key = dateKey(date);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "date-picker-day";
+        button.dataset.date = key;
+        button.textContent = String(date.getDate());
+        button.setAttribute("aria-label", dateLabel(key, key));
+        if (date.getMonth() !== month) button.classList.add("is-outside");
+        if (key < todayKey) button.classList.add("is-past");
+        if (key === todayKey) button.classList.add("is-today");
+        if (key === selectedKey) {
+          button.classList.add("is-selected");
+          button.setAttribute("aria-pressed", "true");
+        } else {
+          button.setAttribute("aria-pressed", "false");
+        }
+        days.appendChild(button);
+      }
+
+      section.appendChild(title);
+      section.appendChild(weekdays);
+      section.appendChild(days);
+      return section;
+    }
+
+    function render() {
+      calendar.textContent = "";
+
+      const head = document.createElement("div");
+      const prev = document.createElement("button");
+      const next = document.createElement("button");
+      const months = document.createElement("div");
+      head.className = "date-picker-head";
+      prev.type = "button";
+      prev.className = "date-picker-nav date-picker-prev";
+      prev.setAttribute("aria-label", "Previous two months");
+      prev.innerHTML = "<span aria-hidden=\"true\"></span>";
+      next.type = "button";
+      next.className = "date-picker-nav date-picker-next";
+      next.setAttribute("aria-label", "Next two months");
+      next.innerHTML = "<span aria-hidden=\"true\"></span>";
+      months.className = "date-picker-months";
+      months.appendChild(renderMonth(viewMonth));
+      months.appendChild(renderMonth(addMonths(viewMonth, 1)));
+      head.appendChild(prev);
+      head.appendChild(next);
+      calendar.appendChild(head);
+      calendar.appendChild(months);
+
+      if (canClear) {
+        const footer = document.createElement("div");
+        const clear = document.createElement("button");
+        footer.className = "date-picker-footer";
+        clear.type = "button";
+        clear.className = "date-picker-clear";
+        clear.textContent = "Clear";
+        clear.disabled = input.value === "";
+        footer.appendChild(clear);
+        calendar.appendChild(footer);
+      }
+    }
+
+    function moveFocus(from, amount) {
+      const days = Array.from(calendar.querySelectorAll(".date-picker-day"));
+      const index = days.indexOf(from);
+      if (index === -1) return;
+      const next = days[index + amount];
+      if (next) {
+        next.focus();
+        return;
+      }
+      viewMonth = addMonths(viewMonth, amount > 0 ? 2 : -2);
+      render();
+      const refreshed = Array.from(calendar.querySelectorAll(".date-picker-day"));
+      const target = refreshed[Math.max(0, Math.min(refreshed.length - 1, index))];
+      if (target) target.focus();
+    }
+
+    const api = { close: closePicker };
+
+    if (trigger) {
+      syncTrigger();
+      trigger.addEventListener("click", function () {
+        if (open) {
+          closePicker();
+        } else {
+          openPicker();
+        }
+      });
+
+      const labelElement = input.closest("label");
+      if (labelElement) {
+        labelElement.addEventListener("click", function (event) {
+          const target = event.target;
+          if (!(target instanceof Element)) return;
+          if (root.contains(target) || target.closest("button, input, select, textarea, a")) return;
+          event.preventDefault();
+          openPicker();
+        });
+      }
+    }
+
+    calendar.addEventListener("click", function (event) {
+      const target = event.target;
+      const day = target instanceof Element ? target.closest(".date-picker-day") : null;
+      if (day && calendar.contains(day)) {
+        setInputValue(day.dataset.date || "");
+        return;
+      }
+
+      const nav = target instanceof Element ? target.closest(".date-picker-nav") : null;
+      if (nav && calendar.contains(nav)) {
+        viewMonth = addMonths(viewMonth, nav.classList.contains("date-picker-next") ? 2 : -2);
+        render();
+        return;
+      }
+
+      const clear = target instanceof Element ? target.closest(".date-picker-clear") : null;
+      if (clear && calendar.contains(clear)) {
+        setInputValue("");
+      }
+    });
+
+    calendar.addEventListener("keydown", function (event) {
+      if (event.key === "Escape") {
+        closePicker();
+        if (trigger) trigger.focus();
+        return;
+      }
+      const day = event.target instanceof Element ? event.target.closest(".date-picker-day") : null;
+      if (!day) return;
+      if (event.key === "ArrowRight") {
+        event.preventDefault();
+        moveFocus(day, 1);
+      } else if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        moveFocus(day, -1);
+      } else if (event.key === "ArrowDown") {
+        event.preventDefault();
+        moveFocus(day, 7);
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        moveFocus(day, -7);
+      }
+    });
+
+    if (inline) render();
+  }
+
+  function initDatePickers() {
+    document.querySelectorAll(datePickerSelector).forEach(initDatePicker);
+    if (document.body.dataset.datePickerDismissReady === "yes") return;
+    document.body.dataset.datePickerDismissReady = "yes";
+    document.addEventListener("pointerdown", function (event) {
+      if (!activeDatePicker) return;
+      const target = event.target;
+      if (target instanceof Element && target.closest(".date-picker")) return;
+      closeActiveDatePicker(null);
+    }, true);
+  }
+
   function initProjects() {
     initProjectIndexTabs();
+    initDatePickers();
     document.querySelectorAll("[data-project-issue-search]").forEach(initIssueSearchMenu);
     document.querySelectorAll("[data-project-status-menu]").forEach(initProjectStatusMenu);
+    document.querySelectorAll("[data-project-choice-menu]").forEach(initProjectChoiceMenu);
     document.querySelectorAll(cardSelector).forEach(initCard);
     document.querySelectorAll(columnSelector).forEach(initColumn);
   }

@@ -20,8 +20,10 @@ const projectIssueCount = project_data.projectIssueCount;
 const project_issue_filter_sql = project_data.project_issue_filter_sql;
 const projectRenderContextFromView = project_views.projectRenderContextFromView;
 const appendProjectWorkspaceChromeStart = project_chrome.appendProjectWorkspaceChromeStart;
-const appendProjectColumnOptions = project_chrome.appendProjectColumnOptions;
-const appendProjectPriorityOptions = project_chrome.appendProjectPriorityOptions;
+const appendProjectIssueMultiSearch = project_chrome.appendProjectIssueMultiSearch;
+const appendProjectPriorityPicker = project_chrome.appendProjectPriorityPicker;
+const appendProjectStatusPicker = project_chrome.appendProjectStatusPicker;
+const appendProjectIssueFormPickers = project_chrome.appendProjectIssueFormPickers;
 const appendProjectIssueAssignees = project_issue_render.appendProjectIssueAssignees;
 const appendKanbanCardLabels = project_issue_render.appendKanbanCardLabels;
 const columnTone = project_issue_render.columnTone;
@@ -65,22 +67,13 @@ fn appendProjectIssuesEmptyState(
         \\          <input type="hidden" name="action" value="add-existing">
         \\          <input type="hidden" name="project" value="{project}">
         \\          <input type="hidden" name="view" value="{view}">
-        \\          <div class="project-issue-search-wrap tree-search-wrap">
-        \\            <label class="tree-search-label project-issue-search-label"><span>Issue</span><input class="tree-search-input" type="search" name="issue" placeholder="Search issues or paste a ref" autocomplete="off" spellcheck="false" data-project-issue-search required></label>
-        \\          </div>
-        \\          <label>Priority<select name="priority">
     , .{
         .project = project,
         .view = context.view_ref,
     });
-    try appendProjectPriorityOptions(buf, allocator, if (context.defaults.priority_explicit) context.defaults.priority else "");
+    try appendProjectIssueMultiSearch(buf, allocator);
+    try appendProjectStatusPicker(buf, allocator, if (context.defaults.status_explicit) context.defaults.status else null);
     try buf.appendSlice(allocator,
-        \\          </select></label>
-        \\          <label>Status<select name="column">
-    );
-    try appendProjectColumnOptions(buf, allocator, db, project, if (context.defaults.status_explicit) context.defaults.status else null);
-    try buf.appendSlice(allocator,
-        \\          </select></label>
         \\          <div class="form-actions"><button class="button primary" type="submit">Add issue</button></div>
         \\        </form>
         \\      </div>
@@ -105,19 +98,16 @@ fn appendProjectIssuesEmptyState(
     });
     try buf.appendSlice(allocator,
         \\          <div class="grid two">
-        \\            <label>Priority<select name="priority">
     );
-    try appendProjectPriorityOptions(buf, allocator, context.defaults.priority);
+    try appendProjectPriorityPicker(buf, allocator, context.defaults.priority);
+    try appendProjectStatusPicker(buf, allocator, context.defaults.status);
     try buf.appendSlice(allocator,
-        \\            </select></label>
-        \\            <label>Status<select name="column">
-    );
-    try appendProjectColumnOptions(buf, allocator, db, project, context.defaults.status);
-    try buf.appendSlice(allocator,
-        \\            </select></label>
         \\          </div>
-        \\          <label>Labels<input name="labels" placeholder="bug, docs"></label>
-        \\          <label>Assignees<input name="assignees" placeholder="alice, bob"></label>
+        \\          <div class="grid two">
+    );
+    try appendProjectIssueFormPickers(buf, allocator, db);
+    try buf.appendSlice(allocator,
+        \\          </div>
         \\          <div class="form-actions"><button class="button secondary" type="submit">Create issue</button></div>
         \\        </form>
         \\      </div>

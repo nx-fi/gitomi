@@ -67,8 +67,10 @@ const projectTableFieldsFromConfig = project_data.projectTableFieldsFromConfig;
 const bindProjectIssueFilter = project_data.bindProjectIssueFilter;
 const projectExists = project_data.projectExists;
 const appendProjectWorkspaceChromeStart = project_chrome.appendProjectWorkspaceChromeStart;
-const appendProjectColumnOptions = project_chrome.appendProjectColumnOptions;
-const appendProjectPriorityOptions = project_chrome.appendProjectPriorityOptions;
+const appendProjectIssueMultiSearch = project_chrome.appendProjectIssueMultiSearch;
+const appendProjectPriorityPicker = project_chrome.appendProjectPriorityPicker;
+const appendProjectStatusPicker = project_chrome.appendProjectStatusPicker;
+const appendProjectIssueFormPickers = project_chrome.appendProjectIssueFormPickers;
 const appendProjectNotFound = project_chrome.appendProjectNotFound;
 const appendProjectColumns = project_groups.appendProjectColumns;
 const appendProjectPriorityGroups = project_groups.appendProjectPriorityGroups;
@@ -129,11 +131,18 @@ fn appendProjectColumn(
         \\            <input type="hidden" name="action" value="add-existing">
         \\            <input type="hidden" name="project" value="{project}">
         \\            <input type="hidden" name="column" value="{column}">
-        \\            <input type="hidden" name="priority" value="{existing_priority}">
         \\            <input type="hidden" name="view" value="{view}">
-        \\            <div class="project-issue-search-wrap tree-search-wrap">
-        \\              <label class="tree-search-label project-issue-search-label"><span>Issue</span><input class="tree-search-input" type="search" name="issue" placeholder="Search issues or paste a ref" aria-label="Issue" autocomplete="off" spellcheck="false" data-project-issue-search required></label>
-        \\            </div>
+    , .{
+        .tone = tone,
+        .project = project,
+        .column = column,
+        .view = context.view_ref,
+        .title = title,
+        .count = count,
+        .note = note,
+    });
+    try appendProjectIssueMultiSearch(buf, allocator);
+    try appendTemplate(buf, allocator,
         \\            <div class="form-actions"><button class="button primary" type="submit">Add issue</button></div>
         \\          </form>
         \\          <form class="project-item-form project-column-existing-form" method="post" action="/projects/items">
@@ -142,14 +151,8 @@ fn appendProjectColumn(
         \\            <input type="hidden" name="view" value="{view}">
         \\            <label>Title<input name="title" required></label>
     , .{
-        .tone = tone,
         .project = project,
-        .column = column,
-        .existing_priority = if (context.defaults.priority_explicit) context.defaults.priority else "",
         .view = context.view_ref,
-        .title = title,
-        .count = count,
-        .note = note,
     });
     try shared.appendMarkdownEditor(buf, allocator, .{
         .rows = 4,
@@ -158,19 +161,16 @@ fn appendProjectColumn(
     });
     try buf.appendSlice(allocator,
         \\            <div class="grid two">
-        \\              <label>Priority<select name="priority">
     );
-    try appendProjectPriorityOptions(buf, allocator, context.defaults.priority);
-    try buf.appendSlice(allocator,
-        \\              </select></label>
-        \\              <label>Status<select name="column">
-    );
-    try appendProjectColumnOptions(buf, allocator, db, project, column);
+    try appendProjectPriorityPicker(buf, allocator, context.defaults.priority);
+    try appendProjectStatusPicker(buf, allocator, column);
     try appendTemplate(buf, allocator,
-        \\              </select></label>
         \\            </div>
-        \\            <label>Labels<input name="labels" placeholder="bug, docs"></label>
-        \\            <label>Assignees<input name="assignees" placeholder="alice, bob"></label>
+        \\            <div class="grid two">
+    , .{});
+    try appendProjectIssueFormPickers(buf, allocator, db);
+    try appendTemplate(buf, allocator,
+        \\            </div>
         \\            <div class="form-actions"><button class="button secondary" type="submit">Create issue</button></div>
         \\          </form>
         \\        </div>

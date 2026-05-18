@@ -18,6 +18,7 @@ const createIssueProjectFieldSetEvent = issue_mod.createIssueProjectFieldSetEven
 const createIssueProjectEvent = issue_mod.createIssueProjectEvent;
 const createIssueStringEvent = issue_mod.createIssueStringEvent;
 const formValueOwned = issues_page.formValueOwned;
+const percentDecodeForm = issues_page.percentDecodeForm;
 const jsonStringArgument = cmd_common.jsonStringArgument;
 const sendPlainResponse = shared.sendPlainResponse;
 const sendRedirect = shared.sendRedirect;
@@ -168,7 +169,33 @@ pub fn handleProjectItemPost(allocator: Allocator, repo: Repo, stream: std.net.S
             }
             return;
         };
-    } else if (std.mem.eql(u8, action_owned, "add-existing") or std.mem.eql(u8, action_owned, "move")) {
+    } else if (std.mem.eql(u8, action_owned, "add-existing")) {
+        var issue_refs: std.ArrayList([]u8) = .empty;
+        defer freeStringList(allocator, &issue_refs);
+        try formTrimmedValuesOwned(allocator, form_body, "issue", &issue_refs);
+        if (issue_refs.items.len == 0) {
+            try sendProjectItemError(allocator, stream, wants_async, 422, "Unprocessable Entity", "Issue is required\n");
+            return;
+        }
+        try index.ensureIndex(allocator, repo);
+        var issue_ids: std.ArrayList([]u8) = .empty;
+        defer freeStringList(allocator, &issue_ids);
+        for (issue_refs.items, 0..) |issue_ref, issue_index| {
+            if (containsString(issue_refs.items[0..issue_index], issue_ref)) continue;
+            const issue_id = index.resolveIssueId(allocator, repo, issue_ref) catch {
+                try sendProjectItemError(allocator, stream, wants_async, 404, "Not Found", "Issue not found\n");
+                return;
+            };
+            errdefer allocator.free(issue_id);
+            try issue_ids.append(allocator, issue_id);
+        }
+        for (issue_ids.items) |issue_id| {
+            updateIssueProjectMetadata(allocator, repo, issue_id, project_owned, column_owned, "") catch {
+                try sendProjectItemError(allocator, stream, wants_async, 500, "Internal Server Error", "Could not update issue project metadata\n");
+                return;
+            };
+        }
+    } else if (std.mem.eql(u8, action_owned, "move")) {
         const issue_ref_owned = try formTrimmedOwned(allocator, form_body, "issue");
         defer allocator.free(issue_ref_owned);
         if (issue_ref_owned.len == 0) {
@@ -367,6 +394,38 @@ fn formTrimmedOwned(allocator: Allocator, form_body: []const u8, wanted_key: []c
     defer allocator.free(owned);
     const trimmed = std.mem.trim(u8, owned, " \t\r\n");
     return try allocator.dupe(u8, trimmed);
+}
+
+fn formTrimmedValuesOwned(allocator: Allocator, form_body: []const u8, wanted_key: []const u8, values: *std.ArrayList([]u8)) !void {
+    var pairs = std.mem.splitScalar(u8, form_body, '&');
+    while (pairs.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
+        const raw_key = pair[0..eq];
+        const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
+        const key = try percentDecodeForm(allocator, raw_key);
+        defer allocator.free(key);
+        if (!std.mem.eql(u8, key, wanted_key)) continue;
+
+        const value = try percentDecodeForm(allocator, raw_value);
+        defer allocator.free(value);
+        const trimmed = std.mem.trim(u8, value, " \t\r\n");
+        if (trimmed.len == 0 or containsString(values.items, trimmed)) continue;
+        const owned = try allocator.dupe(u8, trimmed);
+        errdefer allocator.free(owned);
+        try values.append(allocator, owned);
+    }
+}
+
+fn containsString(values: []const []u8, value: []const u8) bool {
+    for (values) |candidate| {
+        if (std.mem.eql(u8, candidate, value)) return true;
+    }
+    return false;
+}
+
+fn freeStringList(allocator: Allocator, values: *std.ArrayList([]u8)) void {
+    for (values.items) |value| allocator.free(value);
+    values.deinit(allocator);
 }
 
 fn projectWorkspaceLocationOwned(allocator: Allocator, project: []const u8, view_ref: []const u8) ![]u8 {

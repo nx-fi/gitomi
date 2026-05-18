@@ -590,7 +590,7 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!optionalString(payload, "description")) return "project.updated payload.description must be a string";
         if (!optionalStringWithin(payload, "description", git.max_payload_text_bytes)) return "project.updated payload.description exceeds v1 text size limit";
         if (!optionalState(payload, "state", &.{ "open", "closed" })) return "project.updated payload.state must be open or closed";
-        if (!optionalIssueStatus(payload, "status")) return "project.updated payload.status must be Draft, Todo, WIP, Review, Done, or Failed";
+        if (!optionalProjectStatus(payload, "status")) return "project.updated payload.status must be Backlog, Planned, In Progress, Completed, or Canceled";
         if (!optionalIssuePriority(payload, "priority")) return "project.updated payload.priority must be P0, P1, P2, or P3";
         if (!optionalDateString(payload, "start_at")) return "project.updated payload.start_at must be YYYY-MM-DD";
         if (!optionalDateString(payload, "end_at")) return "project.updated payload.end_at must be YYYY-MM-DD";
@@ -1032,6 +1032,20 @@ fn hasIssueStatus(object: std.json.ObjectMap, key: []const u8) bool {
         std.mem.eql(u8, value, "Review") or
         std.mem.eql(u8, value, "Done") or
         std.mem.eql(u8, value, "Failed");
+}
+
+fn optionalProjectStatus(object: std.json.ObjectMap, key: []const u8) bool {
+    if (object.get(key) == null) return true;
+    return hasProjectStatus(object, key);
+}
+
+fn hasProjectStatus(object: std.json.ObjectMap, key: []const u8) bool {
+    const value = jsonString(object.get(key)) orelse return false;
+    return std.mem.eql(u8, value, "Backlog") or
+        std.mem.eql(u8, value, "Planned") or
+        std.mem.eql(u8, value, "In Progress") or
+        std.mem.eql(u8, value, "Completed") or
+        std.mem.eql(u8, value, "Canceled");
 }
 
 fn hasIssueRelationshipKind(object: std.json.ObjectMap, key: []const u8) bool {

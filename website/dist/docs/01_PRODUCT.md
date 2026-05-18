@@ -248,7 +248,7 @@ The following payload members are REQUIRED for interoperable v1 implementations:
 *   `pull.merged`: `merge_oid` or `target_oid`
 *   `pull.reaction_added` / `pull.reaction_removed`: `emoji`; for removal, OPTIONAL `add_hashes`
 *   `project.created`: `name`; OPTIONAL `description`, `slug`, `columns`
-*   `project.updated`: OPTIONAL `name`, `description`, `state`; at least one field MUST be present
+*   `project.updated`: OPTIONAL `name`, `description`, `state`, `status`, `priority`, `start_at`, `end_at`, `leads_added`, `leads_removed`, `members_added`, `members_removed`, `labels_added`, `labels_removed`, `milestones_added`, `milestones_removed`, `update_body`; `status` MUST be one of `Backlog`, `Planned`, `In Progress`, `Completed`, or `Canceled`; `priority` MUST be one of `P0`, `P1`, `P2`, or `P3`; at least one field MUST be present
 *   `project.column_added` / `project.column_removed`: `column`; OPTIONAL `column_ref`
 *   `milestone.created`: `title`; OPTIONAL `description`, `slug`, `due_at`, `state`
 *   `milestone.updated`: OPTIONAL `title`, `description`, `due_at`, `state`; at least one field MUST be present
@@ -307,7 +307,9 @@ The command-line interface SHOULD expose listing unread and recent inbox
 events, subscribing and unsubscribing issue or pull request targets, listing
 subscriptions, and marking one or all notifications read. The web interface
 SHOULD expose a top-right inbox affordance that shows recent and unread
-notifications and links to an inbox view.
+notifications and links to an inbox view. Issue and pull request detail pages
+SHOULD expose a subscribe/unsubscribe control that writes the same notification
+subscription events as the CLI.
 
 ### 4.8. Pull Request Product Model
 

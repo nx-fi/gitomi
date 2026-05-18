@@ -311,12 +311,12 @@ fn appendProjectRoadmapItem(
         });
         if (has_start_field) {
             try appendTemplate(buf, allocator,
-                \\  <label>Start<input type="date" name="start_at" value="{start_at}"></label>
+                \\  <label>Start<input type="date" name="start_at" value="{start_at}" data-date-picker data-date-picker-label="Start date" data-date-picker-placeholder="No start date"></label>
             , .{ .start_at = start_at });
         }
         if (has_end_field or has_legacy_target_field) {
             try appendTemplate(buf, allocator,
-                \\  <label>End<input type="date" name="end_at" value="{end_at}"></label>
+                \\  <label>End<input type="date" name="end_at" value="{end_at}" data-date-picker data-date-picker-label="End date" data-date-picker-placeholder="No end date"></label>
             , .{ .end_at = visible_end_at });
         }
         try buf.appendSlice(allocator,

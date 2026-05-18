@@ -1,4 +1,5 @@
 const std = @import("std");
+const cmd_common = @import("../../cmd_common.zig");
 const index = @import("../../index.zig");
 const repo_mod = @import("../../repo.zig");
 const project_issue_render = @import("issue_render.zig");
@@ -103,7 +104,7 @@ pub fn renderProjectIndex(allocator: Allocator, repo: Repo, db: *SqliteDb) ![]u8
         \\  pn.name,
         \\  COALESCE(lp.description, ''),
         \\  COALESCE(lp.state, 'open'),
-        \\  COALESCE(lp.status, 'WIP'),
+        \\  COALESCE(lp.status, 'Planned'),
         \\  COALESCE(NULLIF(lp.status_occurred_at, ''), NULLIF(lp.created_at, ''), ''),
         \\  COALESCE(lp.priority, ''),
         \\  COALESCE(lp.end_at, ''),
@@ -282,16 +283,18 @@ fn appendProjectIndexRow(
 }
 
 fn projectHealthLabel(status: []const u8, state: []const u8) []const u8 {
-    if (std.mem.eql(u8, state, "closed") or std.mem.eql(u8, status, "Done")) return "Complete";
-    if (std.mem.eql(u8, status, "Failed")) return "At risk";
-    if (status.len == 0 or std.mem.eql(u8, status, "Draft") or std.mem.eql(u8, status, "Todo")) return "Not started";
+    const project_status = cmd_common.canonicalProjectStatus(status);
+    if (std.mem.eql(u8, state, "closed") or std.mem.eql(u8, project_status, "Completed")) return "Complete";
+    if (std.mem.eql(u8, project_status, "Canceled")) return "Canceled";
+    if (std.mem.eql(u8, project_status, "Backlog") or std.mem.eql(u8, project_status, "Planned")) return "Not started";
     return "On track";
 }
 
 fn projectHealthTone(status: []const u8, state: []const u8) []const u8 {
-    if (std.mem.eql(u8, state, "closed") or std.mem.eql(u8, status, "Done")) return "done";
-    if (std.mem.eql(u8, status, "Failed")) return "failed";
-    if (status.len == 0 or std.mem.eql(u8, status, "Draft") or std.mem.eql(u8, status, "Todo")) return "todo";
+    const project_status = cmd_common.canonicalProjectStatus(status);
+    if (std.mem.eql(u8, state, "closed") or std.mem.eql(u8, project_status, "Completed")) return "done";
+    if (std.mem.eql(u8, project_status, "Canceled")) return "failed";
+    if (std.mem.eql(u8, project_status, "Backlog") or std.mem.eql(u8, project_status, "Planned")) return "todo";
     return "progress";
 }
 
@@ -374,7 +377,7 @@ test "project index names do not prepend at sign" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
 
-    try appendProjectIndexRow(&buf, std.testing.allocator, "Release & Plan", "", "open", "WIP", "", "", "", 0, 0, "", 0, "");
+    try appendProjectIndexRow(&buf, std.testing.allocator, "Release & Plan", "", "open", cmd_common.default_project_status, "", "", "", 0, 0, "", 0, "");
 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, ">Release &amp; Plan</a>") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "@Release") == null);

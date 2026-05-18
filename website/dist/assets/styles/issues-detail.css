@@ -65,6 +65,17 @@
   gap: 8px;
   flex: 0 0 auto;
 }
+.issue-subscribe-form {
+  margin: 0;
+}
+.issue-subscribe-button {
+  gap: 7px;
+}
+.issue-subscribe-form.is-subscribed .issue-subscribe-button {
+  color: var(--text);
+  background: color-mix(in oklch, var(--green) 14%, var(--button-secondary-bg));
+  border-color: color-mix(in oklch, var(--green) 40%, var(--border-strong));
+}
 .issue-page-actions .button:disabled,
 .issue-copy-button:disabled,
 .issue-sidebar-full-button:disabled {

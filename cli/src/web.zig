@@ -564,6 +564,9 @@ fn handleIssueActionPost(ctx: WebContext) !void {
     } else if (std.mem.eql(u8, action, "comments")) {
         if (!try requireCsrfToken(ctx)) return;
         try issues_page.handleIssueCommentPost(ctx.allocator, ctx.repo, ctx.stream, issue_ref, ctx.csrf_token, ctx.request.body);
+    } else if (std.mem.eql(u8, action, "notifications")) {
+        if (!try requireCsrfToken(ctx)) return;
+        try issues_page.handleIssueNotificationPost(ctx.allocator, ctx.repo, ctx.stream, issue_ref, ctx.request.body);
     } else if (std.mem.eql(u8, action, "sidebar")) {
         try issues_page.handleIssueSidebarPost(ctx.allocator, ctx.repo, ctx.stream, issue_ref, ctx.request.body);
     } else {
@@ -618,6 +621,9 @@ fn handlePullActionPost(ctx: WebContext) !void {
         try pulls_page.handlePullChecklistPost(ctx.allocator, ctx.repo, ctx.stream, pull_ref, ctx.request.body);
     } else if (std.mem.eql(u8, action, "comments")) {
         try pulls_page.handlePullCommentPost(ctx.allocator, ctx.repo, ctx.stream, pull_ref, ctx.request.body);
+    } else if (std.mem.eql(u8, action, "notifications")) {
+        if (!try requireCsrfToken(ctx)) return;
+        try pulls_page.handlePullNotificationPost(ctx.allocator, ctx.repo, ctx.stream, pull_ref, ctx.request.body);
     } else if (std.mem.eql(u8, action, "sidebar")) {
         if (!try requireCsrfToken(ctx)) return;
         try pulls_page.handlePullSidebarPost(ctx.allocator, ctx.repo, ctx.stream, pull_ref, ctx.csrf_token, ctx.request.body);

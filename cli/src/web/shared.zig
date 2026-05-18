@@ -24,7 +24,7 @@ const loadConfig = repo_mod.loadConfig;
 const default_web_shortcut_leader = "Space";
 const default_web_shortcut_keys = "A S D F J K L E R U I O W Q P Z X C V B N M G H Y T";
 const default_web_shortcut_timeout_ms: u64 = 900;
-const asset_version = "20260518-project-issue-search";
+const asset_version = "20260518-project-issue-picker-history-back";
 
 const WebStats = struct {
     inbox_refs: usize = 0,
@@ -1646,10 +1646,10 @@ pub fn appendButtonLink(buf: *std.ArrayList(u8), allocator: Allocator, button: B
 }
 
 pub fn appendDetailBackButton(buf: *std.ArrayList(u8), allocator: Allocator, href: Href, label: []const u8) !void {
+    _ = href;
     try appendTemplate(buf, allocator,
-        \\<nav class="detail-back-nav" aria-label="Detail navigation"><a class="detail-back-button" href="{href}" aria-label="{label}" title="{label}"><span class="button-icon icon-arrow-left" aria-hidden="true"></span></a></nav>
+        \\<nav class="detail-back-nav" aria-label="Detail navigation"><button class="detail-back-button" type="button" data-history-back aria-label="{label}" title="{label}"><span class="button-icon icon-arrow-left" aria-hidden="true"></span></button></nav>
     , .{
-        .href = href,
         .label = label,
     });
 }
@@ -2178,14 +2178,17 @@ test "web pagination nav renders only available actions" {
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues?page=3\"") != null);
 }
 
-test "web detail back button renders accessible icon link" {
+test "web detail back button renders accessible history button" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
 
     try appendDetailBackButton(&buf, std.testing.allocator, literalHref("/issues"), "Back to issues");
 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "class=\"detail-back-button\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<button") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "type=\"button\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-history-back") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "aria-label=\"Back to issues\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "icon-arrow-left") != null);
 }

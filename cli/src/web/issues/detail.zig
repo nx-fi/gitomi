@@ -8,6 +8,7 @@ const issue_reactions = @import("reactions.zig");
 const issue_sidebar = @import("sidebar.zig");
 const issue_timeline = @import("timeline.zig");
 const issues_list = @import("list.zig");
+const notification_mod = @import("../../notification.zig");
 const reaction_mod = @import("../../reaction.zig");
 const repo_mod = @import("../../repo.zig");
 const shared = @import("../shared.zig");
@@ -29,6 +30,7 @@ const createCommentBodySetEvent = comment_mod.createCommentBodySetEvent;
 const createCommentReplyEvent = comment_mod.createCommentReplyEvent;
 const createIssueStringEvent = issue.createIssueStringEvent;
 const createIssueUpdatedEvent = issue.createIssueUpdatedEvent;
+const createNotificationSubscriptionEvent = notification_mod.createNotificationSubscriptionEvent;
 const createReactionEvent = reaction_mod.createReactionEvent;
 const ensureIndex = index.ensureIndex;
 const sendRedirect = shared.sendRedirect;
@@ -76,13 +78,18 @@ fn renderIssueDetailPageWithCommentForm(
     const current_role = if (current_actor) |actor| try index.effectiveWriteRoleForPrincipal(allocator, repo, actor) else null;
     defer if (current_role) |role| allocator.free(role);
     const can_edit_issue = currentActorCanEditAuthor(current_actor, current_role, detail.author_principal);
+    const can_manage_notifications = current_actor != null;
+    const notification_subscribed = if (current_actor) |actor|
+        try isNotificationSubscribed(&db, actor, "issue", detail.id)
+    else
+        false;
     const issue_edit_href = if (can_edit_issue) try issueEditHrefOwned(allocator, raw_ref, null) else "";
     defer if (can_edit_issue) allocator.free(issue_edit_href);
 
     try appendShellStart(&buf, allocator, repo, detail.title, "issues");
     try shared.appendDetailBackButton(&buf, allocator, shared.literalHref("/issues"), "Back to issues");
     try buf.appendSlice(allocator, "<section class=\"issue-page\">");
-    try appendIssuePageHeader(&buf, allocator, raw_ref, detail.id, detail.title, detail.state, display_author, detail.opened_at, detail.state_occurred_at, detail.comment_count, detail.legacy_number, can_edit_issue);
+    try appendIssuePageHeader(&buf, allocator, raw_ref, detail.id, detail.title, detail.state, display_author, detail.opened_at, detail.state_occurred_at, detail.comment_count, detail.legacy_number, can_edit_issue, can_manage_notifications, notification_subscribed, csrf_token);
     try appendTemplate(&buf, allocator,
         \\  <div class="issue-conversation-layout">
         \\    <div class="issue-conversation">
@@ -150,6 +157,9 @@ fn appendIssuePageHeader(
     comment_count: usize,
     legacy_number: i64,
     can_edit: bool,
+    can_manage_notifications: bool,
+    notification_subscribed: bool,
+    csrf_token: []const u8,
 ) !void {
     try appendTemplate(buf, allocator,
         \\  <header class="issue-page-head">
@@ -168,6 +178,7 @@ fn appendIssuePageHeader(
     } else {
         try buf.appendSlice(allocator, "        <button class=\"button secondary\" type=\"button\" disabled>Edit</button>\n");
     }
+    try appendNotificationSubscriptionButton(buf, allocator, "issues", raw_ref, can_manage_notifications, notification_subscribed, csrf_token);
     try appendTemplate(buf, allocator,
         \\
         \\        <a class="button primary" href="/new-issue">New issue</a>
@@ -562,6 +573,29 @@ fn currentActorCanEditAuthor(current_actor: ?[]const u8, current_role: ?[]const 
     return event_mod.roleAtLeast(role, "contributor") and std.mem.eql(u8, actor, author);
 }
 
+fn currentActorCanManageNotifications(current_actor: ?[]const u8, current_role: ?[]const u8) bool {
+    if (current_actor == null) return false;
+    const role = current_role orelse return false;
+    return event_mod.roleAtLeast(role, "reporter");
+}
+
+fn isNotificationSubscribed(db: *SqliteDb, principal: []const u8, object_kind: []const u8, object_id: []const u8) !bool {
+    var stmt = try db.prepare(
+        \\SELECT active
+        \\FROM notification_subscriptions
+        \\WHERE principal = ?
+        \\  AND object_kind = ?
+        \\  AND object_id = ?
+        \\LIMIT 1
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, principal);
+    try stmt.bindText(2, object_kind);
+    try stmt.bindText(3, object_id);
+    if (!(try stmt.step())) return false;
+    return stmt.columnInt(0) != 0;
+}
+
 fn issueEditHrefOwned(allocator: Allocator, raw_ref: []const u8, target_ref: ?[]const u8) ![]u8 {
     var href: std.ArrayList(u8) = .empty;
     errdefer href.deinit(allocator);
@@ -591,6 +625,40 @@ fn appendIssueActionMenuItem(
         \\><span class="issue-menu-icon {icon_class}" aria-hidden="true"></span><span data-issue-menu-label>{label}</span></button>
     , .{
         .icon_class = icon_class,
+        .label = label,
+    });
+}
+
+pub fn appendNotificationSubscriptionButton(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    route_kind: []const u8,
+    raw_ref: []const u8,
+    can_manage_notifications: bool,
+    subscribed: bool,
+    csrf_token: []const u8,
+) !void {
+    const action_value = if (subscribed) "unsubscribe" else "subscribe";
+    const label = if (subscribed) "Subscribed" else "Subscribe";
+    const title = if (subscribed) "Unsubscribe from notifications" else "Subscribe to notifications";
+    try appendTemplate(buf, allocator,
+        \\        <form class="{classes}" method="post" action="/{route_kind}/
+    , .{
+        .classes = shared.classes("issue-subscribe-form", &.{shared.class("is-subscribed", subscribed)}),
+        .route_kind = route_kind,
+    });
+    try shared.appendUrlEncoded(buf, allocator, raw_ref);
+    try appendTemplate(buf, allocator,
+        \\/notifications">
+        \\          <input type="hidden" name="{csrf_field}" value="{csrf_token}">
+        \\          <button class="button secondary issue-subscribe-button" type="submit" name="action" value="{action}" title="{title}"{disabled}><span class="button-icon icon-bell" aria-hidden="true"></span><span>{label}</span></button>
+        \\        </form>
+    , .{
+        .csrf_field = zwf.csrf.field_name,
+        .csrf_token = csrf_token,
+        .action = action_value,
+        .title = title,
+        .disabled = if (can_manage_notifications) "" else " disabled",
         .label = label,
     });
 }
@@ -1013,6 +1081,52 @@ pub fn handleIssueCommentPost(allocator: Allocator, repo: Repo, stream: std.net.
             return;
         };
     }
+
+    const location = try std.fmt.allocPrint(allocator, "/issues/{s}", .{raw_ref});
+    defer allocator.free(location);
+    try sendRedirect(allocator, stream, location);
+}
+
+pub fn handleIssueNotificationPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
+    try ensureIndex(allocator, repo);
+    const issue_id = index.resolveIssueId(allocator, repo, raw_ref) catch {
+        try sendPlainResponse(allocator, stream, 404, "Not Found", "Issue not found\n");
+        return;
+    };
+    defer allocator.free(issue_id);
+
+    const action_owned = (try formValueOwned(allocator, form_body, "action")) orelse {
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Missing notification action\n");
+        return;
+    };
+    defer allocator.free(action_owned);
+    const action = std.mem.trim(u8, action_owned, " \t\r\n");
+    const subscribe = if (std.mem.eql(u8, action, "subscribe"))
+        true
+    else if (std.mem.eql(u8, action, "unsubscribe"))
+        false
+    else {
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Unknown notification action\n");
+        return;
+    };
+
+    const current_actor = try shared.currentPrincipalOwned(allocator, repo);
+    defer if (current_actor) |actor_value| allocator.free(actor_value);
+    const actor = current_actor orelse {
+        try sendPlainResponse(allocator, stream, 409, "Conflict", "Gitomi is not initialized\n");
+        return;
+    };
+    const current_role = try index.effectiveWriteRoleForPrincipal(allocator, repo, actor);
+    defer if (current_role) |role| allocator.free(role);
+    if (!currentActorCanManageNotifications(actor, current_role)) {
+        try sendPlainResponse(allocator, stream, 403, "Forbidden", "Forbidden\n");
+        return;
+    }
+
+    createNotificationSubscriptionEvent(allocator, actor, "issue", issue_id, subscribe) catch |err| {
+        try sendPlainResponse(allocator, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), shared.writeFailureMessage(err, "Could not update notification subscription\n"));
+        return;
+    };
 
     const location = try std.fmt.allocPrint(allocator, "/issues/{s}", .{raw_ref});
     defer allocator.free(location);

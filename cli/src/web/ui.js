@@ -278,7 +278,7 @@
 
   function closePopoverMenus(except) {
     document.querySelectorAll(popoverMenuSelector + "[open]").forEach(function (menu) {
-      if (menu !== except) {
+      if (menu !== except && !(except && menu.contains(except))) {
         menu.open = false;
         setExpanded(menu);
       }
@@ -357,6 +357,18 @@
         if (stats) updateNavStats(stats);
       })
       .catch(function () {});
+  }
+
+  function initHistoryBackButtons() {
+    if (document.body.dataset.historyBackButtonsReady === "yes") return;
+    document.body.dataset.historyBackButtonsReady = "yes";
+
+    document.addEventListener("click", function (event) {
+      const button = event.target instanceof Element ? event.target.closest("[data-history-back]") : null;
+      if (!button) return;
+      event.preventDefault();
+      window.history.back();
+    });
   }
 
   function labelRowName(row) {
@@ -1064,6 +1076,7 @@
     initSubmitLocks();
     initPopoverMenus();
     initNavStats();
+    initHistoryBackButtons();
     initLabelsPage();
     initIssueFormPickers(document);
     initPullMergeMethodMenus();

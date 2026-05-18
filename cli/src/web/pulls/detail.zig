@@ -6,6 +6,7 @@ const issues_page = @import("../issues.zig");
 const pull_comments = @import("comments.zig");
 const pull_git_tabs = @import("git_tabs.zig");
 const merge_editor = @import("merge_editor.zig");
+const notification_mod = @import("../../notification.zig");
 const pull_merge = @import("merge.zig");
 const pulls_list = @import("list.zig");
 const pull_sidebar = @import("sidebar.zig");
@@ -30,6 +31,7 @@ const appendTemplate = shared.appendTemplate;
 const commitHref = shared.commitHref;
 const createCommentAddedEvent = comment_mod.createCommentAddedEvent;
 const createCommentReplyEvent = comment_mod.createCommentReplyEvent;
+const createNotificationSubscriptionEvent = notification_mod.createNotificationSubscriptionEvent;
 const createReactionEvent = reaction_mod.createReactionEvent;
 const literalHref = shared.literalHref;
 const pullHref = shared.pullHref;
@@ -112,6 +114,16 @@ fn renderPullDetailPageWithMergeError(allocator: Allocator, repo: Repo, raw_ref:
     const tab_counts = try loadPullTabCounts(allocator, repo, &db, detail);
     const merge_status = try pull_merge.loadStatus(allocator, repo, detail);
     defer merge_status.deinit(allocator);
+    const current_actor = try shared.currentPrincipalOwned(allocator, repo);
+    defer if (current_actor) |actor| allocator.free(actor);
+    const current_role = if (current_actor) |actor| try index.effectiveWriteRoleForPrincipal(allocator, repo, actor) else null;
+    defer if (current_role) |role| allocator.free(role);
+    const can_edit_pull = currentActorCanEditAuthor(current_actor, current_role, detail.author_principal);
+    const can_manage_notifications = current_actor != null;
+    const notification_subscribed = if (current_actor) |actor|
+        try isNotificationSubscribed(&db, actor, "pull", detail.id)
+    else
+        false;
 
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -119,17 +131,12 @@ fn renderPullDetailPageWithMergeError(allocator: Allocator, repo: Repo, raw_ref:
     try appendShellStart(&buf, allocator, repo, detail.title, "pulls");
     try shared.appendDetailBackButton(&buf, allocator, shared.literalHref("/pulls"), "Back to pull requests");
     try buf.appendSlice(allocator, "<section class=\"pull-detail issue-page\">");
-    try appendPullPageHeader(&buf, allocator, detail, pull_ref, tab_counts, merge_status);
+    try appendPullPageHeader(&buf, allocator, detail, pull_ref, tab_counts, merge_status, can_manage_notifications, notification_subscribed, csrf_token);
     try appendPullTabs(&buf, allocator, pull_ref, tab, tab_counts);
     try appendTemplate(&buf, allocator,
         \\<div class="issue-conversation-layout pull-conversation-layout">
         \\  <div class="pull-tab-content">
     , .{});
-    const current_actor = try shared.currentPrincipalOwned(allocator, repo);
-    defer if (current_actor) |actor| allocator.free(actor);
-    const current_role = if (current_actor) |actor| try index.effectiveWriteRoleForPrincipal(allocator, repo, actor) else null;
-    defer if (current_role) |role| allocator.free(role);
-    const can_edit_pull = currentActorCanEditAuthor(current_actor, current_role, detail.author_principal);
     switch (tab) {
         .conversation => try appendPullConversation(&buf, allocator, &db, detail, raw_ref, tab_counts, current_actor, can_edit_pull, merge_status, csrf_token, merge_error),
         .commits => try pull_git_tabs.appendCommits(&buf, allocator, repo, detail),
@@ -217,7 +224,17 @@ fn loadPullTabCounts(allocator: Allocator, repo: Repo, db: *SqliteDb, detail: Pu
     return counts;
 }
 
-fn appendPullPageHeader(buf: *std.ArrayList(u8), allocator: Allocator, detail: PullDetail, pull_ref: []const u8, counts: PullTabCounts, merge_status: PullMergeStatus) !void {
+fn appendPullPageHeader(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    detail: PullDetail,
+    pull_ref: []const u8,
+    counts: PullTabCounts,
+    merge_status: PullMergeStatus,
+    can_manage_notifications: bool,
+    notification_subscribed: bool,
+    csrf_token: []const u8,
+) !void {
     try appendTemplate(buf, allocator,
         \\<header class="issue-page-head pull-page-head">
         \\  <div class="issue-title-line">
@@ -237,6 +254,7 @@ fn appendPullPageHeader(buf: *std.ArrayList(u8), allocator: Allocator, detail: P
             \\      <a class="button secondary pull-conflicts-button" href="/pulls/{pull_ref}/conflicts"><span class="button-icon icon-conflict" aria-hidden="true"></span><span>Resolve conflicts</span></a>
         , .{ .pull_ref = pull_ref });
     }
+    try issues_page.appendNotificationSubscriptionButton(buf, allocator, "pulls", pull_ref, can_manage_notifications, notification_subscribed, csrf_token);
     try appendTemplate(buf, allocator,
         \\      <button class="issue-copy-button" type="button" data-copy-work-item-link="{copy_href}" aria-label="Copy link" title="Copy link"><span class="button-icon icon-copy" aria-hidden="true"></span></button>
         \\    </div>
@@ -316,6 +334,29 @@ fn currentActorCanEditAuthor(current_actor: ?[]const u8, current_role: ?[]const 
     if (event_mod.roleAtLeast(role, "maintainer")) return true;
     const actor = current_actor orelse return false;
     return event_mod.roleAtLeast(role, "contributor") and std.mem.eql(u8, actor, author);
+}
+
+fn currentActorCanManageNotifications(current_actor: ?[]const u8, current_role: ?[]const u8) bool {
+    if (current_actor == null) return false;
+    const role = current_role orelse return false;
+    return event_mod.roleAtLeast(role, "reporter");
+}
+
+fn isNotificationSubscribed(db: *SqliteDb, principal: []const u8, object_kind: []const u8, object_id: []const u8) !bool {
+    var stmt = try db.prepare(
+        \\SELECT active
+        \\FROM notification_subscriptions
+        \\WHERE principal = ?
+        \\  AND object_kind = ?
+        \\  AND object_id = ?
+        \\LIMIT 1
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, principal);
+    try stmt.bindText(2, object_kind);
+    try stmt.bindText(3, object_id);
+    if (!(try stmt.step())) return false;
+    return stmt.columnInt(0) != 0;
 }
 
 fn currentActorCanEditInRepo(allocator: Allocator, repo: Repo, author: []const u8) !bool {
@@ -1138,6 +1179,52 @@ pub fn handlePullCommentPost(allocator: Allocator, repo: Repo, stream: std.net.S
             return;
         };
     }
+
+    const location = try std.fmt.allocPrint(allocator, "/pulls/{s}", .{raw_ref});
+    defer allocator.free(location);
+    try sendRedirect(allocator, stream, location);
+}
+
+pub fn handlePullNotificationPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
+    try index.ensureIndex(allocator, repo);
+    const pull_id = index.resolvePullId(allocator, repo, raw_ref) catch {
+        try sendPlainResponse(allocator, stream, 404, "Not Found", "Pull request not found\n");
+        return;
+    };
+    defer allocator.free(pull_id);
+
+    const action_owned = (try issues_page.formValueOwned(allocator, form_body, "action")) orelse {
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Missing notification action\n");
+        return;
+    };
+    defer allocator.free(action_owned);
+    const action = std.mem.trim(u8, action_owned, " \t\r\n");
+    const subscribe = if (std.mem.eql(u8, action, "subscribe"))
+        true
+    else if (std.mem.eql(u8, action, "unsubscribe"))
+        false
+    else {
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Unknown notification action\n");
+        return;
+    };
+
+    const current_actor = try shared.currentPrincipalOwned(allocator, repo);
+    defer if (current_actor) |actor_value| allocator.free(actor_value);
+    const actor = current_actor orelse {
+        try sendPlainResponse(allocator, stream, 409, "Conflict", "Gitomi is not initialized\n");
+        return;
+    };
+    const current_role = try index.effectiveWriteRoleForPrincipal(allocator, repo, actor);
+    defer if (current_role) |role| allocator.free(role);
+    if (!currentActorCanManageNotifications(actor, current_role)) {
+        try sendPlainResponse(allocator, stream, 403, "Forbidden", "Forbidden\n");
+        return;
+    }
+
+    createNotificationSubscriptionEvent(allocator, actor, "pull", pull_id, subscribe) catch |err| {
+        try sendPlainResponse(allocator, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), shared.writeFailureMessage(err, "Could not update notification subscription\n"));
+        return;
+    };
 
     const location = try std.fmt.allocPrint(allocator, "/pulls/{s}", .{raw_ref});
     defer allocator.free(location);

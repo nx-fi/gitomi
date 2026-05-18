@@ -19,29 +19,29 @@ const sendResponse = shared.sendResponse;
 const splitCommaFields = util.splitCommaFields;
 const sqlite = index.sqlite;
 
-const LabelOption = struct {
+pub const LabelOption = struct {
     name: []u8,
     color: []u8,
 
-    fn deinit(self: *LabelOption, allocator: Allocator) void {
+    pub fn deinit(self: *LabelOption, allocator: Allocator) void {
         allocator.free(self.name);
         allocator.free(self.color);
     }
 };
 
-const AssigneeOption = struct {
+pub const AssigneeOption = struct {
     name: []u8,
 
-    fn deinit(self: *AssigneeOption, allocator: Allocator) void {
+    pub fn deinit(self: *AssigneeOption, allocator: Allocator) void {
         allocator.free(self.name);
     }
 };
 
-const IssueFormPickerOptions = struct {
+pub const IssueFormPickerOptions = struct {
     labels: std.ArrayList(LabelOption) = .empty,
     assignees: std.ArrayList(AssigneeOption) = .empty,
 
-    fn deinit(self: *IssueFormPickerOptions, allocator: Allocator) void {
+    pub fn deinit(self: *IssueFormPickerOptions, allocator: Allocator) void {
         for (self.labels.items) |*label| label.deinit(allocator);
         self.labels.deinit(allocator);
         for (self.assignees.items) |*assignee| assignee.deinit(allocator);
@@ -111,14 +111,18 @@ pub fn renderIssueForm(
 fn loadIssueFormPickerOptions(allocator: Allocator, repo: Repo) !IssueFormPickerOptions {
     try ensureIndex(allocator, repo);
 
-    var options: IssueFormPickerOptions = .{};
-    errdefer options.deinit(allocator);
-
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
 
-    try loadLabelOptions(allocator, &db, &options.labels);
-    try loadAssigneeOptions(allocator, &db, &options.assignees);
+    return loadIssueFormPickerOptionsFromDb(allocator, &db);
+}
+
+pub fn loadIssueFormPickerOptionsFromDb(allocator: Allocator, db: *SqliteDb) !IssueFormPickerOptions {
+    var options: IssueFormPickerOptions = .{};
+    errdefer options.deinit(allocator);
+
+    try loadLabelOptions(allocator, db, &options.labels);
+    try loadAssigneeOptions(allocator, db, &options.assignees);
     return options;
 }
 
@@ -185,7 +189,7 @@ fn loadAssigneeOptions(allocator: Allocator, db: *SqliteDb, assignees: *std.Arra
     }
 }
 
-fn appendIssueFormLabelsPicker(
+pub fn appendIssueFormLabelsPicker(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
     labels: []const LabelOption,
@@ -217,7 +221,7 @@ fn appendIssueFormLabelsPicker(
     try appendIssueFormPickerEnd(buf, allocator);
 }
 
-fn appendIssueFormAssigneesPicker(
+pub fn appendIssueFormAssigneesPicker(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
     assignees: []const AssigneeOption,

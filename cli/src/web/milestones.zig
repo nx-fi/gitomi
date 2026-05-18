@@ -1091,7 +1091,7 @@ fn renderMilestoneForm(
         .title_value = title_value,
     });
     try appendTemplate(&buf, allocator,
-        \\  <label>Due date <span class="muted">(optional)</span><input type="date" name="due_at" value="{due_at_value}" placeholder="2026-06-30"></label>
+        \\  <label>Due date <span class="muted">(optional)</span><input type="date" name="due_at" value="{due_at_value}" placeholder="2026-06-30" data-date-picker data-date-picker-label="Due date" data-date-picker-placeholder="No due date"></label>
         \\  <label>Description <span class="muted">(optional)</span><textarea name="description" rows="7" placeholder="Describe your milestone">{description_value}</textarea></label>
     , .{
         .description_value = description_value,

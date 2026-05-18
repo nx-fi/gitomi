@@ -395,6 +395,29 @@ pub fn isIssueStatus(value: []const u8) bool {
         std.mem.eql(u8, value, "Failed");
 }
 
+pub const default_project_status = "Planned";
+pub const project_status_values = [_][]const u8{ "Backlog", "Planned", "In Progress", "Completed", "Canceled" };
+
+pub fn isProjectStatus(value: []const u8) bool {
+    for (project_status_values) |status| {
+        if (std.mem.eql(u8, value, status)) return true;
+    }
+    return false;
+}
+
+pub fn canonicalProjectStatus(value: []const u8) []const u8 {
+    if (value.len == 0) return default_project_status;
+    for (project_status_values) |status| {
+        if (std.mem.eql(u8, value, status)) return status;
+    }
+    if (std.mem.eql(u8, value, "Draft")) return "Backlog";
+    if (std.mem.eql(u8, value, "Todo")) return "Planned";
+    if (std.mem.eql(u8, value, "WIP") or std.mem.eql(u8, value, "Review")) return "In Progress";
+    if (std.mem.eql(u8, value, "Done")) return "Completed";
+    if (std.mem.eql(u8, value, "Failed")) return "Canceled";
+    return value;
+}
+
 pub fn isProjectState(value: []const u8) bool {
     return std.mem.eql(u8, value, "open") or std.mem.eql(u8, value, "closed");
 }

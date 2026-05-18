@@ -268,6 +268,9 @@ on `issue.opened`, `issue.updated`, and `issue.priority_set` MUST be one of
 `P0`, `P1`, `P2`, or `P3`. `payload.status` on `issue.opened`,
 `issue.updated`, and `issue.status_set` MUST be one of `Draft`, `Todo`, `WIP`,
 `Review`, `Done`, or `Failed`; writers MUST emit `Todo` for not-started work.
+Project lifecycle payloads use a separate enum. `payload.status` on
+`project.updated` MUST be one of `Backlog`, `Planned`, `In Progress`,
+`Completed`, or `Canceled`.
 
 ### 3.5. Reference Message Directives
 

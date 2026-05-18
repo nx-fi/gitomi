@@ -3,8 +3,10 @@ const index = @import("../../index.zig");
 const repo_mod = @import("../../repo.zig");
 const util = @import("../../util.zig");
 const project_data = @import("data.zig");
+const project_issue_render = @import("issue_render.zig");
 const project_overview = @import("overview.zig");
 const project_views = @import("views.zig");
+const issue_form = @import("../issues/form.zig");
 const shared = @import("../shared.zig");
 
 const Allocator = std.mem.Allocator;
@@ -63,6 +65,8 @@ const activeBuiltinProjectView = project_data.activeBuiltinProjectView;
 const projectTableFieldsFromConfig = project_data.projectTableFieldsFromConfig;
 const bindProjectIssueFilter = project_data.bindProjectIssueFilter;
 const projectExists = project_data.projectExists;
+const columnTone = project_issue_render.columnTone;
+const priorityTone = project_issue_render.priorityTone;
 
 pub fn appendProjectWorkspaceChromeStart(
     buf: *std.ArrayList(u8),
@@ -217,6 +221,106 @@ pub fn appendProjectPriorityOptions(buf: *std.ArrayList(u8), allocator: Allocato
     }
 }
 
+pub fn appendProjectIssueMultiSearch(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try buf.appendSlice(allocator,
+        \\        <div class="project-issue-search-wrap tree-search-wrap project-issue-multi-search" data-project-issue-multi-search>
+        \\          <div class="tree-search-label project-issue-search-label"><span class="project-issue-search-title">Issues</span><span class="project-issue-token-input" data-project-issue-token-input><span class="project-selected-issues" data-project-selected-issues></span><input class="tree-search-input" type="search" placeholder="Search issues or paste a ref" aria-label="Search issues" autocomplete="off" spellcheck="false" data-project-issue-search data-project-issue-multiple></span></div>
+        \\        </div>
+    );
+}
+
+pub fn appendProjectPriorityPicker(buf: *std.ArrayList(u8), allocator: Allocator, selected: []const u8) !void {
+    const current = if (selected.len == 0) default_project_priority else selected;
+    try buf.appendSlice(allocator,
+        \\<div class="project-choice-field project-choice-field-priority">
+        \\  <div class="project-choice-label">Priority</div>
+        \\  <details class="project-choice-menu" data-popover-menu data-project-choice-menu>
+        \\    <summary class="project-choice-control" aria-label="Select priority">
+        \\      <span class="project-choice-selected" data-project-choice-selected>
+    );
+    try appendProjectPriorityChip(buf, allocator, current);
+    try buf.appendSlice(allocator,
+        \\      </span>
+        \\      <span class="project-choice-caret" aria-hidden="true"></span>
+        \\    </summary>
+        \\    <div class="project-choice-popover" role="radiogroup" aria-label="Priority">
+    );
+    for (project_priority_values) |priority| {
+        try appendTemplate(buf, allocator,
+            \\      <label class="project-choice-option"><input type="radio" name="priority" value="{priority}"{checked}><span class="project-choice-option-content" data-project-choice-option-content>
+        , .{
+            .priority = priority,
+            .checked = shared.trustedHtml(if (std.mem.eql(u8, current, priority)) " checked" else ""),
+        });
+        try appendProjectPriorityChip(buf, allocator, priority);
+        try buf.appendSlice(allocator, "</span></label>");
+    }
+    try buf.appendSlice(allocator,
+        \\    </div>
+        \\  </details>
+        \\</div>
+    );
+}
+
+pub fn appendProjectStatusPicker(buf: *std.ArrayList(u8), allocator: Allocator, selected: ?[]const u8) !void {
+    const current = if (selected) |value| if (value.len == 0) default_project_status else value else default_project_status;
+    try buf.appendSlice(allocator,
+        \\<div class="project-choice-field project-choice-field-status">
+        \\  <div class="project-choice-label">Status</div>
+        \\  <details class="project-choice-menu" data-popover-menu data-project-choice-menu>
+        \\    <summary class="project-choice-control" aria-label="Select status">
+        \\      <span class="project-choice-selected" data-project-choice-selected>
+    );
+    try appendProjectStatusChip(buf, allocator, current);
+    try buf.appendSlice(allocator,
+        \\      </span>
+        \\      <span class="project-choice-caret" aria-hidden="true"></span>
+        \\    </summary>
+        \\    <div class="project-choice-popover" role="radiogroup" aria-label="Status">
+    );
+    for (project_status_values) |status| {
+        try appendTemplate(buf, allocator,
+            \\      <label class="project-choice-option"><input type="radio" name="column" value="{status}"{checked}><span class="project-choice-option-content" data-project-choice-option-content>
+        , .{
+            .status = status,
+            .checked = shared.trustedHtml(if (std.mem.eql(u8, current, status)) " checked" else ""),
+        });
+        try appendProjectStatusChip(buf, allocator, status);
+        try buf.appendSlice(allocator, "</span></label>");
+    }
+    try buf.appendSlice(allocator,
+        \\    </div>
+        \\  </details>
+        \\</div>
+    );
+}
+
+pub fn appendProjectIssueFormPickers(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb) !void {
+    var picker_options = issue_form.loadIssueFormPickerOptionsFromDb(allocator, db) catch issue_form.IssueFormPickerOptions{};
+    defer picker_options.deinit(allocator);
+    const empty_values: []const []const u8 = &.{};
+    try issue_form.appendIssueFormLabelsPicker(buf, allocator, picker_options.labels.items, empty_values, "");
+    try issue_form.appendIssueFormAssigneesPicker(buf, allocator, picker_options.assignees.items, empty_values, "");
+}
+
+fn appendProjectPriorityChip(buf: *std.ArrayList(u8), allocator: Allocator, priority: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<span class="project-priority-chip tone-{tone}">{priority}</span>
+    , .{
+        .tone = priorityTone(priority),
+        .priority = if (priority.len == 0) "None" else priority,
+    });
+}
+
+fn appendProjectStatusChip(buf: *std.ArrayList(u8), allocator: Allocator, status: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<span class="project-status-chip tone-{tone}"><span class="kanban-status-dot" aria-hidden="true"></span>{status}</span>
+    , .{
+        .tone = columnTone(status),
+        .status = if (status.len == 0) "No status" else status,
+    });
+}
+
 fn appendProjectViewTabs(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -254,22 +358,13 @@ fn appendProjectItemActions(
         \\        <input type="hidden" name="action" value="add-existing">
         \\        <input type="hidden" name="project" value="{project}">
         \\        <input type="hidden" name="view" value="{view}">
-        \\        <div class="project-issue-search-wrap tree-search-wrap">
-        \\          <label class="tree-search-label project-issue-search-label"><span>Issue</span><input class="tree-search-input" type="search" name="issue" placeholder="Search issues or paste a ref" autocomplete="off" spellcheck="false" data-project-issue-search required></label>
-        \\        </div>
-        \\        <label>Priority<select name="priority">
     , .{
         .project = project,
         .view = active_view.ref,
     });
-    try appendProjectPriorityOptions(buf, allocator, if (defaults.priority_explicit) defaults.priority else "");
-    try buf.appendSlice(allocator,
-        \\        </select></label>
-        \\        <label>Status<select name="column">
-    );
-    try appendProjectColumnOptions(buf, allocator, db, project, if (defaults.status_explicit) defaults.status else null);
+    try appendProjectIssueMultiSearch(buf, allocator);
+    try appendProjectStatusPicker(buf, allocator, if (defaults.status_explicit) defaults.status else null);
     try appendTemplate(buf, allocator,
-        \\        </select></label>
         \\        <div class="form-actions"><button class="button primary" type="submit">Add issue</button></div>
         \\      </form>
         \\    </div>
@@ -293,19 +388,16 @@ fn appendProjectItemActions(
     });
     try buf.appendSlice(allocator,
         \\        <div class="grid two">
-        \\          <label>Priority<select name="priority">
     );
-    try appendProjectPriorityOptions(buf, allocator, defaults.priority);
+    try appendProjectPriorityPicker(buf, allocator, defaults.priority);
+    try appendProjectStatusPicker(buf, allocator, defaults.status);
     try appendTemplate(buf, allocator,
-        \\          </select></label>
-        \\          <label>Status<select name="column">
-    , .{});
-    try appendProjectColumnOptions(buf, allocator, db, project, defaults.status);
-    try appendTemplate(buf, allocator,
-        \\          </select></label>
         \\        </div>
-        \\        <label>Labels<input name="labels" placeholder="bug, docs"></label>
-        \\        <label>Assignees<input name="assignees" placeholder="alice, bob"></label>
+        \\        <div class="grid two">
+    , .{});
+    try appendProjectIssueFormPickers(buf, allocator, db);
+    try appendTemplate(buf, allocator,
+        \\        </div>
         \\        <div class="form-actions"><button class="button secondary" type="submit">Create issue</button></div>
         \\      </form>
         \\    </div>

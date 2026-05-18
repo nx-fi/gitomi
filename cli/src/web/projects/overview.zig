@@ -18,6 +18,7 @@ const formValueOwned = issues_page.formValueOwned;
 const appendRelativeTime = shared.appendRelativeTime;
 const appendTemplate = shared.appendTemplate;
 const isIssuePriority = cmd_common.isIssuePriority;
+const isProjectStatus = cmd_common.isProjectStatus;
 const sendPlainResponse = shared.sendPlainResponse;
 const sendRedirect = shared.sendRedirect;
 const percentDecodeForm = issues_page.percentDecodeForm;
@@ -199,8 +200,8 @@ pub fn handleProjectPropertiesPost(allocator: Allocator, repo: Repo, stream: std
         const status_owned = try requiredProjectFormValue(allocator, stream, form_body, "status", "Status is required\n");
         const status = status_owned orelse return;
         defer allocator.free(status);
-        if (!project_views.isProjectStatusValue(status)) {
-            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Status must be Draft, Todo, WIP, Review, Done, or Failed\n");
+        if (!isProjectStatus(status)) {
+            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Status must be Backlog, Planned, In Progress, Completed, or Canceled\n");
             return;
         }
         const body_owned = (try formValueOwned(allocator, form_body, "update_body")) orelse try allocator.dupe(u8, "");
@@ -254,8 +255,8 @@ pub fn handleProjectPropertiesPost(allocator: Allocator, repo: Repo, stream: std
         const status_owned = try requiredProjectFormValue(allocator, stream, form_body, "status", "Status is required\n");
         const status = status_owned orelse return;
         defer allocator.free(status);
-        if (!project_views.isProjectStatusValue(status)) {
-            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Status must be Draft, Todo, WIP, Review, Done, or Failed\n");
+        if (!isProjectStatus(status)) {
+            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Status must be Backlog, Planned, In Progress, Completed, or Canceled\n");
             return;
         }
         if (!(try writeProjectUpdateOrFail(allocator, stream, project_id, .{ .status = status }))) return;
@@ -269,20 +270,31 @@ pub fn handleProjectPropertiesPost(allocator: Allocator, repo: Repo, stream: std
         }
         if (!(try writeProjectUpdateOrFail(allocator, stream, project_id, .{ .priority = priority }))) return;
     } else if (std.mem.eql(u8, action_owned, "set-dates")) {
-        const start_owned = try requiredProjectFormValue(allocator, stream, form_body, "start_at", "Start date is required\n");
-        const start_at = start_owned orelse return;
-        defer allocator.free(start_at);
+        const start_owned = try formTrimmedOwned(allocator, form_body, "start_at");
+        defer allocator.free(start_owned);
         const end_owned = try formTrimmedOwned(allocator, form_body, "end_at");
         defer allocator.free(end_owned);
-        if (!isProjectDateValue(start_at) or !isProjectDateValue(end_owned)) {
+        if (!isProjectDateValue(start_owned) or !isProjectDateValue(end_owned)) {
             try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Dates must use YYYY-MM-DD\n");
             return;
         }
-        if (end_owned.len != 0 and std.mem.order(u8, end_owned, start_at) != .gt) {
-            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "End date must be after start date\n");
+        if (!(try writeProjectUpdateOrFail(allocator, stream, project_id, .{ .start_at = start_owned, .end_at = end_owned }))) return;
+    } else if (std.mem.eql(u8, action_owned, "set-start-date")) {
+        const start_owned = try formTrimmedOwned(allocator, form_body, "start_at");
+        defer allocator.free(start_owned);
+        if (!isProjectDateValue(start_owned)) {
+            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Date must use YYYY-MM-DD\n");
             return;
         }
-        if (!(try writeProjectUpdateOrFail(allocator, stream, project_id, .{ .start_at = start_at, .end_at = end_owned }))) return;
+        if (!(try writeProjectUpdateOrFail(allocator, stream, project_id, .{ .start_at = start_owned }))) return;
+    } else if (std.mem.eql(u8, action_owned, "set-end-date")) {
+        const end_owned = try formTrimmedOwned(allocator, form_body, "end_at");
+        defer allocator.free(end_owned);
+        if (!isProjectDateValue(end_owned)) {
+            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Date must use YYYY-MM-DD\n");
+            return;
+        }
+        if (!(try writeProjectUpdateOrFail(allocator, stream, project_id, .{ .end_at = end_owned }))) return;
     } else if (std.mem.eql(u8, action_owned, "add-lead") or std.mem.eql(u8, action_owned, "remove-lead")) {
         const value_owned = try requiredProjectFormValue(allocator, stream, form_body, "value", "Lead is required\n");
         const value = value_owned orelse return;
@@ -471,7 +483,7 @@ fn loadProjectSummary(allocator: Allocator, db: *SqliteDb, project: []const u8) 
         .name = try allocator.dupe(u8, project),
         .description = try allocator.dupe(u8, ""),
         .state = try allocator.dupe(u8, "open"),
-        .status = try allocator.dupe(u8, "WIP"),
+        .status = try allocator.dupe(u8, cmd_common.default_project_status),
         .status_occurred_at = try allocator.dupe(u8, ""),
         .priority = try allocator.dupe(u8, ""),
         .start_at = try allocator.dupe(u8, ""),
@@ -829,16 +841,18 @@ fn projectSummaryValueClass(tone: []const u8) []const u8 {
 }
 
 fn projectHealthLabel(status: []const u8, state: []const u8) []const u8 {
-    if (std.mem.eql(u8, state, "closed") or std.mem.eql(u8, status, "Done")) return "Complete";
-    if (std.mem.eql(u8, status, "Failed")) return "At risk";
-    if (status.len == 0 or std.mem.eql(u8, status, "Draft") or std.mem.eql(u8, status, "Todo")) return "Not started";
+    const project_status = cmd_common.canonicalProjectStatus(status);
+    if (std.mem.eql(u8, state, "closed") or std.mem.eql(u8, project_status, "Completed")) return "Complete";
+    if (std.mem.eql(u8, project_status, "Canceled")) return "Canceled";
+    if (std.mem.eql(u8, project_status, "Backlog") or std.mem.eql(u8, project_status, "Planned")) return "Not started";
     return "On track";
 }
 
 fn projectHealthTone(status: []const u8, state: []const u8) []const u8 {
-    if (std.mem.eql(u8, state, "closed") or std.mem.eql(u8, status, "Done")) return "done";
-    if (std.mem.eql(u8, status, "Failed")) return "failed";
-    if (status.len == 0 or std.mem.eql(u8, status, "Draft") or std.mem.eql(u8, status, "Todo")) return "todo";
+    const project_status = cmd_common.canonicalProjectStatus(status);
+    if (std.mem.eql(u8, state, "closed") or std.mem.eql(u8, project_status, "Completed")) return "done";
+    if (std.mem.eql(u8, project_status, "Canceled")) return "failed";
+    if (std.mem.eql(u8, project_status, "Backlog") or std.mem.eql(u8, project_status, "Planned")) return "todo";
     return "progress";
 }
 
@@ -905,9 +919,8 @@ fn appendProjectResourceLink(
 }
 
 fn appendProjectUpdateSection(buf: *std.ArrayList(u8), allocator: Allocator, summary: *const ProjectSummary, note: *const ProjectUpdateNote) !void {
-    const effective_status = if (note.status.len != 0) note.status else summary.status;
-    const health_label = projectUpdateHealthLabel(effective_status, summary.state);
-    const health_tone = projectUpdateHealthTone(effective_status, summary.state);
+    const effective_status = projectLifecycleStatusValue(if (note.status.len != 0) note.status else summary.status);
+    const status_tone = projectLifecycleStatusTone(effective_status);
     try buf.appendSlice(allocator,
         \\<section class="project-overview-section project-markdown-section project-update-section">
         \\  <details class="project-markdown-edit project-update-edit">
@@ -932,11 +945,11 @@ fn appendProjectUpdateSection(buf: *std.ArrayList(u8), allocator: Allocator, sum
         \\    </form>
         \\  </details>
         \\  <div class="project-overview-section-title project-update-section-title"><h2>Latest update</h2></div>
-        \\  <article class="project-update-card project-markdown-preview tone-{health_tone}">
+        \\  <article class="project-update-card project-markdown-preview tone-{status_tone}">
         \\    <header class="project-update-card-head">
         \\      <div class="project-update-card-meta">
-    , .{ .health_tone = health_tone });
-    try appendProjectUpdateHealthChip(buf, allocator, health_label, health_tone);
+    , .{ .status_tone = status_tone });
+    try appendProjectLifecycleStatusChip(buf, allocator, effective_status);
     if (note.actor.len != 0) {
         try project_issue_render.appendIssueAvatar(buf, allocator, note.actor, "project-update-avatar");
         try appendTemplate(buf, allocator, "<strong>{actor}</strong>", .{ .actor = note.actor });
@@ -1007,92 +1020,96 @@ fn appendProjectDescription(buf: *std.ArrayList(u8), allocator: Allocator, summa
 }
 
 fn appendProjectStatusSelect(buf: *std.ArrayList(u8), allocator: Allocator, selected_status: []const u8) !void {
-    const selected_health = projectUpdateHealthStatusValue(selected_status);
-    const options = [_]struct {
-        value: []const u8,
-        label: []const u8,
-        tone: []const u8,
-    }{
-        .{ .value = "WIP", .label = "On track", .tone = "progress" },
-        .{ .value = "Review", .label = "At risk", .tone = "risk" },
-        .{ .value = "Failed", .label = "Off track", .tone = "failed" },
-    };
+    const selected_project_status = projectLifecycleStatusValue(selected_status);
     try buf.appendSlice(allocator,
-        \\<fieldset class="project-update-status-field">
-        \\  <legend>Status</legend>
-        \\  <details class="project-update-status-menu" data-popover-menu data-project-status-menu>
-        \\    <summary class="project-update-status-control" aria-label="Status">
+        \\<details class="project-update-status-menu" data-popover-menu data-project-status-menu>
+        \\  <summary class="project-update-status-control" aria-label="Change status">
     );
-    for (options) |option| {
+    for (cmd_common.project_status_values) |status| {
         try appendTemplate(buf, allocator,
             \\<span class="project-update-status-selected project-update-status-selected-{class}">
-        , .{ .class = projectUpdateStatusValueClass(option.value) });
-        try appendProjectUpdateHealthChip(buf, allocator, option.label, option.tone);
+        , .{ .class = projectUpdateStatusValueClass(status) });
+        try appendProjectLifecycleStatusTriggerChip(buf, allocator, status, "project-update-status-trigger-chip", "project-update-status-chevron");
         try buf.appendSlice(allocator, "</span>");
     }
     try buf.appendSlice(allocator,
-        \\      <span class="project-update-status-chevron" aria-hidden="true"></span>
-        \\    </summary>
-        \\    <div class="project-update-status-options" role="radiogroup" aria-label="Status">
+        \\  </summary>
+        \\  <div class="project-update-status-options" role="radiogroup" aria-label="Status">
     );
-    for (options) |option| {
+    for (cmd_common.project_status_values) |status| {
         try appendTemplate(buf, allocator,
             \\<label class="project-update-status-option tone-{tone}">
             \\  <input type="radio" name="status" value="{status}" required
         , .{
-            .tone = option.tone,
-            .status = option.value,
+            .tone = projectLifecycleStatusTone(status),
+            .status = status,
         });
-        if (std.mem.eql(u8, selected_health, option.value)) try buf.appendSlice(allocator, " checked");
+        if (std.mem.eql(u8, selected_project_status, status)) try buf.appendSlice(allocator, " checked");
         try buf.appendSlice(allocator, ">");
-        try appendProjectUpdateHealthChip(buf, allocator, option.label, option.tone);
+        try appendProjectLifecycleStatusChip(buf, allocator, status);
         try buf.appendSlice(allocator,
             \\  <span class="project-update-status-check" aria-hidden="true"></span>
             \\</label>
         );
     }
     try buf.appendSlice(allocator,
-        \\    </div>
-        \\  </details>
-        \\</fieldset>
+        \\  </div>
+        \\</details>
     );
 }
 
 fn projectUpdateStatusValueClass(value: []const u8) []const u8 {
-    if (std.mem.eql(u8, value, "Failed")) return "failed";
-    if (std.mem.eql(u8, value, "Review")) return "review";
-    return "wip";
+    const status = projectLifecycleStatusValue(value);
+    if (std.mem.eql(u8, status, "Backlog")) return "backlog";
+    if (std.mem.eql(u8, status, "Planned")) return "planned";
+    if (std.mem.eql(u8, status, "Completed")) return "completed";
+    if (std.mem.eql(u8, status, "Canceled")) return "canceled";
+    return "progress";
 }
 
-fn appendProjectUpdateHealthChip(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, tone: []const u8) !void {
+fn appendProjectLifecycleStatusChip(buf: *std.ArrayList(u8), allocator: Allocator, status: []const u8) !void {
+    const project_status = projectLifecycleStatusValue(status);
     try appendTemplate(buf, allocator,
-        \\<span class="issue-state-badge project-update-health-chip tone-{tone}"><span class="issue-state-mark" aria-hidden="true"></span>{label}</span>
+        \\<span class="project-lifecycle-status-chip tone-{tone}"><span class="project-lifecycle-status-mark" aria-hidden="true"></span>{status}</span>
     , .{
-        .tone = tone,
-        .label = label,
+        .tone = projectLifecycleStatusTone(project_status),
+        .status = projectLifecycleStatusLabel(project_status),
     });
 }
 
-fn projectUpdateHealthStatusValue(status: []const u8) []const u8 {
-    if (std.mem.eql(u8, status, "Failed")) return "Failed";
-    if (std.mem.eql(u8, status, "Review") or std.mem.eql(u8, status, "Draft") or std.mem.eql(u8, status, "Todo")) return "Review";
-    return "WIP";
+fn appendProjectLifecycleStatusTriggerChip(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    status: []const u8,
+    extra_class: []const u8,
+    chevron_class: []const u8,
+) !void {
+    const project_status = projectLifecycleStatusValue(status);
+    try appendTemplate(buf, allocator,
+        \\<span class="project-lifecycle-status-chip {extra_class} tone-{tone}"><span class="project-lifecycle-status-mark" aria-hidden="true"></span>{status}<span class="{chevron_class}" aria-hidden="true"></span></span>
+    , .{
+        .extra_class = extra_class,
+        .tone = projectLifecycleStatusTone(project_status),
+        .status = projectLifecycleStatusLabel(project_status),
+        .chevron_class = chevron_class,
+    });
 }
 
-fn projectUpdateHealthLabel(status: []const u8, state: []const u8) []const u8 {
-    _ = state;
-    const health_status = projectUpdateHealthStatusValue(status);
-    if (std.mem.eql(u8, health_status, "Failed")) return "Off track";
-    if (std.mem.eql(u8, health_status, "Review")) return "At risk";
-    return "On track";
+fn projectLifecycleStatusValue(status: []const u8) []const u8 {
+    return cmd_common.canonicalProjectStatus(status);
 }
 
-fn projectUpdateHealthTone(status: []const u8, state: []const u8) []const u8 {
-    _ = state;
-    const health_status = projectUpdateHealthStatusValue(status);
-    if (std.mem.eql(u8, health_status, "Failed")) return "failed";
-    if (std.mem.eql(u8, health_status, "Review")) return "risk";
-    return "progress";
+fn projectLifecycleStatusLabel(status: []const u8) []const u8 {
+    return if (status.len == 0) "No status" else status;
+}
+
+fn projectLifecycleStatusTone(status: []const u8) []const u8 {
+    if (std.mem.eql(u8, status, "Backlog")) return "backlog";
+    if (std.mem.eql(u8, status, "Planned")) return "planned";
+    if (std.mem.eql(u8, status, "Completed")) return "completed";
+    if (std.mem.eql(u8, status, "Canceled")) return "canceled";
+    if (std.mem.eql(u8, status, "In Progress")) return "progress";
+    return "neutral";
 }
 
 fn appendProjectHashFields(buf: *std.ArrayList(u8), allocator: Allocator, kind: []const u8, status: []const u8, body: []const u8) !void {
@@ -1409,9 +1426,12 @@ fn appendProjectPropertiesPanel(buf: *std.ArrayList(u8), allocator: Allocator, d
     defer allocator.free(issues_label);
     try appendProjectPeopleProperty(buf, allocator, db, summary, "Members", "icon-users", "project_members", "member", "add-member", "remove-member", "Add member", "Filter members", members_label);
     try appendSidebarProperty(buf, allocator, "Issues", "icon-issues", issues_label);
-    const date_label = try projectDatesLabelOwned(allocator, summary);
-    defer allocator.free(date_label);
-    try appendProjectDatesProperty(buf, allocator, summary, date_label);
+    const start_label = if (summary.start_at.len != 0) try dateLabelOwned(allocator, summary.start_at) else try allocator.dupe(u8, "No start date");
+    defer allocator.free(start_label);
+    const end_label = if (summary.end_at.len != 0) try dateLabelOwned(allocator, summary.end_at) else try allocator.dupe(u8, "No end date");
+    defer allocator.free(end_label);
+    try appendProjectDateProperty(buf, allocator, summary, "Start date", "Start date", "set-start-date", "start_at", summary.start_at, start_label, "No start date");
+    try appendProjectDateProperty(buf, allocator, summary, "End date", "End date", "set-end-date", "end_at", summary.end_at, end_label, "No end date");
     try appendProjectLabelsProperty(buf, allocator, db, summary, metrics);
     try buf.appendSlice(allocator,
         \\  </dl>
@@ -1475,16 +1495,17 @@ fn appendSidebarProperty(
 }
 
 fn appendProjectStatusProperty(buf: *std.ArrayList(u8), allocator: Allocator, summary: *const ProjectSummary) !void {
+    const current_status = projectLifecycleStatusValue(summary.status);
     try appendProjectPropertyChipMenuStart(buf, allocator, "Status", "Set status");
     if (summary.status.len == 0) {
-        try buf.appendSlice(allocator, "<span class=\"project-property-empty\">No status</span>");
+        try appendProjectPropertyEmptyTrigger(buf, allocator, "No status");
     } else {
-        try appendProjectStatusChip(buf, allocator, summary.status);
+        try appendProjectStatusTriggerChip(buf, allocator, current_status);
     }
     try appendProjectPropertyChipMenuPopoverStart(buf, allocator, "Set status");
     try appendProjectMenuGroupStart(buf, allocator, "Statuses");
-    for (project_views.project_status_values) |status| {
-        try appendProjectValueActionRow(buf, allocator, summary, "set-status", "status", status, status, std.mem.eql(u8, summary.status, status), .status);
+    for (cmd_common.project_status_values) |status| {
+        try appendProjectValueActionRow(buf, allocator, summary, "set-status", "status", status, status, std.mem.eql(u8, current_status, status), .status);
     }
     try appendProjectMenuGroupEnd(buf, allocator);
     try appendProjectPropertyMenuEnd(buf, allocator);
@@ -1493,9 +1514,9 @@ fn appendProjectStatusProperty(buf: *std.ArrayList(u8), allocator: Allocator, su
 fn appendProjectPriorityProperty(buf: *std.ArrayList(u8), allocator: Allocator, summary: *const ProjectSummary) !void {
     try appendProjectPropertyChipMenuStart(buf, allocator, "Priority", "Set priority");
     if (summary.priority.len == 0) {
-        try buf.appendSlice(allocator, "<span class=\"project-property-empty\">No priority</span>");
+        try appendProjectPropertyEmptyTrigger(buf, allocator, "No priority");
     } else {
-        try appendProjectPriorityChip(buf, allocator, summary.priority);
+        try appendProjectPriorityTriggerChip(buf, allocator, summary.priority);
     }
     try appendProjectPropertyChipMenuPopoverStart(buf, allocator, "Set priority");
     try appendProjectMenuGroupStart(buf, allocator, "Priorities");
@@ -1524,7 +1545,7 @@ fn appendProjectPropertyChipMenuStart(
 
 fn appendProjectPropertyChipMenuPopoverStart(buf: *std.ArrayList(u8), allocator: Allocator, menu_label: []const u8) !void {
     try appendTemplate(buf, allocator,
-        \\<span class="issue-sidebar-menu-icon project-property-menu-icon" aria-hidden="true"></span></summary><div class="issue-sidebar-popover project-property-popover" role="dialog" aria-label="{menu_label}"><div class="issue-sidebar-popover-title">{menu_label}</div>
+        \\</summary><div class="issue-sidebar-popover project-property-popover" role="dialog" aria-label="{menu_label}"><div class="issue-sidebar-popover-title">{menu_label}</div>
     , .{ .menu_label = menu_label });
 }
 
@@ -1606,19 +1627,30 @@ fn appendProjectPeopleProperty(
     try appendProjectPropertyMenuEnd(buf, allocator);
 }
 
-fn appendProjectDatesProperty(buf: *std.ArrayList(u8), allocator: Allocator, summary: *const ProjectSummary, value: []const u8) !void {
-    try appendProjectPropertyMenuStart(buf, allocator, "Dates", "icon-calendar", "Set dates", value);
-    try buf.appendSlice(allocator, "<form class=\"project-property-date-form\" method=\"post\" action=\"/projects/properties\">");
+fn appendProjectDateProperty(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    summary: *const ProjectSummary,
+    label: []const u8,
+    menu_label: []const u8,
+    action: []const u8,
+    input_name: []const u8,
+    input_value: []const u8,
+    display_value: []const u8,
+    placeholder: []const u8,
+) !void {
+    try appendProjectPropertyMenuStart(buf, allocator, label, "icon-calendar", menu_label, display_value);
+    try buf.appendSlice(allocator, "<form class=\"project-property-date-form project-property-date-picker-form\" method=\"post\" action=\"/projects/properties\">");
     try appendProjectHiddenFields(buf, allocator, summary);
     try appendTemplate(buf, allocator,
-        \\<input type="hidden" name="action" value="set-dates">
-        \\<label>Start<input type="date" name="start_at" value="{start_at}" required></label>
-        \\<label>End<input type="date" name="end_at" value="{end_at}" min="{min_end_at}"></label>
-        \\<button type="submit">Save dates</button>
+        \\<input type="hidden" name="action" value="{action}">
+        \\<input type="date" name="{input_name}" value="{input_value}" aria-label="{menu_label}" data-date-picker data-date-picker-inline="yes" data-date-picker-autosubmit="yes" data-date-picker-placeholder="{placeholder}">
     , .{
-        .start_at = summary.start_at,
-        .end_at = summary.end_at,
-        .min_end_at = summary.start_at,
+        .action = action,
+        .input_name = input_name,
+        .input_value = input_value,
+        .menu_label = menu_label,
+        .placeholder = placeholder,
     });
     try buf.appendSlice(allocator, "</form>");
     try appendProjectPropertyMenuEnd(buf, allocator);
@@ -1837,12 +1869,11 @@ fn appendProjectLabelActionRow(
 }
 
 fn appendProjectStatusChip(buf: *std.ArrayList(u8), allocator: Allocator, status: []const u8) !void {
-    try appendTemplate(buf, allocator,
-        \\<span class="project-status-chip tone-{tone}">{status}</span>
-    , .{
-        .tone = project_issue_render.columnTone(status),
-        .status = statusLabel(status),
-    });
+    try appendProjectLifecycleStatusChip(buf, allocator, status);
+}
+
+fn appendProjectStatusTriggerChip(buf: *std.ArrayList(u8), allocator: Allocator, status: []const u8) !void {
+    try appendProjectLifecycleStatusTriggerChip(buf, allocator, status, "project-property-trigger-chip", "project-property-chip-chevron");
 }
 
 fn appendProjectPriorityChip(buf: *std.ArrayList(u8), allocator: Allocator, priority: []const u8) !void {
@@ -1852,6 +1883,21 @@ fn appendProjectPriorityChip(buf: *std.ArrayList(u8), allocator: Allocator, prio
         .tone = project_issue_render.priorityTone(priority),
         .priority = priority,
     });
+}
+
+fn appendProjectPriorityTriggerChip(buf: *std.ArrayList(u8), allocator: Allocator, priority: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<span class="project-priority-trigger"><span class="issue-row-priority issue-row-priority-{tone}" title="Priority: {priority}" aria-label="Priority: {priority}">{priority}</span><span class="project-property-chip-chevron" aria-hidden="true"></span></span>
+    , .{
+        .tone = project_issue_render.priorityTone(priority),
+        .priority = priority,
+    });
+}
+
+fn appendProjectPropertyEmptyTrigger(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<span class="project-property-empty project-property-empty-trigger">{label}<span class="project-property-chip-chevron" aria-hidden="true"></span></span>
+    , .{ .label = label });
 }
 
 fn appendProjectLabel(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, color: []const u8) !void {
@@ -2067,12 +2113,6 @@ fn milestoneStateLabel(state: []const u8) []const u8 {
     return if (state.len == 0) "Open" else state;
 }
 
-fn statusLabel(status: []const u8) []const u8 {
-    if (status.len == 0) return "No status";
-    if (std.mem.eql(u8, status, "WIP")) return "In Progress";
-    return status;
-}
-
 fn priorityLabel(priority: []const u8) []const u8 {
     return if (priority.len == 0) "No priority" else priority;
 }
@@ -2195,7 +2235,7 @@ test "project overview header renders plain project name" {
         .name = try std.testing.allocator.dupe(u8, "Release & Plan"),
         .description = try std.testing.allocator.dupe(u8, ""),
         .state = try std.testing.allocator.dupe(u8, "open"),
-        .status = try std.testing.allocator.dupe(u8, "WIP"),
+        .status = try std.testing.allocator.dupe(u8, cmd_common.default_project_status),
         .status_occurred_at = try std.testing.allocator.dupe(u8, ""),
         .priority = try std.testing.allocator.dupe(u8, ""),
         .start_at = try std.testing.allocator.dupe(u8, ""),
@@ -2237,7 +2277,7 @@ test "project dates label uses start plus end" {
         .name = try std.testing.allocator.dupe(u8, "Release"),
         .description = try std.testing.allocator.dupe(u8, ""),
         .state = try std.testing.allocator.dupe(u8, "open"),
-        .status = try std.testing.allocator.dupe(u8, "WIP"),
+        .status = try std.testing.allocator.dupe(u8, cmd_common.default_project_status),
         .status_occurred_at = try std.testing.allocator.dupe(u8, ""),
         .priority = try std.testing.allocator.dupe(u8, ""),
         .start_at = try std.testing.allocator.dupe(u8, "2026-05-17"),

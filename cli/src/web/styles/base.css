@@ -717,10 +717,13 @@ main.page-projects:has(.project-overview-page) {
   width: 32px;
   height: 32px;
   flex: 0 0 auto;
+  padding: 0;
   color: var(--muted);
+  font: inherit;
   background: transparent;
   border: 1px solid transparent;
   border-radius: var(--radius-md);
+  cursor: pointer;
 }
 .detail-back-button:hover {
   color: var(--text);
