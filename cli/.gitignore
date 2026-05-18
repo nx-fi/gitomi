@@ -1,3 +1,6 @@
 .zig-cache/
 zig-out/
 .zig-global-cache/
+
+# Local agent state
+.codex/

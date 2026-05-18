@@ -167,12 +167,14 @@ fn runSyncOnce(allocator: Allocator, options: Options) !void {
     var import_stats = importer.ImportStats{};
     try importer.importFromApi(allocator, client, .{
         .project = options.project,
-        .api_url = options.api_url,
-        .token_arg = options.token,
-        .bot_principal = options.bot_principal,
-        .bot_device = options.bot_device,
-        .max_pages = options.max_pages,
-        .map_file = map_path,
+        .base = .{
+            .api_url = options.api_url,
+            .token_arg = options.token,
+            .bot_principal = options.bot_principal,
+            .bot_device = options.bot_device,
+            .max_pages = options.max_pages,
+            .map_file = map_path,
+        },
     }, &import_stats);
 
     try index.ensureIndex(allocator, repo);

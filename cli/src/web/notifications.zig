@@ -10,6 +10,8 @@ const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
 const SqliteDb = index.SqliteDb;
 const createNotificationSubscriptionEvent = notification_mod.createNotificationSubscriptionEvent;
+const createNotificationReadAllEvent = notification_mod.createNotificationReadAllEvent;
+const createNotificationReadEvent = notification_mod.createNotificationReadEvent;
 
 const default_limit = 50;
 const max_limit = 200;
@@ -114,6 +116,53 @@ pub fn handleNotificationPost(
     const location = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ redirect_prefix, raw_ref });
     defer allocator.free(location);
     try shared.sendRedirect(allocator, stream, location);
+}
+
+pub fn handleInboxReadPost(
+    allocator: Allocator,
+    repo: Repo,
+    stream: std.net.Stream,
+    form_body: []const u8,
+    redirect_target: []const u8,
+) !void {
+    const principal = (try shared.currentPrincipalOwned(allocator, repo)) orelse {
+        try shared.sendPlainResponse(allocator, stream, 409, "Conflict", "Gitomi is not initialized\n");
+        return;
+    };
+    defer allocator.free(principal);
+
+    const action_owned = (try shared.formValueOwned(allocator, form_body, "action")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(action_owned);
+    const action = std.mem.trim(u8, action_owned, " \t\r\n");
+
+    if (std.mem.eql(u8, action, "read-all")) {
+        createNotificationReadAllEvent(allocator, principal) catch |err| {
+            try sendNotificationWriteFailure(allocator, stream, err);
+            return;
+        };
+    } else {
+        const event_hash = (try shared.formValueOwned(allocator, form_body, "event_hash")) orelse {
+            try shared.sendPlainResponse(allocator, stream, 400, "Bad Request", "Missing event_hash\n");
+            return;
+        };
+        defer allocator.free(event_hash);
+        createNotificationReadEvent(allocator, principal, event_hash) catch |err| {
+            try sendNotificationWriteFailure(allocator, stream, err);
+            return;
+        };
+    }
+
+    try shared.sendRedirect(allocator, stream, redirect_target);
+}
+
+fn sendNotificationWriteFailure(allocator: Allocator, stream: std.net.Stream, err: anyerror) !void {
+    try shared.sendPlainResponse(
+        allocator,
+        stream,
+        shared.writeFailureStatus(err),
+        shared.writeFailureReason(err),
+        shared.writeFailureMessage(err, "Could not update notification read state\n"),
+    );
 }
 
 fn notFoundMessage(comptime object_kind: []const u8) []const u8 {

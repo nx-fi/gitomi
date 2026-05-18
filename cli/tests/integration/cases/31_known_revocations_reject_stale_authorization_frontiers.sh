@@ -58,10 +58,17 @@ init_repo "$frontier_auth"
 
   gt identity add-device alice phone >/dev/null
   phone_add_commit="$(git rev-parse refs/gitomi/inbox/alice/laptop)"
-  phone_revoke_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002007","event_type":"identity.device_revoked","object":{"kind":"identity","id":"identity:alice:phone"},"idempotency_key":"018f0000-0000-7000-8000-000000002207","actor":{"principal":"alice","device":"b"},"seq":3,"occurred_at":"2026-05-13T18:33:06Z","parent_hashes":{"log":"'"$revoke_commit"'","anchor":"","causal":["'"$phone_add_commit"'"],"related":["'"$phone_add_commit"'"]},"legacy":{},"payload":{"principal":"alice","device":"phone"}}'
+  phone_revoke_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000004007","event_type":"identity.device_revoked","object":{"kind":"identity","id":"identity:alice:phone"},"idempotency_key":"018f0000-0000-7000-8000-000000004207","actor":{"principal":"alice","device":"b"},"seq":3,"occurred_at":"2026-05-13T18:33:06Z","parent_hashes":{"log":"'"$revoke_commit"'","anchor":"","causal":["'"$phone_add_commit"'"],"related":["'"$phone_add_commit"'"]},"legacy":{},"payload":{"principal":"alice","device":"phone"}}'
   phone_revoke_commit="$(git commit-tree -S -m "identity.device_revoked alice/phone stale frontier" -m "$phone_revoke_body" "$empty_tree" -p "$revoke_commit" -p "$phone_add_commit")"
-  phone_issue_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002008","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000002104"},"idempotency_key":"018f0000-0000-7000-8000-000000002208","actor":{"principal":"alice","device":"phone"},"seq":1,"occurred_at":"2026-05-13T18:33:07Z","parent_hashes":{"log":"","anchor":"'"$genesis_head"'","causal":["'"$phone_add_commit"'"],"related":["'"$phone_add_commit"'"]},"legacy":{},"payload":{"title":"Phone stale issue"}}'
-  phone_issue_commit="$(git commit-tree -S -m "issue.opened phone stale frontier" -m "$phone_issue_body" "$empty_tree" -p "$genesis_head" -p "$phone_add_commit")"
+  phone_issue_commit=""
+  for n in $(seq 1 512); do
+    event_uuid="$(printf '018f0000-0000-7000-8000-%012d' $((4008 + n)))"
+    idem="$(printf '018f0000-0000-7000-8000-%012d' $((4208 + n)))"
+    phone_issue_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"'"$event_uuid"'","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000002104"},"idempotency_key":"'"$idem"'","actor":{"principal":"alice","device":"phone"},"seq":1,"occurred_at":"2026-05-13T18:33:07Z","parent_hashes":{"log":"","anchor":"'"$genesis_head"'","causal":["'"$phone_add_commit"'"],"related":["'"$phone_add_commit"'"]},"legacy":{},"payload":{"title":"Phone stale issue"}}'
+    phone_issue_commit="$(git commit-tree -S -m "issue.opened phone stale frontier $n" -m "$phone_issue_body" "$empty_tree" -p "$genesis_head" -p "$phone_add_commit")"
+    [[ "$phone_issue_commit" < "$phone_revoke_commit" ]] && break
+  done
+  [[ "$phone_issue_commit" < "$phone_revoke_commit" ]] || fail "expected stale phone event hash to sort before device revoke hash"
   git update-ref refs/gitomi/inbox/alice/b "$phone_revoke_commit" "$revoke_commit"
   git update-ref refs/gitomi/inbox/alice/phone "$phone_issue_commit"
   events="$(gt events list --json)"
@@ -71,4 +78,3 @@ init_repo "$frontier_auth"
   issues="$(gt issue list --json)"
   assert_not_contains "$issues" '"title":"Phone stale issue"'
 )
-

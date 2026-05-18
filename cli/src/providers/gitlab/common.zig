@@ -3,8 +3,8 @@ const errors = @import("../../errors.zig");
 const event_json = @import("../../event/json.zig");
 const git = @import("../../git.zig");
 const io = @import("../../io.zig");
-const github_common = @import("../github/common.zig");
 const http_client = @import("../http_client.zig");
+const provider_common = @import("../common.zig");
 
 const Allocator = std.mem.Allocator;
 const CliError = errors.CliError;
@@ -81,24 +81,24 @@ pub fn tokenFromEnv(allocator: Allocator) !?[]u8 {
     };
 }
 
-pub const secretFromEnv = github_common.secretFromEnv;
-pub const secretFromFile = github_common.secretFromFile;
-pub const sizedString = github_common.githubSizedString;
-pub const subject = github_common.githubSubject;
-pub const timestampOrNow = github_common.githubTimestampOrNow;
-pub const firstJsonValue = github_common.firstJsonValue;
-pub const namedArray = github_common.githubNamedArray;
-pub const optionalUnsignedField = github_common.githubOptionalUnsignedField;
-pub const nestedString = github_common.nestedString;
+pub const secretFromEnv = provider_common.secretFromEnv;
+pub const secretFromFile = provider_common.secretFromFile;
+pub const sizedString = provider_common.sizedString;
+pub const subject = provider_common.subject;
+pub const timestampOrNow = provider_common.timestampOrNow;
+pub const firstJsonValue = provider_common.firstJsonValue;
+pub const namedArray = provider_common.namedArray;
+pub const optionalUnsignedField = provider_common.optionalUnsignedField;
+pub const nestedString = provider_common.nestedString;
 pub const jsonArray = event_json.jsonArray;
 pub const jsonBool = event_json.jsonBool;
 pub const jsonInteger = event_json.jsonInteger;
-pub const urlPathEscape = github_common.urlPathEscape;
-pub const parseResponseNumber = github_common.parseResponseNumber;
-pub const legacyNumber = github_common.legacyNumber;
-pub const appendStringField = github_common.appendStringField;
-pub const appendBoolField = github_common.appendBoolField;
-pub const singleArrayBody = github_common.singleArrayBody;
+pub const urlPathEscape = provider_common.urlPathEscape;
+pub const parseResponseNumber = provider_common.parseResponseNumber;
+pub const legacyNumber = provider_common.legacyNumber;
+pub const appendStringField = provider_common.appendStringField;
+pub const appendBoolField = provider_common.appendBoolField;
+pub const singleArrayBody = provider_common.singleArrayBody;
 
 pub fn requestStderrIsNotFound(stderr: []const u8) bool {
     return http_client.requestStderrIsNotFound(stderr);

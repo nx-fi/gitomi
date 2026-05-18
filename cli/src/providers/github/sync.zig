@@ -238,16 +238,18 @@ fn runSyncOnceAttempt(allocator: Allocator, options: Options) !void {
     var import_stats = importer.ImportStats{};
     try importer.importFromApi(allocator, client, .{
         .repo = options.repo,
-        .api_url = options.api_url,
-        .token_arg = options.token,
-        .include_comments = options.include_comments,
+        .base = .{
+            .api_url = options.api_url,
+            .token_arg = options.token,
+            .include_comments = options.include_comments,
+            .bot_principal = options.bot_principal,
+            .bot_device = options.bot_device,
+            .max_pages = options.max_pages,
+            .map_file = map_path,
+        },
         .include_projects = options.include_projects,
-        .bot_principal = options.bot_principal,
-        .bot_device = options.bot_device,
-        .max_pages = options.max_pages,
         .use_gh = options.use_gh,
         .mode = options.mode,
-        .map_file = map_path,
     }, &import_stats);
 
     try index.ensureIndex(allocator, repo);

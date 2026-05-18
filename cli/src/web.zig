@@ -4,21 +4,20 @@ const commits_page = @import("web/commits.zig");
 const errors = @import("errors.zig");
 const events_page = @import("web/events.zig");
 const explorer = @import("web/explorer.zig");
-const index = @import("index.zig");
 const io = @import("io.zig");
-const github_live = @import("providers/github/live.zig");
 const access_page = @import("web/access.zig");
 const issues_page = @import("web/issues.zig");
 const labels_page = @import("web/labels.zig");
+const live_mode_page = @import("web/live_mode.zig");
 const models_page = @import("web/models.zig");
 const milestones_page = @import("web/milestones.zig");
-const notification_cli = @import("notification.zig");
 const notifications_page = @import("web/notifications.zig");
 const projects_page = @import("web/projects.zig");
 const pulls_page = @import("web/pulls.zig");
 const refs_page = @import("web/refs.zig");
 const repo_mod = @import("repo.zig");
 const shared = @import("web/shared.zig");
+const status_indexing_page = @import("web/status_indexing.zig");
 const theme_settings_page = @import("web/theme_settings.zig");
 const worktrees_page = @import("web/worktrees.zig");
 const zwf = @import("zwf.zig");
@@ -342,12 +341,11 @@ fn handleRaw(ctx: WebContext) !void {
 }
 
 fn handleIndexRebuild(ctx: WebContext) !void {
-    try index.ensureIndex(ctx.allocator, ctx.repo);
-    try shared.sendResponse(ctx.allocator, ctx.stream, 204, "No Content", "text/plain", "", null);
+    try status_indexing_page.handleIndexRebuild(ctx.allocator, ctx.repo, ctx.stream);
 }
 
 fn handleNavStats(ctx: WebContext) !void {
-    try sendOwnedResponse(ctx, 200, "OK", "application/json", try shared.renderNavStatsJson(ctx.allocator, ctx.repo), "Cache-Control: no-store\r\n");
+    try status_indexing_page.handleNavStats(ctx.allocator, ctx.repo, ctx.stream);
 }
 
 fn handleCodePage(ctx: WebContext) !void {
@@ -375,22 +373,9 @@ fn handleCodeSyncPost(ctx: WebContext) !void {
 }
 
 fn handleLiveModePost(ctx: WebContext) !void {
-    var form = try ctx.request.formValues(ctx.allocator);
-    defer form.deinit();
-
-    const enabled_raw = form.value("enabled") orelse "false";
-    const enabled = std.ascii.eqlIgnoreCase(enabled_raw, "true") or
-        std.mem.eql(u8, enabled_raw, "1") or
-        std.ascii.eqlIgnoreCase(enabled_raw, "on");
-
-    if (!github_live.setRuntimeActive(enabled)) {
-        try shared.sendPlainResponse(ctx.allocator, ctx.stream, 409, "Conflict", "Live mode is not available\n");
-        return;
-    }
-
     const location = try sameOriginRefererTargetOwned(ctx.allocator, ctx.request, "/");
     defer ctx.allocator.free(location);
-    try shared.sendRedirect(ctx.allocator, ctx.stream, location);
+    try live_mode_page.handleLiveModePost(ctx.allocator, ctx.stream, ctx.request.body, location);
 }
 
 fn isSameOriginPost(request: HttpRequest) bool {
@@ -503,32 +488,9 @@ fn handleInboxPage(ctx: WebContext) !void {
 fn handleInboxReadPost(ctx: WebContext) !void {
     if (!try requireCsrfToken(ctx)) return;
 
-    var cfg = repo_mod.loadConfig(ctx.allocator, ctx.repo.config_path) catch |err| switch (err) {
-        CliError.ConfigNotFound, CliError.ConfigInvalid => {
-            try shared.sendPlainResponse(ctx.allocator, ctx.stream, 409, "Conflict", "Gitomi is not initialized\n");
-            return;
-        },
-        else => return err,
-    };
-    defer cfg.deinit();
-
-    var form = try ctx.request.formValues(ctx.allocator);
-    defer form.deinit();
-
-    const action = form.value("action") orelse "";
-    if (std.mem.eql(u8, action, "read-all")) {
-        try notification_cli.createNotificationReadAllEvent(ctx.allocator, cfg.principal);
-    } else {
-        const event_hash = form.value("event_hash") orelse {
-            try shared.sendPlainResponse(ctx.allocator, ctx.stream, 400, "Bad Request", "Missing event_hash\n");
-            return;
-        };
-        try notification_cli.createNotificationReadEvent(ctx.allocator, cfg.principal, event_hash);
-    }
-
     const location = try sameOriginRefererTargetOwned(ctx.allocator, ctx.request, "/inbox");
     defer ctx.allocator.free(location);
-    try shared.sendRedirect(ctx.allocator, ctx.stream, location);
+    try notifications_page.handleInboxReadPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body, location);
 }
 
 fn handleIssuesPage(ctx: WebContext) !void {

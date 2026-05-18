@@ -20,9 +20,9 @@ init_repo "$reset_local"
   refs="$(gt refs)"
   assert_contains "$refs" "refs/gitomi/genesis"
   printf 'delete local gitomi state\n' | gt reset local >/dev/null
+  trust_repo "$PWD"
   refs="$(gt refs)"
   assert_contains "$refs" "no Gitomi refs"
   [[ ! -e .git/gitomi/config.toml ]] || fail "expected config to be deleted"
   [[ ! -e .git/gitomi/index.sqlite ]] || fail "expected index to be deleted"
 )
-

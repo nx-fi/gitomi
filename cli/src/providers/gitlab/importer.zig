@@ -1,6 +1,5 @@
 const std = @import("std");
 const event_model = @import("../../event/model.zig");
-const event_builders = @import("../../event/builders.zig");
 const event_json = @import("../../event/json.zig");
 const event_writer_mod = @import("../../event_writer.zig");
 const errors = @import("../../errors.zig");
@@ -10,8 +9,8 @@ const io = @import("../../io.zig");
 const milestone_mod = @import("../../milestone.zig");
 const repo_mod = @import("../../repo.zig");
 const util = @import("../../util.zig");
-const import_common = @import("../import_common.zig");
 const import_bot = @import("../import_bot.zig");
+const provider_common = @import("../common.zig");
 const common = @import("common.zig");
 const exporter = @import("exporter.zig");
 
@@ -38,15 +37,25 @@ const gitlab_import_capability = "gitlab.import";
 const gitlab_import_scope = "gitlab:*";
 
 pub const ImportOptions = struct {
+    base: provider_common.BaseImportOptions = .{
+        .api_url = default_api_url,
+        .bot_device = import_bot.gitlab_device,
+    },
     project: ?ProjectRef = null,
-    api_url: []const u8 = default_api_url,
-    token_arg: ?[]const u8 = null,
-    from_file: ?[]const u8 = null,
-    include_comments: bool = true,
-    bot_principal: []const u8 = import_bot.principal,
-    bot_device: []const u8 = import_bot.gitlab_device,
-    max_pages: usize = 10,
-    map_file: ?[]const u8 = null,
+};
+
+const ImportArgParser = struct {
+    pub const command_context = "gt gitlab import";
+    pub const token_help = "--token-env, --token-file, GITLAB_TOKEN, or GL_TOKEN";
+
+    pub fn parseProviderArg(_: Allocator, args: []const []const u8, i: *usize, arg: []const u8, options: *ImportOptions) !bool {
+        if (std.mem.eql(u8, arg, "--project") or std.mem.eql(u8, arg, "--repo")) {
+            options.project = try parseProjectRef(try util.requireValue(args, i, arg));
+        } else {
+            return false;
+        }
+        return true;
+    }
 };
 
 pub const ImportStats = struct {
@@ -61,92 +70,40 @@ const ImportedObject = struct {
     comment_count: ?u64 = null,
 };
 
-const ImportedCommentRef = struct {
-    id: []u8,
-    event_hash: []u8,
-
-    fn deinit(self: ImportedCommentRef, allocator: Allocator) void {
-        allocator.free(self.id);
-        allocator.free(self.event_hash);
-    }
-};
+const ImportedCommentRef = provider_common.ImportedCommentRef;
 
 pub fn cmdImport(allocator: Allocator, args: []const []const u8) !void {
     var options = ImportOptions{};
-    var token_source_owned: ?[]u8 = null;
-    defer if (token_source_owned) |value| allocator.free(value);
+    var parsed_args = try provider_common.parseImportArgs(allocator, args, &options, ImportArgParser);
+    defer parsed_args.deinit();
 
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
-        if (std.mem.eql(u8, arg, "--project") or std.mem.eql(u8, arg, "--repo")) {
-            options.project = try parseProjectRef(try util.requireValue(args, &i, arg));
-        } else if (std.mem.eql(u8, arg, "--api-url")) {
-            options.api_url = try util.requireValue(args, &i, "--api-url");
-        } else if (std.mem.eql(u8, arg, "--token")) {
-            _ = try util.requireValue(args, &i, "--token");
-            try eprint("gt gitlab import: --token exposes credentials in process lists; use --token-env, --token-file, GITLAB_TOKEN, or GL_TOKEN\n", .{});
-            return CliError.InvalidArgument;
-        } else if (std.mem.eql(u8, arg, "--token-env")) {
-            const env_name = try util.requireValue(args, &i, "--token-env");
-            if (token_source_owned) |value| allocator.free(value);
-            token_source_owned = null;
-            token_source_owned = try common.secretFromEnv(allocator, "gt gitlab import", env_name);
-            options.token_arg = token_source_owned;
-        } else if (std.mem.eql(u8, arg, "--token-file")) {
-            const path = try util.requireValue(args, &i, "--token-file");
-            if (token_source_owned) |value| allocator.free(value);
-            token_source_owned = null;
-            token_source_owned = try common.secretFromFile(allocator, "gt gitlab import", path);
-            options.token_arg = token_source_owned;
-        } else if (std.mem.eql(u8, arg, "--from-file")) {
-            options.from_file = try util.requireValue(args, &i, "--from-file");
-        } else if (std.mem.eql(u8, arg, "--no-comments")) {
-            options.include_comments = false;
-        } else if (std.mem.eql(u8, arg, "--import-bot")) {
-            options.bot_principal = try util.requireValue(args, &i, "--import-bot");
-        } else if (std.mem.eql(u8, arg, "--device")) {
-            options.bot_device = try util.requireValue(args, &i, "--device");
-        } else if (std.mem.eql(u8, arg, "--max-pages")) {
-            options.max_pages = std.fmt.parseUnsigned(usize, try util.requireValue(args, &i, "--max-pages"), 10) catch {
-                try eprint("gt gitlab import: --max-pages must be a positive integer\n", .{});
-                return CliError.InvalidArgument;
-            };
-        } else if (std.mem.eql(u8, arg, "--map-file")) {
-            options.map_file = try util.requireValue(args, &i, "--map-file");
-        } else {
-            try eprint("gt gitlab import: unknown option '{s}'\n", .{arg});
-            return CliError.UserError;
-        }
-    }
-
-    if (options.project == null and options.from_file == null) {
+    if (options.project == null and options.base.from_file == null) {
         try eprint("gt gitlab import: --project or --from-file is required\n", .{});
         return CliError.MissingArgument;
     }
 
-    try eprint("gt gitlab import: preparing delegated import actor {s}/{s}\n", .{ options.bot_principal, options.bot_device });
-    try ensureImportDelegation(allocator, options.bot_principal, options.bot_device);
+    try eprint("gt gitlab import: preparing delegated import actor {s}/{s}\n", .{ options.base.bot_principal, options.base.bot_device });
+    try ensureImportDelegation(allocator, options.base.bot_principal, options.base.bot_device);
 
     var token_owned: ?[]u8 = null;
     defer if (token_owned) |value| allocator.free(value);
-    const token = options.token_arg orelse blk: {
+    const token = options.base.token_arg orelse blk: {
         token_owned = common.tokenFromEnv(allocator) catch null;
         break :blk token_owned;
     };
-    if (options.from_file == null and token == null) {
+    if (options.base.from_file == null and token == null) {
         try eprint("gt gitlab import: --token-env, --token-file, GITLAB_TOKEN, or GL_TOKEN is required for API imports\n", .{});
         return CliError.MissingArgument;
     }
 
     var stats = ImportStats{};
-    if (options.from_file) |path| {
+    if (options.base.from_file) |path| {
         try eprint("gt gitlab import: reading fixture {s}\n", .{path});
         try importFromFile(allocator, path, options, &stats);
     } else {
         const client = GitLabClient{
             .allocator = allocator,
-            .api_url = options.api_url,
+            .api_url = options.base.api_url,
             .project = options.project.?,
             .token = token,
         };
@@ -165,72 +122,12 @@ pub fn cmdImport(allocator: Allocator, args: []const []const u8) !void {
 }
 
 fn ensureImportDelegation(allocator: Allocator, principal: []const u8, device: []const u8) !void {
-    const checked_principal = try util.checkedRefSegment(allocator, principal, "principal");
-    defer allocator.free(checked_principal);
-    const checked_device = try util.checkedRefSegment(allocator, device, "device");
-    defer allocator.free(checked_device);
-
-    var writer = try EventWriter.init(allocator, "gt gitlab import");
-    defer writer.deinit();
-
-    const role = try index.roleForPrincipal(allocator, writer.repo, writer.cfg.principal);
-    defer if (role) |value| allocator.free(value);
-    if (role == null or !roleAtLeastMaintainer(role.?)) {
-        try eprint("gt gitlab import: {s} must be maintainer or owner to delegate GitLab import authority\n", .{writer.cfg.principal});
-        return CliError.Unauthorized;
-    }
-
-    if (!(try index.isIdentityDeviceActive(allocator, writer.repo, writer.cfg.principal, writer.cfg.device))) {
-        try eprint("gt gitlab import: configured actor {s}/{s} is not an active device\n", .{ writer.cfg.principal, writer.cfg.device });
-        return CliError.Unauthorized;
-    }
-
-    var signing_key = try repo_mod.configuredSigningKey(allocator);
-    defer signing_key.deinit();
-    if (std.mem.trim(u8, signing_key.public_key, " \t\r\n").len == 0) {
-        try eprint("gt gitlab import: signing public key is required to delegate import-bot; configure Git signing with user.signingkey\n", .{});
-        return CliError.MissingArgument;
-    }
-
-    if (try index.hasActiveDelegation(allocator, writer.repo, checked_principal, checked_device, gitlab_import_capability, gitlab_import_scope, signing_key.fingerprint)) {
-        return;
-    }
-
-    const event_uuid = try util.newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try util.newUuidV7(allocator);
-    defer allocator.free(idem);
-    const occurred_at = try util.rfc3339Now(allocator);
-    defer allocator.free(occurred_at);
-    const body = try event_builders.buildAclDelegationJson(
-        allocator,
-        writer.cfg,
-        writer.nextSeq(),
-        checked_principal,
-        checked_device,
-        gitlab_import_capability,
-        gitlab_import_scope,
-        .{
-            .scheme = signing_key.scheme,
-            .public_key = signing_key.public_key,
-            .fingerprint = signing_key.fingerprint,
-        },
-        event_uuid,
-        idem,
-        occurred_at,
-        writer.eventParents(),
-        true,
-    );
-    defer allocator.free(body);
-    const subject_line = try std.fmt.allocPrint(allocator, "acl.delegation_granted {s}/{s} {s}", .{ checked_principal, checked_device, gitlab_import_capability });
-    defer allocator.free(subject_line);
-    const commit = try writer.write("gt gitlab import", subject_line, body);
-    allocator.free(commit);
-    try index.ensureIndex(allocator, writer.repo);
-}
-
-fn roleAtLeastMaintainer(role: []const u8) bool {
-    return std.mem.eql(u8, role, "maintainer") or std.mem.eql(u8, role, "owner");
+    try provider_common.ensureImportDelegation(allocator, principal, device, .{
+        .command_context = "gt gitlab import",
+        .provider_name = "GitLab",
+        .capability = gitlab_import_capability,
+        .scope = gitlab_import_scope,
+    });
 }
 
 fn importFromFile(allocator: Allocator, path: []const u8, options: ImportOptions, stats: *ImportStats) !void {
@@ -254,9 +151,9 @@ fn importFromFile(allocator: Allocator, path: []const u8, options: ImportOptions
         try eprint("gt gitlab import: importing {d} fixture issue record{s}\n", .{ issues.items.len, if (issues.items.len == 1) "" else "s" });
         for (issues.items) |item| {
             if (item != .object) continue;
-            var writer = try EventWriter.initForActor(allocator, "gt gitlab import", options.bot_principal, options.bot_device);
+            var writer = try EventWriter.initForActor(allocator, "gt gitlab import", options.base.bot_principal, options.base.bot_device);
             defer writer.deinit();
-            const issue_result = try importIssueObject(allocator, &writer, item.object, options.map_file, stats);
+            const issue_result = try importIssueObject(allocator, &writer, item.object, options.base.map_file, stats);
             defer if (issue_result) |result| allocator.free(result.id);
             if (issue_result) |result| {
                 if (result.is_new) try importFixtureComments(allocator, &writer, root, "issue", item.object, result.id, options, stats);
@@ -269,9 +166,9 @@ fn importFromFile(allocator: Allocator, path: []const u8, options: ImportOptions
         try eprint("gt gitlab import: importing {d} fixture merge request record{s}\n", .{ pulls.items.len, if (pulls.items.len == 1) "" else "s" });
         for (pulls.items) |item| {
             if (item != .object) continue;
-            var writer = try EventWriter.initForActor(allocator, "gt gitlab import", options.bot_principal, options.bot_device);
+            var writer = try EventWriter.initForActor(allocator, "gt gitlab import", options.base.bot_principal, options.base.bot_device);
             defer writer.deinit();
-            const pull_result = try importPullObject(allocator, &writer, item.object, options.map_file, stats);
+            const pull_result = try importPullObject(allocator, &writer, item.object, options.base.map_file, stats);
             defer if (pull_result) |result| allocator.free(result.id);
             if (pull_result) |result| {
                 if (result.is_new) try importFixtureComments(allocator, &writer, root, "pull", item.object, result.id, options, stats);
@@ -291,7 +188,7 @@ fn importFixtureComments(
     options: ImportOptions,
     stats: *ImportStats,
 ) !void {
-    if (!options.include_comments) return;
+    if (!options.base.include_comments) return;
     const number = gitlabIid(object) orelse return;
     const comments_root = switch (root.get("notes") orelse root.get("comments") orelse return) {
         .object => |map| map,
@@ -300,12 +197,12 @@ fn importFixtureComments(
     const key = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ parent_kind, number });
     defer allocator.free(key);
     const comments = jsonArray(comments_root.get(key)) orelse return;
-    try importCommentsArray(allocator, writer, parent_kind, parent_id, comments, options.map_file, stats);
+    try importCommentsArray(allocator, writer, parent_kind, parent_id, comments, options.base.map_file, stats);
 }
 
 pub fn importFromApi(allocator: Allocator, client: GitLabClient, options: ImportOptions, stats: *ImportStats) !void {
     var page: usize = 1;
-    while (page <= options.max_pages) : (page += 1) {
+    while (page <= options.base.max_pages) : (page += 1) {
         try eprint("gt gitlab import: fetching issues page {d}\n", .{page});
         const suffix = try std.fmt.allocPrint(allocator, "/issues?state=all&scope=all&per_page=100&page={d}", .{page});
         defer allocator.free(suffix);
@@ -326,9 +223,9 @@ pub fn importFromApi(allocator: Allocator, client: GitLabClient, options: Import
             if (event_json.jsonString(item.object.get("issue_type"))) |issue_type| {
                 if (!std.mem.eql(u8, issue_type, "issue")) continue;
             }
-            var writer = try EventWriter.initForActor(allocator, "gt gitlab import", options.bot_principal, options.bot_device);
+            var writer = try EventWriter.initForActor(allocator, "gt gitlab import", options.base.bot_principal, options.base.bot_device);
             defer writer.deinit();
-            const issue_result = try importIssueObject(allocator, &writer, item.object, options.map_file, stats);
+            const issue_result = try importIssueObject(allocator, &writer, item.object, options.base.map_file, stats);
             defer if (issue_result) |result| allocator.free(result.id);
             if (issue_result) |result| {
                 if (result.is_new and shouldFetchApiComments(result.comment_count)) try importApiComments(allocator, &writer, client, "issue", gitlabIid(item.object).?, result.id, options, stats);
@@ -339,7 +236,7 @@ pub fn importFromApi(allocator: Allocator, client: GitLabClient, options: Import
     }
 
     page = 1;
-    while (page <= options.max_pages) : (page += 1) {
+    while (page <= options.base.max_pages) : (page += 1) {
         try eprint("gt gitlab import: fetching merge requests page {d}\n", .{page});
         const suffix = try std.fmt.allocPrint(allocator, "/merge_requests?state=all&scope=all&per_page=100&page={d}", .{page});
         defer allocator.free(suffix);
@@ -357,9 +254,9 @@ pub fn importFromApi(allocator: Allocator, client: GitLabClient, options: Import
         if (pulls.items.len == 0) break;
         for (pulls.items) |item| {
             if (item != .object) continue;
-            var writer = try EventWriter.initForActor(allocator, "gt gitlab import", options.bot_principal, options.bot_device);
+            var writer = try EventWriter.initForActor(allocator, "gt gitlab import", options.base.bot_principal, options.base.bot_device);
             defer writer.deinit();
-            const pull_result = try importPullObject(allocator, &writer, item.object, options.map_file, stats);
+            const pull_result = try importPullObject(allocator, &writer, item.object, options.base.map_file, stats);
             defer if (pull_result) |result| allocator.free(result.id);
             if (pull_result) |result| {
                 if (result.is_new and shouldFetchApiComments(result.comment_count)) try importApiComments(allocator, &writer, client, "pull", gitlabIid(item.object).?, result.id, options, stats);
@@ -384,10 +281,10 @@ fn importApiComments(
     options: ImportOptions,
     stats: *ImportStats,
 ) !void {
-    if (!options.include_comments) return;
+    if (!options.base.include_comments) return;
     var total: usize = 0;
     var page: usize = 1;
-    while (page <= options.max_pages) : (page += 1) {
+    while (page <= options.base.max_pages) : (page += 1) {
         const collection = if (std.mem.eql(u8, parent_kind, "issue"))
             try std.fmt.allocPrint(allocator, "/issues/{d}/notes?per_page=100&page={d}&sort=asc&order_by=created_at", .{ iid, page })
         else
@@ -405,7 +302,7 @@ fn importApiComments(
         };
         if (notes.items.len == 0) break;
         total += notes.items.len;
-        try importCommentsArray(allocator, writer, parent_kind, parent_id, notes, options.map_file, stats);
+        try importCommentsArray(allocator, writer, parent_kind, parent_id, notes, options.base.map_file, stats);
         if (notes.items.len < 100) break;
     }
     try eprint("gt gitlab import: {s} !{d}: {d} note{s}\n", .{ parent_kind, iid, total, if (total == 1) "" else "s" });
@@ -502,9 +399,9 @@ fn importPullObject(allocator: Allocator, writer: *EventWriter, pull: std.json.O
         false,
         .{
             .source_author = if (source_author.len == 0) null else source_author,
-            .labels = import_common.constStringList(labels),
-            .assignees = import_common.constStringList(assignees),
-            .reviewers = import_common.constStringList(reviewers),
+            .labels = provider_common.constStringList(labels),
+            .assignees = provider_common.constStringList(assignees),
+            .reviewers = provider_common.constStringList(reviewers),
             .commit_count = common.optionalUnsignedField(pull, &.{ "commits_count", "commit_count" }),
             .changed_files = common.optionalUnsignedField(pull, &.{ "changes_count", "changed_files", "file_count" }),
         },
@@ -546,21 +443,21 @@ fn syncExistingIssue(allocator: Allocator, writer: *EventWriter, issue_id: []con
     const occurred_at = try timestampOrNow(allocator, firstJsonValue(issue.get("updated_at"), issue.get("created_at")));
     defer allocator.free(occurred_at);
     try ensureMilestoneCreatedForTitleStaged(allocator, writer, desired.milestone, "", "", occurred_at, "gt gitlab import");
+    var label_diff = try provider_common.diffStringLists(allocator, desired.labels, current.labels);
+    defer label_diff.deinit();
+    var assignee_diff = try provider_common.diffStringLists(allocator, desired.assignees, current.assignees);
+    defer assignee_diff.deinit();
 
     var update = event_model.IssueUpdate{
         .title = if (!std.mem.eql(u8, current.title, desired.title)) desired.title else null,
         .body = if (!std.mem.eql(u8, current.body, desired.body)) desired.body else null,
         .state = if (!std.mem.eql(u8, current.state, desired.state)) desired.state else null,
         .milestone = if (!std.mem.eql(u8, current.milestone, desired.milestone)) desired.milestone else null,
-        .labels_added = try diffAdded(allocator, desired.labels, current.labels),
-        .labels_removed = try diffAdded(allocator, current.labels, desired.labels),
-        .assignees_added = try diffAdded(allocator, desired.assignees, current.assignees),
-        .assignees_removed = try diffAdded(allocator, current.assignees, desired.assignees),
+        .labels_added = label_diff.added,
+        .labels_removed = label_diff.removed,
+        .assignees_added = assignee_diff.added,
+        .assignees_removed = assignee_diff.removed,
     };
-    defer allocator.free(update.labels_added);
-    defer allocator.free(update.labels_removed);
-    defer allocator.free(update.assignees_added);
-    defer allocator.free(update.assignees_removed);
     if (!update.hasChanges()) return;
     try writeImportedIssueUpdated(allocator, writer, issue_id, occurred_at, update);
     stats.issues += 1;
@@ -584,25 +481,26 @@ fn syncExistingPull(allocator: Allocator, writer: *EventWriter, pull_id: []const
         stats.pulls += 1;
         return;
     }
+    var label_diff = try provider_common.diffStringLists(allocator, desired.labels, current.labels);
+    defer label_diff.deinit();
+    var assignee_diff = try provider_common.diffStringLists(allocator, desired.assignees, current.assignees);
+    defer assignee_diff.deinit();
+    var reviewer_diff = try provider_common.diffStringLists(allocator, desired.reviewers, current.reviewers);
+    defer reviewer_diff.deinit();
+
     var update = event_model.PullUpdate{
         .title = if (!std.mem.eql(u8, current.title, desired.title)) desired.title else null,
         .body = if (!std.mem.eql(u8, current.body, desired.body)) desired.body else null,
         .state = if (!std.mem.eql(u8, current.state, desired.state)) desired.state else null,
         .base_ref = if (!std.mem.eql(u8, current.base_ref, desired.base_ref)) desired.base_ref else null,
         .head_ref = if (!std.mem.eql(u8, current.head_ref, desired.head_ref)) desired.head_ref else null,
-        .labels_added = try diffAdded(allocator, desired.labels, current.labels),
-        .labels_removed = try diffAdded(allocator, current.labels, desired.labels),
-        .assignees_added = try diffAdded(allocator, desired.assignees, current.assignees),
-        .assignees_removed = try diffAdded(allocator, current.assignees, desired.assignees),
-        .reviewers_added = try diffAdded(allocator, desired.reviewers, current.reviewers),
-        .reviewers_removed = try diffAdded(allocator, current.reviewers, desired.reviewers),
+        .labels_added = label_diff.added,
+        .labels_removed = label_diff.removed,
+        .assignees_added = assignee_diff.added,
+        .assignees_removed = assignee_diff.removed,
+        .reviewers_added = reviewer_diff.added,
+        .reviewers_removed = reviewer_diff.removed,
     };
-    defer allocator.free(update.labels_added);
-    defer allocator.free(update.labels_removed);
-    defer allocator.free(update.assignees_added);
-    defer allocator.free(update.assignees_removed);
-    defer allocator.free(update.reviewers_added);
-    defer allocator.free(update.reviewers_removed);
     if (!update.hasChanges()) return;
     try writeImportedPullUpdated(allocator, writer, pull_id, occurred_at, update);
     stats.pulls += 1;
@@ -663,8 +561,8 @@ fn localIssueState(allocator: Allocator, db: *index.SqliteDb, issue_id: []const 
         .body = try stmt.columnTextDup(allocator, 1),
         .state = try stmt.columnTextDup(allocator, 2),
         .milestone = try stmt.columnTextDup(allocator, 3),
-        .labels = try collectionStrings(allocator, db, "SELECT DISTINCT label FROM issue_labels WHERE issue_id = ? ORDER BY label", issue_id),
-        .assignees = try collectionStrings(allocator, db, "SELECT DISTINCT assignee FROM issue_assignees WHERE issue_id = ? ORDER BY assignee", issue_id),
+        .labels = try provider_common.queryStringList(allocator, db, "SELECT DISTINCT label FROM issue_labels WHERE issue_id = ? ORDER BY label", issue_id),
+        .assignees = try provider_common.queryStringList(allocator, db, "SELECT DISTINCT assignee FROM issue_assignees WHERE issue_id = ? ORDER BY assignee", issue_id),
     };
 }
 
@@ -679,22 +577,10 @@ fn localPullState(allocator: Allocator, db: *index.SqliteDb, pull_id: []const u8
         .state = try stmt.columnTextDup(allocator, 2),
         .base_ref = try stmt.columnTextDup(allocator, 3),
         .head_ref = try stmt.columnTextDup(allocator, 4),
-        .labels = try collectionStrings(allocator, db, "SELECT DISTINCT label FROM pull_labels WHERE pull_id = ? ORDER BY label", pull_id),
-        .assignees = try collectionStrings(allocator, db, "SELECT DISTINCT assignee FROM pull_assignees WHERE pull_id = ? ORDER BY assignee", pull_id),
-        .reviewers = try collectionStrings(allocator, db, "SELECT DISTINCT reviewer FROM pull_reviewers WHERE pull_id = ? ORDER BY reviewer", pull_id),
+        .labels = try provider_common.queryStringList(allocator, db, "SELECT DISTINCT label FROM pull_labels WHERE pull_id = ? ORDER BY label", pull_id),
+        .assignees = try provider_common.queryStringList(allocator, db, "SELECT DISTINCT assignee FROM pull_assignees WHERE pull_id = ? ORDER BY assignee", pull_id),
+        .reviewers = try provider_common.queryStringList(allocator, db, "SELECT DISTINCT reviewer FROM pull_reviewers WHERE pull_id = ? ORDER BY reviewer", pull_id),
     };
-}
-
-fn collectionStrings(allocator: Allocator, db: *index.SqliteDb, sql: []const u8, object_id: []const u8) ![][]u8 {
-    var stmt = try db.prepare(sql);
-    defer stmt.deinit();
-    try stmt.bindText(1, object_id);
-    var list: std.ArrayList([]u8) = .empty;
-    errdefer git.freeStringList(allocator, list.items);
-    while (try stmt.step()) {
-        try list.append(allocator, try stmt.columnTextDup(allocator, 0));
-    }
-    return try list.toOwnedSlice(allocator);
 }
 
 fn desiredIssueState(allocator: Allocator, issue: std.json.ObjectMap) !IssueState {
@@ -745,22 +631,6 @@ fn desiredPullState(allocator: Allocator, pull: std.json.ObjectMap) !PullState {
         .assignees = assignees,
         .reviewers = reviewers,
     };
-}
-
-fn diffAdded(allocator: Allocator, desired: []const []const u8, current: []const []const u8) ![]const []const u8 {
-    var list: std.ArrayList([]const u8) = .empty;
-    errdefer list.deinit(allocator);
-    for (desired) |value| {
-        if (!containsString(current, value)) try list.append(allocator, value);
-    }
-    return try list.toOwnedSlice(allocator);
-}
-
-fn containsString(values: []const []const u8, needle: []const u8) bool {
-    for (values) |value| {
-        if (std.mem.eql(u8, value, needle)) return true;
-    }
-    return false;
 }
 
 fn importCommentsArray(
@@ -859,17 +729,17 @@ fn writeImportedIssueOpened(
     source_author: []const u8,
     milestone: []const u8,
 ) !void {
-    const subject_prefix = try import_common.openedSubjectPrefix(allocator, .issue, issue_id, "GitLab", "#", number);
+    const subject_prefix = try provider_common.openedSubjectPrefix(allocator, .issue, issue_id, "GitLab", "#", number);
     defer allocator.free(subject_prefix);
     const subject_line = try subject(allocator, subject_prefix, title);
     defer allocator.free(subject_line);
-    try import_common.writeImportedIssueOpened(allocator, writer, .{
+    try provider_common.writeImportedIssueOpened(allocator, writer, .{
         .issue_id = issue_id,
         .occurred_at = occurred_at,
         .title = title,
         .body_text = body_text,
-        .labels = import_common.constStringList(labels),
-        .assignees = import_common.constStringList(assignees),
+        .labels = provider_common.constStringList(labels),
+        .assignees = provider_common.constStringList(assignees),
         .legacy = .{ .gitlab_issue_iid = number },
         .metadata = .{
             .source_author = if (source_author.len == 0) null else source_author,
@@ -893,11 +763,11 @@ fn writeImportedPullOpened(
     draft: bool,
     metadata: event_model.PullOpenedMetadata,
 ) !void {
-    const subject_prefix = try import_common.openedSubjectPrefix(allocator, .pull, pull_id, "GitLab", "!", number);
+    const subject_prefix = try provider_common.openedSubjectPrefix(allocator, .pull, pull_id, "GitLab", "!", number);
     defer allocator.free(subject_prefix);
     const subject_line = try subject(allocator, subject_prefix, title);
     defer allocator.free(subject_line);
-    try import_common.writeImportedPullOpened(allocator, writer, .{
+    try provider_common.writeImportedPullOpened(allocator, writer, .{
         .pull_id = pull_id,
         .occurred_at = occurred_at,
         .title = title,
@@ -915,14 +785,14 @@ fn writeImportedPullOpened(
 fn writeImportedStringEvent(
     allocator: Allocator,
     writer: *EventWriter,
-    object_kind: import_common.ObjectKind,
+    object_kind: provider_common.ObjectKind,
     object_id: []const u8,
     event_type: []const u8,
     payload_key: []const u8,
     payload_value: []const u8,
     occurred_at: []const u8,
 ) !void {
-    try import_common.writeImportedStringEvent(allocator, writer, .{
+    try provider_common.writeImportedStringEvent(allocator, writer, .{
         .object_kind = object_kind,
         .object_id = object_id,
         .event_type = event_type,
@@ -935,7 +805,7 @@ fn writeImportedStringEvent(
 }
 
 fn writeImportedIssueUpdated(allocator: Allocator, writer: *EventWriter, issue_id: []const u8, occurred_at: []const u8, update: event_model.IssueUpdate) !void {
-    try import_common.writeImportedIssueUpdated(allocator, writer, .{
+    try provider_common.writeImportedIssueUpdated(allocator, writer, .{
         .issue_id = issue_id,
         .occurred_at = occurred_at,
         .update = update,
@@ -945,7 +815,7 @@ fn writeImportedIssueUpdated(allocator: Allocator, writer: *EventWriter, issue_i
 }
 
 fn writeImportedPullUpdated(allocator: Allocator, writer: *EventWriter, pull_id: []const u8, occurred_at: []const u8, update: event_model.PullUpdate) !void {
-    try import_common.writeImportedPullUpdated(allocator, writer, .{
+    try provider_common.writeImportedPullUpdated(allocator, writer, .{
         .pull_id = pull_id,
         .occurred_at = occurred_at,
         .update = update,
@@ -962,7 +832,7 @@ fn writeImportedPullMerged(
     merge_oid: []const u8,
     target_oid: ?[]const u8,
 ) !void {
-    try import_common.writeImportedPullMerged(allocator, writer, .{
+    try provider_common.writeImportedPullMerged(allocator, writer, .{
         .pull_id = pull_id,
         .occurred_at = occurred_at,
         .merge_oid = merge_oid,
@@ -983,50 +853,18 @@ fn writeImportedCommentAdded(
     reply_parent_id: []const u8,
     reply_parent_hash: []const u8,
 ) !ImportedCommentRef {
-    var comment_id: ?[]u8 = try util.newUuidV7(allocator);
-    errdefer if (comment_id) |value| allocator.free(value);
-    const event_uuid = try util.newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try util.newUuidV7(allocator);
-    defer allocator.free(idem);
-    var related: std.ArrayList([]const u8) = .empty;
-    defer related.deinit(allocator);
-    const base_parents = writer.stagedEventParents();
-    try related.appendSlice(allocator, base_parents.related);
-    if (reply_parent_hash.len != 0 and !containsString(related.items, reply_parent_hash)) try related.append(allocator, reply_parent_hash);
-    const parents = event_model.EventParents{
-        .log = base_parents.log,
-        .anchor = base_parents.anchor,
-        .causal = base_parents.causal,
-        .related = related.items,
-    };
-    const body = try event_builders.buildCommentAddedJsonWithMetadata(
-        allocator,
-        writer.cfg,
-        writer.nextSeq(),
-        comment_id.?,
-        event_uuid,
-        idem,
-        occurred_at,
-        parents,
-        parent_kind,
-        parent_id,
-        body_text,
-        .{
+    return try provider_common.writeImportedCommentAdded(allocator, writer, .{
+        .parent_kind = parent_kind,
+        .parent_id = parent_id,
+        .occurred_at = occurred_at,
+        .body_text = body_text,
+        .metadata = .{
             .source_author = if (source_author.len == 0) null else source_author,
             .reply_parent_id = if (reply_parent_id.len == 0) null else reply_parent_id,
             .reply_parent_hash = if (reply_parent_hash.len == 0) null else reply_parent_hash,
         },
-    );
-    defer allocator.free(body);
-    const subject_line = try std.fmt.allocPrint(allocator, "comment.added #{s} GitLab sync", .{comment_id.?[0..7]});
-    defer allocator.free(subject_line);
-    const commit = try writer.stage("gt gitlab import", subject_line, body);
-    errdefer allocator.free(commit);
-    const result = ImportedCommentRef{
-        .id = comment_id.?,
-        .event_hash = commit,
-    };
-    comment_id = null;
-    return result;
+        .reply_parent_hash = reply_parent_hash,
+        .command_context = "gt gitlab import",
+        .subject_suffix = " GitLab sync",
+    });
 }
