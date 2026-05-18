@@ -39,26 +39,37 @@ fn isDataPlaneIndexRef(ref: []const u8) bool {
 pub fn projectIndexedEvents(allocator: Allocator, db: *SqliteDb) !void {
     try seedGenesisAuthorization(allocator, db);
 
-    try projectEventQuery(allocator, db, "SELECT event_hash FROM events WHERE valid_json != 0 AND (event_type LIKE 'acl.%' OR event_type LIKE 'identity.%') ORDER BY ordinal", true);
-    try projectEventQuery(allocator, db, "SELECT event_hash FROM events WHERE valid_json != 0 AND event_type NOT LIKE 'acl.%' AND event_type NOT LIKE 'identity.%' ORDER BY ordinal", false);
+    try projectEventQuery(allocator, db, "SELECT event_hash, event_type FROM events WHERE valid_json != 0 AND (event_type LIKE 'acl.%' OR event_type LIKE 'identity.%') ORDER BY ordinal", true);
+    try projectEventQuery(allocator, db, "SELECT event_hash, event_type FROM events WHERE valid_json != 0 AND event_type NOT LIKE 'acl.%' AND event_type NOT LIKE 'identity.%' ORDER BY ordinal", false);
 }
 
 pub fn projectNewIndexedEvents(allocator: Allocator, db: *SqliteDb) !void {
-    try projectEventQuery(allocator, db, "SELECT event_hash FROM events WHERE valid_json != 0 AND domain_status = 'pending' AND (event_type LIKE 'acl.%' OR event_type LIKE 'identity.%') ORDER BY ordinal", true);
-    try projectEventQuery(allocator, db, "SELECT event_hash FROM events WHERE valid_json != 0 AND domain_status = 'pending' AND event_type NOT LIKE 'acl.%' AND event_type NOT LIKE 'identity.%' ORDER BY ordinal", false);
+    try projectEventQuery(allocator, db, "SELECT event_hash, event_type FROM events WHERE valid_json != 0 AND domain_status = 'pending' AND (event_type LIKE 'acl.%' OR event_type LIKE 'identity.%') ORDER BY ordinal", true);
+    try projectEventQuery(allocator, db, "SELECT event_hash, event_type FROM events WHERE valid_json != 0 AND domain_status = 'pending' AND event_type NOT LIKE 'acl.%' AND event_type NOT LIKE 'identity.%' ORDER BY ordinal", false);
 }
 
 fn projectEventQuery(allocator: Allocator, db: *SqliteDb, comptime sql_text: []const u8, auth_phase: bool) !void {
     var event_hashes: std.ArrayList([]u8) = .empty;
     defer freeStringArrayList(allocator, &event_hashes);
 
+    var auth_priorities = std.StringHashMap(u8).init(allocator);
+    defer auth_priorities.deinit();
+
     var stmt = try db.prepare(sql_text);
     defer stmt.deinit();
     while (try stmt.step()) {
-        try event_hashes.append(allocator, try stmt.columnTextDup(allocator, 0));
+        const event_hash = try stmt.columnTextDup(allocator, 0);
+        errdefer allocator.free(event_hash);
+        try event_hashes.append(allocator, event_hash);
+
+        if (auth_phase) {
+            const event_type = try stmt.columnTextDup(allocator, 1);
+            defer allocator.free(event_type);
+            try auth_priorities.put(event_hash, authEventSortPriority(event_type));
+        }
     }
 
-    try orderEventHashesTopologically(allocator, &event_hashes);
+    try orderEventHashesTopologically(allocator, &event_hashes, if (auth_phase) &auth_priorities else null);
 
     for (event_hashes.items) |event_hash| {
         const body = try eventBodyByHash(allocator, db, event_hash);
@@ -67,7 +78,7 @@ fn projectEventQuery(allocator: Allocator, db: *SqliteDb, comptime sql_text: []c
     }
 }
 
-fn orderEventHashesTopologically(allocator: Allocator, event_hashes: *std.ArrayList([]u8)) !void {
+fn orderEventHashesTopologically(allocator: Allocator, event_hashes: *std.ArrayList([]u8), auth_priorities: ?*const std.StringHashMap(u8)) !void {
     if (event_hashes.items.len < 2) return;
 
     var input: std.ArrayList(u8) = .empty;
@@ -108,29 +119,44 @@ fn orderEventHashesTopologically(allocator: Allocator, event_hashes: *std.ArrayL
         count += 1;
     }
     @memcpy(event_hashes.items, ordered);
-    try orderConcurrentEventHashesByHashDescending(allocator, event_hashes.items);
+    try orderConcurrentEventHashes(allocator, event_hashes.items, auth_priorities);
 }
 
-fn orderConcurrentEventHashesByHashDescending(allocator: Allocator, event_hashes: [][]u8) !void {
+fn orderConcurrentEventHashes(allocator: Allocator, event_hashes: [][]u8, auth_priorities: ?*const std.StringHashMap(u8)) !void {
     if (event_hashes.len < 2) return;
 
     var index: usize = 1;
     while (index < event_hashes.len) : (index += 1) {
         var swap_index = index;
-        while (swap_index > 0 and try eventShouldSortBefore(allocator, event_hashes[swap_index], event_hashes[swap_index - 1])) {
+        while (swap_index > 0 and try eventShouldSortBefore(allocator, event_hashes[swap_index], event_hashes[swap_index - 1], auth_priorities)) {
             std.mem.swap([]u8, &event_hashes[swap_index], &event_hashes[swap_index - 1]);
             swap_index -= 1;
         }
     }
 }
 
-fn eventShouldSortBefore(allocator: Allocator, candidate: []const u8, current: []const u8) !bool {
+fn eventShouldSortBefore(allocator: Allocator, candidate: []const u8, current: []const u8, auth_priorities: ?*const std.StringHashMap(u8)) !bool {
     if (std.mem.eql(u8, candidate, current)) return false;
     if (candidate.len != 0 and current.len != 0) {
         if (try git.isAncestor(allocator, candidate, current)) return true;
         if (try git.isAncestor(allocator, current, candidate)) return false;
     }
+    if (auth_priorities) |priorities| {
+        const candidate_priority = priorities.get(candidate) orelse 1;
+        const current_priority = priorities.get(current) orelse 1;
+        if (candidate_priority != current_priority) return candidate_priority < current_priority;
+    }
     return std.mem.order(u8, candidate, current) == .gt;
+}
+
+fn authEventSortPriority(event_type: []const u8) u8 {
+    if (std.mem.eql(u8, event_type, "acl.role_revoked") or
+        std.mem.eql(u8, event_type, "acl.delegation_revoked") or
+        std.mem.eql(u8, event_type, "identity.device_revoked"))
+    {
+        return 0;
+    }
+    return 1;
 }
 
 fn eventBodyByHash(allocator: Allocator, db: *SqliteDb, event_hash: []const u8) ![]u8 {
@@ -1150,7 +1176,7 @@ fn applyAclProjection(allocator: Allocator, db: *SqliteDb, event_hash: []const u
     if (std.mem.eql(u8, envelope.event_type, "acl.role_granted")) {
         const role = event_mod.jsonString(payload.get("role")) orelse return "invalid_event_envelope";
         if (!event_mod.isKnownRole(role)) return "invalid_role";
-        const actor_role = (try aclRoleAtFrontier(allocator, db, envelope.actor_principal, event_hash)) orelse return "unauthorized_principal";
+        const actor_role = (try aclRoleAtAuthFrontier(allocator, db, envelope.actor_principal, event_hash)) orelse return "unauthorized_principal";
         defer allocator.free(actor_role);
         if (!roleAtLeast(actor_role, role)) return "privilege_escalation";
         try insertAclHistory(db, principal, role, event_hash, envelope.event_type);

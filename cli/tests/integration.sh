@@ -317,7 +317,12 @@ init_repo "$github_io"
 (
   cd "$github_io"
   gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
-  cat > github-fixture.json <<'JSON'
+  mkdir -p src
+  printf 'legacy merge target\n' > src/legacy-merge.txt
+  git add src/legacy-merge.txt
+  git commit -m "Legacy merge target" >/dev/null
+  fixture_merge_oid="$(git rev-parse HEAD)"
+  cat > github-fixture.json <<JSON
 {
   "issues": [
     {
@@ -342,7 +347,7 @@ init_repo "$github_io"
       "state": "closed",
       "created_at": "2026-01-03T00:00:00Z",
       "merged_at": "2026-01-04T00:00:00Z",
-      "merge_commit_sha": "0123456789abcdef0123456789abcdef01234567",
+      "merge_commit_sha": "$fixture_merge_oid",
       "user": { "login": "ichewm" },
       "labels": [{ "name": "docs" }],
       "assignees": [{ "login": "bob" }],
@@ -402,7 +407,6 @@ JSON
   assert_contains "$events" '"actor_principal":"alice"'
   assert_contains "$events" '"actor_principal":"import-bot"'
   assert_contains "$events" '"event_type":"comment.added"'
-  mkdir -p src
   printf 'legacy refs\n' > src/legacy.txt
   git add src/legacy.txt
   git commit -m "Connect #42 and #7" >/dev/null
@@ -676,6 +680,11 @@ init_repo "$github_gh"
   cd "$github_gh"
   gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
   git remote add origin git@github.com:acme/current.git
+  mkdir -p src
+  printf 'gh fixture merge target\n' > src/gh-merge-target.txt
+  git add src/gh-merge-target.txt
+  git commit -m "GH fixture merge target" >/dev/null
+  gh_fixture_merge_oid="$(git rev-parse HEAD)"
   fakebin="$PWD/fakebin"
   mkdir -p "$fakebin"
   cat > "$fakebin/gh" <<'SH'
@@ -737,7 +746,7 @@ JSON
 JSON
     ;;
   'repos/{owner}/{repo}/pulls/44')
-    cat <<'JSON'
+    cat <<JSON
 {
   "number": 44,
   "title": "Current repo pull",
@@ -745,7 +754,7 @@ JSON
   "state": "closed",
   "created_at": "2026-01-06T00:00:00Z",
   "merged_at": "2026-01-06T02:00:00Z",
-  "merge_commit_sha": "abcdef0123456789abcdef0123456789abcdef01",
+  "merge_commit_sha": "${GH_FIXTURE_MERGE_OID:?}",
   "user": { "login": "pull-author" },
   "comments": 1,
   "labels": [{ "name": "api" }],
@@ -787,6 +796,7 @@ esac
 SH
   chmod +x "$fakebin/gh"
   export GH_CALL_LOG="$PWD/gh-calls.log"
+  export GH_FIXTURE_MERGE_OID="$gh_fixture_merge_oid"
   set +e
   GH_FAIL_ISSUE_COMMENTS=1 PATH="$fakebin:$PATH" gt github import --rest >/tmp/github-import-issue-comment-failure.log 2>&1
   failed_status=$?
@@ -1433,6 +1443,10 @@ init_repo "$pulls_repo"
   gt pr base "$pull_ref" --base trunk >/dev/null
   gt pr label "$pull_ref" add review >/dev/null
   gt pr reviewer "$pull_ref" add alice >/dev/null
+  mkdir -p src
+  printf 'pull merge target\n' > src/pull-merge-target.txt
+  git add src/pull-merge-target.txt
+  git commit -m "Pull merge target" >/dev/null
   merge_target_oid="$(git rev-parse HEAD)"
   gt pr merge "$pull_ref" --target-oid "$merge_target_oid" >/dev/null
   pulls_json="$(gt pr list --json)"
@@ -1885,8 +1899,15 @@ init_repo "$frontier_auth"
 
   anchor_b_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002005","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000002103"},"idempotency_key":"018f0000-0000-7000-8000-000000002205","actor":{"principal":"alice","device":"b"},"seq":1,"occurred_at":"2026-05-13T18:33:04Z","parent_hashes":{"log":"","anchor":"'"$genesis_head"'","causal":["'"$identity_b_commit"'"],"related":["'"$identity_b_commit"'"]},"legacy":{},"payload":{"title":"Frontier anchor B"}}'
   anchor_b_commit="$(git commit-tree -S -m "issue.opened frontier anchor B" -m "$anchor_b_body" "$empty_tree" -p "$genesis_head" -p "$identity_b_commit")"
-  revoke_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002006","event_type":"acl.role_revoked","object":{"kind":"acl","id":"acl:bob"},"idempotency_key":"018f0000-0000-7000-8000-000000002206","actor":{"principal":"alice","device":"b"},"seq":2,"occurred_at":"2026-05-13T18:33:05Z","parent_hashes":{"log":"'"$anchor_b_commit"'","anchor":"","causal":["'"$identity_commit"'"],"related":["'"$identity_commit"'"]},"legacy":{},"payload":{"principal":"bob","role":"reporter"}}'
-  revoke_commit="$(git commit-tree -S -m "acl.role_revoked bob reporter frontier" -m "$revoke_body" "$empty_tree" -p "$anchor_b_commit" -p "$identity_commit")"
+  revoke_commit=""
+  for n in $(seq 1 200); do
+    event_uuid="$(printf '018f0000-0000-7000-8000-%012d' $((2006 + n)))"
+    idem="$(printf '018f0000-0000-7000-8000-%012d' $((2206 + n)))"
+    revoke_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"'"$event_uuid"'","event_type":"acl.role_revoked","object":{"kind":"acl","id":"acl:bob"},"idempotency_key":"'"$idem"'","actor":{"principal":"alice","device":"b"},"seq":2,"occurred_at":"2026-05-13T18:33:05Z","parent_hashes":{"log":"'"$anchor_b_commit"'","anchor":"","causal":["'"$identity_commit"'"],"related":["'"$identity_commit"'"]},"legacy":{},"payload":{"principal":"bob","role":"reporter"}}'
+    revoke_commit="$(git commit-tree -S -m "acl.role_revoked bob reporter frontier $n" -m "$revoke_body" "$empty_tree" -p "$anchor_b_commit" -p "$identity_commit")"
+    [[ "$bob_issue_commit" > "$revoke_commit" ]] && break
+  done
+  [[ "$bob_issue_commit" > "$revoke_commit" ]] || fail "expected stale event hash to sort before ACL revoke hash"
 
   git update-ref refs/gitomi/inbox/alice/a "$identity_commit"
   git update-ref refs/gitomi/inbox/alice/b "$revoke_commit"

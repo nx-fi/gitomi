@@ -1183,10 +1183,47 @@ pub fn worktreeObjectType(allocator: Allocator, root: []const u8, path: []const 
     });
 }
 
+fn listedWorktreePathKind(allocator: Allocator, root: []const u8, path: []const u8) !?WorktreePathKind {
+    if (path.len == 0) return .tree;
+
+    const raw = try listWorktreePaths(allocator, root) orelse return null;
+    defer allocator.free(raw);
+
+    var found_tree = false;
+    var records = std.mem.splitScalar(u8, raw, 0);
+    while (records.next()) |record| {
+        if (record.len == 0) continue;
+        if (std.mem.eql(u8, record, path)) return .blob;
+        if (record.len > path.len and
+            record[path.len] == '/' and
+            std.mem.startsWith(u8, record, path))
+        {
+            found_tree = true;
+        }
+    }
+    return if (found_tree) .tree else null;
+}
+
+fn listedSafeWorktreeObjectType(allocator: Allocator, root: []const u8, path: []const u8) !?[]u8 {
+    const listed_kind = try listedWorktreePathKind(allocator, root, path) orelse return null;
+    const stat_kind = try worktreePathKind(root, path) orelse return null;
+    if (listed_kind != stat_kind) return null;
+    return try allocator.dupe(u8, switch (stat_kind) {
+        .blob => "blob",
+        .tree => "tree",
+    });
+}
+
 pub fn worktreeBlobSize(root: []const u8, path: []const u8) !?usize {
     const stat = try safeWorktreePathStat(std.heap.page_allocator, root, path) orelse return null;
     if (stat.kind != .file) return null;
     return stat.size;
+}
+
+fn listedSafeWorktreeBlobSize(allocator: Allocator, root: []const u8, path: []const u8) !?usize {
+    const listed_kind = try listedWorktreePathKind(allocator, root, path) orelse return null;
+    if (listed_kind != .blob) return null;
+    return worktreeBlobSize(root, path);
 }
 
 pub fn readWorktreeFile(allocator: Allocator, root: []const u8, path: []const u8, max_bytes: usize) !?[]u8 {
@@ -1198,10 +1235,36 @@ pub fn readWorktreeFile(allocator: Allocator, root: []const u8, path: []const u8
     };
 }
 
+fn listedSafeReadWorktreeFile(allocator: Allocator, root: []const u8, path: []const u8, max_bytes: usize) !?[]u8 {
+    const listed_kind = try listedWorktreePathKind(allocator, root, path) orelse return null;
+    if (listed_kind != .blob) return null;
+    return readWorktreeFile(allocator, root, path, max_bytes);
+}
+
 fn safeWorktreeFilePath(allocator: Allocator, root: []const u8, path: []const u8) !?[]u8 {
     const stat = try safeWorktreePathStat(allocator, root, path) orelse return null;
     if (stat.kind != .file) return null;
     return try absoluteWorktreePath(allocator, root, path);
+}
+
+fn pathIsSymlink(path: []const u8) !bool {
+    var link_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    _ = std.fs.cwd().readLink(path, &link_buffer) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir, error.NotLink => return false,
+        else => return err,
+    };
+    return true;
+}
+
+fn safeRelativeWorktreePath(path: []const u8) bool {
+    if (path.len == 0) return true;
+    if (std.fs.path.isAbsolute(path)) return false;
+    var parts = std.mem.splitScalar(u8, path, '/');
+    while (parts.next()) |part| {
+        if (part.len == 0) return false;
+        if (std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return false;
+    }
+    return true;
 }
 
 fn safeWorktreePathStat(allocator: Allocator, root: []const u8, path: []const u8) !?std.fs.File.Stat {
@@ -1209,6 +1272,7 @@ fn safeWorktreePathStat(allocator: Allocator, root: []const u8, path: []const u8
         error.FileNotFound, error.NotDir => return null,
         else => return err,
     };
+    if (!safeRelativeWorktreePath(path)) return null;
 
     var cursor: usize = 0;
     while (cursor < path.len) {
@@ -1218,6 +1282,7 @@ fn safeWorktreePathStat(allocator: Allocator, root: []const u8, path: []const u8
         const absolute_path = try absoluteWorktreePath(allocator, root, prefix);
         defer allocator.free(absolute_path);
 
+        if (try pathIsSymlink(absolute_path)) return null;
         const stat = std.fs.cwd().statFile(absolute_path) catch |err| switch (err) {
             error.FileNotFound, error.NotDir => return null,
             else => return err,
@@ -1567,7 +1632,7 @@ pub fn browseObjectType(allocator: Allocator, repo: Repo, ref: []const u8, path:
     if (isFilesystemRef(ref)) {
         const root = try worktreeRootOwned(allocator, repo, ref) orelse return null;
         defer allocator.free(root);
-        return worktreeObjectType(allocator, root, path);
+        return listedSafeWorktreeObjectType(allocator, root, path);
     }
     const spec = try objectSpec(allocator, ref, path);
     defer allocator.free(spec);
@@ -1586,7 +1651,7 @@ pub fn browseBlobSize(allocator: Allocator, repo: Repo, ref: []const u8, path: [
     if (isFilesystemRef(ref)) {
         const root = try worktreeRootOwned(allocator, repo, ref) orelse return null;
         defer allocator.free(root);
-        return worktreeBlobSize(root, path);
+        return listedSafeWorktreeBlobSize(allocator, root, path);
     }
     const spec = try objectSpec(allocator, ref, path);
     defer allocator.free(spec);
@@ -1597,7 +1662,7 @@ pub fn loadBlobBytes(allocator: Allocator, repo: Repo, ref: []const u8, path: []
     if (isFilesystemRef(ref)) {
         const root = try worktreeRootOwned(allocator, repo, ref) orelse return null;
         defer allocator.free(root);
-        return readWorktreeFile(allocator, root, path, max_bytes);
+        return listedSafeReadWorktreeFile(allocator, root, path, max_bytes);
     }
     const spec = try objectSpec(allocator, ref, path);
     defer allocator.free(spec);
@@ -1872,6 +1937,84 @@ test "web explorer handles extreme blame relative timestamps" {
     const future = try relativeTimeOwned(allocator, std.math.maxInt(i64), 0);
     defer allocator.free(future);
     try std.testing.expectEqualStrings("now", future);
+}
+
+test "web explorer working tree direct reads are confined to listed safe files" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makeDir("repo");
+    try writeTestFile(tmp.dir, "outside.secret", "outside");
+    try writeTestFile(tmp.dir, "repo/.gitignore", "ignored.secret\n");
+    try writeTestFile(tmp.dir, "repo/tracked.txt", "tracked");
+    try writeTestFile(tmp.dir, "repo/visible.txt", "visible");
+    try writeTestFile(tmp.dir, "repo/ignored.secret", "ignored");
+
+    const repo_root = try tmp.dir.realpathAlloc(allocator, "repo");
+    defer allocator.free(repo_root);
+
+    try expectGitOk(allocator, repo_root, &.{ "init", "-q" });
+    try expectGitOk(allocator, repo_root, &.{ "add", ".gitignore", "tracked.txt" });
+
+    var repo = Repo{
+        .allocator = allocator,
+        .root = try allocator.dupe(u8, repo_root),
+        .git_dir = try allocator.dupe(u8, ""),
+        .gitomi_dir = try allocator.dupe(u8, ""),
+        .config_path = try allocator.dupe(u8, ""),
+        .index_path = try allocator.dupe(u8, ""),
+        .cursors_path = try allocator.dupe(u8, ""),
+        .settings_path = try allocator.dupe(u8, ""),
+    };
+    defer repo.deinit();
+
+    const tracked = try loadBlobBytes(allocator, repo, unstaged_ref, "tracked.txt", 1024);
+    defer if (tracked) |bytes| allocator.free(bytes);
+    try std.testing.expectEqualStrings("tracked", tracked.?);
+
+    const visible = try loadBlobBytes(allocator, repo, unstaged_ref, "visible.txt", 1024);
+    defer if (visible) |bytes| allocator.free(bytes);
+    try std.testing.expectEqualStrings("visible", visible.?);
+
+    try std.testing.expect(try browseObjectType(allocator, repo, unstaged_ref, ".git/config") == null);
+    try std.testing.expect(try loadBlobBytes(allocator, repo, unstaged_ref, ".git/config", 1024) == null);
+    try std.testing.expect(try browseObjectType(allocator, repo, unstaged_ref, "ignored.secret") == null);
+    try std.testing.expect(try loadBlobBytes(allocator, repo, unstaged_ref, "ignored.secret", 1024) == null);
+    try std.testing.expect(try readWorktreeFile(allocator, repo_root, "../outside.secret", 1024) == null);
+}
+
+test "web explorer working tree direct reads reject symlinks" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makeDir("repo");
+    try writeTestFile(tmp.dir, "outside.secret", "outside");
+    try tmp.dir.symLink("../outside.secret", "repo/leak", .{});
+
+    const repo_root = try tmp.dir.realpathAlloc(allocator, "repo");
+    defer allocator.free(repo_root);
+
+    try expectGitOk(allocator, repo_root, &.{ "init", "-q" });
+    try expectGitOk(allocator, repo_root, &.{ "add", "leak" });
+
+    var repo = Repo{
+        .allocator = allocator,
+        .root = try allocator.dupe(u8, repo_root),
+        .git_dir = try allocator.dupe(u8, ""),
+        .gitomi_dir = try allocator.dupe(u8, ""),
+        .config_path = try allocator.dupe(u8, ""),
+        .index_path = try allocator.dupe(u8, ""),
+        .cursors_path = try allocator.dupe(u8, ""),
+        .settings_path = try allocator.dupe(u8, ""),
+    };
+    defer repo.deinit();
+
+    try std.testing.expect(try browseObjectType(allocator, repo, unstaged_ref, "leak") == null);
+    try std.testing.expect(try loadBlobBytes(allocator, repo, unstaged_ref, "leak", 1024) == null);
 }
 
 test "web explorer sums tracked file sizes separately from untracked files" {
