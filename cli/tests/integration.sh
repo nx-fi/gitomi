@@ -518,6 +518,155 @@ SH
   gt fsck >/dev/null
 )
 
+echo "integration: github sync publishes export aliases before another replica imports github"
+github_export_alias="$ROOT/github-export-alias"
+mkdir -p "$github_export_alias"
+git -C "$github_export_alias" init --bare remote.git >/dev/null
+init_repo "$github_export_alias/source"
+init_repo "$github_export_alias/replica"
+configure_bob_signing "$github_export_alias/replica"
+git -C "$github_export_alias/source" remote add origin "$github_export_alias/remote.git"
+git -C "$github_export_alias/replica" remote add origin "$github_export_alias/remote.git"
+(
+  cd "$github_export_alias/source"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  gt identity add-device bob desktop --public-key "$BOB_PUBLIC_KEY" --fingerprint "$BOB_FINGERPRINT" >/dev/null
+  gt acl grant bob maintainer >/dev/null
+  gt issue open --title "Local exported issue" --body "Created locally first" >/dev/null
+  local_issue_id="$(json_field "$(gt issue list --json)" id)"
+  [[ -n "$local_issue_id" ]] || fail "expected local exported issue id"
+  printf '%s\n' "$local_issue_id" > "$github_export_alias/local_issue_id"
+  fakebin="$PWD/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ "${1:-}" == "api" ]] || {
+  echo "expected gh api" >&2
+  exit 2
+}
+
+method=""
+endpoint=""
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --method)
+      method="$2"
+      shift 2
+      ;;
+    --input)
+      shift 2
+      ;;
+    -H)
+      shift 2
+      ;;
+    *)
+      endpoint="$1"
+      shift
+      ;;
+  esac
+done
+
+if [[ "$method" == "POST" ]]; then
+  cat >/dev/null
+fi
+
+case "$method $endpoint" in
+  'GET repos/acme/export-alias/issues?state=all&per_page=100&page=1')
+    echo '[]'
+    ;;
+  'GET repos/acme/export-alias/pulls?state=all&per_page=100&page=1')
+    echo '[]'
+    ;;
+  'POST repos/acme/export-alias/issues')
+    echo '{"number":88}'
+    ;;
+  *)
+    echo "unexpected request: $method $endpoint" >&2
+    exit 3
+    ;;
+esac
+SH
+  chmod +x "$fakebin/gh"
+  PATH="$fakebin:$PATH" gt github sync --repo acme/export-alias --use-gh --rest --no-comments --no-projects --remote origin >/dev/null
+  git --git-dir="$github_export_alias/remote.git" rev-parse --verify refs/gitomi/inbox/import-bot/github >/dev/null
+)
+(
+  cd "$github_export_alias/replica"
+  mkdir -p .git/gitomi
+  write_gt_config "$REPO_ID" bob desktop 0
+  fakebin="$PWD/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ "${1:-}" == "api" ]] || {
+  echo "expected gh api" >&2
+  exit 2
+}
+
+method=""
+endpoint=""
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --method)
+      method="$2"
+      shift 2
+      ;;
+    --input)
+      shift 2
+      ;;
+    -H)
+      shift 2
+      ;;
+    *)
+      endpoint="$1"
+      shift
+      ;;
+  esac
+done
+
+case "$method $endpoint" in
+  'GET repos/acme/export-alias/issues?state=all&per_page=100&page=1')
+    cat <<'JSON'
+[
+  {
+    "number": 88,
+    "title": "Local exported issue",
+    "body": "Created locally first",
+    "state": "open",
+    "created_at": "2026-01-08T00:00:00Z",
+    "comments": 0,
+    "labels": [],
+    "assignees": []
+  }
+]
+JSON
+    ;;
+  'GET repos/acme/export-alias/pulls?state=all&per_page=100&page=1')
+    echo '[]'
+    ;;
+  *)
+    echo "unexpected request: $method $endpoint" >&2
+    exit 3
+    ;;
+esac
+SH
+  chmod +x "$fakebin/gh"
+  PATH="$fakebin:$PATH" gt github sync --repo acme/export-alias --use-gh --rest --no-comments --no-projects --import-only --remote origin >/dev/null
+  issues="$(gt issue list --json)"
+  assert_line_count "$issues" 1
+  assert_contains "$issues" '"id":"'"$(cat "$github_export_alias/local_issue_id")"'"'
+  assert_contains "$issues" '"legacy_github_issue_number":88'
+  import_opened="$(gt events list --json | grep 'issue.opened' | grep 'import-bot' || true)"
+  assert_equal "$import_opened" "" "expected GitHub import to reuse the exported local issue instead of opening a duplicate"
+  replay="$(PATH="$fakebin:$PATH" gt github export --repo acme/export-alias --use-gh --rest)"
+  assert_contains "$replay" "github export: replayed 0 events"
+  gt fsck >/dev/null
+)
+
 echo "integration: github import without options uses local gh current-repo context"
 github_gh="$ROOT/github-gh"
 init_repo "$github_gh"
@@ -1863,6 +2012,129 @@ git -C "$sync_device_binding/replica" remote add origin "$sync_device_binding/re
   if git show-ref --verify --quiet refs/gitomi/inbox/alice/phone; then
     fail "expected inactive actor device inbox ref to stay out of authoritative refs"
   fi
+)
+
+echo "integration: sync admits valid prefix before quarantining duplicate actor sequence"
+sync_duplicate_prefix="$ROOT/sync-duplicate-prefix"
+mkdir -p "$sync_duplicate_prefix"
+git -C "$sync_duplicate_prefix" init --bare remote.git >/dev/null
+init_repo "$sync_duplicate_prefix/source"
+init_repo "$sync_duplicate_prefix/replica"
+git -C "$sync_duplicate_prefix/source" remote add origin "$sync_duplicate_prefix/remote.git"
+git -C "$sync_duplicate_prefix/replica" remote add origin "$sync_duplicate_prefix/remote.git"
+(
+  cd "$sync_duplicate_prefix/source"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
+  genesis_head="$(git rev-parse refs/gitomi/genesis)"
+  body1='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002501","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000002500"},"idempotency_key":"018f0000-0000-7000-8000-000000002502","actor":{"principal":"alice","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:34:30Z","parent_hashes":{"log":"","anchor":"'"$genesis_head"'","causal":[],"related":[]},"legacy":{},"payload":{"title":"Valid prefix"}}'
+  first_commit="$(git commit-tree -S -m "issue.opened valid prefix" -m "$body1" "$empty_tree" -p "$genesis_head")"
+  body2='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002503","event_type":"issue.updated","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000002500"},"idempotency_key":"018f0000-0000-7000-8000-000000002504","actor":{"principal":"alice","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:34:31Z","parent_hashes":{"log":"'"$first_commit"'","anchor":"","causal":[],"related":[]},"legacy":{},"payload":{"title":"Duplicate seq"}}'
+  bad_commit="$(git commit-tree -S -m "issue.updated duplicate seq" -m "$body2" "$empty_tree" -p "$first_commit")"
+  git update-ref refs/gitomi/inbox/alice/laptop "$bad_commit"
+  printf '%s\n' "$first_commit" > "$sync_duplicate_prefix/first-prefix-commit"
+  git push origin refs/gitomi/genesis:refs/gitomi/genesis refs/gitomi/inbox/alice/laptop:refs/gitomi/inbox/alice/laptop >/dev/null
+)
+(
+  cd "$sync_duplicate_prefix/replica"
+  gt sync --pull-only >sync-duplicate-prefix.out 2>&1
+  output="$(cat sync-duplicate-prefix.out)"
+  assert_contains "$output" "seq 1 is not strictly greater than previous sequence 1"
+  assert_contains "$output" "quarantined"
+  assert_contains "$output" "created refs/gitomi/inbox/alice/laptop with first 1 valid event"
+  assert_equal "$(git rev-parse refs/gitomi/inbox/alice/laptop)" "$(cat "$sync_duplicate_prefix/first-prefix-commit")" "expected local inbox to stop at the valid prefix"
+  quarantine_refs="$(git for-each-ref --format='%(refname)' refs/gitomi/quarantine)"
+  assert_contains "$quarantine_refs" "refs/gitomi/quarantine/origin/inbox/alice/laptop"
+  gt fsck >/dev/null
+)
+
+echo "integration: sync fast-forwards valid prefix before quarantining duplicate actor sequence"
+sync_ff_duplicate="$ROOT/sync-ff-duplicate"
+mkdir -p "$sync_ff_duplicate"
+git -C "$sync_ff_duplicate" init --bare remote.git >/dev/null
+init_repo "$sync_ff_duplicate/source"
+init_repo "$sync_ff_duplicate/replica"
+git -C "$sync_ff_duplicate/source" remote add origin "$sync_ff_duplicate/remote.git"
+git -C "$sync_ff_duplicate/replica" remote add origin "$sync_ff_duplicate/remote.git"
+(
+  cd "$sync_ff_duplicate/source"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
+  genesis_head="$(git rev-parse refs/gitomi/genesis)"
+  issue_id="018f0000-0000-7000-8000-000000002510"
+  body1='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002511","event_type":"issue.opened","object":{"kind":"issue","id":"'"$issue_id"'"},"idempotency_key":"018f0000-0000-7000-8000-000000002512","actor":{"principal":"alice","device":"laptop"},"seq":1,"occurred_at":"2026-05-13T18:34:32Z","parent_hashes":{"log":"","anchor":"'"$genesis_head"'","causal":[],"related":[]},"legacy":{},"payload":{"title":"Fast-forward prefix"}}'
+  first_commit="$(git commit-tree -S -m "issue.opened fast-forward prefix" -m "$body1" "$empty_tree" -p "$genesis_head")"
+  git update-ref refs/gitomi/inbox/alice/laptop "$first_commit"
+  git push origin refs/gitomi/genesis:refs/gitomi/genesis refs/gitomi/inbox/alice/laptop:refs/gitomi/inbox/alice/laptop >/dev/null
+)
+(
+  cd "$sync_ff_duplicate/replica"
+  gt sync --pull-only >/dev/null
+  assert_equal "$(git rev-parse refs/gitomi/inbox/alice/laptop)" "$(git -C "$sync_ff_duplicate/source" rev-parse refs/gitomi/inbox/alice/laptop)" "expected initial pull to admit first event"
+)
+(
+  cd "$sync_ff_duplicate/source"
+  empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
+  issue_id="018f0000-0000-7000-8000-000000002510"
+  first_commit="$(git rev-parse refs/gitomi/inbox/alice/laptop)"
+  body2='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002513","event_type":"issue.updated","object":{"kind":"issue","id":"'"$issue_id"'"},"idempotency_key":"018f0000-0000-7000-8000-000000002514","actor":{"principal":"alice","device":"laptop"},"seq":2,"occurred_at":"2026-05-13T18:34:33Z","parent_hashes":{"log":"'"$first_commit"'","anchor":"","causal":[],"related":[]},"legacy":{},"payload":{"title":"Fast-forward valid prefix"}}'
+  second_commit="$(git commit-tree -S -m "issue.updated fast-forward valid prefix" -m "$body2" "$empty_tree" -p "$first_commit")"
+  body3='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002515","event_type":"issue.updated","object":{"kind":"issue","id":"'"$issue_id"'"},"idempotency_key":"018f0000-0000-7000-8000-000000002516","actor":{"principal":"alice","device":"laptop"},"seq":2,"occurred_at":"2026-05-13T18:34:34Z","parent_hashes":{"log":"'"$second_commit"'","anchor":"","causal":[],"related":[]},"legacy":{},"payload":{"title":"Fast-forward duplicate seq"}}'
+  bad_commit="$(git commit-tree -S -m "issue.updated fast-forward duplicate seq" -m "$body3" "$empty_tree" -p "$second_commit")"
+  git update-ref refs/gitomi/inbox/alice/laptop "$bad_commit"
+  printf '%s\n' "$second_commit" > "$sync_ff_duplicate/second-prefix-commit"
+  git push origin refs/gitomi/inbox/alice/laptop:refs/gitomi/inbox/alice/laptop >/dev/null
+)
+(
+  cd "$sync_ff_duplicate/replica"
+  gt sync --pull-only >sync-ff-duplicate.out 2>&1
+  output="$(cat sync-ff-duplicate.out)"
+  assert_contains "$output" "seq 2 is not strictly greater than previous sequence 2"
+  assert_contains "$output" "quarantined"
+  assert_contains "$output" "fast-forwarded refs/gitomi/inbox/alice/laptop by first 1 valid event"
+  assert_equal "$(git rev-parse refs/gitomi/inbox/alice/laptop)" "$(cat "$sync_ff_duplicate/second-prefix-commit")" "expected fast-forward pull to stop at the valid prefix"
+  gt fsck >/dev/null
+)
+
+echo "integration: sync admits authorization chains before dependent issue chains"
+sync_auth_order="$ROOT/sync-auth-order"
+mkdir -p "$sync_auth_order"
+git -C "$sync_auth_order" init --bare remote.git >/dev/null
+init_repo "$sync_auth_order/source"
+init_repo "$sync_auth_order/replica"
+git -C "$sync_auth_order/source" remote add origin "$sync_auth_order/remote.git"
+git -C "$sync_auth_order/replica" remote add origin "$sync_auth_order/remote.git"
+(
+  cd "$sync_auth_order/source"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  gt identity add-device alice zzz >/dev/null
+  alice_zzz_identity="$(git rev-parse refs/gitomi/inbox/alice/laptop)"
+  empty_tree="$(git hash-object -w -t tree --stdin < /dev/null)"
+  genesis_head="$(git rev-parse refs/gitomi/genesis)"
+  grant_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002601","event_type":"acl.role_granted","object":{"kind":"acl","id":"acl:aaron"},"idempotency_key":"018f0000-0000-7000-8000-000000002602","actor":{"principal":"alice","device":"zzz"},"seq":1,"occurred_at":"2026-05-13T18:34:40Z","parent_hashes":{"log":"","anchor":"'"$genesis_head"'","causal":["'"$alice_zzz_identity"'"],"related":["'"$alice_zzz_identity"'"]},"legacy":{},"payload":{"principal":"aaron","role":"reporter"}}'
+  grant_commit="$(git commit-tree -S -m "acl.role_granted aaron reporter order" -m "$grant_body" "$empty_tree" -p "$genesis_head" -p "$alice_zzz_identity")"
+  identity_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002603","event_type":"identity.device_added","object":{"kind":"identity","id":"identity:aaron:desktop"},"idempotency_key":"018f0000-0000-7000-8000-000000002604","actor":{"principal":"alice","device":"zzz"},"seq":2,"occurred_at":"2026-05-13T18:34:41Z","parent_hashes":{"log":"'"$grant_commit"'","anchor":"","causal":[],"related":[]},"legacy":{},"payload":{"principal":"aaron","device":"desktop","signing_key":{"scheme":"ssh","public_key":"'"$BOB_PUBLIC_KEY"'","fingerprint":"'"$BOB_FINGERPRINT"'"}}}'
+  identity_commit="$(git commit-tree -S -m "identity.device_added aaron/desktop order" -m "$identity_body" "$empty_tree" -p "$grant_commit")"
+  git update-ref refs/gitomi/inbox/alice/zzz "$identity_commit"
+  issue_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002605","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000002606"},"idempotency_key":"018f0000-0000-7000-8000-000000002607","actor":{"principal":"aaron","device":"desktop"},"seq":1,"occurred_at":"2026-05-13T18:34:42Z","parent_hashes":{"log":"","anchor":"'"$genesis_head"'","causal":["'"$identity_commit"'"],"related":["'"$identity_commit"'"]},"legacy":{},"payload":{"title":"Aaron order-independent issue"}}'
+  git config user.name "Bob"
+  git config user.email "bob@example.com"
+  git config user.signingkey "$BOB_KEY"
+  issue_commit="$(git commit-tree -S -m "issue.opened aaron order-independent" -m "$issue_body" "$empty_tree" -p "$genesis_head" -p "$identity_commit")"
+  git update-ref refs/gitomi/inbox/aaron/desktop "$issue_commit"
+  git push origin refs/gitomi/genesis:refs/gitomi/genesis refs/gitomi/inbox/alice/laptop:refs/gitomi/inbox/alice/laptop refs/gitomi/inbox/alice/zzz:refs/gitomi/inbox/alice/zzz refs/gitomi/inbox/aaron/desktop:refs/gitomi/inbox/aaron/desktop >/dev/null
+)
+(
+  cd "$sync_auth_order/replica"
+  gt sync --pull-only >sync-auth-order.out 2>&1
+  output="$(cat sync-auth-order.out)"
+  assert_not_contains "$output" "quarantined"
+  events="$(gt events list --json)"
+  aaron_line="$(printf '%s\n' "$events" | grep '"actor_principal":"aaron"')"
+  assert_contains "$aaron_line" '"domain_status":"accepted"'
+  issues="$(gt issue list --json)"
+  assert_contains "$issues" '"title":"Aaron order-independent issue"'
+  gt fsck >/dev/null
 )
 
 echo "integration: unauthorized remote event is audited and not projected"

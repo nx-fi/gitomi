@@ -362,6 +362,25 @@ pub fn buildIssueUpdatedJson(
     return try buf.toOwnedSlice(allocator);
 }
 
+pub fn buildIssueLegacyAliasJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    issue_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    legacy: LegacyInfo,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefixWithLegacy(&buf, allocator, cfg, seq, issue_id, event_uuid, idem, occurred_at, parents, "issue.updated", "issue", legacy);
+    try buf.appendSlice(allocator, "\"payload\":{}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
 pub fn buildProjectCreatedJson(
     allocator: Allocator,
     cfg: Config,
@@ -1176,6 +1195,25 @@ pub fn buildPullUpdatedJson(
         buf.items.len -= 1;
     }
     try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildPullLegacyAliasJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    pull_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    legacy: LegacyInfo,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefixWithLegacy(&buf, allocator, cfg, seq, pull_id, event_uuid, idem, occurred_at, parents, "pull.updated", "pull", legacy);
+    try buf.appendSlice(allocator, "\"payload\":{}}");
     return try buf.toOwnedSlice(allocator);
 }
 

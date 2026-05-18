@@ -374,9 +374,29 @@ pub fn admitStagedInboxRefs(allocator: Allocator, staging_prefix: []const u8) !v
     const empty_tree = try emptyTreeOid(allocator);
     defer allocator.free(empty_tree);
 
+    var ordered_refs: std.ArrayList(StagedInboxRefInfo) = .empty;
+    defer ordered_refs.deinit(allocator);
     for (refs) |staged_ref| {
-        try admitStagedInboxRef(allocator, staging_prefix, staged_ref, empty_tree, genesis_oid.?, expected_repo_id);
+        try ordered_refs.append(allocator, .{
+            .ref = staged_ref,
+            .has_authorization_events = try stagedInboxRefHasAuthorizationEvents(allocator, staging_prefix, staged_ref, genesis_oid.?),
+        });
     }
+    std.mem.sort(StagedInboxRefInfo, ordered_refs.items, {}, stagedInboxRefLessThan);
+
+    for (ordered_refs.items) |staged_ref| {
+        try admitStagedInboxRef(allocator, staging_prefix, staged_ref.ref, empty_tree, genesis_oid.?, expected_repo_id);
+    }
+}
+
+const StagedInboxRefInfo = struct {
+    ref: []const u8,
+    has_authorization_events: bool,
+};
+
+fn stagedInboxRefLessThan(_: void, left: StagedInboxRefInfo, right: StagedInboxRefInfo) bool {
+    if (left.has_authorization_events != right.has_authorization_events) return left.has_authorization_events;
+    return std.mem.lessThan(u8, left.ref, right.ref);
 }
 
 fn countNewStagedInboxRefs(allocator: Allocator, staging_prefix: []const u8, refs: []const []const u8) !usize {
@@ -392,6 +412,42 @@ fn countNewStagedInboxRefs(allocator: Allocator, staging_prefix: []const u8, ref
         }
     }
     return count;
+}
+
+fn stagedInboxRefHasAuthorizationEvents(allocator: Allocator, staging_prefix: []const u8, staged_ref: []const u8, genesis_oid: []const u8) !bool {
+    const local_ref = try localRefFromStaged(allocator, staging_prefix, staged_ref);
+    defer allocator.free(local_ref);
+    const local_oid = try resolveOptionalRef(allocator, local_ref);
+    defer if (local_oid) |oid| allocator.free(oid);
+
+    const log = try inboxCommitLog(allocator, staged_ref, local_oid, genesis_oid);
+    defer allocator.free(log);
+
+    var records = std.mem.splitScalar(u8, log, 0x1e);
+    while (records.next()) |record_raw| {
+        const record = inbox_commit.parseRecord(record_raw) orelse continue;
+        if (bodyHasAuthorizationEventType(allocator, record.body)) return true;
+    }
+    return false;
+}
+
+fn bodyHasAuthorizationEventType(allocator: Allocator, body: []const u8) bool {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return false;
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return false,
+    };
+    const event_type_value = root.get("event_type") orelse return false;
+    const event_type = switch (event_type_value) {
+        .string => |value| value,
+        else => return false,
+    };
+    return eventTypeIsAuthorization(event_type);
+}
+
+fn eventTypeIsAuthorization(event_type: []const u8) bool {
+    return std.mem.startsWith(u8, event_type, "acl.") or std.mem.startsWith(u8, event_type, "identity.");
 }
 
 pub fn admitStagedInboxRef(
@@ -418,16 +474,26 @@ pub fn admitStagedInboxRef(
         }
 
         if (try isAncestor(allocator, old_oid, staged_oid)) {
-            const admitted = validateInboxRange(allocator, staged_ref, local_ref, old_oid, empty_tree, genesis_oid, expected_repo_id) catch |err| {
+            var progress = InboxRangeProgress.init(allocator);
+            defer progress.deinit();
+            validateInboxRangeInto(allocator, staged_ref, local_ref, old_oid, empty_tree, genesis_oid, expected_repo_id, &progress) catch |err| {
                 if (errors.isUserError(err)) {
+                    if (progress.admit_prefix_on_error and progress.last_valid_oid != null) {
+                        const last_valid_oid = progress.last_valid_oid.?;
+                        const updated = try gitChecked(allocator, &.{ "update-ref", local_ref, last_valid_oid, old_oid });
+                        defer allocator.free(updated);
+                    }
                     try quarantineStagedRef(allocator, staging_prefix, staged_ref, staged_oid);
+                    if (progress.admit_prefix_on_error and progress.last_valid_oid != null) {
+                        try out("fast-forwarded {s} by first {d} valid event{s}; quarantined rejected remote head\n", .{ local_ref, progress.count, if (progress.count == 1) "" else "s" });
+                    }
                     return;
                 }
                 return err;
             };
             const updated = try gitChecked(allocator, &.{ "update-ref", local_ref, staged_oid, old_oid });
             defer allocator.free(updated);
-            try out("fast-forwarded {s} by {d} event{s}\n", .{ local_ref, admitted, if (admitted == 1) "" else "s" });
+            try out("fast-forwarded {s} by {d} event{s}\n", .{ local_ref, progress.count, if (progress.count == 1) "" else "s" });
             return;
         }
 
@@ -441,16 +507,26 @@ pub fn admitStagedInboxRef(
         return;
     }
 
-    const admitted = validateInboxRange(allocator, staged_ref, local_ref, null, empty_tree, genesis_oid, expected_repo_id) catch |err| {
+    var progress = InboxRangeProgress.init(allocator);
+    defer progress.deinit();
+    validateInboxRangeInto(allocator, staged_ref, local_ref, null, empty_tree, genesis_oid, expected_repo_id, &progress) catch |err| {
         if (errors.isUserError(err)) {
+            if (progress.admit_prefix_on_error and progress.last_valid_oid != null) {
+                const last_valid_oid = progress.last_valid_oid.?;
+                const updated = try gitChecked(allocator, &.{ "update-ref", local_ref, last_valid_oid, "" });
+                defer allocator.free(updated);
+            }
             try quarantineStagedRef(allocator, staging_prefix, staged_ref, staged_oid);
+            if (progress.admit_prefix_on_error and progress.last_valid_oid != null) {
+                try out("created {s} with first {d} valid event{s}; quarantined rejected remote head\n", .{ local_ref, progress.count, if (progress.count == 1) "" else "s" });
+            }
             return;
         }
         return err;
     };
     const updated = try gitChecked(allocator, &.{ "update-ref", local_ref, staged_oid, "" });
     defer allocator.free(updated);
-    try out("created {s} with {d} event{s}\n", .{ local_ref, admitted, if (admitted == 1) "" else "s" });
+    try out("created {s} with {d} event{s}\n", .{ local_ref, progress.count, if (progress.count == 1) "" else "s" });
 }
 
 fn quarantineStagedRef(allocator: Allocator, staging_prefix: []const u8, staged_ref: []const u8, staged_oid: []const u8) !void {
@@ -500,6 +576,46 @@ pub fn validateInboxRange(
     genesis_oid: []const u8,
     expected_repo_id: []const u8,
 ) !usize {
+    var progress = InboxRangeProgress.init(allocator);
+    defer progress.deinit();
+    try validateInboxRangeInto(allocator, ref, expected_actor_ref, local_base, empty_tree, genesis_oid, expected_repo_id, &progress);
+    return progress.count;
+}
+
+pub const InboxRangeProgress = struct {
+    allocator: Allocator,
+    count: usize = 0,
+    last_valid_oid: ?[]u8 = null,
+    admit_prefix_on_error: bool = true,
+
+    fn init(allocator: Allocator) InboxRangeProgress {
+        return .{ .allocator = allocator };
+    }
+
+    fn deinit(self: *InboxRangeProgress) void {
+        if (self.last_valid_oid) |oid| self.allocator.free(oid);
+        self.last_valid_oid = null;
+    }
+
+    fn rememberValid(self: *InboxRangeProgress, commit: []const u8) !void {
+        const copy = try self.allocator.dupe(u8, commit);
+        errdefer self.allocator.free(copy);
+        if (self.last_valid_oid) |oid| self.allocator.free(oid);
+        self.last_valid_oid = copy;
+        self.count += 1;
+    }
+};
+
+fn validateInboxRangeInto(
+    allocator: Allocator,
+    ref: []const u8,
+    expected_actor_ref: []const u8,
+    local_base: ?[]const u8,
+    empty_tree: []const u8,
+    genesis_oid: []const u8,
+    expected_repo_id: []const u8,
+    progress: *InboxRangeProgress,
+) !void {
     const log = try inboxCommitLog(allocator, ref, local_base, genesis_oid);
     defer allocator.free(log);
     const expected_identity = inbox_commit.parseRefIdentity(expected_actor_ref) orelse {
@@ -507,7 +623,6 @@ pub fn validateInboxRange(
         return CliError.UserError;
     };
 
-    var count: usize = 0;
     var expected_first_parent: ?[]const u8 = if (local_base) |base| base else genesis_oid;
     var actor_seqs = ActorSeqTracker.init(allocator);
     defer actor_seqs.deinit();
@@ -521,7 +636,8 @@ pub fn validateInboxRange(
             try eprint("gt sync: git log returned malformed inbox commit metadata\n", .{});
             return CliError.GitFailed;
         };
-        if (count >= git.max_default_admit_commits) {
+        if (progress.count >= git.max_default_admit_commits) {
+            progress.admit_prefix_on_error = false;
             try eprint("gt sync: refusing to admit more than {d} new inbox commits in one pull\n", .{git.max_default_admit_commits});
             return CliError.UserError;
         }
@@ -541,9 +657,8 @@ pub fn validateInboxRange(
         }
         try rememberActorSeq(&actor_seqs, record.commit, ref, envelope.actor_principal, envelope.actor_device, envelope.seq);
         expected_first_parent = record.commit;
-        count += 1;
+        try progress.rememberValid(record.commit);
     }
-    return count;
 }
 
 fn validateEnvelopeActorMatchesRef(

@@ -200,6 +200,7 @@ pub fn applyIssueProjection(allocator: Allocator, db: *SqliteDb, event_hash: []c
     }
 
     if (!(try acceptedCreationInFrontier(allocator, db, "issue.opened", envelope.object_id, event_hash))) return "object_not_created";
+    try insertLegacyAliasFromEnvelope(db, "issue", envelope.object_id, legacy);
 
     if (std.mem.eql(u8, envelope.event_type, "issue.updated")) {
         if (try applyIssueUpdated(allocator, db, payload, event_hash, envelope)) |reason| return reason;
@@ -2518,6 +2519,7 @@ pub fn applyPullProjection(allocator: Allocator, db: *SqliteDb, event_hash: []co
     }
 
     if (!(try acceptedCreationInFrontier(allocator, db, "pull.opened", envelope.object_id, event_hash))) return "object_not_created";
+    try insertLegacyAliasFromEnvelope(db, "pull", envelope.object_id, legacy);
 
     if (std.mem.eql(u8, envelope.event_type, "pull.updated")) {
         if (try applyPullUpdated(allocator, db, payload, event_hash, envelope)) |reason| return reason;

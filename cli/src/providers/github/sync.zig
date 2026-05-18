@@ -1,5 +1,7 @@
 const std = @import("std");
 const errors = @import("../../errors.zig");
+const event_mod = @import("../../event.zig");
+const EventWriter = @import("../../event_writer.zig").EventWriter;
 const git = @import("../../git.zig");
 const index = @import("../../index.zig");
 const io = @import("../../io.zig");
@@ -192,7 +194,7 @@ fn runSyncOnce(allocator: Allocator, options: Options) !void {
                     try eprint("gt github sync: remote import bot inbox kept advancing; retry later after `gt sync --pull-only`\n", .{});
                     return CliError.GitFailed;
                 }
-                try eprint("gt github sync: remote import bot inbox advanced during sync; retrying import ({d}/{d})\n", .{ attempt + 2, bridge_publish_attempts });
+                try eprint("gt github sync: remote import bot inbox advanced during sync; retrying ({d}/{d})\n", .{ attempt + 2, bridge_publish_attempts });
                 continue;
             },
             else => return err,
@@ -253,6 +255,7 @@ fn runSyncOnceAttempt(allocator: Allocator, options: Options) !void {
     }
 
     var export_result = exporter.ExportResult{};
+    defer export_result.deinit(allocator);
     if (options.export_enabled) {
         var state = try loadState(allocator, repo, options.repo);
         export_result = try exporter.exportToGithub(allocator, .{
@@ -270,6 +273,13 @@ fn runSyncOnceAttempt(allocator: Allocator, options: Options) !void {
             .quiet = true,
             .mode = options.mode,
         });
+        if (!options.dry_run and export_result.alias_mappings.items.len != 0) {
+            if (options.git_sync) {
+                try publishExportAliasMappings(allocator, options, bot_inbox_ref, export_result.alias_mappings.items);
+            } else {
+                _ = try writeExportAliasEvents(allocator, options, export_result.alias_mappings.items);
+            }
+        }
         if (export_result.max_ordinal > state.last_export_ordinal) {
             state.last_export_ordinal = export_result.max_ordinal;
             if (!options.dry_run) try saveState(allocator, repo, options.repo, state);
@@ -307,6 +317,120 @@ fn publishGitomiBridgeRefs(
             return err;
         },
         else => return err,
+    };
+}
+
+fn publishExportAliasMappings(
+    allocator: Allocator,
+    options: Options,
+    bot_inbox_ref: []const u8,
+    mappings: []const exporter.ExportAliasMapping,
+) !void {
+    const bot_base_oid = try git.resolveOptionalRef(allocator, bot_inbox_ref);
+    defer if (bot_base_oid) |oid| allocator.free(oid);
+
+    const written = try writeExportAliasEvents(allocator, options, mappings);
+    if (written == 0) return;
+
+    sync_mod.syncPushInboxRef(allocator, options.remote, bot_inbox_ref) catch |err| switch (err) {
+        error.RemoteRejected => {
+            try eprint("gt github sync: abandoning unpublished export aliases after remote fast-forward race\n", .{});
+            try resetLocalRefTo(allocator, bot_inbox_ref, bot_base_oid);
+            return err;
+        },
+        else => return err,
+    };
+}
+
+fn writeExportAliasEvents(
+    allocator: Allocator,
+    options: Options,
+    mappings: []const exporter.ExportAliasMapping,
+) !usize {
+    var repo = try repo_mod.discoverRepo(allocator);
+    defer repo.deinit();
+    try index.ensureIndex(allocator, repo);
+
+    var db = try index.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
+    var writer = try EventWriter.initForActor(allocator, "gt github sync", options.bot_principal, options.bot_device);
+    defer writer.deinit();
+
+    var written: usize = 0;
+    for (mappings) |mapping| {
+        if (mapping.number <= 0) continue;
+        const kind = exportAliasKindName(mapping.kind);
+        if (try exportAliasExists(&db, kind, mapping.object_id, mapping.number)) continue;
+
+        const number_u64: u64 = @intCast(mapping.number);
+        const event_uuid = try util.newUuidV7(allocator);
+        defer allocator.free(event_uuid);
+        const idem = try util.newUuidV7(allocator);
+        defer allocator.free(idem);
+        const occurred_at = try util.rfc3339Now(allocator);
+        defer allocator.free(occurred_at);
+
+        const body = switch (mapping.kind) {
+            .issue => try event_mod.buildIssueLegacyAliasJson(
+                allocator,
+                writer.cfg,
+                writer.nextSeq(),
+                mapping.object_id,
+                event_uuid,
+                idem,
+                occurred_at,
+                writer.stagedEventParents(),
+                .{ .github_issue_number = number_u64 },
+            ),
+            .pull => try event_mod.buildPullLegacyAliasJson(
+                allocator,
+                writer.cfg,
+                writer.nextSeq(),
+                mapping.object_id,
+                event_uuid,
+                idem,
+                occurred_at,
+                writer.stagedEventParents(),
+                .{ .github_pull_number = number_u64 },
+            ),
+        };
+        defer allocator.free(body);
+
+        var object_ref_buf: [util.short_object_ref_len]u8 = undefined;
+        const object_ref = util.shortObjectRef(&object_ref_buf, mapping.object_id);
+        const subject = try std.fmt.allocPrint(allocator, "{s}.updated #{s} GitHub #{d} alias", .{ kind, object_ref, mapping.number });
+        defer allocator.free(subject);
+        const commit = try writer.stage("gt github sync", subject, body);
+        allocator.free(commit);
+        written += 1;
+    }
+
+    try writer.commitStaged();
+    return written;
+}
+
+fn exportAliasExists(db: *index.SqliteDb, kind: []const u8, object_id: []const u8, number: i64) !bool {
+    var stmt = try db.prepare(
+        \\SELECT 1
+        \\FROM legacy_aliases
+        \\WHERE provider = 'github'
+        \\  AND object_kind = ?
+        \\  AND object_id = ?
+        \\  AND number = ?
+        \\LIMIT 1
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, kind);
+    try stmt.bindText(2, object_id);
+    try stmt.bindInt64(3, number);
+    return try stmt.step();
+}
+
+fn exportAliasKindName(kind: exporter.ExportAliasKind) []const u8 {
+    return switch (kind) {
+        .issue => "issue",
+        .pull => "pull",
     };
 }
 

@@ -198,7 +198,7 @@ pub fn validateEnvelopeObject(allocator: Allocator, root: std.json.ObjectMap) !?
         .value => |value| value,
         .message => |message| return message,
     };
-    _ = switch (try requiredEnvelopeObject(allocator, root, "legacy", "legacy")) {
+    const legacy = switch (try requiredEnvelopeObject(allocator, root, "legacy", "legacy")) {
         .value => |value| value,
         .message => |message| return message,
     };
@@ -252,7 +252,7 @@ pub fn validateEnvelopeObject(allocator: Allocator, root: std.json.ObjectMap) !?
         .value => |value| value,
         .message => |message| return message,
     };
-    if (payloadRequirementError(event_type, kind, payload)) |message| {
+    if (payloadRequirementError(event_type, kind, payload, legacy)) |message| {
         return try allocator.dupe(u8, message);
     }
     if (objectIdRequirementError(event_type, kind, object_id, payload)) |message| {
@@ -428,7 +428,7 @@ pub fn roleAtLeast(actual: []const u8, required: []const u8) bool {
     return roleRank(actual) >= roleRank(required) and roleRank(required) != 0;
 }
 
-pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, payload: std.json.ObjectMap) ?[]const u8 {
+pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, payload: std.json.ObjectMap, legacy: std.json.ObjectMap) ?[]const u8 {
     if (std.mem.startsWith(u8, event_type, "issue.") and !std.mem.eql(u8, object_kind, "issue")) {
         return "issue event object.kind must be issue";
     }
@@ -508,7 +508,7 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!optionalStringArrayWithin(payload, "assignees_added", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "issue.updated payload.assignees_added exceeds v1 collection limits";
         if (!optionalStringArray(payload, "assignees_removed")) return "issue.updated payload.assignees_removed must be an array of strings";
         if (!optionalStringArrayWithin(payload, "assignees_removed", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "issue.updated payload.assignees_removed exceeds v1 collection limits";
-        if (!hasAnyKey(payload, &.{ "title", "body", "state", "milestone", "type", "priority", "status", "projects", "labels_added", "labels_removed", "assignees_added", "assignees_removed" })) return "issue.updated payload must contain at least one update field";
+        if (!hasAnyKey(payload, &.{ "title", "body", "state", "milestone", "type", "priority", "status", "projects", "labels_added", "labels_removed", "assignees_added", "assignees_removed" }) and !hasIssueLegacyAlias(legacy)) return "issue.updated payload must contain at least one update field";
         return null;
     }
     if (std.mem.eql(u8, event_type, "issue.title_set")) return requirePayloadStringWithin(payload, "issue.title_set", "title", git.max_payload_title_bytes);
@@ -793,7 +793,7 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!optionalStringArrayWithin(payload, "reviewers_added", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "pull.updated payload.reviewers_added exceeds v1 collection limits";
         if (!optionalStringArray(payload, "reviewers_removed")) return "pull.updated payload.reviewers_removed must be an array of strings";
         if (!optionalStringArrayWithin(payload, "reviewers_removed", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "pull.updated payload.reviewers_removed exceeds v1 collection limits";
-        if (!hasAnyKey(payload, &.{ "title", "body", "state", "base_ref", "head_ref", "labels_added", "labels_removed", "assignees_added", "assignees_removed", "reviewers_added", "reviewers_removed" })) return "pull.updated payload must contain at least one update field";
+        if (!hasAnyKey(payload, &.{ "title", "body", "state", "base_ref", "head_ref", "labels_added", "labels_removed", "assignees_added", "assignees_removed", "reviewers_added", "reviewers_removed" }) and !hasPullLegacyAlias(legacy)) return "pull.updated payload must contain at least one update field";
         return null;
     }
     if (std.mem.eql(u8, event_type, "pull.title_set")) return requirePayloadStringWithin(payload, "pull.title_set", "title", git.max_payload_title_bytes);
@@ -1298,6 +1298,20 @@ fn hasAnyKey(object: std.json.ObjectMap, keys: []const []const u8) bool {
         if (object.get(key) != null) return true;
     }
     return false;
+}
+
+fn hasIssueLegacyAlias(legacy: std.json.ObjectMap) bool {
+    return hasPositiveInteger(legacy, "github_issue_number") or hasPositiveInteger(legacy, "gitlab_issue_iid");
+}
+
+fn hasPullLegacyAlias(legacy: std.json.ObjectMap) bool {
+    return hasPositiveInteger(legacy, "github_pull_number") or hasPositiveInteger(legacy, "gitlab_merge_request_iid");
+}
+
+fn hasPositiveInteger(object: std.json.ObjectMap, key: []const u8) bool {
+    const value = object.get(key) orelse return false;
+    if (value != .integer) return false;
+    return value.integer > 0;
 }
 
 fn arrayLen(object: std.json.ObjectMap, key: []const u8) usize {

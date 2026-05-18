@@ -53,6 +53,36 @@ pub const ExportResult = struct {
     scanned: usize = 0,
     exported: usize = 0,
     max_ordinal: i64 = 0,
+    alias_mappings: std.ArrayList(ExportAliasMapping) = .empty,
+
+    pub fn deinit(self: *ExportResult, allocator: Allocator) void {
+        for (self.alias_mappings.items) |mapping| allocator.free(mapping.object_id);
+        self.alias_mappings.deinit(allocator);
+        self.* = .{};
+    }
+
+    fn recordAliasMapping(self: *ExportResult, allocator: Allocator, kind: ExportAliasKind, object_id: []const u8, number: i64) !void {
+        if (number <= 0) return;
+        for (self.alias_mappings.items) |mapping| {
+            if (mapping.kind == kind and mapping.number == number and std.mem.eql(u8, mapping.object_id, object_id)) return;
+        }
+        try self.alias_mappings.append(allocator, .{
+            .kind = kind,
+            .object_id = try allocator.dupe(u8, object_id),
+            .number = number,
+        });
+    }
+};
+
+pub const ExportAliasKind = enum {
+    issue,
+    pull,
+};
+
+pub const ExportAliasMapping = struct {
+    kind: ExportAliasKind,
+    object_id: []u8,
+    number: i64,
 };
 
 pub fn cmdExport(allocator: Allocator, args: []const []const u8) !void {
@@ -134,7 +164,8 @@ pub fn cmdExport(allocator: Allocator, args: []const []const u8) !void {
         .use_gh = use_gh,
         .mode = mode,
     };
-    _ = try exportToGithub(allocator, options);
+    var result = try exportToGithub(allocator, options);
+    defer result.deinit(allocator);
 }
 
 const MappingStore = struct {
@@ -427,6 +458,11 @@ pub fn exportToGithub(allocator: Allocator, options: ExportOptions) !ExportResul
 
     var db = try index.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
+    var result = ExportResult{};
+    errdefer result.deinit(allocator);
+    try loadIndexLegacyAliases(&mappings, &db);
+    try collectMissingAliasMappings(allocator, &mappings, &db, &result);
+
     var stmt = try db.prepare(
         \\SELECT ordinal, event_type, object_kind, object_id, actor_principal, actor_device, body
         \\FROM events
@@ -438,7 +474,6 @@ pub fn exportToGithub(allocator: Allocator, options: ExportOptions) !ExportResul
     defer stmt.deinit();
     try stmt.bindInt64(1, options.after_ordinal);
 
-    var result = ExportResult{};
     while (try stmt.step()) {
         const ordinal = stmt.columnInt64(0);
         if (ordinal > result.max_ordinal) result.max_ordinal = ordinal;
@@ -465,7 +500,7 @@ pub fn exportToGithub(allocator: Allocator, options: ExportOptions) !ExportResul
             }
         }
 
-        if (try exportEvent(allocator, client, &mappings, options, event_type, object_kind, object_id, body)) {
+        if (try exportEvent(allocator, client, &mappings, &result, options, event_type, object_kind, object_id, body)) {
             result.exported += 1;
             if (options.max_events != 0 and result.exported >= options.max_events) break;
         }
@@ -475,6 +510,68 @@ pub fn exportToGithub(allocator: Allocator, options: ExportOptions) !ExportResul
         try out("github export: replayed {d} event{s}\n", .{ result.exported, if (result.exported == 1) "" else "s" });
     }
     return result;
+}
+
+fn loadIndexLegacyAliases(mappings: *MappingStore, db: *index.SqliteDb) !void {
+    var stmt = try db.prepare(
+        \\SELECT object_kind, object_id, number
+        \\FROM legacy_aliases
+        \\WHERE provider = 'github'
+        \\  AND (object_kind = 'issue' OR object_kind = 'pull')
+        \\ORDER BY object_kind, object_id, number
+    );
+    defer stmt.deinit();
+
+    while (try stmt.step()) {
+        const kind = try stmt.columnTextDup(mappings.allocator, 0);
+        defer mappings.allocator.free(kind);
+        const object_id = try stmt.columnTextDup(mappings.allocator, 1);
+        defer mappings.allocator.free(object_id);
+        const number = stmt.columnInt64(2);
+        if (number <= 0) continue;
+        try mappings.put(kind, object_id, number);
+    }
+}
+
+fn collectMissingAliasMappings(allocator: Allocator, mappings: *MappingStore, db: *index.SqliteDb, result: *ExportResult) !void {
+    var it = mappings.map.iterator();
+    while (it.next()) |entry| {
+        const separator = std.mem.indexOfScalar(u8, entry.key_ptr.*, '\x1f') orelse continue;
+        const kind = entry.key_ptr.*[0..separator];
+        if (!std.mem.eql(u8, kind, "issue") and !std.mem.eql(u8, kind, "pull")) continue;
+        const object_id = entry.key_ptr.*[separator + 1 ..];
+        if (!try localObjectExists(db, kind, object_id)) continue;
+        if (try legacyAliasExists(db, kind, object_id, entry.value_ptr.*)) continue;
+        try result.recordAliasMapping(allocator, if (std.mem.eql(u8, kind, "issue")) .issue else .pull, object_id, entry.value_ptr.*);
+    }
+}
+
+fn localObjectExists(db: *index.SqliteDb, kind: []const u8, object_id: []const u8) !bool {
+    const sql = if (std.mem.eql(u8, kind, "issue"))
+        "SELECT 1 FROM issues WHERE id = ? LIMIT 1"
+    else
+        "SELECT 1 FROM pulls WHERE id = ? LIMIT 1";
+    var stmt = try db.prepare(sql);
+    defer stmt.deinit();
+    try stmt.bindText(1, object_id);
+    return try stmt.step();
+}
+
+fn legacyAliasExists(db: *index.SqliteDb, kind: []const u8, object_id: []const u8, number: i64) !bool {
+    var stmt = try db.prepare(
+        \\SELECT 1
+        \\FROM legacy_aliases
+        \\WHERE provider = 'github'
+        \\  AND object_kind = ?
+        \\  AND object_id = ?
+        \\  AND number = ?
+        \\LIMIT 1
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, kind);
+    try stmt.bindText(2, object_id);
+    try stmt.bindInt64(3, number);
+    return try stmt.step();
 }
 
 const graphql_repository_id_query =
@@ -813,6 +910,7 @@ fn exportEvent(
     allocator: Allocator,
     client: GitHubClient,
     mappings: *MappingStore,
+    result: *ExportResult,
     options: ExportOptions,
     event_type: []const u8,
     object_kind: []const u8,
@@ -831,10 +929,10 @@ fn exportEvent(
     };
 
     if (std.mem.startsWith(u8, event_type, "issue.")) {
-        return try exportIssueEvent(allocator, client, mappings, options, event_type, object_id, root, payload);
+        return try exportIssueEvent(allocator, client, mappings, result, options, event_type, object_id, root, payload);
     }
     if (std.mem.startsWith(u8, event_type, "pull.")) {
-        return try exportPullEvent(allocator, client, mappings, options, event_type, object_id, root, payload);
+        return try exportPullEvent(allocator, client, mappings, result, options, event_type, object_id, root, payload);
     }
     if (std.mem.startsWith(u8, event_type, "comment.") and std.mem.eql(u8, object_kind, "comment")) {
         return try exportCommentEvent(allocator, client, mappings, options, event_type, object_id, payload);
@@ -846,6 +944,7 @@ fn exportIssueEvent(
     allocator: Allocator,
     client: GitHubClient,
     mappings: *MappingStore,
+    result: *ExportResult,
     options: ExportOptions,
     event_type: []const u8,
     issue_id: []const u8,
@@ -853,7 +952,10 @@ fn exportIssueEvent(
     payload: std.json.ObjectMap,
 ) !bool {
     if (std.mem.eql(u8, event_type, "issue.opened")) {
-        if (try mappings.get("issue", issue_id) != null) return false;
+        if (try mappings.get("issue", issue_id)) |number| {
+            if (legacyNumber(root, "github_issue_number") == null) try result.recordAliasMapping(allocator, .issue, issue_id, number);
+            return false;
+        }
         if (options.reuse_legacy) {
             if (legacyNumber(root, "github_issue_number")) |number| {
                 try mappings.put("issue", issue_id, number);
@@ -872,6 +974,7 @@ fn exportIssueEvent(
             break :blk if (client.dry_run) try mappings.putSynthetic("issue", issue_id) else parseResponseNumber(allocator, raw, "number") orelse return CliError.UserError;
         };
         if (!client.dry_run) try mappings.put("issue", issue_id, number);
+        if (!client.dry_run and legacyNumber(root, "github_issue_number") == null) try result.recordAliasMapping(allocator, .issue, issue_id, number);
         if (options.mode == .graphql) {
             try replayStringArrayLabels(allocator, client, number, payload.get("labels"), true);
             try replayStringArrayAssignees(allocator, client, number, payload.get("assignees"), true);
@@ -934,6 +1037,7 @@ fn exportPullEvent(
     allocator: Allocator,
     client: GitHubClient,
     mappings: *MappingStore,
+    result: *ExportResult,
     options: ExportOptions,
     event_type: []const u8,
     pull_id: []const u8,
@@ -941,7 +1045,10 @@ fn exportPullEvent(
     payload: std.json.ObjectMap,
 ) !bool {
     if (std.mem.eql(u8, event_type, "pull.opened")) {
-        if (try mappings.get("pull", pull_id) != null) return false;
+        if (try mappings.get("pull", pull_id)) |number| {
+            if (legacyNumber(root, "github_pull_number") == null) try result.recordAliasMapping(allocator, .pull, pull_id, number);
+            return false;
+        }
         if (options.reuse_legacy) {
             if (legacyNumber(root, "github_pull_number")) |number| {
                 try mappings.put("pull", pull_id, number);
@@ -960,6 +1067,7 @@ fn exportPullEvent(
             break :blk if (client.dry_run) try mappings.putSynthetic("pull", pull_id) else parseResponseNumber(allocator, raw, "number") orelse return CliError.UserError;
         };
         if (!client.dry_run) try mappings.put("pull", pull_id, number);
+        if (!client.dry_run and legacyNumber(root, "github_pull_number") == null) try result.recordAliasMapping(allocator, .pull, pull_id, number);
         return true;
     }
 
