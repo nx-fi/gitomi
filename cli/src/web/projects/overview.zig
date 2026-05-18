@@ -1430,8 +1430,8 @@ fn appendProjectPropertiesPanel(buf: *std.ArrayList(u8), allocator: Allocator, d
     defer allocator.free(start_label);
     const end_label = if (summary.end_at.len != 0) try dateLabelOwned(allocator, summary.end_at) else try allocator.dupe(u8, "No end date");
     defer allocator.free(end_label);
-    try appendProjectDateProperty(buf, allocator, summary, "Start date", "Start date", "set-start-date", "start_at", summary.start_at, start_label, "No start date");
-    try appendProjectDateProperty(buf, allocator, summary, "End date", "End date", "set-end-date", "end_at", summary.end_at, end_label, "No end date");
+    try appendProjectDateProperty(buf, allocator, summary, "Start date", "Start date", "set-start-date", "start_at", summary.start_at, start_label, "No start date", "", summary.end_at);
+    try appendProjectDateProperty(buf, allocator, summary, "End date", "End date", "set-end-date", "end_at", summary.end_at, end_label, "No end date", summary.start_at, "");
     try appendProjectLabelsProperty(buf, allocator, db, summary, metrics);
     try buf.appendSlice(allocator,
         \\  </dl>
@@ -1638,13 +1638,15 @@ fn appendProjectDateProperty(
     input_value: []const u8,
     display_value: []const u8,
     placeholder: []const u8,
+    invalid_until: []const u8,
+    invalid_from: []const u8,
 ) !void {
     try appendProjectPropertyMenuStart(buf, allocator, label, "icon-calendar", menu_label, display_value);
     try buf.appendSlice(allocator, "<form class=\"project-property-date-form project-property-date-picker-form\" method=\"post\" action=\"/projects/properties\">");
     try appendProjectHiddenFields(buf, allocator, summary);
     try appendTemplate(buf, allocator,
         \\<input type="hidden" name="action" value="{action}">
-        \\<input type="date" name="{input_name}" value="{input_value}" aria-label="{menu_label}" data-date-picker data-date-picker-inline="yes" data-date-picker-autosubmit="yes" data-date-picker-placeholder="{placeholder}">
+        \\<input type="date" name="{input_name}" value="{input_value}" aria-label="{menu_label}" data-date-picker data-date-picker-inline="yes" data-date-picker-autosubmit="yes" data-date-picker-placeholder="{placeholder}"
     , .{
         .action = action,
         .input_name = input_name,
@@ -1652,6 +1654,13 @@ fn appendProjectDateProperty(
         .menu_label = menu_label,
         .placeholder = placeholder,
     });
+    if (invalid_until.len != 0) {
+        try appendTemplate(buf, allocator, " data-date-picker-invalid-until=\"{invalid_until}\"", .{ .invalid_until = invalid_until });
+    }
+    if (invalid_from.len != 0) {
+        try appendTemplate(buf, allocator, " data-date-picker-invalid-from=\"{invalid_from}\"", .{ .invalid_from = invalid_from });
+    }
+    try buf.appendSlice(allocator, ">");
     try buf.appendSlice(allocator, "</form>");
     try appendProjectPropertyMenuEnd(buf, allocator);
 }

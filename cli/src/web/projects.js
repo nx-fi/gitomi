@@ -755,6 +755,10 @@
     const placeholder = input.dataset.datePickerPlaceholder || "Select date";
     const label = input.dataset.datePickerLabel || input.getAttribute("aria-label") || placeholder;
     const canClear = input.dataset.datePickerClear !== "no" && !input.required;
+    const invalidUntilDate = parseDateKey(input.dataset.datePickerInvalidUntil || "");
+    const invalidUntilKey = invalidUntilDate ? dateKey(invalidUntilDate) : "";
+    const invalidFromDate = parseDateKey(input.dataset.datePickerInvalidFrom || "");
+    const invalidFromKey = invalidFromDate ? dateKey(invalidFromDate) : "";
     const root = document.createElement("div");
     const calendar = document.createElement("div");
     const today = todayDate();
@@ -826,9 +830,15 @@
       if (trigger) trigger.setAttribute("aria-expanded", "true");
       render();
       const selected = calendar.querySelector(".date-picker-day.is-selected") ||
-        calendar.querySelector(".date-picker-day.is-today") ||
-        calendar.querySelector(".date-picker-day");
+        calendar.querySelector(".date-picker-day.is-today:not(:disabled)") ||
+        calendar.querySelector(".date-picker-day:not(:disabled)");
       if (selected) selected.focus();
+    }
+
+    function isInvalidDateKey(key) {
+      if (invalidUntilKey && key <= invalidUntilKey) return true;
+      if (invalidFromKey && key >= invalidFromKey) return true;
+      return false;
     }
 
     function renderMonth(monthDate) {
@@ -836,13 +846,11 @@
       const selectedKey = input.value || "";
       const todayKey = dateKey(today);
       const section = document.createElement("section");
-      const title = document.createElement("h3");
       const weekdays = document.createElement("div");
       const days = document.createElement("div");
       const gridStart = monthGridStart(monthDate);
 
       section.className = "date-picker-month";
-      title.textContent = monthTitle(monthDate);
       weekdays.className = "date-picker-weekdays";
       ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].forEach(function (name) {
         const weekday = document.createElement("span");
@@ -860,6 +868,11 @@
         button.dataset.date = key;
         button.textContent = String(date.getDate());
         button.setAttribute("aria-label", dateLabel(key, key));
+        if (isInvalidDateKey(key)) {
+          button.disabled = true;
+          button.setAttribute("aria-disabled", "true");
+          button.classList.add("is-disabled");
+        }
         if (date.getMonth() !== month) button.classList.add("is-outside");
         if (key < todayKey) button.classList.add("is-past");
         if (key === todayKey) button.classList.add("is-today");
@@ -872,7 +885,6 @@
         days.appendChild(button);
       }
 
-      section.appendChild(title);
       section.appendChild(weekdays);
       section.appendChild(days);
       return section;
@@ -884,6 +896,8 @@
       const head = document.createElement("div");
       const prev = document.createElement("button");
       const next = document.createElement("button");
+      const firstTitle = document.createElement("h3");
+      const secondTitle = document.createElement("h3");
       const months = document.createElement("div");
       head.className = "date-picker-head";
       prev.type = "button";
@@ -894,10 +908,14 @@
       next.className = "date-picker-nav date-picker-next";
       next.setAttribute("aria-label", "Next two months");
       next.innerHTML = "<span aria-hidden=\"true\"></span>";
+      firstTitle.textContent = monthTitle(viewMonth);
+      secondTitle.textContent = monthTitle(addMonths(viewMonth, 1));
       months.className = "date-picker-months";
       months.appendChild(renderMonth(viewMonth));
       months.appendChild(renderMonth(addMonths(viewMonth, 1)));
       head.appendChild(prev);
+      head.appendChild(firstTitle);
+      head.appendChild(secondTitle);
       head.appendChild(next);
       calendar.appendChild(head);
       calendar.appendChild(months);
@@ -916,7 +934,7 @@
     }
 
     function moveFocus(from, amount) {
-      const days = Array.from(calendar.querySelectorAll(".date-picker-day"));
+      const days = Array.from(calendar.querySelectorAll(".date-picker-day:not(:disabled)"));
       const index = days.indexOf(from);
       if (index === -1) return;
       const next = days[index + amount];
@@ -926,7 +944,7 @@
       }
       viewMonth = addMonths(viewMonth, amount > 0 ? 2 : -2);
       render();
-      const refreshed = Array.from(calendar.querySelectorAll(".date-picker-day"));
+      const refreshed = Array.from(calendar.querySelectorAll(".date-picker-day:not(:disabled)"));
       const target = refreshed[Math.max(0, Math.min(refreshed.length - 1, index))];
       if (target) target.focus();
     }
@@ -956,15 +974,19 @@
     }
 
     calendar.addEventListener("click", function (event) {
+      event.stopPropagation();
       const target = event.target;
       const day = target instanceof Element ? target.closest(".date-picker-day") : null;
       if (day && calendar.contains(day)) {
+        event.preventDefault();
+        if (day.disabled) return;
         setInputValue(day.dataset.date || "");
         return;
       }
 
       const nav = target instanceof Element ? target.closest(".date-picker-nav") : null;
       if (nav && calendar.contains(nav)) {
+        event.preventDefault();
         viewMonth = addMonths(viewMonth, nav.classList.contains("date-picker-next") ? 2 : -2);
         render();
         return;
@@ -972,6 +994,7 @@
 
       const clear = target instanceof Element ? target.closest(".date-picker-clear") : null;
       if (clear && calendar.contains(clear)) {
+        event.preventDefault();
         setInputValue("");
       }
     });
@@ -1006,6 +1029,12 @@
     document.querySelectorAll(datePickerSelector).forEach(initDatePicker);
     if (document.body.dataset.datePickerDismissReady === "yes") return;
     document.body.dataset.datePickerDismissReady = "yes";
+    window.addEventListener("pointerdown", function (event) {
+      const target = event.target;
+      if (target instanceof Element && target.closest(".date-picker-calendar")) {
+        event.stopPropagation();
+      }
+    }, true);
     document.addEventListener("pointerdown", function (event) {
       if (!activeDatePicker) return;
       const target = event.target;
