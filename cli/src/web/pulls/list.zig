@@ -72,8 +72,8 @@ pub fn renderPullsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]
         .href = literalHref("/new-pull"),
         .kind = "primary",
     });
-    try appendPullsToolbar(&buf, allocator, filters);
-    try appendPullsListHeader(&buf, allocator, &db, filters, counts);
+    try appendPullsToolbar(&buf, allocator, &db, filters);
+    try appendPullsListHeader(&buf, allocator, filters, counts);
 
     var stmt = try work_items.preparePullListStmt(allocator, &db, filters);
     defer stmt.deinit();
@@ -183,29 +183,38 @@ fn takePullFilterValue(allocator: Allocator, slot: *?[]const u8, source: *?[]u8)
     }
 }
 
-fn appendPullsToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters) !void {
-    const query = try pullSearchInputValue(allocator, filters);
-    defer allocator.free(query);
+fn appendPullsToolbar(buf: *std.ArrayList(u8), allocator: Allocator, db: ?*SqliteDb, filters: PullFilters) !void {
+    const query = filters.q orelse "";
     try appendTemplate(buf, allocator,
         \\<div class="pulls-toolbar issues-toolbar work-items-toolbar">
         \\  <form class="issues-search" action="/pulls" method="get">
         \\    <span class="issues-search-icon" aria-hidden="true"></span>
-        \\    <input type="search" name="q" value="{query}" aria-label="Search pull requests">
-        \\  </form>
-        \\</div>
+        \\    <input type="search" name="q" value="{query}" placeholder="Search pull requests" aria-label="Search pull requests">
     , .{
         .query = query,
     });
+    try appendHiddenPullSearchFilters(buf, allocator, filters);
+    try buf.appendSlice(allocator,
+        \\  </form>
+    );
+    if (db) |database| {
+        try buf.appendSlice(allocator,
+            \\  <div class="work-items-toolbar-actions">
+        );
+        try appendPullFiltersPopover(buf, allocator, database, filters);
+        try buf.appendSlice(allocator,
+            \\  </div>
+        );
+    }
+    try appendPullSearchChips(buf, allocator, filters);
+    try buf.appendSlice(allocator,
+        \\</div>
+    );
 }
 
-fn pullSearchInputValue(allocator: Allocator, filters: PullFilters) ![]u8 {
-    return work_items.pullFilterQueryOwned(allocator, filters);
-}
-
-fn appendPullsListHeader(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, filters: PullFilters, counts: PullCounts) !void {
+fn appendPullsListHeader(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters, counts: PullCounts) !void {
     try buf.appendSlice(allocator,
         \\<header class="pulls-list-head issues-list-head">
-        \\  <div class="issues-select-all"><input type="checkbox" aria-label="Select all pull requests" disabled></div>
         \\  <nav class="issues-state-tabs" aria-label="Pull request state">
     );
     try appendPullStateTab(buf, allocator, "Open", counts.open, .open, filters, pullStateIconClass(.open));
@@ -213,17 +222,200 @@ fn appendPullsListHeader(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sql
     try appendPullStateTab(buf, allocator, "Closed", counts.closed, .closed, filters, pullStateIconClass(.closed));
     try buf.appendSlice(allocator,
         \\  </nav>
-        \\  <div class="issues-filter-menus">
-    );
-    try appendPullFilterMenu(buf, allocator, db, filters, .author);
-    try appendPullFilterMenu(buf, allocator, db, filters, .label);
-    try appendPullFilterMenu(buf, allocator, db, filters, .reviewer);
-    try appendPullFilterMenu(buf, allocator, db, filters, .assignee);
-    try appendPullSortMenu(buf, allocator, filters);
-    try buf.appendSlice(allocator,
-        \\  </div>
         \\</header>
     );
+}
+
+fn appendHiddenPullSearchFilters(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters) !void {
+    try appendHiddenPullFilter(buf, allocator, "state", work_items.pullStateValue(filters.state));
+    try appendHiddenPullFilter(buf, allocator, "author", filters.author);
+    try appendHiddenPullFilter(buf, allocator, "label", filters.label);
+    try appendHiddenPullFilter(buf, allocator, "assignee", filters.assignee);
+    try appendHiddenPullFilter(buf, allocator, "reviewer", filters.reviewer);
+    try appendHiddenPullFilter(buf, allocator, "base", filters.base);
+    try appendHiddenPullFilter(buf, allocator, "head", filters.head);
+    if (filters.sort != .newest) try appendHiddenPullFilter(buf, allocator, "sort", work_items.pullSortValue(filters.sort));
+}
+
+fn appendHiddenPullFilter(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8, value: ?[]const u8) !void {
+    const filter_value = value orelse return;
+    try appendTemplate(buf, allocator,
+        \\    <input type="hidden" name="{name}" value="{value}">
+    , .{
+        .name = name,
+        .value = filter_value,
+    });
+}
+
+fn appendPullSearchChips(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters) !void {
+    if (!hasPullSearchChips(filters)) return;
+    try buf.appendSlice(allocator, "<div class=\"work-item-search-chips\" aria-label=\"Active filters\">");
+    if (filters.state == .all) {
+        try appendPullStateChip(buf, allocator, filters, "State", pullStateFilterLabel(.all), .open);
+    }
+    if (filters.author) |value| try appendPullFilterChip(buf, allocator, filters, "Author", value, "author");
+    if (filters.label) |value| try appendPullFilterChip(buf, allocator, filters, "Label", value, "label");
+    if (filters.assignee) |value| try appendPullFilterChip(buf, allocator, filters, "Assignee", value, "assignee");
+    if (filters.reviewer) |value| try appendPullFilterChip(buf, allocator, filters, "Reviewer", value, "reviewer");
+    if (filters.base) |value| try appendPullFilterChip(buf, allocator, filters, "Base", value, "base");
+    if (filters.head) |value| try appendPullFilterChip(buf, allocator, filters, "Head", value, "head");
+    if (filters.sort != .newest) try appendPullSortChip(buf, allocator, filters);
+    try buf.appendSlice(allocator, "</div>");
+}
+
+fn hasPullSearchChips(filters: PullFilters) bool {
+    return filters.state == .all or
+        filters.author != null or
+        filters.label != null or
+        filters.assignee != null or
+        filters.reviewer != null or
+        filters.base != null or
+        filters.head != null or
+        filters.sort != .newest;
+}
+
+fn appendPullFilterChip(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    filters: PullFilters,
+    label: []const u8,
+    value: []const u8,
+    param_name: []const u8,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<a class="work-item-search-chip" href="
+    , .{});
+    try appendPullsHref(buf, allocator, filters, .{
+        .param_name = param_name,
+        .param_value = null,
+    });
+    try appendTemplate(buf, allocator,
+        \\"><span>{label}</span><strong>{value}</strong><span class="work-item-search-chip-remove" aria-hidden="true"></span></a>
+    , .{
+        .label = label,
+        .value = value,
+    });
+}
+
+fn appendPullStateChip(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    filters: PullFilters,
+    label: []const u8,
+    value: []const u8,
+    clear_state: PullStateFilter,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<a class="work-item-search-chip" href="
+    , .{});
+    try appendPullsHref(buf, allocator, filters, .{ .state = clear_state });
+    try appendTemplate(buf, allocator,
+        \\"><span>{label}</span><strong>{value}</strong><span class="work-item-search-chip-remove" aria-hidden="true"></span></a>
+    , .{
+        .label = label,
+        .value = value,
+    });
+}
+
+fn appendPullSortChip(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters) !void {
+    try appendTemplate(buf, allocator,
+        \\<a class="work-item-search-chip" href="
+    , .{});
+    try appendPullsHref(buf, allocator, filters, .{ .sort = .newest });
+    try appendTemplate(buf, allocator,
+        \\"><span>Sort</span><strong>{value}</strong><span class="work-item-search-chip-remove" aria-hidden="true"></span></a>
+    , .{ .value = pullSortLabel(filters.sort) });
+}
+
+fn appendPullFiltersPopover(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, filters: PullFilters) !void {
+    try appendTemplate(buf, allocator,
+        \\<details{classes} data-popover-menu><summary><span class="button-icon icon-filter" aria-hidden="true"></span><span>Filters</span></summary><div class="issues-filter-popover work-items-filter-popover" role="menu">
+    , .{
+        .classes = shared.classAttr("issues-filter-menu work-items-filter-menu", &.{shared.class("active", hasPullSearchChips(filters))}),
+    });
+    try appendPullStateFilterSection(buf, allocator, filters);
+    try appendPullFilterSection(buf, allocator, db, filters, .author);
+    try appendPullFilterSection(buf, allocator, db, filters, .label);
+    try appendPullFilterSection(buf, allocator, db, filters, .reviewer);
+    try appendPullFilterSection(buf, allocator, db, filters, .assignee);
+    try appendPullSortFilterSection(buf, allocator, filters);
+    try buf.appendSlice(allocator, "</div></details>");
+}
+
+fn appendPullStateFilterSection(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters) !void {
+    try buf.appendSlice(allocator, "<section class=\"work-items-filter-section\"><span class=\"work-items-filter-section-title\">State</span>");
+    try appendPullStateMenuLink(buf, allocator, filters, .open);
+    try appendPullStateMenuLink(buf, allocator, filters, .merged);
+    try appendPullStateMenuLink(buf, allocator, filters, .closed);
+    try appendPullStateMenuLink(buf, allocator, filters, .all);
+    try buf.appendSlice(allocator, "</section>");
+}
+
+fn appendPullStateMenuLink(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters, state: PullStateFilter) !void {
+    try appendTemplate(buf, allocator,
+        \\<a class="{classes}" role="menuitem" href="
+    , .{ .classes = shared.classes("issues-filter-option", &.{shared.class("selected", filters.state == state)}) });
+    try appendPullsHref(buf, allocator, filters, .{ .state = state });
+    try appendTemplate(buf, allocator,
+        \\"><span>{label}</span></a>
+    , .{ .label = pullStateFilterLabel(state) });
+}
+
+fn appendPullFilterSection(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    filters: PullFilters,
+    kind: PullFilterKind,
+) !void {
+    const active = pullFilterValue(filters, kind);
+    try appendTemplate(buf, allocator,
+        \\<section class="work-items-filter-section"><span class="work-items-filter-section-title">{label}</span>
+    , .{ .label = pullFilterLabel(kind) });
+    try appendPullFilterMenuLink(buf, allocator, filters, kind, null, pullFilterAllLabel(kind), null, active == null);
+
+    var stmt = try db.prepare(pullFilterOptionsSql(kind));
+    defer stmt.deinit();
+    var shown = false;
+    while (try stmt.step()) {
+        const value = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(value);
+        const count = @as(usize, @intCast(stmt.columnInt64(1)));
+        try appendPullFilterMenuLink(
+            buf,
+            allocator,
+            filters,
+            kind,
+            value,
+            value,
+            count,
+            active != null and std.mem.eql(u8, active.?, value),
+        );
+        shown = true;
+    }
+    if (!shown) {
+        try appendTemplate(buf, allocator,
+            \\<span class="issues-filter-empty">No values</span>
+        , .{});
+    }
+    try buf.appendSlice(allocator, "</section>");
+}
+
+fn appendPullSortFilterSection(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters) !void {
+    try buf.appendSlice(allocator, "<section class=\"work-items-filter-section\"><span class=\"work-items-filter-section-title\">Sort</span>");
+    try appendPullSortMenuLink(buf, allocator, filters, .newest);
+    try appendPullSortMenuLink(buf, allocator, filters, .oldest);
+    try appendPullSortMenuLink(buf, allocator, filters, .updated);
+    try buf.appendSlice(allocator, "</section>");
+}
+
+fn pullStateFilterLabel(state: PullStateFilter) []const u8 {
+    return switch (state) {
+        .open => "Open",
+        .merged => "Merged",
+        .closed => "Closed",
+        .all => "All",
+    };
 }
 
 fn appendPullStateTab(
@@ -258,55 +450,6 @@ fn pullStateIconClass(state: PullStateFilter) []const u8 {
     };
 }
 
-fn appendPullFilterMenu(
-    buf: *std.ArrayList(u8),
-    allocator: Allocator,
-    db: *SqliteDb,
-    filters: PullFilters,
-    kind: PullFilterKind,
-) !void {
-    const active = pullFilterValue(filters, kind);
-    try appendTemplate(buf, allocator,
-        \\<details{classes} data-popover-menu><summary>{label}
-    , .{
-        .classes = shared.classAttr("issues-filter-menu", &.{shared.class("active", active != null)}),
-        .label = pullFilterLabel(kind),
-    });
-    if (active) |value| {
-        try appendTemplate(buf, allocator, ": {value}", .{ .value = value });
-    }
-    try buf.appendSlice(allocator,
-        \\</summary><div class="issues-filter-popover" role="menu">
-    );
-    try appendPullFilterMenuLink(buf, allocator, filters, kind, null, pullFilterAllLabel(kind), null, active == null);
-
-    var stmt = try db.prepare(pullFilterOptionsSql(kind));
-    defer stmt.deinit();
-    var shown = false;
-    while (try stmt.step()) {
-        const value = try stmt.columnTextDup(allocator, 0);
-        defer allocator.free(value);
-        const count = @as(usize, @intCast(stmt.columnInt64(1)));
-        try appendPullFilterMenuLink(
-            buf,
-            allocator,
-            filters,
-            kind,
-            value,
-            value,
-            count,
-            active != null and std.mem.eql(u8, active.?, value),
-        );
-        shown = true;
-    }
-    if (!shown) {
-        try appendTemplate(buf, allocator,
-            \\<span class="issues-filter-empty">No values</span>
-        , .{});
-    }
-    try buf.appendSlice(allocator, "</div></details>");
-}
-
 fn appendPullFilterMenuLink(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -333,19 +476,6 @@ fn appendPullFilterMenuLink(
         , .{ .count = value_count });
     }
     try buf.appendSlice(allocator, "</a>");
-}
-
-fn appendPullSortMenu(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters) !void {
-    try appendTemplate(buf, allocator,
-        \\<details{classes} data-popover-menu><summary>{label}</summary><div class="issues-filter-popover" role="menu">
-    , .{
-        .classes = shared.classAttr("issues-filter-menu", &.{shared.class("active", filters.sort != .newest)}),
-        .label = pullSortLabel(filters.sort),
-    });
-    try appendPullSortMenuLink(buf, allocator, filters, .newest);
-    try appendPullSortMenuLink(buf, allocator, filters, .oldest);
-    try appendPullSortMenuLink(buf, allocator, filters, .updated);
-    try buf.appendSlice(allocator, "</div></details>");
 }
 
 fn appendPullSortMenuLink(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters, sort: PullSort) !void {
@@ -527,13 +657,11 @@ fn appendPullListRow(
     const pull_ref = util.shortObjectRef(&pull_ref_buf, id);
     try appendTemplate(buf, allocator,
         \\<article class="pull-list-row issue-list-row is-{state}">
-        \\  <div class="issue-select-cell"><input type="checkbox" aria-label="Select pull request {id}" disabled></div>
         \\  <div class="issue-state-cell"><span class="issue-state-icon pull-state-icon {state}" title="{state}" aria-label="{state}"></span></div>
         \\  <div class="issue-row-content">
         \\    <div class="issue-row-title-line"><a class="issue-row-title" href="{href}">{title}</a>
     , .{
         .state = state,
-        .id = pull_ref,
         .href = pullHref(pull_ref),
         .title = title,
     });
@@ -685,7 +813,7 @@ test "pulls toolbar renders search form" {
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
-    try appendPullsToolbar(&buf, std.testing.allocator, filters);
+    try appendPullsToolbar(&buf, std.testing.allocator, null, filters);
 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "class=\"pulls-toolbar issues-toolbar work-items-toolbar\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "action=\"/pulls\"") != null);

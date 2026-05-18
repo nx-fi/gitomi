@@ -118,7 +118,7 @@ pub fn renderActionsPage(allocator: Allocator, repo: Repo, target: []const u8, c
 }
 
 fn renderActionsPageWithMessage(allocator: Allocator, repo: Repo, target: []const u8, csrf_token: []const u8, message: ?[]const u8) ![]u8 {
-    if (try shared.renderIndexingPageIfStale(allocator, repo, "Workflows", "actions", "/workflows")) |body| return body;
+    if (try shared.renderIndexingPageIfStale(allocator, repo, "Pipelines", "actions", "/pipelines")) |body| return body;
     try ensureIndex(allocator, repo);
 
     var buf: std.ArrayList(u8) = .empty;
@@ -139,16 +139,16 @@ fn renderActionsPageWithMessage(allocator: Allocator, repo: Repo, target: []cons
     const pending = actions.countPendingRequests(allocator, repo) catch 0;
     const stats = actionsStats(workflows.len, runs.items, pending);
 
-    try appendShellStart(&buf, allocator, repo, "Workflows", "actions");
+    try appendShellStart(&buf, allocator, repo, "Pipelines", "actions");
     try buf.appendSlice(allocator, "<div class=\"project-page-layout actions-layout\">");
     try appendActionsSidebar(&buf, allocator, workflows, runs.items, filters);
     try buf.appendSlice(allocator, "<div class=\"project-page-content actions-main\">");
     if (message) |value| {
         try appendTemplate(&buf, allocator, "<div class=\"flash error\">{message}</div>", .{ .message = value });
     } else if (std.mem.indexOf(u8, target, "requested=1") != null) {
-        try buf.appendSlice(allocator, "<div class=\"flash success\">Workflow run requested.</div>");
+        try buf.appendSlice(allocator, "<div class=\"flash success\">Pipeline run requested.</div>");
     } else if (std.mem.indexOf(u8, target, "run=1") != null) {
-        try buf.appendSlice(allocator, "<div class=\"flash success\">Pending action runs processed.</div>");
+        try buf.appendSlice(allocator, "<div class=\"flash success\">Pending pipeline runs processed.</div>");
     }
     try appendActionsMain(&buf, allocator, workflows, runs.items, filters, stats, csrf_token);
     try buf.appendSlice(allocator, "</div></div>");
@@ -179,9 +179,9 @@ fn appendActionsSidebar(
 ) !void {
     try buf.appendSlice(allocator,
         \\<aside class="project-page-sidebar actions-sidebar">
-        \\  <nav class="project-page-tabs actions-workflow-nav" aria-label="Workflows">
+        \\  <nav class="project-page-tabs actions-workflow-nav" aria-label="Pipelines">
     );
-    try appendActionsSidebarLink(buf, allocator, filters, "All workflows", null, filters.workflow == null, runs.len);
+    try appendActionsSidebarLink(buf, allocator, filters, "All pipelines", null, filters.workflow == null, runs.len);
     for (workflows) |workflow| {
         try appendActionsSidebarLink(
             buf,
@@ -194,7 +194,7 @@ fn appendActionsSidebar(
         );
     }
     if (workflows.len == 0) {
-        try buf.appendSlice(allocator, "<p class=\"actions-sidebar-empty\">No workflow files found.</p>");
+        try buf.appendSlice(allocator, "<p class=\"actions-sidebar-empty\">No pipeline files found.</p>");
     }
     try appendTemplate(buf, allocator,
         \\  </nav>
@@ -214,10 +214,10 @@ fn appendActionsManualRun(
     if (filters.workflow != null) try buf.appendSlice(allocator, " open");
     try appendTemplate(buf, allocator,
         \\>
-        \\    <summary>Request workflow</summary>
-        \\    <form method="post" action="/workflows/request">
+        \\    <summary>Request pipeline</summary>
+        \\    <form method="post" action="/pipelines/request">
         \\      <input type="hidden" name="{csrf_field}" value="{csrf_token}">
-        \\      <label>Workflow<select name="workflow" required>
+        \\      <label>Pipeline<select name="workflow" required>
     , .{ .csrf_field = zwf.csrf.field_name, .csrf_token = csrf_token });
     for (workflows) |workflow| {
         try appendTemplate(buf, allocator, "<option value=\"{path}\"", .{
@@ -229,7 +229,7 @@ fn appendActionsManualRun(
         try appendTemplate(buf, allocator, ">{name}</option>", .{ .name = workflow.name });
     }
     if (workflows.len == 0) {
-        try buf.appendSlice(allocator, "<option value=\"\" disabled selected>No workflows found</option>");
+        try buf.appendSlice(allocator, "<option value=\"\" disabled selected>No pipelines found</option>");
     }
     try buf.appendSlice(allocator,
         \\      </select></label>
@@ -245,7 +245,7 @@ fn appendActionsManualRun(
     try appendTemplate(buf, allocator,
         \\      </div>
         \\    </form>
-        \\    <form method="post" action="/workflows/run-requested">
+        \\    <form method="post" action="/pipelines/run-requested">
         \\      <input type="hidden" name="{csrf_field}" value="{csrf_token}">
         \\      <button class="button secondary" type="submit">Run pending ({pending})</button>
         \\    </form>
@@ -258,7 +258,7 @@ fn appendActionsStatus(buf: *std.ArrayList(u8), allocator: Allocator, stats: Act
         \\  <div class="actions-status">
         \\    <h2>Status</h2>
         \\    <div class="actions-status-grid">
-        \\      <span><strong>{workflows}</strong><small>Workflows</small></span>
+        \\      <span><strong>{workflows}</strong><small>Pipelines</small></span>
         \\      <span><strong>{runs}</strong><small>Runs</small></span>
         \\      <span><strong>{pending}</strong><small>Pending</small></span>
         \\      <span><strong>{successful}</strong><small>Successful</small></span>
@@ -310,12 +310,12 @@ fn appendActionsMain(
     csrf_token: []const u8,
 ) !void {
     const visible_count = filteredRunCount(runs, filters);
-    const selected_title = if (filters.workflow) |selected| workflowDisplayName(workflows, selected) else "All workflows";
+    const selected_title = if (filters.workflow) |selected| workflowDisplayName(workflows, selected) else "All pipelines";
     const query = filters.query orelse "";
 
     try buf.appendSlice(allocator, "<section class=\"panel actions-panel\">");
-    try appendSectionHead(buf, allocator, "Workflows", selected_title, Button{
-        .label = "New workflow",
+    try appendSectionHead(buf, allocator, "Pipelines", selected_title, Button{
+        .label = "New pipeline",
         .href = literalHref("/code?ref=HEAD&path=.github/workflows"),
         .kind = "primary",
     });
@@ -323,14 +323,14 @@ fn appendActionsMain(
         \\<div class="actions-main-body">
         \\<div class="actions-main-head">
         \\  <p>{subtitle}</p>
-        \\  <form class="actions-filter" method="get" action="/workflows">
+        \\  <form class="actions-filter" method="get" action="/pipelines">
     , .{
-        .subtitle = if (filters.workflow == null) "Showing runs from all workflows" else "Showing runs from the selected workflow",
+        .subtitle = if (filters.workflow == null) "Showing runs from all pipelines" else "Showing runs from the selected pipeline",
     });
     try appendActionsFilterHiddenInputs(buf, allocator, filters);
     try appendTemplate(buf, allocator,
         \\    <span class="actions-filter-icon" aria-hidden="true"></span>
-        \\    <input type="search" name="q" value="{query}" placeholder="Filter workflow runs" aria-label="Filter workflow runs">
+        \\    <input type="search" name="q" value="{query}" placeholder="Filter pipeline runs" aria-label="Filter pipeline runs">
         \\  </form>
         \\</div>
     , .{
@@ -344,7 +344,7 @@ fn appendActionsMain(
     try appendTemplate(buf, allocator,
         \\<section class="actions-runs-panel">
         \\  <div class="actions-runs-head">
-        \\    <strong>{count} workflow {run_label}</strong>
+        \\    <strong>{count} pipeline {run_label}</strong>
         \\    <div class="actions-runs-filters">
     , .{
         .count = groupedUnsigned(@intCast(visible_count)),
@@ -368,16 +368,16 @@ fn appendActionsMain(
     }
     if (shown == 0) {
         if (hasRestrictiveActionsFilters(filters)) {
-            try appendEmptyState(buf, allocator, "No matching workflow runs.", "Change or clear filters to widen the run list.");
+            try appendEmptyState(buf, allocator, "No matching pipeline runs.", "Change or clear filters to widen the run list.");
         } else {
-            try appendEmptyState(buf, allocator, "No workflow runs yet.", "Request a workflow run or start the actions daemon to populate this list.");
+            try appendEmptyState(buf, allocator, "No pipeline runs yet.", "Request a pipeline run or start the actions daemon to populate this list.");
         }
     }
     try buf.appendSlice(allocator, "</section></div></section>");
 }
 
 fn appendActionsFilterHiddenInputs(buf: *std.ArrayList(u8), allocator: Allocator, filters: ActionsFilters) !void {
-    try appendActionsHiddenInputIfPresent(buf, allocator, "workflow", filters.workflow);
+    try appendActionsHiddenInputIfPresent(buf, allocator, "pipeline", filters.workflow);
     try appendActionsHiddenInputIfPresent(buf, allocator, "event", filters.event);
     try appendActionsHiddenInputIfPresent(buf, allocator, "status", filters.status);
     try appendActionsHiddenInputIfPresent(buf, allocator, "branch", filters.branch);
@@ -538,9 +538,9 @@ fn appendRunRow(buf: *std.ArrayList(u8), allocator: Allocator, workflows: []cons
 
 fn appendRunMenu(buf: *std.ArrayList(u8), allocator: Allocator, row: RunRow, csrf_token: []const u8) !void {
     if (row.workflow.len != 0) {
-        try appendRunMenuCodeLink(buf, allocator, "Workflow file", "HEAD", row.workflow);
+        try appendRunMenuCodeLink(buf, allocator, "Pipeline file", "HEAD", row.workflow);
     } else {
-        try appendRunMenuDisabled(buf, allocator, "Workflow file");
+        try appendRunMenuDisabled(buf, allocator, "Pipeline file");
     }
 
     if (row.target_oid.len != 0) {
@@ -558,7 +558,7 @@ fn appendRunMenu(buf: *std.ArrayList(u8), allocator: Allocator, row: RunRow, csr
     }
 
     try buf.appendSlice(allocator, "<div class=\"actions-run-popover-divider\" aria-hidden=\"true\"></div>");
-    try appendRunRequestForm(buf, allocator, row, "Rerun workflow", false, csrf_token);
+    try appendRunRequestForm(buf, allocator, row, "Rerun pipeline", false, csrf_token);
     try appendRunRequestForm(buf, allocator, row, "Run now", true, csrf_token);
 }
 
@@ -582,11 +582,11 @@ fn appendRunRequestForm(buf: *std.ArrayList(u8), allocator: Allocator, row: RunR
     const disabled = pending_only and !std.mem.eql(u8, row.conclusion, "pending");
     if (pending_only) {
         try appendTemplate(buf, allocator,
-            \\<form method="post" action="/workflows/run-requested"><input type="hidden" name="{csrf_field}" value="{csrf_token}"><input type="hidden" name="run" value="{run_id}">
+            \\<form method="post" action="/pipelines/run-requested"><input type="hidden" name="{csrf_field}" value="{csrf_token}"><input type="hidden" name="run" value="{run_id}">
         , .{ .csrf_field = zwf.csrf.field_name, .csrf_token = csrf_token, .run_id = row.run_id });
     } else {
         try appendTemplate(buf, allocator,
-            \\<form method="post" action="/workflows/request"><input type="hidden" name="{csrf_field}" value="{csrf_token}"><input type="hidden" name="workflow" value="{workflow}"><input type="hidden" name="event" value="{event_name}">
+            \\<form method="post" action="/pipelines/request"><input type="hidden" name="{csrf_field}" value="{csrf_token}"><input type="hidden" name="workflow" value="{workflow}"><input type="hidden" name="event" value="{event_name}">
         , .{
             .csrf_field = zwf.csrf.field_name,
             .csrf_token = csrf_token,
@@ -627,9 +627,9 @@ fn appendWorkflowOverview(
     }
 
     try appendTemplate(buf, allocator,
-        \\<section class="actions-workflow-overview" aria-label="Workflow definitions">
+        \\<section class="actions-workflow-overview" aria-label="Pipeline definitions">
         \\  <div class="actions-section-head">
-        \\    <h2>Workflows</h2>
+        \\    <h2>Pipelines</h2>
         \\    <span>{count} discovered</span>
         \\  </div>
         \\  <div class="actions-workflow-grid">
@@ -644,7 +644,7 @@ fn appendSelectedWorkflow(buf: *std.ArrayList(u8), allocator: Allocator, workflo
     try appendTemplate(buf, allocator,
         \\<section class="actions-workflow-detail">
     , .{});
-    try shared.appendDetailBackButton(buf, allocator, shared.literalHref("/workflows"), "Back to workflows");
+    try shared.appendDetailBackButton(buf, allocator, shared.literalHref("/pipelines"), "Back to pipelines");
     try appendTemplate(buf, allocator,
         \\  <div class="actions-workflow-detail-head">
         \\    <div>
@@ -829,7 +829,9 @@ fn actionsFiltersFromTarget(allocator: Allocator, target: []const u8) !ActionsFi
     var filters = ActionsFilters{ .allocator = allocator };
     errdefer filters.deinit();
 
-    if (try queryTextValueOwned(allocator, target, "workflow")) |workflow| {
+    if (try queryTextValueOwned(allocator, target, "pipeline")) |pipeline| {
+        filters.workflow = pipeline;
+    } else if (try queryTextValueOwned(allocator, target, "workflow")) |workflow| {
         filters.workflow = workflow;
     }
     if (try queryTextValueOwned(allocator, target, "q")) |query| {
@@ -880,9 +882,9 @@ fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const
 }
 
 fn appendActionsHref(buf: *std.ArrayList(u8), allocator: Allocator, filters: ActionsFilters, override: ActionsHrefOverride) !void {
-    try buf.appendSlice(allocator, "/workflows");
+    try buf.appendSlice(allocator, "/pipelines");
     var first = true;
-    if (actionsFilterHrefValue(filters, override, "workflow")) |value| try appendActionsHrefParam(buf, allocator, &first, "workflow", value);
+    if (actionsFilterHrefValue(filters, override, "workflow")) |value| try appendActionsHrefParam(buf, allocator, &first, "pipeline", value);
     if (actionsFilterHrefValue(filters, override, "q")) |value| try appendActionsHrefParam(buf, allocator, &first, "q", value);
     if (actionsFilterHrefValue(filters, override, "event")) |value| try appendActionsHrefParam(buf, allocator, &first, "event", value);
     if (actionsFilterHrefValue(filters, override, "status")) |value| try appendActionsHrefParam(buf, allocator, &first, "status", value);
@@ -912,7 +914,7 @@ fn appendActionsHrefParam(buf: *std.ArrayList(u8), allocator: Allocator, first: 
 }
 
 test "web actions filters parse and preserve href parameters" {
-    var filters = try actionsFiltersFromTarget(std.testing.allocator, "/workflows?workflow=.github/workflows/ci.yml&q=deploy+main&event=push&status=success&branch=refs/heads/main&actor=alice");
+    var filters = try actionsFiltersFromTarget(std.testing.allocator, "/pipelines?pipeline=.github/workflows/ci.yml&q=deploy+main&event=push&status=success&branch=refs/heads/main&actor=alice");
     defer filters.deinit();
 
     try std.testing.expectEqualStrings(".github/workflows/ci.yml", filters.workflow.?);
@@ -928,7 +930,14 @@ test "web actions filters parse and preserve href parameters" {
         .param_name = "status",
         .param_value = null,
     });
-    try std.testing.expectEqualStrings("/workflows?workflow=.github/workflows/ci.yml&amp;q=deploy%20main&amp;event=push&amp;branch=refs/heads/main&amp;actor=alice", buf.items);
+    try std.testing.expectEqualStrings("/pipelines?pipeline=.github/workflows/ci.yml&amp;q=deploy%20main&amp;event=push&amp;branch=refs/heads/main&amp;actor=alice", buf.items);
+}
+
+test "web actions filters accept legacy workflow parameter" {
+    var filters = try actionsFiltersFromTarget(std.testing.allocator, "/workflows?workflow=.github/workflows/ci.yml");
+    defer filters.deinit();
+
+    try std.testing.expectEqualStrings(".github/workflows/ci.yml", filters.workflow.?);
 }
 
 fn workflowRunCount(workflow: []const u8, runs: []const RunRow) usize {
@@ -987,7 +996,7 @@ fn actionsFilterValue(filters: ActionsFilters, kind: ActionsFilterKind) ?[]const
 
 fn actionsFilterLabel(kind: ActionsFilterKind) []const u8 {
     return switch (kind) {
-        .workflow => "Workflow",
+        .workflow => "Pipeline",
         .event => "Event",
         .status => "Status",
         .branch => "Branch",
@@ -997,7 +1006,7 @@ fn actionsFilterLabel(kind: ActionsFilterKind) []const u8 {
 
 fn actionsFilterAllLabel(kind: ActionsFilterKind) []const u8 {
     return switch (kind) {
-        .workflow => "Any workflow",
+        .workflow => "Any pipeline",
         .event => "Any event",
         .status => "Any status",
         .branch => "Any branch",
@@ -1345,7 +1354,7 @@ pub fn handleActionsRequestPost(allocator: Allocator, repo: Repo, stream: std.ne
     const target_ref = std.mem.trim(u8, ref_owned, " \t\r\n");
     const target_oid = std.mem.trim(u8, oid_owned, " \t\r\n");
     if (workflow.len == 0) {
-        const body = try renderActionsPageWithMessage(allocator, repo, "/workflows", csrf_token, "Workflow is required.");
+        const body = try renderActionsPageWithMessage(allocator, repo, "/pipelines", csrf_token, "Pipeline is required.");
         defer allocator.free(body);
         try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", body, null);
         return;
@@ -1359,14 +1368,14 @@ pub fn handleActionsRequestPost(allocator: Allocator, repo: Repo, stream: std.ne
         if (event_name.len == 0) "workflow_dispatch" else event_name,
         null,
     ) catch {
-        const body = try renderActionsPageWithMessage(allocator, repo, "/workflows", csrf_token, "Could not request the workflow. Check signing and the workflow selector.");
+        const body = try renderActionsPageWithMessage(allocator, repo, "/pipelines", csrf_token, "Could not request the pipeline. Check signing and the pipeline selector.");
         defer allocator.free(body);
         try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", body, null);
         return;
     };
     defer result.deinit();
 
-    try sendRedirect(allocator, stream, "/workflows?requested=1");
+    try sendRedirect(allocator, stream, "/pipelines?requested=1");
 }
 
 pub fn handleRunRequestedPost(allocator: Allocator, stream: std.net.Stream, form_body: []const u8) !void {
@@ -1379,11 +1388,11 @@ pub fn handleRunRequestedPost(allocator: Allocator, stream: std.net.Stream, form
 
     actions.runRequested(allocator, run_filter, .{}) catch |err| {
         if (!errors.isUserError(err)) {
-            try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Action runner failed\n");
+            try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Pipeline runner failed\n");
             return;
         }
-        try sendPlainResponse(allocator, stream, 409, "Conflict", "No matching pending action run\n");
+        try sendPlainResponse(allocator, stream, 409, "Conflict", "No matching pending pipeline run\n");
         return;
     };
-    try sendRedirect(allocator, stream, "/workflows?run=1");
+    try sendRedirect(allocator, stream, "/pipelines?run=1");
 }

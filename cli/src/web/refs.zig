@@ -911,7 +911,7 @@ fn classifyRef(ref: []const u8) RefScope {
         return .{ .label = "Local cache", .detail = "snapshot", .class = "local" };
     }
     if (std.mem.startsWith(u8, ref, "refs/gitomi/runs/")) {
-        return .{ .label = "Local", .detail = "workflow run", .class = "local" };
+        return .{ .label = "Local", .detail = "pipeline run", .class = "local" };
     }
     if (std.mem.startsWith(u8, ref, "refs/heads/")) {
         return .{ .label = "Local", .detail = "branch", .class = "local" };

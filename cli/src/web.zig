@@ -14,7 +14,6 @@ const models_page = @import("web/models.zig");
 const milestones_page = @import("web/milestones.zig");
 const notification_cli = @import("notification.zig");
 const notifications_page = @import("web/notifications.zig");
-const overview_page = @import("web/overview.zig");
 const projects_page = @import("web/projects.zig");
 const pulls_page = @import("web/pulls.zig");
 const refs_page = @import("web/refs.zig");
@@ -85,6 +84,7 @@ const routes = [_]Route{
     Route.static("/theme.js", "application/javascript", theme_js),
     Route.static("/ui.js", "application/javascript", ui_js),
     Route.static("/shortcuts.js", "application/javascript", shortcuts_js),
+    Route.static("/not-found.js", "application/javascript", not_found_js),
     Route.static("/tree.js", "application/javascript", tree_js),
     Route.static("/code.js", "application/javascript", code_js),
     Route.static("/pdf.js", "application/javascript", pdf_js),
@@ -110,7 +110,6 @@ const routes = [_]Route{
     Route.get("/blame", handleBlamePage),
     Route.get("/commits", handleCommitsPage),
     Route.get("/commit", handleCommitPage),
-    Route.get("/overview", handleOverviewPage),
     Route.get("/inbox", handleInboxPage),
     Route.post("/inbox/read", handleInboxReadPost),
     Route.get("/issues", handleIssuesPage),
@@ -149,9 +148,12 @@ const routes = [_]Route{
     Route.post("/settings/labels", handleLabelsPost),
     Route.get("/labels", handleLabelsPage),
     Route.post("/labels", handleLabelsPost),
-    Route.get("/workflows", handleActionsPage),
-    Route.post("/workflows/request", handleActionsRequestPost),
-    Route.post("/workflows/run-requested", handleRunRequestedPost),
+    Route.get("/pipelines", handleActionsPage),
+    Route.post("/pipelines/request", handleActionsRequestPost),
+    Route.post("/pipelines/run-requested", handleRunRequestedPost),
+    Route.get("/workflows", handleWorkflowsRedirect),
+    Route.post("/workflows/request", handleWorkflowsRequestRedirect),
+    Route.post("/workflows/run-requested", handleWorkflowsRunRequestedRedirect),
     Route.get("/actions", handleActionsRedirect),
     Route.post("/actions/request", handleActionsRequestRedirect),
     Route.post("/actions/run-requested", handleRunRequestedRedirect),
@@ -313,7 +315,7 @@ fn sendPlainNotFound(ctx: WebContext) !void {
 }
 
 fn sendNotFound(ctx: WebContext) !void {
-    try sendOwnedResponse(ctx, 404, "Not Found", "text/html", try renderNotFoundPage(ctx.allocator, ctx.repo), null);
+    try sendOwnedResponse(ctx, 404, "Not Found", "text/html", try renderNotFoundPage(ctx.allocator, ctx.repo, ctx.request.path), null);
 }
 
 fn handleRaw(ctx: WebContext) !void {
@@ -488,10 +490,6 @@ fn handleCommitsPage(ctx: WebContext) !void {
 
 fn handleCommitPage(ctx: WebContext) !void {
     try sendOwnedHtml(ctx, try commits_page.renderCommitPage(ctx.allocator, ctx.repo, ctx.request.target));
-}
-
-fn handleOverviewPage(ctx: WebContext) !void {
-    try sendOwnedHtml(ctx, try overview_page.renderHomePage(ctx.allocator, ctx.repo));
 }
 
 fn handleInboxPage(ctx: WebContext) !void {
@@ -738,16 +736,28 @@ fn handleActionsPage(ctx: WebContext) !void {
     try sendOwnedHtml(ctx, try actions_page.renderActionsPage(ctx.allocator, ctx.repo, ctx.request.target, ctx.csrf_token));
 }
 
+fn handleWorkflowsRedirect(ctx: WebContext) !void {
+    try sendRedirectReplacingPath(ctx, "/workflows", "/pipelines", false);
+}
+
+fn handleWorkflowsRequestRedirect(ctx: WebContext) !void {
+    try sendRedirectReplacingPath(ctx, "/workflows/request", "/pipelines/request", true);
+}
+
+fn handleWorkflowsRunRequestedRedirect(ctx: WebContext) !void {
+    try sendRedirectReplacingPath(ctx, "/workflows/run-requested", "/pipelines/run-requested", true);
+}
+
 fn handleActionsRedirect(ctx: WebContext) !void {
-    try sendRedirectReplacingPath(ctx, "/actions", "/workflows", false);
+    try sendRedirectReplacingPath(ctx, "/actions", "/pipelines", false);
 }
 
 fn handleActionsRequestRedirect(ctx: WebContext) !void {
-    try sendRedirectReplacingPath(ctx, "/actions/request", "/workflows/request", true);
+    try sendRedirectReplacingPath(ctx, "/actions/request", "/pipelines/request", true);
 }
 
 fn handleRunRequestedRedirect(ctx: WebContext) !void {
-    try sendRedirectReplacingPath(ctx, "/actions/run-requested", "/workflows/run-requested", true);
+    try sendRedirectReplacingPath(ctx, "/actions/run-requested", "/pipelines/run-requested", true);
 }
 
 fn handleActionsRequestPost(ctx: WebContext) !void {
@@ -1017,11 +1027,28 @@ test "merge origin guard rejects missing provenance headers" {
     try std.testing.expect(!requestHasTrustedOrigin(request));
 }
 
-fn renderNotFoundPage(allocator: Allocator, repo: Repo) ![]u8 {
+fn renderNotFoundPage(allocator: Allocator, repo: Repo, path: []const u8) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
-    try shared.appendShellStart(&buf, allocator, repo, "Not Found", "");
-    try shared.appendEmptyState(&buf, allocator, "Page not found.", "The local Gitomi web UI does not have a route for that path.");
+    try shared.appendShellStart(&buf, allocator, repo, "Not Found", "not-found");
+    try shared.appendTemplate(&buf, allocator,
+        \\<section class="not-found-life" aria-labelledby="not-found-title" data-not-found-life data-path="{path}">
+        \\  <canvas class="not-found-life-canvas" aria-hidden="true"></canvas>
+        \\  <div class="not-found-life-hud">
+        \\    <div>
+        \\      <p class="not-found-kicker">404 / route not found</p>
+        \\      <h1 id="not-found-title">404</h1>
+        \\      <code>{path}</code>
+        \\    </div>
+        \\    <nav class="not-found-actions" aria-label="Recovery links">
+        \\      <a class="button primary" href="/"><span class="button-icon icon-code" aria-hidden="true"></span><span>Code</span></a>
+        \\      <a class="button secondary" href="/issues"><span class="button-icon icon-issues" aria-hidden="true"></span><span>Issues</span></a>
+        \\      <a class="button secondary" href="/pulls"><span class="button-icon icon-pull-request" aria-hidden="true"></span><span>Pull Requests</span></a>
+        \\    </nav>
+        \\  </div>
+        \\</section>
+        \\<script src="/not-found.js"></script>
+    , .{ .path = path });
     try shared.appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
 }
@@ -1125,6 +1152,7 @@ const logo_svg = @embedFile("web/logo.svg");
 const theme_js = @embedFile("web/theme.js");
 const ui_js = @embedFile("web/ui.js");
 const shortcuts_js = @embedFile("web/shortcuts.js");
+const not_found_js = @embedFile("web/not_found.js");
 const tree_js = @embedFile("web/tree.js");
 const code_js = @embedFile("web/code.js");
 const pdf_js = @embedFile("web/pdf.js");
@@ -1772,9 +1800,16 @@ test "web static asset etag matcher handles lists and weak tags" {
     try std.testing.expect(!zwf.middleware.etagMatches("\"different\"", "\"asset-etag\""));
 }
 
-test "web actions redirects preserve query on workflows route" {
-    const location = try redirectLocationReplacingPathOwned(std.testing.allocator, "/actions?workflow=ci&q=main", "/actions", "/workflows");
+test "web actions redirects preserve query on pipelines route" {
+    const location = try redirectLocationReplacingPathOwned(std.testing.allocator, "/actions?workflow=ci&q=main", "/actions", "/pipelines");
     defer std.testing.allocator.free(location);
 
-    try std.testing.expectEqualStrings("/workflows?workflow=ci&q=main", location);
+    try std.testing.expectEqualStrings("/pipelines?workflow=ci&q=main", location);
+}
+
+test "web workflows redirects preserve query on pipelines route" {
+    const location = try redirectLocationReplacingPathOwned(std.testing.allocator, "/workflows?workflow=ci&q=main", "/workflows", "/pipelines");
+    defer std.testing.allocator.free(location);
+
+    try std.testing.expectEqualStrings("/pipelines?workflow=ci&q=main", location);
 }

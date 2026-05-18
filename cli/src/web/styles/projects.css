@@ -211,9 +211,9 @@
 .project-index-list-head,
 .project-index-row.issue-list-row {
   display: grid;
-  grid-template-columns: 44px minmax(150px, 1fr) 220px 72px minmax(132px, 0.44fr) 140px 60px 84px;
+  grid-template-columns: minmax(150px, 1fr) 220px 72px minmax(132px, 0.44fr) 140px 60px 84px;
   align-items: center;
-  min-width: 940px;
+  min-width: 896px;
 }
 .project-index-list-head {
   min-height: 44px;
@@ -229,7 +229,7 @@
 }
 .project-index-row.issue-list-row {
   gap: 0;
-  padding: 12px 14px 12px 0;
+  padding: 12px 14px;
 }
 .project-index-name-cell {
   display: grid;
@@ -2094,7 +2094,7 @@
   display: grid;
 }
 .project-issue-list-row {
-  grid-template-columns: 44px minmax(0, 1fr) auto;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
   border-right: 0;
   border-left: 0;
   border-radius: 0;

@@ -190,7 +190,7 @@ pub fn handleProjectItemPost(allocator: Allocator, repo: Repo, stream: std.net.S
             try issue_ids.append(allocator, issue_id);
         }
         for (issue_ids.items) |issue_id| {
-            updateIssueProjectMetadata(allocator, repo, issue_id, project_owned, column_owned, "") catch {
+            addIssueToProjectWithMetadata(allocator, repo, issue_id, project_owned, column_owned, "") catch {
                 try sendProjectItemError(allocator, stream, wants_async, 500, "Internal Server Error", "Could not update issue project metadata\n");
                 return;
             };
@@ -208,7 +208,7 @@ pub fn handleProjectItemPost(allocator: Allocator, repo: Repo, stream: std.net.S
             return;
         };
         defer allocator.free(issue_id);
-        updateIssueProjectMetadata(allocator, repo, issue_id, project_owned, column_owned, priority_owned) catch {
+        moveIssueOnStatusBoard(allocator, issue_id, column_owned) catch {
             try sendProjectItemError(allocator, stream, wants_async, 500, "Internal Server Error", "Could not update issue project metadata\n");
             return;
         };
@@ -468,20 +468,19 @@ fn replaceIssueProjectPlacement(allocator: Allocator, repo: Repo, issue_id: []co
     try createIssueProjectEvent(allocator, issue_id, project, column, null, null, true);
 }
 
-fn updateIssueProjectMetadata(allocator: Allocator, repo: Repo, issue_id: []const u8, project: []const u8, column: []const u8, priority: []const u8) !void {
+fn addIssueToProjectWithMetadata(allocator: Allocator, repo: Repo, issue_id: []const u8, project: []const u8, column: []const u8, priority: []const u8) !void {
+    try setIssueStatusAndPriority(allocator, issue_id, column, priority);
+    try replaceIssueProjectPlacement(allocator, repo, issue_id, project, column, null);
+}
+
+fn moveIssueOnStatusBoard(allocator: Allocator, issue_id: []const u8, column: []const u8) !void {
+    try createIssueStringEvent(allocator, issue_id, "issue.status_set", "status", column);
+}
+
+fn setIssueStatusAndPriority(allocator: Allocator, issue_id: []const u8, column: []const u8, priority: []const u8) !void {
     try createIssueStringEvent(allocator, issue_id, "issue.status_set", "status", column);
     if (priority.len != 0) {
         try createIssueStringEvent(allocator, issue_id, "issue.priority_set", "priority", priority);
-    }
-    try replaceIssueProjectPlacement(allocator, repo, issue_id, project, column, null);
-    if (std.mem.eql(u8, column, "Done")) {
-        try createIssueStringEvent(allocator, issue_id, "issue.state_set", "state", "closed");
-        var existing = try loadIssueProjectColumns(allocator, repo, issue_id, project, null);
-        defer freeColumnList(allocator, &existing);
-        for (existing.items) |existing_column| {
-            if (std.mem.eql(u8, existing_column, "Done")) continue;
-            try createIssueProjectEvent(allocator, issue_id, project, existing_column, null, null, false);
-        }
     }
 }
 

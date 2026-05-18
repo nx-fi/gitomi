@@ -183,7 +183,6 @@ pub fn renderProjectIndex(allocator: Allocator, repo: Repo, db: *SqliteDb, csrf_
 fn appendProjectIndexListHeader(buf: *std.ArrayList(u8), allocator: Allocator) !void {
     try buf.appendSlice(allocator,
         \\<header class="project-index-list-head">
-        \\  <div class="issues-select-all"><input type="checkbox" aria-label="Select all projects" disabled></div>
         \\  <span>Name</span>
         \\  <span>Health</span>
         \\  <span>Priority</span>
@@ -222,7 +221,6 @@ fn appendProjectIndexRow(
     defer allocator.free(target_label);
     try appendTemplate(buf, allocator,
         \\<article class="project-index-row issue-list-row tone-{health_tone}">
-        \\  <div class="issue-select-cell"><input type="checkbox" aria-label="Select project {project}" disabled></div>
         \\  <div class="project-index-name-cell">
         \\    <span class="project-index-icon" aria-hidden="true"></span>
         \\    <div>

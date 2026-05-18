@@ -693,7 +693,7 @@ fn appendEventObjectHref(
         try buf.appendSlice(allocator, "/settings/labels#label-");
         try shared.appendUrlEncoded(buf, allocator, object_id);
     } else if (std.mem.eql(u8, object_kind, "action")) {
-        try buf.appendSlice(allocator, "/workflows?q=");
+        try buf.appendSlice(allocator, "/pipelines?q=");
         try shared.appendUrlEncoded(buf, allocator, object_id);
     } else if (std.mem.eql(u8, object_kind, "acl") or std.mem.eql(u8, object_kind, "identity")) {
         try buf.appendSlice(allocator, "/access");

@@ -127,7 +127,7 @@ code {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  align-self: start;
+  align-self: center;
   width: 34px;
   height: 34px;
   margin-left: 0;
@@ -192,6 +192,23 @@ code {
 .topbar-sync-button .button-icon {
   width: 16px;
   height: 16px;
+}
+.topbar-sync-menu.compact .topbar-sync-button {
+  width: 34px;
+  padding: 0;
+  color: var(--topbar-link);
+  background: transparent;
+  border-color: transparent;
+}
+.topbar-sync-menu.compact .topbar-sync-label,
+.topbar-sync-menu.compact .root-caret {
+  display: none;
+}
+.topbar-sync-menu.compact .topbar-sync-button:hover,
+.topbar-sync-menu.compact[open] .topbar-sync-button {
+  color: var(--topbar-text);
+  background: color-mix(in oklch, var(--topbar-text) 8%, transparent);
+  border-color: var(--topbar-border);
 }
 .topbar-sync-menu .topbar-sync-popover {
   z-index: 32;
@@ -418,15 +435,45 @@ code {
 .topbar-actions {
   grid-area: actions;
   display: inline-flex;
-  align-items: stretch;
+  align-items: flex-start;
   gap: 10px;
-  align-self: stretch;
+  align-self: start;
   margin-left: auto;
   padding-bottom: 8px;
 }
+.topbar-account-area {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: start;
+  min-width: 0;
+  padding: 4px;
+  background: color-mix(in oklch, var(--topbar-text) 4%, transparent);
+  border: 1px solid var(--topbar-border);
+  border-radius: calc(var(--radius-md) + 4px);
+}
+.topbar-account-area .live-mode-control,
+.topbar-account-area .theme-toggle,
+.topbar-account-area .user-menu {
+  align-self: center;
+}
+.topbar-account-area .live-mode-switch,
+.topbar-account-area .live-mode-control.unavailable,
+.topbar-account-area .theme-toggle,
+.topbar-account-area .user-menu summary {
+  background: transparent;
+  border-color: transparent;
+}
+.topbar-account-area .live-mode-switch:hover,
+.topbar-account-area .theme-toggle:hover,
+.topbar-account-area .user-menu summary:hover,
+.topbar-account-area .user-menu[open] summary {
+  background: color-mix(in oklch, var(--topbar-text) 8%, transparent);
+  border-color: var(--topbar-border);
+}
 .user-menu {
   position: relative;
-  align-self: stretch;
+  align-self: center;
   flex: 0 1 auto;
   min-width: 0;
 }
@@ -434,15 +481,13 @@ code {
   z-index: 40;
 }
 .user-menu summary {
-  display: grid;
-  grid-template-rows: 36px minmax(0, 1fr);
-  place-items: center;
+  display: inline-flex;
   align-items: center;
-  gap: 6px;
-  height: 100%;
-  min-height: 88px;
-  max-width: 210px;
-  padding: 6px 12px 7px;
+  gap: 8px;
+  height: 34px;
+  min-height: 34px;
+  max-width: 190px;
+  padding: 0 8px 0 5px;
   color: var(--topbar-text);
   background: color-mix(in oklch, var(--topbar-text) 6%, transparent);
   border: 1px solid var(--topbar-border);
@@ -466,8 +511,8 @@ code {
   position: relative;
   display: inline-grid;
   place-items: center;
-  width: 32px;
-  height: 32px;
+  width: 24px;
+  height: 24px;
   flex: 0 0 auto;
   overflow: hidden;
   border: 1px solid color-mix(in oklch, var(--topbar-border) 78%, var(--panel));
@@ -480,20 +525,20 @@ code {
   z-index: 2;
   right: 2px;
   bottom: 2px;
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
   background: var(--green);
-  border: 2px solid var(--panel);
+  border: 1px solid var(--panel);
   border-radius: 50%;
 }
 .user-menu-label {
   display: grid;
-  justify-content: center;
+  justify-content: start;
   gap: 2px;
   min-width: 0;
-  max-width: 184px;
+  max-width: 140px;
   line-height: 1.12;
-  text-align: center;
+  text-align: left;
 }
 .user-menu-label strong,
 .user-menu-label span {
@@ -768,6 +813,107 @@ main.page-projects:has(.project-overview-page) {
 .init-banner span {
   color: var(--muted);
   overflow-wrap: anywhere;
+}
+.page-not-found {
+  width: 100%;
+  max-width: none;
+  min-height: calc(100dvh - var(--sticky-top));
+  margin: 0;
+}
+.not-found-life {
+  position: relative;
+  min-height: calc(100dvh - var(--sticky-top));
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 45%, color-mix(in oklch, var(--brand) 12%, transparent), transparent 32%),
+    linear-gradient(180deg, color-mix(in oklch, var(--panel-strong) 64%, var(--bg)), var(--bg));
+}
+.not-found-life-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.not-found-life-hud {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: 16px;
+  z-index: 1;
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 14px;
+  pointer-events: none;
+}
+.not-found-life-hud > div,
+.not-found-actions {
+  pointer-events: auto;
+}
+.not-found-life-hud > div {
+  display: grid;
+  gap: 7px;
+  max-width: min(420px, 100%);
+  padding: 12px 14px;
+  background: color-mix(in oklch, var(--panel) 76%, transparent);
+  border: 1px solid color-mix(in oklch, var(--border-strong) 72%, transparent);
+  border-radius: 8px;
+  box-shadow: var(--shadow-subtle);
+  backdrop-filter: blur(16px);
+}
+.not-found-kicker {
+  margin: 0;
+  color: var(--brand-strong);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0;
+  line-height: 1.1;
+  text-transform: uppercase;
+}
+.not-found-life h1 {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+}
+.not-found-life code {
+  display: block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  background: color-mix(in oklch, var(--code-bg) 88%, transparent);
+}
+.not-found-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  max-width: min(520px, 100%);
+}
+@media (max-width: 900px) {
+  .not-found-life-hud {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .not-found-actions {
+    justify-content: stretch;
+    align-items: stretch;
+  }
+  .not-found-actions .button {
+    flex: 1 1 0;
+  }
+}
+@media (max-width: 760px) {
+  .page-not-found,
+  .not-found-life {
+    min-height: calc(100dvh - 150px);
+  }
 }
 .panel {
   background: var(--panel);

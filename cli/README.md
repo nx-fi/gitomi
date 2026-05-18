@@ -372,7 +372,7 @@ while the live webhook listener uses `--live-host`, `--live-port`, and
 `--rest` to force REST export, requires `--webhook-url` unless `--no-subscribe`
 is used, and requires `--secret-env` or `--secret-file` for authenticated
 webhook deliveries. It opens on a committed-tree code explorer, also serves
-overview/issues/projects/workflows/events/refs pages, and can create signed issue
+issues/projects/workflows/events/refs pages, and can create signed issue
 events and workflow run requests through the same storage path as the CLI. The
 inbox menu shows recent notifications, and issue and pull request detail pages
 can subscribe or unsubscribe the current principal from notifications. The

@@ -884,7 +884,6 @@ fn appendMilestoneDetailIssuesHeader(
 ) !void {
     try buf.appendSlice(allocator,
         \\<header class="issues-list-head milestone-detail-issues-head">
-        \\  <div class="issues-select-all"><input type="checkbox" aria-label="Select all milestone issues" disabled></div>
         \\  <nav class="issues-state-tabs" aria-label="Milestone issue state">
     );
     try appendMilestoneIssueStateTab(buf, allocator, milestone_ref, "Open", open_count, .open, current_state, "issue-open-icon");
@@ -935,7 +934,6 @@ fn appendMilestoneDetailIssueRow(
     const closed = std.mem.eql(u8, state, "closed");
     try appendTemplate(buf, allocator,
         \\<article class="issue-list-row milestone-detail-issue-row is-{state}">
-        \\  <div class="issue-select-cell"><input type="checkbox" aria-label="Select issue {issue_ref}" disabled></div>
         \\  <div class="issue-state-cell"><span class="issue-state-icon {state}" title="{state}" aria-label="{state}"></span></div>
         \\  <div class="issue-row-content">
         \\    <div class="issue-row-title-line"><a class="issue-row-title" href="{href}">{title}</a></div>

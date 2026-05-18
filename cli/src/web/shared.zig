@@ -880,17 +880,20 @@ fn appendShellStartWithOptions(
     try appendNavLink(buf, allocator, active, "code", "/", "Code", "icon-code", null);
     try appendNavLink(buf, allocator, active, "issues", "/issues", "Issues", "icon-issues", stats.issues);
     try appendNavLink(buf, allocator, active, "pulls", "/pulls", "Pull Requests", "icon-pull-request", stats.pulls);
-    try appendNavLink(buf, allocator, active, "actions", "/workflows", "Workflows", "icon-workflow", null);
+    try appendNavLink(buf, allocator, active, "actions", "/pipelines", "Pipelines", "icon-workflow", null);
     try appendNavLink(buf, allocator, active, "projects", "/projects", "Projects", "icon-projects", null);
     try appendSettingsNavLink(buf, allocator, active);
     try buf.appendSlice(allocator,
         \\  </nav>
         \\  <div class="topbar-actions">
     );
-    try appendLiveModeControl(buf, allocator, github_live.runtimeStatus());
-    try appendTopbarSyncMenu(buf, allocator);
+    try appendTopbarSyncMenu(buf, allocator, topbarSyncProminent(active));
     const topbar_principal: ?[]const u8 = if (cfg_opt) |cfg| cfg.principal else null;
     try appendTopbarInboxMenu(buf, allocator, repo, topbar_principal, stats.unread_notifications);
+    try buf.appendSlice(allocator,
+        \\  <div class="topbar-account-area" role="group" aria-label="Account and status">
+    );
+    try appendLiveModeControl(buf, allocator, github_live.runtimeStatus());
     try appendTemplate(buf, allocator,
         \\  <button class="theme-toggle" type="button" data-theme-toggle aria-pressed="false" aria-label="Toggle dark mode" title="Toggle dark mode">
         \\    <span class="button-icon theme-toggle-icon theme-toggle-icon-light icon-sun" aria-hidden="true"></span>
@@ -901,6 +904,7 @@ fn appendShellStartWithOptions(
         try appendUserMenu(buf, allocator, repo, cfg, options.load_user_role);
     }
     try appendTemplate(buf, allocator,
+        \\  </div>
         \\  </div>
         \\</header>
         \\<main class="page page-{active}">
@@ -916,10 +920,10 @@ fn appendShellStartWithOptions(
     }
 }
 
-fn appendTopbarSyncMenu(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+fn appendTopbarSyncMenu(buf: *std.ArrayList(u8), allocator: Allocator, prominent: bool) !void {
     try appendTemplate(buf, allocator,
-        \\<details class="topbar-sync-menu" data-popover-menu>
-        \\  <summary class="topbar-sync-button" title="Sync Gitomi refs with origin"><span class="button-icon icon-sync" aria-hidden="true"></span><span class="topbar-sync-label">Sync refs</span><span class="root-caret" aria-hidden="true"></span></summary>
+        \\<details class="{classes}" data-popover-menu>
+        \\  <summary class="topbar-sync-button" aria-label="Sync Gitomi refs with origin" title="Sync Gitomi refs with origin"><span class="button-icon icon-sync" aria-hidden="true"></span><span class="topbar-sync-label">Sync refs</span><span class="root-caret" aria-hidden="true"></span></summary>
         \\  <form class="root-action-popover root-sync-popover topbar-sync-popover" method="post" action="/code/sync" role="menu">
         \\    <button type="submit" name="action" value="exchange" role="menuitem">Exchange Gitomi refs</button>
         \\    <button type="submit" name="action" value="import" role="menuitem">Import remote Gitomi refs</button>
@@ -927,7 +931,17 @@ fn appendTopbarSyncMenu(buf: *std.ArrayList(u8), allocator: Allocator) !void {
         \\    <button type="submit" name="action" value="prune" role="menuitem">Prune deleted remote branches</button>
         \\  </form>
         \\</details>
-    , .{});
+    , .{ .classes = classes("topbar-sync-menu", &.{class("compact", !prominent)}) });
+}
+
+fn topbarSyncProminent(active: []const u8) bool {
+    return std.mem.eql(u8, active, "code") or
+        std.mem.eql(u8, active, "commits") or
+        std.mem.eql(u8, active, "refs") or
+        std.mem.eql(u8, active, "events") or
+        std.mem.eql(u8, active, "labels") or
+        std.mem.eql(u8, active, "models") or
+        std.mem.eql(u8, active, "access");
 }
 
 fn appendTopbarInboxMenu(
@@ -2510,6 +2524,15 @@ test "web internal reference linked text caps resolved references per value" {
         countSubstrings(buf.items, "<a href=\"/commit?sha=abcdef0\">#abcdef0</a>"),
     );
     try std.testing.expectEqual(max_internal_reference_links_per_text + 1, countSubstrings(buf.items, "#abcdef0"));
+}
+
+test "web topbar sync prominence follows repository and admin contexts" {
+    try std.testing.expect(topbarSyncProminent("code"));
+    try std.testing.expect(topbarSyncProminent("refs"));
+    try std.testing.expect(topbarSyncProminent("access"));
+    try std.testing.expect(!topbarSyncProminent("issues"));
+    try std.testing.expect(!topbarSyncProminent("pulls"));
+    try std.testing.expect(!topbarSyncProminent("projects"));
 }
 
 fn countSubstrings(haystack: []const u8, needle: []const u8) usize {

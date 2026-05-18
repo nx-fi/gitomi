@@ -73,8 +73,8 @@ pub fn renderIssuesPage(allocator: Allocator, repo: Repo, target: []const u8) ![
         .href = literalHref("/new-issue"),
         .kind = "primary",
     });
-    try appendIssuesToolbar(&buf, allocator, filters);
-    try appendIssuesListHeader(&buf, allocator, &db, filters, counts);
+    try appendIssuesToolbar(&buf, allocator, &db, filters);
+    try appendIssuesListHeader(&buf, allocator, filters, counts);
 
     var stmt = try work_items.prepareIssueListStmt(allocator, &db, filters);
     defer stmt.deinit();
@@ -188,72 +188,181 @@ fn issueSortFromTarget(allocator: Allocator, target: []const u8) !IssueSort {
     return .newest;
 }
 
-fn appendIssuesToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filters: IssueFilters) !void {
-    const query = try work_items.issueFilterQueryOwned(allocator, filters);
-    defer allocator.free(query);
+fn appendIssuesToolbar(buf: *std.ArrayList(u8), allocator: Allocator, db: ?*SqliteDb, filters: IssueFilters) !void {
+    const query = filters.q orelse "";
     try appendTemplate(buf, allocator,
         \\<div class="issues-toolbar work-items-toolbar">
         \\  <form class="issues-search" action="/issues" method="get">
         \\    <span class="issues-search-icon" aria-hidden="true"></span>
-        \\    <input type="search" name="q" value="{query}" aria-label="Search issues">
+        \\    <input type="search" name="q" value="{query}" placeholder="Search issues" aria-label="Search issues">
     , .{
         .query = query,
     });
+    try appendHiddenIssueSearchFilters(buf, allocator, filters);
     try buf.appendSlice(allocator,
         \\  </form>
+    );
+    if (db) |database| {
+        try buf.appendSlice(allocator,
+            \\  <div class="work-items-toolbar-actions">
+        );
+        try appendIssueFiltersPopover(buf, allocator, database, filters);
+        try buf.appendSlice(allocator,
+            \\  </div>
+        );
+    }
+    try appendIssueSearchChips(buf, allocator, filters);
+    try buf.appendSlice(allocator,
         \\</div>
     );
 }
 
-fn appendIssuesListHeader(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, filters: IssueFilters, counts: IssueCounts) !void {
+fn appendIssuesListHeader(buf: *std.ArrayList(u8), allocator: Allocator, filters: IssueFilters, counts: IssueCounts) !void {
     try buf.appendSlice(allocator,
         \\<header class="issues-list-head">
-        \\  <div class="issues-select-all"><input type="checkbox" aria-label="Select all issues" disabled></div>
         \\  <nav class="issues-state-tabs" aria-label="Issue state">
     );
     try appendIssueStateTab(buf, allocator, "Open", counts.open, .open, filters, "issue-open-icon");
     try appendIssueStateTab(buf, allocator, "Closed", counts.closed, .closed, filters, "issue-closed-icon");
     try buf.appendSlice(allocator,
         \\  </nav>
-        \\  <div class="issues-filter-menus">
-    );
-    try appendIssueFilterMenu(buf, allocator, db, filters, .author);
-    try appendIssueFilterMenu(buf, allocator, db, filters, .label);
-    try appendIssueFilterMenu(buf, allocator, db, filters, .project);
-    try appendIssueFilterMenu(buf, allocator, db, filters, .milestone);
-    try appendIssueFilterMenu(buf, allocator, db, filters, .assignee);
-    try appendIssueSortMenu(buf, allocator, filters);
-    try buf.appendSlice(allocator,
-        \\  </div>
         \\</header>
     );
 }
 
-fn appendIssueStateTab(
-    buf: *std.ArrayList(u8),
-    allocator: Allocator,
-    label: []const u8,
-    count: usize,
-    tab_filter: IssueStateFilter,
-    filters: IssueFilters,
-    icon_class: []const u8,
-) !void {
+fn appendHiddenIssueSearchFilters(buf: *std.ArrayList(u8), allocator: Allocator, filters: IssueFilters) !void {
+    try appendHiddenIssueFilter(buf, allocator, "state", work_items.issueStateValue(filters.state));
+    try appendHiddenIssueFilter(buf, allocator, "author", filters.author);
+    try appendHiddenIssueFilter(buf, allocator, "label", filters.label);
+    try appendHiddenIssueFilter(buf, allocator, "project", filters.project);
+    try appendHiddenIssueFilter(buf, allocator, "milestone", filters.milestone);
+    try appendHiddenIssueFilter(buf, allocator, "assignee", filters.assignee);
+    if (filters.sort != .newest) try appendHiddenIssueFilter(buf, allocator, "sort", work_items.issueSortValue(filters.sort));
+}
+
+fn appendHiddenIssueFilter(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8, value: ?[]const u8) !void {
+    const filter_value = value orelse return;
     try appendTemplate(buf, allocator,
-        \\<a class="{classes}" href="
+        \\    <input type="hidden" name="{name}" value="{value}">
     , .{
-        .classes = shared.classes("issues-state-tab", &.{shared.class("active", tab_filter == filters.state)}),
-    });
-    try appendIssuesHref(buf, allocator, filters, .{ .state = tab_filter });
-    try appendTemplate(buf, allocator,
-        \\"><span class="issue-tab-icon {icon_class}" aria-hidden="true"></span><span>{label}</span><span class="issue-count-badge">{count}</span></a>
-    , .{
-        .icon_class = icon_class,
-        .label = label,
-        .count = count,
+        .name = name,
+        .value = filter_value,
     });
 }
 
-fn appendIssueFilterMenu(
+fn appendIssueSearchChips(buf: *std.ArrayList(u8), allocator: Allocator, filters: IssueFilters) !void {
+    if (!hasIssueSearchChips(filters)) return;
+    try buf.appendSlice(allocator, "<div class=\"work-item-search-chips\" aria-label=\"Active filters\">");
+    if (filters.state == .all) {
+        try appendIssueStateChip(buf, allocator, filters, "State", issueStateFilterLabel(.all), .open);
+    }
+    if (filters.author) |value| try appendIssueFilterChip(buf, allocator, filters, "Author", value, "author");
+    if (filters.label) |value| try appendIssueFilterChip(buf, allocator, filters, "Label", value, "label");
+    if (filters.project) |value| try appendIssueFilterChip(buf, allocator, filters, "Project", value, "project");
+    if (filters.milestone) |value| try appendIssueFilterChip(buf, allocator, filters, "Milestone", value, "milestone");
+    if (filters.assignee) |value| try appendIssueFilterChip(buf, allocator, filters, "Assignee", value, "assignee");
+    if (filters.sort != .newest) try appendIssueSortChip(buf, allocator, filters);
+    try buf.appendSlice(allocator, "</div>");
+}
+
+fn hasIssueSearchChips(filters: IssueFilters) bool {
+    return filters.state == .all or
+        filters.author != null or
+        filters.label != null or
+        filters.project != null or
+        filters.milestone != null or
+        filters.assignee != null or
+        filters.sort != .newest;
+}
+
+fn appendIssueFilterChip(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    filters: IssueFilters,
+    label: []const u8,
+    value: []const u8,
+    param_name: []const u8,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<a class="work-item-search-chip" href="
+    , .{});
+    try appendIssuesHref(buf, allocator, filters, .{
+        .param_name = param_name,
+        .param_value = null,
+    });
+    try appendTemplate(buf, allocator,
+        \\"><span>{label}</span><strong>{value}</strong><span class="work-item-search-chip-remove" aria-hidden="true"></span></a>
+    , .{
+        .label = label,
+        .value = value,
+    });
+}
+
+fn appendIssueStateChip(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    filters: IssueFilters,
+    label: []const u8,
+    value: []const u8,
+    clear_state: IssueStateFilter,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<a class="work-item-search-chip" href="
+    , .{});
+    try appendIssuesHref(buf, allocator, filters, .{ .state = clear_state });
+    try appendTemplate(buf, allocator,
+        \\"><span>{label}</span><strong>{value}</strong><span class="work-item-search-chip-remove" aria-hidden="true"></span></a>
+    , .{
+        .label = label,
+        .value = value,
+    });
+}
+
+fn appendIssueSortChip(buf: *std.ArrayList(u8), allocator: Allocator, filters: IssueFilters) !void {
+    try appendTemplate(buf, allocator,
+        \\<a class="work-item-search-chip" href="
+    , .{});
+    try appendIssuesHref(buf, allocator, filters, .{ .sort = .newest });
+    try appendTemplate(buf, allocator,
+        \\"><span>Sort</span><strong>{value}</strong><span class="work-item-search-chip-remove" aria-hidden="true"></span></a>
+    , .{ .value = issueSortLabel(filters.sort) });
+}
+
+fn appendIssueFiltersPopover(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, filters: IssueFilters) !void {
+    try appendTemplate(buf, allocator,
+        \\<details{classes} data-popover-menu><summary><span class="button-icon icon-filter" aria-hidden="true"></span><span>Filters</span></summary><div class="issues-filter-popover work-items-filter-popover" role="menu">
+    , .{
+        .classes = shared.classAttr("issues-filter-menu work-items-filter-menu", &.{shared.class("active", hasIssueSearchChips(filters))}),
+    });
+    try appendIssueStateFilterSection(buf, allocator, filters);
+    try appendIssueFilterSection(buf, allocator, db, filters, .author);
+    try appendIssueFilterSection(buf, allocator, db, filters, .label);
+    try appendIssueFilterSection(buf, allocator, db, filters, .project);
+    try appendIssueFilterSection(buf, allocator, db, filters, .milestone);
+    try appendIssueFilterSection(buf, allocator, db, filters, .assignee);
+    try appendIssueSortFilterSection(buf, allocator, filters);
+    try buf.appendSlice(allocator, "</div></details>");
+}
+
+fn appendIssueStateFilterSection(buf: *std.ArrayList(u8), allocator: Allocator, filters: IssueFilters) !void {
+    try buf.appendSlice(allocator, "<section class=\"work-items-filter-section\"><span class=\"work-items-filter-section-title\">State</span>");
+    try appendIssueStateMenuLink(buf, allocator, filters, .open);
+    try appendIssueStateMenuLink(buf, allocator, filters, .closed);
+    try appendIssueStateMenuLink(buf, allocator, filters, .all);
+    try buf.appendSlice(allocator, "</section>");
+}
+
+fn appendIssueStateMenuLink(buf: *std.ArrayList(u8), allocator: Allocator, filters: IssueFilters, state: IssueStateFilter) !void {
+    try appendTemplate(buf, allocator,
+        \\<a class="{classes}" role="menuitem" href="
+    , .{ .classes = shared.classes("issues-filter-option", &.{shared.class("selected", filters.state == state)}) });
+    try appendIssuesHref(buf, allocator, filters, .{ .state = state });
+    try appendTemplate(buf, allocator,
+        \\"><span>{label}</span></a>
+    , .{ .label = issueStateFilterLabel(state) });
+}
+
+fn appendIssueFilterSection(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
     db: *SqliteDb,
@@ -262,17 +371,8 @@ fn appendIssueFilterMenu(
 ) !void {
     const active = issueFilterValue(filters, kind);
     try appendTemplate(buf, allocator,
-        \\<details{classes} data-popover-menu><summary>{label}
-    , .{
-        .classes = shared.classAttr("issues-filter-menu", &.{shared.class("active", active != null)}),
-        .label = issueFilterLabel(kind),
-    });
-    if (active) |value| {
-        try appendTemplate(buf, allocator, ": {value}", .{ .value = value });
-    }
-    try buf.appendSlice(allocator,
-        \\</summary><div class="issues-filter-popover" role="menu">
-    );
+        \\<section class="work-items-filter-section"><span class="work-items-filter-section-title">{label}</span>
+    , .{ .label = issueFilterLabel(kind) });
     try appendIssueFilterMenuLink(buf, allocator, filters, kind, null, issueFilterAllLabel(kind), null, active == null);
 
     var stmt = try db.prepare(issueFilterOptionsSql(kind));
@@ -299,7 +399,47 @@ fn appendIssueFilterMenu(
             \\<span class="issues-filter-empty">No values</span>
         , .{});
     }
-    try buf.appendSlice(allocator, "</div></details>");
+    try buf.appendSlice(allocator, "</section>");
+}
+
+fn appendIssueSortFilterSection(buf: *std.ArrayList(u8), allocator: Allocator, filters: IssueFilters) !void {
+    try buf.appendSlice(allocator, "<section class=\"work-items-filter-section\"><span class=\"work-items-filter-section-title\">Sort</span>");
+    try appendIssueSortMenuLink(buf, allocator, filters, .newest);
+    try appendIssueSortMenuLink(buf, allocator, filters, .oldest);
+    try appendIssueSortMenuLink(buf, allocator, filters, .updated);
+    try buf.appendSlice(allocator, "</section>");
+}
+
+fn issueStateFilterLabel(state: IssueStateFilter) []const u8 {
+    return switch (state) {
+        .open => "Open",
+        .closed => "Closed",
+        .all => "All",
+    };
+}
+
+fn appendIssueStateTab(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    label: []const u8,
+    count: usize,
+    tab_filter: IssueStateFilter,
+    filters: IssueFilters,
+    icon_class: []const u8,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<a class="{classes}" href="
+    , .{
+        .classes = shared.classes("issues-state-tab", &.{shared.class("active", tab_filter == filters.state)}),
+    });
+    try appendIssuesHref(buf, allocator, filters, .{ .state = tab_filter });
+    try appendTemplate(buf, allocator,
+        \\"><span class="issue-tab-icon {icon_class}" aria-hidden="true"></span><span>{label}</span><span class="issue-count-badge">{count}</span></a>
+    , .{
+        .icon_class = icon_class,
+        .label = label,
+        .count = count,
+    });
 }
 
 fn appendIssueFilterMenuLink(
@@ -328,19 +468,6 @@ fn appendIssueFilterMenuLink(
         , .{ .count = value_count });
     }
     try buf.appendSlice(allocator, "</a>");
-}
-
-fn appendIssueSortMenu(buf: *std.ArrayList(u8), allocator: Allocator, filters: IssueFilters) !void {
-    try appendTemplate(buf, allocator,
-        \\<details{classes} data-popover-menu><summary>{label}</summary><div class="issues-filter-popover" role="menu">
-    , .{
-        .classes = shared.classAttr("issues-filter-menu", &.{shared.class("active", filters.sort != .newest)}),
-        .label = issueSortLabel(filters.sort),
-    });
-    try appendIssueSortMenuLink(buf, allocator, filters, .newest);
-    try appendIssueSortMenuLink(buf, allocator, filters, .oldest);
-    try appendIssueSortMenuLink(buf, allocator, filters, .updated);
-    try buf.appendSlice(allocator, "</div></details>");
 }
 
 fn appendIssueSortMenuLink(buf: *std.ArrayList(u8), allocator: Allocator, filters: IssueFilters, sort: IssueSort) !void {
@@ -524,13 +651,11 @@ fn appendIssueListRow(
     const closed = std.mem.eql(u8, state, "closed");
     try appendTemplate(buf, allocator,
         \\<article class="issue-list-row is-{state}">
-        \\  <div class="issue-select-cell"><input type="checkbox" aria-label="Select issue {id}" disabled></div>
         \\  <div class="issue-state-cell"><span class="issue-state-icon {state}" title="{state}" aria-label="{state}"></span></div>
         \\  <div class="issue-row-content">
         \\    <div class="issue-row-title-line"><a class="issue-row-title" href="{href}">{title}</a>
     , .{
         .state = state,
-        .id = issue_ref,
         .href = issueHref(issue_ref),
         .title = title,
     });
@@ -829,7 +954,7 @@ test "issues toolbar renders search form" {
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
-    try appendIssuesToolbar(&buf, std.testing.allocator, filters);
+    try appendIssuesToolbar(&buf, std.testing.allocator, null, filters);
 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "class=\"issues-toolbar work-items-toolbar\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "action=\"/issues\"") != null);

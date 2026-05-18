@@ -225,7 +225,7 @@
   margin-top: 12px;
 }
 .milestone-detail-issues-head {
-  grid-template-columns: 44px auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
 }
 .milestone-detail-issue-row .issue-row-side {
   min-height: 1px;
