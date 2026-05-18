@@ -1,6 +1,8 @@
 const std = @import("std");
 const auth_binding = @import("auth_binding.zig");
-const event_mod = @import("event.zig");
+const event_model = @import("event/model.zig");
+const event_validation = @import("event/validation.zig");
+const actor_sequence = @import("event/actor_sequence.zig");
 const git = @import("git.zig");
 const inbox_commit = @import("inbox_commit.zig");
 const util = @import("util.zig");
@@ -12,13 +14,13 @@ const max_git_output = git.max_git_output;
 const isRefSafeSegment = util.isRefSafeSegment;
 const looksLikeUuid = util.looksLikeUuid;
 const eprint = @import("io.zig").eprint;
-const Envelope = event_mod.ValidatedEnvelope;
+const Envelope = event_model.ValidatedEnvelope;
 
 pub const State = struct {
     allocator: Allocator,
     config_repo_id: ?[]const u8,
     observed_repo_id: ?[]u8 = null,
-    actor_seqs: event_mod.ActorSeqAdmissionTracker,
+    actor_seqs: actor_sequence.AdmissionTracker,
     refs: usize = 0,
     commits: usize = 0,
     errors: usize = 0,
@@ -27,7 +29,7 @@ pub const State = struct {
         return .{
             .allocator = allocator,
             .config_repo_id = config_repo_id,
-            .actor_seqs = event_mod.ActorSeqAdmissionTracker.init(allocator),
+            .actor_seqs = actor_sequence.AdmissionTracker.init(allocator),
         };
     }
 
@@ -189,10 +191,10 @@ fn checkParentHashes(
     defer allocator.free(parents_raw);
     const parents = std.mem.trim(u8, parents_raw, " \t\r\n");
 
-    const failure = (try event_mod.validateParentHashes(allocator, parents, body)) orelse return;
+    const failure = (try event_validation.validateParentHashes(allocator, parents, body)) orelse return;
     switch (failure) {
         .invalid_event_body, .invalid_parent_hashes => return,
-        else => try fsck.fail("{s}: {s}: {s}", .{ ref, commit, event_mod.parentHashValidationMessage(failure) }),
+        else => try fsck.fail("{s}: {s}: {s}", .{ ref, commit, event_validation.parentHashValidationMessage(failure) }),
     }
 }
 
@@ -238,7 +240,7 @@ fn parseEnvelope(
     ref: []const u8,
     commit: []const u8,
     body: []const u8,
-) !?event_mod.ValidatedEnvelope {
+) !?event_model.ValidatedEnvelope {
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch {
         try fsck.fail("{s}: {s}: event body is not valid JSON", .{ ref, commit });
         return null;
@@ -253,13 +255,13 @@ fn parseEnvelope(
         },
     };
 
-    if (try event_mod.validateEnvelopeObject(allocator, root)) |message| {
+    if (try event_validation.validateEnvelopeObject(allocator, root)) |message| {
         defer allocator.free(message);
         try fsck.fail("{s}: {s}: {s}", .{ ref, commit, message });
         return null;
     }
 
-    return event_mod.parseValidatedEnvelopeObject(allocator, root) catch {
+    return event_validation.parseValidatedEnvelopeObject(allocator, root) catch {
         try fsck.fail("{s}: {s}: invalid event envelope", .{ ref, commit });
         return null;
     };

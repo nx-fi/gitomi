@@ -1,12 +1,12 @@
 const std = @import("std");
 const comment_mod = @import("../../comment.zig");
-const event_mod = @import("../../event.zig");
+const event_validation = @import("../../event/validation.zig");
 const index = @import("../../index.zig");
 const issues_page = @import("../issues.zig");
 const pull_comments = @import("comments.zig");
 const pull_git_tabs = @import("git_tabs.zig");
 const merge_editor = @import("merge_editor.zig");
-const notification_mod = @import("../../notification.zig");
+const notifications = @import("../notifications.zig");
 const pull_merge = @import("merge.zig");
 const pulls_list = @import("list.zig");
 const pull_sidebar = @import("sidebar.zig");
@@ -31,10 +31,10 @@ const appendTemplate = shared.appendTemplate;
 const commitHref = shared.commitHref;
 const createCommentAddedEvent = comment_mod.createCommentAddedEvent;
 const createCommentReplyEvent = comment_mod.createCommentReplyEvent;
-const createNotificationSubscriptionEvent = notification_mod.createNotificationSubscriptionEvent;
 const createReactionEvent = reaction_mod.createReactionEvent;
 const literalHref = shared.literalHref;
 const pullHref = shared.pullHref;
+const queryValueOwned = shared.queryValueOwned;
 const sendRedirect = shared.sendRedirect;
 const sendPlainResponse = shared.sendPlainResponse;
 const sendResponse = shared.sendResponse;
@@ -120,9 +120,9 @@ fn renderPullDetailPageWithMergeError(allocator: Allocator, repo: Repo, raw_ref:
     const current_role = if (current_actor) |actor| try index.effectiveWriteRoleForPrincipal(allocator, repo, actor) else null;
     defer if (current_role) |role| allocator.free(role);
     const can_edit_pull = currentActorCanEditAuthor(current_actor, current_role, detail.author_principal);
-    const can_manage_notifications = current_actor != null;
+    const can_manage_notifications = notifications.currentActorCanManageNotifications(current_actor, current_role);
     const notification_subscribed = if (current_actor) |actor|
-        try isNotificationSubscribed(&db, actor, "pull", detail.id)
+        try notifications.isNotificationSubscribed(&db, actor, "pull", detail.id)
     else
         false;
 
@@ -332,32 +332,9 @@ fn pullDisplayAuthor(detail: PullDetail) []const u8 {
 
 fn currentActorCanEditAuthor(current_actor: ?[]const u8, current_role: ?[]const u8, author: []const u8) bool {
     const role = current_role orelse return false;
-    if (event_mod.roleAtLeast(role, "maintainer")) return true;
+    if (event_validation.roleAtLeast(role, "maintainer")) return true;
     const actor = current_actor orelse return false;
-    return event_mod.roleAtLeast(role, "contributor") and std.mem.eql(u8, actor, author);
-}
-
-fn currentActorCanManageNotifications(current_actor: ?[]const u8, current_role: ?[]const u8) bool {
-    if (current_actor == null) return false;
-    const role = current_role orelse return false;
-    return event_mod.roleAtLeast(role, "reporter");
-}
-
-fn isNotificationSubscribed(db: *SqliteDb, principal: []const u8, object_kind: []const u8, object_id: []const u8) !bool {
-    var stmt = try db.prepare(
-        \\SELECT active
-        \\FROM notification_subscriptions
-        \\WHERE principal = ?
-        \\  AND object_kind = ?
-        \\  AND object_id = ?
-        \\LIMIT 1
-    );
-    defer stmt.deinit();
-    try stmt.bindText(1, principal);
-    try stmt.bindText(2, object_kind);
-    try stmt.bindText(3, object_id);
-    if (!(try stmt.step())) return false;
-    return stmt.columnInt(0) != 0;
+    return event_validation.roleAtLeast(role, "contributor") and std.mem.eql(u8, actor, author);
 }
 
 fn currentActorCanEditInRepo(allocator: Allocator, repo: Repo, author: []const u8) !bool {
@@ -1003,7 +980,7 @@ pub fn handlePullChecklistPost(allocator: Allocator, repo: Repo, stream: std.net
     };
     defer allocator.free(pull_id);
 
-    const body_owned = (try issues_page.formValueOwned(allocator, form_body, "body")) orelse {
+    const body_owned = (try shared.formValueOwned(allocator, form_body, "body")) orelse {
         try sendPlainResponse(allocator, stream, 400, "Bad Request", "Missing body\n");
         return;
     };
@@ -1187,68 +1164,11 @@ pub fn handlePullCommentPost(allocator: Allocator, repo: Repo, stream: std.net.S
 }
 
 pub fn handlePullNotificationPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
-    try index.ensureIndex(allocator, repo);
-    const pull_id = index.resolvePullId(allocator, repo, raw_ref) catch {
-        try sendPlainResponse(allocator, stream, 404, "Not Found", "Pull request not found\n");
-        return;
-    };
-    defer allocator.free(pull_id);
-
-    const action_owned = (try issues_page.formValueOwned(allocator, form_body, "action")) orelse {
-        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Missing notification action\n");
-        return;
-    };
-    defer allocator.free(action_owned);
-    const action = std.mem.trim(u8, action_owned, " \t\r\n");
-    const subscribe = if (std.mem.eql(u8, action, "subscribe"))
-        true
-    else if (std.mem.eql(u8, action, "unsubscribe"))
-        false
-    else {
-        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Unknown notification action\n");
-        return;
-    };
-
-    const current_actor = try shared.currentPrincipalOwned(allocator, repo);
-    defer if (current_actor) |actor_value| allocator.free(actor_value);
-    const actor = current_actor orelse {
-        try sendPlainResponse(allocator, stream, 409, "Conflict", "Gitomi is not initialized\n");
-        return;
-    };
-    const current_role = try index.effectiveWriteRoleForPrincipal(allocator, repo, actor);
-    defer if (current_role) |role| allocator.free(role);
-    if (!currentActorCanManageNotifications(actor, current_role)) {
-        try sendPlainResponse(allocator, stream, 403, "Forbidden", "Forbidden\n");
-        return;
-    }
-
-    createNotificationSubscriptionEvent(allocator, actor, "pull", pull_id, subscribe) catch |err| {
-        try sendPlainResponse(allocator, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), shared.writeFailureMessage(err, "Could not update notification subscription\n"));
-        return;
-    };
-
-    const location = try std.fmt.allocPrint(allocator, "/pulls/{s}", .{raw_ref});
-    defer allocator.free(location);
-    try sendRedirect(allocator, stream, location);
+    try notifications.handleNotificationPost("pull", index.resolvePullId, "/pulls", allocator, repo, stream, raw_ref, form_body);
 }
 
 pub fn handlePullSidebarPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, csrf_token: []const u8, form_body: []const u8) !void {
     try pull_sidebar.handlePullSidebarPost(allocator, repo, stream, raw_ref, csrf_token, form_body);
-}
-
-fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const u8) !?[]u8 {
-    const query_start = std.mem.indexOfScalar(u8, target, '?') orelse return null;
-    var pairs = std.mem.splitScalar(u8, target[query_start + 1 ..], '&');
-    while (pairs.next()) |pair| {
-        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
-        const raw_key = pair[0..eq];
-        const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
-        const key = try issues_page.percentDecodeForm(allocator, raw_key);
-        defer allocator.free(key);
-        if (!std.mem.eql(u8, key, wanted_key)) continue;
-        return try issues_page.percentDecodeForm(allocator, raw_value);
-    }
-    return null;
 }
 
 fn parseFormFieldsOwned(allocator: Allocator, body: []const u8) ![]FormField {
@@ -1263,9 +1183,9 @@ fn parseFormFieldsOwned(allocator: Allocator, body: []const u8) ![]FormField {
         const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
         const raw_key = pair[0..eq];
         const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
-        const key = try issues_page.percentDecodeForm(allocator, raw_key);
+        const key = try shared.percentDecodeForm(allocator, raw_key);
         errdefer allocator.free(key);
-        const value = try issues_page.percentDecodeForm(allocator, raw_value);
+        const value = try shared.percentDecodeForm(allocator, raw_value);
         errdefer allocator.free(value);
         try fields.append(allocator, .{ .name = key, .value = value });
     }

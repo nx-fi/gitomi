@@ -1,7 +1,9 @@
 const std = @import("std");
 
 const errors = @import("../errors.zig");
-const event_mod = @import("../event.zig");
+const event_model = @import("../event/model.zig");
+const event_validation = @import("../event/validation.zig");
+const event_json = @import("../event/json.zig");
 const index_event_row = @import("event_row.zig");
 const index_schema = @import("schema.zig");
 const io = @import("../io.zig");
@@ -28,8 +30,8 @@ const fileExists = util.fileExists;
 const freeIndexedEvent = index_event_row.freeIndexedEvent;
 const indexedEventFromStmt = index_event_row.indexedEventFromStmt;
 const out = io.out;
-const parseValidatedEnvelopeObject = event_mod.parseValidatedEnvelopeObject;
-const validateEnvelopeObject = event_mod.validateEnvelopeObject;
+const parseValidatedEnvelopeObject = event_validation.parseValidatedEnvelopeObject;
+const validateEnvelopeObject = event_validation.validateEnvelopeObject;
 const printIndexedEvent = index_event_row.printIndexedEvent;
 
 pub const CommentParentInfo = struct {
@@ -155,7 +157,7 @@ pub fn requireAuthorizedWrite(allocator: Allocator, repo: Repo, event_body: []co
     }
 }
 
-fn openLocalActorAuthorized(allocator: Allocator, db: *SqliteDb, envelope: event_mod.ValidatedEnvelope, event_body: []const u8) !bool {
+fn openLocalActorAuthorized(allocator: Allocator, db: *SqliteDb, envelope: event_model.ValidatedEnvelope, event_body: []const u8) !bool {
     var signing_key = repo_mod.configuredSigningKey(allocator) catch return false;
     defer signing_key.deinit();
 
@@ -175,7 +177,7 @@ fn localDomainRejectionCanBeAudited(event_type: []const u8, reason: []const u8) 
     return std.mem.eql(u8, reason, "insufficient_role") or std.mem.eql(u8, reason, "unauthorized_principal");
 }
 
-fn localDelegationAuthorizesWrite(allocator: Allocator, repo: Repo, envelope: event_mod.ValidatedEnvelope) !bool {
+fn localDelegationAuthorizesWrite(allocator: Allocator, repo: Repo, envelope: event_model.ValidatedEnvelope) !bool {
     if (!projection.importDelegatesEvent(envelope.event_type)) return false;
 
     var signing_key = repo_mod.configuredSigningKey(allocator) catch return false;
@@ -184,7 +186,7 @@ fn localDelegationAuthorizesWrite(allocator: Allocator, repo: Repo, envelope: ev
         try hasActiveDelegation(allocator, repo, envelope.actor_principal, envelope.actor_device, "gitlab.import", "gitlab:*", signing_key.fingerprint);
 }
 
-fn localDelegationAuthorizesLegacyAliasWrite(allocator: Allocator, repo: Repo, envelope: event_mod.ValidatedEnvelope, event_body: []const u8) !bool {
+fn localDelegationAuthorizesLegacyAliasWrite(allocator: Allocator, repo: Repo, envelope: event_model.ValidatedEnvelope, event_body: []const u8) !bool {
     if (!projection.importDelegatesEvent(envelope.event_type)) return false;
 
     const aliases = providerLegacyAliases(allocator, envelope.event_type, event_body) catch return false;
@@ -198,7 +200,7 @@ fn localDelegationAuthorizesLegacyAliasWrite(allocator: Allocator, repo: Repo, e
     return true;
 }
 
-fn localDelegationAuthorizesSourceIdentityWrite(allocator: Allocator, repo: Repo, envelope: event_mod.ValidatedEnvelope, event_body: []const u8) !bool {
+fn localDelegationAuthorizesSourceIdentityWrite(allocator: Allocator, repo: Repo, envelope: event_model.ValidatedEnvelope, event_body: []const u8) !bool {
     if (!projection.importDelegatesEvent(envelope.event_type)) return false;
 
     const metadata = sourceIdentityMetadataAuthorization(allocator, envelope.event_type, event_body) catch return false;
@@ -250,7 +252,7 @@ fn sourceIdentityMetadataAuthorization(allocator: Allocator, event_type: []const
         else => return .{},
     };
     if (!payloadHasSourceIdentityMetadata(payload)) return .{};
-    const source_identity = event_mod.jsonString(payload.get("source_identity")) orelse "";
+    const source_identity = event_json.jsonString(payload.get("source_identity")) orelse "";
     if (source_identity.len != 0) {
         return .{
             .has_metadata = true,
@@ -293,7 +295,7 @@ fn payloadHasSourceIdentityMetadata(payload: std.json.ObjectMap) bool {
 }
 
 fn payloadHasNonEmptyString(payload: std.json.ObjectMap, key: []const u8) bool {
-    const value = event_mod.jsonString(payload.get(key)) orelse return false;
+    const value = event_json.jsonString(payload.get(key)) orelse return false;
     return value.len != 0;
 }
 
@@ -309,7 +311,7 @@ fn providersForSourceIdentity(source_identity: []const u8) ProviderLegacyAliases
 }
 
 fn legacyPositiveInteger(legacy: std.json.ObjectMap, key: []const u8) bool {
-    const number = event_mod.jsonInteger(legacy.get(key)) orelse return false;
+    const number = event_json.jsonInteger(legacy.get(key)) orelse return false;
     return number > 0;
 }
 

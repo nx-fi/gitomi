@@ -1,9 +1,9 @@
 const std = @import("std");
-const event_mod = @import("../event.zig");
+const event_model = @import("../event/model.zig");
+const event_builders = @import("../event/builders.zig");
 const event_writer_mod = @import("../event_writer.zig");
 const index = @import("../index.zig");
 const issue_mod = @import("../issue.zig");
-const issues_page = @import("issues.zig");
 const pull_mod = @import("../pr.zig");
 const repo_mod = @import("../repo.zig");
 const shared = @import("shared.zig");
@@ -18,7 +18,7 @@ const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
 const appendTemplate = shared.appendTemplate;
 const appendUrlEncoded = shared.appendUrlEncoded;
-const formValueOwned = issues_page.formValueOwned;
+const formValueOwned = shared.formValueOwned;
 const groupedUnsigned = shared.groupedUnsigned;
 const sendPlainResponse = shared.sendPlainResponse;
 const sendRedirect = shared.sendRedirect;
@@ -216,7 +216,7 @@ pub fn handleLabelsPost(allocator: Allocator, repo: Repo, stream: std.net.Stream
         }
 
         if (definition) |existing| {
-            var update = event_mod.LabelUpdate{};
+            var update = event_model.LabelUpdate{};
             if (!std.mem.eql(u8, label, new_label)) update.name = new_label;
             if (!std.mem.eql(u8, existing.description, description)) update.description = description;
             if (!std.mem.eql(u8, existing.color, color)) update.color = color;
@@ -328,7 +328,7 @@ fn writeLabelCreatedEvent(allocator: Allocator, name: []const u8, description: [
     const occurred_at = try rfc3339Now(allocator);
     defer allocator.free(occurred_at);
 
-    const event_body = try event_mod.buildLabelCreatedJson(
+    const event_body = try event_builders.buildLabelCreatedJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
@@ -350,7 +350,7 @@ fn writeLabelCreatedEvent(allocator: Allocator, name: []const u8, description: [
     defer allocator.free(commit_oid);
 }
 
-fn writeLabelUpdatedEvent(allocator: Allocator, label_id: []const u8, update: event_mod.LabelUpdate) !void {
+fn writeLabelUpdatedEvent(allocator: Allocator, label_id: []const u8, update: event_model.LabelUpdate) !void {
     if (!update.hasChanges()) return;
 
     var writer = try EventWriter.init(allocator, "gt label edit");
@@ -363,7 +363,7 @@ fn writeLabelUpdatedEvent(allocator: Allocator, label_id: []const u8, update: ev
     const occurred_at = try rfc3339Now(allocator);
     defer allocator.free(occurred_at);
 
-    const event_body = try event_mod.buildLabelUpdatedJson(
+    const event_body = try event_builders.buildLabelUpdatedJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
@@ -514,7 +514,7 @@ fn writeLabelDeletedEvent(allocator: Allocator, label_id: []const u8) !void {
     const occurred_at = try rfc3339Now(allocator);
     defer allocator.free(occurred_at);
 
-    const event_body = try event_mod.buildLabelDeletedJson(
+    const event_body = try event_builders.buildLabelDeletedJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),

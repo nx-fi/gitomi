@@ -1,7 +1,7 @@
 const std = @import("std");
 const cmd_common = @import("cmd_common.zig");
 const errors = @import("errors.zig");
-const event_mod = @import("event.zig");
+const event_builders = @import("event/builders.zig");
 const event_writer_mod = @import("event_writer.zig");
 const index = @import("index.zig");
 const io = @import("io.zig");
@@ -238,7 +238,7 @@ pub fn createNotificationSubscriptionEvent(
     defer allocator.free(occurred_at);
     const event_type: []const u8 = if (subscribe) "notification.subscribed" else "notification.unsubscribed";
 
-    const event_body = try event_mod.buildNotificationSubscriptionJson(
+    const event_body = try event_builders.buildNotificationSubscriptionJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
@@ -290,7 +290,7 @@ fn createNotificationReadInternal(allocator: Allocator, principal: []const u8, e
     defer allocator.free(occurred_at);
 
     const event_body = if (all)
-        try event_mod.buildNotificationReadAllJson(
+        try event_builders.buildNotificationReadAllJson(
             allocator,
             writer.cfg,
             writer.nextSeq(),
@@ -302,7 +302,7 @@ fn createNotificationReadInternal(allocator: Allocator, principal: []const u8, e
             principal,
         )
     else
-        try event_mod.buildNotificationReadJson(
+        try event_builders.buildNotificationReadJson(
             allocator,
             writer.cfg,
             writer.nextSeq(),

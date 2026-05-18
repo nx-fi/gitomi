@@ -5,6 +5,7 @@ const io = @import("../../io.zig");
 const repo_mod = @import("../../repo.zig");
 const sync_mod = @import("../../sync.zig");
 const util = @import("../../util.zig");
+const import_bot = @import("../import_bot.zig");
 const common = @import("common.zig");
 const exporter = @import("exporter.zig");
 const importer = @import("importer.zig");
@@ -27,8 +28,8 @@ const Options = struct {
     git_sync: bool = true,
     interval_ms: u64 = default_interval_ms,
     max_pages: usize = 10,
-    bot_principal: []const u8 = "import-bot",
-    bot_device: []const u8 = "gitlab",
+    bot_principal: []const u8 = import_bot.principal,
+    bot_device: []const u8 = import_bot.gitlab_device,
     map_file: ?[]const u8 = null,
 };
 
@@ -47,8 +48,8 @@ pub fn cmdSync(allocator: Allocator, args: []const []const u8) !void {
     var git_sync = true;
     var interval_ms: u64 = default_interval_ms;
     var max_pages: usize = 10;
-    var bot_principal: []const u8 = "import-bot";
-    var bot_device: []const u8 = "gitlab";
+    var bot_principal: []const u8 = import_bot.principal;
+    var bot_device: []const u8 = import_bot.gitlab_device;
     var map_file_arg: ?[]const u8 = null;
 
     var i: usize = 0;

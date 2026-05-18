@@ -1,10 +1,12 @@
 const std = @import("std");
 const errors = @import("../../errors.zig");
-const event_mod = @import("../../event.zig");
+const event_model = @import("../../event/model.zig");
+const event_json = @import("../../event/json.zig");
 const git = @import("../../git.zig");
 const io = @import("../../io.zig");
 const json_writer = @import("../../json_writer.zig");
 const util = @import("../../util.zig");
+const http_client = @import("../http_client.zig");
 
 const Allocator = std.mem.Allocator;
 const CliError = errors.CliError;
@@ -12,13 +14,20 @@ const appendJsonFieldBool = json_writer.appendJsonFieldBool;
 const appendJsonFieldString = json_writer.appendJsonFieldString;
 const appendJsonFieldStringArray = json_writer.appendJsonFieldStringArray;
 const appendJsonString = json_writer.appendJsonString;
-const out = io.out;
 const eprint = io.eprint;
+const RequestOptions = http_client.RequestOptions;
 
 pub const default_api_url = "https://api.github.com";
-pub const max_github_json = 32 * 1024 * 1024;
-const github_api_retries = 3;
-const retry_base_delay_ns = 500 * std.time.ns_per_ms;
+pub const max_github_json = http_client.max_response_json;
+pub const jsonArray = event_json.jsonArray;
+pub const jsonBool = event_json.jsonBool;
+pub const jsonInteger = event_json.jsonInteger;
+const github_api_retries = http_client.default_retries;
+const github_headers = [_][]const u8{
+    "Accept: application/vnd.github+json",
+    "X-GitHub-Api-Version: 2022-11-28",
+    "User-Agent: gitomi/0.1.0",
+};
 pub const gh_current_repo = RepoSlug{
     .owner = "OWNER",
     .name = "REPO",
@@ -68,87 +77,9 @@ pub const GitHubClient = struct {
         return try self.request("POST", "/graphql", body);
     }
 
-    const RequestOptions = struct {
-        not_found_as_null: bool = false,
-    };
-
     fn requestInternal(self: GitHubClient, method: []const u8, path: []const u8, body: ?[]const u8, options: RequestOptions) !?[]u8 {
-        if (self.dry_run) {
-            try out("{s} {s}", .{ method, path });
-            if (body) |bytes| try out(" {s}", .{bytes});
-            try out("\n", .{});
-            return try self.allocator.dupe(u8, "{}");
-        }
-
-        if (self.use_gh) return try self.requestGhInternal(method, path, body, options);
-
-        const url = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.api_url, path });
-        defer self.allocator.free(url);
-
-        var attempt: usize = 0;
-        while (true) : (attempt += 1) {
-            const config_path = try self.writeCurlConfig(method, url, body != null);
-            defer self.allocator.free(config_path);
-            defer std.fs.deleteFileAbsolute(config_path) catch {};
-
-            var result = try git.runCommand(self.allocator, &.{
-                "curl",
-                "-sS",
-                "--config",
-                config_path,
-                "--write-out",
-                "\n%{http_code}",
-            }, body, max_github_json);
-
-            if (result.exitCode() == 0) {
-                if (parseCurlHttpResponse(self.allocator, result.stdout)) |response| {
-                    defer self.allocator.free(response.body);
-                    if (response.status >= 200 and response.status < 300) {
-                        const body_owned = try self.allocator.dupe(u8, response.body);
-                        result.deinit();
-                        return body_owned;
-                    }
-                    if (options.not_found_as_null and response.status == 404) {
-                        result.deinit();
-                        return null;
-                    }
-                    if (isRetryableHttpStatus(response.status) and attempt + 1 < github_api_retries) {
-                        result.deinit();
-                        sleepBeforeRetry(attempt);
-                        continue;
-                    }
-                    const response_body = std.mem.trim(u8, response.body, " \t\r\n");
-                    if (response_body.len != 0) {
-                        try eprint("gt github: GitHub API request failed with HTTP {d}: {s}\n", .{ response.status, response_body });
-                    } else {
-                        try eprint("gt github: GitHub API request failed with HTTP {d}\n", .{response.status});
-                    }
-                    result.deinit();
-                    return CliError.UserError;
-                } else |err| {
-                    result.deinit();
-                    return err;
-                }
-            }
-
-            const stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
-            if (attempt + 1 < github_api_retries) {
-                result.deinit();
-                sleepBeforeRetry(attempt);
-                continue;
-            }
-            if (options.not_found_as_null and githubRequestStderrIsNotFound(stderr)) {
-                result.deinit();
-                return null;
-            }
-            if (stderr.len != 0) {
-                try eprint("gt github: GitHub API request failed: {s}\n", .{stderr});
-            } else {
-                try eprint("gt github: GitHub API request failed\n", .{});
-            }
-            result.deinit();
-            return CliError.UserError;
-        }
+        if (self.dry_run or !self.use_gh) return try self.httpClient().request(method, path, body, options);
+        return try self.requestGhInternal(method, path, body, options);
     }
 
     pub fn requestGh(self: GitHubClient, method: []const u8, path: []const u8, body: ?[]const u8) ![]u8 {
@@ -188,7 +119,7 @@ pub const GitHubClient = struct {
             const stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
             if (options.not_found_as_null and githubRequestStderrIsNotFound(stderr)) return null;
             if (isRetryableGithubError(stderr) and attempt + 1 < github_api_retries) {
-                sleepBeforeRetry(attempt);
+                http_client.sleepBeforeRetry(attempt);
                 continue;
             }
             if (stderr.len != 0) {
@@ -207,81 +138,25 @@ pub const GitHubClient = struct {
         return std.fmt.allocPrint(allocator, "/repos/{s}{s}", .{ self.repo.slug, suffix });
     }
 
-    fn writeCurlConfig(self: GitHubClient, method: []const u8, url: []const u8, has_body: bool) ![]u8 {
-        const id = try util.newUuidV7(self.allocator);
-        defer self.allocator.free(id);
-        const path = try std.fmt.allocPrint(self.allocator, "/tmp/gitomi-curl-{s}.cfg", .{id});
-        errdefer self.allocator.free(path);
-
-        var buf: std.ArrayList(u8) = .empty;
-        defer buf.deinit(self.allocator);
-        try appendCurlConfigOption(&buf, self.allocator, "request", method);
-        try appendCurlConfigOption(&buf, self.allocator, "header", "Accept: application/vnd.github+json");
-        try appendCurlConfigOption(&buf, self.allocator, "header", "X-GitHub-Api-Version: 2022-11-28");
-        try appendCurlConfigOption(&buf, self.allocator, "header", "User-Agent: gitomi/0.1.0");
-        if (self.token) |token| {
-            const auth = try std.fmt.allocPrint(self.allocator, "Authorization: Bearer {s}", .{token});
-            defer self.allocator.free(auth);
-            try appendCurlConfigOption(&buf, self.allocator, "header", auth);
-        }
-        if (has_body) {
-            try appendCurlConfigOption(&buf, self.allocator, "header", "Content-Type: application/json");
-            try appendCurlConfigOption(&buf, self.allocator, "data-binary", "@-");
-        }
-        try appendCurlConfigOption(&buf, self.allocator, "url", url);
-
-        var file = try std.fs.createFileAbsolute(path, .{ .mode = 0o600 });
-        errdefer std.fs.deleteFileAbsolute(path) catch {};
-        defer file.close();
-        try file.writeAll(buf.items);
-        try file.sync();
-        return path;
+    fn httpClient(self: GitHubClient) http_client.HttpApiClient {
+        return .{
+            .allocator = self.allocator,
+            .command_name = "gt github",
+            .service_name = "GitHub",
+            .api_url = self.api_url,
+            .token = self.token,
+            .auth_header_style = .bearer,
+            .headers = &github_headers,
+            .curl_config_prefix = "gitomi-curl",
+            .dry_run = self.dry_run,
+        };
     }
 };
-
-fn appendCurlConfigOption(buf: *std.ArrayList(u8), allocator: Allocator, key: []const u8, value: []const u8) !void {
-    try buf.appendSlice(allocator, key);
-    try buf.appendSlice(allocator, " = \"");
-    for (value) |c| {
-        switch (c) {
-            '"' => try buf.appendSlice(allocator, "\\\""),
-            '\\' => try buf.appendSlice(allocator, "\\\\"),
-            '\n' => try buf.appendSlice(allocator, "\\n"),
-            '\r' => try buf.appendSlice(allocator, "\\r"),
-            '\t' => try buf.appendSlice(allocator, "\\t"),
-            else => try buf.append(allocator, c),
-        }
-    }
-    try buf.appendSlice(allocator, "\"\n");
-}
-
-const HttpResponse = struct {
-    body: []u8,
-    status: u16,
-};
-
-fn parseCurlHttpResponse(allocator: Allocator, stdout: []const u8) !HttpResponse {
-    const marker = std.mem.lastIndexOfScalar(u8, stdout, '\n') orelse return CliError.UserError;
-    const raw_status = std.mem.trim(u8, stdout[marker + 1 ..], " \t\r\n");
-    if (raw_status.len != 3) return CliError.UserError;
-    const status = std.fmt.parseUnsigned(u16, raw_status, 10) catch return CliError.UserError;
-    const body = try allocator.dupe(u8, stdout[0..marker]);
-    return .{ .body = body, .status = status };
-}
-
-fn isRetryableHttpStatus(status: u16) bool {
-    return status == 429 or (status >= 500 and status <= 599);
-}
 
 fn isRetryableGithubError(stderr: []const u8) bool {
     return std.mem.indexOf(u8, stderr, "HTTP 429") != null or
         std.mem.indexOf(u8, stderr, "HTTP 5") != null or
         std.ascii.indexOfIgnoreCase(stderr, "rate limit") != null;
-}
-
-fn sleepBeforeRetry(attempt: usize) void {
-    const multiplier = @as(u64, 1) << @intCast(@min(attempt, 4));
-    std.Thread.sleep(retry_base_delay_ns * multiplier);
 }
 
 pub fn githubTokenFromEnv(allocator: Allocator) !?[]u8 {
@@ -328,9 +203,7 @@ pub fn secretFromFile(allocator: Allocator, command: []const u8, path: []const u
 }
 
 pub fn githubRequestStderrIsNotFound(stderr: []const u8) bool {
-    return std.mem.indexOf(u8, stderr, "HTTP 404") != null or
-        std.mem.indexOf(u8, stderr, "returned error: 404") != null or
-        std.mem.indexOf(u8, stderr, "error: 404") != null;
+    return http_client.requestStderrIsNotFound(stderr);
 }
 
 pub fn githubSizedString(allocator: Allocator, value: ?[]const u8, fallback: []const u8, max_bytes: usize) ![]u8 {
@@ -433,7 +306,7 @@ pub fn legacyNumber(root: std.json.ObjectMap, key: []const u8) ?i64 {
 }
 
 pub fn githubTimestampOrNow(allocator: Allocator, value: ?std.json.Value) ![]u8 {
-    if (event_mod.jsonString(value)) |timestamp| {
+    if (event_json.jsonString(value)) |timestamp| {
         if (timestamp.len != 0 and timestamp[timestamp.len - 1] == 'Z') {
             return allocator.dupe(u8, timestamp);
         }
@@ -450,7 +323,7 @@ pub fn firstJsonValue3(a: ?std.json.Value, b: ?std.json.Value, c: ?std.json.Valu
 }
 
 pub fn githubStateEquals(value: ?std.json.Value, expected_lower: []const u8) bool {
-    const raw = event_mod.jsonString(value) orelse return false;
+    const raw = event_json.jsonString(value) orelse return false;
     return std.ascii.eqlIgnoreCase(raw, expected_lower);
 }
 
@@ -484,7 +357,7 @@ pub fn appendGithubNamedArray(allocator: Allocator, list: *std.ArrayList([]u8), 
     switch (actual) {
         .array => |array| return appendGithubNamedArrayItems(allocator, list, array, key),
         .object => |object| {
-            if (event_mod.jsonString(object.get(key))) |name| {
+            if (event_json.jsonString(object.get(key))) |name| {
                 if (name.len != 0) try list.append(allocator, try githubSizedString(allocator, name, "", git.max_payload_atom_bytes));
             }
             if (jsonArray(object.get("nodes"))) |nodes| try appendGithubNamedArrayItems(allocator, list, nodes, key);
@@ -495,7 +368,7 @@ pub fn appendGithubNamedArray(allocator: Allocator, list: *std.ArrayList([]u8), 
                         .object => |node_object| node_object,
                         else => continue,
                     };
-                    if (event_mod.jsonString(node.get(key))) |name| {
+                    if (event_json.jsonString(node.get(key))) |name| {
                         if (name.len != 0) try list.append(allocator, try githubSizedString(allocator, name, "", git.max_payload_atom_bytes));
                     }
                 }
@@ -511,7 +384,7 @@ fn appendGithubNamedArrayItems(allocator: Allocator, list: *std.ArrayList([]u8),
         if (item == .string) {
             try list.append(allocator, try githubSizedString(allocator, item.string, "", git.max_payload_atom_bytes));
         } else if (item == .object) {
-            if (event_mod.jsonString(item.object.get(key))) |name| {
+            if (event_json.jsonString(item.object.get(key))) |name| {
                 if (name.len != 0) try list.append(allocator, try githubSizedString(allocator, name, "", git.max_payload_atom_bytes));
             }
         }
@@ -533,22 +406,22 @@ fn appendGithubReviewRequests(allocator: Allocator, list: *std.ArrayList([]u8), 
             .object => |object| object,
             else => continue,
         };
-        const name = event_mod.jsonString(reviewer.get("login")) orelse
-            event_mod.jsonString(reviewer.get("slug")) orelse
-            event_mod.jsonString(reviewer.get("name")) orelse
+        const name = event_json.jsonString(reviewer.get("login")) orelse
+            event_json.jsonString(reviewer.get("slug")) orelse
+            event_json.jsonString(reviewer.get("name")) orelse
             continue;
         if (name.len != 0) try list.append(allocator, try githubSizedString(allocator, name, "", git.max_payload_atom_bytes));
     }
 }
 
 pub fn githubAuthorLogin(object: std.json.ObjectMap) ?[]const u8 {
-    if (event_mod.jsonString(object.get("source_author"))) |value| return value;
-    if (event_mod.jsonString(object.get("author_login"))) |value| return value;
-    if (event_mod.jsonString(object.get("user_login"))) |value| return value;
+    if (event_json.jsonString(object.get("source_author"))) |value| return value;
+    if (event_json.jsonString(object.get("author_login"))) |value| return value;
+    if (event_json.jsonString(object.get("user_login"))) |value| return value;
     if (nestedString(object, "user", "login")) |value| return value;
     if (nestedString(object, "author", "login")) |value| return value;
-    if (event_mod.jsonString(object.get("author"))) |value| return value;
-    if (event_mod.jsonString(object.get("user"))) |value| return value;
+    if (event_json.jsonString(object.get("author"))) |value| return value;
+    if (event_json.jsonString(object.get("user"))) |value| return value;
     return null;
 }
 
@@ -560,7 +433,7 @@ pub fn githubOptionalUnsignedField(object: std.json.ObjectMap, keys: []const []c
 }
 
 pub fn githubMilestoneTitle(object: std.json.ObjectMap) ?[]const u8 {
-    if (event_mod.jsonString(object.get("milestone"))) |value| return value;
+    if (event_json.jsonString(object.get("milestone"))) |value| return value;
     return nestedString(object, "milestone", "title");
 }
 
@@ -570,8 +443,8 @@ pub fn githubFixtureProjects(
     parent_kind: []const u8,
     number: i64,
     object: std.json.ObjectMap,
-) ![]event_mod.IssueProjectPlacement {
-    var list: std.ArrayList(event_mod.IssueProjectPlacement) = .empty;
+) ![]event_model.IssueProjectPlacement {
+    var list: std.ArrayList(event_model.IssueProjectPlacement) = .empty;
     errdefer freeProjectPlacements(allocator, list.items);
     try appendProjectPlacements(allocator, &list, object.get("projects"));
 
@@ -587,7 +460,7 @@ pub fn githubFixtureProjects(
 
 pub fn appendProjectPlacements(
     allocator: Allocator,
-    list: *std.ArrayList(event_mod.IssueProjectPlacement),
+    list: *std.ArrayList(event_model.IssueProjectPlacement),
     value: ?std.json.Value,
 ) !void {
     const array = jsonArray(value) orelse return;
@@ -605,12 +478,12 @@ pub fn appendProjectPlacements(
                 }
             },
             .object => |map| {
-                project_name = event_mod.jsonString(map.get("project")) orelse
-                    event_mod.jsonString(map.get("name")) orelse
-                    event_mod.jsonString(map.get("title"));
-                column_name = event_mod.jsonString(map.get("column")) orelse
-                    event_mod.jsonString(map.get("column_name")) orelse
-                    event_mod.jsonString(map.get("status")) orelse
+                project_name = event_json.jsonString(map.get("project")) orelse
+                    event_json.jsonString(map.get("name")) orelse
+                    event_json.jsonString(map.get("title"));
+                column_name = event_json.jsonString(map.get("column")) orelse
+                    event_json.jsonString(map.get("column_name")) orelse
+                    event_json.jsonString(map.get("status")) orelse
                     "";
             },
             else => continue,
@@ -624,7 +497,7 @@ pub fn appendProjectPlacements(
     }
 }
 
-pub fn freeProjectPlacements(allocator: Allocator, projects: []event_mod.IssueProjectPlacement) void {
+pub fn freeProjectPlacements(allocator: Allocator, projects: []event_model.IssueProjectPlacement) void {
     for (projects) |project| {
         allocator.free(project.project);
         allocator.free(project.column);
@@ -637,37 +510,7 @@ pub fn nestedString(object: std.json.ObjectMap, parent_key: []const u8, child_ke
         .object => |map| map,
         else => return null,
     };
-    return event_mod.jsonString(parent.get(child_key));
-}
-
-pub fn jsonArray(value: ?std.json.Value) ?std.json.Array {
-    if (value) |v| {
-        return switch (v) {
-            .array => |array| array,
-            else => null,
-        };
-    }
-    return null;
-}
-
-pub fn jsonBool(value: ?std.json.Value) ?bool {
-    if (value) |v| {
-        return switch (v) {
-            .bool => |b| b,
-            else => null,
-        };
-    }
-    return null;
-}
-
-pub fn jsonInteger(value: ?std.json.Value) ?i64 {
-    if (value) |v| {
-        return switch (v) {
-            .integer => |i| i,
-            else => null,
-        };
-    }
-    return null;
+    return event_json.jsonString(parent.get(child_key));
 }
 
 pub fn jsonOptionalUnsigned(value: ?std.json.Value) ?u64 {

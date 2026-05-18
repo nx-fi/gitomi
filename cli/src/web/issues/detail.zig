@@ -1,14 +1,14 @@
 const std = @import("std");
 const comment_mod = @import("../../comment.zig");
-const event_mod = @import("../../event.zig");
+const event_model = @import("../../event/model.zig");
+const event_validation = @import("../../event/validation.zig");
 const index = @import("../../index.zig");
 const issue = @import("../../issue.zig");
-const issue_form = @import("form.zig");
 const issue_reactions = @import("reactions.zig");
 const issue_sidebar = @import("sidebar.zig");
 const issue_timeline = @import("timeline.zig");
 const issues_list = @import("list.zig");
-const notification_mod = @import("../../notification.zig");
+const notifications = @import("../notifications.zig");
 const reaction_mod = @import("../../reaction.zig");
 const repo_mod = @import("../../repo.zig");
 const shared = @import("../shared.zig");
@@ -30,7 +30,6 @@ const createCommentBodySetEvent = comment_mod.createCommentBodySetEvent;
 const createCommentReplyEvent = comment_mod.createCommentReplyEvent;
 const createIssueStringEvent = issue.createIssueStringEvent;
 const createIssueUpdatedEvent = issue.createIssueUpdatedEvent;
-const createNotificationSubscriptionEvent = notification_mod.createNotificationSubscriptionEvent;
 const createReactionEvent = reaction_mod.createReactionEvent;
 const ensureIndex = index.ensureIndex;
 const sendRedirect = shared.sendRedirect;
@@ -40,8 +39,8 @@ const sqlite = index.sqlite;
 
 pub const renderIssuesPage = issues_list.renderIssuesPage;
 pub const handleIssueBulkPost = issues_list.handleIssueBulkPost;
-const formValueOwned = issue_form.formValueOwned;
-const queryValueOwned = issue_form.queryValueOwned;
+const formValueOwned = shared.formValueOwned;
+const queryValueOwned = shared.queryValueOwned;
 
 pub fn renderIssueDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u8, csrf_token: []const u8) ![]u8 {
     return renderIssueDetailPageWithCommentForm(allocator, repo, raw_ref, csrf_token, null, "");
@@ -79,9 +78,9 @@ fn renderIssueDetailPageWithCommentForm(
     const current_role = if (current_actor) |actor| try index.effectiveWriteRoleForPrincipal(allocator, repo, actor) else null;
     defer if (current_role) |role| allocator.free(role);
     const can_edit_issue = currentActorCanEditAuthor(current_actor, current_role, detail.author_principal);
-    const can_manage_notifications = current_actor != null;
+    const can_manage_notifications = notifications.currentActorCanManageNotifications(current_actor, current_role);
     const notification_subscribed = if (current_actor) |actor|
-        try isNotificationSubscribed(&db, actor, "issue", detail.id)
+        try notifications.isNotificationSubscribed(&db, actor, "issue", detail.id)
     else
         false;
     const issue_edit_href = if (can_edit_issue) try issueEditHrefOwned(allocator, raw_ref, null) else "";
@@ -569,32 +568,9 @@ pub fn appendIssueActionMenu(
 
 fn currentActorCanEditAuthor(current_actor: ?[]const u8, current_role: ?[]const u8, author: []const u8) bool {
     const role = current_role orelse return false;
-    if (event_mod.roleAtLeast(role, "maintainer")) return true;
+    if (event_validation.roleAtLeast(role, "maintainer")) return true;
     const actor = current_actor orelse return false;
-    return event_mod.roleAtLeast(role, "contributor") and std.mem.eql(u8, actor, author);
-}
-
-fn currentActorCanManageNotifications(current_actor: ?[]const u8, current_role: ?[]const u8) bool {
-    if (current_actor == null) return false;
-    const role = current_role orelse return false;
-    return event_mod.roleAtLeast(role, "reporter");
-}
-
-fn isNotificationSubscribed(db: *SqliteDb, principal: []const u8, object_kind: []const u8, object_id: []const u8) !bool {
-    var stmt = try db.prepare(
-        \\SELECT active
-        \\FROM notification_subscriptions
-        \\WHERE principal = ?
-        \\  AND object_kind = ?
-        \\  AND object_id = ?
-        \\LIMIT 1
-    );
-    defer stmt.deinit();
-    try stmt.bindText(1, principal);
-    try stmt.bindText(2, object_kind);
-    try stmt.bindText(3, object_id);
-    if (!(try stmt.step())) return false;
-    return stmt.columnInt(0) != 0;
+    return event_validation.roleAtLeast(role, "contributor") and std.mem.eql(u8, actor, author);
 }
 
 fn issueEditHrefOwned(allocator: Allocator, raw_ref: []const u8, target_ref: ?[]const u8) ![]u8 {
@@ -780,7 +756,7 @@ fn handleIssueBodyEditPost(
         return;
     }
 
-    var update: event_mod.IssueUpdate = .{};
+    var update: event_model.IssueUpdate = .{};
     if (!std.mem.eql(u8, title, current_title)) update.title = title;
     if (!std.mem.eql(u8, body_owned, current_body)) update.body = body_owned;
     if (!update.hasChanges()) {
@@ -1089,47 +1065,5 @@ pub fn handleIssueCommentPost(allocator: Allocator, repo: Repo, stream: std.net.
 }
 
 pub fn handleIssueNotificationPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
-    try ensureIndex(allocator, repo);
-    const issue_id = index.resolveIssueId(allocator, repo, raw_ref) catch {
-        try sendPlainResponse(allocator, stream, 404, "Not Found", "Issue not found\n");
-        return;
-    };
-    defer allocator.free(issue_id);
-
-    const action_owned = (try formValueOwned(allocator, form_body, "action")) orelse {
-        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Missing notification action\n");
-        return;
-    };
-    defer allocator.free(action_owned);
-    const action = std.mem.trim(u8, action_owned, " \t\r\n");
-    const subscribe = if (std.mem.eql(u8, action, "subscribe"))
-        true
-    else if (std.mem.eql(u8, action, "unsubscribe"))
-        false
-    else {
-        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Unknown notification action\n");
-        return;
-    };
-
-    const current_actor = try shared.currentPrincipalOwned(allocator, repo);
-    defer if (current_actor) |actor_value| allocator.free(actor_value);
-    const actor = current_actor orelse {
-        try sendPlainResponse(allocator, stream, 409, "Conflict", "Gitomi is not initialized\n");
-        return;
-    };
-    const current_role = try index.effectiveWriteRoleForPrincipal(allocator, repo, actor);
-    defer if (current_role) |role| allocator.free(role);
-    if (!currentActorCanManageNotifications(actor, current_role)) {
-        try sendPlainResponse(allocator, stream, 403, "Forbidden", "Forbidden\n");
-        return;
-    }
-
-    createNotificationSubscriptionEvent(allocator, actor, "issue", issue_id, subscribe) catch |err| {
-        try sendPlainResponse(allocator, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), shared.writeFailureMessage(err, "Could not update notification subscription\n"));
-        return;
-    };
-
-    const location = try std.fmt.allocPrint(allocator, "/issues/{s}", .{raw_ref});
-    defer allocator.free(location);
-    try sendRedirect(allocator, stream, location);
+    try notifications.handleNotificationPost("issue", index.resolveIssueId, "/issues", allocator, repo, stream, raw_ref, form_body);
 }

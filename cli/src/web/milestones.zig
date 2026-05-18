@@ -1,11 +1,10 @@
 const std = @import("std");
-const event_mod = @import("../event.zig");
+const event_model = @import("../event/model.zig");
 const index = @import("../index.zig");
 const issue_mod = @import("../issue.zig");
 const milestone_mod = @import("../milestone.zig");
 const repo_mod = @import("../repo.zig");
 const shared = @import("shared.zig");
-const issues_page = @import("issues.zig");
 const util = @import("../util.zig");
 const zwf = @import("../zwf.zig");
 
@@ -25,9 +24,9 @@ const createMilestoneDeletedEvent = milestone_mod.createMilestoneDeletedEvent;
 const createMilestoneStringEvent = milestone_mod.createMilestoneStringEvent;
 const createMilestoneUpdatedEvent = milestone_mod.createMilestoneUpdatedEvent;
 const createIssueStringEvent = issue_mod.createIssueStringEvent;
-const formValueOwned = issues_page.formValueOwned;
+const formValueOwned = shared.formValueOwned;
+const formValuesOwned = shared.formValuesOwned;
 const literalHref = shared.literalHref;
-const percentDecodeForm = issues_page.percentDecodeForm;
 const sendRedirect = shared.sendRedirect;
 const sendResponse = shared.sendResponse;
 const sendPlainResponse = shared.sendPlainResponse;
@@ -1351,7 +1350,7 @@ fn handleMilestoneUpdatePost(allocator: Allocator, repo: Repo, stream: std.net.S
         return;
     }
 
-    const update = event_mod.MilestoneUpdate{
+    const update = event_model.MilestoneUpdate{
         .title = title,
         .description = description_owned,
         .due_at = due_at_owned,
@@ -1430,30 +1429,6 @@ fn handleMilestoneAddIssuesPost(
     try sendRedirect(allocator, stream, return_to);
 }
 
-fn formValuesOwned(allocator: Allocator, body: []const u8, wanted_key: []const u8) !std.ArrayList([]u8) {
-    var values: std.ArrayList([]u8) = .empty;
-    errdefer {
-        for (values.items) |value| allocator.free(value);
-        values.deinit(allocator);
-    }
-
-    var pairs = std.mem.splitScalar(u8, body, '&');
-    while (pairs.next()) |pair| {
-        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
-        const raw_key = pair[0..eq];
-        const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
-        const key = try percentDecodeForm(allocator, raw_key);
-        defer allocator.free(key);
-        if (!std.mem.eql(u8, key, wanted_key)) continue;
-        const value = try percentDecodeForm(allocator, raw_value);
-        values.append(allocator, value) catch |err| {
-            allocator.free(value);
-            return err;
-        };
-    }
-    return values;
-}
-
 fn containsString(values: []const []u8, needle: []const u8) bool {
     for (values) |value| {
         if (std.mem.eql(u8, value, needle)) return true;
@@ -1468,18 +1443,15 @@ fn validMilestoneState(state: []const u8) bool {
 fn milestoneReturnTargetOwned(allocator: Allocator, form_body: []const u8, fallback: []const u8) ![]u8 {
     const owned = (try formValueOwned(allocator, form_body, "return_to")) orelse return try allocator.dupe(u8, fallback);
     errdefer allocator.free(owned);
-    if (!isSafeMilestoneReturnTarget(owned)) {
+    const value = std.mem.trim(u8, owned, " \t\r\n");
+    if (!shared.isSafeReturnTarget(value, "/milestones")) {
         allocator.free(owned);
         return try allocator.dupe(u8, fallback);
     }
-    return owned;
-}
-
-fn isSafeMilestoneReturnTarget(value: []const u8) bool {
-    if (value.len == 0 or value[0] != '/') return false;
-    if (value.len > 1 and value[1] == '/') return false;
-    if (!std.mem.startsWith(u8, value, "/milestones")) return false;
-    return std.mem.indexOfAny(u8, value, "\r\n") == null;
+    if (value.len == owned.len) return owned;
+    const trimmed = try allocator.dupe(u8, value);
+    allocator.free(owned);
+    return trimmed;
 }
 
 fn loadMilestoneTitleByIdOwned(allocator: Allocator, db: *SqliteDb, milestone_id: []const u8) ![]u8 {

@@ -16,6 +16,7 @@ const appendTemplate = shared.appendTemplate;
 const codeHref = shared.codeHref;
 const commitHref = shared.commitHref;
 const literalHref = shared.literalHref;
+const queryValueOwned = shared.queryValueOwned;
 const runCommand = git.runCommand;
 
 const max_commit_diff_bytes = 8 * 1024 * 1024;
@@ -614,43 +615,6 @@ fn normalizedPathOwned(allocator: Allocator, raw: []const u8) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
-fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const u8) !?[]u8 {
-    const query_start = std.mem.indexOfScalar(u8, target, '?') orelse return null;
-    var pairs = std.mem.splitScalar(u8, target[query_start + 1 ..], '&');
-    while (pairs.next()) |pair| {
-        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
-        const raw_key = pair[0..eq];
-        const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
-        const key = try percentDecode(allocator, raw_key);
-        defer allocator.free(key);
-        if (!std.mem.eql(u8, key, wanted_key)) continue;
-        return try percentDecode(allocator, raw_value);
-    }
-    return null;
-}
-
-fn percentDecode(allocator: Allocator, value: []const u8) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-
-    var i: usize = 0;
-    while (i < value.len) : (i += 1) {
-        switch (value[i]) {
-            '+' => try buf.append(allocator, ' '),
-            '%' => {
-                if (i + 2 >= value.len) return error.InvalidUrlEncoding;
-                const hi = hexValue(value[i + 1]) orelse return error.InvalidUrlEncoding;
-                const lo = hexValue(value[i + 2]) orelse return error.InvalidUrlEncoding;
-                try buf.append(allocator, (hi << 4) | lo);
-                i += 2;
-            },
-            else => |c| try buf.append(allocator, c),
-        }
-    }
-
-    return buf.toOwnedSlice(allocator);
-}
-
 fn freeCommitList(allocator: Allocator, commits: []CommitListEntry) void {
     for (commits) |commit| commit.deinit(allocator);
     allocator.free(commits);
@@ -678,15 +642,6 @@ fn gitMaybe(allocator: Allocator, repo: Repo, git_args: []const []const u8, max_
 
     result.deinit();
     return null;
-}
-
-fn hexValue(c: u8) ?u8 {
-    return switch (c) {
-        '0'...'9' => c - '0',
-        'a'...'f' => c - 'a' + 10,
-        'A'...'F' => c - 'A' + 10,
-        else => null,
-    };
 }
 
 test "web commits rejects option-like revisions" {

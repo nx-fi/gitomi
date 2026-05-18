@@ -1,6 +1,6 @@
 const std = @import("std");
 const errors = @import("errors.zig");
-const event_mod = @import("event.zig");
+const event_builders = @import("event/builders.zig");
 const event_writer_mod = @import("event_writer.zig");
 const io = @import("io.zig");
 const util = @import("util.zig");
@@ -43,7 +43,7 @@ pub fn createReactionEvent(
 
     const event_type = try std.fmt.allocPrint(allocator, "{s}.reaction_{s}", .{ canonical_kind, if (add) "added" else "removed" });
     defer allocator.free(event_type);
-    const event_body = try event_mod.buildReactionJson(
+    const event_body = try event_builders.buildReactionJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),

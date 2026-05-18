@@ -1,6 +1,8 @@
 const std = @import("std");
 const errors = @import("errors.zig");
-const event_mod = @import("event.zig");
+const event_model = @import("event/model.zig");
+const event_builders = @import("event/builders.zig");
+const event_json = @import("event/json.zig");
 const event_writer_mod = @import("event_writer.zig");
 const git = @import("git.zig");
 const index = @import("index.zig");
@@ -831,8 +833,8 @@ fn branchFromEventPayload(allocator: Allocator, body: []const u8) !?[]u8 {
         .object => |object| object,
         else => return null,
     };
-    if (event_mod.jsonString(payload.get("base_ref"))) |value| return try allocator.dupe(u8, value);
-    if (event_mod.jsonString(payload.get("ref"))) |value| return try allocator.dupe(u8, value);
+    if (event_json.jsonString(payload.get("base_ref"))) |value| return try allocator.dupe(u8, value);
+    if (event_json.jsonString(payload.get("ref"))) |value| return try allocator.dupe(u8, value);
     return null;
 }
 
@@ -947,7 +949,7 @@ fn createRunRequestedEventWithMetadata(
     const occurred_at = try util.rfc3339Now(allocator);
     defer allocator.free(occurred_at);
 
-    const event_body = try event_mod.buildActionRunRequestedJson(
+    const event_body = try event_builders.buildActionRunRequestedJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
@@ -1029,7 +1031,7 @@ fn createRunCompletedEventWithMetadata(
     event_name: ?[]const u8,
     diagnostics_ref: ?[]const u8,
     diagnostics_oid: ?[]const u8,
-    metadata: event_mod.ActionRunCompletedMetadata,
+    metadata: event_model.ActionRunCompletedMetadata,
     quiet: bool,
 ) !CompleteResult {
     var writer = try EventWriter.init(allocator, "gt actions complete");
@@ -1042,7 +1044,7 @@ fn createRunCompletedEventWithMetadata(
     const occurred_at = try util.rfc3339Now(allocator);
     defer allocator.free(occurred_at);
 
-    const event_body = try event_mod.buildActionRunCompletedJson(
+    const event_body = try event_builders.buildActionRunCompletedJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),

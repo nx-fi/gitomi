@@ -1,11 +1,10 @@
 const std = @import("std");
 const actions = @import("../actions.zig");
 const errors = @import("../errors.zig");
-const event_mod = @import("../event.zig");
+const event_json = @import("../event/json.zig");
 const index = @import("../index.zig");
 const repo_mod = @import("../repo.zig");
 const shared = @import("shared.zig");
-const issues_page = @import("issues.zig");
 const zwf = @import("../zwf.zig");
 
 const Allocator = std.mem.Allocator;
@@ -25,6 +24,7 @@ const classAttr = shared.classAttr;
 const ensureIndex = index.ensureIndex;
 const groupedUnsigned = shared.groupedUnsigned;
 const literalHref = shared.literalHref;
+const queryValueOwned = shared.queryValueOwned;
 const sendPlainResponse = shared.sendPlainResponse;
 const sendRedirect = shared.sendRedirect;
 const sendResponse = shared.sendResponse;
@@ -866,21 +866,6 @@ fn queryTextValueOwned(allocator: Allocator, target: []const u8, name: []const u
     return result;
 }
 
-fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const u8) !?[]u8 {
-    const query_start = std.mem.indexOfScalar(u8, target, '?') orelse return null;
-    var pairs = std.mem.splitScalar(u8, target[query_start + 1 ..], '&');
-    while (pairs.next()) |pair| {
-        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
-        const raw_key = pair[0..eq];
-        const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
-        const key = try issues_page.percentDecodeForm(allocator, raw_key);
-        defer allocator.free(key);
-        if (!std.mem.eql(u8, key, wanted_key)) continue;
-        return try issues_page.percentDecodeForm(allocator, raw_value);
-    }
-    return null;
-}
-
 fn appendActionsHref(buf: *std.ArrayList(u8), allocator: Allocator, filters: ActionsFilters, override: ActionsHrefOverride) !void {
     try buf.appendSlice(allocator, "/pipelines");
     var first = true;
@@ -1335,18 +1320,18 @@ fn payloadStringOwned(allocator: Allocator, body: []const u8, field: []const u8,
         .object => |object| object,
         else => return allocator.dupe(u8, default_value),
     };
-    const value = event_mod.jsonString(payload.get(field)) orelse default_value;
+    const value = event_json.jsonString(payload.get(field)) orelse default_value;
     return allocator.dupe(u8, value);
 }
 
 pub fn handleActionsRequestPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, csrf_token: []const u8, form_body: []const u8) !void {
-    const workflow_owned = (try issues_page.formValueOwned(allocator, form_body, "workflow")) orelse try allocator.dupe(u8, "");
+    const workflow_owned = (try shared.formValueOwned(allocator, form_body, "workflow")) orelse try allocator.dupe(u8, "");
     defer allocator.free(workflow_owned);
-    const event_owned = (try issues_page.formValueOwned(allocator, form_body, "event")) orelse try allocator.dupe(u8, "workflow_dispatch");
+    const event_owned = (try shared.formValueOwned(allocator, form_body, "event")) orelse try allocator.dupe(u8, "workflow_dispatch");
     defer allocator.free(event_owned);
-    const ref_owned = (try issues_page.formValueOwned(allocator, form_body, "ref")) orelse try allocator.dupe(u8, "HEAD");
+    const ref_owned = (try shared.formValueOwned(allocator, form_body, "ref")) orelse try allocator.dupe(u8, "HEAD");
     defer allocator.free(ref_owned);
-    const oid_owned = (try issues_page.formValueOwned(allocator, form_body, "oid")) orelse try allocator.dupe(u8, "");
+    const oid_owned = (try shared.formValueOwned(allocator, form_body, "oid")) orelse try allocator.dupe(u8, "");
     defer allocator.free(oid_owned);
 
     const workflow = std.mem.trim(u8, workflow_owned, " \t\r\n");
@@ -1379,7 +1364,7 @@ pub fn handleActionsRequestPost(allocator: Allocator, repo: Repo, stream: std.ne
 }
 
 pub fn handleRunRequestedPost(allocator: Allocator, stream: std.net.Stream, form_body: []const u8) !void {
-    const run_owned = try issues_page.formValueOwned(allocator, form_body, "run");
+    const run_owned = try shared.formValueOwned(allocator, form_body, "run");
     defer if (run_owned) |value| allocator.free(value);
     const run_filter: ?[]const u8 = if (run_owned) |value| blk: {
         const trimmed = std.mem.trim(u8, value, " \t\r\n");

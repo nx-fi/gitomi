@@ -14,6 +14,8 @@ const appendShellStart = shared.appendShellStart;
 const appendTemplate = shared.appendTemplate;
 const createIssueOpenedEvent = issue.createIssueOpenedEvent;
 const ensureIndex = index.ensureIndex;
+const formValueOwned = shared.formValueOwned;
+const queryValueOwned = shared.queryValueOwned;
 const sendRedirect = shared.sendRedirect;
 const sendResponse = shared.sendResponse;
 const splitCommaFields = util.splitCommaFields;
@@ -531,76 +533,6 @@ pub fn issueTitleFromSubject(subject: []const u8) []const u8 {
     const title_index = std.mem.indexOfScalar(u8, after_marker, ' ') orelse return subject;
     const title = std.mem.trim(u8, after_marker[title_index + 1 ..], " \t\r\n");
     return if (title.len == 0) subject else title;
-}
-
-pub fn formValueOwned(allocator: Allocator, body: []const u8, wanted_key: []const u8) !?[]u8 {
-    var pairs = std.mem.splitScalar(u8, body, '&');
-    while (pairs.next()) |pair| {
-        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
-        const raw_key = pair[0..eq];
-        const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
-        const key = try percentDecodeForm(allocator, raw_key);
-        defer allocator.free(key);
-        if (!std.mem.eql(u8, key, wanted_key)) continue;
-        return try percentDecodeForm(allocator, raw_value);
-    }
-    return null;
-}
-
-pub fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const u8) !?[]u8 {
-    const query_start = std.mem.indexOfScalar(u8, target, '?') orelse return null;
-    var pairs = std.mem.splitScalar(u8, target[query_start + 1 ..], '&');
-    while (pairs.next()) |pair| {
-        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
-        const raw_key = pair[0..eq];
-        const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
-        const key = try percentDecodeForm(allocator, raw_key);
-        defer allocator.free(key);
-        if (!std.mem.eql(u8, key, wanted_key)) continue;
-        return try percentDecodeForm(allocator, raw_value);
-    }
-    return null;
-}
-
-pub fn percentDecodeForm(allocator: Allocator, value: []const u8) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-
-    var i: usize = 0;
-    while (i < value.len) : (i += 1) {
-        switch (value[i]) {
-            '+' => try buf.append(allocator, ' '),
-            '%' => {
-                if (i + 2 >= value.len) return error.InvalidFormEncoding;
-                const hi = hexValue(value[i + 1]) orelse return error.InvalidFormEncoding;
-                const lo = hexValue(value[i + 2]) orelse return error.InvalidFormEncoding;
-                try buf.append(allocator, (hi << 4) | lo);
-                i += 2;
-            },
-            else => |c| try buf.append(allocator, c),
-        }
-    }
-
-    return buf.toOwnedSlice(allocator);
-}
-
-pub fn hexValue(c: u8) ?u8 {
-    return switch (c) {
-        '0'...'9' => c - '0',
-        'a'...'f' => c - 'a' + 10,
-        'A'...'F' => c - 'A' + 10,
-        else => null,
-    };
-}
-
-test "web form decoding handles spaces and escapes" {
-    const decoded = try percentDecodeForm(std.testing.allocator, "hello+local%2Fworld%21");
-    defer std.testing.allocator.free(decoded);
-    try std.testing.expectEqualStrings("hello local/world!", decoded);
-
-    const value = (try formValueOwned(std.testing.allocator, "title=First+issue&labels=bug%2Cdocs", "labels")).?;
-    defer std.testing.allocator.free(value);
-    try std.testing.expectEqualStrings("bug,docs", value);
 }
 
 test "web issue titles come from issue opened subjects" {

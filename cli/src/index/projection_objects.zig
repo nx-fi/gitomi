@@ -1,6 +1,7 @@
 const std = @import("std");
 
-const event_mod = @import("../event.zig");
+const event_model = @import("../event/model.zig");
+const event_json = @import("../event/json.zig");
 const git = @import("../git.zig");
 const index_schema = @import("schema.zig");
 const json_writer = @import("../json_writer.zig");
@@ -10,7 +11,7 @@ const util = @import("../util.zig");
 
 const Allocator = std.mem.Allocator;
 const SqliteDb = sqlite_db.SqliteDb;
-const ValidatedEnvelope = event_mod.ValidatedEnvelope;
+const ValidatedEnvelope = event_model.ValidatedEnvelope;
 const eventInFrontier = ordering.eventInFrontier;
 const eventWins = ordering.eventWins;
 
@@ -42,10 +43,10 @@ const ExistingSourceIdentity = struct {
 
 fn sourceIdentityFromPayload(payload: std.json.ObjectMap) ProjectedSourceIdentity {
     return .{
-        .identity = event_mod.jsonString(payload.get("source_identity")) orelse "",
-        .author = event_mod.jsonString(payload.get("source_author")) orelse "",
-        .email = event_mod.jsonString(payload.get("source_email")) orelse "",
-        .avatar_url = event_mod.jsonString(payload.get("source_avatar_url")) orelse "",
+        .identity = event_json.jsonString(payload.get("source_identity")) orelse "",
+        .author = event_json.jsonString(payload.get("source_author")) orelse "",
+        .email = event_json.jsonString(payload.get("source_email")) orelse "",
+        .avatar_url = event_json.jsonString(payload.get("source_avatar_url")) orelse "",
     };
 }
 
@@ -207,8 +208,8 @@ pub fn applyIssueProjection(allocator: Allocator, db: *SqliteDb, event_hash: []c
 
     if (std.mem.eql(u8, envelope.event_type, "issue.opened")) {
         if (!(try creationEventWins(db, "issue.opened", envelope.object_id, event_hash))) return "duplicate_object_id";
-        const title = event_mod.jsonString(payload.get("title")) orelse return "invalid_event_envelope";
-        const body_value = event_mod.jsonString(payload.get("body")) orelse "";
+        const title = event_json.jsonString(payload.get("title")) orelse return "invalid_event_envelope";
+        const body_value = event_json.jsonString(payload.get("body")) orelse "";
         const source_identity = sourceIdentityFromPayload(payload);
         try upsertSourceIdentity(db, source_identity);
         try insertIssueOpened(db, event_hash, envelope, title, body_value);
@@ -216,10 +217,10 @@ pub fn applyIssueProjection(allocator: Allocator, db: *SqliteDb, event_hash: []c
             db,
             envelope.object_id,
             source_identity,
-            event_mod.jsonString(payload.get("milestone")) orelse "",
-            event_mod.jsonString(payload.get("type")) orelse "",
-            event_mod.jsonString(payload.get("priority")) orelse "",
-            event_mod.jsonString(payload.get("status")) orelse "",
+            event_json.jsonString(payload.get("milestone")) orelse "",
+            event_json.jsonString(payload.get("type")) orelse "",
+            event_json.jsonString(payload.get("priority")) orelse "",
+            event_json.jsonString(payload.get("status")) orelse "",
             event_hash,
             envelope,
         );
@@ -236,49 +237,49 @@ pub fn applyIssueProjection(allocator: Allocator, db: *SqliteDb, event_hash: []c
     if (std.mem.eql(u8, envelope.event_type, "issue.updated")) {
         if (try applyIssueUpdated(allocator, db, payload, event_hash, envelope)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "issue.title_set")) {
-        const title = event_mod.jsonString(payload.get("title")) orelse return "invalid_event_envelope";
+        const title = event_json.jsonString(payload.get("title")) orelse return "invalid_event_envelope";
         try updateIssueScalar(allocator, db, envelope.object_id, title, event_hash, envelope, "title", "title_occurred_at", "title_actor_principal", "title_event_hash");
     } else if (std.mem.eql(u8, envelope.event_type, "issue.body_set")) {
-        const body_value = event_mod.jsonString(payload.get("body")) orelse return "invalid_event_envelope";
+        const body_value = event_json.jsonString(payload.get("body")) orelse return "invalid_event_envelope";
         try updateIssueScalar(allocator, db, envelope.object_id, body_value, event_hash, envelope, "body", "body_occurred_at", "body_actor_principal", "body_event_hash");
     } else if (std.mem.eql(u8, envelope.event_type, "issue.state_set")) {
-        const state = event_mod.jsonString(payload.get("state")) orelse return "invalid_event_envelope";
+        const state = event_json.jsonString(payload.get("state")) orelse return "invalid_event_envelope";
         if (std.mem.eql(u8, state, "open") and try issueStatusIsWip(db, envelope.object_id) and try concurrentGroupHasActivePeer(db, envelope.object_id)) {
             return "concurrent_group_busy";
         }
         try updateIssueScalar(allocator, db, envelope.object_id, state, event_hash, envelope, "state", "state_occurred_at", "state_actor_principal", "state_event_hash");
     } else if (std.mem.eql(u8, envelope.event_type, "issue.priority_set")) {
-        const priority = event_mod.jsonString(payload.get("priority")) orelse return "invalid_event_envelope";
+        const priority = event_json.jsonString(payload.get("priority")) orelse return "invalid_event_envelope";
         try updateIssueMetadataScalar(allocator, db, envelope.object_id, priority, event_hash, envelope, "priority", "priority_occurred_at", "priority_actor_principal", "priority_event_hash");
     } else if (std.mem.eql(u8, envelope.event_type, "issue.type_set")) {
-        const issue_type = event_mod.jsonString(payload.get("type")) orelse return "invalid_event_envelope";
+        const issue_type = event_json.jsonString(payload.get("type")) orelse return "invalid_event_envelope";
         try updateIssueMetadataScalar(allocator, db, envelope.object_id, issue_type, event_hash, envelope, "issue_type", "issue_type_occurred_at", "issue_type_actor_principal", "issue_type_event_hash");
     } else if (std.mem.eql(u8, envelope.event_type, "issue.status_set")) {
-        const status = event_mod.jsonString(payload.get("status")) orelse return "invalid_event_envelope";
+        const status = event_json.jsonString(payload.get("status")) orelse return "invalid_event_envelope";
         if (std.mem.eql(u8, status, "WIP") and try issueStateIsOpen(db, envelope.object_id) and try concurrentGroupHasActivePeer(db, envelope.object_id)) {
             return "concurrent_group_busy";
         }
         try updateIssueMetadataScalar(allocator, db, envelope.object_id, status, event_hash, envelope, "status", "status_occurred_at", "status_actor_principal", "status_event_hash");
     } else if (std.mem.eql(u8, envelope.event_type, "issue.label_added")) {
-        const label = event_mod.jsonString(payload.get("label")) orelse return "invalid_event_envelope";
+        const label = event_json.jsonString(payload.get("label")) orelse return "invalid_event_envelope";
         try insertIssueCollectionValue(db, insert_issue_label_sql, envelope.object_id, label, event_hash);
         if (try issueCollectionLimitRejection(db, envelope.object_id)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "issue.label_removed")) {
-        const label = event_mod.jsonString(payload.get("label")) orelse return "invalid_event_envelope";
+        const label = event_json.jsonString(payload.get("label")) orelse return "invalid_event_envelope";
         try deleteIssueCollectionValue(allocator, db, "SELECT add_hash FROM issue_labels WHERE issue_id = ? AND label = ?", "DELETE FROM issue_labels WHERE issue_id = ? AND label = ? AND add_hash = ?", envelope.object_id, label, event_hash);
     } else if (std.mem.eql(u8, envelope.event_type, "issue.assignee_added")) {
-        const assignee = event_mod.jsonString(payload.get("assignee")) orelse return "invalid_event_envelope";
+        const assignee = event_json.jsonString(payload.get("assignee")) orelse return "invalid_event_envelope";
         try insertIssueCollectionValue(db, insert_issue_assignee_sql, envelope.object_id, assignee, event_hash);
         if (try issueCollectionLimitRejection(db, envelope.object_id)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "issue.assignee_removed")) {
-        const assignee = event_mod.jsonString(payload.get("assignee")) orelse return "invalid_event_envelope";
+        const assignee = event_json.jsonString(payload.get("assignee")) orelse return "invalid_event_envelope";
         try deleteIssueCollectionValue(allocator, db, "SELECT add_hash FROM issue_assignees WHERE issue_id = ? AND assignee = ?", "DELETE FROM issue_assignees WHERE issue_id = ? AND assignee = ? AND add_hash = ?", envelope.object_id, assignee, event_hash);
     } else if (std.mem.eql(u8, envelope.event_type, "issue.milestone_set")) {
-        const milestone = event_mod.jsonString(payload.get("milestone")) orelse return "invalid_event_envelope";
+        const milestone = event_json.jsonString(payload.get("milestone")) orelse return "invalid_event_envelope";
         try upsertIssueMilestone(db, envelope.object_id, milestone);
     } else if (std.mem.eql(u8, envelope.event_type, "issue.project_added")) {
-        const project = event_mod.jsonString(payload.get("project")) orelse return "invalid_event_envelope";
-        const column = event_mod.jsonString(payload.get("column")) orelse return "invalid_event_envelope";
+        const project = event_json.jsonString(payload.get("project")) orelse return "invalid_event_envelope";
+        const column = event_json.jsonString(payload.get("column")) orelse return "invalid_event_envelope";
         try insertIssueProject(db, envelope.object_id, project, column, event_hash);
         if (try projectIdFromPayloadOrName(allocator, db, payload, project)) |project_id| {
             defer allocator.free(project_id);
@@ -287,8 +288,8 @@ pub fn applyIssueProjection(allocator: Allocator, db: *SqliteDb, event_hash: []c
         }
         if (try issueCollectionLimitRejection(db, envelope.object_id)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "issue.project_removed")) {
-        const project = event_mod.jsonString(payload.get("project")) orelse return "invalid_event_envelope";
-        const column = event_mod.jsonString(payload.get("column")) orelse return "invalid_event_envelope";
+        const project = event_json.jsonString(payload.get("project")) orelse return "invalid_event_envelope";
+        const column = event_json.jsonString(payload.get("column")) orelse return "invalid_event_envelope";
         try deleteIssueProject(allocator, db, envelope.object_id, project, column, event_hash);
         if (try projectIdFromPayloadOrName(allocator, db, payload, project)) |project_id| {
             defer allocator.free(project_id);
@@ -300,13 +301,13 @@ pub fn applyIssueProjection(allocator: Allocator, db: *SqliteDb, event_hash: []c
     } else if (std.mem.eql(u8, envelope.event_type, "issue.relationship_removed")) {
         if (try applyIssueRelationshipRemoved(allocator, db, payload, event_hash, envelope)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "issue.concurrent_group_added")) {
-        const group = event_mod.jsonString(payload.get("group")) orelse return "invalid_event_envelope";
+        const group = event_json.jsonString(payload.get("group")) orelse return "invalid_event_envelope";
         if (std.mem.trim(u8, group, " \t\r\n").len == 0) return "invalid_event_envelope";
         try insertIssueConcurrentGroup(db, envelope.object_id, group, event_hash, envelope);
         if (try concurrentGroupBusy(db, group)) return "concurrent_group_busy";
         if (try issueCollectionLimitRejection(db, envelope.object_id)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "issue.concurrent_group_removed")) {
-        const group = event_mod.jsonString(payload.get("group")) orelse return "invalid_event_envelope";
+        const group = event_json.jsonString(payload.get("group")) orelse return "invalid_event_envelope";
         if (std.mem.trim(u8, group, " \t\r\n").len == 0) return "invalid_event_envelope";
         try deleteIssueConcurrentGroup(allocator, db, envelope.object_id, group, event_hash);
     } else if (std.mem.eql(u8, envelope.event_type, "issue.project_field_set")) {
@@ -314,11 +315,11 @@ pub fn applyIssueProjection(allocator: Allocator, db: *SqliteDb, event_hash: []c
     } else if (std.mem.eql(u8, envelope.event_type, "issue.project_field_cleared")) {
         if (try applyIssueProjectFieldClear(allocator, db, envelope.object_id, payload, event_hash)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "issue.reaction_added")) {
-        const emoji = event_mod.jsonString(payload.get("emoji")) orelse return "invalid_event_envelope";
+        const emoji = event_json.jsonString(payload.get("emoji")) orelse return "invalid_event_envelope";
         try insertReaction(db, "issue", envelope.object_id, emoji, envelope.actor_principal, event_hash, envelope.occurred_at);
         if (try reactionLimitRejection(db, "issue", envelope.object_id)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "issue.reaction_removed")) {
-        const emoji = event_mod.jsonString(payload.get("emoji")) orelse return "invalid_event_envelope";
+        const emoji = event_json.jsonString(payload.get("emoji")) orelse return "invalid_event_envelope";
         try deleteReaction(allocator, db, "issue", envelope.object_id, emoji, envelope.actor_principal, event_hash, payload);
     }
     return null;
@@ -337,28 +338,28 @@ fn applyIssueUpdated(
     event_hash: []const u8,
     envelope: ValidatedEnvelope,
 ) !?[]const u8 {
-    if (event_mod.jsonString(payload.get("title"))) |title| {
+    if (event_json.jsonString(payload.get("title"))) |title| {
         try updateIssueScalar(allocator, db, envelope.object_id, title, event_hash, envelope, "title", "title_occurred_at", "title_actor_principal", "title_event_hash");
     }
-    if (event_mod.jsonString(payload.get("body"))) |body_value| {
+    if (event_json.jsonString(payload.get("body"))) |body_value| {
         try updateIssueScalar(allocator, db, envelope.object_id, body_value, event_hash, envelope, "body", "body_occurred_at", "body_actor_principal", "body_event_hash");
     }
-    if (event_mod.jsonString(payload.get("state"))) |state| {
+    if (event_json.jsonString(payload.get("state"))) |state| {
         if (std.mem.eql(u8, state, "open") and try issueStatusIsWip(db, envelope.object_id) and try concurrentGroupHasActivePeer(db, envelope.object_id)) {
             return "concurrent_group_busy";
         }
         try updateIssueScalar(allocator, db, envelope.object_id, state, event_hash, envelope, "state", "state_occurred_at", "state_actor_principal", "state_event_hash");
     }
-    if (event_mod.jsonString(payload.get("milestone"))) |milestone| {
+    if (event_json.jsonString(payload.get("milestone"))) |milestone| {
         try upsertIssueMilestone(db, envelope.object_id, milestone);
     }
-    if (event_mod.jsonString(payload.get("type"))) |issue_type| {
+    if (event_json.jsonString(payload.get("type"))) |issue_type| {
         try updateIssueMetadataScalar(allocator, db, envelope.object_id, issue_type, event_hash, envelope, "issue_type", "issue_type_occurred_at", "issue_type_actor_principal", "issue_type_event_hash");
     }
-    if (event_mod.jsonString(payload.get("priority"))) |priority| {
+    if (event_json.jsonString(payload.get("priority"))) |priority| {
         try updateIssueMetadataScalar(allocator, db, envelope.object_id, priority, event_hash, envelope, "priority", "priority_occurred_at", "priority_actor_principal", "priority_event_hash");
     }
-    if (event_mod.jsonString(payload.get("status"))) |status| {
+    if (event_json.jsonString(payload.get("status"))) |status| {
         if (std.mem.eql(u8, status, "WIP") and try issueStateIsOpen(db, envelope.object_id) and try concurrentGroupHasActivePeer(db, envelope.object_id)) {
             return "concurrent_group_busy";
         }
@@ -503,7 +504,7 @@ fn upsertPullMetadata(
 }
 
 fn metadataCount(payload: std.json.ObjectMap, key: []const u8) i64 {
-    const value = event_mod.jsonInteger(payload.get(key)) orelse return -1;
+    const value = event_json.jsonInteger(payload.get(key)) orelse return -1;
     return if (value >= 0) value else -1;
 }
 
@@ -518,7 +519,7 @@ fn insertLegacyAliasFromEnvelope(db: *SqliteDb, object_kind: []const u8, object_
 }
 
 fn insertLegacyAliasField(db: *SqliteDb, provider: []const u8, object_kind: []const u8, object_id: []const u8, legacy: std.json.ObjectMap, key: []const u8) !void {
-    const number = event_mod.jsonInteger(legacy.get(key)) orelse return;
+    const number = event_json.jsonInteger(legacy.get(key)) orelse return;
     if (number <= 0) return;
 
     var stmt = try db.prepare(
@@ -735,8 +736,8 @@ fn insertPayloadIssueProjects(
             .object => |map| map,
             else => continue,
         };
-        const project_name = event_mod.jsonString(project.get("project")) orelse continue;
-        const column = event_mod.jsonString(project.get("column")) orelse "";
+        const project_name = event_json.jsonString(project.get("project")) orelse continue;
+        const column = event_json.jsonString(project.get("column")) orelse "";
         try insertIssueProject(db, issue_id, project_name, column, event_hash);
     }
 }
@@ -786,8 +787,8 @@ fn applyIssueRelationshipAdded(
     event_hash: []const u8,
     envelope: ValidatedEnvelope,
 ) !?[]const u8 {
-    const relationship = event_mod.jsonString(payload.get("kind")) orelse return "invalid_event_envelope";
-    const target_id = event_mod.jsonString(payload.get("target_id")) orelse return "invalid_event_envelope";
+    const relationship = event_json.jsonString(payload.get("kind")) orelse return "invalid_event_envelope";
+    const target_id = event_json.jsonString(payload.get("target_id")) orelse return "invalid_event_envelope";
     if (!isIssueRelationshipKind(relationship)) return "invalid_issue_relationship";
     if (std.mem.eql(u8, envelope.object_id, target_id)) return "invalid_issue_relationship";
     if (!(try acceptedCreationInFrontier(allocator, db, "issue.opened", target_id, event_hash))) return "target_not_created";
@@ -807,8 +808,8 @@ fn applyIssueRelationshipRemoved(
     event_hash: []const u8,
     envelope: ValidatedEnvelope,
 ) !?[]const u8 {
-    const relationship = event_mod.jsonString(payload.get("kind")) orelse return "invalid_event_envelope";
-    const target_id = event_mod.jsonString(payload.get("target_id")) orelse return "invalid_event_envelope";
+    const relationship = event_json.jsonString(payload.get("kind")) orelse return "invalid_event_envelope";
+    const target_id = event_json.jsonString(payload.get("target_id")) orelse return "invalid_event_envelope";
     if (!isIssueRelationshipKind(relationship)) return "invalid_issue_relationship";
     try deleteIssueRelationship(allocator, db, envelope.object_id, relationship, target_id, event_hash);
     return null;
@@ -1091,11 +1092,11 @@ pub fn applyProjectProjection(allocator: Allocator, db: *SqliteDb, event_hash: [
 
     if (std.mem.eql(u8, envelope.event_type, "project.created")) {
         if (!(try creationEventWins(db, "project.created", envelope.object_id, event_hash))) return "duplicate_object_id";
-        const name = event_mod.jsonString(payload.get("name")) orelse return "invalid_event_envelope";
+        const name = event_json.jsonString(payload.get("name")) orelse return "invalid_event_envelope";
         const slug = try projectSlugForCreate(allocator, db, payload, envelope.object_id, name);
         defer allocator.free(slug);
-        const description = event_mod.jsonString(payload.get("description")) orelse "";
-        const state = event_mod.jsonString(payload.get("state")) orelse "open";
+        const description = event_json.jsonString(payload.get("description")) orelse "";
+        const state = event_json.jsonString(payload.get("state")) orelse "open";
         try insertProjectCreated(db, event_hash, envelope, name, slug, description, state);
         try insertPayloadProjectColumns(allocator, db, payload, envelope.object_id, event_hash);
         if (try projectColumnLimitRejection(db, envelope.object_id)) |reason| return reason;
@@ -1105,25 +1106,25 @@ pub fn applyProjectProjection(allocator: Allocator, db: *SqliteDb, event_hash: [
     if (!(try acceptedCreationInFrontier(allocator, db, "project.created", envelope.object_id, event_hash))) return "object_not_created";
 
     if (std.mem.eql(u8, envelope.event_type, "project.updated")) {
-        if (event_mod.jsonString(payload.get("name"))) |name| {
+        if (event_json.jsonString(payload.get("name"))) |name| {
             try updateProjectScalar(allocator, db, envelope.object_id, name, event_hash, envelope, "name", "name_occurred_at", "name_actor_principal", "name_event_hash");
         }
-        if (event_mod.jsonString(payload.get("description"))) |description| {
+        if (event_json.jsonString(payload.get("description"))) |description| {
             try updateProjectScalar(allocator, db, envelope.object_id, description, event_hash, envelope, "description", "description_occurred_at", "description_actor_principal", "description_event_hash");
         }
-        if (event_mod.jsonString(payload.get("state"))) |state| {
+        if (event_json.jsonString(payload.get("state"))) |state| {
             try updateProjectScalar(allocator, db, envelope.object_id, state, event_hash, envelope, "state", "state_occurred_at", "state_actor_principal", "state_event_hash");
         }
-        if (event_mod.jsonString(payload.get("status"))) |status| {
+        if (event_json.jsonString(payload.get("status"))) |status| {
             try updateProjectScalar(allocator, db, envelope.object_id, status, event_hash, envelope, "status", "status_occurred_at", "status_actor_principal", "status_event_hash");
         }
-        if (event_mod.jsonString(payload.get("priority"))) |priority| {
+        if (event_json.jsonString(payload.get("priority"))) |priority| {
             try updateProjectScalar(allocator, db, envelope.object_id, priority, event_hash, envelope, "priority", "priority_occurred_at", "priority_actor_principal", "priority_event_hash");
         }
-        if (event_mod.jsonString(payload.get("start_at"))) |start_at| {
+        if (event_json.jsonString(payload.get("start_at"))) |start_at| {
             try updateProjectScalar(allocator, db, envelope.object_id, start_at, event_hash, envelope, "start_at", "start_at_occurred_at", "start_at_actor_principal", "start_at_event_hash");
         }
-        if (event_mod.jsonString(payload.get("end_at"))) |end_at| {
+        if (event_json.jsonString(payload.get("end_at"))) |end_at| {
             try updateProjectScalar(allocator, db, envelope.object_id, end_at, event_hash, envelope, "end_at", "end_at_occurred_at", "end_at_actor_principal", "end_at_event_hash");
         }
         try insertProjectPayloadStringArray(db, payload, "leads_added", "INSERT OR IGNORE INTO project_leads(project_id, lead, add_hash, created_at, actor_principal) VALUES (?, ?, ?, ?, ?)", envelope.object_id, event_hash, envelope);
@@ -1136,35 +1137,35 @@ pub fn applyProjectProjection(allocator: Allocator, db: *SqliteDb, event_hash: [
         try deleteProjectPayloadStringArray(allocator, db, payload, "milestones_removed", "SELECT add_hash FROM project_milestones WHERE project_id = ? AND milestone_id = ?", "DELETE FROM project_milestones WHERE project_id = ? AND milestone_id = ? AND add_hash = ?", envelope.object_id, event_hash);
         if (try projectPropertyLimitRejection(db, envelope.object_id)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "project.column_added")) {
-        const column = event_mod.jsonString(payload.get("column")) orelse return "invalid_event_envelope";
+        const column = event_json.jsonString(payload.get("column")) orelse return "invalid_event_envelope";
         const column_ref = try projectColumnRefForAdd(allocator, db, payload, envelope.object_id, column);
         defer allocator.free(column_ref);
         try insertProjectColumn(db, envelope.object_id, column, column_ref, event_hash);
         if (try projectColumnLimitRejection(db, envelope.object_id)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "project.column_removed")) {
-        const column = event_mod.jsonString(payload.get("column")) orelse return "invalid_event_envelope";
+        const column = event_json.jsonString(payload.get("column")) orelse return "invalid_event_envelope";
         try deleteProjectColumn(allocator, db, envelope.object_id, column, event_hash);
     } else if (std.mem.eql(u8, envelope.event_type, "project.field_created")) {
         if (try applyProjectFieldCreated(allocator, db, payload, envelope.object_id, event_hash, envelope)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "project.field_updated")) {
         if (try applyProjectFieldUpdated(allocator, db, payload, envelope.object_id, event_hash, envelope)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "project.field_removed")) {
-        const field_id = event_mod.jsonString(payload.get("field_id")) orelse return "invalid_event_envelope";
+        const field_id = event_json.jsonString(payload.get("field_id")) orelse return "invalid_event_envelope";
         try updateProjectFieldState(allocator, db, envelope.object_id, field_id, "removed", event_hash, envelope);
     } else if (std.mem.eql(u8, envelope.event_type, "project.field_option_added")) {
         if (try applyProjectFieldOptionAdded(db, payload, envelope.object_id, event_hash, envelope)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "project.field_option_updated")) {
         if (try applyProjectFieldOptionUpdated(allocator, db, payload, envelope.object_id, event_hash, envelope)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "project.field_option_removed")) {
-        const field_id = event_mod.jsonString(payload.get("field_id")) orelse return "invalid_event_envelope";
-        const option_id = event_mod.jsonString(payload.get("option_id")) orelse return "invalid_event_envelope";
+        const field_id = event_json.jsonString(payload.get("field_id")) orelse return "invalid_event_envelope";
+        const option_id = event_json.jsonString(payload.get("option_id")) orelse return "invalid_event_envelope";
         try updateProjectFieldOptionState(allocator, db, envelope.object_id, field_id, option_id, "removed", event_hash, envelope);
     } else if (std.mem.eql(u8, envelope.event_type, "project.view_created")) {
         if (try applyProjectViewCreated(allocator, db, payload, envelope.object_id, event_hash, envelope)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "project.view_updated")) {
         if (try applyProjectViewUpdated(allocator, db, payload, envelope.object_id, event_hash, envelope)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "project.view_removed")) {
-        const view_id = event_mod.jsonString(payload.get("view_id")) orelse return "invalid_event_envelope";
+        const view_id = event_json.jsonString(payload.get("view_id")) orelse return "invalid_event_envelope";
         try updateProjectViewState(allocator, db, envelope.object_id, view_id, "removed", event_hash, envelope);
     }
     return null;
@@ -1186,10 +1187,10 @@ pub fn applyMilestoneProjection(allocator: Allocator, db: *SqliteDb, event_hash:
 
     if (std.mem.eql(u8, envelope.event_type, "milestone.created")) {
         if (!(try creationEventWins(db, "milestone.created", envelope.object_id, event_hash))) return "duplicate_object_id";
-        const title = event_mod.jsonString(payload.get("title")) orelse return "invalid_event_envelope";
-        const description = event_mod.jsonString(payload.get("description")) orelse "";
-        const due_at = event_mod.jsonString(payload.get("due_at")) orelse "";
-        const state = event_mod.jsonString(payload.get("state")) orelse "open";
+        const title = event_json.jsonString(payload.get("title")) orelse return "invalid_event_envelope";
+        const description = event_json.jsonString(payload.get("description")) orelse "";
+        const due_at = event_json.jsonString(payload.get("due_at")) orelse "";
+        const state = event_json.jsonString(payload.get("state")) orelse "open";
         try insertMilestoneCreated(db, event_hash, envelope, title, description, due_at, state);
         return null;
     }
@@ -1197,20 +1198,20 @@ pub fn applyMilestoneProjection(allocator: Allocator, db: *SqliteDb, event_hash:
     if (!(try acceptedCreationInFrontier(allocator, db, "milestone.created", envelope.object_id, event_hash))) return "object_not_created";
 
     if (std.mem.eql(u8, envelope.event_type, "milestone.updated")) {
-        if (event_mod.jsonString(payload.get("title"))) |title| {
+        if (event_json.jsonString(payload.get("title"))) |title| {
             try updateMilestoneScalar(allocator, db, envelope.object_id, title, event_hash, envelope, "title", "title_occurred_at", "title_actor_principal", "title_event_hash");
         }
-        if (event_mod.jsonString(payload.get("description"))) |description| {
+        if (event_json.jsonString(payload.get("description"))) |description| {
             try updateMilestoneScalar(allocator, db, envelope.object_id, description, event_hash, envelope, "description", "description_occurred_at", "description_actor_principal", "description_event_hash");
         }
-        if (event_mod.jsonString(payload.get("due_at"))) |due_at| {
+        if (event_json.jsonString(payload.get("due_at"))) |due_at| {
             try updateMilestoneScalar(allocator, db, envelope.object_id, due_at, event_hash, envelope, "due_at", "due_at_occurred_at", "due_at_actor_principal", "due_at_event_hash");
         }
-        if (event_mod.jsonString(payload.get("state"))) |state| {
+        if (event_json.jsonString(payload.get("state"))) |state| {
             try updateMilestoneScalar(allocator, db, envelope.object_id, state, event_hash, envelope, "state", "state_occurred_at", "state_actor_principal", "state_event_hash");
         }
     } else if (std.mem.eql(u8, envelope.event_type, "milestone.state_set")) {
-        const state = event_mod.jsonString(payload.get("state")) orelse return "invalid_event_envelope";
+        const state = event_json.jsonString(payload.get("state")) orelse return "invalid_event_envelope";
         try updateMilestoneScalar(allocator, db, envelope.object_id, state, event_hash, envelope, "state", "state_occurred_at", "state_actor_principal", "state_event_hash");
     } else if (std.mem.eql(u8, envelope.event_type, "milestone.deleted")) {
         try deleteMilestone(db, envelope.object_id);
@@ -1236,12 +1237,12 @@ pub fn applyLabelProjection(allocator: Allocator, db: *SqliteDb, event_hash: []c
 
     if (std.mem.eql(u8, envelope.event_type, "label.created")) {
         if (!(try creationEventWins(db, "label.created", envelope.object_id, event_hash))) return "duplicate_object_id";
-        const name = event_mod.jsonString(payload.get("name")) orelse return "invalid_event_envelope";
+        const name = event_json.jsonString(payload.get("name")) orelse return "invalid_event_envelope";
         if (std.mem.trim(u8, name, " \t\r\n").len == 0) return "invalid_event_envelope";
         if (try labelNameInUse(db, name, null)) return "duplicate_label_name";
-        const description = event_mod.jsonString(payload.get("description")) orelse "";
-        const color = event_mod.jsonString(payload.get("color")) orelse "#6e7681";
-        const priority = event_mod.jsonInteger(payload.get("priority")) orelse event_mod.jsonInteger(payload.get("position")) orelse 0;
+        const description = event_json.jsonString(payload.get("description")) orelse "";
+        const color = event_json.jsonString(payload.get("color")) orelse "#6e7681";
+        const priority = event_json.jsonInteger(payload.get("priority")) orelse event_json.jsonInteger(payload.get("position")) orelse 0;
         try insertLabelCreated(db, event_hash, envelope, name, description, color, priority);
         return null;
     }
@@ -1249,18 +1250,18 @@ pub fn applyLabelProjection(allocator: Allocator, db: *SqliteDb, event_hash: []c
     if (!(try acceptedCreationInFrontier(allocator, db, "label.created", envelope.object_id, event_hash))) return "object_not_created";
 
     if (std.mem.eql(u8, envelope.event_type, "label.updated")) {
-        if (event_mod.jsonString(payload.get("name"))) |name| {
+        if (event_json.jsonString(payload.get("name"))) |name| {
             if (std.mem.trim(u8, name, " \t\r\n").len == 0) return "invalid_event_envelope";
             if (try labelNameInUse(db, name, envelope.object_id)) return "duplicate_label_name";
             try updateLabelScalar(allocator, db, envelope.object_id, name, event_hash, envelope, "name", "name_occurred_at", "name_actor_principal", "name_event_hash");
         }
-        if (event_mod.jsonString(payload.get("description"))) |description| {
+        if (event_json.jsonString(payload.get("description"))) |description| {
             try updateLabelScalar(allocator, db, envelope.object_id, description, event_hash, envelope, "description", "description_occurred_at", "description_actor_principal", "description_event_hash");
         }
-        if (event_mod.jsonString(payload.get("color"))) |color| {
+        if (event_json.jsonString(payload.get("color"))) |color| {
             try updateLabelScalar(allocator, db, envelope.object_id, color, event_hash, envelope, "color", "color_occurred_at", "color_actor_principal", "color_event_hash");
         }
-        const priority = event_mod.jsonInteger(payload.get("priority")) orelse event_mod.jsonInteger(payload.get("position"));
+        const priority = event_json.jsonInteger(payload.get("priority")) orelse event_json.jsonInteger(payload.get("position"));
         if (priority) |value| {
             try updateLabelIntegerScalar(allocator, db, envelope.object_id, value, event_hash, envelope, "priority", "priority_occurred_at", "priority_actor_principal", "priority_event_hash");
         }
@@ -1597,7 +1598,7 @@ fn projectViewLimitRejection(db: *SqliteDb, project_id: []const u8) !?[]const u8
 }
 
 fn projectSlugForCreate(allocator: Allocator, db: *SqliteDb, payload: std.json.ObjectMap, project_id: []const u8, name: []const u8) ![]u8 {
-    const raw_slug = event_mod.jsonString(payload.get("slug")) orelse name;
+    const raw_slug = event_json.jsonString(payload.get("slug")) orelse name;
     const sanitized = try util.sanitizeRefSegment(allocator, raw_slug);
     defer allocator.free(sanitized);
     const slug = if (sanitized.len == 0)
@@ -1619,7 +1620,7 @@ fn projectSlugExistsForOther(db: *SqliteDb, slug: []const u8, project_id: []cons
 }
 
 fn projectColumnRefForAdd(allocator: Allocator, db: *SqliteDb, payload: std.json.ObjectMap, project_id: []const u8, column: []const u8) ![]u8 {
-    if (event_mod.jsonString(payload.get("column_ref"))) |column_ref| {
+    if (event_json.jsonString(payload.get("column_ref"))) |column_ref| {
         const sanitized = try util.sanitizeRefSegment(allocator, column_ref);
         if (sanitized.len != 0) return sanitized;
         allocator.free(sanitized);
@@ -1660,15 +1661,15 @@ fn applyProjectFieldCreated(
     event_hash: []const u8,
     envelope: ValidatedEnvelope,
 ) !?[]const u8 {
-    const field_id = event_mod.jsonString(payload.get("field_id")) orelse return "invalid_event_envelope";
-    const key = event_mod.jsonString(payload.get("key")) orelse return "invalid_event_envelope";
-    const name = event_mod.jsonString(payload.get("name")) orelse return "invalid_event_envelope";
-    const field_type = event_mod.jsonString(payload.get("type")) orelse return "invalid_event_envelope";
+    const field_id = event_json.jsonString(payload.get("field_id")) orelse return "invalid_event_envelope";
+    const key = event_json.jsonString(payload.get("key")) orelse return "invalid_event_envelope";
+    const name = event_json.jsonString(payload.get("name")) orelse return "invalid_event_envelope";
+    const field_type = event_json.jsonString(payload.get("type")) orelse return "invalid_event_envelope";
     const position = jsonInteger(payload.get("position")) orelse 0;
     const required = jsonBool(payload.get("required")) orelse false;
     const default_value_json = try jsonValueOrDefaultOwned(allocator, payload.get("default_value"), "null");
     defer allocator.free(default_value_json);
-    const state = event_mod.jsonString(payload.get("state")) orelse "active";
+    const state = event_json.jsonString(payload.get("state")) orelse "active";
 
     var stmt = try db.prepare(
         \\INSERT OR IGNORE INTO project_fields(
@@ -1701,19 +1702,19 @@ fn applyProjectFieldUpdated(
     event_hash: []const u8,
     envelope: ValidatedEnvelope,
 ) !?[]const u8 {
-    const field_id = event_mod.jsonString(payload.get("field_id")) orelse return "invalid_event_envelope";
+    const field_id = event_json.jsonString(payload.get("field_id")) orelse return "invalid_event_envelope";
     var current = try loadProjectField(allocator, db, project_id, field_id) orelse return "object_not_created";
     defer current.deinit(allocator);
     if (!(try eventWins(allocator, event_hash, current.event_hash))) return null;
 
-    const key = event_mod.jsonString(payload.get("key")) orelse current.key;
-    const name = event_mod.jsonString(payload.get("name")) orelse current.name;
-    const field_type = event_mod.jsonString(payload.get("type")) orelse current.field_type;
+    const key = event_json.jsonString(payload.get("key")) orelse current.key;
+    const name = event_json.jsonString(payload.get("name")) orelse current.name;
+    const field_type = event_json.jsonString(payload.get("type")) orelse current.field_type;
     const position = jsonInteger(payload.get("position")) orelse current.position;
     const required = jsonBool(payload.get("required")) orelse current.required;
     const default_value_json = try jsonValueOrDefaultOwned(allocator, payload.get("default_value"), current.default_value_json);
     defer allocator.free(default_value_json);
-    const state = event_mod.jsonString(payload.get("state")) orelse current.state;
+    const state = event_json.jsonString(payload.get("state")) orelse current.state;
 
     if (try projectFieldKeyInUse(db, project_id, key, field_id)) return "duplicate_project_field_key";
 
@@ -1802,13 +1803,13 @@ fn applyProjectFieldOptionAdded(
     event_hash: []const u8,
     envelope: ValidatedEnvelope,
 ) !?[]const u8 {
-    const field_id = event_mod.jsonString(payload.get("field_id")) orelse return "invalid_event_envelope";
+    const field_id = event_json.jsonString(payload.get("field_id")) orelse return "invalid_event_envelope";
     if (!(try projectFieldExists(db, project_id, field_id))) return "object_not_created";
-    const option_id = event_mod.jsonString(payload.get("option_id")) orelse return "invalid_event_envelope";
-    const name = event_mod.jsonString(payload.get("name")) orelse return "invalid_event_envelope";
-    const color = event_mod.jsonString(payload.get("color")) orelse "";
+    const option_id = event_json.jsonString(payload.get("option_id")) orelse return "invalid_event_envelope";
+    const name = event_json.jsonString(payload.get("name")) orelse return "invalid_event_envelope";
+    const color = event_json.jsonString(payload.get("color")) orelse "";
     const position = jsonInteger(payload.get("position")) orelse 0;
-    const state = event_mod.jsonString(payload.get("state")) orelse "active";
+    const state = event_json.jsonString(payload.get("state")) orelse "active";
 
     var stmt = try db.prepare(
         \\INSERT OR IGNORE INTO project_field_options(
@@ -1838,15 +1839,15 @@ fn applyProjectFieldOptionUpdated(
     event_hash: []const u8,
     envelope: ValidatedEnvelope,
 ) !?[]const u8 {
-    const field_id = event_mod.jsonString(payload.get("field_id")) orelse return "invalid_event_envelope";
-    const option_id = event_mod.jsonString(payload.get("option_id")) orelse return "invalid_event_envelope";
+    const field_id = event_json.jsonString(payload.get("field_id")) orelse return "invalid_event_envelope";
+    const option_id = event_json.jsonString(payload.get("option_id")) orelse return "invalid_event_envelope";
     var current = try loadProjectFieldOption(allocator, db, project_id, field_id, option_id) orelse return "object_not_created";
     defer current.deinit(allocator);
     if (!(try eventWins(allocator, event_hash, current.event_hash))) return null;
-    const name = event_mod.jsonString(payload.get("name")) orelse current.name;
-    const color = event_mod.jsonString(payload.get("color")) orelse current.color;
+    const name = event_json.jsonString(payload.get("name")) orelse current.name;
+    const color = event_json.jsonString(payload.get("color")) orelse current.color;
     const position = jsonInteger(payload.get("position")) orelse current.position;
-    const state = event_mod.jsonString(payload.get("state")) orelse current.state;
+    const state = event_json.jsonString(payload.get("state")) orelse current.state;
 
     var stmt = try db.prepare(
         \\UPDATE project_field_options
@@ -1925,13 +1926,13 @@ fn applyProjectViewCreated(
     event_hash: []const u8,
     envelope: ValidatedEnvelope,
 ) !?[]const u8 {
-    const view_id = event_mod.jsonString(payload.get("view_id")) orelse return "invalid_event_envelope";
-    const name = event_mod.jsonString(payload.get("name")) orelse return "invalid_event_envelope";
-    const layout = event_mod.jsonString(payload.get("layout")) orelse return "invalid_event_envelope";
+    const view_id = event_json.jsonString(payload.get("view_id")) orelse return "invalid_event_envelope";
+    const name = event_json.jsonString(payload.get("name")) orelse return "invalid_event_envelope";
+    const layout = event_json.jsonString(payload.get("layout")) orelse return "invalid_event_envelope";
     const position = jsonInteger(payload.get("position")) orelse 0;
     const config_json = try jsonValueOrDefaultOwned(allocator, payload.get("config"), "{}");
     defer allocator.free(config_json);
-    const state = event_mod.jsonString(payload.get("state")) orelse "active";
+    const state = event_json.jsonString(payload.get("state")) orelse "active";
 
     var stmt = try db.prepare(
         \\INSERT OR IGNORE INTO project_views(
@@ -1961,16 +1962,16 @@ fn applyProjectViewUpdated(
     event_hash: []const u8,
     envelope: ValidatedEnvelope,
 ) !?[]const u8 {
-    const view_id = event_mod.jsonString(payload.get("view_id")) orelse return "invalid_event_envelope";
+    const view_id = event_json.jsonString(payload.get("view_id")) orelse return "invalid_event_envelope";
     var current = try loadProjectView(allocator, db, project_id, view_id) orelse return "object_not_created";
     defer current.deinit(allocator);
     if (!(try eventWins(allocator, event_hash, current.event_hash))) return null;
-    const name = event_mod.jsonString(payload.get("name")) orelse current.name;
-    const layout = event_mod.jsonString(payload.get("layout")) orelse current.layout;
+    const name = event_json.jsonString(payload.get("name")) orelse current.name;
+    const layout = event_json.jsonString(payload.get("layout")) orelse current.layout;
     const position = jsonInteger(payload.get("position")) orelse current.position;
     const config_json = try jsonValueOrDefaultOwned(allocator, payload.get("config"), current.config_json);
     defer allocator.free(config_json);
-    const state = event_mod.jsonString(payload.get("state")) orelse current.state;
+    const state = event_json.jsonString(payload.get("state")) orelse current.state;
 
     var stmt = try db.prepare(
         \\UPDATE project_views
@@ -2173,11 +2174,11 @@ fn projectFieldKeyInUse(db: *SqliteDb, project_id: []const u8, key: []const u8, 
 }
 
 fn projectIdFromPayload(allocator: Allocator, db: *SqliteDb, payload: std.json.ObjectMap) !?[]u8 {
-    if (event_mod.jsonString(payload.get("project_id"))) |project_id| {
+    if (event_json.jsonString(payload.get("project_id"))) |project_id| {
         if (try projectExists(db, project_id)) return try allocator.dupe(u8, project_id);
         return null;
     }
-    if (event_mod.jsonString(payload.get("project_ref"))) |project_ref| {
+    if (event_json.jsonString(payload.get("project_ref"))) |project_ref| {
         return try resolveProjectIdInDb(allocator, db, project_ref);
     }
     return null;
@@ -2236,11 +2237,11 @@ fn resolveUniqueProjectByColumn(allocator: Allocator, db: *SqliteDb, comptime co
 }
 
 fn projectFieldIdFromPayload(allocator: Allocator, db: *SqliteDb, project_id: []const u8, payload: std.json.ObjectMap) !?[]u8 {
-    if (event_mod.jsonString(payload.get("field_id"))) |field_id| {
+    if (event_json.jsonString(payload.get("field_id"))) |field_id| {
         if (try projectFieldExists(db, project_id, field_id)) return try allocator.dupe(u8, field_id);
         return null;
     }
-    if (event_mod.jsonString(payload.get("field_key"))) |field_key| {
+    if (event_json.jsonString(payload.get("field_key"))) |field_key| {
         var stmt = try db.prepare("SELECT id FROM project_fields WHERE project_id = ? AND key = ? AND state != 'removed' ORDER BY id LIMIT 2");
         defer stmt.deinit();
         try stmt.bindText(1, project_id);
@@ -2531,11 +2532,11 @@ pub fn applyPullProjection(allocator: Allocator, db: *SqliteDb, event_hash: []co
 
     if (std.mem.eql(u8, envelope.event_type, "pull.opened")) {
         if (!(try creationEventWins(db, "pull.opened", envelope.object_id, event_hash))) return "duplicate_object_id";
-        const title = event_mod.jsonString(payload.get("title")) orelse return "invalid_event_envelope";
-        const base_ref = event_mod.jsonString(payload.get("base_ref")) orelse return "invalid_event_envelope";
-        const head_ref = event_mod.jsonString(payload.get("head_ref")) orelse return "invalid_event_envelope";
-        const body_value = event_mod.jsonString(payload.get("body")) orelse "";
-        const draft = event_mod.jsonBool(payload.get("draft")) orelse false;
+        const title = event_json.jsonString(payload.get("title")) orelse return "invalid_event_envelope";
+        const base_ref = event_json.jsonString(payload.get("base_ref")) orelse return "invalid_event_envelope";
+        const head_ref = event_json.jsonString(payload.get("head_ref")) orelse return "invalid_event_envelope";
+        const body_value = event_json.jsonString(payload.get("body")) orelse "";
+        const draft = event_json.jsonBool(payload.get("draft")) orelse false;
         const source_identity = sourceIdentityFromPayload(payload);
         try upsertSourceIdentity(db, source_identity);
         try insertPullOpened(db, event_hash, envelope, title, body_value, base_ref, head_ref, draft);
@@ -2561,50 +2562,50 @@ pub fn applyPullProjection(allocator: Allocator, db: *SqliteDb, event_hash: []co
     if (std.mem.eql(u8, envelope.event_type, "pull.updated")) {
         if (try applyPullUpdated(allocator, db, payload, event_hash, envelope)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "pull.title_set")) {
-        const title = event_mod.jsonString(payload.get("title")) orelse return "invalid_event_envelope";
+        const title = event_json.jsonString(payload.get("title")) orelse return "invalid_event_envelope";
         _ = try updatePullScalar(allocator, db, envelope.object_id, title, event_hash, envelope, "title", "title_occurred_at", "title_actor_principal", "title_event_hash");
     } else if (std.mem.eql(u8, envelope.event_type, "pull.body_set")) {
-        const body_value = event_mod.jsonString(payload.get("body")) orelse return "invalid_event_envelope";
+        const body_value = event_json.jsonString(payload.get("body")) orelse return "invalid_event_envelope";
         _ = try updatePullScalar(allocator, db, envelope.object_id, body_value, event_hash, envelope, "body", "body_occurred_at", "body_actor_principal", "body_event_hash");
     } else if (std.mem.eql(u8, envelope.event_type, "pull.state_set")) {
-        const state = event_mod.jsonString(payload.get("state")) orelse return "invalid_event_envelope";
+        const state = event_json.jsonString(payload.get("state")) orelse return "invalid_event_envelope";
         if (!stateAllowsPullStateSet(state)) return "invalid_event_envelope";
         _ = try updatePullScalar(allocator, db, envelope.object_id, state, event_hash, envelope, "state", "state_occurred_at", "state_actor_principal", "state_event_hash");
     } else if (std.mem.eql(u8, envelope.event_type, "pull.base_set")) {
-        const base_ref = event_mod.jsonString(payload.get("base_ref")) orelse return "invalid_event_envelope";
+        const base_ref = event_json.jsonString(payload.get("base_ref")) orelse return "invalid_event_envelope";
         _ = try updatePullScalar(allocator, db, envelope.object_id, base_ref, event_hash, envelope, "base_ref", "base_occurred_at", "base_actor_principal", "base_event_hash");
     } else if (std.mem.eql(u8, envelope.event_type, "pull.head_set")) {
-        const head_ref = event_mod.jsonString(payload.get("head_ref")) orelse return "invalid_event_envelope";
+        const head_ref = event_json.jsonString(payload.get("head_ref")) orelse return "invalid_event_envelope";
         _ = try updatePullScalar(allocator, db, envelope.object_id, head_ref, event_hash, envelope, "head_ref", "head_occurred_at", "head_actor_principal", "head_event_hash");
     } else if (std.mem.eql(u8, envelope.event_type, "pull.label_added")) {
-        const label = event_mod.jsonString(payload.get("label")) orelse return "invalid_event_envelope";
+        const label = event_json.jsonString(payload.get("label")) orelse return "invalid_event_envelope";
         try insertPullCollectionValue(db, insert_pull_label_sql, envelope.object_id, label, event_hash);
         if (try pullCollectionLimitRejection(db, envelope.object_id)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "pull.label_removed")) {
-        const label = event_mod.jsonString(payload.get("label")) orelse return "invalid_event_envelope";
+        const label = event_json.jsonString(payload.get("label")) orelse return "invalid_event_envelope";
         try deletePullCollectionValue(allocator, db, "SELECT add_hash FROM pull_labels WHERE pull_id = ? AND label = ?", "DELETE FROM pull_labels WHERE pull_id = ? AND label = ? AND add_hash = ?", envelope.object_id, label, event_hash);
     } else if (std.mem.eql(u8, envelope.event_type, "pull.assignee_added")) {
-        const assignee = event_mod.jsonString(payload.get("assignee")) orelse return "invalid_event_envelope";
+        const assignee = event_json.jsonString(payload.get("assignee")) orelse return "invalid_event_envelope";
         try insertPullCollectionValue(db, insert_pull_assignee_sql, envelope.object_id, assignee, event_hash);
         if (try pullCollectionLimitRejection(db, envelope.object_id)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "pull.assignee_removed")) {
-        const assignee = event_mod.jsonString(payload.get("assignee")) orelse return "invalid_event_envelope";
+        const assignee = event_json.jsonString(payload.get("assignee")) orelse return "invalid_event_envelope";
         try deletePullCollectionValue(allocator, db, "SELECT add_hash FROM pull_assignees WHERE pull_id = ? AND assignee = ?", "DELETE FROM pull_assignees WHERE pull_id = ? AND assignee = ? AND add_hash = ?", envelope.object_id, assignee, event_hash);
     } else if (std.mem.eql(u8, envelope.event_type, "pull.reviewer_added")) {
-        const reviewer = event_mod.jsonString(payload.get("reviewer")) orelse return "invalid_event_envelope";
+        const reviewer = event_json.jsonString(payload.get("reviewer")) orelse return "invalid_event_envelope";
         try insertPullCollectionValue(db, insert_pull_reviewer_sql, envelope.object_id, reviewer, event_hash);
         if (try pullCollectionLimitRejection(db, envelope.object_id)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "pull.reviewer_removed")) {
-        const reviewer = event_mod.jsonString(payload.get("reviewer")) orelse return "invalid_event_envelope";
+        const reviewer = event_json.jsonString(payload.get("reviewer")) orelse return "invalid_event_envelope";
         try deletePullCollectionValue(allocator, db, "SELECT add_hash FROM pull_reviewers WHERE pull_id = ? AND reviewer = ?", "DELETE FROM pull_reviewers WHERE pull_id = ? AND reviewer = ? AND add_hash = ?", envelope.object_id, reviewer, event_hash);
     } else if (std.mem.eql(u8, envelope.event_type, "pull.merged")) {
         if (try applyPullMerged(allocator, db, envelope.object_id, payload, event_hash, envelope)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "pull.reaction_added")) {
-        const emoji = event_mod.jsonString(payload.get("emoji")) orelse return "invalid_event_envelope";
+        const emoji = event_json.jsonString(payload.get("emoji")) orelse return "invalid_event_envelope";
         try insertReaction(db, "pull", envelope.object_id, emoji, envelope.actor_principal, event_hash, envelope.occurred_at);
         if (try reactionLimitRejection(db, "pull", envelope.object_id)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "pull.reaction_removed")) {
-        const emoji = event_mod.jsonString(payload.get("emoji")) orelse return "invalid_event_envelope";
+        const emoji = event_json.jsonString(payload.get("emoji")) orelse return "invalid_event_envelope";
         try deleteReaction(allocator, db, "pull", envelope.object_id, emoji, envelope.actor_principal, event_hash, payload);
     }
     return null;
@@ -2621,20 +2622,20 @@ fn applyPullUpdated(
     event_hash: []const u8,
     envelope: ValidatedEnvelope,
 ) !?[]const u8 {
-    if (event_mod.jsonString(payload.get("title"))) |title| {
+    if (event_json.jsonString(payload.get("title"))) |title| {
         _ = try updatePullScalar(allocator, db, envelope.object_id, title, event_hash, envelope, "title", "title_occurred_at", "title_actor_principal", "title_event_hash");
     }
-    if (event_mod.jsonString(payload.get("body"))) |body_value| {
+    if (event_json.jsonString(payload.get("body"))) |body_value| {
         _ = try updatePullScalar(allocator, db, envelope.object_id, body_value, event_hash, envelope, "body", "body_occurred_at", "body_actor_principal", "body_event_hash");
     }
-    if (event_mod.jsonString(payload.get("state"))) |state| {
+    if (event_json.jsonString(payload.get("state"))) |state| {
         if (!stateAllowsPullStateSet(state)) return "invalid_event_envelope";
         _ = try updatePullScalar(allocator, db, envelope.object_id, state, event_hash, envelope, "state", "state_occurred_at", "state_actor_principal", "state_event_hash");
     }
-    if (event_mod.jsonString(payload.get("base_ref"))) |base_ref| {
+    if (event_json.jsonString(payload.get("base_ref"))) |base_ref| {
         _ = try updatePullScalar(allocator, db, envelope.object_id, base_ref, event_hash, envelope, "base_ref", "base_occurred_at", "base_actor_principal", "base_event_hash");
     }
-    if (event_mod.jsonString(payload.get("head_ref"))) |head_ref| {
+    if (event_json.jsonString(payload.get("head_ref"))) |head_ref| {
         _ = try updatePullScalar(allocator, db, envelope.object_id, head_ref, event_hash, envelope, "head_ref", "head_occurred_at", "head_actor_principal", "head_event_hash");
     }
     try insertPullPayloadStringArray(db, payload, "labels_added", insert_pull_label_sql, envelope.object_id, event_hash);
@@ -2745,8 +2746,8 @@ fn applyPullMerged(
     event_hash: []const u8,
     envelope: ValidatedEnvelope,
 ) !?[]const u8 {
-    const merge_oid = event_mod.jsonString(payload.get("merge_oid")) orelse "";
-    const target_oid = event_mod.jsonString(payload.get("target_oid")) orelse "";
+    const merge_oid = event_json.jsonString(payload.get("merge_oid")) orelse "";
+    const target_oid = event_json.jsonString(payload.get("target_oid")) orelse "";
     if (merge_oid.len == 0 and target_oid.len == 0) return "invalid_merge_oid";
 
     if (try pullMergeOidRejection(allocator, merge_oid, target_oid, payload)) |reason| return reason;
@@ -2766,8 +2767,8 @@ fn pullMergeOidRejection(allocator: Allocator, merge_oid: []const u8, target_oid
     if (target_oid.len != 0 and !git.isFullOid(target_oid)) return "invalid_target_oid";
     if (merge_oid.len != 0 and target_oid.len != 0 and !std.mem.eql(u8, merge_oid, target_oid)) return "invalid_target_oid";
 
-    const base_oid = event_mod.jsonString(payload.get("base_oid")) orelse "";
-    const head_oid = event_mod.jsonString(payload.get("head_oid")) orelse "";
+    const base_oid = event_json.jsonString(payload.get("base_oid")) orelse "";
+    const head_oid = event_json.jsonString(payload.get("head_oid")) orelse "";
     if (base_oid.len != 0 and !git.isFullOid(base_oid)) return "invalid_base_oid";
     if (head_oid.len != 0 and !git.isFullOid(head_oid)) return "invalid_head_oid";
 
@@ -2938,17 +2939,17 @@ pub fn applyCommentProjection(allocator: Allocator, db: *SqliteDb, event_hash: [
 
     if (std.mem.eql(u8, envelope.event_type, "comment.added")) {
         if (!(try creationEventWins(db, "comment.added", envelope.object_id, event_hash))) return "duplicate_object_id";
-        const parent_kind = event_mod.jsonString(payload.get("parent_kind")) orelse return "invalid_event_envelope";
-        const parent_id = event_mod.jsonString(payload.get("parent_id")) orelse return "invalid_event_envelope";
+        const parent_kind = event_json.jsonString(payload.get("parent_kind")) orelse return "invalid_event_envelope";
+        const parent_id = event_json.jsonString(payload.get("parent_id")) orelse return "invalid_event_envelope";
         if (std.mem.eql(u8, parent_kind, "issue")) {
             if (!(try acceptedCreationInFrontier(allocator, db, "issue.opened", parent_id, event_hash))) return "parent_not_created";
         } else if (std.mem.eql(u8, parent_kind, "pull")) {
             if (!(try acceptedCreationInFrontier(allocator, db, "pull.opened", parent_id, event_hash))) return "parent_not_created";
         }
-        const comment_body = event_mod.jsonString(payload.get("body")) orelse return "invalid_event_envelope";
-        const source_author = event_mod.jsonString(payload.get("source_author")) orelse "";
-        const reply_parent_hash = event_mod.jsonString(payload.get("reply_parent_hash")) orelse "";
-        const reply_parent_id = try commentReplyParentId(allocator, db, event_mod.jsonString(payload.get("reply_parent_id")) orelse "", reply_parent_hash);
+        const comment_body = event_json.jsonString(payload.get("body")) orelse return "invalid_event_envelope";
+        const source_author = event_json.jsonString(payload.get("source_author")) orelse "";
+        const reply_parent_hash = event_json.jsonString(payload.get("reply_parent_hash")) orelse "";
+        const reply_parent_id = try commentReplyParentId(allocator, db, event_json.jsonString(payload.get("reply_parent_id")) orelse "", reply_parent_hash);
         defer allocator.free(reply_parent_id);
         if (reply_parent_hash.len != 0 and reply_parent_id.len == 0) return "parent_not_created";
         if (reply_parent_id.len != 0 and !(try acceptedCreationInFrontier(allocator, db, "comment.added", reply_parent_id, event_hash))) return "parent_not_created";
@@ -2959,19 +2960,19 @@ pub fn applyCommentProjection(allocator: Allocator, db: *SqliteDb, event_hash: [
         try insertCommentAdded(db, event_hash, envelope, parent_kind, parent_id, comment_body, source_author, source_identity, reply_parent_id, reply_parent_hash);
     } else if (std.mem.eql(u8, envelope.event_type, "comment.body_set")) {
         if (!(try acceptedCreationInFrontier(allocator, db, "comment.added", envelope.object_id, event_hash))) return "object_not_created";
-        const comment_body = event_mod.jsonString(payload.get("body")) orelse return "invalid_event_envelope";
+        const comment_body = event_json.jsonString(payload.get("body")) orelse return "invalid_event_envelope";
         if (try updateCommentBody(allocator, db, envelope.object_id, comment_body, event_hash, envelope)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "comment.redacted")) {
         if (!(try acceptedCreationInFrontier(allocator, db, "comment.added", envelope.object_id, event_hash))) return "object_not_created";
         try redactComment(allocator, db, envelope.object_id, event_hash, envelope);
     } else if (std.mem.eql(u8, envelope.event_type, "comment.reaction_added")) {
         if (!(try acceptedCreationInFrontier(allocator, db, "comment.added", envelope.object_id, event_hash))) return "object_not_created";
-        const emoji = event_mod.jsonString(payload.get("emoji")) orelse return "invalid_event_envelope";
+        const emoji = event_json.jsonString(payload.get("emoji")) orelse return "invalid_event_envelope";
         try insertReaction(db, "comment", envelope.object_id, emoji, envelope.actor_principal, event_hash, envelope.occurred_at);
         if (try reactionLimitRejection(db, "comment", envelope.object_id)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "comment.reaction_removed")) {
         if (!(try acceptedCreationInFrontier(allocator, db, "comment.added", envelope.object_id, event_hash))) return "object_not_created";
-        const emoji = event_mod.jsonString(payload.get("emoji")) orelse return "invalid_event_envelope";
+        const emoji = event_json.jsonString(payload.get("emoji")) orelse return "invalid_event_envelope";
         try deleteReaction(allocator, db, "comment", envelope.object_id, emoji, envelope.actor_principal, event_hash, payload);
     }
     return null;
@@ -2990,13 +2991,13 @@ pub fn applyNotificationProjection(allocator: Allocator, db: *SqliteDb, event_ha
         .object => |object| object,
         else => return "invalid_event_envelope",
     };
-    const principal = event_mod.jsonString(payload.get("principal")) orelse return "invalid_event_envelope";
+    const principal = event_json.jsonString(payload.get("principal")) orelse return "invalid_event_envelope";
 
     if (std.mem.eql(u8, envelope.event_type, "notification.subscribed") or
         std.mem.eql(u8, envelope.event_type, "notification.unsubscribed"))
     {
-        const target_kind = event_mod.jsonString(payload.get("target_kind")) orelse return "invalid_event_envelope";
-        const target_id = event_mod.jsonString(payload.get("target_id")) orelse return "invalid_event_envelope";
+        const target_kind = event_json.jsonString(payload.get("target_kind")) orelse return "invalid_event_envelope";
+        const target_id = event_json.jsonString(payload.get("target_id")) orelse return "invalid_event_envelope";
         if (!(try notificationTargetExists(allocator, db, target_kind, target_id, event_hash))) return "object_not_created";
         try upsertNotificationSubscription(
             allocator,
@@ -3005,7 +3006,7 @@ pub fn applyNotificationProjection(allocator: Allocator, db: *SqliteDb, event_ha
             target_kind,
             target_id,
             std.mem.eql(u8, envelope.event_type, "notification.subscribed"),
-            event_mod.jsonString(payload.get("reason")) orelse "manual",
+            event_json.jsonString(payload.get("reason")) orelse "manual",
             event_hash,
             envelope,
         );
@@ -3013,7 +3014,7 @@ pub fn applyNotificationProjection(allocator: Allocator, db: *SqliteDb, event_ha
     }
 
     if (std.mem.eql(u8, envelope.event_type, "notification.read")) {
-        const read_event_hash = event_mod.jsonString(payload.get("event_hash")) orelse return "invalid_event_envelope";
+        const read_event_hash = event_json.jsonString(payload.get("event_hash")) orelse return "invalid_event_envelope";
         try markNotificationRead(db, principal, read_event_hash, event_hash, envelope.occurred_at);
         return null;
     }
@@ -3058,7 +3059,7 @@ pub fn applyNotificationSideEffects(allocator: Allocator, db: *SqliteDb, event_h
     } else if (std.mem.eql(u8, envelope.event_type, "issue.updated")) {
         try subscribePayloadStringArray(allocator, db, payload, "assignees_added", "issue", envelope.object_id, "assignee", event_hash, envelope);
     } else if (std.mem.eql(u8, envelope.event_type, "issue.assignee_added")) {
-        if (event_mod.jsonString(payload.get("assignee"))) |assignee| {
+        if (event_json.jsonString(payload.get("assignee"))) |assignee| {
             try upsertNotificationSubscription(allocator, db, assignee, "issue", envelope.object_id, true, "assignee", event_hash, envelope);
         }
     } else if (std.mem.eql(u8, envelope.event_type, "pull.opened")) {
@@ -3069,11 +3070,11 @@ pub fn applyNotificationSideEffects(allocator: Allocator, db: *SqliteDb, event_h
         try subscribePayloadStringArray(allocator, db, payload, "assignees_added", "pull", envelope.object_id, "assignee", event_hash, envelope);
         try subscribePayloadStringArray(allocator, db, payload, "reviewers_added", "pull", envelope.object_id, "reviewer", event_hash, envelope);
     } else if (std.mem.eql(u8, envelope.event_type, "pull.assignee_added")) {
-        if (event_mod.jsonString(payload.get("assignee"))) |assignee| {
+        if (event_json.jsonString(payload.get("assignee"))) |assignee| {
             try upsertNotificationSubscription(allocator, db, assignee, "pull", envelope.object_id, true, "assignee", event_hash, envelope);
         }
     } else if (std.mem.eql(u8, envelope.event_type, "pull.reviewer_added")) {
-        if (event_mod.jsonString(payload.get("reviewer"))) |reviewer| {
+        if (event_json.jsonString(payload.get("reviewer"))) |reviewer| {
             try upsertNotificationSubscription(allocator, db, reviewer, "pull", envelope.object_id, true, "reviewer", event_hash, envelope);
         }
     }
@@ -3093,12 +3094,12 @@ fn applyCommentNotificationSideEffects(allocator: Allocator, db: *SqliteDb, even
             .object => |object| object,
             else => return,
         };
-        const parent_kind = event_mod.jsonString(payload.get("parent_kind")) orelse return;
-        const parent_id = event_mod.jsonString(payload.get("parent_id")) orelse return;
+        const parent_kind = event_json.jsonString(payload.get("parent_kind")) orelse return;
+        const parent_id = event_json.jsonString(payload.get("parent_id")) orelse return;
         if (!std.mem.eql(u8, parent_kind, "issue") and !std.mem.eql(u8, parent_kind, "pull")) return;
 
         try upsertNotificationSubscription(allocator, db, envelope.actor_principal, parent_kind, parent_id, true, "commenter", event_hash, envelope);
-        if (event_mod.jsonString(payload.get("body"))) |comment_body| {
+        if (event_json.jsonString(payload.get("body"))) |comment_body| {
             try subscribeMentionedPrincipals(allocator, db, comment_body, parent_kind, parent_id, event_hash, envelope);
         }
         try publishNotificationEvent(db, event_hash, parent_kind, parent_id, envelope.event_type, envelope.actor_principal, envelope.occurred_at);

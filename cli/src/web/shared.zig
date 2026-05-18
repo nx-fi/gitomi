@@ -2001,12 +2001,15 @@ pub fn paginationSummaryOwned(allocator: Allocator, pagination: Pagination, show
 
 pub fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const u8) !?[]u8 {
     const query_start = std.mem.indexOfScalar(u8, target, '?') orelse return null;
-    var fields = std.mem.splitScalar(u8, target[query_start + 1 ..], '&');
-    while (fields.next()) |field| {
-        if (field.len == 0) continue;
-        const equals = std.mem.indexOfScalar(u8, field, '=') orelse field.len;
-        const raw_key = field[0..equals];
-        const raw_value = if (equals < field.len) field[equals + 1 ..] else "";
+    return formValueOwned(allocator, target[query_start + 1 ..], wanted_key);
+}
+
+pub fn formValueOwned(allocator: Allocator, body: []const u8, wanted_key: []const u8) !?[]u8 {
+    var pairs = std.mem.splitScalar(u8, body, '&');
+    while (pairs.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
+        const raw_key = pair[0..eq];
+        const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
         const key = try percentDecodeForm(allocator, raw_key);
         defer allocator.free(key);
         if (!std.mem.eql(u8, key, wanted_key)) continue;
@@ -2015,30 +2018,99 @@ pub fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []c
     return null;
 }
 
+pub fn formValuesOwned(allocator: Allocator, body: []const u8, wanted_key: []const u8) !std.ArrayList([]u8) {
+    var values: std.ArrayList([]u8) = .empty;
+    errdefer freeOwnedStringList(allocator, &values);
+
+    var pairs = std.mem.splitScalar(u8, body, '&');
+    while (pairs.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
+        const raw_key = pair[0..eq];
+        const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
+        const key = try percentDecodeForm(allocator, raw_key);
+        defer allocator.free(key);
+        if (!std.mem.eql(u8, key, wanted_key)) continue;
+        const value = try percentDecodeForm(allocator, raw_value);
+        errdefer allocator.free(value);
+        try values.append(allocator, value);
+    }
+
+    return values;
+}
+
+pub fn isSafeReturnTarget(value: []const u8, allowed_prefix: []const u8) bool {
+    if (value.len == 0 or allowed_prefix.len == 0) return false;
+    if (allowed_prefix[0] != '/') return false;
+    if (value[0] != '/') return false;
+    if (value.len > 1 and value[1] == '/') return false;
+    if (std.mem.indexOfAny(u8, value, "\r\n") != null) return false;
+    if (!std.mem.startsWith(u8, value, allowed_prefix)) return false;
+    if (value.len == allowed_prefix.len) return true;
+    return value[allowed_prefix.len] == '?' or value[allowed_prefix.len] == '/';
+}
+
 pub fn percentDecodeForm(allocator: Allocator, value: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
     var i: usize = 0;
-    while (i < value.len) {
-        const c = value[i];
-        if (c == '+') {
-            try out.append(allocator, ' ');
-            i += 1;
-        } else if (c == '%' and i + 2 < value.len) {
-            const decoded = std.fmt.parseInt(u8, value[i + 1 .. i + 3], 16) catch null;
-            if (decoded) |byte| {
-                try out.append(allocator, byte);
-                i += 3;
-            } else {
-                try out.append(allocator, c);
-                i += 1;
-            }
-        } else {
-            try out.append(allocator, c);
-            i += 1;
+    while (i < value.len) : (i += 1) {
+        switch (value[i]) {
+            '+' => try buf.append(allocator, ' '),
+            '%' => {
+                if (i + 2 >= value.len) return error.InvalidFormEncoding;
+                const hi = hexValue(value[i + 1]) orelse return error.InvalidFormEncoding;
+                const lo = hexValue(value[i + 2]) orelse return error.InvalidFormEncoding;
+                try buf.append(allocator, (hi << 4) | lo);
+                i += 2;
+            },
+            else => |c| try buf.append(allocator, c),
         }
     }
-    return out.toOwnedSlice(allocator);
+
+    return buf.toOwnedSlice(allocator);
+}
+
+fn hexValue(c: u8) ?u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => null,
+    };
+}
+
+fn freeOwnedStringList(allocator: Allocator, values: *std.ArrayList([]u8)) void {
+    for (values.items) |item| allocator.free(item);
+    values.deinit(allocator);
+}
+
+test "web form decoding handles spaces and escapes" {
+    const decoded = try percentDecodeForm(std.testing.allocator, "hello+local%2Fworld%21");
+    defer std.testing.allocator.free(decoded);
+    try std.testing.expectEqualStrings("hello local/world!", decoded);
+
+    const value = (try formValueOwned(std.testing.allocator, "title=First+issue&labels=bug%2Cdocs", "labels")).?;
+    defer std.testing.allocator.free(value);
+    try std.testing.expectEqualStrings("bug,docs", value);
+}
+
+test "web form values returns all matching fields" {
+    var values = try formValuesOwned(std.testing.allocator, "issue=one&ignored=1&issue=two%203", "issue");
+    defer freeOwnedStringList(std.testing.allocator, &values);
+
+    try std.testing.expectEqual(@as(usize, 2), values.items.len);
+    try std.testing.expectEqualStrings("one", values.items[0]);
+    try std.testing.expectEqualStrings("two 3", values.items[1]);
+}
+
+test "web return targets stay under allowed prefixes" {
+    try std.testing.expect(isSafeReturnTarget("/issues", "/issues"));
+    try std.testing.expect(isSafeReturnTarget("/issues?state=open", "/issues"));
+    try std.testing.expect(isSafeReturnTarget("/issues/abc123", "/issues"));
+    try std.testing.expect(!isSafeReturnTarget("/issues-next", "/issues"));
+    try std.testing.expect(!isSafeReturnTarget("//issues", "/issues"));
+    try std.testing.expect(!isSafeReturnTarget("/issues\nLocation:/pulls", "/issues"));
 }
 
 fn loadWebStats(allocator: Allocator, repo: Repo) !WebStats {

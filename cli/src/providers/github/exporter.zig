@@ -1,6 +1,6 @@
 const std = @import("std");
 const errors = @import("../../errors.zig");
-const event_mod = @import("../../event.zig");
+const event_json = @import("../../event/json.zig");
 const git = @import("../../git.zig");
 const index = @import("../../index.zig");
 const io = @import("../../io.zig");
@@ -248,11 +248,11 @@ const MappingStore = struct {
                     return CliError.UserError;
                 },
             };
-            const kind = event_mod.jsonString(root.get("kind")) orelse {
+            const kind = event_json.jsonString(root.get("kind")) orelse {
                 try eprint("gt github export: map file {s} line {d} is missing kind\n", .{ self.path, line_number });
                 return CliError.UserError;
             };
-            const id = event_mod.jsonString(root.get("id")) orelse {
+            const id = event_json.jsonString(root.get("id")) orelse {
                 try eprint("gt github export: map file {s} line {d} is missing id\n", .{ self.path, line_number });
                 return CliError.UserError;
             };
@@ -393,7 +393,7 @@ fn lookupMappedObjectIdUnlocked(allocator: Allocator, map_file: []const u8, kind
                 return CliError.UserError;
             },
         };
-        const mapped_kind = event_mod.jsonString(root.get("kind")) orelse {
+        const mapped_kind = event_json.jsonString(root.get("kind")) orelse {
             try eprint("gt github: map file {s} line {d} is missing kind\n", .{ map_file, line_number });
             return CliError.UserError;
         };
@@ -401,7 +401,7 @@ fn lookupMappedObjectIdUnlocked(allocator: Allocator, map_file: []const u8, kind
             try eprint("gt github: map file {s} line {d} is missing number\n", .{ map_file, line_number });
             return CliError.UserError;
         };
-        const id = event_mod.jsonString(root.get("id")) orelse {
+        const id = event_json.jsonString(root.get("id")) orelse {
             try eprint("gt github: map file {s} line {d} is missing id\n", .{ map_file, line_number });
             return CliError.UserError;
         };
@@ -437,11 +437,11 @@ fn mappingExistsUnlocked(allocator: Allocator, map_file: []const u8, kind: []con
                 return CliError.UserError;
             },
         };
-        const mapped_kind = event_mod.jsonString(root.get("kind")) orelse {
+        const mapped_kind = event_json.jsonString(root.get("kind")) orelse {
             try eprint("gt github: map file {s} line {d} is missing kind\n", .{ map_file, line_number });
             return CliError.UserError;
         };
-        const mapped_id = event_mod.jsonString(root.get("id")) orelse {
+        const mapped_id = event_json.jsonString(root.get("id")) orelse {
             try eprint("gt github: map file {s} line {d} is missing id\n", .{ map_file, line_number });
             return CliError.UserError;
         };
@@ -790,7 +790,7 @@ fn fetchRepositoryNodeId(allocator: Allocator, client: GitHubClient) ![]u8 {
     defer parsed.deinit();
     const data = graphqlData(parsed.value) orelse return CliError.UserError;
     const repository = jsonObject(data.get("repository")) orelse return CliError.UserError;
-    const id = event_mod.jsonString(repository.get("id")) orelse return CliError.UserError;
+    const id = event_json.jsonString(repository.get("id")) orelse return CliError.UserError;
     return try allocator.dupe(u8, id);
 }
 
@@ -805,7 +805,7 @@ fn fetchIssueNodeId(allocator: Allocator, client: GitHubClient, number: i64) ![]
     const data = graphqlData(parsed.value) orelse return CliError.UserError;
     const repository = jsonObject(data.get("repository")) orelse return CliError.UserError;
     const issue = jsonObject(repository.get("issue")) orelse return CliError.UserError;
-    const id = event_mod.jsonString(issue.get("id")) orelse return CliError.UserError;
+    const id = event_json.jsonString(issue.get("id")) orelse return CliError.UserError;
     return try allocator.dupe(u8, id);
 }
 
@@ -820,7 +820,7 @@ fn fetchPullNodeId(allocator: Allocator, client: GitHubClient, number: i64) ![]u
     const data = graphqlData(parsed.value) orelse return CliError.UserError;
     const repository = jsonObject(data.get("repository")) orelse return CliError.UserError;
     const pull = jsonObject(repository.get("pullRequest")) orelse return CliError.UserError;
-    const id = event_mod.jsonString(pull.get("id")) orelse return CliError.UserError;
+    const id = event_json.jsonString(pull.get("id")) orelse return CliError.UserError;
     return try allocator.dupe(u8, id);
 }
 
@@ -830,8 +830,8 @@ fn githubIssueCreateGraphqlInput(allocator: Allocator, repo_id: []const u8, payl
     var first = true;
     try buf.append(allocator, '{');
     try appendStringField(&buf, allocator, &first, "repositoryId", repo_id);
-    try appendStringField(&buf, allocator, &first, "title", event_mod.jsonString(payload.get("title")) orelse "(untitled)");
-    if (event_mod.jsonString(payload.get("body"))) |body| try appendStringField(&buf, allocator, &first, "body", body);
+    try appendStringField(&buf, allocator, &first, "title", event_json.jsonString(payload.get("title")) orelse "(untitled)");
+    if (event_json.jsonString(payload.get("body"))) |body| try appendStringField(&buf, allocator, &first, "body", body);
     try buf.append(allocator, '}');
     return try buf.toOwnedSlice(allocator);
 }
@@ -842,9 +842,9 @@ fn githubIssueUpdateGraphqlInput(allocator: Allocator, issue_id: []const u8, pay
     var first = true;
     try buf.append(allocator, '{');
     try appendStringField(&buf, allocator, &first, "id", issue_id);
-    if (event_mod.jsonString(payload.get("title"))) |value| try appendStringField(&buf, allocator, &first, "title", value);
-    if (event_mod.jsonString(payload.get("body"))) |value| try appendStringField(&buf, allocator, &first, "body", value);
-    if (event_mod.jsonString(payload.get("state"))) |value| try appendStringField(&buf, allocator, &first, "state", githubStateEnum(value));
+    if (event_json.jsonString(payload.get("title"))) |value| try appendStringField(&buf, allocator, &first, "title", value);
+    if (event_json.jsonString(payload.get("body"))) |value| try appendStringField(&buf, allocator, &first, "body", value);
+    if (event_json.jsonString(payload.get("state"))) |value| try appendStringField(&buf, allocator, &first, "state", githubStateEnum(value));
     try buf.append(allocator, '}');
     return try buf.toOwnedSlice(allocator);
 }
@@ -855,10 +855,10 @@ fn githubPullCreateGraphqlInput(allocator: Allocator, repo_id: []const u8, paylo
     var first = true;
     try buf.append(allocator, '{');
     try appendStringField(&buf, allocator, &first, "repositoryId", repo_id);
-    try appendStringField(&buf, allocator, &first, "title", event_mod.jsonString(payload.get("title")) orelse "(untitled)");
-    if (event_mod.jsonString(payload.get("body"))) |body| try appendStringField(&buf, allocator, &first, "body", body);
-    try appendStringField(&buf, allocator, &first, "baseRefName", event_mod.jsonString(payload.get("base_ref")) orelse "main");
-    try appendStringField(&buf, allocator, &first, "headRefName", event_mod.jsonString(payload.get("head_ref")) orelse "unknown");
+    try appendStringField(&buf, allocator, &first, "title", event_json.jsonString(payload.get("title")) orelse "(untitled)");
+    if (event_json.jsonString(payload.get("body"))) |body| try appendStringField(&buf, allocator, &first, "body", body);
+    try appendStringField(&buf, allocator, &first, "baseRefName", event_json.jsonString(payload.get("base_ref")) orelse "main");
+    try appendStringField(&buf, allocator, &first, "headRefName", event_json.jsonString(payload.get("head_ref")) orelse "unknown");
     if (jsonBool(payload.get("draft"))) |draft| try appendBoolField(&buf, allocator, &first, "draft", draft);
     try buf.append(allocator, '}');
     return try buf.toOwnedSlice(allocator);
@@ -870,10 +870,10 @@ fn githubPullUpdateGraphqlInput(allocator: Allocator, pull_id: []const u8, paylo
     var first = true;
     try buf.append(allocator, '{');
     try appendStringField(&buf, allocator, &first, "pullRequestId", pull_id);
-    if (event_mod.jsonString(payload.get("title"))) |value| try appendStringField(&buf, allocator, &first, "title", value);
-    if (event_mod.jsonString(payload.get("body"))) |value| try appendStringField(&buf, allocator, &first, "body", value);
-    if (event_mod.jsonString(payload.get("state"))) |value| try appendStringField(&buf, allocator, &first, "state", githubStateEnum(value));
-    if (event_mod.jsonString(payload.get("base_ref"))) |value| try appendStringField(&buf, allocator, &first, "baseRefName", value);
+    if (event_json.jsonString(payload.get("title"))) |value| try appendStringField(&buf, allocator, &first, "title", value);
+    if (event_json.jsonString(payload.get("body"))) |value| try appendStringField(&buf, allocator, &first, "body", value);
+    if (event_json.jsonString(payload.get("state"))) |value| try appendStringField(&buf, allocator, &first, "state", githubStateEnum(value));
+    if (event_json.jsonString(payload.get("base_ref"))) |value| try appendStringField(&buf, allocator, &first, "baseRefName", value);
     try buf.append(allocator, '}');
     return try buf.toOwnedSlice(allocator);
 }
@@ -923,7 +923,7 @@ fn parseGraphqlResponse(allocator: Allocator, raw: []const u8, command: []const 
     if (jsonArray(root.get("errors"))) |errors_array| {
         if (errors_array.items.len != 0) {
             if (errors_array.items[0] == .object) {
-                const message = event_mod.jsonString(errors_array.items[0].object.get("message")) orelse "unknown GraphQL error";
+                const message = event_json.jsonString(errors_array.items[0].object.get("message")) orelse "unknown GraphQL error";
                 try eprint("{s}: GraphQL request failed: {s}\n", .{ command, message });
             } else {
                 try eprint("{s}: GraphQL request failed\n", .{command});
@@ -1071,19 +1071,19 @@ fn exportIssueEvent(
         return true;
     }
     if (std.mem.eql(u8, event_type, "issue.label_added")) {
-        try replayOneLabel(allocator, client, number, event_mod.jsonString(payload.get("label")) orelse "", true);
+        try replayOneLabel(allocator, client, number, event_json.jsonString(payload.get("label")) orelse "", true);
         return true;
     }
     if (std.mem.eql(u8, event_type, "issue.label_removed")) {
-        try replayOneLabel(allocator, client, number, event_mod.jsonString(payload.get("label")) orelse "", false);
+        try replayOneLabel(allocator, client, number, event_json.jsonString(payload.get("label")) orelse "", false);
         return true;
     }
     if (std.mem.eql(u8, event_type, "issue.assignee_added")) {
-        try replayOneAssignee(allocator, client, number, event_mod.jsonString(payload.get("assignee")) orelse "", true);
+        try replayOneAssignee(allocator, client, number, event_json.jsonString(payload.get("assignee")) orelse "", true);
         return true;
     }
     if (std.mem.eql(u8, event_type, "issue.assignee_removed")) {
-        try replayOneAssignee(allocator, client, number, event_mod.jsonString(payload.get("assignee")) orelse "", false);
+        try replayOneAssignee(allocator, client, number, event_json.jsonString(payload.get("assignee")) orelse "", false);
         return true;
     }
     return false;
@@ -1172,27 +1172,27 @@ fn exportPullEvent(
         return true;
     }
     if (std.mem.eql(u8, event_type, "pull.label_added")) {
-        try replayOneLabel(allocator, client, number, event_mod.jsonString(payload.get("label")) orelse "", true);
+        try replayOneLabel(allocator, client, number, event_json.jsonString(payload.get("label")) orelse "", true);
         return true;
     }
     if (std.mem.eql(u8, event_type, "pull.label_removed")) {
-        try replayOneLabel(allocator, client, number, event_mod.jsonString(payload.get("label")) orelse "", false);
+        try replayOneLabel(allocator, client, number, event_json.jsonString(payload.get("label")) orelse "", false);
         return true;
     }
     if (std.mem.eql(u8, event_type, "pull.assignee_added")) {
-        try replayOneAssignee(allocator, client, number, event_mod.jsonString(payload.get("assignee")) orelse "", true);
+        try replayOneAssignee(allocator, client, number, event_json.jsonString(payload.get("assignee")) orelse "", true);
         return true;
     }
     if (std.mem.eql(u8, event_type, "pull.assignee_removed")) {
-        try replayOneAssignee(allocator, client, number, event_mod.jsonString(payload.get("assignee")) orelse "", false);
+        try replayOneAssignee(allocator, client, number, event_json.jsonString(payload.get("assignee")) orelse "", false);
         return true;
     }
     if (std.mem.eql(u8, event_type, "pull.reviewer_added")) {
-        try replayOneReviewer(allocator, client, number, event_mod.jsonString(payload.get("reviewer")) orelse "", true);
+        try replayOneReviewer(allocator, client, number, event_json.jsonString(payload.get("reviewer")) orelse "", true);
         return true;
     }
     if (std.mem.eql(u8, event_type, "pull.reviewer_removed")) {
-        try replayOneReviewer(allocator, client, number, event_mod.jsonString(payload.get("reviewer")) orelse "", false);
+        try replayOneReviewer(allocator, client, number, event_json.jsonString(payload.get("reviewer")) orelse "", false);
         return true;
     }
     return false;
@@ -1209,13 +1209,13 @@ fn exportCommentEvent(
 ) !bool {
     if (std.mem.eql(u8, event_type, "comment.added")) {
         if (try mappings.get("comment", comment_id) != null) return false;
-        const parent_kind = event_mod.jsonString(payload.get("parent_kind")) orelse return false;
-        const parent_id = event_mod.jsonString(payload.get("parent_id")) orelse return false;
+        const parent_kind = event_json.jsonString(payload.get("parent_kind")) orelse return false;
+        const parent_id = event_json.jsonString(payload.get("parent_id")) orelse return false;
         const parent_number = (try mappings.get(parent_kind, parent_id)) orelse return false;
         const comment_number = if (options.mode == .graphql)
-            if (try addCommentGraphql(allocator, client, parent_kind, parent_number, event_mod.jsonString(payload.get("body")) orelse "")) |created_number| created_number else try mappings.putSynthetic("comment", comment_id)
+            if (try addCommentGraphql(allocator, client, parent_kind, parent_number, event_json.jsonString(payload.get("body")) orelse "")) |created_number| created_number else try mappings.putSynthetic("comment", comment_id)
         else blk: {
-            const request_body = try githubCommentBody(allocator, event_mod.jsonString(payload.get("body")) orelse "");
+            const request_body = try githubCommentBody(allocator, event_json.jsonString(payload.get("body")) orelse "");
             defer allocator.free(request_body);
             const path = try std.fmt.allocPrint(allocator, "/repos/{s}/issues/{d}/comments", .{ client.repo.slug, parent_number });
             defer allocator.free(path);
@@ -1231,7 +1231,7 @@ fn exportCommentEvent(
     const body_text = if (std.mem.eql(u8, event_type, "comment.redacted"))
         "[redacted]"
     else
-        event_mod.jsonString(payload.get("body")) orelse return false;
+        event_json.jsonString(payload.get("body")) orelse return false;
     const request_body = try githubCommentBody(allocator, body_text);
     defer allocator.free(request_body);
     const path = try std.fmt.allocPrint(allocator, "/repos/{s}/issues/comments/{d}", .{ client.repo.slug, github_id });
@@ -1246,8 +1246,8 @@ pub fn githubIssueCreateBody(allocator: Allocator, payload: std.json.ObjectMap) 
     errdefer buf.deinit(allocator);
     var first = true;
     try buf.append(allocator, '{');
-    try appendStringField(&buf, allocator, &first, "title", event_mod.jsonString(payload.get("title")) orelse "(untitled)");
-    if (event_mod.jsonString(payload.get("body"))) |body| try appendStringField(&buf, allocator, &first, "body", body);
+    try appendStringField(&buf, allocator, &first, "title", event_json.jsonString(payload.get("title")) orelse "(untitled)");
+    if (event_json.jsonString(payload.get("body"))) |body| try appendStringField(&buf, allocator, &first, "body", body);
     try appendStringArrayValueField(&buf, allocator, &first, "labels", payload.get("labels"));
     try appendStringArrayValueField(&buf, allocator, &first, "assignees", payload.get("assignees"));
     try buf.append(allocator, '}');
@@ -1259,10 +1259,10 @@ pub fn githubPullCreateBody(allocator: Allocator, payload: std.json.ObjectMap) !
     errdefer buf.deinit(allocator);
     var first = true;
     try buf.append(allocator, '{');
-    try appendStringField(&buf, allocator, &first, "title", event_mod.jsonString(payload.get("title")) orelse "(untitled)");
-    if (event_mod.jsonString(payload.get("body"))) |body| try appendStringField(&buf, allocator, &first, "body", body);
-    try appendStringField(&buf, allocator, &first, "base", event_mod.jsonString(payload.get("base_ref")) orelse "main");
-    try appendStringField(&buf, allocator, &first, "head", event_mod.jsonString(payload.get("head_ref")) orelse "unknown");
+    try appendStringField(&buf, allocator, &first, "title", event_json.jsonString(payload.get("title")) orelse "(untitled)");
+    if (event_json.jsonString(payload.get("body"))) |body| try appendStringField(&buf, allocator, &first, "body", body);
+    try appendStringField(&buf, allocator, &first, "base", event_json.jsonString(payload.get("base_ref")) orelse "main");
+    try appendStringField(&buf, allocator, &first, "head", event_json.jsonString(payload.get("head_ref")) orelse "unknown");
     if (jsonBool(payload.get("draft"))) |draft| try appendBoolField(&buf, allocator, &first, "draft", draft);
     try buf.append(allocator, '}');
     return try buf.toOwnedSlice(allocator);
@@ -1273,9 +1273,9 @@ pub fn githubIssuePatchBody(allocator: Allocator, payload: std.json.ObjectMap) !
     errdefer buf.deinit(allocator);
     var first = true;
     try buf.append(allocator, '{');
-    if (event_mod.jsonString(payload.get("title"))) |value| try appendStringField(&buf, allocator, &first, "title", value);
-    if (event_mod.jsonString(payload.get("body"))) |value| try appendStringField(&buf, allocator, &first, "body", value);
-    if (event_mod.jsonString(payload.get("state"))) |value| try appendStringField(&buf, allocator, &first, "state", value);
+    if (event_json.jsonString(payload.get("title"))) |value| try appendStringField(&buf, allocator, &first, "title", value);
+    if (event_json.jsonString(payload.get("body"))) |value| try appendStringField(&buf, allocator, &first, "body", value);
+    if (event_json.jsonString(payload.get("state"))) |value| try appendStringField(&buf, allocator, &first, "state", value);
     if (first) {
         buf.deinit(allocator);
         return null;
@@ -1289,10 +1289,10 @@ pub fn githubPullPatchBody(allocator: Allocator, payload: std.json.ObjectMap) !?
     errdefer buf.deinit(allocator);
     var first = true;
     try buf.append(allocator, '{');
-    if (event_mod.jsonString(payload.get("title"))) |value| try appendStringField(&buf, allocator, &first, "title", value);
-    if (event_mod.jsonString(payload.get("body"))) |value| try appendStringField(&buf, allocator, &first, "body", value);
-    if (event_mod.jsonString(payload.get("state"))) |value| try appendStringField(&buf, allocator, &first, "state", value);
-    if (event_mod.jsonString(payload.get("base_ref"))) |value| try appendStringField(&buf, allocator, &first, "base", value);
+    if (event_json.jsonString(payload.get("title"))) |value| try appendStringField(&buf, allocator, &first, "title", value);
+    if (event_json.jsonString(payload.get("body"))) |value| try appendStringField(&buf, allocator, &first, "body", value);
+    if (event_json.jsonString(payload.get("state"))) |value| try appendStringField(&buf, allocator, &first, "state", value);
+    if (event_json.jsonString(payload.get("base_ref"))) |value| try appendStringField(&buf, allocator, &first, "base", value);
     if (first) {
         buf.deinit(allocator);
         return null;
@@ -1306,11 +1306,11 @@ pub fn githubSinglePatchBody(allocator: Allocator, payload: std.json.ObjectMap) 
     errdefer buf.deinit(allocator);
     var first = true;
     try buf.append(allocator, '{');
-    if (event_mod.jsonString(payload.get("title"))) |value| try appendStringField(&buf, allocator, &first, "title", value);
-    if (event_mod.jsonString(payload.get("body"))) |value| try appendStringField(&buf, allocator, &first, "body", value);
-    if (event_mod.jsonString(payload.get("state"))) |value| try appendStringField(&buf, allocator, &first, "state", value);
-    if (event_mod.jsonString(payload.get("base_ref"))) |value| try appendStringField(&buf, allocator, &first, "base", value);
-    if (event_mod.jsonString(payload.get("head_ref"))) |value| try appendStringField(&buf, allocator, &first, "head", value);
+    if (event_json.jsonString(payload.get("title"))) |value| try appendStringField(&buf, allocator, &first, "title", value);
+    if (event_json.jsonString(payload.get("body"))) |value| try appendStringField(&buf, allocator, &first, "body", value);
+    if (event_json.jsonString(payload.get("state"))) |value| try appendStringField(&buf, allocator, &first, "state", value);
+    if (event_json.jsonString(payload.get("base_ref"))) |value| try appendStringField(&buf, allocator, &first, "base", value);
+    if (event_json.jsonString(payload.get("head_ref"))) |value| try appendStringField(&buf, allocator, &first, "head", value);
     try buf.append(allocator, '}');
     return buf.toOwnedSlice(allocator);
 }

@@ -2,7 +2,6 @@ const std = @import("std");
 const cmd_common = @import("../../cmd_common.zig");
 const index = @import("../../index.zig");
 const issue = @import("../../issue.zig");
-const issue_form = @import("form.zig");
 const repo_mod = @import("../../repo.zig");
 const shared = @import("../shared.zig");
 const util = @import("../../util.zig");
@@ -23,8 +22,10 @@ const createIssueProjectEvent = issue.createIssueProjectEvent;
 const createIssueStringEvent = issue.createIssueStringEvent;
 const issueHref = shared.issueHref;
 const literalHref = shared.literalHref;
-const formValueOwned = issue_form.formValueOwned;
+const formValueOwned = shared.formValueOwned;
+const formValuesOwned = shared.formValuesOwned;
 const isIssueType = cmd_common.isIssueType;
+const queryValueOwned = shared.queryValueOwned;
 const sendPlainResponse = shared.sendPlainResponse;
 const sendRedirect = shared.sendRedirect;
 const sqlite = index.sqlite;
@@ -1065,52 +1066,6 @@ fn asciiEqlIgnoreCase(a: []const u8, b: []const u8) bool {
     return true;
 }
 
-fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const u8) !?[]u8 {
-    const query_start = std.mem.indexOfScalar(u8, target, '?') orelse return null;
-    var pairs = std.mem.splitScalar(u8, target[query_start + 1 ..], '&');
-    while (pairs.next()) |pair| {
-        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
-        const raw_key = pair[0..eq];
-        const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
-        const key = try percentDecodeForm(allocator, raw_key);
-        defer allocator.free(key);
-        if (!std.mem.eql(u8, key, wanted_key)) continue;
-        return try percentDecodeForm(allocator, raw_value);
-    }
-    return null;
-}
-
-fn percentDecodeForm(allocator: Allocator, value: []const u8) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-
-    var i: usize = 0;
-    while (i < value.len) : (i += 1) {
-        switch (value[i]) {
-            '+' => try buf.append(allocator, ' '),
-            '%' => {
-                if (i + 2 >= value.len) return error.InvalidFormEncoding;
-                const hi = hexValue(value[i + 1]) orelse return error.InvalidFormEncoding;
-                const lo = hexValue(value[i + 2]) orelse return error.InvalidFormEncoding;
-                try buf.append(allocator, (hi << 4) | lo);
-                i += 2;
-            },
-            else => |c| try buf.append(allocator, c),
-        }
-    }
-
-    return buf.toOwnedSlice(allocator);
-}
-
-fn hexValue(c: u8) ?u8 {
-    return switch (c) {
-        '0'...'9' => c - '0',
-        'a'...'f' => c - 'a' + 10,
-        'A'...'F' => c - 'A' + 10,
-        else => null,
-    };
-}
-
 pub fn handleIssueBulkPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
     try index.ensureIndex(allocator, repo);
 
@@ -1249,26 +1204,6 @@ fn loadBulkIssueProjectColumns(allocator: Allocator, repo: Repo, issue_id: []con
     return columns;
 }
 
-fn formValuesOwned(allocator: Allocator, body: []const u8, wanted_key: []const u8) !std.ArrayList([]u8) {
-    var values: std.ArrayList([]u8) = .empty;
-    errdefer freeStringList(allocator, &values);
-
-    var pairs = std.mem.splitScalar(u8, body, '&');
-    while (pairs.next()) |pair| {
-        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
-        const raw_key = pair[0..eq];
-        const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
-        const key = try percentDecodeForm(allocator, raw_key);
-        defer allocator.free(key);
-        if (!std.mem.eql(u8, key, wanted_key)) continue;
-        const value = try percentDecodeForm(allocator, raw_value);
-        errdefer allocator.free(value);
-        try values.append(allocator, value);
-    }
-
-    return values;
-}
-
 fn freeStringList(allocator: Allocator, values: *std.ArrayList([]u8)) void {
     for (values.items) |value| allocator.free(value);
     values.deinit(allocator);
@@ -1278,16 +1213,8 @@ fn issueBulkReturnTargetOwned(allocator: Allocator, form_body: []const u8) ![]u8
     const owned = (try formValueOwned(allocator, form_body, "return_to")) orelse return allocator.dupe(u8, "/issues");
     defer allocator.free(owned);
     const value = std.mem.trim(u8, owned, " \t\r\n");
-    if (!isSafeIssuesReturnTarget(value)) return allocator.dupe(u8, "/issues");
+    if (!shared.isSafeReturnTarget(value, "/issues")) return allocator.dupe(u8, "/issues");
     return allocator.dupe(u8, value);
-}
-
-fn isSafeIssuesReturnTarget(value: []const u8) bool {
-    if (std.mem.indexOfAny(u8, value, "\r\n") != null) return false;
-    if (std.mem.eql(u8, value, "/issues")) return true;
-    if (std.mem.startsWith(u8, value, "/issues?")) return true;
-    if (std.mem.startsWith(u8, value, "/issues/")) return true;
-    return false;
 }
 
 test "issue list SQL includes selected filters" {

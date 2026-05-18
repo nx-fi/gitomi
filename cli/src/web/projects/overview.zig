@@ -1,8 +1,8 @@
 const std = @import("std");
 const cmd_common = @import("../../cmd_common.zig");
-const event_mod = @import("../../event.zig");
+const event_model = @import("../../event/model.zig");
+const event_json = @import("../../event/json.zig");
 const index = @import("../../index.zig");
-const issues_page = @import("../issues.zig");
 const project_mod = @import("../../project.zig");
 const repo_mod = @import("../../repo.zig");
 const util = @import("../../util.zig");
@@ -15,7 +15,8 @@ const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
 const SqliteDb = index.SqliteDb;
 const createProjectUpdatedEvent = project_mod.createProjectUpdatedEvent;
-const formValueOwned = issues_page.formValueOwned;
+const formValueOwned = shared.formValueOwned;
+const formValuesOwned = shared.formValuesOwned;
 const appendRelativeTime = shared.appendRelativeTime;
 const appendTemplate = shared.appendTemplate;
 const isIssuePriority = cmd_common.isIssuePriority;
@@ -23,7 +24,6 @@ const isProjectStatus = cmd_common.isProjectStatus;
 const isProjectUpdateHealth = cmd_common.isProjectUpdateHealth;
 const sendPlainResponse = shared.sendPlainResponse;
 const sendRedirect = shared.sendRedirect;
-const percentDecodeForm = issues_page.percentDecodeForm;
 
 pub const ProjectPageTab = enum {
     overview,
@@ -306,7 +306,7 @@ pub fn handleProjectPropertiesPost(allocator: Allocator, repo: Repo, stream: std
         const value = value_owned orelse return;
         defer allocator.free(value);
         const values = [_][]const u8{value};
-        var update = event_mod.ProjectUpdate{};
+        var update = event_model.ProjectUpdate{};
         if (std.mem.eql(u8, action_owned, "add-lead")) {
             update.leads_added = values[0..];
         } else {
@@ -318,7 +318,7 @@ pub fn handleProjectPropertiesPost(allocator: Allocator, repo: Repo, stream: std
         const value = value_owned orelse return;
         defer allocator.free(value);
         const values = [_][]const u8{value};
-        var update = event_mod.ProjectUpdate{};
+        var update = event_model.ProjectUpdate{};
         if (std.mem.eql(u8, action_owned, "add-member")) {
             update.members_added = values[0..];
         } else {
@@ -330,7 +330,7 @@ pub fn handleProjectPropertiesPost(allocator: Allocator, repo: Repo, stream: std
         const value = value_owned orelse return;
         defer allocator.free(value);
         const values = [_][]const u8{value};
-        var update = event_mod.ProjectUpdate{};
+        var update = event_model.ProjectUpdate{};
         if (std.mem.eql(u8, action_owned, "add-label")) {
             update.labels_added = values[0..];
         } else {
@@ -350,25 +350,6 @@ fn formTrimmedOwned(allocator: Allocator, form_body: []const u8, wanted_key: []c
     defer allocator.free(owned);
     const trimmed = std.mem.trim(u8, owned, " \t\r\n");
     return try allocator.dupe(u8, trimmed);
-}
-
-fn formValuesOwned(allocator: Allocator, body: []const u8, wanted_key: []const u8) !std.ArrayList([]u8) {
-    var values: std.ArrayList([]u8) = .empty;
-    errdefer freeStringList(allocator, &values);
-
-    var pairs = std.mem.splitScalar(u8, body, '&');
-    while (pairs.next()) |pair| {
-        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
-        const raw_key = pair[0..eq];
-        const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
-        const key = try percentDecodeForm(allocator, raw_key);
-        defer allocator.free(key);
-        if (!std.mem.eql(u8, key, wanted_key)) continue;
-        const value = try percentDecodeForm(allocator, raw_value);
-        errdefer allocator.free(value);
-        try values.append(allocator, value);
-    }
-    return values;
 }
 
 fn freeStringList(allocator: Allocator, values: *std.ArrayList([]u8)) void {
@@ -399,7 +380,7 @@ fn requiredProjectFormValue(allocator: Allocator, stream: std.net.Stream, form_b
     return value_owned;
 }
 
-fn writeProjectUpdateOrFail(allocator: Allocator, stream: std.net.Stream, project_id: []const u8, update: event_mod.ProjectUpdate) !bool {
+fn writeProjectUpdateOrFail(allocator: Allocator, stream: std.net.Stream, project_id: []const u8, update: event_model.ProjectUpdate) !bool {
     createProjectUpdatedEvent(allocator, project_id, update) catch {
         try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update project properties\n");
         return false;
@@ -609,8 +590,8 @@ fn loadLatestProjectUpdateNote(allocator: Allocator, db: *SqliteDb, summary: *co
             .object => |object| object,
             else => continue,
         };
-        const update_body = event_mod.jsonString(payload.get("update_body"));
-        const health = projectUpdateHealthValue(event_mod.jsonString(payload.get("update_health")) orelse "");
+        const update_body = event_json.jsonString(payload.get("update_body"));
+        const health = projectUpdateHealthValue(event_json.jsonString(payload.get("update_health")) orelse "");
         if (update_body == null and health.len == 0) continue;
         return .{
             .body = try allocator.dupe(u8, update_body orelse ""),

@@ -1,6 +1,7 @@
 const std = @import("std");
 const errors = @import("errors.zig");
-const event_mod = @import("event.zig");
+const event_builders = @import("event/builders.zig");
+const event_validation = @import("event/validation.zig");
 const event_writer_mod = @import("event_writer.zig");
 const index = @import("index.zig");
 const io = @import("io.zig");
@@ -16,7 +17,7 @@ const newUuidV7 = util.newUuidV7;
 const rfc3339Now = util.rfc3339Now;
 
 pub fn createAclGrantEvent(allocator: Allocator, raw_principal: []const u8, role: []const u8) !void {
-    if (!event_mod.isKnownRole(role)) {
+    if (!event_validation.isKnownRole(role)) {
         try eprint("gt acl grant: role must be reader, reporter, contributor, maintainer, or owner\n", .{});
         return CliError.InvalidArgument;
     }
@@ -28,7 +29,7 @@ pub fn createAclGrantEvent(allocator: Allocator, raw_principal: []const u8, role
 
     const actor_role = try loadAuthorizedActorRole(allocator, &writer, "gt acl grant");
     defer allocator.free(actor_role);
-    if (!event_mod.roleAtLeast(actor_role, role)) {
+    if (!event_validation.roleAtLeast(actor_role, role)) {
         try eprint("gt acl grant: refusing to grant {s}; current actor {s} has role {s}\n", .{ role, writer.cfg.principal, actor_role });
         return CliError.Unauthorized;
     }
@@ -183,7 +184,7 @@ fn requireActorRoleAtLeast(
     command_context: []const u8,
     action: []const u8,
 ) !void {
-    if (event_mod.roleAtLeast(actor_role, required_role)) return;
+    if (event_validation.roleAtLeast(actor_role, required_role)) return;
     try eprint("{s}: owner role required to {s}; current actor {s} has role {s}\n", .{ command_context, action, writer.cfg.principal, actor_role });
     return CliError.Unauthorized;
 }
@@ -195,7 +196,7 @@ fn buildAclEvent(allocator: Allocator, writer: *const EventWriter, principal: []
     defer allocator.free(idem);
     const occurred_at = try rfc3339Now(allocator);
     defer allocator.free(occurred_at);
-    return try event_mod.buildAclRoleJson(allocator, writer.cfg, writer.nextSeq(), principal, role, event_uuid, idem, occurred_at, writer.eventParents(), grant);
+    return try event_builders.buildAclRoleJson(allocator, writer.cfg, writer.nextSeq(), principal, role, event_uuid, idem, occurred_at, writer.eventParents(), grant);
 }
 
 fn buildIdentityAddedEvent(
@@ -213,7 +214,7 @@ fn buildIdentityAddedEvent(
     defer allocator.free(idem);
     const occurred_at = try rfc3339Now(allocator);
     defer allocator.free(occurred_at);
-    return try event_mod.buildIdentityDeviceAddedJson(allocator, writer.cfg, writer.nextSeq(), principal, device, public_key, fingerprint, scheme, event_uuid, idem, occurred_at, writer.eventParents());
+    return try event_builders.buildIdentityDeviceAddedJson(allocator, writer.cfg, writer.nextSeq(), principal, device, public_key, fingerprint, scheme, event_uuid, idem, occurred_at, writer.eventParents());
 }
 
 fn buildIdentityRevokedEvent(allocator: Allocator, writer: *const EventWriter, principal: []const u8, device: []const u8) ![]u8 {
@@ -223,5 +224,5 @@ fn buildIdentityRevokedEvent(allocator: Allocator, writer: *const EventWriter, p
     defer allocator.free(idem);
     const occurred_at = try rfc3339Now(allocator);
     defer allocator.free(occurred_at);
-    return try event_mod.buildIdentityDeviceRevokedJson(allocator, writer.cfg, writer.nextSeq(), principal, device, event_uuid, idem, occurred_at, writer.eventParents());
+    return try event_builders.buildIdentityDeviceRevokedJson(allocator, writer.cfg, writer.nextSeq(), principal, device, event_uuid, idem, occurred_at, writer.eventParents());
 }

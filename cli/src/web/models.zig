@@ -11,6 +11,7 @@ const appendSectionHead = shared.appendSectionHead;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
 const appendTemplate = shared.appendTemplate;
+const formValueOwned = shared.formValueOwned;
 const sendResponse = shared.sendResponse;
 
 const FlashKind = enum { success, failure };
@@ -236,21 +237,6 @@ fn providerLabel(provider_kind: []const u8) []const u8 {
 fn findModel(models: []const settings.AiModel, id: []const u8) ?*const settings.AiModel {
     for (models) |*model| {
         if (std.mem.eql(u8, model.id, id)) return model;
-    }
-    return null;
-}
-
-fn formValueOwned(allocator: Allocator, body: []const u8, wanted_key: []const u8) !?[]u8 {
-    var fields = std.mem.splitScalar(u8, body, '&');
-    while (fields.next()) |field| {
-        if (field.len == 0) continue;
-        const equals = std.mem.indexOfScalar(u8, field, '=') orelse field.len;
-        const raw_key = field[0..equals];
-        const raw_value = if (equals < field.len) field[equals + 1 ..] else "";
-        const key = try shared.percentDecodeForm(allocator, raw_key);
-        defer allocator.free(key);
-        if (!std.mem.eql(u8, key, wanted_key)) continue;
-        return try shared.percentDecodeForm(allocator, raw_value);
     }
     return null;
 }

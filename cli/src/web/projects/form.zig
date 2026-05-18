@@ -4,7 +4,6 @@ const project_mod = @import("../../project.zig");
 const repo_mod = @import("../../repo.zig");
 const util = @import("../../util.zig");
 const project_views = @import("views.zig");
-const issues_page = @import("../issues.zig");
 const shared = @import("../shared.zig");
 
 const Allocator = std.mem.Allocator;
@@ -13,8 +12,9 @@ const Repo = repo_mod.Repo;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
 const appendTemplate = shared.appendTemplate;
-const formValueOwned = issues_page.formValueOwned;
+const formValueOwned = shared.formValueOwned;
 const newUuidV7 = util.newUuidV7;
+const queryValueOwned = shared.queryValueOwned;
 const sendRedirect = shared.sendRedirect;
 const sendResponse = shared.sendResponse;
 const stageProjectCreatedEvent = project_mod.stageProjectCreatedEvent;
@@ -171,21 +171,6 @@ fn appendProjectConfigForm(
         \\  </form>
         \\</div>
     );
-}
-
-fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const u8) !?[]u8 {
-    const query_start = std.mem.indexOfScalar(u8, target, '?') orelse return null;
-    var pairs = std.mem.splitScalar(u8, target[query_start + 1 ..], '&');
-    while (pairs.next()) |pair| {
-        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
-        const raw_key = pair[0..eq];
-        const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
-        const key = try issues_page.percentDecodeForm(allocator, raw_key);
-        defer allocator.free(key);
-        if (!std.mem.eql(u8, key, wanted_key)) continue;
-        return try issues_page.percentDecodeForm(allocator, raw_value);
-    }
-    return null;
 }
 
 test "project create form only asks for name" {

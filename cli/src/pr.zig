@@ -2,11 +2,13 @@ const std = @import("std");
 const cmd_common = @import("cmd_common.zig");
 const comment = @import("comment.zig");
 const errors = @import("errors.zig");
-const event_mod = @import("event.zig");
+const event_model = @import("event/model.zig");
+const event_builders = @import("event/builders.zig");
 const event_writer_mod = @import("event_writer.zig");
 const index = @import("index.zig");
 const io = @import("io.zig");
 const reaction = @import("reaction.zig");
+const string_event = @import("string_event.zig");
 const util = @import("util.zig");
 const work_items = @import("work_items.zig");
 
@@ -41,25 +43,18 @@ pub fn createPullOpenedEvent(
     var writer = try EventWriter.init(allocator, "gt pr create");
     defer writer.deinit();
 
-    const pull_id = try newUuidV7(allocator);
-    defer allocator.free(pull_id);
-    const event_uuid = try newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try newUuidV7(allocator);
-    defer allocator.free(idem);
-    const occurred_at = try rfc3339Now(allocator);
-    defer allocator.free(occurred_at);
-    const event_parents = writer.eventParents();
+    var envelope = try writer.prepareEnvelope();
+    defer envelope.deinit();
 
-    const event_body = try event_mod.buildPullOpenedJson(
+    const event_body = try event_builders.buildPullOpenedJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
-        pull_id,
-        event_uuid,
-        idem,
-        occurred_at,
-        event_parents,
+        envelope.entity_id,
+        envelope.event_uuid,
+        envelope.idem,
+        envelope.occurred_at,
+        envelope.event_parents,
         title,
         body,
         base_ref,
@@ -69,16 +64,11 @@ pub fn createPullOpenedEvent(
     defer allocator.free(event_body);
 
     var pull_ref_buf: [short_object_ref_len]u8 = undefined;
-    const pull_ref = shortObjectRef(&pull_ref_buf, pull_id);
+    const pull_ref = shortObjectRef(&pull_ref_buf, envelope.entity_id);
     const subject = try std.fmt.allocPrint(allocator, "pull.opened #{s} {s}", .{ pull_ref, title });
     defer allocator.free(subject);
-    const commit_oid = try writer.write("gt pr", subject, event_body);
+    const commit_oid = try writer.writeAndPrint("gt pr", subject, event_body, "opened pr #", pull_ref, envelope.entity_id);
     defer allocator.free(commit_oid);
-
-    try out("opened pr #{s}\n", .{pull_ref});
-    try out("  id:     {s}\n", .{pull_id});
-    try out("  commit: {s}\n", .{commit_oid});
-    try out("  ref:    {s}\n", .{writer.inbox_ref});
 }
 
 pub fn createPullStringEvent(
@@ -88,42 +78,7 @@ pub fn createPullStringEvent(
     payload_key: []const u8,
     payload_value: []const u8,
 ) !void {
-    var writer = try EventWriter.init(allocator, "gt pr");
-    defer writer.deinit();
-
-    const event_uuid = try newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try newUuidV7(allocator);
-    defer allocator.free(idem);
-    const occurred_at = try rfc3339Now(allocator);
-    defer allocator.free(occurred_at);
-    const event_parents = writer.eventParents();
-
-    const event_body = try event_mod.buildPullStringPayloadJson(
-        allocator,
-        writer.cfg,
-        writer.nextSeq(),
-        pull_id,
-        event_uuid,
-        idem,
-        occurred_at,
-        event_parents,
-        event_type,
-        payload_key,
-        payload_value,
-    );
-    defer allocator.free(event_body);
-
-    var pull_ref_buf: [short_object_ref_len]u8 = undefined;
-    const pull_ref = shortObjectRef(&pull_ref_buf, pull_id);
-    const subject = try std.fmt.allocPrint(allocator, "{s} #{s} {s}", .{ event_type, pull_ref, payload_value });
-    defer allocator.free(subject);
-    const commit_oid = try writer.write("gt pr", subject, event_body);
-    defer allocator.free(commit_oid);
-
-    try out("{s} #{s}\n", .{ event_type, pull_ref });
-    try out("  commit: {s}\n", .{commit_oid});
-    try out("  ref:    {s}\n", .{writer.inbox_ref});
+    try string_event.createStringEvent(allocator, .pull, pull_id, event_type, payload_key, payload_value);
 }
 
 pub fn createPullMergedEvent(
@@ -140,7 +95,7 @@ pub fn createPullMergedEventWithMetadata(
     pull_id: []const u8,
     merge_oid: ?[]const u8,
     target_oid: ?[]const u8,
-    metadata: event_mod.PullMergedMetadata,
+    metadata: event_model.PullMergedMetadata,
 ) !void {
     var writer = try EventWriter.init(allocator, "gt pr");
     defer writer.deinit();
@@ -153,7 +108,7 @@ pub fn createPullMergedEventWithMetadata(
     defer allocator.free(occurred_at);
     const event_parents = writer.eventParents();
 
-    const event_body = try event_mod.buildPullMergedJsonWithMetadata(
+    const event_body = try event_builders.buildPullMergedJsonWithMetadata(
         allocator,
         writer.cfg,
         writer.nextSeq(),
@@ -183,7 +138,7 @@ pub fn createPullMergedEventWithMetadata(
 pub fn createPullUpdatedEvent(
     allocator: Allocator,
     pull_id: []const u8,
-    update: event_mod.PullUpdate,
+    update: event_model.PullUpdate,
 ) !void {
     if (!update.hasChanges()) {
         try eprint("gt pr edit: at least one update option is required\n", .{});
@@ -201,7 +156,7 @@ pub fn createPullUpdatedEvent(
     defer allocator.free(occurred_at);
     const event_parents = writer.eventParents();
 
-    const event_body = try event_mod.buildPullUpdatedJson(
+    const event_body = try event_builders.buildPullUpdatedJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
@@ -371,7 +326,7 @@ pub fn cmdPr(allocator: Allocator, args: []const []const u8, command_context: []
             return CliError.UserError;
         }
 
-        var update = event_mod.PullUpdate{};
+        var update = event_model.PullUpdate{};
         var labels_added: std.ArrayList([]const u8) = .empty;
         defer labels_added.deinit(allocator);
         var labels_removed: std.ArrayList([]const u8) = .empty;

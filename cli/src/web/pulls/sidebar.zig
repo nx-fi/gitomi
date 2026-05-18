@@ -2,7 +2,6 @@ const std = @import("std");
 const development_links = @import("../development_links.zig");
 const git = @import("../../git.zig");
 const index = @import("../../index.zig");
-const issues_page = @import("../issues.zig");
 const pr = @import("../../pr.zig");
 const repo_mod = @import("../../repo.zig");
 const shared = @import("../shared.zig");
@@ -671,7 +670,7 @@ fn asciiEqlIgnoreCase(a: []const u8, b: []const u8) bool {
 }
 
 pub fn handlePullSidebarPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, csrf_token: []const u8, form_body: []const u8) !void {
-    const submitted_csrf = (try issues_page.formValueOwned(allocator, form_body, zwf.csrf.field_name)) orelse {
+    const submitted_csrf = (try shared.formValueOwned(allocator, form_body, zwf.csrf.field_name)) orelse {
         try sendPlainResponse(allocator, stream, 403, "Forbidden", "Invalid CSRF token\n");
         return;
     };
@@ -688,7 +687,7 @@ pub fn handlePullSidebarPost(allocator: Allocator, repo: Repo, stream: std.net.S
     };
     defer allocator.free(pull_id);
 
-    const action_owned = (try issues_page.formValueOwned(allocator, form_body, "action")) orelse {
+    const action_owned = (try shared.formValueOwned(allocator, form_body, "action")) orelse {
         try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Missing sidebar action\n");
         return;
     };
@@ -724,7 +723,7 @@ pub fn handlePullSidebarPost(allocator: Allocator, repo: Repo, stream: std.net.S
 }
 
 fn requiredSidebarValue(allocator: Allocator, stream: std.net.Stream, form_body: []const u8, name: []const u8, message: []const u8) !?[]u8 {
-    const owned = (try issues_page.formValueOwned(allocator, form_body, name)) orelse {
+    const owned = (try shared.formValueOwned(allocator, form_body, name)) orelse {
         try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", message);
         return null;
     };

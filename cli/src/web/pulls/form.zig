@@ -1,5 +1,4 @@
 const std = @import("std");
-const issues_page = @import("../issues.zig");
 const pull = @import("../../pr.zig");
 const repo_mod = @import("../../repo.zig");
 const shared = @import("../shared.zig");
@@ -71,22 +70,22 @@ pub fn renderPullForm(
 }
 
 pub fn handlePullPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, csrf_token: []const u8, form_body: []const u8) !void {
-    const submitted_token = try issues_page.formValueOwned(allocator, form_body, "csrf_token");
+    const submitted_token = try shared.formValueOwned(allocator, form_body, "csrf_token");
     defer if (submitted_token) |value| allocator.free(value);
     if (submitted_token == null or !std.mem.eql(u8, submitted_token.?, csrf_token)) {
         try sendPlainResponse(allocator, stream, 403, "Forbidden", "Invalid CSRF token\n");
         return;
     }
 
-    const title_owned = (try issues_page.formValueOwned(allocator, form_body, "title")) orelse try allocator.dupe(u8, "");
+    const title_owned = (try shared.formValueOwned(allocator, form_body, "title")) orelse try allocator.dupe(u8, "");
     defer allocator.free(title_owned);
-    const body_owned = (try issues_page.formValueOwned(allocator, form_body, "body")) orelse try allocator.dupe(u8, "");
+    const body_owned = (try shared.formValueOwned(allocator, form_body, "body")) orelse try allocator.dupe(u8, "");
     defer allocator.free(body_owned);
-    const base_owned = (try issues_page.formValueOwned(allocator, form_body, "base")) orelse try allocator.dupe(u8, "");
+    const base_owned = (try shared.formValueOwned(allocator, form_body, "base")) orelse try allocator.dupe(u8, "");
     defer allocator.free(base_owned);
-    const head_owned = (try issues_page.formValueOwned(allocator, form_body, "head")) orelse try allocator.dupe(u8, "");
+    const head_owned = (try shared.formValueOwned(allocator, form_body, "head")) orelse try allocator.dupe(u8, "");
     defer allocator.free(head_owned);
-    const draft_value = try issues_page.formValueOwned(allocator, form_body, "draft");
+    const draft_value = try shared.formValueOwned(allocator, form_body, "draft");
     defer if (draft_value) |value| allocator.free(value);
     const draft = draft_value != null;
 

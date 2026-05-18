@@ -3,7 +3,6 @@ const cmd_common = @import("../../cmd_common.zig");
 const development_links = @import("../development_links.zig");
 const index = @import("../../index.zig");
 const issue = @import("../../issue.zig");
-const issue_form = @import("form.zig");
 const issue_relationships = @import("relationships.zig");
 const milestone_mod = @import("../../milestone.zig");
 const project_issue_render = @import("../projects/issue_render.zig");
@@ -31,7 +30,7 @@ const commitHref = shared.commitHref;
 const pullHref = shared.pullHref;
 const sendRedirect = shared.sendRedirect;
 const sendPlainResponse = shared.sendPlainResponse;
-const formValueOwned = issue_form.formValueOwned;
+const formValueOwned = shared.formValueOwned;
 const RelationshipItem = issue_relationships.RelationshipItem;
 
 const issue_sidebar_csrf_field = "csrf_token";

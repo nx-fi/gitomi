@@ -5,7 +5,6 @@ const auth_binding = @import("auth_binding.zig");
 const build_options = @import("build_options");
 const comment = @import("comment.zig");
 const errors = @import("errors.zig");
-const event_mod = @import("event.zig");
 const fsck = @import("fsck.zig");
 const git = @import("git.zig");
 const index = @import("index.zig");

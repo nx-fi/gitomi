@@ -42,7 +42,7 @@ const PathQuery = model.PathQuery;
 const containsNul = file_info.containsNul;
 const findReadme = file_info.findReadme;
 const normalizedPathOwned = file_info.normalizedPathOwned;
-const queryValueOwned = file_info.queryValueOwned;
+const queryValueOwned = shared.queryValueOwned;
 const trimOwned = file_info.trimOwned;
 
 pub fn loadRootGitStatus(allocator: Allocator, repo: Repo) !RootGitStatus {

@@ -1,7 +1,8 @@
 const std = @import("std");
 const cmd_common = @import("cmd_common.zig");
 const errors = @import("errors.zig");
-const event_mod = @import("event.zig");
+const event_model = @import("event/model.zig");
+const event_builders = @import("event/builders.zig");
 const event_writer_mod = @import("event_writer.zig");
 const git = @import("git.zig");
 const index = @import("index.zig");
@@ -48,40 +49,34 @@ pub fn createCommentAddedEventWithMetadata(
     parent_kind: []const u8,
     parent_id: []const u8,
     body: []const u8,
-    metadata: event_mod.CommentAddedMetadata,
+    metadata: event_model.CommentAddedMetadata,
 ) !void {
     var writer = try EventWriter.init(allocator, "gt comment");
     defer writer.deinit();
 
-    const comment_id = try newUuidV7(allocator);
-    defer allocator.free(comment_id);
-    const event_uuid = try newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try newUuidV7(allocator);
-    defer allocator.free(idem);
-    const occurred_at = try rfc3339Now(allocator);
-    defer allocator.free(occurred_at);
     var related: std.ArrayList([]const u8) = .empty;
     defer related.deinit(allocator);
     try related.appendSlice(allocator, writer.related_heads);
     if (metadata.reply_parent_hash) |hash| {
         if (hash.len != 0 and !git.containsString(related.items, hash)) try related.append(allocator, hash);
     }
-    const event_parents = event_mod.EventParents{
+    const event_parents = event_model.EventParents{
         .log = writer.prepared_parents.old_head,
         .causal = writer.prepared_parents.causal_heads,
         .related = related.items,
     };
+    var envelope = try writer.prepareEnvelopeWithParents(event_parents);
+    defer envelope.deinit();
 
-    const event_body = try event_mod.buildCommentAddedJsonWithMetadata(
+    const event_body = try event_builders.buildCommentAddedJsonWithMetadata(
         allocator,
         writer.cfg,
         writer.nextSeq(),
-        comment_id,
-        event_uuid,
-        idem,
-        occurred_at,
-        event_parents,
+        envelope.entity_id,
+        envelope.event_uuid,
+        envelope.idem,
+        envelope.occurred_at,
+        envelope.event_parents,
         parent_kind,
         parent_id,
         body,
@@ -90,16 +85,11 @@ pub fn createCommentAddedEventWithMetadata(
     defer allocator.free(event_body);
 
     var comment_ref_buf: [short_object_ref_len]u8 = undefined;
-    const comment_ref = shortObjectRef(&comment_ref_buf, comment_id);
+    const comment_ref = shortObjectRef(&comment_ref_buf, envelope.entity_id);
     const subject = try std.fmt.allocPrint(allocator, "comment.added comment:{s}", .{comment_ref});
     defer allocator.free(subject);
-    const commit_oid = try writer.write("gt comment", subject, event_body);
+    const commit_oid = try writer.writeAndPrint("gt comment", subject, event_body, "added comment comment:", comment_ref, envelope.entity_id);
     defer allocator.free(commit_oid);
-
-    try out("added comment comment:{s}\n", .{comment_ref});
-    try out("  id:     {s}\n", .{comment_id});
-    try out("  commit: {s}\n", .{commit_oid});
-    try out("  ref:    {s}\n", .{writer.inbox_ref});
 }
 
 pub fn createCommentBodySetEvent(allocator: Allocator, comment_id: []const u8, body: []const u8) !void {
@@ -134,8 +124,8 @@ fn createCommentUpdateEvent(
     const event_parents = writer.eventParents();
 
     const event_body = switch (kind) {
-        .body_set => try event_mod.buildCommentBodySetJson(allocator, writer.cfg, writer.nextSeq(), comment_id, event_uuid, idem, occurred_at, event_parents, body),
-        .redacted => try event_mod.buildCommentRedactedJson(allocator, writer.cfg, writer.nextSeq(), comment_id, event_uuid, idem, occurred_at, event_parents, reason),
+        .body_set => try event_builders.buildCommentBodySetJson(allocator, writer.cfg, writer.nextSeq(), comment_id, event_uuid, idem, occurred_at, event_parents, body),
+        .redacted => try event_builders.buildCommentRedactedJson(allocator, writer.cfg, writer.nextSeq(), comment_id, event_uuid, idem, occurred_at, event_parents, reason),
     };
     defer allocator.free(event_body);
 

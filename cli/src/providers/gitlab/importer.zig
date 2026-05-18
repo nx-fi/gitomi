@@ -1,5 +1,7 @@
 const std = @import("std");
-const event_mod = @import("../../event.zig");
+const event_model = @import("../../event/model.zig");
+const event_builders = @import("../../event/builders.zig");
+const event_json = @import("../../event/json.zig");
 const event_writer_mod = @import("../../event_writer.zig");
 const errors = @import("../../errors.zig");
 const git = @import("../../git.zig");
@@ -8,6 +10,8 @@ const io = @import("../../io.zig");
 const milestone_mod = @import("../../milestone.zig");
 const repo_mod = @import("../../repo.zig");
 const util = @import("../../util.zig");
+const import_common = @import("../import_common.zig");
+const import_bot = @import("../import_bot.zig");
 const common = @import("common.zig");
 const exporter = @import("exporter.zig");
 
@@ -30,8 +34,6 @@ const sizedString = common.sizedString;
 const subject = common.subject;
 const ensureMilestoneCreatedForTitleStaged = milestone_mod.ensureMilestoneCreatedForTitleStaged;
 
-const import_bot_principal = "import-bot";
-const import_bot_device = "gitlab";
 const gitlab_import_capability = "gitlab.import";
 const gitlab_import_scope = "gitlab:*";
 
@@ -41,8 +43,8 @@ pub const ImportOptions = struct {
     token_arg: ?[]const u8 = null,
     from_file: ?[]const u8 = null,
     include_comments: bool = true,
-    bot_principal: []const u8 = import_bot_principal,
-    bot_device: []const u8 = import_bot_device,
+    bot_principal: []const u8 = import_bot.principal,
+    bot_device: []const u8 = import_bot.gitlab_device,
     max_pages: usize = 10,
     map_file: ?[]const u8 = null,
 };
@@ -200,7 +202,7 @@ fn ensureImportDelegation(allocator: Allocator, principal: []const u8, device: [
     defer allocator.free(idem);
     const occurred_at = try util.rfc3339Now(allocator);
     defer allocator.free(occurred_at);
-    const body = try event_mod.buildAclDelegationJson(
+    const body = try event_builders.buildAclDelegationJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
@@ -321,7 +323,7 @@ pub fn importFromApi(allocator: Allocator, client: GitLabClient, options: Import
         if (issues.items.len == 0) break;
         for (issues.items) |item| {
             if (item != .object) continue;
-            if (event_mod.jsonString(item.object.get("issue_type"))) |issue_type| {
+            if (event_json.jsonString(item.object.get("issue_type"))) |issue_type| {
                 if (!std.mem.eql(u8, issue_type, "issue")) continue;
             }
             var writer = try EventWriter.initForActor(allocator, "gt gitlab import", options.bot_principal, options.bot_device);
@@ -422,9 +424,9 @@ fn importIssueObject(allocator: Allocator, writer: *EventWriter, issue: std.json
 
     const issue_id = try util.newUuidV7(allocator);
     errdefer allocator.free(issue_id);
-    const title = try sizedString(allocator, event_mod.jsonString(issue.get("title")), "(untitled)", git.max_payload_title_bytes);
+    const title = try sizedString(allocator, event_json.jsonString(issue.get("title")), "(untitled)", git.max_payload_title_bytes);
     defer allocator.free(title);
-    const body = try sizedString(allocator, event_mod.jsonString(issue.get("description")) orelse event_mod.jsonString(issue.get("body")), "", git.max_payload_text_bytes);
+    const body = try sizedString(allocator, event_json.jsonString(issue.get("description")) orelse event_json.jsonString(issue.get("body")), "", git.max_payload_text_bytes);
     defer allocator.free(body);
     const occurred_at = try timestampOrNow(allocator, issue.get("created_at"));
     defer allocator.free(occurred_at);
@@ -445,7 +447,7 @@ fn importIssueObject(allocator: Allocator, writer: *EventWriter, issue: std.json
         if (std.mem.eql(u8, state, "closed")) {
             const closed_at = try timestampOrNow(allocator, firstJsonValue(issue.get("closed_at"), issue.get("updated_at")));
             defer allocator.free(closed_at);
-            try writeImportedStringEvent(allocator, writer, "issue", issue_id, "issue.state_set", "state", "closed", closed_at);
+            try writeImportedStringEvent(allocator, writer, .issue, issue_id, "issue.state_set", "state", "closed", closed_at);
         }
     }
     if (map_file) |path| try exporter.recordMappedObjectId(allocator, path, "issue", issue_id, number);
@@ -466,13 +468,13 @@ fn importPullObject(allocator: Allocator, writer: *EventWriter, pull: std.json.O
 
     const pull_id = try util.newUuidV7(allocator);
     errdefer allocator.free(pull_id);
-    const title = try sizedString(allocator, event_mod.jsonString(pull.get("title")), "(untitled)", git.max_payload_title_bytes);
+    const title = try sizedString(allocator, event_json.jsonString(pull.get("title")), "(untitled)", git.max_payload_title_bytes);
     defer allocator.free(title);
-    const body = try sizedString(allocator, event_mod.jsonString(pull.get("description")) orelse event_mod.jsonString(pull.get("body")), "", git.max_payload_text_bytes);
+    const body = try sizedString(allocator, event_json.jsonString(pull.get("description")) orelse event_json.jsonString(pull.get("body")), "", git.max_payload_text_bytes);
     defer allocator.free(body);
-    const base_ref = try sizedString(allocator, event_mod.jsonString(pull.get("target_branch")) orelse common.nestedString(pull, "base", "ref"), "main", git.max_payload_ref_bytes);
+    const base_ref = try sizedString(allocator, event_json.jsonString(pull.get("target_branch")) orelse common.nestedString(pull, "base", "ref"), "main", git.max_payload_ref_bytes);
     defer allocator.free(base_ref);
-    const head_ref = try sizedString(allocator, event_mod.jsonString(pull.get("source_branch")) orelse common.nestedString(pull, "head", "ref"), "unknown", git.max_payload_ref_bytes);
+    const head_ref = try sizedString(allocator, event_json.jsonString(pull.get("source_branch")) orelse common.nestedString(pull, "head", "ref"), "unknown", git.max_payload_ref_bytes);
     defer allocator.free(head_ref);
     const occurred_at = try timestampOrNow(allocator, pull.get("created_at"));
     defer allocator.free(occurred_at);
@@ -500,9 +502,9 @@ fn importPullObject(allocator: Allocator, writer: *EventWriter, pull: std.json.O
         false,
         .{
             .source_author = if (source_author.len == 0) null else source_author,
-            .labels = constStringList(labels),
-            .assignees = constStringList(assignees),
-            .reviewers = constStringList(reviewers),
+            .labels = import_common.constStringList(labels),
+            .assignees = import_common.constStringList(assignees),
+            .reviewers = import_common.constStringList(reviewers),
             .commit_count = common.optionalUnsignedField(pull, &.{ "commits_count", "commit_count" }),
             .changed_files = common.optionalUnsignedField(pull, &.{ "changes_count", "changed_files", "file_count" }),
         },
@@ -511,11 +513,11 @@ fn importPullObject(allocator: Allocator, writer: *EventWriter, pull: std.json.O
         if (std.mem.eql(u8, state, "merged")) {
             const merged_at = try timestampOrNow(allocator, firstJsonValue(pull.get("merged_at"), pull.get("updated_at")));
             defer allocator.free(merged_at);
-            try writeImportedPullMerged(allocator, writer, pull_id, merged_at, event_mod.jsonString(pull.get("merge_commit_sha")) orelse "", null);
+            try writeImportedPullMerged(allocator, writer, pull_id, merged_at, event_json.jsonString(pull.get("merge_commit_sha")) orelse "", null);
         } else if (std.mem.eql(u8, state, "closed")) {
             const closed_at = try timestampOrNow(allocator, firstJsonValue(pull.get("closed_at"), pull.get("updated_at")));
             defer allocator.free(closed_at);
-            try writeImportedStringEvent(allocator, writer, "pull", pull_id, "pull.state_set", "state", "closed", closed_at);
+            try writeImportedStringEvent(allocator, writer, .pull, pull_id, "pull.state_set", "state", "closed", closed_at);
         }
     }
     if (map_file) |path| try exporter.recordMappedObjectId(allocator, path, "pull", pull_id, number);
@@ -545,7 +547,7 @@ fn syncExistingIssue(allocator: Allocator, writer: *EventWriter, issue_id: []con
     defer allocator.free(occurred_at);
     try ensureMilestoneCreatedForTitleStaged(allocator, writer, desired.milestone, "", "", occurred_at, "gt gitlab import");
 
-    var update = event_mod.IssueUpdate{
+    var update = event_model.IssueUpdate{
         .title = if (!std.mem.eql(u8, current.title, desired.title)) desired.title else null,
         .body = if (!std.mem.eql(u8, current.body, desired.body)) desired.body else null,
         .state = if (!std.mem.eql(u8, current.state, desired.state)) desired.state else null,
@@ -578,11 +580,11 @@ fn syncExistingPull(allocator: Allocator, writer: *EventWriter, pull_id: []const
     const occurred_at = try timestampOrNow(allocator, firstJsonValue(pull.get("updated_at"), pull.get("created_at")));
     defer allocator.free(occurred_at);
     if (std.mem.eql(u8, desired.state, "merged") and !std.mem.eql(u8, current.state, "merged")) {
-        try writeImportedPullMerged(allocator, writer, pull_id, occurred_at, event_mod.jsonString(pull.get("merge_commit_sha")) orelse "", null);
+        try writeImportedPullMerged(allocator, writer, pull_id, occurred_at, event_json.jsonString(pull.get("merge_commit_sha")) orelse "", null);
         stats.pulls += 1;
         return;
     }
-    var update = event_mod.PullUpdate{
+    var update = event_model.PullUpdate{
         .title = if (!std.mem.eql(u8, current.title, desired.title)) desired.title else null,
         .body = if (!std.mem.eql(u8, current.body, desired.body)) desired.body else null,
         .state = if (!std.mem.eql(u8, current.state, desired.state)) desired.state else null,
@@ -696,9 +698,9 @@ fn collectionStrings(allocator: Allocator, db: *index.SqliteDb, sql: []const u8,
 }
 
 fn desiredIssueState(allocator: Allocator, issue: std.json.ObjectMap) !IssueState {
-    const title = try sizedString(allocator, event_mod.jsonString(issue.get("title")), "(untitled)", git.max_payload_title_bytes);
+    const title = try sizedString(allocator, event_json.jsonString(issue.get("title")), "(untitled)", git.max_payload_title_bytes);
     errdefer allocator.free(title);
-    const body = try sizedString(allocator, event_mod.jsonString(issue.get("description")) orelse event_mod.jsonString(issue.get("body")), "", git.max_payload_text_bytes);
+    const body = try sizedString(allocator, event_json.jsonString(issue.get("description")) orelse event_json.jsonString(issue.get("body")), "", git.max_payload_text_bytes);
     errdefer allocator.free(body);
     const state = try allocator.dupe(u8, gitlabIssueState(issue) orelse "open");
     errdefer allocator.free(state);
@@ -718,15 +720,15 @@ fn desiredIssueState(allocator: Allocator, issue: std.json.ObjectMap) !IssueStat
 }
 
 fn desiredPullState(allocator: Allocator, pull: std.json.ObjectMap) !PullState {
-    const title = try sizedString(allocator, event_mod.jsonString(pull.get("title")), "(untitled)", git.max_payload_title_bytes);
+    const title = try sizedString(allocator, event_json.jsonString(pull.get("title")), "(untitled)", git.max_payload_title_bytes);
     errdefer allocator.free(title);
-    const body = try sizedString(allocator, event_mod.jsonString(pull.get("description")) orelse event_mod.jsonString(pull.get("body")), "", git.max_payload_text_bytes);
+    const body = try sizedString(allocator, event_json.jsonString(pull.get("description")) orelse event_json.jsonString(pull.get("body")), "", git.max_payload_text_bytes);
     errdefer allocator.free(body);
     const state = try allocator.dupe(u8, gitlabMergeState(pull) orelse "open");
     errdefer allocator.free(state);
-    const base_ref = try sizedString(allocator, event_mod.jsonString(pull.get("target_branch")) orelse common.nestedString(pull, "base", "ref"), "main", git.max_payload_ref_bytes);
+    const base_ref = try sizedString(allocator, event_json.jsonString(pull.get("target_branch")) orelse common.nestedString(pull, "base", "ref"), "main", git.max_payload_ref_bytes);
     errdefer allocator.free(base_ref);
-    const head_ref = try sizedString(allocator, event_mod.jsonString(pull.get("source_branch")) orelse common.nestedString(pull, "head", "ref"), "unknown", git.max_payload_ref_bytes);
+    const head_ref = try sizedString(allocator, event_json.jsonString(pull.get("source_branch")) orelse common.nestedString(pull, "head", "ref"), "unknown", git.max_payload_ref_bytes);
     errdefer allocator.free(head_ref);
     const labels = try common.labels(allocator, pull);
     errdefer git.freeStringList(allocator, labels);
@@ -783,7 +785,7 @@ fn importCommentsArray(
                 continue;
             }
         }
-        const body = try sizedString(allocator, event_mod.jsonString(item.object.get("body")), "", git.max_payload_text_bytes);
+        const body = try sizedString(allocator, event_json.jsonString(item.object.get("body")), "", git.max_payload_text_bytes);
         defer allocator.free(body);
         if (body.len == 0) continue;
         const occurred_at = try timestampOrNow(allocator, item.object.get("created_at"));
@@ -828,7 +830,7 @@ fn gitlabIid(object: std.json.ObjectMap) ?i64 {
 }
 
 fn gitlabIssueState(issue: std.json.ObjectMap) ?[]const u8 {
-    const state = event_mod.jsonString(issue.get("state")) orelse return null;
+    const state = event_json.jsonString(issue.get("state")) orelse return null;
     if (std.mem.eql(u8, state, "opened")) return "open";
     if (std.mem.eql(u8, state, "open")) return "open";
     if (std.mem.eql(u8, state, "closed")) return "closed";
@@ -836,16 +838,12 @@ fn gitlabIssueState(issue: std.json.ObjectMap) ?[]const u8 {
 }
 
 fn gitlabMergeState(pull: std.json.ObjectMap) ?[]const u8 {
-    const state = event_mod.jsonString(pull.get("state")) orelse return null;
+    const state = event_json.jsonString(pull.get("state")) orelse return null;
     if (std.mem.eql(u8, state, "opened")) return "open";
     if (std.mem.eql(u8, state, "open")) return "open";
     if (std.mem.eql(u8, state, "closed")) return "closed";
     if (std.mem.eql(u8, state, "merged")) return "merged";
     return null;
-}
-
-fn constStringList(values: [][]u8) []const []const u8 {
-    return @ptrCast(values);
 }
 
 fn writeImportedIssueOpened(
@@ -861,38 +859,25 @@ fn writeImportedIssueOpened(
     source_author: []const u8,
     milestone: []const u8,
 ) !void {
-    const event_uuid = try util.newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try util.newUuidV7(allocator);
-    defer allocator.free(idem);
-    const body = try event_mod.buildIssueOpenedJsonWithLegacyAndMetadata(
-        allocator,
-        writer.cfg,
-        writer.nextSeq(),
-        issue_id,
-        event_uuid,
-        idem,
-        occurred_at,
-        writer.stagedEventParents(),
-        title,
-        body_text,
-        constStringList(labels),
-        constStringList(assignees),
-        .{ .gitlab_issue_iid = number },
-        .{
-            .source_author = if (source_author.len == 0) null else source_author,
-            .milestone = if (milestone.len == 0) null else milestone,
-        },
-    );
-    defer allocator.free(body);
-    var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
-    const issue_ref = util.shortObjectRef(&issue_ref_buf, issue_id);
-    const subject_prefix = try std.fmt.allocPrint(allocator, "issue.opened #{s} GitLab #{d} ", .{ issue_ref, number });
+    const subject_prefix = try import_common.openedSubjectPrefix(allocator, .issue, issue_id, "GitLab", "#", number);
     defer allocator.free(subject_prefix);
     const subject_line = try subject(allocator, subject_prefix, title);
     defer allocator.free(subject_line);
-    const commit = try writer.stage("gt gitlab import", subject_line, body);
-    allocator.free(commit);
+    try import_common.writeImportedIssueOpened(allocator, writer, .{
+        .issue_id = issue_id,
+        .occurred_at = occurred_at,
+        .title = title,
+        .body_text = body_text,
+        .labels = import_common.constStringList(labels),
+        .assignees = import_common.constStringList(assignees),
+        .legacy = .{ .gitlab_issue_iid = number },
+        .metadata = .{
+            .source_author = if (source_author.len == 0) null else source_author,
+            .milestone = if (milestone.len == 0) null else milestone,
+        },
+        .command_context = "gt gitlab import",
+        .subject = subject_line,
+    });
 }
 
 fn writeImportedPullOpened(
@@ -906,95 +891,67 @@ fn writeImportedPullOpened(
     base_ref: []const u8,
     head_ref: []const u8,
     draft: bool,
-    metadata: event_mod.PullOpenedMetadata,
+    metadata: event_model.PullOpenedMetadata,
 ) !void {
-    const event_uuid = try util.newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try util.newUuidV7(allocator);
-    defer allocator.free(idem);
-    const body = try event_mod.buildPullOpenedJsonWithLegacyAndMetadata(
-        allocator,
-        writer.cfg,
-        writer.nextSeq(),
-        pull_id,
-        event_uuid,
-        idem,
-        occurred_at,
-        writer.stagedEventParents(),
-        title,
-        body_text,
-        base_ref,
-        head_ref,
-        draft,
-        .{ .gitlab_merge_request_iid = number },
-        metadata,
-    );
-    defer allocator.free(body);
-    var pull_ref_buf: [util.short_object_ref_len]u8 = undefined;
-    const pull_ref = util.shortObjectRef(&pull_ref_buf, pull_id);
-    const subject_prefix = try std.fmt.allocPrint(allocator, "pull.opened #{s} GitLab !{d} ", .{ pull_ref, number });
+    const subject_prefix = try import_common.openedSubjectPrefix(allocator, .pull, pull_id, "GitLab", "!", number);
     defer allocator.free(subject_prefix);
     const subject_line = try subject(allocator, subject_prefix, title);
     defer allocator.free(subject_line);
-    const commit = try writer.stage("gt gitlab import", subject_line, body);
-    allocator.free(commit);
+    try import_common.writeImportedPullOpened(allocator, writer, .{
+        .pull_id = pull_id,
+        .occurred_at = occurred_at,
+        .title = title,
+        .body_text = body_text,
+        .base_ref = base_ref,
+        .head_ref = head_ref,
+        .draft = draft,
+        .legacy = .{ .gitlab_merge_request_iid = number },
+        .metadata = metadata,
+        .command_context = "gt gitlab import",
+        .subject = subject_line,
+    });
 }
 
 fn writeImportedStringEvent(
     allocator: Allocator,
     writer: *EventWriter,
-    object_kind: []const u8,
+    object_kind: import_common.ObjectKind,
     object_id: []const u8,
     event_type: []const u8,
     payload_key: []const u8,
     payload_value: []const u8,
     occurred_at: []const u8,
 ) !void {
-    const event_uuid = try util.newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try util.newUuidV7(allocator);
-    defer allocator.free(idem);
-    const body = if (std.mem.eql(u8, object_kind, "issue"))
-        try event_mod.buildIssueStringPayloadJson(allocator, writer.cfg, writer.nextSeq(), object_id, event_uuid, idem, occurred_at, writer.stagedEventParents(), event_type, payload_key, payload_value)
-    else
-        try event_mod.buildPullStringPayloadJson(allocator, writer.cfg, writer.nextSeq(), object_id, event_uuid, idem, occurred_at, writer.stagedEventParents(), event_type, payload_key, payload_value);
-    defer allocator.free(body);
-    var object_ref_buf: [util.short_object_ref_len]u8 = undefined;
-    const object_ref = util.shortObjectRef(&object_ref_buf, object_id);
-    const subject_line = try std.fmt.allocPrint(allocator, "{s} #{s} GitLab sync", .{ event_type, object_ref });
-    defer allocator.free(subject_line);
-    const commit = try writer.stage("gt gitlab import", subject_line, body);
-    allocator.free(commit);
+    try import_common.writeImportedStringEvent(allocator, writer, .{
+        .object_kind = object_kind,
+        .object_id = object_id,
+        .event_type = event_type,
+        .payload_key = payload_key,
+        .payload_value = payload_value,
+        .occurred_at = occurred_at,
+        .command_context = "gt gitlab import",
+        .subject_suffix = " GitLab sync",
+    });
 }
 
-fn writeImportedIssueUpdated(allocator: Allocator, writer: *EventWriter, issue_id: []const u8, occurred_at: []const u8, update: event_mod.IssueUpdate) !void {
-    const event_uuid = try util.newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try util.newUuidV7(allocator);
-    defer allocator.free(idem);
-    const body = try event_mod.buildIssueUpdatedJson(allocator, writer.cfg, writer.nextSeq(), issue_id, event_uuid, idem, occurred_at, writer.stagedEventParents(), update);
-    defer allocator.free(body);
-    var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
-    const issue_ref = util.shortObjectRef(&issue_ref_buf, issue_id);
-    const subject_line = try std.fmt.allocPrint(allocator, "issue.updated #{s} GitLab sync", .{issue_ref});
-    defer allocator.free(subject_line);
-    const commit = try writer.stage("gt gitlab import", subject_line, body);
-    allocator.free(commit);
+fn writeImportedIssueUpdated(allocator: Allocator, writer: *EventWriter, issue_id: []const u8, occurred_at: []const u8, update: event_model.IssueUpdate) !void {
+    try import_common.writeImportedIssueUpdated(allocator, writer, .{
+        .issue_id = issue_id,
+        .occurred_at = occurred_at,
+        .update = update,
+        .command_context = "gt gitlab import",
+        .subject_suffix = " GitLab sync",
+    });
 }
 
-fn writeImportedPullUpdated(allocator: Allocator, writer: *EventWriter, pull_id: []const u8, occurred_at: []const u8, update: event_mod.PullUpdate) !void {
-    const event_uuid = try util.newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try util.newUuidV7(allocator);
-    defer allocator.free(idem);
-    const body = try event_mod.buildPullUpdatedJson(allocator, writer.cfg, writer.nextSeq(), pull_id, event_uuid, idem, occurred_at, writer.stagedEventParents(), update);
-    defer allocator.free(body);
-    var pull_ref_buf: [util.short_object_ref_len]u8 = undefined;
-    const pull_ref = util.shortObjectRef(&pull_ref_buf, pull_id);
-    const subject_line = try std.fmt.allocPrint(allocator, "pull.updated #{s} GitLab sync", .{pull_ref});
-    defer allocator.free(subject_line);
-    const commit = try writer.stage("gt gitlab import", subject_line, body);
-    allocator.free(commit);
+fn writeImportedPullUpdated(allocator: Allocator, writer: *EventWriter, pull_id: []const u8, occurred_at: []const u8, update: event_model.PullUpdate) !void {
+    try import_common.writeImportedPullUpdated(allocator, writer, .{
+        .pull_id = pull_id,
+        .occurred_at = occurred_at,
+        .update = update,
+        .command_context = "gt gitlab import",
+        .subject_suffix = " GitLab sync",
+    });
 }
 
 fn writeImportedPullMerged(
@@ -1005,18 +962,14 @@ fn writeImportedPullMerged(
     merge_oid: []const u8,
     target_oid: ?[]const u8,
 ) !void {
-    const event_uuid = try util.newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try util.newUuidV7(allocator);
-    defer allocator.free(idem);
-    const body = try event_mod.buildPullMergedJson(allocator, writer.cfg, writer.nextSeq(), pull_id, event_uuid, idem, occurred_at, writer.stagedEventParents(), if (merge_oid.len == 0) null else merge_oid, target_oid);
-    defer allocator.free(body);
-    var pull_ref_buf: [util.short_object_ref_len]u8 = undefined;
-    const pull_ref = util.shortObjectRef(&pull_ref_buf, pull_id);
-    const subject_line = try std.fmt.allocPrint(allocator, "pull.merged #{s} GitLab sync", .{pull_ref});
-    defer allocator.free(subject_line);
-    const commit = try writer.stage("gt gitlab import", subject_line, body);
-    allocator.free(commit);
+    try import_common.writeImportedPullMerged(allocator, writer, .{
+        .pull_id = pull_id,
+        .occurred_at = occurred_at,
+        .merge_oid = merge_oid,
+        .target_oid = target_oid,
+        .command_context = "gt gitlab import",
+        .subject_suffix = " GitLab sync",
+    });
 }
 
 fn writeImportedCommentAdded(
@@ -1041,13 +994,13 @@ fn writeImportedCommentAdded(
     const base_parents = writer.stagedEventParents();
     try related.appendSlice(allocator, base_parents.related);
     if (reply_parent_hash.len != 0 and !containsString(related.items, reply_parent_hash)) try related.append(allocator, reply_parent_hash);
-    const parents = event_mod.EventParents{
+    const parents = event_model.EventParents{
         .log = base_parents.log,
         .anchor = base_parents.anchor,
         .causal = base_parents.causal,
         .related = related.items,
     };
-    const body = try event_mod.buildCommentAddedJsonWithMetadata(
+    const body = try event_builders.buildCommentAddedJsonWithMetadata(
         allocator,
         writer.cfg,
         writer.nextSeq(),

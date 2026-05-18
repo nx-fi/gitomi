@@ -1,10 +1,9 @@
 const std = @import("std");
-const event_mod = @import("../event.zig");
+const event_validation = @import("../event/validation.zig");
 const index = @import("../index.zig");
 const rbac = @import("../rbac.zig");
 const repo_mod = @import("../repo.zig");
 const shared = @import("shared.zig");
-const issues_page = @import("issues.zig");
 
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
@@ -14,7 +13,7 @@ const appendSectionHead = shared.appendSectionHead;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
 const appendTemplate = shared.appendTemplate;
-const formValueOwned = issues_page.formValueOwned;
+const formValueOwned = shared.formValueOwned;
 const sendRedirect = shared.sendRedirect;
 const sendResponse = shared.sendResponse;
 const sqlite = index.sqlite;
@@ -64,7 +63,7 @@ pub fn handleAccessRolePost(allocator: Allocator, repo: Repo, stream: std.net.St
         const role_owned = (try formValueOwned(allocator, form_body, "role")) orelse try allocator.dupe(u8, "");
         defer allocator.free(role_owned);
         const role = std.mem.trim(u8, role_owned, " \t\r\n");
-        if (!event_mod.isKnownRole(role)) {
+        if (!event_validation.isKnownRole(role)) {
             try sendAccessError(allocator, repo, stream, 422, "Unprocessable Entity", "Role must be reader, reporter, contributor, maintainer, or owner.", csrf_token);
             return;
         }

@@ -2,11 +2,13 @@ const std = @import("std");
 const cmd_common = @import("cmd_common.zig");
 const comment = @import("comment.zig");
 const errors = @import("errors.zig");
-const event_mod = @import("event.zig");
+const event_model = @import("event/model.zig");
+const event_builders = @import("event/builders.zig");
 const event_writer_mod = @import("event_writer.zig");
 const index = @import("index.zig");
 const io = @import("io.zig");
 const reaction = @import("reaction.zig");
+const string_event = @import("string_event.zig");
 const util = @import("util.zig");
 const work_items = @import("work_items.zig");
 
@@ -16,13 +18,13 @@ const issue = @This();
 const out = io.out;
 const eprint = io.eprint;
 const EventWriter = event_writer_mod.EventWriter;
-const buildIssueProjectEventJson = event_mod.buildIssueProjectEventJson;
-const buildIssueProjectFieldClearedJson = event_mod.buildIssueProjectFieldClearedJson;
-const buildIssueProjectFieldSetJson = event_mod.buildIssueProjectFieldSetJson;
-const buildIssueRelationshipEventJson = event_mod.buildIssueRelationshipEventJson;
-const buildIssueConcurrentGroupEventJson = event_mod.buildIssueConcurrentGroupEventJson;
-const buildIssueStringPayloadJson = event_mod.buildIssueStringPayloadJson;
-const buildIssueUpdatedJson = event_mod.buildIssueUpdatedJson;
+const buildIssueProjectEventJson = event_builders.buildIssueProjectEventJson;
+const buildIssueProjectFieldClearedJson = event_builders.buildIssueProjectFieldClearedJson;
+const buildIssueProjectFieldSetJson = event_builders.buildIssueProjectFieldSetJson;
+const buildIssueRelationshipEventJson = event_builders.buildIssueRelationshipEventJson;
+const buildIssueConcurrentGroupEventJson = event_builders.buildIssueConcurrentGroupEventJson;
+const buildIssueStringPayloadJson = event_builders.buildIssueStringPayloadJson;
+const buildIssueUpdatedJson = event_builders.buildIssueUpdatedJson;
 const newUuidV7 = util.newUuidV7;
 const rfc3339Now = util.rfc3339Now;
 const shortObjectRef = util.shortObjectRef;
@@ -69,7 +71,7 @@ pub fn createIssueOpenedWithMetadataEvent(
     body: []const u8,
     labels: []const []const u8,
     assignees: []const []const u8,
-    metadata: event_mod.IssueOpenedMetadata,
+    metadata: event_model.IssueOpenedMetadata,
 ) !void {
     const result = try createIssueOpenedWithMetadataEventResult(allocator, title, body, labels, assignees, metadata);
     defer result.deinit(allocator);
@@ -88,30 +90,24 @@ pub fn createIssueOpenedWithMetadataEventResult(
     body: []const u8,
     labels: []const []const u8,
     assignees: []const []const u8,
-    metadata: event_mod.IssueOpenedMetadata,
+    metadata: event_model.IssueOpenedMetadata,
 ) !IssueWriteResult {
     var writer = try EventWriter.init(allocator, "gt issue open");
     defer writer.deinit();
 
-    const issue_id = try newUuidV7(allocator);
-    errdefer allocator.free(issue_id);
-    const event_uuid = try newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try newUuidV7(allocator);
-    defer allocator.free(idem);
-    const occurred_at = try rfc3339Now(allocator);
-    defer allocator.free(occurred_at);
-    const event_parents = writer.eventParents();
+    var envelope = try writer.prepareEnvelope();
+    defer envelope.deinit();
+    const issue_id = envelope.entity_id;
 
-    const event_body = try event_mod.buildIssueOpenedJsonWithLegacyAndMetadata(
+    const event_body = try event_builders.buildIssueOpenedJsonWithLegacyAndMetadata(
         allocator,
         writer.cfg,
         writer.nextSeq(),
         issue_id,
-        event_uuid,
-        idem,
-        occurred_at,
-        event_parents,
+        envelope.event_uuid,
+        envelope.idem,
+        envelope.occurred_at,
+        envelope.event_parents,
         title,
         body,
         labels,
@@ -132,7 +128,7 @@ pub fn createIssueOpenedWithMetadataEventResult(
     errdefer allocator.free(inbox_ref);
 
     return .{
-        .issue_id = issue_id,
+        .issue_id = envelope.takeEntityId(),
         .commit_oid = commit_oid,
         .inbox_ref = inbox_ref,
     };
@@ -145,29 +141,24 @@ pub fn createSubIssueOpenedWithMetadataEventResult(
     body: []const u8,
     labels: []const []const u8,
     assignees: []const []const u8,
-    metadata: event_mod.IssueOpenedMetadata,
+    metadata: event_model.IssueOpenedMetadata,
 ) !IssueWriteResult {
     var writer = try EventWriter.init(allocator, "gt issue sub-issue");
     defer writer.deinit();
 
-    const issue_id = try newUuidV7(allocator);
-    errdefer allocator.free(issue_id);
-    const event_uuid = try newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try newUuidV7(allocator);
-    defer allocator.free(idem);
-    const occurred_at = try rfc3339Now(allocator);
-    defer allocator.free(occurred_at);
+    var envelope = try writer.prepareStagedEnvelope();
+    defer envelope.deinit();
+    const issue_id = envelope.entity_id;
 
-    const event_body = try event_mod.buildIssueOpenedJsonWithLegacyAndMetadata(
+    const event_body = try event_builders.buildIssueOpenedJsonWithLegacyAndMetadata(
         allocator,
         writer.cfg,
         writer.nextSeq(),
         issue_id,
-        event_uuid,
-        idem,
-        occurred_at,
-        writer.stagedEventParents(),
+        envelope.event_uuid,
+        envelope.idem,
+        envelope.occurred_at,
+        envelope.event_parents,
         title,
         body,
         labels,
@@ -218,7 +209,7 @@ pub fn createSubIssueOpenedWithMetadataEventResult(
     errdefer allocator.free(inbox_ref);
 
     return .{
-        .issue_id = issue_id,
+        .issue_id = envelope.takeEntityId(),
         .commit_oid = commit_oid,
         .inbox_ref = inbox_ref,
     };
@@ -231,48 +222,13 @@ pub fn createIssueStringEvent(
     payload_key: []const u8,
     payload_value: []const u8,
 ) !void {
-    var writer = try EventWriter.init(allocator, "gt issue");
-    defer writer.deinit();
-
-    const event_uuid = try newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try newUuidV7(allocator);
-    defer allocator.free(idem);
-    const occurred_at = try rfc3339Now(allocator);
-    defer allocator.free(occurred_at);
-    const event_parents = writer.eventParents();
-
-    const event_body = try buildIssueStringPayloadJson(
-        allocator,
-        writer.cfg,
-        writer.nextSeq(),
-        issue_id,
-        event_uuid,
-        idem,
-        occurred_at,
-        event_parents,
-        event_type,
-        payload_key,
-        payload_value,
-    );
-    defer allocator.free(event_body);
-
-    var issue_ref_buf: [short_object_ref_len]u8 = undefined;
-    const issue_ref = shortObjectRef(&issue_ref_buf, issue_id);
-    const subject = try std.fmt.allocPrint(allocator, "{s} #{s} {s}", .{ event_type, issue_ref, payload_value });
-    defer allocator.free(subject);
-    const commit_oid = try writer.write("gt issue", subject, event_body);
-    defer allocator.free(commit_oid);
-
-    try out("{s} #{s}\n", .{ event_type, issue_ref });
-    try out("  commit: {s}\n", .{commit_oid});
-    try out("  ref:    {s}\n", .{writer.inbox_ref});
+    try string_event.createStringEvent(allocator, .issue, issue_id, event_type, payload_key, payload_value);
 }
 
 pub fn createIssueUpdatedEvent(
     allocator: Allocator,
     issue_id: []const u8,
-    update: event_mod.IssueUpdate,
+    update: event_model.IssueUpdate,
 ) !void {
     if (!update.hasChanges()) {
         try eprint("gt issue edit: at least one update option is required\n", .{});
@@ -710,7 +666,7 @@ pub fn cmdIssue(allocator: Allocator, args: []const []const u8) !void {
             return CliError.UserError;
         }
 
-        var update = event_mod.IssueUpdate{};
+        var update = event_model.IssueUpdate{};
         var labels_added: std.ArrayList([]const u8) = .empty;
         defer labels_added.deinit(allocator);
         var labels_removed: std.ArrayList([]const u8) = .empty;

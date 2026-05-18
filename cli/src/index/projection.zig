@@ -1,7 +1,10 @@
 const std = @import("std");
 
 const errors = @import("../errors.zig");
-const event_mod = @import("../event.zig");
+const event_model = @import("../event/model.zig");
+const event_validation = @import("../event/validation.zig");
+const event_summary = @import("../event/summary.zig");
+const event_json = @import("../event/json.zig");
 const git = @import("../git.zig");
 const index_schema = @import("schema.zig");
 const ordering = @import("projection_ordering.zig");
@@ -14,9 +17,9 @@ const Allocator = std.mem.Allocator;
 const CliError = errors.CliError;
 const SqliteDb = sqlite_db.SqliteDb;
 const SqliteStmt = sqlite_db.SqliteStmt;
-const parseEventSummary = event_mod.parseEventSummary;
-const parseValidatedEnvelope = event_mod.parseValidatedEnvelope;
-const ValidatedEnvelope = event_mod.ValidatedEnvelope;
+const parseEventSummary = event_summary.parseEventSummary;
+const parseValidatedEnvelope = event_validation.parseValidatedEnvelope;
+const ValidatedEnvelope = event_model.ValidatedEnvelope;
 const runCommand = git.runCommand;
 const max_git_output = git.max_git_output;
 const gitCheckedMax = git.gitCheckedMax;
@@ -875,15 +878,15 @@ pub fn selfRegistrationFingerprint(allocator: Allocator, envelope: ValidatedEnve
         .object => |object| object,
         else => return null,
     };
-    const principal = event_mod.jsonString(payload.get("principal")) orelse return null;
-    const device = event_mod.jsonString(payload.get("device")) orelse return null;
+    const principal = event_json.jsonString(payload.get("principal")) orelse return null;
+    const device = event_json.jsonString(payload.get("device")) orelse return null;
     if (!std.mem.eql(u8, principal, envelope.actor_principal) or !std.mem.eql(u8, device, envelope.actor_device)) return null;
 
     const signing_key = switch (payload.get("signing_key") orelse return null) {
         .object => |object| object,
         else => return null,
     };
-    const fingerprint = event_mod.jsonString(signing_key.get("fingerprint")) orelse return null;
+    const fingerprint = event_json.jsonString(signing_key.get("fingerprint")) orelse return null;
     if (fingerprint.len == 0) return null;
     return try allocator.dupe(u8, fingerprint);
 }
@@ -1118,15 +1121,15 @@ fn eventAuthorizationRejection(
         std.mem.eql(u8, envelope.event_type, "notification.read_all"))
     {
         if (!roleAtLeast(role, "reporter")) return "insufficient_role";
-        const principal = event_mod.jsonString(payload.get("principal")) orelse return "invalid_event_envelope";
+        const principal = event_json.jsonString(payload.get("principal")) orelse return "invalid_event_envelope";
         if (std.mem.eql(u8, principal, envelope.actor_principal)) return null;
         return if (roleAtLeast(role, "maintainer")) null else "insufficient_role";
     }
 
     if (std.mem.eql(u8, envelope.event_type, "acl.role_granted")) {
         if (!roleAtLeast(role, "owner")) return "insufficient_role";
-        const target_role = event_mod.jsonString(payload.get("role")) orelse return "invalid_event_envelope";
-        if (!event_mod.isKnownRole(target_role)) return "invalid_role";
+        const target_role = event_json.jsonString(payload.get("role")) orelse return "invalid_event_envelope";
+        if (!event_validation.isKnownRole(target_role)) return "invalid_role";
         if (!roleAtLeast(role, target_role)) return "privilege_escalation";
         return null;
     }
@@ -1322,12 +1325,12 @@ fn payloadHasSourceIdentityMetadata(payload: std.json.ObjectMap) bool {
 }
 
 fn payloadHasNonEmptyString(payload: std.json.ObjectMap, key: []const u8) bool {
-    const value = event_mod.jsonString(payload.get(key)) orelse return false;
+    const value = event_json.jsonString(payload.get(key)) orelse return false;
     return value.len != 0;
 }
 
 fn sourceIdentityImportCapability(event_type: []const u8, root: std.json.ObjectMap, payload: std.json.ObjectMap) ?[]const u8 {
-    const source_identity = event_mod.jsonString(payload.get("source_identity")) orelse "";
+    const source_identity = event_json.jsonString(payload.get("source_identity")) orelse "";
     if (source_identity.len != 0) return capabilityForSourceIdentity(source_identity);
     if (hasGitHubLegacyAlias(event_type, root)) return "github.import";
     if (hasGitLabLegacyAlias(event_type, root)) return "gitlab.import";
@@ -1389,7 +1392,7 @@ fn payloadContainsNonEmptyArray(payload: std.json.ObjectMap, key: []const u8) bo
 }
 
 fn roleAtLeast(actual: []const u8, required: []const u8) bool {
-    return event_mod.roleAtLeast(actual, required);
+    return event_validation.roleAtLeast(actual, required);
 }
 
 fn canEditObject(allocator: Allocator, db: *SqliteDb, role: []const u8, actor: []const u8, kind: []const u8, object_id: []const u8, before_event_hash: ?[]const u8) !bool {
@@ -1490,11 +1493,11 @@ fn applyAclProjection(allocator: Allocator, db: *SqliteDb, event_hash: []const u
         .object => |object| object,
         else => return "invalid_event_envelope",
     };
-    const principal = event_mod.jsonString(payload.get("principal")) orelse return "invalid_event_envelope";
+    const principal = event_json.jsonString(payload.get("principal")) orelse return "invalid_event_envelope";
 
     if (std.mem.eql(u8, envelope.event_type, "acl.role_granted")) {
-        const role = event_mod.jsonString(payload.get("role")) orelse return "invalid_event_envelope";
-        if (!event_mod.isKnownRole(role)) return "invalid_role";
+        const role = event_json.jsonString(payload.get("role")) orelse return "invalid_event_envelope";
+        if (!event_validation.isKnownRole(role)) return "invalid_role";
         const actor_role = (try aclRoleAtAuthFrontier(allocator, db, envelope.actor_principal, event_hash)) orelse return "unauthorized_principal";
         defer allocator.free(actor_role);
         if (!roleAtLeast(actor_role, role)) return "privilege_escalation";
@@ -1504,8 +1507,8 @@ fn applyAclProjection(allocator: Allocator, db: *SqliteDb, event_hash: []const u
     }
 
     if (std.mem.eql(u8, envelope.event_type, "acl.role_revoked")) {
-        const role = event_mod.jsonString(payload.get("role")) orelse return "invalid_event_envelope";
-        if (!event_mod.isKnownRole(role)) return "invalid_role";
+        const role = event_json.jsonString(payload.get("role")) orelse return "invalid_event_envelope";
+        if (!event_validation.isKnownRole(role)) return "invalid_role";
         const existing_role = (try aclRoleAtFrontier(allocator, db, principal, event_hash)) orelse return "role_not_granted";
         defer allocator.free(existing_role);
         if (!std.mem.eql(u8, existing_role, role)) return "role_mismatch";
@@ -1519,25 +1522,25 @@ fn applyAclProjection(allocator: Allocator, db: *SqliteDb, event_hash: []const u
     }
 
     if (std.mem.eql(u8, envelope.event_type, "acl.delegation_granted")) {
-        const device = event_mod.jsonString(payload.get("device")) orelse return "invalid_event_envelope";
-        const capability = event_mod.jsonString(payload.get("capability")) orelse return "invalid_event_envelope";
-        const scope = event_mod.jsonString(payload.get("scope")) orelse return "invalid_event_envelope";
+        const device = event_json.jsonString(payload.get("device")) orelse return "invalid_event_envelope";
+        const capability = event_json.jsonString(payload.get("capability")) orelse return "invalid_event_envelope";
+        const scope = event_json.jsonString(payload.get("scope")) orelse return "invalid_event_envelope";
         if (!isKnownImportCapability(capability)) return "unknown_capability";
         const signing_key = switch (payload.get("signing_key") orelse return "invalid_event_envelope") {
             .object => |object| object,
             else => return "invalid_event_envelope",
         };
-        const public_key = event_mod.jsonString(signing_key.get("public_key")) orelse return "invalid_event_envelope";
-        const fingerprint = event_mod.jsonString(signing_key.get("fingerprint")) orelse return "invalid_event_envelope";
+        const public_key = event_json.jsonString(signing_key.get("public_key")) orelse return "invalid_event_envelope";
+        const fingerprint = event_json.jsonString(signing_key.get("fingerprint")) orelse return "invalid_event_envelope";
         try insertDelegationHistory(db, principal, device, capability, scope, fingerprint, public_key, event_hash, envelope.event_type);
         try reconcileDelegation(allocator, db, principal, device, capability, scope);
         return null;
     }
 
     if (std.mem.eql(u8, envelope.event_type, "acl.delegation_revoked")) {
-        const device = event_mod.jsonString(payload.get("device")) orelse return "invalid_event_envelope";
-        const capability = event_mod.jsonString(payload.get("capability")) orelse return "invalid_event_envelope";
-        const scope = event_mod.jsonString(payload.get("scope")) orelse return "invalid_event_envelope";
+        const device = event_json.jsonString(payload.get("device")) orelse return "invalid_event_envelope";
+        const capability = event_json.jsonString(payload.get("capability")) orelse return "invalid_event_envelope";
+        const scope = event_json.jsonString(payload.get("scope")) orelse return "invalid_event_envelope";
         if (!isKnownImportCapability(capability)) return "unknown_capability";
         if (!(try delegationActiveAtFrontier(allocator, db, principal, device, capability, scope, event_hash))) return "delegation_not_active";
         try insertDelegationHistory(db, principal, device, capability, scope, "", "", event_hash, envelope.event_type);
@@ -1561,16 +1564,16 @@ fn applyIdentityProjection(allocator: Allocator, db: *SqliteDb, event_hash: []co
         .object => |object| object,
         else => return "invalid_event_envelope",
     };
-    const principal = event_mod.jsonString(payload.get("principal")) orelse return "invalid_event_envelope";
-    const device = event_mod.jsonString(payload.get("device")) orelse return "invalid_event_envelope";
+    const principal = event_json.jsonString(payload.get("principal")) orelse return "invalid_event_envelope";
+    const device = event_json.jsonString(payload.get("device")) orelse return "invalid_event_envelope";
 
     if (std.mem.eql(u8, envelope.event_type, "identity.device_added")) {
         const signing_key = switch (payload.get("signing_key") orelse return "invalid_event_envelope") {
             .object => |object| object,
             else => return "invalid_event_envelope",
         };
-        const public_key = event_mod.jsonString(signing_key.get("public_key")) orelse return "invalid_event_envelope";
-        const fingerprint = event_mod.jsonString(signing_key.get("fingerprint")) orelse return "invalid_event_envelope";
+        const public_key = event_json.jsonString(signing_key.get("public_key")) orelse return "invalid_event_envelope";
+        const fingerprint = event_json.jsonString(signing_key.get("fingerprint")) orelse return "invalid_event_envelope";
         try insertIdentityHistory(db, principal, device, fingerprint, public_key, event_hash, envelope.event_type);
         try reconcileIdentityDevice(allocator, db, principal, device);
         return null;

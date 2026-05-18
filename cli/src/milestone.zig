@@ -1,7 +1,8 @@
 const std = @import("std");
 const cmd_common = @import("cmd_common.zig");
 const errors = @import("errors.zig");
-const event_mod = @import("event.zig");
+const event_model = @import("event/model.zig");
+const event_builders = @import("event/builders.zig");
 const event_writer_mod = @import("event_writer.zig");
 const index = @import("index.zig");
 const io = @import("io.zig");
@@ -28,40 +29,29 @@ pub fn createMilestoneCreatedEvent(
     var writer = try EventWriter.init(allocator, "gt milestone create");
     defer writer.deinit();
 
-    const milestone_id = try newUuidV7(allocator);
-    defer allocator.free(milestone_id);
-    const event_uuid = try newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try newUuidV7(allocator);
-    defer allocator.free(idem);
-    const occurred_at = try rfc3339Now(allocator);
-    defer allocator.free(occurred_at);
-    const event_parents = writer.eventParents();
+    var envelope = try writer.prepareEnvelope();
+    defer envelope.deinit();
 
-    const event_body = try event_mod.buildMilestoneCreatedJson(
+    const event_body = try event_builders.buildMilestoneCreatedJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
-        milestone_id,
-        event_uuid,
-        idem,
-        occurred_at,
-        event_parents,
+        envelope.entity_id,
+        envelope.event_uuid,
+        envelope.idem,
+        envelope.occurred_at,
+        envelope.event_parents,
         title,
         description,
         due_at,
     );
     defer allocator.free(event_body);
 
-    const subject = try std.fmt.allocPrint(allocator, "milestone.created ^{s} {s}", .{ milestone_id[0..7], title });
+    const milestone_ref = envelope.entity_id[0..7];
+    const subject = try std.fmt.allocPrint(allocator, "milestone.created ^{s} {s}", .{ milestone_ref, title });
     defer allocator.free(subject);
-    const commit_oid = try writer.write("gt milestone", subject, event_body);
+    const commit_oid = try writer.writeAndPrint("gt milestone", subject, event_body, "created milestone ^", milestone_ref, envelope.entity_id);
     defer allocator.free(commit_oid);
-
-    try out("created milestone ^{s}\n", .{milestone_id[0..7]});
-    try out("  id:     {s}\n", .{milestone_id});
-    try out("  commit: {s}\n", .{commit_oid});
-    try out("  ref:    {s}\n", .{writer.inbox_ref});
 }
 
 pub fn ensureMilestoneCreatedForTitle(
@@ -116,7 +106,7 @@ fn stageMilestoneCreatedEvent(
     const idem = try newUuidV7(allocator);
     defer allocator.free(idem);
 
-    const event_body = try event_mod.buildMilestoneCreatedJson(
+    const event_body = try event_builders.buildMilestoneCreatedJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
@@ -140,7 +130,7 @@ fn stageMilestoneCreatedEvent(
 pub fn createMilestoneUpdatedEvent(
     allocator: Allocator,
     milestone_id: []const u8,
-    update: event_mod.MilestoneUpdate,
+    update: event_model.MilestoneUpdate,
 ) !void {
     var writer = try EventWriter.init(allocator, "gt milestone edit");
     defer writer.deinit();
@@ -153,7 +143,7 @@ pub fn createMilestoneUpdatedEvent(
     defer allocator.free(occurred_at);
     const event_parents = writer.eventParents();
 
-    const event_body = try event_mod.buildMilestoneUpdatedJson(
+    const event_body = try event_builders.buildMilestoneUpdatedJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
@@ -195,7 +185,7 @@ pub fn createMilestoneStringEvent(
     defer allocator.free(occurred_at);
     const event_parents = writer.eventParents();
 
-    const event_body = try event_mod.buildMilestoneStringPayloadJson(
+    const event_body = try event_builders.buildMilestoneStringPayloadJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
@@ -236,7 +226,7 @@ pub fn createMilestoneDeletedEvent(
     defer allocator.free(occurred_at);
     const event_parents = writer.eventParents();
 
-    const event_body = try event_mod.buildMilestoneDeletedJson(
+    const event_body = try event_builders.buildMilestoneDeletedJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
@@ -315,7 +305,7 @@ pub fn cmdMilestone(allocator: Allocator, args: []const []const u8) !void {
             return CliError.UserError;
         }
 
-        var update = event_mod.MilestoneUpdate{};
+        var update = event_model.MilestoneUpdate{};
         var i: usize = 2;
         while (i < args.len) : (i += 1) {
             if (std.mem.eql(u8, args[i], "--title") or std.mem.eql(u8, args[i], "-t")) {

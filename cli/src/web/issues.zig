@@ -17,6 +17,3 @@ pub const renderIssueForm = form.renderIssueForm;
 pub const renderIssueFormFromTarget = form.renderIssueFormFromTarget;
 pub const handleIssuePost = form.handleIssuePost;
 pub const issueTitleFromSubject = form.issueTitleFromSubject;
-pub const formValueOwned = form.formValueOwned;
-pub const percentDecodeForm = form.percentDecodeForm;
-pub const hexValue = form.hexValue;

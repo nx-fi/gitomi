@@ -1,12 +1,11 @@
 const std = @import("std");
 const cmd_common = @import("../../cmd_common.zig");
-const event_mod = @import("../../event.zig");
+const event_model = @import("../../event/model.zig");
 const index = @import("../../index.zig");
 const issue_mod = @import("../../issue.zig");
 const repo_mod = @import("../../repo.zig");
 const util = @import("../../util.zig");
 const project_views = @import("views.zig");
-const issues_page = @import("../issues.zig");
 const shared = @import("../shared.zig");
 
 const Allocator = std.mem.Allocator;
@@ -17,8 +16,8 @@ const createIssueProjectFieldClearedEvent = issue_mod.createIssueProjectFieldCle
 const createIssueProjectFieldSetEvent = issue_mod.createIssueProjectFieldSetEvent;
 const createIssueProjectEvent = issue_mod.createIssueProjectEvent;
 const createIssueStringEvent = issue_mod.createIssueStringEvent;
-const formValueOwned = issues_page.formValueOwned;
-const percentDecodeForm = issues_page.percentDecodeForm;
+const formValueOwned = shared.formValueOwned;
+const percentDecodeForm = shared.percentDecodeForm;
 const jsonStringArgument = cmd_common.jsonStringArgument;
 const sendPlainResponse = shared.sendPlainResponse;
 const sendRedirect = shared.sendRedirect;
@@ -79,7 +78,7 @@ pub fn handleProjectItemPost(allocator: Allocator, repo: Repo, stream: std.net.S
         defer labels.deinit(allocator);
         var assignees = try splitCommaFields(allocator, assignees_owned);
         defer assignees.deinit(allocator);
-        const placements = [_]event_mod.IssueProjectPlacement{.{
+        const placements = [_]event_model.IssueProjectPlacement{.{
             .project = project_owned,
             .column = column_owned,
         }};

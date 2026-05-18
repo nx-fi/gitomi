@@ -1,7 +1,10 @@
 const std = @import("std");
 
 const errors = @import("errors.zig");
-const event_mod = @import("event.zig");
+const event_model = @import("event/model.zig");
+const event_validation = @import("event/validation.zig");
+const event_json = @import("event/json.zig");
+const actor_sequence = @import("event/actor_sequence.zig");
 const git = @import("git.zig");
 const inbox_commit = @import("inbox_commit.zig");
 const index_event_row = @import("index/event_row.zig");
@@ -37,8 +40,8 @@ const gitCheckedMax = git.gitCheckedMax;
 const emptyTreeOid = git.emptyTreeOid;
 const runCommand = git.runCommand;
 const max_git_output = git.max_git_output;
-const parseValidatedEnvelope = event_mod.parseValidatedEnvelope;
-const ValidatedEnvelope = event_mod.ValidatedEnvelope;
+const parseValidatedEnvelope = event_validation.parseValidatedEnvelope;
+const ValidatedEnvelope = event_model.ValidatedEnvelope;
 const appendJsonFieldString = json_writer.appendJsonFieldString;
 const appendJsonFieldBool = json_writer.appendJsonFieldBool;
 const appendJsonFieldInteger = json_writer.appendJsonFieldInteger;
@@ -146,14 +149,14 @@ const IndexAdmission = struct {
     allocator: Allocator,
     expected_repo_id: ?[]const u8,
     observed_repo_id: ?[]u8 = null,
-    actor_seqs: event_mod.ActorSeqAdmissionTracker,
+    actor_seqs: actor_sequence.AdmissionTracker,
     idempotency_keys: std.BufSet,
 
     fn init(allocator: Allocator, expected_repo_id: ?[]const u8) IndexAdmission {
         return .{
             .allocator = allocator,
             .expected_repo_id = expected_repo_id,
-            .actor_seqs = event_mod.ActorSeqAdmissionTracker.init(allocator),
+            .actor_seqs = actor_sequence.AdmissionTracker.init(allocator),
             .idempotency_keys = std.BufSet.init(allocator),
         };
     }
@@ -1163,7 +1166,7 @@ fn parseSnapshotManifest(allocator: Allocator, bytes: []const u8) ![]u8 {
         else => return error.InvalidSnapshot,
     };
 
-    const schema = event_mod.jsonString(root.get("$schema")) orelse return error.InvalidSnapshot;
+    const schema = event_json.jsonString(root.get("$schema")) orelse return error.InvalidSnapshot;
     if (!std.mem.eql(u8, schema, snapshot_schema)) return error.InvalidSnapshot;
 
     const version_value = root.get("schema_version") orelse return error.InvalidSnapshot;
@@ -1173,18 +1176,18 @@ fn parseSnapshotManifest(allocator: Allocator, bytes: []const u8) ![]u8 {
     };
     if (version < 0 or @as(u64, @intCast(version)) != snapshot_schema_version) return error.InvalidSnapshot;
 
-    const index_version = event_mod.jsonString(root.get("index_schema_version")) orelse return error.InvalidSnapshot;
+    const index_version = event_json.jsonString(root.get("index_schema_version")) orelse return error.InvalidSnapshot;
     if (!std.mem.eql(u8, index_version, index_schema_version)) return error.InvalidSnapshot;
 
-    const covered_refs_raw = event_mod.jsonString(root.get("covered_refs_raw")) orelse return error.InvalidSnapshot;
+    const covered_refs_raw = event_json.jsonString(root.get("covered_refs_raw")) orelse return error.InvalidSnapshot;
     if (std.mem.trim(u8, covered_refs_raw, " \t\r\n").len == 0) return error.InvalidSnapshot;
 
     const state = switch (root.get("state") orelse return error.InvalidSnapshot) {
         .object => |object| object,
         else => return error.InvalidSnapshot,
     };
-    const state_format = event_mod.jsonString(state.get("format")) orelse return error.InvalidSnapshot;
-    const state_path = event_mod.jsonString(state.get("path")) orelse return error.InvalidSnapshot;
+    const state_format = event_json.jsonString(state.get("format")) orelse return error.InvalidSnapshot;
+    const state_path = event_json.jsonString(state.get("path")) orelse return error.InvalidSnapshot;
     if (!std.mem.eql(u8, state_format, "sqlite-index")) return error.InvalidSnapshot;
     if (!std.mem.eql(u8, state_path, snapshot_index_path)) return error.InvalidSnapshot;
 
@@ -1351,7 +1354,7 @@ fn firstParentMatches(parents: []const u8, expected_first_parent: ?[]const u8) b
 }
 
 fn eventParentHashesMatch(allocator: Allocator, parents: []const u8, body: []const u8) !bool {
-    return (try event_mod.validateParentHashes(allocator, parents, body)) == null;
+    return (try event_validation.validateParentHashes(allocator, parents, body)) == null;
 }
 
 fn verifyCommitSignatureQuiet(allocator: Allocator, commit: []const u8) !bool {

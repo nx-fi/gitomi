@@ -12,6 +12,16 @@ pub fn jsonString(value: ?std.json.Value) ?[]const u8 {
     return null;
 }
 
+pub fn jsonArray(value: ?std.json.Value) ?std.json.Array {
+    if (value) |v| {
+        return switch (v) {
+            .array => |array| array,
+            else => null,
+        };
+    }
+    return null;
+}
+
 pub fn jsonBool(value: ?std.json.Value) ?bool {
     if (value) |v| {
         return switch (v) {

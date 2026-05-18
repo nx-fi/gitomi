@@ -1,6 +1,7 @@
 const std = @import("std");
 const errors = @import("errors.zig");
-const event_mod = @import("event.zig");
+const event_model = @import("event/model.zig");
+const event_validation = @import("event/validation.zig");
 const git = @import("git.zig");
 const index = @import("index.zig");
 const io = @import("io.zig");
@@ -10,6 +11,7 @@ const util = @import("util.zig");
 const Allocator = std.mem.Allocator;
 const CliError = errors.CliError;
 const eprint = io.eprint;
+const out = io.out;
 
 pub const EventWriter = struct {
     allocator: Allocator,
@@ -20,6 +22,28 @@ pub const EventWriter = struct {
     related_heads: [][]u8,
     staged_head: ?[]u8 = null,
     persist_config: bool,
+
+    pub const PreparedEnvelope = struct {
+        allocator: Allocator,
+        entity_id: []u8,
+        event_uuid: []u8,
+        idem: []u8,
+        occurred_at: []u8,
+        event_parents: event_model.EventParents,
+        entity_id_owned: bool = true,
+
+        pub fn deinit(self: *PreparedEnvelope) void {
+            if (self.entity_id_owned) self.allocator.free(self.entity_id);
+            self.allocator.free(self.event_uuid);
+            self.allocator.free(self.idem);
+            self.allocator.free(self.occurred_at);
+        }
+
+        pub fn takeEntityId(self: *PreparedEnvelope) []u8 {
+            self.entity_id_owned = false;
+            return self.entity_id;
+        }
+    };
 
     pub fn init(allocator: Allocator, command_context: []const u8) !EventWriter {
         return initInternal(allocator, command_context, null, null, null, null, true);
@@ -118,7 +142,7 @@ pub const EventWriter = struct {
         return self.cfg.seq + 1;
     }
 
-    pub fn eventParents(self: *const EventWriter) event_mod.EventParents {
+    pub fn eventParents(self: *const EventWriter) event_model.EventParents {
         return .{
             .log = self.prepared_parents.old_head,
             .anchor = self.prepared_parents.anchor,
@@ -127,7 +151,7 @@ pub const EventWriter = struct {
         };
     }
 
-    pub fn stagedEventParents(self: *const EventWriter) event_mod.EventParents {
+    pub fn stagedEventParents(self: *const EventWriter) event_model.EventParents {
         if (self.staged_head) |head| {
             return .{
                 .log = head,
@@ -137,6 +161,34 @@ pub const EventWriter = struct {
             };
         }
         return self.eventParents();
+    }
+
+    pub fn prepareEnvelope(self: *const EventWriter) !PreparedEnvelope {
+        return self.prepareEnvelopeWithParents(self.eventParents());
+    }
+
+    pub fn prepareStagedEnvelope(self: *const EventWriter) !PreparedEnvelope {
+        return self.prepareEnvelopeWithParents(self.stagedEventParents());
+    }
+
+    pub fn prepareEnvelopeWithParents(self: *const EventWriter, event_parents: event_model.EventParents) !PreparedEnvelope {
+        const entity_id = try util.newUuidV7(self.allocator);
+        errdefer self.allocator.free(entity_id);
+        const event_uuid = try util.newUuidV7(self.allocator);
+        errdefer self.allocator.free(event_uuid);
+        const idem = try util.newUuidV7(self.allocator);
+        errdefer self.allocator.free(idem);
+        const occurred_at = try util.rfc3339Now(self.allocator);
+        errdefer self.allocator.free(occurred_at);
+
+        return .{
+            .allocator = self.allocator,
+            .entity_id = entity_id,
+            .event_uuid = event_uuid,
+            .idem = idem,
+            .occurred_at = occurred_at,
+            .event_parents = event_parents,
+        };
     }
 
     pub fn write(self: *EventWriter, command_context: []const u8, subject: []const u8, event_body: []const u8) ![]u8 {
@@ -159,6 +211,26 @@ pub const EventWriter = struct {
         if (self.persist_config) {
             try repo_mod.writeConfig(self.repo.config_path, self.cfg);
         }
+        return commit_oid;
+    }
+
+    pub fn writeAndPrint(
+        self: *EventWriter,
+        command_context: []const u8,
+        subject: []const u8,
+        event_body: []const u8,
+        prefix: []const u8,
+        object_ref: []const u8,
+        entity_id: ?[]const u8,
+    ) ![]u8 {
+        const commit_oid = try self.write(command_context, subject, event_body);
+        errdefer self.allocator.free(commit_oid);
+
+        try out("{s}{s}\n", .{ prefix, object_ref });
+        if (entity_id) |id| try out("  id:     {s}\n", .{id});
+        try out("  commit: {s}\n", .{commit_oid});
+        try out("  ref:    {s}\n", .{self.inbox_ref});
+
         return commit_oid;
     }
 
@@ -202,7 +274,7 @@ pub const EventWriter = struct {
     }
 
     fn ensureEventFresh(self: *EventWriter, command_context: []const u8, event_body: []const u8) !void {
-        var envelope = event_mod.parseValidatedEnvelope(self.allocator, event_body) catch {
+        var envelope = event_validation.parseValidatedEnvelope(self.allocator, event_body) catch {
             try eprint("{s}: refusing to write invalid event body\n", .{command_context});
             return CliError.InvalidEvent;
         };

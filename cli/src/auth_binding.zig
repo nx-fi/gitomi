@@ -1,12 +1,12 @@
 const std = @import("std");
 
-const event_mod = @import("event.zig");
+const event_model = @import("event/model.zig");
 const index = @import("index.zig");
 const repo_mod = @import("repo.zig");
 const util = @import("util.zig");
 
 const Allocator = std.mem.Allocator;
-const ValidatedEnvelope = event_mod.ValidatedEnvelope;
+const ValidatedEnvelope = event_model.ValidatedEnvelope;
 
 pub const CommitRecord = struct {
     ref: []const u8,

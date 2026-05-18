@@ -1,6 +1,6 @@
 const std = @import("std");
 const errors = @import("../../errors.zig");
-const event_mod = @import("../../event.zig");
+const event_json = @import("../../event/json.zig");
 const git = @import("../../git.zig");
 const index = @import("../../index.zig");
 const io = @import("../../io.zig");
@@ -9,6 +9,7 @@ const repo_mod = @import("../../repo.zig");
 const sync_mod = @import("../../sync.zig");
 const util = @import("../../util.zig");
 const zwf = @import("../../zwf.zig");
+const import_bot = @import("../import_bot.zig");
 const common = @import("common.zig");
 const exporter = @import("exporter.zig");
 const importer = @import("importer.zig");
@@ -26,8 +27,6 @@ pub const default_host = "127.0.0.1";
 pub const default_port: u16 = 12656;
 pub const default_path = "/github/webhook";
 pub const default_interval_ms: u64 = 5000;
-const import_bot_principal = "import-bot";
-const import_bot_device = "github";
 const max_delivery_log_bytes = 64 * 1024 * 1024;
 const max_delivery_id_bytes = 128;
 const max_export_events_per_tick = 50;
@@ -55,8 +54,8 @@ pub const Options = struct {
     subscribe: bool = true,
     dry_run: bool = false,
     git_sync: bool = true,
-    bot_principal: []const u8 = import_bot_principal,
-    bot_device: []const u8 = import_bot_device,
+    bot_principal: []const u8 = import_bot.principal,
+    bot_device: []const u8 = import_bot.github_device,
     mode: ApiMode = .graphql,
 };
 
@@ -132,8 +131,8 @@ pub fn cmdLive(allocator: Allocator, args: []const []const u8) !void {
     var subscribe = true;
     var dry_run = false;
     var git_sync = true;
-    var bot_principal: []const u8 = import_bot_principal;
-    var bot_device: []const u8 = import_bot_device;
+    var bot_principal: []const u8 = import_bot.principal;
+    var bot_device: []const u8 = import_bot.github_device;
     var mode: ApiMode = .graphql;
 
     var i: usize = 0;
@@ -654,11 +653,11 @@ fn remoteWebhookNeedsUpdate(root: std.json.ObjectMap, options: Options) bool {
 
     const config = jsonObject(root.get("config")) orelse return true;
     const expected_url = options.webhook_url orelse return true;
-    const url = event_mod.jsonString(config.get("url")) orelse return true;
+    const url = event_json.jsonString(config.get("url")) orelse return true;
     if (!std.mem.eql(u8, url, expected_url)) return true;
-    const content_type = event_mod.jsonString(config.get("content_type")) orelse return true;
+    const content_type = event_json.jsonString(config.get("content_type")) orelse return true;
     if (!std.mem.eql(u8, content_type, "json")) return true;
-    const insecure_ssl = event_mod.jsonString(config.get("insecure_ssl")) orelse return true;
+    const insecure_ssl = event_json.jsonString(config.get("insecure_ssl")) orelse return true;
     if (!std.mem.eql(u8, insecure_ssl, "0")) return true;
     return false;
 }
@@ -666,7 +665,7 @@ fn remoteWebhookNeedsUpdate(root: std.json.ObjectMap, options: Options) bool {
 fn remoteWebhookUrlMatches(root: std.json.ObjectMap, options: Options) bool {
     const expected_url = options.webhook_url orelse return false;
     const config = jsonObject(root.get("config")) orelse return false;
-    const url = event_mod.jsonString(config.get("url")) orelse return false;
+    const url = event_json.jsonString(config.get("url")) orelse return false;
     return std.mem.eql(u8, url, expected_url);
 }
 
@@ -677,7 +676,7 @@ fn remoteWebhookEventsMatch(value: ?std.json.Value) bool {
     for (expected) |event_name| {
         var found = false;
         for (events.items) |item| {
-            const actual = event_mod.jsonString(item) orelse return false;
+            const actual = event_json.jsonString(item) orelse return false;
             if (std.mem.eql(u8, actual, event_name)) {
                 found = true;
                 break;
@@ -1018,7 +1017,7 @@ fn checkWebhookRepository(allocator: Allocator, expected: RepoSlug, body: []cons
         .object => |object| object,
         else => return .missing,
     };
-    const full_name = event_mod.jsonString(repository.get("full_name")) orelse return .missing;
+    const full_name = event_json.jsonString(repository.get("full_name")) orelse return .missing;
     if (std.ascii.eqlIgnoreCase(full_name, expected.slug)) return .matches;
     return .mismatch;
 }

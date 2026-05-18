@@ -546,57 +546,6 @@ pub fn normalizedPathOwned(allocator: Allocator, raw: []const u8) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
-pub fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const u8) !?[]u8 {
-    const query_start = std.mem.indexOfScalar(u8, target, '?') orelse return null;
-    var pairs = std.mem.splitScalar(u8, target[query_start + 1 ..], '&');
-    while (pairs.next()) |pair| {
-        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
-        const raw_key = pair[0..eq];
-        const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
-        const key = try percentDecode(allocator, raw_key);
-        defer allocator.free(key);
-        if (!std.mem.eql(u8, key, wanted_key)) continue;
-        return try percentDecode(allocator, raw_value);
-    }
-    return null;
-}
-
-pub fn formValueOwned(allocator: Allocator, body: []const u8, wanted_key: []const u8) !?[]u8 {
-    var pairs = std.mem.splitScalar(u8, body, '&');
-    while (pairs.next()) |pair| {
-        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
-        const raw_key = pair[0..eq];
-        const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
-        const key = try percentDecode(allocator, raw_key);
-        defer allocator.free(key);
-        if (!std.mem.eql(u8, key, wanted_key)) continue;
-        return try percentDecode(allocator, raw_value);
-    }
-    return null;
-}
-
-pub fn percentDecode(allocator: Allocator, value: []const u8) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-
-    var i: usize = 0;
-    while (i < value.len) : (i += 1) {
-        switch (value[i]) {
-            '+' => try buf.append(allocator, ' '),
-            '%' => {
-                if (i + 2 >= value.len) return error.InvalidUrlEncoding;
-                const hi = hexValue(value[i + 1]) orelse return error.InvalidUrlEncoding;
-                const lo = hexValue(value[i + 2]) orelse return error.InvalidUrlEncoding;
-                try buf.append(allocator, (hi << 4) | lo);
-                i += 2;
-            },
-            else => |c| try buf.append(allocator, c),
-        }
-    }
-
-    return buf.toOwnedSlice(allocator);
-}
-
 pub fn appendSize(buf: *std.ArrayList(u8), allocator: Allocator, raw: []const u8) !void {
     const size = std.fmt.parseUnsigned(usize, raw, 10) catch {
         try appendTemplate(buf, allocator, "{raw}", .{ .raw = raw });
@@ -626,15 +575,6 @@ pub fn containsNul(bytes: []const u8) bool {
 pub fn trimOwned(allocator: Allocator, raw: []u8) ![]u8 {
     defer allocator.free(raw);
     return allocator.dupe(u8, std.mem.trim(u8, raw, " \t\r\n"));
-}
-
-pub fn hexValue(c: u8) ?u8 {
-    return switch (c) {
-        '0'...'9' => c - '0',
-        'a'...'f' => c - 'a' + 10,
-        'A'...'F' => c - 'A' + 10,
-        else => null,
-    };
 }
 
 pub fn endsWithIgnoreCase(value: []const u8, suffix: []const u8) bool {

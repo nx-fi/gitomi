@@ -144,14 +144,12 @@ const mediaKindForPath = file_info.mediaKindForPath;
 const contentTypeForPath = file_info.contentTypeForPath;
 const languageForPath = file_info.languageForPath;
 const normalizedPathOwned = file_info.normalizedPathOwned;
-const queryValueOwned = file_info.queryValueOwned;
-const formValueOwned = file_info.formValueOwned;
-const percentDecode = file_info.percentDecode;
+const queryValueOwned = shared.queryValueOwned;
+const formValueOwned = shared.formValueOwned;
 const appendSize = file_info.appendSize;
 const appendByteSize = file_info.appendByteSize;
 const containsNul = file_info.containsNul;
 const trimOwned = file_info.trimOwned;
-const hexValue = file_info.hexValue;
 const endsWithIgnoreCase = file_info.endsWithIgnoreCase;
 
 const BlobPreviewKind = enum {

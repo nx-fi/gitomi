@@ -1,5 +1,7 @@
 const std = @import("std");
+const event_validation = @import("../event/validation.zig");
 const index = @import("../index.zig");
+const notification_mod = @import("../notification.zig");
 const repo_mod = @import("../repo.zig");
 const shared = @import("shared.zig");
 const util = @import("../util.zig");
@@ -7,6 +9,7 @@ const util = @import("../util.zig");
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
 const SqliteDb = index.SqliteDb;
+const createNotificationSubscriptionEvent = notification_mod.createNotificationSubscriptionEvent;
 
 const default_limit = 50;
 const max_limit = 200;
@@ -34,6 +37,89 @@ const InboxRow = struct {
         allocator.free(self.title);
     }
 };
+
+pub fn currentActorCanManageNotifications(current_actor: ?[]const u8, current_role: ?[]const u8) bool {
+    if (current_actor == null) return false;
+    const role = current_role orelse return false;
+    return event_validation.roleAtLeast(role, "reporter");
+}
+
+pub fn isNotificationSubscribed(db: *SqliteDb, principal: []const u8, object_kind: []const u8, object_id: []const u8) !bool {
+    var stmt = try db.prepare(
+        \\SELECT active
+        \\FROM notification_subscriptions
+        \\WHERE principal = ?
+        \\  AND object_kind = ?
+        \\  AND object_id = ?
+        \\LIMIT 1
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, principal);
+    try stmt.bindText(2, object_kind);
+    try stmt.bindText(3, object_id);
+    if (!(try stmt.step())) return false;
+    return stmt.columnInt(0) != 0;
+}
+
+pub fn handleNotificationPost(
+    comptime object_kind: []const u8,
+    comptime resolveObjectId: anytype,
+    comptime redirect_prefix: []const u8,
+    allocator: Allocator,
+    repo: Repo,
+    stream: std.net.Stream,
+    raw_ref: []const u8,
+    form_body: []const u8,
+) !void {
+    try index.ensureIndex(allocator, repo);
+    const object_id = resolveObjectId(allocator, repo, raw_ref) catch {
+        try shared.sendPlainResponse(allocator, stream, 404, "Not Found", notFoundMessage(object_kind));
+        return;
+    };
+    defer allocator.free(object_id);
+
+    const action_owned = (try shared.formValueOwned(allocator, form_body, "action")) orelse {
+        try shared.sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Missing notification action\n");
+        return;
+    };
+    defer allocator.free(action_owned);
+    const action = std.mem.trim(u8, action_owned, " \t\r\n");
+    const subscribe = if (std.mem.eql(u8, action, "subscribe"))
+        true
+    else if (std.mem.eql(u8, action, "unsubscribe"))
+        false
+    else {
+        try shared.sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Unknown notification action\n");
+        return;
+    };
+
+    const current_actor = try shared.currentPrincipalOwned(allocator, repo);
+    defer if (current_actor) |actor_value| allocator.free(actor_value);
+    const actor = current_actor orelse {
+        try shared.sendPlainResponse(allocator, stream, 409, "Conflict", "Gitomi is not initialized\n");
+        return;
+    };
+    const current_role = try index.effectiveWriteRoleForPrincipal(allocator, repo, actor);
+    defer if (current_role) |role| allocator.free(role);
+    if (!currentActorCanManageNotifications(actor, current_role)) {
+        try shared.sendPlainResponse(allocator, stream, 403, "Forbidden", "Forbidden\n");
+        return;
+    }
+
+    createNotificationSubscriptionEvent(allocator, actor, object_kind, object_id, subscribe) catch |err| {
+        try shared.sendPlainResponse(allocator, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), shared.writeFailureMessage(err, "Could not update notification subscription\n"));
+        return;
+    };
+
+    const location = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ redirect_prefix, raw_ref });
+    defer allocator.free(location);
+    try shared.sendRedirect(allocator, stream, location);
+}
+
+fn notFoundMessage(comptime object_kind: []const u8) []const u8 {
+    if (std.mem.eql(u8, object_kind, "pull")) return "Pull request not found\n";
+    return "Issue not found\n";
+}
 
 pub fn renderInboxPage(allocator: Allocator, repo: Repo, target: []const u8, csrf_token: []const u8) ![]u8 {
     if (try shared.renderIndexingPageIfStale(allocator, repo, "Inbox", "inbox", target)) |body| return body;

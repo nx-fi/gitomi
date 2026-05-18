@@ -1,6 +1,6 @@
 const std = @import("std");
 const errors = @import("../../errors.zig");
-const event_mod = @import("../../event.zig");
+const event_builders = @import("../../event/builders.zig");
 const EventWriter = @import("../../event_writer.zig").EventWriter;
 const git = @import("../../git.zig");
 const index = @import("../../index.zig");
@@ -8,6 +8,7 @@ const io = @import("../../io.zig");
 const repo_mod = @import("../../repo.zig");
 const sync_mod = @import("../../sync.zig");
 const util = @import("../../util.zig");
+const import_bot = @import("../import_bot.zig");
 const common = @import("common.zig");
 const exporter = @import("exporter.zig");
 const importer = @import("importer.zig");
@@ -33,8 +34,8 @@ const Options = struct {
     git_sync: bool = true,
     interval_ms: u64 = default_interval_ms,
     max_pages: usize = 10,
-    bot_principal: []const u8 = "import-bot",
-    bot_device: []const u8 = "github",
+    bot_principal: []const u8 = import_bot.principal,
+    bot_device: []const u8 = import_bot.github_device,
     map_file: ?[]const u8 = null,
     include_comments: bool = true,
     include_projects: bool = true,
@@ -60,8 +61,8 @@ pub fn cmdSync(allocator: Allocator, args: []const []const u8) !void {
     var git_sync = true;
     var interval_ms: u64 = default_interval_ms;
     var max_pages: usize = 10;
-    var bot_principal: []const u8 = "import-bot";
-    var bot_device: []const u8 = "github";
+    var bot_principal: []const u8 = import_bot.principal;
+    var bot_device: []const u8 = import_bot.github_device;
     var map_file_arg: ?[]const u8 = null;
     var include_comments = true;
     var include_projects = true;
@@ -373,7 +374,7 @@ fn writeExportAliasEvents(
         defer allocator.free(occurred_at);
 
         const body = switch (mapping.kind) {
-            .issue => try event_mod.buildIssueLegacyAliasJson(
+            .issue => try event_builders.buildIssueLegacyAliasJson(
                 allocator,
                 writer.cfg,
                 writer.nextSeq(),
@@ -387,7 +388,7 @@ fn writeExportAliasEvents(
                     .github_issue_id = positiveI64ToU64(mapping.api_id),
                 },
             ),
-            .pull => try event_mod.buildPullLegacyAliasJson(
+            .pull => try event_builders.buildPullLegacyAliasJson(
                 allocator,
                 writer.cfg,
                 writer.nextSeq(),

@@ -1,6 +1,7 @@
 const std = @import("std");
 const errors = @import("../errors.zig");
-const event_mod = @import("../event.zig");
+const event_validation = @import("../event/validation.zig");
+const event_json = @import("../event/json.zig");
 const git = @import("../git.zig");
 const index = @import("../index.zig");
 const io = @import("../io.zig");
@@ -1416,16 +1417,16 @@ pub fn toolClassAllowed(tool: []const u8, reduce_write: bool, context: GrantCont
 
 pub fn roleAllowsRead(role: ?[]const u8) bool {
     const value = role orelse return false;
-    return event_mod.roleAtLeast(value, "reader");
+    return event_validation.roleAtLeast(value, "reader");
 }
 
 pub fn roleAllowsWriteScope(role: ?[]const u8, key: []const u8) bool {
     const value = role orelse return false;
-    if (std.mem.eql(u8, key, "write-all")) return event_mod.roleAtLeast(value, "owner");
-    if (std.mem.eql(u8, key, "*")) return event_mod.roleAtLeast(value, "owner");
-    if (std.mem.indexOf(u8, key, "acl") != null or std.mem.indexOf(u8, key, "identity") != null) return event_mod.roleAtLeast(value, "owner");
-    if (std.mem.indexOf(u8, key, "comment") != null or std.mem.indexOf(u8, key, "comments") != null) return event_mod.roleAtLeast(value, "reporter");
-    return event_mod.roleAtLeast(value, "maintainer");
+    if (std.mem.eql(u8, key, "write-all")) return event_validation.roleAtLeast(value, "owner");
+    if (std.mem.eql(u8, key, "*")) return event_validation.roleAtLeast(value, "owner");
+    if (std.mem.indexOf(u8, key, "acl") != null or std.mem.indexOf(u8, key, "identity") != null) return event_validation.roleAtLeast(value, "owner");
+    if (std.mem.indexOf(u8, key, "comment") != null or std.mem.indexOf(u8, key, "comments") != null) return event_validation.roleAtLeast(value, "reporter");
+    return event_validation.roleAtLeast(value, "maintainer");
 }
 
 pub fn isWritePermissionValue(value: []const u8) bool {
@@ -1854,14 +1855,14 @@ pub fn parseRunRequest(allocator: Allocator, run_id: []const u8, body: []const u
         else => return error.InvalidEventEnvelope,
     };
 
-    const workflow = event_mod.jsonString(payload.get("workflow")) orelse return error.InvalidEventEnvelope;
-    const event_name = event_mod.jsonString(payload.get("event_name")) orelse "workflow_dispatch";
-    const gitomi_event_type = event_mod.jsonString(payload.get("gitomi_event_type")) orelse "";
-    const schedule_slot = event_mod.jsonString(payload.get("schedule_slot"));
-    const workflow_source_ref = event_mod.jsonString(payload.get("workflow_source_ref"));
-    const workflow_source_oid = event_mod.jsonString(payload.get("workflow_source_oid"));
-    const source_workflow_from = event_mod.jsonString(payload.get("source_workflow_from"));
-    const source_code_from = event_mod.jsonString(payload.get("source_code_from"));
+    const workflow = event_json.jsonString(payload.get("workflow")) orelse return error.InvalidEventEnvelope;
+    const event_name = event_json.jsonString(payload.get("event_name")) orelse "workflow_dispatch";
+    const gitomi_event_type = event_json.jsonString(payload.get("gitomi_event_type")) orelse "";
+    const schedule_slot = event_json.jsonString(payload.get("schedule_slot"));
+    const workflow_source_ref = event_json.jsonString(payload.get("workflow_source_ref"));
+    const workflow_source_oid = event_json.jsonString(payload.get("workflow_source_oid"));
+    const source_workflow_from = event_json.jsonString(payload.get("source_workflow_from"));
+    const source_code_from = event_json.jsonString(payload.get("source_code_from"));
 
     return .{
         .allocator = allocator,
@@ -1869,8 +1870,8 @@ pub fn parseRunRequest(allocator: Allocator, run_id: []const u8, body: []const u
         .workflow = try allocator.dupe(u8, workflow),
         .workflow_source_ref = if (workflow_source_ref) |value| try allocator.dupe(u8, value) else null,
         .workflow_source_oid = if (workflow_source_oid) |value| try allocator.dupe(u8, value) else null,
-        .target_ref = if (event_mod.jsonString(payload.get("target_ref"))) |value| try allocator.dupe(u8, value) else null,
-        .target_oid = if (event_mod.jsonString(payload.get("target_oid"))) |value| try allocator.dupe(u8, value) else null,
+        .target_ref = if (event_json.jsonString(payload.get("target_ref"))) |value| try allocator.dupe(u8, value) else null,
+        .target_oid = if (event_json.jsonString(payload.get("target_oid"))) |value| try allocator.dupe(u8, value) else null,
         .event_name = try allocator.dupe(u8, event_name),
         .gitomi_event_type = try allocator.dupe(u8, gitomi_event_type),
         .schedule_slot = if (schedule_slot) |value| try allocator.dupe(u8, value) else null,

@@ -4,7 +4,6 @@ const pull = @import("../../pr.zig");
 const repo_mod = @import("../../repo.zig");
 const util = @import("../../util.zig");
 const work_items = @import("../../work_items.zig");
-const issues_page = @import("../issues.zig");
 const shared = @import("../shared.zig");
 const zwf = @import("../../zwf.zig");
 
@@ -21,7 +20,9 @@ const appendTemplate = shared.appendTemplate;
 const createPullStringEvent = pull.createPullStringEvent;
 const literalHref = shared.literalHref;
 const pullHref = shared.pullHref;
-const formValueOwned = issues_page.formValueOwned;
+const formValueOwned = shared.formValueOwned;
+const formValuesOwned = shared.formValuesOwned;
+const queryValueOwned = shared.queryValueOwned;
 const sendPlainResponse = shared.sendPlainResponse;
 const sendRedirect = shared.sendRedirect;
 const sqlite = index.sqlite;
@@ -940,21 +941,6 @@ fn queryTextFilterOwned(allocator: Allocator, target: []const u8, name: []const 
     return result;
 }
 
-fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const u8) !?[]u8 {
-    const query_start = std.mem.indexOfScalar(u8, target, '?') orelse return null;
-    var pairs = std.mem.splitScalar(u8, target[query_start + 1 ..], '&');
-    while (pairs.next()) |pair| {
-        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
-        const raw_key = pair[0..eq];
-        const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
-        const key = try issues_page.percentDecodeForm(allocator, raw_key);
-        defer allocator.free(key);
-        if (!std.mem.eql(u8, key, wanted_key)) continue;
-        return try issues_page.percentDecodeForm(allocator, raw_value);
-    }
-    return null;
-}
-
 pub fn handlePullBulkPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
     try index.ensureIndex(allocator, repo);
 
@@ -1045,26 +1031,6 @@ fn writeBulkStringEventOrFail(
     return true;
 }
 
-fn formValuesOwned(allocator: Allocator, body: []const u8, wanted_key: []const u8) !std.ArrayList([]u8) {
-    var values: std.ArrayList([]u8) = .empty;
-    errdefer freeStringList(allocator, &values);
-
-    var pairs = std.mem.splitScalar(u8, body, '&');
-    while (pairs.next()) |pair| {
-        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
-        const raw_key = pair[0..eq];
-        const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
-        const key = try issues_page.percentDecodeForm(allocator, raw_key);
-        defer allocator.free(key);
-        if (!std.mem.eql(u8, key, wanted_key)) continue;
-        const value = try issues_page.percentDecodeForm(allocator, raw_value);
-        errdefer allocator.free(value);
-        try values.append(allocator, value);
-    }
-
-    return values;
-}
-
 fn freeStringList(allocator: Allocator, values: *std.ArrayList([]u8)) void {
     for (values.items) |value| allocator.free(value);
     values.deinit(allocator);
@@ -1074,16 +1040,8 @@ fn pullBulkReturnTargetOwned(allocator: Allocator, form_body: []const u8) ![]u8 
     const owned = (try formValueOwned(allocator, form_body, "return_to")) orelse return allocator.dupe(u8, "/pulls");
     defer allocator.free(owned);
     const value = std.mem.trim(u8, owned, " \t\r\n");
-    if (!isSafePullsReturnTarget(value)) return allocator.dupe(u8, "/pulls");
+    if (!shared.isSafeReturnTarget(value, "/pulls") and !shared.isSafeReturnTarget(value, "/prs")) return allocator.dupe(u8, "/pulls");
     return allocator.dupe(u8, value);
-}
-
-fn isSafePullsReturnTarget(value: []const u8) bool {
-    if (std.mem.indexOfAny(u8, value, "\r\n") != null) return false;
-    if (std.mem.eql(u8, value, "/pulls") or std.mem.eql(u8, value, "/prs")) return true;
-    if (std.mem.startsWith(u8, value, "/pulls?") or std.mem.startsWith(u8, value, "/prs?")) return true;
-    if (std.mem.startsWith(u8, value, "/pulls/") or std.mem.startsWith(u8, value, "/prs/")) return true;
-    return false;
 }
 
 test "pulls toolbar renders search form" {

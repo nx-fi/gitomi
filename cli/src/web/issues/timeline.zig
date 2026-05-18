@@ -1,5 +1,5 @@
 const std = @import("std");
-const event_mod = @import("../../event.zig");
+const event_json = @import("../../event/json.zig");
 const index = @import("../../index.zig");
 const util = @import("../../util.zig");
 const work_items = @import("../../work_items.zig");
@@ -96,49 +96,49 @@ fn appendMessage(
     } else if (std.mem.eql(u8, event_type, "issue.body_set")) {
         try buf.appendSlice(allocator, "edited the description");
     } else if (std.mem.eql(u8, event_type, "issue.state_set")) {
-        try appendStateMessage(buf, allocator, event_mod.jsonString(payload.get("state")) orelse "");
+        try appendStateMessage(buf, allocator, event_json.jsonString(payload.get("state")) orelse "");
     } else if (std.mem.eql(u8, event_type, "issue.priority_set")) {
         try appendTemplate(buf, allocator, "set priority to <span class=\"issue-event-value\">{priority}</span>", .{
-            .priority = event_mod.jsonString(payload.get("priority")) orelse "priority",
+            .priority = event_json.jsonString(payload.get("priority")) orelse "priority",
         });
     } else if (std.mem.eql(u8, event_type, "issue.type_set")) {
         try appendTemplate(buf, allocator, "set type to <span class=\"issue-event-value\">{issue_type}</span>", .{
-            .issue_type = issueTypeLabel(event_mod.jsonString(payload.get("type")) orelse "type"),
+            .issue_type = issueTypeLabel(event_json.jsonString(payload.get("type")) orelse "type"),
         });
     } else if (std.mem.eql(u8, event_type, "issue.status_set")) {
         try appendTemplate(buf, allocator, "set status to <span class=\"issue-event-value\">{status}</span>", .{
-            .status = event_mod.jsonString(payload.get("status")) orelse "status",
+            .status = event_json.jsonString(payload.get("status")) orelse "status",
         });
     } else if (std.mem.eql(u8, event_type, "issue.label_added")) {
         try buf.appendSlice(allocator, "added ");
-        try appendLabel(buf, allocator, db, event_mod.jsonString(payload.get("label")) orelse "label");
+        try appendLabel(buf, allocator, db, event_json.jsonString(payload.get("label")) orelse "label");
     } else if (std.mem.eql(u8, event_type, "issue.label_removed")) {
         try buf.appendSlice(allocator, "removed ");
-        try appendLabel(buf, allocator, db, event_mod.jsonString(payload.get("label")) orelse "label");
+        try appendLabel(buf, allocator, db, event_json.jsonString(payload.get("label")) orelse "label");
     } else if (std.mem.eql(u8, event_type, "issue.assignee_added")) {
         try appendTemplate(buf, allocator, "assigned <span class=\"issue-event-value\">{assignee}</span>", .{
-            .assignee = event_mod.jsonString(payload.get("assignee")) orelse "someone",
+            .assignee = event_json.jsonString(payload.get("assignee")) orelse "someone",
         });
     } else if (std.mem.eql(u8, event_type, "issue.assignee_removed")) {
         try appendTemplate(buf, allocator, "unassigned <span class=\"issue-event-value\">{assignee}</span>", .{
-            .assignee = event_mod.jsonString(payload.get("assignee")) orelse "someone",
+            .assignee = event_json.jsonString(payload.get("assignee")) orelse "someone",
         });
     } else if (std.mem.eql(u8, event_type, "issue.milestone_set")) {
-        try appendMilestoneMessage(buf, allocator, event_mod.jsonString(payload.get("milestone")) orelse "");
+        try appendMilestoneMessage(buf, allocator, event_json.jsonString(payload.get("milestone")) orelse "");
     } else if (std.mem.eql(u8, event_type, "issue.project_added")) {
         try appendProjectMessage(buf, allocator, "added this to", .{
-            .project = event_mod.jsonString(payload.get("project")) orelse "project",
-            .column = event_mod.jsonString(payload.get("column")) orelse "",
+            .project = event_json.jsonString(payload.get("project")) orelse "project",
+            .column = event_json.jsonString(payload.get("column")) orelse "",
         });
     } else if (std.mem.eql(u8, event_type, "issue.project_removed")) {
         try appendProjectMessage(buf, allocator, "removed this from", .{
-            .project = event_mod.jsonString(payload.get("project")) orelse "project",
-            .column = event_mod.jsonString(payload.get("column")) orelse "",
+            .project = event_json.jsonString(payload.get("project")) orelse "project",
+            .column = event_json.jsonString(payload.get("column")) orelse "",
         });
     } else if (std.mem.eql(u8, event_type, "issue.relationship_added") or std.mem.eql(u8, event_type, "issue.relationship_removed")) {
         try appendRelationshipMessage(buf, allocator, db, std.mem.eql(u8, event_type, "issue.relationship_added"), payload);
     } else if (std.mem.eql(u8, event_type, "issue.concurrent_group_added") or std.mem.eql(u8, event_type, "issue.concurrent_group_removed")) {
-        const group = event_mod.jsonString(payload.get("group")) orelse "group";
+        const group = event_json.jsonString(payload.get("group")) orelse "group";
         try appendTemplate(buf, allocator, "{verb} concurrent group <span class=\"issue-sidebar-pill\">{group}</span>", .{
             .verb = if (std.mem.eql(u8, event_type, "issue.concurrent_group_added")) "joined" else "left",
             .group = group,
@@ -151,8 +151,8 @@ fn appendMessage(
 }
 
 fn appendRelationshipMessage(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, added: bool, payload: std.json.ObjectMap) !void {
-    const relationship = event_mod.jsonString(payload.get("kind")) orelse "relationship";
-    const target_id = event_mod.jsonString(payload.get("target_id")) orelse "";
+    const relationship = event_json.jsonString(payload.get("kind")) orelse "relationship";
+    const target_id = event_json.jsonString(payload.get("target_id")) orelse "";
     try appendTemplate(buf, allocator, "{verb} {kind} ", .{
         .verb = if (added) "added" else "removed",
         .kind = relationshipLabel(relationship),
@@ -216,7 +216,7 @@ fn payloadStringEquals(body: []const u8, key: []const u8, expected: []const u8) 
     var parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, body, .{}) catch return false;
     defer parsed.deinit();
     const payload = eventPayload(parsed.value) orelse return false;
-    const value = event_mod.jsonString(payload.get(key)) orelse return false;
+    const value = event_json.jsonString(payload.get(key)) orelse return false;
     return std.mem.eql(u8, value, expected);
 }
 
@@ -255,15 +255,15 @@ fn appendProjectMessage(
 }
 
 fn appendUpdatedMessage(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, payload: std.json.ObjectMap) !void {
-    if (event_mod.jsonString(payload.get("state"))) |state| {
+    if (event_json.jsonString(payload.get("state"))) |state| {
         try appendStateMessage(buf, allocator, state);
-    } else if (event_mod.jsonString(payload.get("milestone"))) |milestone| {
+    } else if (event_json.jsonString(payload.get("milestone"))) |milestone| {
         try appendMilestoneMessage(buf, allocator, milestone);
-    } else if (event_mod.jsonString(payload.get("priority"))) |priority| {
+    } else if (event_json.jsonString(payload.get("priority"))) |priority| {
         try appendTemplate(buf, allocator, "set priority to <span class=\"issue-event-value\">{priority}</span>", .{ .priority = priority });
-    } else if (event_mod.jsonString(payload.get("type"))) |issue_type| {
+    } else if (event_json.jsonString(payload.get("type"))) |issue_type| {
         try appendTemplate(buf, allocator, "set type to <span class=\"issue-event-value\">{issue_type}</span>", .{ .issue_type = issueTypeLabel(issue_type) });
-    } else if (event_mod.jsonString(payload.get("status"))) |status| {
+    } else if (event_json.jsonString(payload.get("status"))) |status| {
         try appendTemplate(buf, allocator, "set status to <span class=\"issue-event-value\">{status}</span>", .{ .status = status });
     } else if (firstStringFromJsonArray(payload, "labels_added")) |label| {
         try buf.appendSlice(allocator, "added ");
@@ -317,8 +317,8 @@ fn firstProjectFromJsonArray(payload: std.json.ObjectMap, key: []const u8) ?Issu
             else => continue,
         };
         return .{
-            .project = event_mod.jsonString(object.get("project")) orelse "project",
-            .column = event_mod.jsonString(object.get("column")) orelse "",
+            .project = event_json.jsonString(object.get("project")) orelse "project",
+            .column = event_json.jsonString(object.get("column")) orelse "",
         };
     }
     return null;

@@ -1,6 +1,5 @@
 const std = @import("std");
 const git = @import("../git.zig");
-const issues_page = @import("issues.zig");
 const repo_mod = @import("../repo.zig");
 const shared = @import("shared.zig");
 const sync = @import("../sync.zig");
@@ -147,11 +146,11 @@ pub fn handleRefsDeletePost(allocator: Allocator, repo: Repo, stream: std.net.St
         return;
     }
 
-    const action_owned = (try issues_page.formValueOwned(allocator, form_body, "action")) orelse try allocator.dupe(u8, "");
+    const action_owned = (try shared.formValueOwned(allocator, form_body, "action")) orelse try allocator.dupe(u8, "");
     defer allocator.free(action_owned);
-    const ref_owned = (try issues_page.formValueOwned(allocator, form_body, "ref")) orelse try allocator.dupe(u8, "");
+    const ref_owned = (try shared.formValueOwned(allocator, form_body, "ref")) orelse try allocator.dupe(u8, "");
     defer allocator.free(ref_owned);
-    const oid_owned = (try issues_page.formValueOwned(allocator, form_body, "oid")) orelse try allocator.dupe(u8, "");
+    const oid_owned = (try shared.formValueOwned(allocator, form_body, "oid")) orelse try allocator.dupe(u8, "");
     defer allocator.free(oid_owned);
 
     const redirect_token = applyRefsDeleteAction(allocator, action_owned, ref_owned, oid_owned) catch |err| {
@@ -456,11 +455,11 @@ fn formValueEquals(allocator: Allocator, body: []const u8, wanted_key: []const u
         const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
         const raw_key = pair[0..eq];
         const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
-        const key = try issues_page.percentDecodeForm(allocator, raw_key);
+        const key = try shared.percentDecodeForm(allocator, raw_key);
         defer allocator.free(key);
         if (!std.mem.eql(u8, key, wanted_key)) continue;
 
-        const value = try issues_page.percentDecodeForm(allocator, raw_value);
+        const value = try shared.percentDecodeForm(allocator, raw_value);
         defer allocator.free(value);
         return std.mem.eql(u8, value, wanted_value);
     }

@@ -1,6 +1,6 @@
 const std = @import("std");
 const errors = @import("../../errors.zig");
-const event_mod = @import("../../event.zig");
+const event_json = @import("../../event/json.zig");
 const git = @import("../../git.zig");
 const index = @import("../../index.zig");
 const io = @import("../../io.zig");
@@ -178,8 +178,8 @@ const MappingStore = struct {
                     return CliError.UserError;
                 },
             };
-            const kind = event_mod.jsonString(root.get("kind")) orelse return CliError.UserError;
-            const id = event_mod.jsonString(root.get("id")) orelse return CliError.UserError;
+            const kind = event_json.jsonString(root.get("kind")) orelse return CliError.UserError;
+            const id = event_json.jsonString(root.get("id")) orelse return CliError.UserError;
             const number = jsonInteger(root.get("number")) orelse return CliError.UserError;
             try self.putMemory(kind, id, number);
             if (number >= self.next_synthetic) self.next_synthetic = number + 1;
@@ -263,9 +263,9 @@ fn lookupMappedObjectIdUnlocked(allocator: Allocator, map_file: []const u8, kind
             .object => |object| object,
             else => return CliError.UserError,
         };
-        const mapped_kind = event_mod.jsonString(root.get("kind")) orelse return CliError.UserError;
+        const mapped_kind = event_json.jsonString(root.get("kind")) orelse return CliError.UserError;
         const mapped_number = jsonInteger(root.get("number")) orelse return CliError.UserError;
-        const id = event_mod.jsonString(root.get("id")) orelse return CliError.UserError;
+        const id = event_json.jsonString(root.get("id")) orelse return CliError.UserError;
         if (std.mem.eql(u8, mapped_kind, kind) and mapped_number == number) return try allocator.dupe(u8, id);
     }
     return null;
@@ -288,8 +288,8 @@ fn mappingExistsUnlocked(allocator: Allocator, map_file: []const u8, kind: []con
             .object => |object| object,
             else => return CliError.UserError,
         };
-        const mapped_kind = event_mod.jsonString(root.get("kind")) orelse return CliError.UserError;
-        const mapped_id = event_mod.jsonString(root.get("id")) orelse return CliError.UserError;
+        const mapped_kind = event_json.jsonString(root.get("kind")) orelse return CliError.UserError;
+        const mapped_id = event_json.jsonString(root.get("id")) orelse return CliError.UserError;
         const mapped_number = jsonInteger(root.get("number")) orelse return CliError.UserError;
         if (!std.mem.eql(u8, mapped_kind, kind)) continue;
         if (std.mem.eql(u8, mapped_id, id) or mapped_number == number) return true;
@@ -472,19 +472,19 @@ fn exportIssueEvent(
         return true;
     }
     if (std.mem.eql(u8, event_type, "issue.label_added")) {
-        try replayOneLabel(allocator, client, "issue", iid, event_mod.jsonString(payload.get("label")) orelse "", true);
+        try replayOneLabel(allocator, client, "issue", iid, event_json.jsonString(payload.get("label")) orelse "", true);
         return true;
     }
     if (std.mem.eql(u8, event_type, "issue.label_removed")) {
-        try replayOneLabel(allocator, client, "issue", iid, event_mod.jsonString(payload.get("label")) orelse "", false);
+        try replayOneLabel(allocator, client, "issue", iid, event_json.jsonString(payload.get("label")) orelse "", false);
         return true;
     }
     if (std.mem.eql(u8, event_type, "issue.assignee_added")) {
-        try replayOneAssignee(allocator, client, "issue", iid, event_mod.jsonString(payload.get("assignee")) orelse "", true);
+        try replayOneAssignee(allocator, client, "issue", iid, event_json.jsonString(payload.get("assignee")) orelse "", true);
         return true;
     }
     if (std.mem.eql(u8, event_type, "issue.assignee_removed")) {
-        try replayOneAssignee(allocator, client, "issue", iid, event_mod.jsonString(payload.get("assignee")) orelse "", false);
+        try replayOneAssignee(allocator, client, "issue", iid, event_json.jsonString(payload.get("assignee")) orelse "", false);
         return true;
     }
     return false;
@@ -554,27 +554,27 @@ fn exportPullEvent(
         return true;
     }
     if (std.mem.eql(u8, event_type, "pull.label_added")) {
-        try replayOneLabel(allocator, client, "pull", iid, event_mod.jsonString(payload.get("label")) orelse "", true);
+        try replayOneLabel(allocator, client, "pull", iid, event_json.jsonString(payload.get("label")) orelse "", true);
         return true;
     }
     if (std.mem.eql(u8, event_type, "pull.label_removed")) {
-        try replayOneLabel(allocator, client, "pull", iid, event_mod.jsonString(payload.get("label")) orelse "", false);
+        try replayOneLabel(allocator, client, "pull", iid, event_json.jsonString(payload.get("label")) orelse "", false);
         return true;
     }
     if (std.mem.eql(u8, event_type, "pull.assignee_added")) {
-        try replayOneAssignee(allocator, client, "pull", iid, event_mod.jsonString(payload.get("assignee")) orelse "", true);
+        try replayOneAssignee(allocator, client, "pull", iid, event_json.jsonString(payload.get("assignee")) orelse "", true);
         return true;
     }
     if (std.mem.eql(u8, event_type, "pull.assignee_removed")) {
-        try replayOneAssignee(allocator, client, "pull", iid, event_mod.jsonString(payload.get("assignee")) orelse "", false);
+        try replayOneAssignee(allocator, client, "pull", iid, event_json.jsonString(payload.get("assignee")) orelse "", false);
         return true;
     }
     if (std.mem.eql(u8, event_type, "pull.reviewer_added")) {
-        try replayOneReviewer(allocator, client, iid, event_mod.jsonString(payload.get("reviewer")) orelse "", true);
+        try replayOneReviewer(allocator, client, iid, event_json.jsonString(payload.get("reviewer")) orelse "", true);
         return true;
     }
     if (std.mem.eql(u8, event_type, "pull.reviewer_removed")) {
-        try replayOneReviewer(allocator, client, iid, event_mod.jsonString(payload.get("reviewer")) orelse "", false);
+        try replayOneReviewer(allocator, client, iid, event_json.jsonString(payload.get("reviewer")) orelse "", false);
         return true;
     }
     return false;
@@ -591,10 +591,10 @@ fn exportCommentEvent(
 ) !bool {
     if (std.mem.eql(u8, event_type, "comment.added")) {
         if (try mappings.get("comment", comment_id) != null) return false;
-        const parent_kind = event_mod.jsonString(payload.get("parent_kind")) orelse return false;
-        const parent_id = event_mod.jsonString(payload.get("parent_id")) orelse return false;
+        const parent_kind = event_json.jsonString(payload.get("parent_kind")) orelse return false;
+        const parent_id = event_json.jsonString(payload.get("parent_id")) orelse return false;
         const parent_iid = (try mappings.get(parent_kind, parent_id)) orelse return false;
-        const request_body = try gitlabNoteBody(allocator, event_mod.jsonString(payload.get("body")) orelse "");
+        const request_body = try gitlabNoteBody(allocator, event_json.jsonString(payload.get("body")) orelse "");
         defer allocator.free(request_body);
         const path = try noteCollectionPath(allocator, client, parent_kind, parent_iid);
         defer allocator.free(path);
@@ -612,7 +612,7 @@ fn exportCommentEvent(
     const body_text = if (std.mem.eql(u8, event_type, "comment.redacted"))
         "[redacted]"
     else
-        event_mod.jsonString(payload.get("body")) orelse return false;
+        event_json.jsonString(payload.get("body")) orelse return false;
     const request_body = try gitlabNoteBody(allocator, body_text);
     defer allocator.free(request_body);
     const path = try notePath(allocator, client, parent_info.parent_kind, parent_iid, note_id);
@@ -627,8 +627,8 @@ pub fn gitlabIssueCreateBody(allocator: Allocator, payload: std.json.ObjectMap, 
     errdefer buf.deinit(allocator);
     var first = true;
     try buf.append(allocator, '{');
-    try appendStringField(&buf, allocator, &first, "title", event_mod.jsonString(payload.get("title")) orelse "(untitled)");
-    if (event_mod.jsonString(payload.get("body"))) |body| try appendStringField(&buf, allocator, &first, "description", body);
+    try appendStringField(&buf, allocator, &first, "title", event_json.jsonString(payload.get("title")) orelse "(untitled)");
+    if (event_json.jsonString(payload.get("body"))) |body| try appendStringField(&buf, allocator, &first, "description", body);
     try common.appendStringArrayAsCommaField(&buf, allocator, &first, "labels", payload.get("labels"));
     try appendIntegerArrayField(&buf, allocator, &first, "assignee_ids", assignee_ids);
     try buf.append(allocator, '}');
@@ -640,10 +640,10 @@ pub fn gitlabMergeRequestCreateBody(allocator: Allocator, payload: std.json.Obje
     errdefer buf.deinit(allocator);
     var first = true;
     try buf.append(allocator, '{');
-    try appendStringField(&buf, allocator, &first, "title", event_mod.jsonString(payload.get("title")) orelse "(untitled)");
-    if (event_mod.jsonString(payload.get("body"))) |body| try appendStringField(&buf, allocator, &first, "description", body);
-    try appendStringField(&buf, allocator, &first, "target_branch", event_mod.jsonString(payload.get("base_ref")) orelse "main");
-    try appendStringField(&buf, allocator, &first, "source_branch", event_mod.jsonString(payload.get("head_ref")) orelse "unknown");
+    try appendStringField(&buf, allocator, &first, "title", event_json.jsonString(payload.get("title")) orelse "(untitled)");
+    if (event_json.jsonString(payload.get("body"))) |body| try appendStringField(&buf, allocator, &first, "description", body);
+    try appendStringField(&buf, allocator, &first, "target_branch", event_json.jsonString(payload.get("base_ref")) orelse "main");
+    try appendStringField(&buf, allocator, &first, "source_branch", event_json.jsonString(payload.get("head_ref")) orelse "unknown");
     try common.appendStringArrayAsCommaField(&buf, allocator, &first, "labels", payload.get("labels"));
     try appendIntegerArrayField(&buf, allocator, &first, "assignee_ids", assignee_ids);
     try appendIntegerArrayField(&buf, allocator, &first, "reviewer_ids", reviewer_ids);
@@ -656,9 +656,9 @@ pub fn gitlabIssuePatchBody(allocator: Allocator, payload: std.json.ObjectMap) !
     errdefer buf.deinit(allocator);
     var first = true;
     try buf.append(allocator, '{');
-    if (event_mod.jsonString(payload.get("title"))) |value| try appendStringField(&buf, allocator, &first, "title", value);
-    if (event_mod.jsonString(payload.get("body"))) |value| try appendStringField(&buf, allocator, &first, "description", value);
-    if (stateEvent(event_mod.jsonString(payload.get("state")))) |value| try appendStringField(&buf, allocator, &first, "state_event", value);
+    if (event_json.jsonString(payload.get("title"))) |value| try appendStringField(&buf, allocator, &first, "title", value);
+    if (event_json.jsonString(payload.get("body"))) |value| try appendStringField(&buf, allocator, &first, "description", value);
+    if (stateEvent(event_json.jsonString(payload.get("state")))) |value| try appendStringField(&buf, allocator, &first, "state_event", value);
     try buf.append(allocator, '}');
     if (first) {
         buf.deinit(allocator);
@@ -672,10 +672,10 @@ pub fn gitlabMergeRequestPatchBody(allocator: Allocator, payload: std.json.Objec
     errdefer buf.deinit(allocator);
     var first = true;
     try buf.append(allocator, '{');
-    if (event_mod.jsonString(payload.get("title"))) |value| try appendStringField(&buf, allocator, &first, "title", value);
-    if (event_mod.jsonString(payload.get("body"))) |value| try appendStringField(&buf, allocator, &first, "description", value);
-    if (event_mod.jsonString(payload.get("base_ref"))) |value| try appendStringField(&buf, allocator, &first, "target_branch", value);
-    if (stateEvent(event_mod.jsonString(payload.get("state")))) |value| try appendStringField(&buf, allocator, &first, "state_event", value);
+    if (event_json.jsonString(payload.get("title"))) |value| try appendStringField(&buf, allocator, &first, "title", value);
+    if (event_json.jsonString(payload.get("body"))) |value| try appendStringField(&buf, allocator, &first, "description", value);
+    if (event_json.jsonString(payload.get("base_ref"))) |value| try appendStringField(&buf, allocator, &first, "target_branch", value);
+    if (stateEvent(event_json.jsonString(payload.get("state")))) |value| try appendStringField(&buf, allocator, &first, "state_event", value);
     try buf.append(allocator, '}');
     if (first) {
         buf.deinit(allocator);
@@ -791,7 +791,7 @@ fn resolveUserIdsFromPayload(allocator: Allocator, client: GitLabClient, value: 
     var ids: std.ArrayList(i64) = .empty;
     errdefer ids.deinit(allocator);
     for (array.items) |item| {
-        const username = event_mod.jsonString(item) orelse continue;
+        const username = event_json.jsonString(item) orelse continue;
         if (try resolveUserId(allocator, client, username)) |id| try appendUniqueId(allocator, &ids, id);
     }
     return try ids.toOwnedSlice(allocator);

@@ -1,5 +1,5 @@
 const std = @import("std");
-const event_mod = @import("../../event.zig");
+const event_json = @import("../../event/json.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -162,7 +162,7 @@ pub fn projectGroupFieldFromConfig(allocator: Allocator, config_json: []const u8
         .object => |object| object,
         else => return .status,
     };
-    const group_by = event_mod.jsonString(root.get("group_by")) orelse return .status;
+    const group_by = event_json.jsonString(root.get("group_by")) orelse return .status;
     if (std.mem.eql(u8, group_by, "issue.priority") or std.mem.eql(u8, group_by, "priority")) return .priority;
     return .status;
 }
@@ -217,13 +217,13 @@ pub fn projectViewDefaultsFromConfig(allocator: Allocator, config_json: []const 
     };
 
     var defaults: ProjectViewDefaults = .{};
-    if (event_mod.jsonString(defaults_object.get("issue.status")) orelse event_mod.jsonString(defaults_object.get("status"))) |status| {
+    if (event_json.jsonString(defaults_object.get("issue.status")) orelse event_json.jsonString(defaults_object.get("status"))) |status| {
         if (canonicalProjectStatus(status)) |canonical| {
             defaults.status = canonical;
             defaults.status_explicit = true;
         }
     }
-    if (event_mod.jsonString(defaults_object.get("issue.priority")) orelse event_mod.jsonString(defaults_object.get("priority"))) |priority| {
+    if (event_json.jsonString(defaults_object.get("issue.priority")) orelse event_json.jsonString(defaults_object.get("priority"))) |priority| {
         if (canonicalProjectPriority(priority)) |canonical| {
             defaults.priority = canonical;
             defaults.priority_explicit = true;
@@ -248,19 +248,19 @@ pub fn projectIssueFilterFromConfig(allocator: Allocator, config_json: []const u
 fn applyProjectIssueFilterValue(filter: *ProjectIssueFilter, value: std.json.Value, current_principal: []const u8) void {
     switch (value) {
         .object => |object| {
-            if (event_mod.jsonString(object.get("assignee"))) |assignee| {
+            if (event_json.jsonString(object.get("assignee"))) |assignee| {
                 if (asciiEqlIgnoreCase(assignee, "@me")) {
                     filter.require_assignee = true;
                     filter.assignee = current_principal;
                 }
             }
-            if (event_mod.jsonString(object.get("label"))) |label| {
+            if (event_json.jsonString(object.get("label"))) |label| {
                 if (asciiEqlIgnoreCase(label, "bug")) filter.bug_label = true;
             }
-            if (event_mod.jsonString(object.get("issue.type"))) |issue_type| {
+            if (event_json.jsonString(object.get("issue.type"))) |issue_type| {
                 if (asciiEqlIgnoreCase(issue_type, "bug")) filter.bug_label = true;
             }
-            if (event_mod.jsonString(object.get("project.iteration"))) |iteration| {
+            if (event_json.jsonString(object.get("project.iteration"))) |iteration| {
                 if (asciiEqlIgnoreCase(iteration, "current")) filter.current_iteration = true;
             }
             if (object.get("any")) |any_value| {

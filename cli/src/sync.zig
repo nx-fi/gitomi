@@ -1,7 +1,9 @@
 const std = @import("std");
 const auth_binding = @import("auth_binding.zig");
 const errors = @import("errors.zig");
-const event_mod = @import("event.zig");
+const event_model = @import("event/model.zig");
+const event_validation = @import("event/validation.zig");
+const actor_sequence = @import("event/actor_sequence.zig");
 const git = @import("git.zig");
 const inbox_commit = @import("inbox_commit.zig");
 const io = @import("io.zig");
@@ -20,9 +22,9 @@ const isAncestor = git.isAncestor;
 const runCommand = git.runCommand;
 const max_git_output = git.max_git_output;
 const sanitizeRefSegment = util.sanitizeRefSegment;
-const validateEventEnvelope = event_mod.validateEventEnvelope;
-const parseValidatedEnvelope = event_mod.parseValidatedEnvelope;
-const ActorSeqTracker = event_mod.ActorSeqLastTracker;
+const validateEventEnvelope = event_validation.validateEventEnvelope;
+const parseValidatedEnvelope = event_validation.parseValidatedEnvelope;
+const ActorSeqTracker = actor_sequence.LastSeqTracker;
 
 pub const InboxPushError = error{
     RemoteRejected,
@@ -714,7 +716,7 @@ fn validateInboxRangeIntoWithVerifier(
 fn validateEnvelopeActorMatchesRef(
     commit: []const u8,
     ref: []const u8,
-    envelope: event_mod.ValidatedEnvelope,
+    envelope: event_model.ValidatedEnvelope,
     expected_identity: inbox_commit.RefIdentity,
 ) !void {
     if (inbox_commit.actorMatchesRefIdentity(expected_identity, envelope.actor_principal, envelope.actor_device)) return;
@@ -765,7 +767,7 @@ pub fn validateInboxCommit(
     commit: []const u8,
     expected_first_parent: ?[]const u8,
     empty_tree: []const u8,
-) !event_mod.ValidatedEnvelope {
+) !event_model.ValidatedEnvelope {
     const log = try gitChecked(allocator, &.{ "log", "-1", inbox_commit.log_format, commit });
     defer allocator.free(log);
 
@@ -788,7 +790,7 @@ fn validateInboxRecord(
     record: inbox_commit.Record,
     expected_first_parent: ?[]const u8,
     empty_tree: []const u8,
-) !event_mod.ValidatedEnvelope {
+) !event_model.ValidatedEnvelope {
     if (!std.mem.eql(u8, record.tree, empty_tree)) {
         try eprint("gt sync: rejecting {s}: inbox event does not use the empty tree\n", .{record.commit});
         return CliError.UserError;
@@ -877,8 +879,8 @@ pub fn verifyGenesisCommitSignature(allocator: Allocator, commit: []const u8, ex
 }
 
 fn validateEnvelopeParentHashes(allocator: Allocator, commit: []const u8, parents: []const u8, body: []const u8) !void {
-    if (try event_mod.validateParentHashes(allocator, parents, body)) |failure| {
-        try eprint("gt sync: rejecting {s}: {s}\n", .{ commit, event_mod.parentHashValidationMessage(failure) });
+    if (try event_validation.validateParentHashes(allocator, parents, body)) |failure| {
+        try eprint("gt sync: rejecting {s}: {s}\n", .{ commit, event_validation.parentHashValidationMessage(failure) });
         return CliError.UserError;
     }
 }
@@ -955,7 +957,7 @@ test "envelope repo id validation rejects foreign repositories" {
 
 test "envelope actor validation rejects mismatched inbox refs" {
     const allocator = std.testing.allocator;
-    var envelope = event_mod.ValidatedEnvelope{
+    var envelope = event_model.ValidatedEnvelope{
         .allocator = allocator,
         .repo_id = try allocator.dupe(u8, "018f0000-0000-7000-8000-000000000001"),
         .event_uuid = try allocator.dupe(u8, "018f0000-0000-7000-8000-000000000002"),

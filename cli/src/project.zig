@@ -1,7 +1,8 @@
 const std = @import("std");
 const cmd_common = @import("cmd_common.zig");
 const errors = @import("errors.zig");
-const event_mod = @import("event.zig");
+const event_model = @import("event/model.zig");
+const event_builders = @import("event/builders.zig");
 const event_writer_mod = @import("event_writer.zig");
 const index = @import("index.zig");
 const io = @import("io.zig");
@@ -35,28 +36,22 @@ pub fn createProjectCreatedEvent(
     var writer = try EventWriter.init(allocator, "gt project create");
     defer writer.deinit();
 
-    const project_id = try newUuidV7(allocator);
-    errdefer allocator.free(project_id);
-    const event_uuid = try newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try newUuidV7(allocator);
-    defer allocator.free(idem);
-    const occurred_at = try rfc3339Now(allocator);
-    defer allocator.free(occurred_at);
-    const event_parents = writer.eventParents();
+    var envelope = try writer.prepareEnvelope();
+    defer envelope.deinit();
+    const project_id = envelope.entity_id;
     const effective_columns = if (columns.len == 0) default_columns[0..] else columns;
     const slug = try optionalSanitizedRef(allocator, name);
     defer if (slug) |value| allocator.free(value);
 
-    const event_body = try event_mod.buildProjectCreatedJson(
+    const event_body = try event_builders.buildProjectCreatedJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
         project_id,
-        event_uuid,
-        idem,
-        occurred_at,
-        event_parents,
+        envelope.event_uuid,
+        envelope.idem,
+        envelope.occurred_at,
+        envelope.event_parents,
         name,
         description,
         slug,
@@ -64,16 +59,13 @@ pub fn createProjectCreatedEvent(
     );
     defer allocator.free(event_body);
 
-    const subject = try std.fmt.allocPrint(allocator, "project.created @{s} {s}", .{ project_id[0..7], name });
+    const project_ref = project_id[0..7];
+    const subject = try std.fmt.allocPrint(allocator, "project.created @{s} {s}", .{ project_ref, name });
     defer allocator.free(subject);
-    const commit_oid = try writer.write("gt project", subject, event_body);
+    const commit_oid = try writer.writeAndPrint("gt project", subject, event_body, "created project @", project_ref, project_id);
     defer allocator.free(commit_oid);
 
-    try out("created project @{s}\n", .{project_id[0..7]});
-    try out("  id:     {s}\n", .{project_id});
-    try out("  commit: {s}\n", .{commit_oid});
-    try out("  ref:    {s}\n", .{writer.inbox_ref});
-    return project_id;
+    return envelope.takeEntityId();
 }
 
 pub fn stageProjectCreatedEvent(
@@ -95,7 +87,7 @@ pub fn stageProjectCreatedEvent(
     const slug = try optionalSanitizedRef(allocator, name);
     defer if (slug) |value| allocator.free(value);
 
-    const event_body = try event_mod.buildProjectCreatedJson(
+    const event_body = try event_builders.buildProjectCreatedJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
@@ -138,7 +130,7 @@ pub fn createProjectColumnEvent(
     defer if (generated_ref) |value| allocator.free(value);
     const effective_ref = column_ref orelse generated_ref;
 
-    const event_body = try event_mod.buildProjectColumnEventJson(
+    const event_body = try event_builders.buildProjectColumnEventJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
@@ -166,7 +158,7 @@ pub fn createProjectColumnEvent(
 pub fn createProjectUpdatedEvent(
     allocator: Allocator,
     project_id: []const u8,
-    update: event_mod.ProjectUpdate,
+    update: event_model.ProjectUpdate,
 ) !void {
     var writer = try EventWriter.init(allocator, "gt project edit");
     defer writer.deinit();
@@ -178,7 +170,7 @@ pub fn createProjectUpdatedEvent(
     const occurred_at = try rfc3339Now(allocator);
     defer allocator.free(occurred_at);
 
-    const event_body = try event_mod.buildProjectUpdatedJson(
+    const event_body = try event_builders.buildProjectUpdatedJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
@@ -214,24 +206,19 @@ pub fn createProjectFieldCreatedEvent(
     var writer = try EventWriter.init(allocator, "gt project field create");
     defer writer.deinit();
 
-    const field_id = try newUuidV7(allocator);
-    errdefer allocator.free(field_id);
-    const event_uuid = try newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try newUuidV7(allocator);
-    defer allocator.free(idem);
-    const occurred_at = try rfc3339Now(allocator);
-    defer allocator.free(occurred_at);
+    var envelope = try writer.prepareEnvelope();
+    defer envelope.deinit();
+    const field_id = envelope.entity_id;
 
-    const event_body = try event_mod.buildProjectFieldCreatedJson(
+    const event_body = try event_builders.buildProjectFieldCreatedJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
         project_id,
-        event_uuid,
-        idem,
-        occurred_at,
-        writer.eventParents(),
+        envelope.event_uuid,
+        envelope.idem,
+        envelope.occurred_at,
+        envelope.event_parents,
         field_id,
         key,
         name,
@@ -251,7 +238,7 @@ pub fn createProjectFieldCreatedEvent(
     try out("  field:  {s}\n", .{field_id});
     try out("  commit: {s}\n", .{commit_oid});
     try out("  ref:    {s}\n", .{writer.inbox_ref});
-    return field_id;
+    return envelope.takeEntityId();
 }
 
 pub fn stageProjectFieldCreatedEvent(
@@ -265,24 +252,19 @@ pub fn stageProjectFieldCreatedEvent(
     required: ?bool,
     default_value_json: ?[]const u8,
 ) ![]u8 {
-    const field_id = try newUuidV7(allocator);
-    errdefer allocator.free(field_id);
-    const event_uuid = try newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try newUuidV7(allocator);
-    defer allocator.free(idem);
-    const occurred_at = try rfc3339Now(allocator);
-    defer allocator.free(occurred_at);
+    var envelope = try writer.prepareStagedEnvelope();
+    defer envelope.deinit();
+    const field_id = envelope.entity_id;
 
-    const event_body = try event_mod.buildProjectFieldCreatedJson(
+    const event_body = try event_builders.buildProjectFieldCreatedJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
         project_id,
-        event_uuid,
-        idem,
-        occurred_at,
-        writer.stagedEventParents(),
+        envelope.event_uuid,
+        envelope.idem,
+        envelope.occurred_at,
+        envelope.event_parents,
         field_id,
         key,
         name,
@@ -297,14 +279,14 @@ pub fn stageProjectFieldCreatedEvent(
     defer allocator.free(subject);
     const commit_oid = try writer.stage("gt project", subject, event_body);
     defer allocator.free(commit_oid);
-    return field_id;
+    return envelope.takeEntityId();
 }
 
 pub fn createProjectFieldUpdatedEvent(
     allocator: Allocator,
     project_id: []const u8,
     field_id: []const u8,
-    update: event_mod.ProjectFieldUpdate,
+    update: event_model.ProjectFieldUpdate,
 ) !void {
     var writer = try EventWriter.init(allocator, "gt project field update");
     defer writer.deinit();
@@ -316,7 +298,7 @@ pub fn createProjectFieldUpdatedEvent(
     const occurred_at = try rfc3339Now(allocator);
     defer allocator.free(occurred_at);
 
-    const event_body = try event_mod.buildProjectFieldUpdatedJson(
+    const event_body = try event_builders.buildProjectFieldUpdatedJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
@@ -351,7 +333,7 @@ pub fn createProjectFieldRemovedEvent(allocator: Allocator, project_id: []const 
     const occurred_at = try rfc3339Now(allocator);
     defer allocator.free(occurred_at);
 
-    const event_body = try event_mod.buildProjectFieldRemovedJson(
+    const event_body = try event_builders.buildProjectFieldRemovedJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
@@ -385,26 +367,20 @@ pub fn createProjectFieldOptionAddedEvent(
     var writer = try EventWriter.init(allocator, "gt project field-option add");
     defer writer.deinit();
 
-    const option_id = try newUuidV7(allocator);
-    defer allocator.free(option_id);
-    const event_uuid = try newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try newUuidV7(allocator);
-    defer allocator.free(idem);
-    const occurred_at = try rfc3339Now(allocator);
-    defer allocator.free(occurred_at);
+    var envelope = try writer.prepareEnvelope();
+    defer envelope.deinit();
 
-    const event_body = try event_mod.buildProjectFieldOptionAddedJson(
+    const event_body = try event_builders.buildProjectFieldOptionAddedJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
         project_id,
-        event_uuid,
-        idem,
-        occurred_at,
-        writer.eventParents(),
+        envelope.event_uuid,
+        envelope.idem,
+        envelope.occurred_at,
+        envelope.event_parents,
         field_id,
-        option_id,
+        envelope.entity_id,
         name,
         color,
         position,
@@ -417,7 +393,7 @@ pub fn createProjectFieldOptionAddedEvent(
     defer allocator.free(commit_oid);
 
     try out("project.field_option_added @{s}\n", .{project_id[0..@min(project_id.len, 7)]});
-    try out("  option: {s}\n", .{option_id});
+    try out("  option: {s}\n", .{envelope.entity_id});
     try out("  commit: {s}\n", .{commit_oid});
     try out("  ref:    {s}\n", .{writer.inbox_ref});
 }
@@ -431,26 +407,20 @@ pub fn stageProjectFieldOptionAddedEvent(
     color: ?[]const u8,
     position: ?i64,
 ) !void {
-    const option_id = try newUuidV7(allocator);
-    defer allocator.free(option_id);
-    const event_uuid = try newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try newUuidV7(allocator);
-    defer allocator.free(idem);
-    const occurred_at = try rfc3339Now(allocator);
-    defer allocator.free(occurred_at);
+    var envelope = try writer.prepareStagedEnvelope();
+    defer envelope.deinit();
 
-    const event_body = try event_mod.buildProjectFieldOptionAddedJson(
+    const event_body = try event_builders.buildProjectFieldOptionAddedJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
         project_id,
-        event_uuid,
-        idem,
-        occurred_at,
-        writer.stagedEventParents(),
+        envelope.event_uuid,
+        envelope.idem,
+        envelope.occurred_at,
+        envelope.event_parents,
         field_id,
-        option_id,
+        envelope.entity_id,
         name,
         color,
         position,
@@ -468,7 +438,7 @@ pub fn createProjectFieldOptionUpdatedEvent(
     project_id: []const u8,
     field_id: []const u8,
     option_id: []const u8,
-    update: event_mod.ProjectFieldOptionUpdate,
+    update: event_model.ProjectFieldOptionUpdate,
 ) !void {
     var writer = try EventWriter.init(allocator, "gt project field-option update");
     defer writer.deinit();
@@ -480,7 +450,7 @@ pub fn createProjectFieldOptionUpdatedEvent(
     const occurred_at = try rfc3339Now(allocator);
     defer allocator.free(occurred_at);
 
-    const event_body = try event_mod.buildProjectFieldOptionUpdatedJson(
+    const event_body = try event_builders.buildProjectFieldOptionUpdatedJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
@@ -516,7 +486,7 @@ pub fn createProjectFieldOptionRemovedEvent(allocator: Allocator, project_id: []
     const occurred_at = try rfc3339Now(allocator);
     defer allocator.free(occurred_at);
 
-    const event_body = try event_mod.buildProjectFieldOptionRemovedJson(
+    const event_body = try event_builders.buildProjectFieldOptionRemovedJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
@@ -551,25 +521,19 @@ pub fn createProjectViewCreatedEvent(
     var writer = try EventWriter.init(allocator, "gt project view create");
     defer writer.deinit();
 
-    const view_id = try newUuidV7(allocator);
-    defer allocator.free(view_id);
-    const event_uuid = try newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try newUuidV7(allocator);
-    defer allocator.free(idem);
-    const occurred_at = try rfc3339Now(allocator);
-    defer allocator.free(occurred_at);
+    var envelope = try writer.prepareEnvelope();
+    defer envelope.deinit();
 
-    const event_body = try event_mod.buildProjectViewCreatedJson(
+    const event_body = try event_builders.buildProjectViewCreatedJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
         project_id,
-        event_uuid,
-        idem,
-        occurred_at,
-        writer.eventParents(),
-        view_id,
+        envelope.event_uuid,
+        envelope.idem,
+        envelope.occurred_at,
+        envelope.event_parents,
+        envelope.entity_id,
         name,
         layout,
         position,
@@ -583,7 +547,7 @@ pub fn createProjectViewCreatedEvent(
     defer allocator.free(commit_oid);
 
     try out("project.view_created @{s}\n", .{project_id[0..@min(project_id.len, 7)]});
-    try out("  view:   {s}\n", .{view_id});
+    try out("  view:   {s}\n", .{envelope.entity_id});
     try out("  commit: {s}\n", .{commit_oid});
     try out("  ref:    {s}\n", .{writer.inbox_ref});
 }
@@ -597,25 +561,19 @@ pub fn stageProjectViewCreatedEvent(
     position: ?i64,
     config_json: ?[]const u8,
 ) !void {
-    const view_id = try newUuidV7(allocator);
-    defer allocator.free(view_id);
-    const event_uuid = try newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try newUuidV7(allocator);
-    defer allocator.free(idem);
-    const occurred_at = try rfc3339Now(allocator);
-    defer allocator.free(occurred_at);
+    var envelope = try writer.prepareStagedEnvelope();
+    defer envelope.deinit();
 
-    const event_body = try event_mod.buildProjectViewCreatedJson(
+    const event_body = try event_builders.buildProjectViewCreatedJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
         project_id,
-        event_uuid,
-        idem,
-        occurred_at,
-        writer.stagedEventParents(),
-        view_id,
+        envelope.event_uuid,
+        envelope.idem,
+        envelope.occurred_at,
+        envelope.event_parents,
+        envelope.entity_id,
         name,
         layout,
         position,
@@ -633,7 +591,7 @@ pub fn createProjectViewUpdatedEvent(
     allocator: Allocator,
     project_id: []const u8,
     view_id: []const u8,
-    update: event_mod.ProjectViewUpdate,
+    update: event_model.ProjectViewUpdate,
 ) !void {
     var writer = try EventWriter.init(allocator, "gt project view update");
     defer writer.deinit();
@@ -645,7 +603,7 @@ pub fn createProjectViewUpdatedEvent(
     const occurred_at = try rfc3339Now(allocator);
     defer allocator.free(occurred_at);
 
-    const event_body = try event_mod.buildProjectViewUpdatedJson(
+    const event_body = try event_builders.buildProjectViewUpdatedJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
@@ -680,7 +638,7 @@ pub fn createProjectViewRemovedEvent(allocator: Allocator, project_id: []const u
     const occurred_at = try rfc3339Now(allocator);
     defer allocator.free(occurred_at);
 
-    const event_body = try event_mod.buildProjectViewRemovedJson(
+    const event_body = try event_builders.buildProjectViewRemovedJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
@@ -769,7 +727,7 @@ pub fn cmdProject(allocator: Allocator, args: []const []const u8) !void {
             try io.eprint("gt project edit: PROJECT is required\n", .{});
             return CliError.UserError;
         }
-        var update = event_mod.ProjectUpdate{};
+        var update = event_model.ProjectUpdate{};
         var i: usize = 2;
         while (i < args.len) : (i += 1) {
             const arg = args[i];
@@ -884,7 +842,7 @@ pub fn cmdProject(allocator: Allocator, args: []const []const u8) !void {
             }
             const field_id = try command_repo.resolveProjectFieldId(project_id, args[3]);
             defer allocator.free(field_id);
-            var update = event_mod.ProjectFieldUpdate{};
+            var update = event_model.ProjectFieldUpdate{};
             var i: usize = 4;
             while (i < args.len) : (i += 1) {
                 const arg = args[i];
@@ -988,7 +946,7 @@ pub fn cmdProject(allocator: Allocator, args: []const []const u8) !void {
             }
             const option_id = try command_repo.resolveProjectFieldOptionId(project_id, field_id, args[4]);
             defer allocator.free(option_id);
-            var update = event_mod.ProjectFieldOptionUpdate{};
+            var update = event_model.ProjectFieldOptionUpdate{};
             var i: usize = 5;
             while (i < args.len) : (i += 1) {
                 const arg = args[i];
@@ -1087,7 +1045,7 @@ pub fn cmdProject(allocator: Allocator, args: []const []const u8) !void {
             }
             const view_id = try command_repo.resolveProjectViewId(project_id, args[3]);
             defer allocator.free(view_id);
-            var update = event_mod.ProjectViewUpdate{};
+            var update = event_model.ProjectViewUpdate{};
             var i: usize = 4;
             while (i < args.len) : (i += 1) {
                 const arg = args[i];

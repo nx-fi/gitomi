@@ -1,5 +1,5 @@
 const std = @import("std");
-const event_mod = @import("../../event.zig");
+const event_json = @import("../../event/json.zig");
 const index = @import("../../index.zig");
 const project_views = @import("views.zig");
 
@@ -287,7 +287,7 @@ pub fn projectTableFieldsFromConfig(allocator: Allocator, db: *SqliteDb, project
     };
     for (fields_array.items) |field_value| {
         if (result.len == max_project_table_fields) break;
-        const field_ref = event_mod.jsonString(field_value) orelse continue;
+        const field_ref = event_json.jsonString(field_value) orelse continue;
         const field_key = projectFieldKeyFromViewRef(field_ref) orelse continue;
         if (projectTableFieldsContains(&result, field_key)) continue;
         if (try loadProjectTableField(allocator, db, project, field_key)) |field| {

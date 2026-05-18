@@ -1,5 +1,7 @@
 const std = @import("std");
-const event_mod = @import("../../event.zig");
+const event_model = @import("../../event/model.zig");
+const event_builders = @import("../../event/builders.zig");
+const event_json = @import("../../event/json.zig");
 const event_writer_mod = @import("../../event_writer.zig");
 const errors = @import("../../errors.zig");
 const git = @import("../../git.zig");
@@ -9,6 +11,8 @@ const json_writer = @import("../../json_writer.zig");
 const milestone_mod = @import("../../milestone.zig");
 const repo_mod = @import("../../repo.zig");
 const util = @import("../../util.zig");
+const import_common = @import("../import_common.zig");
+const import_bot = @import("../import_bot.zig");
 const common = @import("common.zig");
 const exporter = @import("exporter.zig");
 
@@ -45,8 +49,6 @@ const firstJsonValue3 = common.firstJsonValue3;
 const githubStateEquals = common.githubStateEquals;
 const ensureMilestoneCreatedForTitleStaged = milestone_mod.ensureMilestoneCreatedForTitleStaged;
 
-const import_bot_principal = "import-bot";
-const import_bot_device = "github";
 const github_import_capability = "github.import";
 const github_import_scope = "github:*";
 
@@ -71,8 +73,8 @@ pub const ImportOptions = struct {
     from_file: ?[]const u8 = null,
     include_comments: bool = true,
     include_projects: bool = true,
-    bot_principal: []const u8 = import_bot_principal,
-    bot_device: []const u8 = import_bot_device,
+    bot_principal: []const u8 = import_bot.principal,
+    bot_device: []const u8 = import_bot.github_device,
     max_pages: usize = 10,
     use_gh: bool = false,
     mode: ApiMode = .graphql,
@@ -201,8 +203,8 @@ pub const ImportStats = struct {
 };
 
 pub const WebhookImportOptions = struct {
-    bot_principal: []const u8 = import_bot_principal,
-    bot_device: []const u8 = import_bot_device,
+    bot_principal: []const u8 = import_bot.principal,
+    bot_device: []const u8 = import_bot.github_device,
     map_file: ?[]const u8 = null,
 };
 
@@ -254,7 +256,7 @@ pub fn importWebhookPayload(allocator: Allocator, event_name: []const u8, payloa
     }
 
     if (std.mem.eql(u8, event_name, "issue_comment")) {
-        const action = event_mod.jsonString(root.get("action")) orelse "";
+        const action = event_json.jsonString(root.get("action")) orelse "";
         const issue = switch (root.get("issue") orelse return stats) {
             .object => |object| object,
             else => return stats,
@@ -330,7 +332,7 @@ pub fn ensureImportDelegation(allocator: Allocator, principal: []const u8, devic
     defer allocator.free(idem);
     const occurred_at = try util.rfc3339Now(allocator);
     defer allocator.free(occurred_at);
-    const body = try event_mod.buildAclDelegationJson(
+    const body = try event_builders.buildAclDelegationJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
@@ -846,7 +848,7 @@ fn parseGraphqlResponse(allocator: Allocator, raw: []const u8, command: []const 
     if (jsonArray(root.get("errors"))) |errors_array| {
         if (errors_array.items.len != 0) {
             if (errors_array.items[0] == .object) {
-                const message = event_mod.jsonString(errors_array.items[0].object.get("message")) orelse "unknown GraphQL error";
+                const message = event_json.jsonString(errors_array.items[0].object.get("message")) orelse "unknown GraphQL error";
                 try eprint("{s}: GraphQL request failed: {s}\n", .{ command, message });
             } else {
                 try eprint("{s}: GraphQL request failed\n", .{command});
@@ -884,7 +886,7 @@ fn connectionHasNextPage(connection: std.json.ObjectMap) bool {
 
 fn connectionEndCursor(connection: std.json.ObjectMap) ?[]const u8 {
     const page_info = jsonObject(connection.get("pageInfo")) orelse return null;
-    return event_mod.jsonString(page_info.get("endCursor"));
+    return event_json.jsonString(page_info.get("endCursor"));
 }
 
 fn replaceOptionalString(allocator: Allocator, target: *?[]u8, value: ?[]const u8) !void {
@@ -1034,7 +1036,7 @@ fn importWebhookIssueCommentEdited(
     defer current.deinit(allocator);
     if (current.redacted) return;
 
-    const body = try githubSizedString(allocator, event_mod.jsonString(comment.get("body")), "", git.max_payload_text_bytes);
+    const body = try githubSizedString(allocator, event_json.jsonString(comment.get("body")), "", git.max_payload_text_bytes);
     defer allocator.free(body);
     if (std.mem.eql(u8, current.body, body)) return;
 
@@ -1095,8 +1097,8 @@ fn importClassicProjects(allocator: Allocator, client: GitHubClient, options: Im
     for (projects.items) |project_value| {
         if (project_value != .object) continue;
         const project_id = jsonInteger(project_value.object.get("id")) orelse continue;
-        const project_name = event_mod.jsonString(project_value.object.get("name")) orelse
-            event_mod.jsonString(project_value.object.get("title")) orelse
+        const project_name = event_json.jsonString(project_value.object.get("name")) orelse
+            event_json.jsonString(project_value.object.get("title")) orelse
             continue;
         try importClassicProjectColumns(allocator, client, options, stats, project_id, project_name);
     }
@@ -1123,7 +1125,7 @@ fn importClassicProjectColumns(
     for (columns.items) |column_value| {
         if (column_value != .object) continue;
         const column_id = jsonInteger(column_value.object.get("id")) orelse continue;
-        const column_name = event_mod.jsonString(column_value.object.get("name")) orelse "";
+        const column_name = event_json.jsonString(column_value.object.get("name")) orelse "";
         try importClassicProjectCards(allocator, client, options, stats, project_name, column_id, column_name);
     }
 }
@@ -1156,7 +1158,7 @@ fn importClassicProjectCards(
 
     for (cards.items) |card_value| {
         if (card_value != .object) continue;
-        const content_url = event_mod.jsonString(card_value.object.get("content_url")) orelse continue;
+        const content_url = event_json.jsonString(card_value.object.get("content_url")) orelse continue;
         const number = issueNumberFromContentUrl(content_url) orelse continue;
         const issue_id = (try index.lookupLegacyGithubObjectId(allocator, repo, "issue", number)) orelse continue;
         defer allocator.free(issue_id);
@@ -1236,7 +1238,7 @@ fn githubSourceIdentityOwned(allocator: Allocator, object: std.json.ObjectMap) !
 }
 
 fn githubAuthorIdentityOwned(allocator: Allocator, object: std.json.ObjectMap, avatar_url: []const u8) ![]u8 {
-    if (event_mod.jsonString(object.get("source_identity"))) |value| {
+    if (event_json.jsonString(object.get("source_identity"))) |value| {
         if (value.len != 0) return githubSizedString(allocator, value, "", git.max_payload_ref_bytes);
     }
     if (githubAuthorNumericId(object)) |id| {
@@ -1263,27 +1265,27 @@ fn githubAuthorNumericId(object: std.json.ObjectMap) ?i64 {
 fn githubAuthorNodeId(object: std.json.ObjectMap) ?[]const u8 {
     if (nestedString(object, "author", "id")) |value| return value;
     if (nestedString(object, "user", "node_id")) |value| return value;
-    if (event_mod.jsonString(object.get("author_node_id"))) |value| return value;
-    if (event_mod.jsonString(object.get("user_node_id"))) |value| return value;
+    if (event_json.jsonString(object.get("author_node_id"))) |value| return value;
+    if (event_json.jsonString(object.get("user_node_id"))) |value| return value;
     return null;
 }
 
 fn githubAuthorAvatarUrl(object: std.json.ObjectMap) ?[]const u8 {
-    if (event_mod.jsonString(object.get("source_avatar_url"))) |value| return value;
+    if (event_json.jsonString(object.get("source_avatar_url"))) |value| return value;
     if (nestedString(object, "user", "avatar_url")) |value| return value;
     if (nestedString(object, "author", "avatarUrl")) |value| return value;
     if (nestedString(object, "author", "avatar_url")) |value| return value;
-    if (event_mod.jsonString(object.get("author_avatar_url"))) |value| return value;
-    if (event_mod.jsonString(object.get("user_avatar_url"))) |value| return value;
+    if (event_json.jsonString(object.get("author_avatar_url"))) |value| return value;
+    if (event_json.jsonString(object.get("user_avatar_url"))) |value| return value;
     return null;
 }
 
 fn githubAuthorEmail(object: std.json.ObjectMap) ?[]const u8 {
-    if (event_mod.jsonString(object.get("source_email"))) |value| return value;
+    if (event_json.jsonString(object.get("source_email"))) |value| return value;
     if (nestedString(object, "user", "email")) |value| return value;
     if (nestedString(object, "author", "email")) |value| return value;
-    if (event_mod.jsonString(object.get("author_email"))) |value| return value;
-    if (event_mod.jsonString(object.get("user_email"))) |value| return value;
+    if (event_json.jsonString(object.get("author_email"))) |value| return value;
+    if (event_json.jsonString(object.get("user_email"))) |value| return value;
     return null;
 }
 
@@ -1309,7 +1311,7 @@ fn importIssueObject(
     allocator: Allocator,
     writer: *EventWriter,
     issue: std.json.ObjectMap,
-    projects: []const event_mod.IssueProjectPlacement,
+    projects: []const event_model.IssueProjectPlacement,
     map_file: ?[]const u8,
     stats: *ImportStats,
 ) !?ImportedObject {
@@ -1322,9 +1324,9 @@ fn importIssueObject(
         return .{ .id = existing, .is_new = false };
     }
 
-    const title = try githubSizedString(allocator, event_mod.jsonString(issue.get("title")), "(untitled)", git.max_payload_title_bytes);
+    const title = try githubSizedString(allocator, event_json.jsonString(issue.get("title")), "(untitled)", git.max_payload_title_bytes);
     defer allocator.free(title);
-    const body = try githubSizedString(allocator, event_mod.jsonString(issue.get("body")), "", git.max_payload_text_bytes);
+    const body = try githubSizedString(allocator, event_json.jsonString(issue.get("body")), "", git.max_payload_text_bytes);
     defer allocator.free(body);
     const occurred_at = try githubTimestampOrNow(allocator, firstJsonValue(issue.get("created_at"), issue.get("createdAt")));
     defer allocator.free(occurred_at);
@@ -1349,7 +1351,7 @@ fn importIssueObject(
     if (githubStateEquals(issue.get("state"), "closed")) {
         const closed_at = try githubTimestampOrNow(allocator, firstJsonValue3(issue.get("closed_at"), issue.get("closedAt"), firstJsonValue(issue.get("updated_at"), issue.get("updatedAt"))));
         defer allocator.free(closed_at);
-        try writeImportedStringEvent(allocator, writer, "issue", issue_id, "issue.state_set", "state", "closed", closed_at);
+        try writeImportedStringEvent(allocator, writer, .issue, issue_id, "issue.state_set", "state", "closed", closed_at);
     }
 
     return .{ .id = issue_id, .is_new = true, .comment_count = comment_count };
@@ -1365,13 +1367,13 @@ fn importPullObject(allocator: Allocator, writer: *EventWriter, pull: std.json.O
         return .{ .id = existing, .is_new = false };
     }
 
-    const title = try githubSizedString(allocator, event_mod.jsonString(pull.get("title")), "(untitled)", git.max_payload_title_bytes);
+    const title = try githubSizedString(allocator, event_json.jsonString(pull.get("title")), "(untitled)", git.max_payload_title_bytes);
     defer allocator.free(title);
-    const body = try githubSizedString(allocator, event_mod.jsonString(pull.get("body")), "", git.max_payload_text_bytes);
+    const body = try githubSizedString(allocator, event_json.jsonString(pull.get("body")), "", git.max_payload_text_bytes);
     defer allocator.free(body);
-    const base_ref = try githubSizedString(allocator, event_mod.jsonString(pull.get("baseRefName")) orelse nestedString(pull, "base", "ref"), "main", git.max_payload_ref_bytes);
+    const base_ref = try githubSizedString(allocator, event_json.jsonString(pull.get("baseRefName")) orelse nestedString(pull, "base", "ref"), "main", git.max_payload_ref_bytes);
     defer allocator.free(base_ref);
-    const head_ref = try githubSizedString(allocator, event_mod.jsonString(pull.get("headRefName")) orelse nestedString(pull, "head", "ref"), "unknown", git.max_payload_ref_bytes);
+    const head_ref = try githubSizedString(allocator, event_json.jsonString(pull.get("headRefName")) orelse nestedString(pull, "head", "ref"), "unknown", git.max_payload_ref_bytes);
     defer allocator.free(head_ref);
     const draft = jsonBool(firstJsonValue(pull.get("draft"), pull.get("isDraft"))) orelse false;
     const occurred_at = try githubTimestampOrNow(allocator, firstJsonValue(pull.get("created_at"), pull.get("createdAt")));
@@ -1417,15 +1419,15 @@ fn importPullObject(allocator: Allocator, writer: *EventWriter, pull: std.json.O
     stats.pulls += 1;
 
     if (githubStateEquals(pull.get("state"), "closed") or githubStateEquals(pull.get("state"), "merged")) {
-        if (event_mod.jsonString(firstJsonValue(pull.get("merged_at"), pull.get("mergedAt")))) |merged_at| {
+        if (event_json.jsonString(firstJsonValue(pull.get("merged_at"), pull.get("mergedAt")))) |merged_at| {
             if (merged_at.len != 0) {
-                try writeImportedPullMerged(allocator, writer, pull_id, merged_at, event_mod.jsonString(pull.get("merge_commit_sha")) orelse nestedString(pull, "mergeCommit", "oid") orelse "", null);
+                try writeImportedPullMerged(allocator, writer, pull_id, merged_at, event_json.jsonString(pull.get("merge_commit_sha")) orelse nestedString(pull, "mergeCommit", "oid") orelse "", null);
                 return .{ .id = pull_id, .is_new = true, .comment_count = comment_count };
             }
         }
         const closed_at = try githubTimestampOrNow(allocator, firstJsonValue3(pull.get("closed_at"), pull.get("closedAt"), firstJsonValue(pull.get("updated_at"), pull.get("updatedAt"))));
         defer allocator.free(closed_at);
-        try writeImportedStringEvent(allocator, writer, "pull", pull_id, "pull.state_set", "state", "closed", closed_at);
+        try writeImportedStringEvent(allocator, writer, .pull, pull_id, "pull.state_set", "state", "closed", closed_at);
     }
 
     return .{ .id = pull_id, .is_new = true, .comment_count = comment_count };
@@ -1499,11 +1501,11 @@ fn syncExistingIssueObject(
     var current = (try localIssueSnapshot(allocator, &db, issue_id)) orelse return;
     defer current.deinit();
 
-    const title = try githubSizedString(allocator, event_mod.jsonString(issue.get("title")), "(untitled)", git.max_payload_title_bytes);
+    const title = try githubSizedString(allocator, event_json.jsonString(issue.get("title")), "(untitled)", git.max_payload_title_bytes);
     defer allocator.free(title);
-    const body = try githubSizedString(allocator, event_mod.jsonString(issue.get("body")), "", git.max_payload_text_bytes);
+    const body = try githubSizedString(allocator, event_json.jsonString(issue.get("body")), "", git.max_payload_text_bytes);
     defer allocator.free(body);
-    const raw_state = event_mod.jsonString(issue.get("state")) orelse "open";
+    const raw_state = event_json.jsonString(issue.get("state")) orelse "open";
     const state = if (std.ascii.eqlIgnoreCase(raw_state, "closed")) "closed" else "open";
     const milestone = try githubSizedString(allocator, githubMilestoneTitle(issue), "", git.max_payload_atom_bytes);
     defer allocator.free(milestone);
@@ -1520,7 +1522,7 @@ fn syncExistingIssueObject(
 
     try ensureMilestoneCreatedForTitleStaged(allocator, writer, milestone, "", "", occurred_at, "gt github import");
 
-    const update = event_mod.IssueUpdate{
+    const update = event_model.IssueUpdate{
         .title = if (!std.mem.eql(u8, title, current.title)) title else null,
         .body = if (!std.mem.eql(u8, body, current.body)) body else null,
         .state = if (!std.mem.eql(u8, state, current.state)) state else null,
@@ -1548,13 +1550,13 @@ fn syncExistingPullObject(
     var current = (try localPullSnapshot(allocator, &db, pull_id)) orelse return;
     defer current.deinit();
 
-    const title = try githubSizedString(allocator, event_mod.jsonString(pull.get("title")), "(untitled)", git.max_payload_title_bytes);
+    const title = try githubSizedString(allocator, event_json.jsonString(pull.get("title")), "(untitled)", git.max_payload_title_bytes);
     defer allocator.free(title);
-    const body = try githubSizedString(allocator, event_mod.jsonString(pull.get("body")), "", git.max_payload_text_bytes);
+    const body = try githubSizedString(allocator, event_json.jsonString(pull.get("body")), "", git.max_payload_text_bytes);
     defer allocator.free(body);
-    const base_ref = try githubSizedString(allocator, event_mod.jsonString(pull.get("baseRefName")) orelse nestedString(pull, "base", "ref"), "main", git.max_payload_ref_bytes);
+    const base_ref = try githubSizedString(allocator, event_json.jsonString(pull.get("baseRefName")) orelse nestedString(pull, "base", "ref"), "main", git.max_payload_ref_bytes);
     defer allocator.free(base_ref);
-    const head_ref = try githubSizedString(allocator, event_mod.jsonString(pull.get("headRefName")) orelse nestedString(pull, "head", "ref"), "unknown", git.max_payload_ref_bytes);
+    const head_ref = try githubSizedString(allocator, event_json.jsonString(pull.get("headRefName")) orelse nestedString(pull, "head", "ref"), "unknown", git.max_payload_ref_bytes);
     defer allocator.free(head_ref);
     const labels = try githubIssueLabels(allocator, pull);
     defer git.freeStringList(allocator, labels);
@@ -1569,15 +1571,15 @@ fn syncExistingPullObject(
     var reviewer_diff = try diffStringLists(allocator, reviewers, current.reviewers);
     defer reviewer_diff.deinit();
 
-    const raw_github_state = event_mod.jsonString(pull.get("state")) orelse "open";
+    const raw_github_state = event_json.jsonString(pull.get("state")) orelse "open";
     const github_state: []const u8 = if (std.ascii.eqlIgnoreCase(raw_github_state, "merged"))
         "merged"
     else if (std.ascii.eqlIgnoreCase(raw_github_state, "closed"))
         "closed"
     else
         "open";
-    const merged_at = event_mod.jsonString(firstJsonValue(pull.get("merged_at"), pull.get("mergedAt"))) orelse "";
-    const merge_oid = event_mod.jsonString(pull.get("merge_commit_sha")) orelse nestedString(pull, "mergeCommit", "oid") orelse "";
+    const merged_at = event_json.jsonString(firstJsonValue(pull.get("merged_at"), pull.get("mergedAt"))) orelse "";
+    const merge_oid = event_json.jsonString(pull.get("merge_commit_sha")) orelse nestedString(pull, "mergeCommit", "oid") orelse "";
     if ((std.mem.eql(u8, github_state, "closed") or std.mem.eql(u8, github_state, "merged")) and merged_at.len != 0 and
         (!std.mem.eql(u8, current.state, "merged") or (merge_oid.len != 0 and !std.mem.eql(u8, current.merge_oid, merge_oid))))
     {
@@ -1591,7 +1593,7 @@ fn syncExistingPullObject(
     else
         null;
 
-    const update = event_mod.PullUpdate{
+    const update = event_model.PullUpdate{
         .title = if (!std.mem.eql(u8, title, current.title)) title else null,
         .body = if (!std.mem.eql(u8, body, current.body)) body else null,
         .state = if (desired_state) |state| if (!std.mem.eql(u8, state, current.state)) state else null else null,
@@ -1772,7 +1774,7 @@ fn importCommentsArrayWithContext(
             allocator.free(existing);
             continue;
         }
-        const body = try githubSizedString(allocator, event_mod.jsonString(item.object.get("body")), "", git.max_payload_text_bytes);
+        const body = try githubSizedString(allocator, event_json.jsonString(item.object.get("body")), "", git.max_payload_text_bytes);
         defer allocator.free(body);
         if (std.mem.trim(u8, body, " \t\r\n").len == 0) continue;
         const occurred_at = try githubTimestampOrNow(allocator, firstJsonValue(item.object.get("created_at"), item.object.get("createdAt")));
@@ -1833,7 +1835,7 @@ const ImportedCommentReply = struct {
 };
 
 fn importedCommentReply(allocator: Allocator, comment: std.json.ObjectMap, refs: *std.AutoHashMap(i64, ImportedCommentRef)) !ImportedCommentReply {
-    if (event_mod.jsonString(comment.get("parent_hash"))) |hash| {
+    if (event_json.jsonString(comment.get("parent_hash"))) |hash| {
         if (hash.len != 0) {
             return .{ .parent_hash = try allocator.dupe(u8, hash) };
         }
@@ -1899,27 +1901,21 @@ fn writeImportedIssueOpened(
     assignees: []const []const u8,
     source_identity: GithubSourceIdentity,
     milestone: []const u8,
-    projects: []const event_mod.IssueProjectPlacement,
+    projects: []const event_model.IssueProjectPlacement,
 ) !void {
-    const event_uuid = try util.newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try util.newUuidV7(allocator);
-    defer allocator.free(idem);
-    const body = try event_mod.buildIssueOpenedJsonWithLegacyAndMetadata(
-        allocator,
-        writer.cfg,
-        writer.nextSeq(),
-        issue_id,
-        event_uuid,
-        idem,
-        occurred_at,
-        writer.stagedEventParents(),
-        title,
-        body_text,
-        labels,
-        assignees,
-        .{ .github_issue_number = number },
-        .{
+    const subject_prefix = try import_common.openedSubjectPrefix(allocator, .issue, issue_id, "GitHub", "#", number);
+    defer allocator.free(subject_prefix);
+    const subject = try githubSubject(allocator, subject_prefix, title);
+    defer allocator.free(subject);
+    try import_common.writeImportedIssueOpened(allocator, writer, .{
+        .issue_id = issue_id,
+        .occurred_at = occurred_at,
+        .title = title,
+        .body_text = body_text,
+        .labels = labels,
+        .assignees = assignees,
+        .legacy = .{ .github_issue_number = number },
+        .metadata = .{
             .source_author = if (source_identity.author.len == 0) null else source_identity.author,
             .source_identity = if (source_identity.identity.len == 0) null else source_identity.identity,
             .source_email = if (source_identity.email.len == 0) null else source_identity.email,
@@ -1927,16 +1923,9 @@ fn writeImportedIssueOpened(
             .milestone = if (milestone.len == 0) null else milestone,
             .projects = projects,
         },
-    );
-    defer allocator.free(body);
-    var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
-    const issue_ref = util.shortObjectRef(&issue_ref_buf, issue_id);
-    const subject_prefix = try std.fmt.allocPrint(allocator, "issue.opened #{s} GitHub #{d} ", .{ issue_ref, number });
-    defer allocator.free(subject_prefix);
-    const subject = try githubSubject(allocator, subject_prefix, title);
-    defer allocator.free(subject);
-    const commit = try writer.stage("gt github import", subject, body);
-    allocator.free(commit);
+        .command_context = "gt github import",
+        .subject = subject,
+    });
 }
 
 fn writeImportedPullOpened(
@@ -1950,65 +1939,46 @@ fn writeImportedPullOpened(
     base_ref: []const u8,
     head_ref: []const u8,
     draft: bool,
-    metadata: event_mod.PullOpenedMetadata,
+    metadata: event_model.PullOpenedMetadata,
 ) !void {
-    const event_uuid = try util.newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try util.newUuidV7(allocator);
-    defer allocator.free(idem);
-    const body = try event_mod.buildPullOpenedJsonWithLegacyAndMetadata(
-        allocator,
-        writer.cfg,
-        writer.nextSeq(),
-        pull_id,
-        event_uuid,
-        idem,
-        occurred_at,
-        writer.stagedEventParents(),
-        title,
-        body_text,
-        base_ref,
-        head_ref,
-        draft,
-        .{ .github_pull_number = number },
-        metadata,
-    );
-    defer allocator.free(body);
-    var pull_ref_buf: [util.short_object_ref_len]u8 = undefined;
-    const pull_ref = util.shortObjectRef(&pull_ref_buf, pull_id);
-    const subject_prefix = try std.fmt.allocPrint(allocator, "pull.opened #{s} GitHub #{d} ", .{ pull_ref, number });
+    const subject_prefix = try import_common.openedSubjectPrefix(allocator, .pull, pull_id, "GitHub", "#", number);
     defer allocator.free(subject_prefix);
     const subject = try githubSubject(allocator, subject_prefix, title);
     defer allocator.free(subject);
-    const commit = try writer.stage("gt github import", subject, body);
-    allocator.free(commit);
+    try import_common.writeImportedPullOpened(allocator, writer, .{
+        .pull_id = pull_id,
+        .occurred_at = occurred_at,
+        .title = title,
+        .body_text = body_text,
+        .base_ref = base_ref,
+        .head_ref = head_ref,
+        .draft = draft,
+        .legacy = .{ .github_pull_number = number },
+        .metadata = metadata,
+        .command_context = "gt github import",
+        .subject = subject,
+    });
 }
 
 fn writeImportedStringEvent(
     allocator: Allocator,
     writer: *EventWriter,
-    object_kind: []const u8,
+    object_kind: import_common.ObjectKind,
     object_id: []const u8,
     event_type: []const u8,
     payload_key: []const u8,
     payload_value: []const u8,
     occurred_at: []const u8,
 ) !void {
-    const event_uuid = try util.newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try util.newUuidV7(allocator);
-    defer allocator.free(idem);
-    const body = if (std.mem.eql(u8, object_kind, "issue"))
-        try event_mod.buildIssueStringPayloadJson(allocator, writer.cfg, writer.nextSeq(), object_id, event_uuid, idem, occurred_at, writer.stagedEventParents(), event_type, payload_key, payload_value)
-    else
-        try event_mod.buildPullStringPayloadJson(allocator, writer.cfg, writer.nextSeq(), object_id, event_uuid, idem, occurred_at, writer.stagedEventParents(), event_type, payload_key, payload_value);
-    defer allocator.free(body);
-    var object_ref_buf: [util.short_object_ref_len]u8 = undefined;
-    const object_ref = util.shortObjectRef(&object_ref_buf, object_id);
-    const subject = try std.fmt.allocPrint(allocator, "{s} #{s}", .{ event_type, object_ref });
-    defer allocator.free(subject);
-    const commit = try writer.stage("gt github import", subject, body);
-    allocator.free(commit);
+    try import_common.writeImportedStringEvent(allocator, writer, .{
+        .object_kind = object_kind,
+        .object_id = object_id,
+        .event_type = event_type,
+        .payload_key = payload_key,
+        .payload_value = payload_value,
+        .occurred_at = occurred_at,
+        .command_context = "gt github import",
+    });
 }
 
 fn writeImportedIssueUpdated(
@@ -2016,20 +1986,15 @@ fn writeImportedIssueUpdated(
     writer: *EventWriter,
     issue_id: []const u8,
     occurred_at: []const u8,
-    update: event_mod.IssueUpdate,
+    update: event_model.IssueUpdate,
 ) !void {
-    const event_uuid = try util.newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try util.newUuidV7(allocator);
-    defer allocator.free(idem);
-    const body = try event_mod.buildIssueUpdatedJson(allocator, writer.cfg, writer.nextSeq(), issue_id, event_uuid, idem, occurred_at, writer.stagedEventParents(), update);
-    defer allocator.free(body);
-    var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
-    const issue_ref = util.shortObjectRef(&issue_ref_buf, issue_id);
-    const subject = try std.fmt.allocPrint(allocator, "issue.updated #{s} GitHub sync", .{issue_ref});
-    defer allocator.free(subject);
-    const commit = try writer.stage("gt github import", subject, body);
-    allocator.free(commit);
+    try import_common.writeImportedIssueUpdated(allocator, writer, .{
+        .issue_id = issue_id,
+        .occurred_at = occurred_at,
+        .update = update,
+        .command_context = "gt github import",
+        .subject_suffix = " GitHub sync",
+    });
 }
 
 fn writeImportedPullUpdated(
@@ -2037,20 +2002,15 @@ fn writeImportedPullUpdated(
     writer: *EventWriter,
     pull_id: []const u8,
     occurred_at: []const u8,
-    update: event_mod.PullUpdate,
+    update: event_model.PullUpdate,
 ) !void {
-    const event_uuid = try util.newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try util.newUuidV7(allocator);
-    defer allocator.free(idem);
-    const body = try event_mod.buildPullUpdatedJson(allocator, writer.cfg, writer.nextSeq(), pull_id, event_uuid, idem, occurred_at, writer.stagedEventParents(), update);
-    defer allocator.free(body);
-    var pull_ref_buf: [util.short_object_ref_len]u8 = undefined;
-    const pull_ref = util.shortObjectRef(&pull_ref_buf, pull_id);
-    const subject = try std.fmt.allocPrint(allocator, "pull.updated #{s} GitHub sync", .{pull_ref});
-    defer allocator.free(subject);
-    const commit = try writer.stage("gt github import", subject, body);
-    allocator.free(commit);
+    try import_common.writeImportedPullUpdated(allocator, writer, .{
+        .pull_id = pull_id,
+        .occurred_at = occurred_at,
+        .update = update,
+        .command_context = "gt github import",
+        .subject_suffix = " GitHub sync",
+    });
 }
 
 fn writeImportedIssueProjectAdded(
@@ -2065,7 +2025,7 @@ fn writeImportedIssueProjectAdded(
     defer allocator.free(event_uuid);
     const idem = try util.newUuidV7(allocator);
     defer allocator.free(idem);
-    const body = try event_mod.buildIssueProjectEventJson(allocator, writer.cfg, writer.nextSeq(), issue_id, event_uuid, idem, occurred_at, writer.stagedEventParents(), "issue.project_added", project, column, null, null);
+    const body = try event_builders.buildIssueProjectEventJson(allocator, writer.cfg, writer.nextSeq(), issue_id, event_uuid, idem, occurred_at, writer.stagedEventParents(), "issue.project_added", project, column, null, null);
     defer allocator.free(body);
     var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
     const issue_ref = util.shortObjectRef(&issue_ref_buf, issue_id);
@@ -2083,18 +2043,13 @@ fn writeImportedPullMerged(
     merge_oid: []const u8,
     target_oid: ?[]const u8,
 ) !void {
-    const event_uuid = try util.newUuidV7(allocator);
-    defer allocator.free(event_uuid);
-    const idem = try util.newUuidV7(allocator);
-    defer allocator.free(idem);
-    const body = try event_mod.buildPullMergedJson(allocator, writer.cfg, writer.nextSeq(), pull_id, event_uuid, idem, occurred_at, writer.stagedEventParents(), if (merge_oid.len == 0) null else merge_oid, target_oid);
-    defer allocator.free(body);
-    var pull_ref_buf: [util.short_object_ref_len]u8 = undefined;
-    const pull_ref = util.shortObjectRef(&pull_ref_buf, pull_id);
-    const subject = try std.fmt.allocPrint(allocator, "pull.merged #{s}", .{pull_ref});
-    defer allocator.free(subject);
-    const commit = try writer.stage("gt github import", subject, body);
-    allocator.free(commit);
+    try import_common.writeImportedPullMerged(allocator, writer, .{
+        .pull_id = pull_id,
+        .occurred_at = occurred_at,
+        .merge_oid = merge_oid,
+        .target_oid = target_oid,
+        .command_context = "gt github import",
+    });
 }
 
 fn writeImportedCommentAdded(
@@ -2128,13 +2083,13 @@ fn writeImportedCommentAdded(
         }
         if (!seen) try related.append(allocator, reply_parent_hash);
     }
-    const parents = event_mod.EventParents{
+    const parents = event_model.EventParents{
         .log = base_parents.log,
         .anchor = base_parents.anchor,
         .causal = base_parents.causal,
         .related = related.items,
     };
-    const body = try event_mod.buildCommentAddedJsonWithMetadata(
+    const body = try event_builders.buildCommentAddedJsonWithMetadata(
         allocator,
         writer.cfg,
         writer.nextSeq(),
@@ -2179,7 +2134,7 @@ fn writeImportedCommentBodySet(
     defer allocator.free(event_uuid);
     const idem = try util.newUuidV7(allocator);
     defer allocator.free(idem);
-    const body = try event_mod.buildCommentBodySetJson(
+    const body = try event_builders.buildCommentBodySetJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
@@ -2210,7 +2165,7 @@ fn writeImportedCommentRedacted(
     defer allocator.free(event_uuid);
     const idem = try util.newUuidV7(allocator);
     defer allocator.free(idem);
-    const body = try event_mod.buildCommentRedactedJson(
+    const body = try event_builders.buildCommentRedactedJson(
         allocator,
         writer.cfg,
         writer.nextSeq(),
