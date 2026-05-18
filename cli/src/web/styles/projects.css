@@ -808,19 +808,132 @@
 .project-update-status-field {
   display: grid;
   gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
   color: var(--muted);
+  border: 0;
   font-size: 12px;
   font-weight: 800;
 }
-.project-update-status-field select {
-  width: min(260px, 100%);
-  min-height: 34px;
-  padding: 0 10px;
+.project-update-status-field legend {
+  padding: 0;
+}
+.project-update-status-menu {
+  position: relative;
+  width: min(280px, 100%);
+}
+.project-update-status-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 38px;
+  padding: 4px 10px;
   color: var(--text);
-  background: var(--input-bg);
-  border: 1px solid var(--border);
+  background: var(--dropdown-bg);
+  border: 1px solid var(--dropdown-border);
   border-radius: var(--radius-md);
-  font: inherit;
+  cursor: pointer;
+  list-style: none;
+}
+.project-update-status-control::-webkit-details-marker {
+  display: none;
+}
+.project-update-status-menu[open] .project-update-status-control,
+.project-update-status-control:hover {
+  border-color: color-mix(in oklch, var(--dropdown-border) 76%, var(--text));
+}
+.project-update-status-control:focus-visible {
+  outline: 2px solid color-mix(in oklch, var(--brand) 55%, transparent);
+  outline-offset: 2px;
+}
+.project-update-status-selected {
+  display: none;
+  min-width: 0;
+}
+.project-update-status-menu:has(input[value="WIP"]:checked) .project-update-status-selected-wip,
+.project-update-status-menu:has(input[value="Review"]:checked) .project-update-status-selected-review,
+.project-update-status-menu:has(input[value="Failed"]:checked) .project-update-status-selected-failed {
+  display: inline-flex;
+}
+.project-update-status-chevron {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  color: var(--muted);
+  transform: translateY(-2px) rotate(45deg);
+}
+.project-update-status-menu[open] .project-update-status-chevron {
+  transform: translateY(2px) rotate(225deg);
+}
+.project-update-status-options {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 35;
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  min-width: 230px;
+  padding: 6px;
+  background: var(--dropdown-bg);
+  border: 1px solid var(--dropdown-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--dropdown-shadow);
+}
+.project-update-status-option {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 40px;
+  padding: 4px 8px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+.project-update-status-option:hover,
+.project-update-status-option:has(input:focus-visible) {
+  background: var(--dropdown-hover-bg);
+}
+.project-update-status-option:has(input:focus-visible) {
+  outline: 2px solid color-mix(in oklch, var(--brand) 45%, transparent);
+  outline-offset: 1px;
+}
+.project-update-status-option input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.project-update-status-check {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  color: transparent;
+  border: 2px solid transparent;
+  border-radius: 50%;
+}
+.project-update-status-option:has(input:checked) .project-update-status-check {
+  color: var(--brand);
+  border-color: color-mix(in oklch, var(--brand) 32%, transparent);
+}
+.project-update-status-option:has(input:checked) .project-update-status-check::before {
+  content: "";
+  width: 7px;
+  height: 4px;
+  border-bottom: 2px solid currentColor;
+  border-left: 2px solid currentColor;
+  transform: translateY(-1px) rotate(-45deg);
 }
 .project-update-section,
 .project-description-section {
@@ -1514,6 +1627,7 @@
   border-radius: 50%;
 }
 .project-item-actions {
+  position: relative;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -1545,9 +1659,9 @@
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-elevated);
 }
-.project-action-menu:last-child .project-action-popover {
-  right: 0;
-  left: auto;
+.project-item-actions .project-action-menu:last-child .project-action-popover {
+  right: auto;
+  left: 0;
 }
 .project-action-popover-narrow {
   width: min(320px, calc(100vw - 32px));
@@ -2012,7 +2126,7 @@
   z-index: 35;
 }
 .project-issue-search-menu {
-  min-width: min(380px, calc(100vw - 48px));
+  min-width: 0;
 }
 .project-issue-search-result {
   width: 100%;
@@ -2037,6 +2151,21 @@
 }
 .project-column-mini-form .button {
   min-height: 34px;
+}
+
+@media (max-width: 700px) {
+  .project-item-actions .project-action-menu {
+    position: static;
+  }
+  .project-item-actions .project-action-popover {
+    top: calc(100% + 8px);
+    right: auto;
+    left: 14px;
+    width: min(420px, calc(100% - 28px));
+  }
+  .project-item-actions .project-action-popover-narrow {
+    width: min(320px, calc(100% - 28px));
+  }
 }
 .kanban-column-add {
   position: relative;

@@ -132,7 +132,7 @@ fn appendProjectColumn(
         \\            <input type="hidden" name="priority" value="{existing_priority}">
         \\            <input type="hidden" name="view" value="{view}">
         \\            <div class="project-issue-search-wrap tree-search-wrap">
-        \\              <label class="tree-search-label project-issue-search-label"><span>Issue</span><input class="tree-search-input" name="issue" placeholder="Search issues or paste a ref" aria-label="Issue" autocomplete="off" spellcheck="false" data-project-issue-search required></label>
+        \\              <label class="tree-search-label project-issue-search-label"><span>Issue</span><input class="tree-search-input" type="search" name="issue" placeholder="Search issues or paste a ref" aria-label="Issue" autocomplete="off" spellcheck="false" data-project-issue-search required></label>
         \\            </div>
         \\            <div class="form-actions"><button class="button primary" type="submit">Add issue</button></div>
         \\          </form>

@@ -918,10 +918,8 @@ fn appendProjectUpdateSection(buf: *std.ArrayList(u8), allocator: Allocator, sum
     try appendProjectHashFields(buf, allocator, "project-update", effective_status, note.body);
     try buf.appendSlice(allocator,
         \\      <input type="hidden" name="action" value="add-update">
-        \\      <label class="project-update-status-field">Status
     );
     try appendProjectStatusSelect(buf, allocator, effective_status);
-    try buf.appendSlice(allocator, "</label>");
     try shared.appendMarkdownEditor(buf, allocator, .{
         .name = "update_body",
         .rows = 6,
@@ -1013,18 +1011,57 @@ fn appendProjectStatusSelect(buf: *std.ArrayList(u8), allocator: Allocator, sele
     const options = [_]struct {
         value: []const u8,
         label: []const u8,
+        tone: []const u8,
     }{
-        .{ .value = "WIP", .label = "On track" },
-        .{ .value = "Review", .label = "At risk" },
-        .{ .value = "Failed", .label = "Off track" },
+        .{ .value = "WIP", .label = "On track", .tone = "progress" },
+        .{ .value = "Review", .label = "At risk", .tone = "risk" },
+        .{ .value = "Failed", .label = "Off track", .tone = "failed" },
     };
-    try buf.appendSlice(allocator, "<select name=\"status\" required>");
+    try buf.appendSlice(allocator,
+        \\<fieldset class="project-update-status-field">
+        \\  <legend>Status</legend>
+        \\  <details class="project-update-status-menu" data-popover-menu data-project-status-menu>
+        \\    <summary class="project-update-status-control" aria-label="Status">
+    );
     for (options) |option| {
-        try appendTemplate(buf, allocator, "<option value=\"{status}\"", .{ .status = option.value });
-        if (std.mem.eql(u8, selected_health, option.value)) try buf.appendSlice(allocator, " selected");
-        try appendTemplate(buf, allocator, ">{label}</option>", .{ .label = option.label });
+        try appendTemplate(buf, allocator,
+            \\<span class="project-update-status-selected project-update-status-selected-{class}">
+        , .{ .class = projectUpdateStatusValueClass(option.value) });
+        try appendProjectUpdateHealthChip(buf, allocator, option.label, option.tone);
+        try buf.appendSlice(allocator, "</span>");
     }
-    try buf.appendSlice(allocator, "</select>");
+    try buf.appendSlice(allocator,
+        \\      <span class="project-update-status-chevron" aria-hidden="true"></span>
+        \\    </summary>
+        \\    <div class="project-update-status-options" role="radiogroup" aria-label="Status">
+    );
+    for (options) |option| {
+        try appendTemplate(buf, allocator,
+            \\<label class="project-update-status-option tone-{tone}">
+            \\  <input type="radio" name="status" value="{status}" required
+        , .{
+            .tone = option.tone,
+            .status = option.value,
+        });
+        if (std.mem.eql(u8, selected_health, option.value)) try buf.appendSlice(allocator, " checked");
+        try buf.appendSlice(allocator, ">");
+        try appendProjectUpdateHealthChip(buf, allocator, option.label, option.tone);
+        try buf.appendSlice(allocator,
+            \\  <span class="project-update-status-check" aria-hidden="true"></span>
+            \\</label>
+        );
+    }
+    try buf.appendSlice(allocator,
+        \\    </div>
+        \\  </details>
+        \\</fieldset>
+    );
+}
+
+fn projectUpdateStatusValueClass(value: []const u8) []const u8 {
+    if (std.mem.eql(u8, value, "Failed")) return "failed";
+    if (std.mem.eql(u8, value, "Review")) return "review";
+    return "wip";
 }
 
 fn appendProjectUpdateHealthChip(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, tone: []const u8) !void {

@@ -1554,7 +1554,8 @@
 
   function projectMarkdownHashPayload(form) {
     const kind = form.dataset.projectContentKind || "";
-    const statusInput = form.querySelector("[name='status']");
+    const checkedStatus = form.querySelector("input[type='radio'][name='status']:checked");
+    const statusInput = checkedStatus || form.querySelector("[name='status']");
     const textarea = form.querySelector("[data-markdown-input]");
     const status = statusInput ? String(statusInput.value || "") : "";
     let body = textarea ? String(textarea.value || "") : "";
@@ -1583,6 +1584,9 @@
 
   function resetProjectMarkdownForm(form) {
     form.reset();
+    form.querySelectorAll("details[open]").forEach(function (details) {
+      details.open = false;
+    });
     const previous = form.querySelector("[data-project-previous-hash]");
     const current = form.querySelector("[data-project-current-hash]");
     if (previous && current) current.value = previous.value || "";

@@ -112,7 +112,11 @@ fn appendProjectIssueSearchIndex(buf: *std.ArrayList(u8), allocator: Allocator, 
         \\SELECT i.id, i.title, i.state,
         \\       COALESCE(m.priority, ''),
         \\       COALESCE(m.status, ''),
-        \\       COALESCE(a.number, 0)
+        \\       COALESCE(a.number, 0),
+        \\       COALESCE(m.milestone, ''),
+        \\       COALESCE(m.issue_type, ''),
+        \\       ifnull(replace((SELECT group_concat(DISTINCT il.label) FROM issue_labels il WHERE il.issue_id = i.id), ',', ' '), ''),
+        \\       ifnull(replace((SELECT group_concat(DISTINCT ia.assignee) FROM issue_assignees ia WHERE ia.issue_id = i.id), ',', ' '), '')
         \\FROM issues i
         \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
         \\LEFT JOIN legacy_aliases a
@@ -138,6 +142,14 @@ fn appendProjectIssueSearchIndex(buf: *std.ArrayList(u8), allocator: Allocator, 
         const status = try stmt.columnTextDup(allocator, 4);
         defer allocator.free(status);
         const legacy_number = stmt.columnInt64(5);
+        const milestone = try stmt.columnTextDup(allocator, 6);
+        defer allocator.free(milestone);
+        const issue_type = try stmt.columnTextDup(allocator, 7);
+        defer allocator.free(issue_type);
+        const labels = try stmt.columnTextDup(allocator, 8);
+        defer allocator.free(labels);
+        const assignees = try stmt.columnTextDup(allocator, 9);
+        defer allocator.free(assignees);
 
         var ref_buf: [util.short_object_ref_len]u8 = undefined;
         const short_ref = util.shortObjectRef(&ref_buf, id);
@@ -153,7 +165,7 @@ fn appendProjectIssueSearchIndex(buf: *std.ArrayList(u8), allocator: Allocator, 
         defer allocator.free(issue_display);
 
         try appendTemplate(buf, allocator,
-            \\<span data-project-issue-search-item data-issue-ref="{issue_ref}" data-issue-display="{issue_display}" data-issue-title="{title}" data-issue-state="{state}" data-issue-priority="{priority}" data-issue-status="{status}"></span>
+            \\<span data-project-issue-search-item data-issue-ref="{issue_ref}" data-issue-display="{issue_display}" data-issue-title="{title}" data-issue-state="{state}" data-issue-priority="{priority}" data-issue-status="{status}" data-issue-milestone="{milestone}" data-issue-type="{issue_type}" data-issue-labels="{labels}" data-issue-assignees="{assignees}"></span>
         , .{
             .issue_ref = issue_ref,
             .issue_display = issue_display,
@@ -161,6 +173,10 @@ fn appendProjectIssueSearchIndex(buf: *std.ArrayList(u8), allocator: Allocator, 
             .state = state,
             .priority = priority,
             .status = status,
+            .milestone = milestone,
+            .issue_type = issue_type,
+            .labels = labels,
+            .assignees = assignees,
         });
     }
     try buf.appendSlice(allocator, "</div>");
@@ -239,7 +255,7 @@ fn appendProjectItemActions(
         \\        <input type="hidden" name="project" value="{project}">
         \\        <input type="hidden" name="view" value="{view}">
         \\        <div class="project-issue-search-wrap tree-search-wrap">
-        \\          <label class="tree-search-label project-issue-search-label"><span>Issue</span><input class="tree-search-input" name="issue" placeholder="Search issues or paste a ref" autocomplete="off" spellcheck="false" data-project-issue-search required></label>
+        \\          <label class="tree-search-label project-issue-search-label"><span>Issue</span><input class="tree-search-input" type="search" name="issue" placeholder="Search issues or paste a ref" autocomplete="off" spellcheck="false" data-project-issue-search required></label>
         \\        </div>
         \\        <label>Priority<select name="priority">
     , .{

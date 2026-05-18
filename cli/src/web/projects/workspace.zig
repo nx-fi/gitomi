@@ -142,7 +142,9 @@ test "project workspace title does not prepend at sign" {
     defer db.deinit();
     try db.exec("CREATE TABLE projects (id TEXT, name TEXT, description TEXT, state TEXT, created_at TEXT)");
     try db.exec("CREATE TABLE issues (id TEXT, title TEXT, state TEXT, opened_at TEXT)");
-    try db.exec("CREATE TABLE issue_metadata (issue_id TEXT, issue_type TEXT, priority TEXT, status TEXT)");
+    try db.exec("CREATE TABLE issue_metadata (issue_id TEXT, milestone TEXT, issue_type TEXT, priority TEXT, status TEXT)");
+    try db.exec("CREATE TABLE issue_labels (issue_id TEXT, label TEXT)");
+    try db.exec("CREATE TABLE issue_assignees (issue_id TEXT, assignee TEXT)");
     try db.exec("CREATE TABLE legacy_aliases (provider TEXT, object_kind TEXT, object_id TEXT, number INTEGER)");
     try db.exec("CREATE TABLE project_columns (project_id TEXT, column_name TEXT)");
     try db.exec("CREATE TABLE issue_projects (project TEXT, column_name TEXT, issue_id TEXT)");

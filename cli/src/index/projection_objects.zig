@@ -3489,6 +3489,64 @@ test "issue updates require an accepted creation event in frontier" {
     try expectIssueTitle(allocator, &db, "issue-1", "New title");
 }
 
+test "notification side effects subscribe and publish issue conversation events" {
+    const allocator = std.testing.allocator;
+    var db = try SqliteDb.open(allocator, ":memory:", sqlite_db.sqlite.SQLITE_OPEN_READWRITE | sqlite_db.sqlite.SQLITE_OPEN_CREATE, true);
+    defer db.deinit();
+    try index_schema.createIndexSchema(&db);
+
+    var issue_envelope = try testEnvelope(allocator, "issue.opened", "issue", "issue-1", "alice", "laptop");
+    defer issue_envelope.deinit();
+    const issue_body =
+        \\{
+        \\  "payload": {
+        \\    "title": "Inbox",
+        \\    "assignees": ["bob"]
+        \\  },
+        \\  "legacy": {}
+        \\}
+    ;
+    try applyNotificationSideEffects(allocator, &db, "event-open", issue_envelope, issue_body);
+    try expectNotificationSubscription(&db, "alice", "issue", "issue-1", true, "author");
+    try expectNotificationSubscription(&db, "bob", "issue", "issue-1", true, "assignee");
+    try expectNotificationInboxRead(&db, "bob", "event-open", false);
+    try expectNoNotificationInbox(&db, "alice", "event-open");
+
+    var comment_envelope = try testEnvelope(allocator, "comment.added", "comment", "comment-1", "carol", "phone");
+    defer comment_envelope.deinit();
+    const comment_body =
+        \\{
+        \\  "payload": {
+        \\    "parent_kind": "issue",
+        \\    "parent_id": "issue-1",
+        \\    "body": "Looping in @dave."
+        \\  },
+        \\  "legacy": {}
+        \\}
+    ;
+    try applyNotificationSideEffects(allocator, &db, "event-comment", comment_envelope, comment_body);
+    try expectNotificationSubscription(&db, "carol", "issue", "issue-1", true, "commenter");
+    try expectNotificationSubscription(&db, "dave", "issue", "issue-1", true, "mentioned");
+    try expectNotificationInboxRead(&db, "alice", "event-comment", false);
+    try expectNotificationInboxRead(&db, "bob", "event-comment", false);
+    try expectNotificationInboxRead(&db, "dave", "event-comment", false);
+    try expectNoNotificationInbox(&db, "carol", "event-comment");
+
+    var read_envelope = try testEnvelope(allocator, "notification.read", "notification", "notification-1", "dave", "laptop");
+    defer read_envelope.deinit();
+    const read_body =
+        \\{
+        \\  "payload": {
+        \\    "principal": "dave",
+        \\    "event_hash": "event-comment"
+        \\  },
+        \\  "legacy": {}
+        \\}
+    ;
+    try std.testing.expect(try applyNotificationProjection(allocator, &db, "read-event", read_envelope, read_body) == null);
+    try expectNotificationInboxRead(&db, "dave", "event-comment", true);
+}
+
 fn testEnvelope(
     allocator: Allocator,
     event_type: []const u8,
@@ -3586,4 +3644,52 @@ fn expectIssueTitle(allocator: Allocator, db: *SqliteDb, issue_id: []const u8, e
     const title = try stmt.columnTextDup(allocator, 0);
     defer allocator.free(title);
     try std.testing.expectEqualStrings(expected, title);
+}
+
+fn expectNotificationSubscription(db: *SqliteDb, principal: []const u8, object_kind: []const u8, object_id: []const u8, active: bool, reason: []const u8) !void {
+    var stmt = try db.prepare(
+        \\SELECT active, reason
+        \\FROM notification_subscriptions
+        \\WHERE principal = ? AND object_kind = ? AND object_id = ?
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, principal);
+    try stmt.bindText(2, object_kind);
+    try stmt.bindText(3, object_id);
+    try std.testing.expect(try stmt.step());
+    try std.testing.expectEqual(@as(i64, if (active) 1 else 0), stmt.columnInt64(0));
+    const actual_reason = try stmt.columnTextDup(std.testing.allocator, 1);
+    defer std.testing.allocator.free(actual_reason);
+    try std.testing.expectEqualStrings(reason, actual_reason);
+}
+
+fn expectNotificationInboxRead(db: *SqliteDb, principal: []const u8, event_hash: []const u8, read: bool) !void {
+    var stmt = try db.prepare(
+        \\SELECT read_at
+        \\FROM notification_inbox
+        \\WHERE principal = ? AND event_hash = ?
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, principal);
+    try stmt.bindText(2, event_hash);
+    try std.testing.expect(try stmt.step());
+    const read_at = try stmt.columnTextDup(std.testing.allocator, 0);
+    defer std.testing.allocator.free(read_at);
+    if (read) {
+        try std.testing.expect(read_at.len != 0);
+    } else {
+        try std.testing.expectEqualStrings("", read_at);
+    }
+}
+
+fn expectNoNotificationInbox(db: *SqliteDb, principal: []const u8, event_hash: []const u8) !void {
+    var stmt = try db.prepare(
+        \\SELECT 1
+        \\FROM notification_inbox
+        \\WHERE principal = ? AND event_hash = ?
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, principal);
+    try stmt.bindText(2, event_hash);
+    try std.testing.expect(!(try stmt.step()));
 }

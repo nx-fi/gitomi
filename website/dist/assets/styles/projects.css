@@ -694,65 +694,21 @@
   color: var(--green);
 }
 .project-summary-progress-icon {
-  position: relative;
-  display: inline-block;
-  width: 18px;
-  height: 18px;
+  width: 14px;
+  height: 14px;
   flex: 0 0 auto;
-  color: inherit;
-  background: currentColor;
-  clip-path: polygon(50% 0, 90% 24%, 90% 76%, 50% 100%, 10% 76%, 10% 24%);
 }
-.project-summary-progress-icon::before {
-  content: "";
-  position: absolute;
-  inset: 3px;
-  background: var(--panel);
-  clip-path: inherit;
-}
-.project-summary-progress-icon::after {
-  content: "";
-  position: absolute;
-  inset: 7px;
-  background: currentColor;
-  border-radius: 50%;
-}
-.project-summary-health-icon {
-  position: relative;
-  display: inline-block;
-  width: 24px;
-  height: 24px;
-  color: var(--muted);
-  background: color-mix(in oklch, currentColor 18%, transparent);
-  border-radius: 50%;
-}
-.project-summary-health-icon::before {
-  content: "";
-  position: absolute;
-  left: 6px;
-  top: 12px;
-  width: 12px;
-  height: 7px;
-  border-left: 2px solid currentColor;
-  border-top: 2px solid currentColor;
-  transform: skew(-24deg) rotate(-34deg);
-}
-.project-summary-health-icon::after {
-  content: "";
-  position: absolute;
-  left: 14px;
-  top: 7px;
-  width: 4px;
-  height: 4px;
-  background: currentColor;
-  border-radius: 50%;
-}
-.project-summary-health-icon.tone-progress,
-.project-summary-health-icon.tone-done {
+.project-summary-health-icon.tone-progress {
   color: var(--green);
 }
+.project-summary-health-icon.tone-done {
+  color: var(--tone-merged);
+}
+.project-summary-health-icon.tone-risk {
+  color: var(--tone-warning);
+}
 .project-summary-health-icon.tone-failed {
-  color: var(--danger);
+  color: var(--red);
 }
 .project-summary-health-icon.tone-todo {
   color: var(--muted);
@@ -852,19 +808,132 @@
 .project-update-status-field {
   display: grid;
   gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
   color: var(--muted);
+  border: 0;
   font-size: 12px;
   font-weight: 800;
 }
-.project-update-status-field select {
-  width: min(260px, 100%);
-  min-height: 34px;
-  padding: 0 10px;
+.project-update-status-field legend {
+  padding: 0;
+}
+.project-update-status-menu {
+  position: relative;
+  width: min(280px, 100%);
+}
+.project-update-status-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 38px;
+  padding: 4px 10px;
   color: var(--text);
-  background: var(--input-bg);
-  border: 1px solid var(--border);
+  background: var(--dropdown-bg);
+  border: 1px solid var(--dropdown-border);
   border-radius: var(--radius-md);
-  font: inherit;
+  cursor: pointer;
+  list-style: none;
+}
+.project-update-status-control::-webkit-details-marker {
+  display: none;
+}
+.project-update-status-menu[open] .project-update-status-control,
+.project-update-status-control:hover {
+  border-color: color-mix(in oklch, var(--dropdown-border) 76%, var(--text));
+}
+.project-update-status-control:focus-visible {
+  outline: 2px solid color-mix(in oklch, var(--brand) 55%, transparent);
+  outline-offset: 2px;
+}
+.project-update-status-selected {
+  display: none;
+  min-width: 0;
+}
+.project-update-status-menu:has(input[value="WIP"]:checked) .project-update-status-selected-wip,
+.project-update-status-menu:has(input[value="Review"]:checked) .project-update-status-selected-review,
+.project-update-status-menu:has(input[value="Failed"]:checked) .project-update-status-selected-failed {
+  display: inline-flex;
+}
+.project-update-status-chevron {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  color: var(--muted);
+  transform: translateY(-2px) rotate(45deg);
+}
+.project-update-status-menu[open] .project-update-status-chevron {
+  transform: translateY(2px) rotate(225deg);
+}
+.project-update-status-options {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 35;
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  min-width: 230px;
+  padding: 6px;
+  background: var(--dropdown-bg);
+  border: 1px solid var(--dropdown-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--dropdown-shadow);
+}
+.project-update-status-option {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 40px;
+  padding: 4px 8px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+.project-update-status-option:hover,
+.project-update-status-option:has(input:focus-visible) {
+  background: var(--dropdown-hover-bg);
+}
+.project-update-status-option:has(input:focus-visible) {
+  outline: 2px solid color-mix(in oklch, var(--brand) 45%, transparent);
+  outline-offset: 1px;
+}
+.project-update-status-option input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.project-update-status-check {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  color: transparent;
+  border: 2px solid transparent;
+  border-radius: 50%;
+}
+.project-update-status-option:has(input:checked) .project-update-status-check {
+  color: var(--brand);
+  border-color: color-mix(in oklch, var(--brand) 32%, transparent);
+}
+.project-update-status-option:has(input:checked) .project-update-status-check::before {
+  content: "";
+  width: 7px;
+  height: 4px;
+  border-bottom: 2px solid currentColor;
+  border-left: 2px solid currentColor;
+  transform: translateY(-1px) rotate(-45deg);
 }
 .project-update-section,
 .project-description-section {
@@ -929,8 +998,8 @@
   gap: 8px;
   min-width: 0;
 }
-.project-update-card-meta strong,
-.project-update-card-meta span:not(.project-update-health-chip):not(.project-update-health-icon):not(.issue-avatar) {
+.project-update-card-meta > strong,
+.project-update-card-meta > span:not(.project-update-health-chip):not(.issue-avatar) {
   min-width: 0;
   color: var(--muted);
   font-size: 13px;
@@ -945,76 +1014,22 @@
   font-size: 11px;
 }
 .project-update-health-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
   min-height: 28px;
   padding: 0 10px;
-  color: var(--text);
-  background: var(--subtle);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
   font-size: 13px;
   font-weight: 800;
-  white-space: nowrap;
 }
 .project-update-health-chip.tone-progress {
-  color: var(--green);
-  background: color-mix(in oklch, var(--green) 12%, var(--panel));
-  border-color: color-mix(in oklch, var(--green) 34%, var(--border));
+  color: var(--text-on-accent);
+  background: var(--green);
 }
 .project-update-health-chip.tone-risk {
-  color: var(--tone-warning);
-  background: color-mix(in oklch, var(--tone-warning) 14%, var(--panel));
-  border-color: color-mix(in oklch, var(--tone-warning) 38%, var(--border));
+  color: var(--text-on-warning);
+  background: var(--tone-warning);
 }
 .project-update-health-chip.tone-failed {
-  color: var(--tone-danger);
-  background: color-mix(in oklch, var(--tone-danger) 13%, var(--panel));
-  border-color: color-mix(in oklch, var(--tone-danger) 36%, var(--border));
-}
-.project-update-health-icon {
-  position: relative;
-  width: 18px;
-  height: 18px;
-  flex: 0 0 auto;
-  color: currentColor;
-  background: color-mix(in oklch, currentColor 18%, transparent);
-  border-radius: 50%;
-}
-.project-update-health-icon::before {
-  content: "";
-  position: absolute;
-  left: 4px;
-  top: 8px;
-  width: 10px;
-  height: 6px;
-  border-left: 2px solid currentColor;
-  border-top: 2px solid currentColor;
-  transform: skew(-24deg) rotate(-34deg);
-}
-.project-update-health-icon.tone-risk::before {
-  top: 6px;
-  height: 8px;
-  border-top: 0;
-  border-bottom: 2px solid currentColor;
-  transform: skew(-22deg) rotate(-34deg);
-}
-.project-update-health-icon.tone-failed::before,
-.project-update-health-icon.tone-failed::after {
-  content: "";
-  position: absolute;
-  left: 5px;
-  top: 8px;
-  width: 9px;
-  height: 2px;
-  background: currentColor;
-  border: 0;
-  border-radius: var(--radius-pill);
-  transform: rotate(42deg);
-}
-.project-update-health-icon.tone-failed::after {
-  transform: rotate(-42deg);
+  color: var(--text-on-accent);
+  background: var(--red);
 }
 .project-update-body,
 .project-description-body {

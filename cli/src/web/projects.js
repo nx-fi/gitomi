@@ -207,7 +207,11 @@
   }
 
   function rankedSearchItems(items, tokens, limit) {
-    if (tokens.length === 0) return [];
+    if (tokens.length === 0) {
+      return items.slice(0, limit).map(function (item) {
+        return { item: item, score: 0 };
+      });
+    }
     return items
       .map(function (item) {
         return { item: item, score: scoreSearchItem(item, tokens) };
@@ -221,6 +225,15 @@
           a.item.searchPath.localeCompare(b.item.searchPath);
       })
       .slice(0, limit);
+  }
+
+  function appendSearchField(parts, name, value) {
+    if (!value) return;
+    parts.push(value);
+    parts.push(name + ":" + value);
+    value.trim().split(/\s+/).filter(Boolean).forEach(function (part) {
+      parts.push(name + ":" + part);
+    });
   }
 
   function appendHighlightedText(parent, text, tokens) {
@@ -264,15 +277,28 @@
       const state = node.dataset.issueState || "";
       const priority = node.dataset.issuePriority || "";
       const status = node.dataset.issueStatus || "";
+      const milestone = node.dataset.issueMilestone || "";
+      const issueType = node.dataset.issueType || "";
+      const labels = node.dataset.issueLabels || "";
+      const assignees = node.dataset.issueAssignees || "";
       const display = node.dataset.issueDisplay || ref;
-      const meta = [display, status, priority, state].filter(Boolean).join(" ");
+      const meta = [display, status, priority, state, issueType, milestone, labels, assignees].filter(Boolean).join(" ");
+      const fieldSearch = [display];
+      appendSearchField(fieldSearch, "state", state);
+      if (state) fieldSearch.push("is:" + state);
+      appendSearchField(fieldSearch, "priority", priority);
+      appendSearchField(fieldSearch, "status", status);
+      appendSearchField(fieldSearch, "type", issueType);
+      appendSearchField(fieldSearch, "milestone", milestone);
+      appendSearchField(fieldSearch, "label", labels);
+      appendSearchField(fieldSearch, "assignee", assignees);
       const path = [meta, title].filter(Boolean).join(" ");
       return {
         ref: ref,
         name: [display, title].filter(Boolean).join(" "),
         path: path,
         searchName: [display, title].join(" ").toLowerCase(),
-        searchPath: path.toLowerCase(),
+        searchPath: [path, fieldSearch.join(" ")].join(" ").toLowerCase(),
       };
     });
   }
@@ -328,6 +354,10 @@
       if (!result) return;
       input.value = result.item.ref;
       input.dispatchEvent(new Event("input", { bubbles: true }));
+      if (renderFrame !== 0) {
+        window.cancelAnimationFrame(renderFrame);
+        renderFrame = 0;
+      }
       setMenuOpen(false);
       input.focus();
       input.select();
@@ -339,15 +369,10 @@
       results = rankedSearchItems(issueSearchItems(), tokens, maxIssueSearchResults);
       menu.textContent = "";
 
-      if (tokens.length === 0) {
-        setMenuOpen(false);
-        return;
-      }
-
       if (results.length === 0) {
         const empty = document.createElement("div");
         empty.className = "tree-search-empty";
-        empty.textContent = "No matching issues";
+        empty.textContent = tokens.length === 0 ? "No issues available" : "No matching issues";
         menu.appendChild(empty);
         setMenuOpen(true);
         setActiveIndex(-1);
@@ -394,7 +419,7 @@
 
     input.addEventListener("input", scheduleRender);
     input.addEventListener("focus", function () {
-      if (searchTokens(input.value).length !== 0) scheduleRender();
+      scheduleRender();
     });
     input.addEventListener("keydown", function (event) {
       if (event.key === "Escape") {
@@ -480,9 +505,23 @@
     });
   }
 
+  function initProjectStatusMenu(menu) {
+    if (menu.dataset.projectStatusMenuReady === "yes") return;
+    menu.dataset.projectStatusMenuReady = "yes";
+
+    menu.querySelectorAll("input[type='radio'][name='status']").forEach(function (input) {
+      input.addEventListener("change", function () {
+        menu.open = false;
+        const summary = menu.querySelector("summary");
+        if (summary) summary.focus();
+      });
+    });
+  }
+
   function initProjects() {
     initProjectIndexTabs();
     document.querySelectorAll("[data-project-issue-search]").forEach(initIssueSearchMenu);
+    document.querySelectorAll("[data-project-status-menu]").forEach(initProjectStatusMenu);
     document.querySelectorAll(cardSelector).forEach(initCard);
     document.querySelectorAll(columnSelector).forEach(initColumn);
   }

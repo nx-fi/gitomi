@@ -95,6 +95,11 @@ gt comment reply COMMENT --body BODY
 gt comment edit COMMENT --body BODY
 gt comment redact COMMENT [--reason REASON]
 gt comment react|unreact COMMENT EMOJI
+gt inbox [--json] [--all|--unread] [--principal PRINCIPAL] [--limit N]
+gt notification subscribe issue|pr OBJECT [--principal PRINCIPAL]
+gt notification unsubscribe issue|pr OBJECT [--principal PRINCIPAL]
+gt notification subscriptions [--json] [--principal PRINCIPAL]
+gt notification read EVENT|--all [--principal PRINCIPAL]
 gt actions workflows [--json] [--ref REF|--oid OID]
 gt actions request --workflow WORKFLOW [--ref REF|--oid OID] [--event EVENT]
 gt actions complete RUN --conclusion CONCLUSION [--workflow WORKFLOW] [--ref REF|--oid OID] [--event EVENT]
@@ -143,6 +148,12 @@ include detail metadata, comments, reactions, timeline events, commit
 references, and command templates for follow-up actions. `gt pr view --view
 agent --include-diff` also includes a local diff when the pull request base and
 head refs are available.
+
+`gt inbox` lists unread notifications by default and can show recent read and
+unread events with `--all`. `gt notification subscribe` and
+`gt notification unsubscribe` explicitly manage issue or pull request
+subscriptions, while `gt notification read EVENT` and
+`gt notification read --all` write signed read-marker events.
 
 `gt project create` creates a signed project board event with kanban columns.
 When no columns are supplied it creates `Todo`, `In Progress`, and `Done`.
