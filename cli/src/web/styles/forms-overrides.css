@@ -270,6 +270,32 @@ input[type="reset"]:hover,
 [role="button"]:hover {
   transform: none;
 }
+button.is-submitting,
+.button.is-submitting,
+input[type="submit"].is-submitting {
+  cursor: progress;
+}
+button.is-submitting::before,
+.button.is-submitting::before {
+  content: "";
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: gitomi-submit-spin 780ms linear infinite;
+}
+button.is-submitting:not(.button)::before {
+  margin-right: 7px;
+  vertical-align: -2px;
+}
+button.is-submitting:disabled,
+.button.is-submitting:disabled,
+input[type="submit"].is-submitting:disabled {
+  opacity: 0.86;
+}
 .root-branch-select {
   background-image: none;
 }
@@ -382,4 +408,13 @@ input[type="reset"]:hover,
 .gitomi-notification.is-hiding {
   opacity: 0;
   transform: translateY(-6px);
+}
+@keyframes gitomi-submit-spin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  button.is-submitting::before,
+  .button.is-submitting::before {
+    animation-duration: 1600ms;
+  }
 }

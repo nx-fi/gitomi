@@ -9,7 +9,7 @@
   const themeStyleId = "gitomi-theme-stylesheet";
   const themes = {
     gitomi: { label: "Gitomi" },
-    capucine: { label: "Capucine" },
+    terminal: { label: "Terminal" },
     modern: { label: "Modern" },
   };
 
@@ -46,6 +46,7 @@
   }
 
   function normalizeTheme(value) {
+    if (value === "capucine") return "terminal";
     return isTheme(value) ? value : "gitomi";
   }
 
@@ -164,6 +165,8 @@
     if (stored === "light" || stored === "dark") {
       setStored(modeKey, stored);
       setStored(themeKey, "gitomi");
+    } else if (stored === "capucine") {
+      setStored(themeKey, "terminal");
     } else if (!isTheme(stored)) {
       setStored(themeKey, "gitomi");
     }

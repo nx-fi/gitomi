@@ -302,25 +302,19 @@
 .project-title-line h1 {
   overflow-wrap: anywhere;
 }
-.project-lock-icon {
-  position: relative;
+.project-title-icon {
   width: 18px;
   height: 18px;
+}
+.project-title-icon,
+.project-overview-icon {
   flex: 0 0 auto;
   color: var(--muted);
   border: 2px solid currentColor;
   border-radius: var(--radius-sm);
-}
-.project-lock-icon::before {
-  content: "";
-  position: absolute;
-  left: 3px;
-  top: -9px;
-  width: 8px;
-  height: 8px;
-  border: 2px solid currentColor;
-  border-bottom: 0;
-  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  background:
+    linear-gradient(currentColor, currentColor) 50% 0 / 2px 100% no-repeat,
+    linear-gradient(currentColor, currentColor) 0 50% / 100% 2px no-repeat;
 }
 .project-view-tabs {
   display: flex;
@@ -465,36 +459,15 @@
   min-width: 0;
 }
 .project-overview-title h1 {
-  margin: 5px 0 4px;
+  margin: 5px 0 0;
   overflow-wrap: anywhere;
   font-size: 32px;
   line-height: 1.15;
 }
-.project-overview-title p:not(.eyebrow) {
-  max-width: 680px;
-  margin: 0;
-  color: var(--muted);
-  font-size: 15px;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-}
 .project-overview-icon {
-  position: relative;
-  width: 34px;
-  height: 34px;
-  flex: 0 0 auto;
-  color: var(--muted);
-  background: var(--panel-strong);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-}
-.project-overview-icon::before {
-  content: "";
-  position: absolute;
-  inset: 8px;
-  border: 2px solid currentColor;
-  border-radius: var(--radius-sm);
-  transform: rotate(45deg) skew(-8deg, -8deg);
+  width: 24px;
+  height: 24px;
+  margin-top: 4px;
 }
 .project-overview-head-stats {
   display: flex;
@@ -504,21 +477,20 @@
   gap: 8px;
   flex: 0 0 auto;
 }
-.project-overview-head-stats span {
+.project-overview-issue-stat {
   display: inline-flex;
   align-items: center;
-  min-height: 28px;
-  padding: 0 9px;
+  gap: 5px;
   color: var(--muted);
-  background: var(--subtle);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  font-size: 12px;
-  font-weight: 700;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.2;
+  white-space: nowrap;
 }
-.project-overview-head-stats strong {
-  margin-right: 4px;
+.project-overview-issue-stat strong {
   color: var(--text);
+  font-size: 15px;
+  font-weight: 800;
 }
 .project-overview-tabs {
   display: flex;

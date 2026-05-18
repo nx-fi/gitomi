@@ -2,7 +2,9 @@
   const popoverMenuSelector = "details[data-popover-menu]";
   const indexViewSnapshotKey = "gitomi.indexViewSnapshot.v1";
   const submitLockMs = 3000;
+  const longSubmitLockMs = 24 * 60 * 60 * 1000;
   const notificationTimeoutMs = 6000;
+  const submitControlSelector = "button:not([type]), button[type='submit'], input[type='submit'], input[type='image']";
   const nativeFetch = window.fetch ? window.fetch.bind(window) : null;
 
   function notificationRoot() {
@@ -122,7 +124,7 @@
   function submitterFor(event, form) {
     if (event.submitter) return event.submitter;
     const active = document.activeElement;
-    return active && form.contains(active) ? active : null;
+    return active && form.contains(active) && active.matches(submitControlSelector) ? active : null;
   }
 
   function isSubmitLocked(form) {
@@ -130,40 +132,77 @@
     return Number.isFinite(until) && until > Date.now();
   }
 
-  function setSubmitLock(form) {
-    const until = Date.now() + submitLockMs;
+  function setSubmitLock(form, durationMs) {
+    const lockMs = durationMs > 0 ? durationMs : longSubmitLockMs;
+    const token = String(Date.now()) + "-" + Math.random().toString(36).slice(2);
+    const until = Date.now() + lockMs;
+    form.dataset.gitomiSubmitLockToken = token;
     form.dataset.gitomiSubmitLockedUntil = String(until);
-    window.setTimeout(function () {
-      if (Number(form.dataset.gitomiSubmitLockedUntil || "0") <= until) {
+
+    function clear() {
+      if (form.dataset.gitomiSubmitLockToken === token) {
         delete form.dataset.gitomiSubmitLockedUntil;
+        delete form.dataset.gitomiSubmitLockToken;
       }
-    }, submitLockMs);
+    }
+
+    if (durationMs > 0) {
+      window.setTimeout(clear, durationMs);
+    }
+
+    return clear;
   }
 
   function submitControls(form, submitter) {
-    const controls = Array.from(form.querySelectorAll("button:not([type]), button[type='submit'], input[type='submit'], input[type='image']"));
+    const controls = Array.from(form.querySelectorAll(submitControlSelector));
     if (submitter && controls.indexOf(submitter) === -1) controls.push(submitter);
     return controls;
   }
 
-  function lockSubmitControls(form, submitter) {
-    submitControls(form, submitter).forEach(function (control) {
+  function setSubmitterBusy(control, busy) {
+    if (!control) return;
+    control.classList.toggle("is-submitting", busy);
+    if (busy) {
+      control.setAttribute("aria-busy", "true");
+    } else {
+      control.removeAttribute("aria-busy");
+    }
+  }
+
+  function releaseSubmitControl(control) {
+    if (control.dataset.gitomiWasDisabled !== "yes") control.disabled = false;
+    delete control.dataset.gitomiSubmitLock;
+    delete control.dataset.gitomiWasDisabled;
+  }
+
+  function lockSubmitControls(form, submitter, durationMs) {
+    const locked = [];
+    const controls = submitControls(form, submitter);
+    const busyControl = submitter || controls[0] || null;
+    setSubmitterBusy(busyControl, true);
+    controls.forEach(function (control) {
       if (!control || control.dataset.gitomiSubmitLock === "yes") return;
       control.dataset.gitomiSubmitLock = "yes";
       control.dataset.gitomiWasDisabled = control.disabled ? "yes" : "no";
       control.disabled = true;
-      window.setTimeout(function () {
-        if (control.dataset.gitomiSubmitLock !== "yes") return;
-        if (control.dataset.gitomiWasDisabled !== "yes") control.disabled = false;
-        delete control.dataset.gitomiSubmitLock;
-        delete control.dataset.gitomiWasDisabled;
-      }, submitLockMs);
+      locked.push(control);
+      if (durationMs > 0) {
+        window.setTimeout(function () {
+          if (control.dataset.gitomiSubmitLock === "yes") releaseSubmitControl(control);
+        }, durationMs);
+      }
     });
+    return function unlockSubmitControls() {
+      setSubmitterBusy(busyControl, false);
+      locked.forEach(function (control) {
+        if (control.dataset.gitomiSubmitLock === "yes") releaseSubmitControl(control);
+      });
+    };
   }
 
   window.gitomiLockSubmitControls = function (form, submitter) {
     if (!(form instanceof HTMLFormElement)) return;
-    lockSubmitControls(form, submitter);
+    lockSubmitControls(form, submitter, submitLockMs);
   };
 
   function ensureSubmitterShadow(form, submitter) {
@@ -215,27 +254,28 @@
 
     if (response.redirected) {
       window.location.assign(response.url);
-      return;
+      return "navigating";
     }
 
     if (!response.ok) {
       notify(await responseMessage(response), "error");
-      return;
+      return "complete";
     }
 
     if (response.status === 204) {
       window.location.reload();
-      return;
+      return "navigating";
     }
 
     const contentType = response.headers.get("Content-Type") || "";
     if (contentType.toLowerCase().indexOf("text/html") !== -1) {
       replaceDocument(await response.text(), response.url);
-      return;
+      return "navigating";
     }
 
     const text = await response.text();
     if (text.trim()) notify(text, "success");
+    return "complete";
   }
 
   function initSubmitLocks() {
@@ -255,14 +295,23 @@
 
       const submitter = submitterFor(event, form);
       const shadow = ensureSubmitterShadow(form, submitter);
-      setSubmitLock(form);
-      lockSubmitControls(form, submitter);
 
       const action = sameOriginAction(form);
-      if (!nativeFetch || !action || form.enctype === "multipart/form-data") return;
+      const enhanced = nativeFetch && action && form.enctype !== "multipart/form-data";
+      const clearSubmitLock = setSubmitLock(form, enhanced ? 0 : submitLockMs);
+      const unlockSubmitControls = lockSubmitControls(form, submitter, enhanced ? 0 : submitLockMs);
+      if (!enhanced) return;
 
       event.preventDefault();
-      submitPostForm(form, action, shadow).catch(function (error) {
+      function settleSubmit() {
+        unlockSubmitControls();
+        clearSubmitLock();
+      }
+
+      submitPostForm(form, action, shadow).then(function (result) {
+        if (result !== "navigating") settleSubmit();
+      }).catch(function (error) {
+        settleSubmit();
         notify(error && error.message ? error.message : "The action failed.", "error");
       });
     });
@@ -480,11 +529,12 @@
         });
       }
 
-      function persistLabelOrder() {
+      function persistLabelOrder(movedRow) {
         if (!list || !window.fetch || !csrfToken) return;
         const params = new URLSearchParams();
         params.set(csrfField, csrfToken);
         params.set("action", "reorder");
+        if (movedRow) params.set("label", movedRow.dataset.labelName || "");
         params.set("order", Array.from(list.querySelectorAll("[data-label-row]")).map(function (row) {
           return row.dataset.labelName || "";
         }).filter(Boolean).join("\n"));
@@ -619,7 +669,7 @@
         if (!draggedRow) return;
         event.preventDefault();
         updateLabelOrderFromDom();
-        persistLabelOrder();
+        persistLabelOrder(draggedRow);
         draggedRow.classList.remove("is-dragging");
         draggedRow = null;
       });
@@ -627,7 +677,7 @@
       page.addEventListener("dragend", function () {
         if (!draggedRow) return;
         updateLabelOrderFromDom();
-        persistLabelOrder();
+        persistLabelOrder(draggedRow);
         draggedRow.classList.remove("is-dragging");
         draggedRow = null;
       });

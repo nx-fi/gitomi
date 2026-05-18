@@ -235,10 +235,10 @@ pub const LabelUpdate = struct {
     name: ?[]const u8 = null,
     description: ?[]const u8 = null,
     color: ?[]const u8 = null,
-    position: ?i64 = null,
+    priority: ?i64 = null,
 
     pub fn hasChanges(self: LabelUpdate) bool {
-        return self.name != null or self.description != null or self.color != null or self.position != null;
+        return self.name != null or self.description != null or self.color != null or self.priority != null;
     }
 };
 

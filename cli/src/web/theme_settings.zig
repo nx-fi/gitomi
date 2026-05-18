@@ -19,8 +19,8 @@ const ThemeChoice = struct {
 
 const theme_choices = [_]ThemeChoice{
     .{ .id = "gitomi", .label = "Gitomi", .note = "Default", .swatch_class = "theme-swatch-gitomi" },
-    .{ .id = "capucine", .label = "Capucine", .note = "Square", .swatch_class = "theme-swatch-capucine" },
-    .{ .id = "modern", .label = "Modern", .note = "Glass", .swatch_class = "theme-swatch-modern" },
+    .{ .id = "terminal", .label = "Terminal", .note = "Capucine CLI", .swatch_class = "theme-swatch-terminal" },
+    .{ .id = "modern", .label = "Modern", .note = "Paper / Glass", .swatch_class = "theme-swatch-modern" },
 };
 
 pub fn renderThemePage(allocator: Allocator, repo: Repo) ![]u8 {
@@ -74,6 +74,7 @@ fn appendCustomThemeEditor(buf: *std.ArrayList(u8), allocator: Allocator) !void 
         \\  --surface-panel: #151b20;
         \\  --text-default: #eef5f3;
         \\  --interactive-primary: #76e4d4;
+        \\  --font-ui: var(--mono);
         \\  --radius-md: 0px;
         \\}"></textarea>
         \\  <div class="theme-custom-actions">

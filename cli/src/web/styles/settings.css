@@ -166,12 +166,12 @@
 .theme-swatch-gitomi span:nth-child(1) { background: var(--theme-preview-gitomi-surface); }
 .theme-swatch-gitomi span:nth-child(2) { background: var(--theme-preview-gitomi-accent); }
 .theme-swatch-gitomi span:nth-child(3) { background: var(--theme-preview-gitomi-muted); }
-.theme-swatch-capucine {
+.theme-swatch-terminal {
   border-radius: 0;
 }
-.theme-swatch-capucine span:nth-child(1) { background: var(--theme-preview-capucine-surface); }
-.theme-swatch-capucine span:nth-child(2) { background: var(--theme-preview-capucine-accent); }
-.theme-swatch-capucine span:nth-child(3) { background: var(--theme-preview-capucine-muted); }
+.theme-swatch-terminal span:nth-child(1) { background: var(--theme-preview-terminal-surface); }
+.theme-swatch-terminal span:nth-child(2) { background: var(--theme-preview-terminal-accent); }
+.theme-swatch-terminal span:nth-child(3) { background: var(--theme-preview-terminal-muted); }
 .theme-swatch-modern span:nth-child(1) { background: var(--theme-preview-modern-surface); }
 .theme-swatch-modern span:nth-child(2) { background: var(--theme-preview-modern-accent); }
 .theme-swatch-modern span:nth-child(3) { background: var(--theme-preview-modern-muted); }

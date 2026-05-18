@@ -10,6 +10,8 @@ const event_schema = model.event_schema;
 const IssueProjectPlacement = model.IssueProjectPlacement;
 const buildIssueOpenedJson = builders.buildIssueOpenedJson;
 const buildIssueUpdatedJson = builders.buildIssueUpdatedJson;
+const buildLabelCreatedJson = builders.buildLabelCreatedJson;
+const buildLabelUpdatedJson = builders.buildLabelUpdatedJson;
 const buildProjectUpdatedJson = builders.buildProjectUpdatedJson;
 const buildPullMergedJsonWithMetadata = builders.buildPullMergedJsonWithMetadata;
 const validateEventEnvelope = validation.validateEventEnvelope;
@@ -80,6 +82,73 @@ test "issue opened event json passes envelope validation" {
     defer std.testing.allocator.free(body);
 
     try validateEventEnvelope(std.testing.allocator, "test-commit", body);
+}
+
+test "label order events use priority payload" {
+    var cfg = Config{
+        .allocator = std.testing.allocator,
+        .repo_id = try std.testing.allocator.dupe(u8, "018f0000-0000-7000-8000-000000000001"),
+        .principal = try std.testing.allocator.dupe(u8, "alice"),
+        .device = try std.testing.allocator.dupe(u8, "laptop"),
+        .seq = 0,
+    };
+    defer cfg.deinit();
+
+    const body = try buildLabelCreatedJson(
+        std.testing.allocator,
+        cfg,
+        1,
+        "018f0000-0000-7000-8000-000000000002",
+        "018f0000-0000-7000-8000-000000000003",
+        "018f0000-0000-7000-8000-000000000004",
+        "2026-05-13T18:30:59Z",
+        .{},
+        "bug",
+        "",
+        "#d73a4a",
+        100,
+    );
+    defer std.testing.allocator.free(body);
+
+    try validateEventEnvelope(std.testing.allocator, "test-commit", body);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+    defer parsed.deinit();
+    const payload = parsed.value.object.get("payload").?.object;
+    try std.testing.expect(payload.get("position") == null);
+    try std.testing.expectEqual(@as(i64, 100), payload.get("priority").?.integer);
+}
+
+test "label updated validation accepts legacy position payload" {
+    var cfg = Config{
+        .allocator = std.testing.allocator,
+        .repo_id = try std.testing.allocator.dupe(u8, "018f0000-0000-7000-8000-000000000001"),
+        .principal = try std.testing.allocator.dupe(u8, "alice"),
+        .device = try std.testing.allocator.dupe(u8, "laptop"),
+        .seq = 0,
+    };
+    defer cfg.deinit();
+
+    const body = try buildLabelUpdatedJson(
+        std.testing.allocator,
+        cfg,
+        1,
+        "018f0000-0000-7000-8000-000000000002",
+        "018f0000-0000-7000-8000-000000000003",
+        "018f0000-0000-7000-8000-000000000004",
+        "2026-05-13T18:30:59Z",
+        .{},
+        .{ .priority = 150 },
+    );
+    defer std.testing.allocator.free(body);
+
+    const legacy = try std.testing.allocator.dupe(u8, body);
+    defer std.testing.allocator.free(legacy);
+    const priority_field = "\"priority\":150";
+    const position_field = "\"position\":150";
+    const offset = std.mem.indexOf(u8, legacy, priority_field).?;
+    @memcpy(legacy[offset .. offset + position_field.len], position_field);
+
+    try validateEventEnvelope(std.testing.allocator, "test-commit", legacy);
 }
 
 test "pull merged event json records confirmed remote publication" {

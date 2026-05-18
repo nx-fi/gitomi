@@ -26,6 +26,8 @@ const sqlite = index.sqlite;
 const newUuidV7 = util.newUuidV7;
 const rfc3339Now = util.rfc3339Now;
 
+const label_priority_step: i64 = 100;
+
 const label_rows_sql =
     \\WITH label_names AS (
     \\  SELECT name AS label FROM label_definitions
@@ -61,7 +63,7 @@ const label_rows_sql =
     \\LEFT JOIN label_definitions ON label_definitions.name = label_names.label
     \\LEFT JOIN usage_totals ON usage_totals.label = label_names.label
     \\ORDER BY CASE WHEN label_definitions.id IS NULL THEN 1 ELSE 0 END,
-    \\         label_definitions.position,
+    \\         label_definitions.priority,
     \\         lower(label_names.label),
     \\         label_names.label
 ;
@@ -156,9 +158,9 @@ pub fn handleLabelsPost(allocator: Allocator, repo: Repo, stream: std.net.Stream
             try sendPlainResponse(allocator, stream, 409, "Conflict", "Label already exists\n");
             return;
         }
-        const position = try nextLabelPosition(&db);
+        const priority = try nextLabelPriority(&db);
 
-        writeLabelCreatedEvent(allocator, new_label, description, color, position) catch |err| {
+        writeLabelCreatedEvent(allocator, new_label, description, color, priority) catch |err| {
             try sendPlainResponse(allocator, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), shared.writeFailureMessage(err, "Could not create label\n"));
             return;
         };
@@ -169,7 +171,7 @@ pub fn handleLabelsPost(allocator: Allocator, repo: Repo, stream: std.net.Stream
     if (std.mem.eql(u8, action, "reorder")) {
         const order_owned = (try formValueOwned(allocator, form_body, "order")) orelse try allocator.dupe(u8, "");
         defer allocator.free(order_owned);
-        reorderLabels(allocator, repo, order_owned) catch {
+        reorderLabels(allocator, repo, label, order_owned) catch {
             try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not reorder labels\n");
             return;
         };
@@ -225,8 +227,8 @@ pub fn handleLabelsPost(allocator: Allocator, repo: Repo, stream: std.net.Stream
                 };
             }
         } else {
-            const position = try nextLabelPosition(&db);
-            writeLabelCreatedEvent(allocator, new_label, description, color, position) catch |err| {
+            const priority = try nextLabelPriority(&db);
+            writeLabelCreatedEvent(allocator, new_label, description, color, priority) catch |err| {
                 try sendPlainResponse(allocator, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), shared.writeFailureMessage(err, "Could not update label\n"));
                 return;
             };
@@ -265,7 +267,7 @@ const LabelDefinition = struct {
     id: []u8,
     description: []u8,
     color: []u8,
-    position: i64,
+    priority: i64,
 
     fn deinit(self: *LabelDefinition, allocator: Allocator) void {
         allocator.free(self.id);
@@ -275,7 +277,7 @@ const LabelDefinition = struct {
 };
 
 fn loadLabelDefinitionByName(allocator: Allocator, db: *SqliteDb, label: []const u8) !?LabelDefinition {
-    var stmt = try db.prepare("SELECT id, description, color, position FROM label_definitions WHERE name = ?");
+    var stmt = try db.prepare("SELECT id, description, color, priority FROM label_definitions WHERE name = ?");
     defer stmt.deinit();
     try stmt.bindText(1, label);
     if (!(try stmt.step())) return null;
@@ -283,7 +285,7 @@ fn loadLabelDefinitionByName(allocator: Allocator, db: *SqliteDb, label: []const
         .id = try stmt.columnTextDup(allocator, 0),
         .description = try stmt.columnTextDup(allocator, 1),
         .color = try stmt.columnTextDup(allocator, 2),
-        .position = stmt.columnInt64(3),
+        .priority = stmt.columnInt64(3),
     };
 }
 
@@ -305,14 +307,15 @@ fn labelNameExists(db: *SqliteDb, label: []const u8) !bool {
     return try stmt.step();
 }
 
-fn nextLabelPosition(db: *SqliteDb) !i64 {
-    var stmt = try db.prepare("SELECT COALESCE(MAX(position), -1) + 1 FROM label_definitions");
+fn nextLabelPriority(db: *SqliteDb) !i64 {
+    var stmt = try db.prepare("SELECT COALESCE(MAX(priority), 0) + ? FROM label_definitions");
     defer stmt.deinit();
-    if (!(try stmt.step())) return 0;
+    try stmt.bindInt64(1, label_priority_step);
+    if (!(try stmt.step())) return label_priority_step;
     return stmt.columnInt64(0);
 }
 
-fn writeLabelCreatedEvent(allocator: Allocator, name: []const u8, description: []const u8, color: []const u8, position: i64) !void {
+fn writeLabelCreatedEvent(allocator: Allocator, name: []const u8, description: []const u8, color: []const u8, priority: i64) !void {
     var writer = try EventWriter.init(allocator, "gt label create");
     defer writer.deinit();
 
@@ -337,7 +340,7 @@ fn writeLabelCreatedEvent(allocator: Allocator, name: []const u8, description: [
         name,
         description,
         color,
-        position,
+        priority,
     );
     defer allocator.free(event_body);
 
@@ -379,53 +382,125 @@ fn writeLabelUpdatedEvent(allocator: Allocator, label_id: []const u8, update: ev
     defer allocator.free(commit_oid);
 }
 
-fn reorderLabels(allocator: Allocator, repo: Repo, order_body: []const u8) !void {
+fn reorderLabels(allocator: Allocator, repo: Repo, moved_label: []const u8, order_body: []const u8) !void {
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
 
-    var seen = std.StringHashMap(void).init(allocator);
-    defer {
-        var keys = seen.keyIterator();
-        while (keys.next()) |key| allocator.free(key.*);
-        seen.deinit();
+    var order = try parseLabelOrder(allocator, order_body);
+    defer deinitStringList(allocator, &order);
+    if (order.items.len == 0) return;
+    if (moved_label.len == 0) {
+        try rebalanceLabelsFromOrder(allocator, &db, order.items);
+        return;
     }
 
-    var position: i64 = 0;
+    const target_index = indexOfLabel(order.items, moved_label) orelse {
+        try rebalanceLabelsFromOrder(allocator, &db, order.items);
+        return;
+    };
+    const previous_label = if (target_index == 0) null else order.items[target_index - 1];
+    const next_label = if (target_index + 1 >= order.items.len) null else order.items[target_index + 1];
+
+    var existing = try loadLabelDefinitionByName(allocator, &db, moved_label);
+    defer if (existing) |*value| value.deinit(allocator);
+    var previous_definition = if (previous_label) |value| try loadLabelDefinitionByName(allocator, &db, value) else null;
+    defer if (previous_definition) |*value| value.deinit(allocator);
+    var next_definition = if (next_label) |value| try loadLabelDefinitionByName(allocator, &db, value) else null;
+    defer if (next_definition) |*value| value.deinit(allocator);
+    if ((previous_label != null and previous_definition == null) or (next_label != null and next_definition == null)) {
+        try rebalanceLabelsFromOrder(allocator, &db, order.items);
+        return;
+    }
+
+    const previous_ptr: ?*const LabelDefinition = if (previous_definition) |*value| value else null;
+    const next_ptr: ?*const LabelDefinition = if (next_definition) |*value| value else null;
+    if (existing) |*value| {
+        if (labelPriorityAlreadyBetween(value, previous_ptr, next_ptr)) return;
+    }
+    const priority = labelPriorityBetween(previous_ptr, next_ptr) orelse {
+        try rebalanceLabelsFromOrder(allocator, &db, order.items);
+        return;
+    };
+    try writeLabelPriority(allocator, moved_label, existing, priority);
+}
+
+fn parseLabelOrder(allocator: Allocator, order_body: []const u8) !std.ArrayList([]u8) {
+    var order: std.ArrayList([]u8) = .empty;
+    errdefer deinitStringList(allocator, &order);
+
+    var seen = std.StringHashMap(void).init(allocator);
+    defer seen.deinit();
+
     var lines = std.mem.splitScalar(u8, order_body, '\n');
     while (lines.next()) |raw_label| {
         const label = std.mem.trim(u8, raw_label, " \t\r\n");
         if (label.len == 0) continue;
-        if (!(try rememberLabelForReorder(allocator, &seen, label))) continue;
-        try reorderSingleLabel(allocator, &db, label, position);
-        position += 1;
+        if (seen.contains(label)) continue;
+        const key = try allocator.dupe(u8, label);
+        errdefer allocator.free(key);
+        try seen.put(key, {});
+        try order.append(allocator, key);
     }
+    return order;
 }
 
-fn rememberLabelForReorder(allocator: Allocator, seen: *std.StringHashMap(void), label: []const u8) !bool {
-    if (seen.contains(label)) return false;
-    const key = try allocator.dupe(u8, label);
-    errdefer allocator.free(key);
-    const entry = try seen.getOrPut(key);
-    if (entry.found_existing) {
-        allocator.free(key);
-        return false;
+fn deinitStringList(allocator: Allocator, list: *std.ArrayList([]u8)) void {
+    for (list.items) |item| allocator.free(item);
+    list.deinit(allocator);
+}
+
+fn indexOfLabel(order: []const []const u8, label: []const u8) ?usize {
+    for (order, 0..) |candidate, index_value| {
+        if (std.mem.eql(u8, candidate, label)) return index_value;
     }
-    entry.value_ptr.* = {};
+    return null;
+}
+
+fn labelPriorityBetween(previous: ?*const LabelDefinition, next: ?*const LabelDefinition) ?i64 {
+    if (previous) |left| {
+        if (next) |right| {
+            if (left.priority >= std.math.maxInt(i64)) return null;
+            if (right.priority <= left.priority + 1) return null;
+            return left.priority + @divTrunc(right.priority - left.priority, 2);
+        }
+        if (left.priority > std.math.maxInt(i64) - label_priority_step) return null;
+        return left.priority + label_priority_step;
+    }
+    if (next) |right| {
+        if (right.priority <= 1) return null;
+        return @divTrunc(right.priority, 2);
+    }
+    return label_priority_step;
+}
+
+fn labelPriorityAlreadyBetween(existing: *const LabelDefinition, previous: ?*const LabelDefinition, next: ?*const LabelDefinition) bool {
+    if (previous) |left| {
+        if (existing.priority <= left.priority) return false;
+    }
+    if (next) |right| {
+        if (existing.priority >= right.priority) return false;
+    }
     return true;
 }
 
-fn reorderSingleLabel(allocator: Allocator, db: *SqliteDb, label: []const u8, position: i64) !void {
-    var definition = try loadLabelDefinitionByName(allocator, db, label);
-    defer if (definition) |*value| value.deinit(allocator);
+fn rebalanceLabelsFromOrder(allocator: Allocator, db: *SqliteDb, order: []const []const u8) !void {
+    const step: usize = @intCast(label_priority_step);
+    for (order, 0..) |label, index_value| {
+        const priority: i64 = @intCast((index_value + 1) * step);
+        var definition = try loadLabelDefinitionByName(allocator, db, label);
+        defer if (definition) |*value| value.deinit(allocator);
+        try writeLabelPriority(allocator, label, definition, priority);
+    }
+}
 
+fn writeLabelPriority(allocator: Allocator, label: []const u8, definition: ?LabelDefinition, priority: i64) !void {
     if (definition) |existing| {
-        if (existing.position == position) return;
-        try writeLabelUpdatedEvent(allocator, existing.id, .{ .position = position });
+        if (existing.priority == priority) return;
+        try writeLabelUpdatedEvent(allocator, existing.id, .{ .priority = priority });
         return;
     }
-
     const color = defaultLabelColor(label);
-    try writeLabelCreatedEvent(allocator, label, "", color, position);
+    try writeLabelCreatedEvent(allocator, label, "", color, priority);
 }
 
 fn writeLabelDeletedEvent(allocator: Allocator, label_id: []const u8) !void {
@@ -816,13 +891,13 @@ test "labels page usage counts only open issues and pulls" {
     defer db.deinit();
 
     try db.exec(
-        \\CREATE TABLE label_definitions(id TEXT, name TEXT, description TEXT, color TEXT, position INTEGER);
+        \\CREATE TABLE label_definitions(id TEXT, name TEXT, description TEXT, color TEXT, priority INTEGER);
         \\CREATE TABLE issues(id TEXT PRIMARY KEY, state TEXT NOT NULL);
         \\CREATE TABLE issue_labels(issue_id TEXT NOT NULL, label TEXT NOT NULL);
         \\CREATE TABLE pulls(id TEXT PRIMARY KEY, state TEXT NOT NULL);
         \\CREATE TABLE pull_labels(pull_id TEXT NOT NULL, label TEXT NOT NULL);
-        \\INSERT INTO label_definitions(id, name, description, color, position) VALUES ('label-1', 'bug', '', '#ff0000', 0);
-        \\INSERT INTO label_definitions(id, name, description, color, position) VALUES ('label-2', 'history', '', '#00ff00', 1);
+        \\INSERT INTO label_definitions(id, name, description, color, priority) VALUES ('label-1', 'bug', '', '#ff0000', 100);
+        \\INSERT INTO label_definitions(id, name, description, color, priority) VALUES ('label-2', 'history', '', '#00ff00', 200);
         \\INSERT INTO issues(id, state) VALUES ('issue-open', 'open');
         \\INSERT INTO issues(id, state) VALUES ('issue-closed', 'closed');
         \\INSERT INTO issue_labels(issue_id, label) VALUES ('issue-open', 'bug');
@@ -853,6 +928,30 @@ test "labels page usage counts only open issues and pulls" {
     try std.testing.expectEqualStrings("history", history_label);
     try std.testing.expectEqual(@as(i64, 0), stmt.columnInt64(4));
     try std.testing.expectEqual(@as(i64, 0), stmt.columnInt64(5));
+}
+
+test "label priority midpoint preserves gaps" {
+    const left = LabelDefinition{ .id = "", .description = "", .color = "", .priority = 100 };
+    const middle = LabelDefinition{ .id = "", .description = "", .color = "", .priority = 150 };
+    const right = LabelDefinition{ .id = "", .description = "", .color = "", .priority = 200 };
+    const adjacent = LabelDefinition{ .id = "", .description = "", .color = "", .priority = 101 };
+
+    try std.testing.expectEqual(@as(?i64, 150), labelPriorityBetween(&left, &right));
+    try std.testing.expectEqual(@as(?i64, 200), labelPriorityBetween(&left, null));
+    try std.testing.expectEqual(@as(?i64, 50), labelPriorityBetween(null, &left));
+    try std.testing.expectEqual(@as(?i64, null), labelPriorityBetween(&left, &adjacent));
+    try std.testing.expect(labelPriorityAlreadyBetween(&middle, &left, &right));
+    try std.testing.expect(!labelPriorityAlreadyBetween(&left, &middle, &right));
+}
+
+test "label order parser trims and removes duplicates" {
+    var order = try parseLabelOrder(std.testing.allocator, " bug \nfeature\nbug\n\n docs \n");
+    defer deinitStringList(std.testing.allocator, &order);
+
+    try std.testing.expectEqual(@as(usize, 3), order.items.len);
+    try std.testing.expectEqualStrings("bug", order.items[0]);
+    try std.testing.expectEqualStrings("feature", order.items[1]);
+    try std.testing.expectEqualStrings("docs", order.items[2]);
 }
 
 test "label pull link targets open pull label filter" {

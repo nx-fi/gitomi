@@ -543,7 +543,7 @@
 }
 .issue-comment-form textarea {
   min-height: 112px;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-ui);
   resize: vertical;
 }
 .markdown-editor {

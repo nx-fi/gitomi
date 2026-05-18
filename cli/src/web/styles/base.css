@@ -1,16 +1,17 @@
 :root {
   --sticky-top: 96px;
   --back-nav-gutter: 72px;
+  --font-ui: "Inter", "Avenir Next", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --theme-preview-gitomi-surface: #ffffff;
   --theme-preview-gitomi-accent: #009c8f;
   --theme-preview-gitomi-muted: #bec9c7;
-  --theme-preview-capucine-surface: #fff8f5;
-  --theme-preview-capucine-accent: #ff5e4d;
-  --theme-preview-capucine-muted: #815178;
-  --theme-preview-modern-surface: #0b1422;
-  --theme-preview-modern-accent: #2f81ff;
-  --theme-preview-modern-muted: #7dd3fc;
+  --theme-preview-terminal-surface: #120c0a;
+  --theme-preview-terminal-accent: #ff7664;
+  --theme-preview-terminal-muted: #f6b13c;
+  --theme-preview-modern-surface: #fffdfa;
+  --theme-preview-modern-accent: #2563eb;
+  --theme-preview-modern-muted: #d8c8ad;
 }
 * { box-sizing: border-box; }
 body {
@@ -18,7 +19,7 @@ body {
   accent-color: var(--brand);
   background: var(--bg);
   color: var(--text);
-  font: 14px/1.5 "Inter", "Avenir Next", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font: 14px/1.5 var(--font-ui);
 }
 a { color: var(--link-color); text-decoration: none; }
 a:hover { text-decoration: underline; }

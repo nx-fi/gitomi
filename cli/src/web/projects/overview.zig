@@ -646,8 +646,6 @@ fn bindProjectNameTwice(stmt: *index.SqliteStmt, project: []const u8) !void {
 }
 
 fn appendProjectOverviewHeader(buf: *std.ArrayList(u8), allocator: Allocator, summary: *const ProjectSummary, metrics: *const ProjectMetrics) !void {
-    const completion_label = try projectCompletionLabelOwned(allocator, metrics);
-    defer allocator.free(completion_label);
     try appendTemplate(buf, allocator,
         \\<header class="project-overview-head">
         \\  <div class="project-overview-title">
@@ -656,24 +654,16 @@ fn appendProjectOverviewHeader(buf: *std.ArrayList(u8), allocator: Allocator, su
         \\      <p class="eyebrow">Project</p>
         \\      <h1>{project}</h1>
     , .{ .project = summary.name });
-    if (summary.description.len != 0) {
-        try appendTemplate(buf, allocator, "<p>{description}</p>", .{ .description = summary.description });
-    }
     try appendTemplate(buf, allocator,
         \\    </div>
         \\  </div>
         \\  <div class="project-overview-head-stats" aria-label="Project issue summary">
-        \\    <span><strong>{completion_label}</strong></span>
-        \\    <span><strong>{issue_count}</strong> issues</span>
-        \\    <span><strong>{open_count}</strong> open</span>
-        \\    <span><strong>{closed_count}</strong> closed</span>
+        \\    <span class="project-overview-issue-stat"><strong>{open_count}/{issue_count}</strong> issues</span>
         \\  </div>
         \\</header>
     , .{
-        .completion_label = completion_label,
         .issue_count = metrics.issue_count,
         .open_count = metrics.open_issue_count,
-        .closed_count = metrics.closed_issue_count,
     });
 }
 
@@ -1718,7 +1708,7 @@ fn appendProjectLabelsProperty(buf: *std.ArrayList(u8), allocator: Allocator, db
         \\FROM (SELECT DISTINCT label FROM project_labels WHERE project_id = ?) AS selected
         \\LEFT JOIN label_definitions ld ON ld.name = selected.label
         \\ORDER BY CASE WHEN ld.id IS NULL THEN 1 ELSE 0 END,
-        \\         ld.position,
+        \\         ld.priority,
         \\         lower(selected.label),
         \\         selected.label
     );
@@ -1752,7 +1742,7 @@ fn appendProjectLabelsProperty(buf: *std.ArrayList(u8), allocator: Allocator, db
         \\LEFT JOIN label_definitions ld ON ld.name = label_names.label
         \\WHERE label_names.label NOT IN (SELECT label FROM project_labels WHERE project_id = ?)
         \\ORDER BY CASE WHEN ld.id IS NULL THEN 1 ELSE 0 END,
-        \\         ld.position,
+        \\         ld.priority,
         \\         lower(label_names.label),
         \\         label_names.label
         \\LIMIT 24
@@ -2284,7 +2274,7 @@ test "project overview header renders plain project name" {
     var summary = ProjectSummary{
         .id = try std.testing.allocator.dupe(u8, "p1"),
         .name = try std.testing.allocator.dupe(u8, "Release & Plan"),
-        .description = try std.testing.allocator.dupe(u8, ""),
+        .description = try std.testing.allocator.dupe(u8, "Internal roadmap"),
         .state = try std.testing.allocator.dupe(u8, "open"),
         .status = try std.testing.allocator.dupe(u8, cmd_common.default_project_status),
         .status_occurred_at = try std.testing.allocator.dupe(u8, ""),
@@ -2295,12 +2285,21 @@ test "project overview header renders plain project name" {
         .author_principal = try std.testing.allocator.dupe(u8, ""),
     };
     defer summary.deinit(std.testing.allocator);
-    const metrics = ProjectMetrics{};
+    const metrics = ProjectMetrics{
+        .issue_count = 35,
+        .open_issue_count = 24,
+        .closed_issue_count = 11,
+    };
 
     try appendProjectOverviewHeader(&buf, std.testing.allocator, &summary, &metrics);
 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<h1>Release &amp; Plan</h1>") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<h1>@Release") == null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Internal roadmap") == null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "No milestones") == null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<strong>24/35</strong> issues") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, ">24</strong> open") == null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, ">11</strong> closed") == null);
 }
 
 test "project latest update renders update health instead of lifecycle status" {

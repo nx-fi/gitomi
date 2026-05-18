@@ -24,7 +24,7 @@ const loadConfig = repo_mod.loadConfig;
 const default_web_shortcut_leader = "Space";
 const default_web_shortcut_keys = "A S D F J K L E R U I O W Q P Z X C V B N M G H Y T";
 const default_web_shortcut_timeout_ms: u64 = 900;
-const asset_version = "20260518-settings-activity-payload";
+const asset_version = "20260518-submit-spinner";
 
 const WebStats = struct {
     inbox_refs: usize = 0,
@@ -844,7 +844,8 @@ fn appendShellStartWithOptions(
         \\        var legacyMode = storedTheme === "light" || storedTheme === "dark" ? storedTheme : null;
         \\        var legacyCustomMode = localStorage.getItem("gitomi.theme.customMode");
         \\        var systemMode = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-        \\        var theme = storedTheme === "capucine" || storedTheme === "modern" ? storedTheme : "gitomi";
+        \\        var theme = storedTheme === "capucine" ? "terminal" :
+        \\          (storedTheme === "terminal" || storedTheme === "modern" ? storedTheme : "gitomi");
         \\        var mode = storedMode === "light" || storedMode === "dark" ? storedMode :
         \\          legacyMode || (legacyCustomMode === "light" || legacyCustomMode === "dark" ? legacyCustomMode : systemMode);
         \\        document.documentElement.dataset.theme = theme;

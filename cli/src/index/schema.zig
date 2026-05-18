@@ -340,16 +340,17 @@ pub fn createIndexSchema(db: *SqliteDb) !void {
         \\  color_occurred_at TEXT NOT NULL,
         \\  color_actor_principal TEXT NOT NULL,
         \\  color_event_hash TEXT NOT NULL,
-        \\  position INTEGER NOT NULL,
-        \\  position_occurred_at TEXT NOT NULL,
-        \\  position_actor_principal TEXT NOT NULL,
-        \\  position_event_hash TEXT NOT NULL,
+        \\  priority INTEGER NOT NULL,
+        \\  priority_occurred_at TEXT NOT NULL,
+        \\  priority_actor_principal TEXT NOT NULL,
+        \\  priority_event_hash TEXT NOT NULL,
         \\  created_at TEXT NOT NULL,
         \\  author_principal TEXT NOT NULL,
         \\  author_device TEXT NOT NULL,
         \\  UNIQUE(name)
         \\);
         \\CREATE INDEX label_definitions_name_idx ON label_definitions(name, id);
+        \\CREATE INDEX label_definitions_priority_idx ON label_definitions(priority, name, id);
         \\CREATE TABLE pulls (
         \\  id TEXT PRIMARY KEY,
         \\  title TEXT NOT NULL,

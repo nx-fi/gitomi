@@ -140,7 +140,7 @@ fn loadLabelOptions(allocator: Allocator, db: *SqliteDb, labels: *std.ArrayList(
         \\LEFT JOIN label_definitions ld ON ld.name = label_names.label
         \\WHERE label_names.label <> ''
         \\ORDER BY CASE WHEN ld.id IS NULL THEN 1 ELSE 0 END,
-        \\         ld.position,
+        \\         ld.priority,
         \\         lower(label_names.label),
         \\         label_names.label
         \\LIMIT 80

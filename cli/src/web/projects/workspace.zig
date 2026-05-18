@@ -145,7 +145,7 @@ test "project workspace title does not prepend at sign" {
     try db.exec("CREATE TABLE issue_metadata (issue_id TEXT, milestone TEXT, issue_type TEXT, priority TEXT, status TEXT, source_author TEXT, source_identity TEXT)");
     try db.exec("CREATE TABLE issue_labels (issue_id TEXT, label TEXT)");
     try db.exec("CREATE TABLE issue_assignees (issue_id TEXT, assignee TEXT)");
-    try db.exec("CREATE TABLE label_definitions (id TEXT, name TEXT, color TEXT, position INTEGER)");
+    try db.exec("CREATE TABLE label_definitions (id TEXT, name TEXT, color TEXT, priority INTEGER)");
     try db.exec("CREATE TABLE pull_labels (pull_id TEXT, label TEXT)");
     try db.exec("CREATE TABLE pull_assignees (pull_id TEXT, assignee TEXT)");
     try db.exec("CREATE TABLE identities (id TEXT, display_name TEXT, email TEXT)");
@@ -163,6 +163,8 @@ test "project workspace title does not prepend at sign" {
 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<h1>Release &amp; Plan</h1>") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<h1>@Release") == null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "project-title-icon") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "project-lock-icon") == null);
 }
 
 test "project view config parses saved filters" {

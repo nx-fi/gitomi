@@ -259,7 +259,7 @@
   color: var(--muted);
   background: transparent;
   border: 0;
-  font: 600 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font: 600 12px/1.4 var(--font-ui);
   cursor: pointer;
 }
 .merge-fold button:hover {
@@ -335,7 +335,7 @@
   background: var(--panel);
   border: 1px solid color-mix(in oklch, var(--red) 42%, var(--border));
   border-radius: var(--radius-md);
-  font: 600 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font: 600 12px/1.4 var(--font-ui);
   cursor: pointer;
 }
 .merge-line-deleted button:hover {
@@ -381,7 +381,7 @@
   background: var(--panel-strong);
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
-  font: 600 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font: 600 12px/1.4 var(--font-ui);
 }
 .merge-conflict-label {
   color: var(--text);

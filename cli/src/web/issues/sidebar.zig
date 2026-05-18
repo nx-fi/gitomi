@@ -123,7 +123,6 @@ pub fn append(
     try appendIssueSidebarMilestone(buf, allocator, db, raw_ref, milestone);
     try appendIssueSidebarRelationships(buf, allocator, db, raw_ref, issue_id, body);
     try appendIssueSidebarDevelopment(buf, allocator, db, issue_id, body);
-    try appendIssueSidebarNotifications(buf, allocator);
     try appendIssueSidebarParticipants(buf, allocator, db, issue_id, author);
 }
 
@@ -154,7 +153,7 @@ fn appendIssueSidebarLabels(buf: *std.ArrayList(u8), allocator: Allocator, db: *
         \\FROM (SELECT DISTINCT label FROM issue_labels WHERE issue_id = ?) AS selected
         \\LEFT JOIN label_definitions ld ON ld.name = selected.label
         \\ORDER BY CASE WHEN ld.id IS NULL THEN 1 ELSE 0 END,
-        \\         ld.position,
+        \\         ld.priority,
         \\         lower(selected.label),
         \\         selected.label
     );
@@ -358,14 +357,6 @@ fn appendIssueSidebarParticipants(buf: *std.ArrayList(u8), allocator: Allocator,
     try appendIssueSidebarSectionEnd(buf, allocator);
 }
 
-fn appendIssueSidebarNotifications(buf: *std.ArrayList(u8), allocator: Allocator) !void {
-    try appendIssueSidebarSectionStart(buf, allocator, "Notifications");
-    try buf.appendSlice(allocator,
-        \\<button class="button secondary issue-sidebar-full-button" type="button" disabled>Subscribe</button>
-    );
-    try appendIssueSidebarSectionEnd(buf, allocator);
-}
-
 fn appendIssueSidebarAssigneeMenu(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, raw_ref: []const u8, issue_id: []const u8) !void {
     try appendIssueSidebarSingleInputForm(buf, allocator, raw_ref, "add-assignee", "value", "Add assignee", "Filter assignees");
     try appendIssueSidebarMenuGroupStart(buf, allocator, "Assigned");
@@ -419,7 +410,7 @@ fn appendIssueSidebarLabelsMenu(buf: *std.ArrayList(u8), allocator: Allocator, d
         \\FROM (SELECT DISTINCT label FROM issue_labels WHERE issue_id = ?) AS selected
         \\LEFT JOIN label_definitions ld ON ld.name = selected.label
         \\ORDER BY CASE WHEN ld.id IS NULL THEN 1 ELSE 0 END,
-        \\         ld.position,
+        \\         ld.priority,
         \\         lower(selected.label),
         \\         selected.label
     );
@@ -451,7 +442,7 @@ fn appendIssueSidebarLabelsMenu(buf: *std.ArrayList(u8), allocator: Allocator, d
         \\LEFT JOIN label_definitions ld ON ld.name = label_names.label
         \\WHERE label_names.label NOT IN (SELECT label FROM issue_labels WHERE issue_id = ?)
         \\ORDER BY CASE WHEN ld.id IS NULL THEN 1 ELSE 0 END,
-        \\         ld.position,
+        \\         ld.priority,
         \\         lower(label_names.label),
         \\         label_names.label
         \\LIMIT 24

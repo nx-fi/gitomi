@@ -80,7 +80,7 @@ pub fn appendProjectWorkspaceChromeStart(
         \\<section class="panel kanban-panel project-board-panel project-detail-panel project-detail-{view}">
         \\  <div class="project-board-top">
         \\    <div class="project-title-line">
-        \\      <span class="project-lock-icon" aria-hidden="true"></span>
+        \\      <span class="project-title-icon" aria-hidden="true"></span>
         \\      <div>
         \\        <p class="eyebrow">Project {title_label}</p>
         \\        <h1>{project}</h1>

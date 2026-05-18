@@ -1211,8 +1211,8 @@ pub fn applyLabelProjection(allocator: Allocator, db: *SqliteDb, event_hash: []c
         if (try labelNameInUse(db, name, null)) return "duplicate_label_name";
         const description = event_mod.jsonString(payload.get("description")) orelse "";
         const color = event_mod.jsonString(payload.get("color")) orelse "#6e7681";
-        const position = event_mod.jsonInteger(payload.get("position")) orelse 0;
-        try insertLabelCreated(db, event_hash, envelope, name, description, color, position);
+        const priority = event_mod.jsonInteger(payload.get("priority")) orelse event_mod.jsonInteger(payload.get("position")) orelse 0;
+        try insertLabelCreated(db, event_hash, envelope, name, description, color, priority);
         return null;
     }
 
@@ -1230,8 +1230,9 @@ pub fn applyLabelProjection(allocator: Allocator, db: *SqliteDb, event_hash: []c
         if (event_mod.jsonString(payload.get("color"))) |color| {
             try updateLabelScalar(allocator, db, envelope.object_id, color, event_hash, envelope, "color", "color_occurred_at", "color_actor_principal", "color_event_hash");
         }
-        if (event_mod.jsonInteger(payload.get("position"))) |position| {
-            try updateLabelIntegerScalar(allocator, db, envelope.object_id, position, event_hash, envelope, "position", "position_occurred_at", "position_actor_principal", "position_event_hash");
+        const priority = event_mod.jsonInteger(payload.get("priority")) orelse event_mod.jsonInteger(payload.get("position"));
+        if (priority) |value| {
+            try updateLabelIntegerScalar(allocator, db, envelope.object_id, value, event_hash, envelope, "priority", "priority_occurred_at", "priority_actor_principal", "priority_event_hash");
         }
     } else if (std.mem.eql(u8, envelope.event_type, "label.deleted")) {
         try deleteLabelDefinition(db, envelope.object_id);
@@ -1343,14 +1344,14 @@ fn updateProjectScalar(
     try update.stepDone();
 }
 
-fn insertLabelCreated(db: *SqliteDb, event_hash: []const u8, envelope: ValidatedEnvelope, name: []const u8, description: []const u8, color: []const u8, position: i64) !void {
+fn insertLabelCreated(db: *SqliteDb, event_hash: []const u8, envelope: ValidatedEnvelope, name: []const u8, description: []const u8, color: []const u8, priority: i64) !void {
     var stmt = try db.prepare(
         \\INSERT OR IGNORE INTO label_definitions(
         \\  id,
         \\  name, name_occurred_at, name_actor_principal, name_event_hash,
         \\  description, description_occurred_at, description_actor_principal, description_event_hash,
         \\  color, color_occurred_at, color_actor_principal, color_event_hash,
-        \\  position, position_occurred_at, position_actor_principal, position_event_hash,
+        \\  priority, priority_occurred_at, priority_actor_principal, priority_event_hash,
         \\  created_at, author_principal, author_device
         \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     );
@@ -1368,7 +1369,7 @@ fn insertLabelCreated(db: *SqliteDb, event_hash: []const u8, envelope: Validated
     try stmt.bindText(11, envelope.occurred_at);
     try stmt.bindText(12, envelope.actor_principal);
     try stmt.bindText(13, event_hash);
-    try stmt.bindInt64(14, position);
+    try stmt.bindInt64(14, priority);
     try stmt.bindText(15, envelope.occurred_at);
     try stmt.bindText(16, envelope.actor_principal);
     try stmt.bindText(17, event_hash);

@@ -409,7 +409,7 @@ fn pullFilterOptionsSql(kind: PullFilterKind) []const u8 {
         \\LEFT JOIN label_definitions ld ON ld.name = pl.label
         \\GROUP BY pl.label
         \\ORDER BY CASE WHEN MAX(ld.id) IS NULL THEN 1 ELSE 0 END,
-        \\         MIN(ld.position),
+        \\         MIN(ld.priority),
         \\         lower(pl.label),
         \\         pl.label
         ,

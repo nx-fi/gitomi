@@ -838,7 +838,7 @@ pub fn buildLabelCreatedJson(
     name: []const u8,
     description: []const u8,
     color: []const u8,
-    position: ?i64,
+    priority: ?i64,
 ) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -847,8 +847,8 @@ pub fn buildLabelCreatedJson(
     try buf.appendSlice(allocator, "\"payload\":{");
     try appendJsonFieldString(&buf, allocator, "name", name, true);
     try appendJsonFieldString(&buf, allocator, "description", description, true);
-    try appendJsonFieldString(&buf, allocator, "color", color, position != null);
-    if (position) |value| try appendJsonFieldInteger(&buf, allocator, "position", value, false);
+    try appendJsonFieldString(&buf, allocator, "color", color, priority != null);
+    if (priority) |value| try appendJsonFieldInteger(&buf, allocator, "priority", value, false);
     try buf.appendSlice(allocator, "}}");
     return try buf.toOwnedSlice(allocator);
 }
@@ -872,7 +872,7 @@ pub fn buildLabelUpdatedJson(
     if (update.name) |value| try appendJsonFieldString(&buf, allocator, "name", value, true);
     if (update.description) |value| try appendJsonFieldString(&buf, allocator, "description", value, true);
     if (update.color) |value| try appendJsonFieldString(&buf, allocator, "color", value, true);
-    if (update.position) |value| try appendJsonFieldInteger(&buf, allocator, "position", value, true);
+    if (update.priority) |value| try appendJsonFieldInteger(&buf, allocator, "priority", value, true);
     if (buf.items[buf.items.len - 1] == ',') buf.items.len -= 1;
     try buf.appendSlice(allocator, "}}");
     return try buf.toOwnedSlice(allocator);

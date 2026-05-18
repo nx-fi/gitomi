@@ -224,7 +224,7 @@ fn appendLabels(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, ra
         \\FROM (SELECT DISTINCT label FROM pull_labels WHERE pull_id = ?) AS selected
         \\LEFT JOIN label_definitions ld ON ld.name = selected.label
         \\ORDER BY CASE WHEN ld.id IS NULL THEN 1 ELSE 0 END,
-        \\         ld.position,
+        \\         ld.priority,
         \\         lower(selected.label),
         \\         selected.label
     );
@@ -258,7 +258,7 @@ fn appendLabelsMenu(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb
         \\FROM (SELECT DISTINCT label FROM pull_labels WHERE pull_id = ?) AS selected
         \\LEFT JOIN label_definitions ld ON ld.name = selected.label
         \\ORDER BY CASE WHEN ld.id IS NULL THEN 1 ELSE 0 END,
-        \\         ld.position,
+        \\         ld.priority,
         \\         lower(selected.label),
         \\         selected.label
     );
@@ -290,7 +290,7 @@ fn appendLabelsMenu(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb
         \\LEFT JOIN label_definitions ld ON ld.name = label_names.label
         \\WHERE label_names.label NOT IN (SELECT label FROM pull_labels WHERE pull_id = ?)
         \\ORDER BY CASE WHEN ld.id IS NULL THEN 1 ELSE 0 END,
-        \\         ld.position,
+        \\         ld.priority,
         \\         lower(label_names.label),
         \\         label_names.label
         \\LIMIT 24

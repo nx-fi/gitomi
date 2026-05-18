@@ -741,6 +741,7 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!optionalString(payload, "description")) return "label.created payload.description must be a string";
         if (!optionalStringWithin(payload, "description", git.max_payload_text_bytes)) return "label.created payload.description exceeds v1 text size limit";
         if (!optionalLabelColor(payload, "color")) return "label.created payload.color must be a hex color";
+        if (!optionalNonNegativeInteger(payload, "priority")) return "label.created payload.priority must be a non-negative integer";
         if (!optionalNonNegativeInteger(payload, "position")) return "label.created payload.position must be a non-negative integer";
         return null;
     }
@@ -750,8 +751,9 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!optionalString(payload, "description")) return "label.updated payload.description must be a string";
         if (!optionalStringWithin(payload, "description", git.max_payload_text_bytes)) return "label.updated payload.description exceeds v1 text size limit";
         if (!optionalLabelColor(payload, "color")) return "label.updated payload.color must be a hex color";
+        if (!optionalNonNegativeInteger(payload, "priority")) return "label.updated payload.priority must be a non-negative integer";
         if (!optionalNonNegativeInteger(payload, "position")) return "label.updated payload.position must be a non-negative integer";
-        if (!hasAnyKey(payload, &.{ "name", "description", "color", "position" })) return "label.updated payload must contain at least one update field";
+        if (!hasAnyKey(payload, &.{ "name", "description", "color", "priority", "position" })) return "label.updated payload must contain at least one update field";
         return null;
     }
     if (std.mem.eql(u8, event_type, "label.deleted")) return null;
