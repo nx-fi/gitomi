@@ -27,6 +27,11 @@ const max_derived_commit_log_bytes = 64 * 1024 * 1024;
 const max_derived_reference_tokens_per_commit: usize = 512;
 const max_derived_reference_tokens_per_rebuild: usize = 16 * 1024;
 
+const AuthEventVisibility = enum {
+    causal_frontier,
+    known_revocations,
+};
+
 fn isDataPlaneIndexRef(ref: []const u8) bool {
     return std.mem.startsWith(u8, ref, "refs/heads/") or std.mem.startsWith(u8, ref, "refs/tags/");
 }
@@ -775,6 +780,18 @@ fn eventInAuthFrontier(allocator: Allocator, candidate_hash: []const u8, before_
     return try eventInFrontier(allocator, candidate_hash, before_event_hash);
 }
 
+fn authEventVisible(
+    allocator: Allocator,
+    candidate_hash: []const u8,
+    before_event_hash: ?[]const u8,
+    event_type: []const u8,
+    revocation_type: []const u8,
+    visibility: AuthEventVisibility,
+) !bool {
+    if (try eventInAuthFrontier(allocator, candidate_hash, before_event_hash)) return true;
+    return visibility == .known_revocations and std.mem.eql(u8, event_type, revocation_type);
+}
+
 fn eventAuthorizationRejection(
     allocator: Allocator,
     db: *SqliteDb,
@@ -1268,7 +1285,7 @@ const AclRoleEvent = struct {
 };
 
 fn reconcileAclRole(allocator: Allocator, db: *SqliteDb, principal: []const u8) !void {
-    var events = try loadAclRoleEvents(allocator, db, principal, null);
+    var events = try loadAclRoleEvents(allocator, db, principal, null, .causal_frontier);
     defer freeAclRoleEvents(allocator, &events);
 
     const winner_index = try winningAclRoleEventIndex(allocator, events.items);
@@ -1283,7 +1300,7 @@ fn reconcileAclRole(allocator: Allocator, db: *SqliteDb, principal: []const u8) 
 }
 
 fn aclRoleAtFrontier(allocator: Allocator, db: *SqliteDb, principal: []const u8, event_hash: []const u8) !?[]u8 {
-    var events = try loadAclRoleEvents(allocator, db, principal, event_hash);
+    var events = try loadAclRoleEvents(allocator, db, principal, event_hash, .causal_frontier);
     defer freeAclRoleEvents(allocator, &events);
 
     const winner_index = try winningAclRoleEventIndex(allocator, events.items) orelse return null;
@@ -1293,7 +1310,7 @@ fn aclRoleAtFrontier(allocator: Allocator, db: *SqliteDb, principal: []const u8,
 }
 
 fn aclRoleAtAuthFrontier(allocator: Allocator, db: *SqliteDb, principal: []const u8, event_hash: []const u8) !?[]u8 {
-    var events = try loadAclRoleEvents(allocator, db, principal, event_hash);
+    var events = try loadAclRoleEvents(allocator, db, principal, event_hash, .known_revocations);
     defer freeAclRoleEvents(allocator, &events);
 
     const winner_index = try winningAclRoleEventIndex(allocator, events.items) orelse return null;
@@ -1307,6 +1324,7 @@ fn loadAclRoleEvents(
     db: *SqliteDb,
     principal: []const u8,
     before_event_hash: ?[]const u8,
+    visibility: AuthEventVisibility,
 ) !std.ArrayList(AclRoleEvent) {
     var stmt = try db.prepare(
         \\SELECT role, event_hash, event_type
@@ -1324,14 +1342,17 @@ fn loadAclRoleEvents(
         const event_hash = try stmt.columnTextDup(allocator, 1);
         var keep_event_hash = false;
         defer if (!keep_event_hash) allocator.free(event_hash);
-        if (!(try eventInAuthFrontier(allocator, event_hash, before_event_hash))) {
+        var event_type: ?[]u8 = try stmt.columnTextDup(allocator, 2);
+        errdefer if (event_type) |value| allocator.free(value);
+
+        if (!(try authEventVisible(allocator, event_hash, before_event_hash, event_type.?, "acl.role_revoked", visibility))) {
+            allocator.free(event_type.?);
+            event_type = null;
             continue;
         }
 
         var role_value: ?[]u8 = try stmt.columnTextDup(allocator, 0);
         errdefer if (role_value) |value| allocator.free(value);
-        var event_type: ?[]u8 = try stmt.columnTextDup(allocator, 2);
-        errdefer if (event_type) |value| allocator.free(value);
 
         var event = AclRoleEvent{
             .allocator = allocator,
@@ -1357,11 +1378,21 @@ fn freeAclRoleEvents(allocator: Allocator, events: *std.ArrayList(AclRoleEvent))
 fn winningAclRoleEventIndex(allocator: Allocator, events: []const AclRoleEvent) !?usize {
     var winner: ?usize = null;
     for (events, 0..) |event, index| {
+        if (!std.mem.eql(u8, event.event_type, "acl.role_granted")) continue;
+        if (try aclRoleGrantDisabledByRevocation(allocator, events, event.event_hash)) continue;
         if (winner == null or try eventWins(allocator, event.event_hash, events[winner.?].event_hash)) {
             winner = index;
         }
     }
     return winner;
+}
+
+fn aclRoleGrantDisabledByRevocation(allocator: Allocator, events: []const AclRoleEvent, grant_event_hash: []const u8) !bool {
+    for (events) |event| {
+        if (!std.mem.eql(u8, event.event_type, "acl.role_revoked")) continue;
+        if (try authRevocationDisablesGrant(allocator, event.event_hash, grant_event_hash)) return true;
+    }
+    return false;
 }
 
 pub fn countCurrentOwners(db: *SqliteDb) !usize {
@@ -1482,7 +1513,7 @@ const DelegationEvent = struct {
 };
 
 fn reconcileDelegation(allocator: Allocator, db: *SqliteDb, principal: []const u8, device: []const u8, capability: []const u8, scope: []const u8) !void {
-    var events = try loadDelegationEvents(allocator, db, principal, device, capability, scope, null);
+    var events = try loadDelegationEvents(allocator, db, principal, device, capability, scope, null, .causal_frontier);
     defer freeDelegationEvents(allocator, &events);
 
     if (try activeDelegationGrantIndex(allocator, events.items)) |active_index| {
@@ -1495,7 +1526,7 @@ fn reconcileDelegation(allocator: Allocator, db: *SqliteDb, principal: []const u
 }
 
 fn delegationActiveAtFrontier(allocator: Allocator, db: *SqliteDb, principal: []const u8, device: []const u8, capability: []const u8, scope: []const u8, event_hash: []const u8) !bool {
-    var events = try loadDelegationEvents(allocator, db, principal, device, capability, scope, event_hash);
+    var events = try loadDelegationEvents(allocator, db, principal, device, capability, scope, event_hash, .causal_frontier);
     defer freeDelegationEvents(allocator, &events);
     return (try activeDelegationGrantIndex(allocator, events.items)) != null;
 }
@@ -1509,7 +1540,7 @@ fn delegationFingerprintAtAuthFrontier(
     before_event_hash: []const u8,
 ) !?[]u8 {
     const scope: []const u8 = if (std.mem.eql(u8, capability, "gitlab.import")) "gitlab:*" else "github:*";
-    var events = try loadDelegationEvents(allocator, db, principal, device, capability, scope, before_event_hash);
+    var events = try loadDelegationEvents(allocator, db, principal, device, capability, scope, before_event_hash, .known_revocations);
     defer freeDelegationEvents(allocator, &events);
     const active_index = (try activeDelegationGrantIndex(allocator, events.items)) orelse return null;
     return try allocator.dupe(u8, events.items[active_index].key_fingerprint);
@@ -1534,6 +1565,7 @@ fn loadDelegationEvents(
     capability: []const u8,
     scope: []const u8,
     before_event_hash: ?[]const u8,
+    visibility: AuthEventVisibility,
 ) !std.ArrayList(DelegationEvent) {
     var stmt = try db.prepare(
         \\SELECT event_hash, event_type, key_fingerprint, public_key
@@ -1554,12 +1586,15 @@ fn loadDelegationEvents(
         const event_hash = try stmt.columnTextDup(allocator, 0);
         var keep_event_hash = false;
         defer if (!keep_event_hash) allocator.free(event_hash);
-        if (!(try eventInAuthFrontier(allocator, event_hash, before_event_hash))) {
+        var event_type: ?[]u8 = try stmt.columnTextDup(allocator, 1);
+        errdefer if (event_type) |value| allocator.free(value);
+
+        if (!(try authEventVisible(allocator, event_hash, before_event_hash, event_type.?, "acl.delegation_revoked", visibility))) {
+            allocator.free(event_type.?);
+            event_type = null;
             continue;
         }
 
-        var event_type: ?[]u8 = try stmt.columnTextDup(allocator, 1);
-        errdefer if (event_type) |value| allocator.free(value);
         var key_fingerprint: ?[]u8 = try stmt.columnTextDup(allocator, 2);
         errdefer if (key_fingerprint) |value| allocator.free(value);
         var public_key: ?[]u8 = try stmt.columnTextDup(allocator, 3);
@@ -1609,6 +1644,10 @@ fn delegationGrantDisabledByRevocation(allocator: Allocator, events: []const Del
 }
 
 fn delegationRevocationDisablesGrant(allocator: Allocator, revoke_event_hash: []const u8, grant_event_hash: []const u8) !bool {
+    return authRevocationDisablesGrant(allocator, revoke_event_hash, grant_event_hash);
+}
+
+fn authRevocationDisablesGrant(allocator: Allocator, revoke_event_hash: []const u8, grant_event_hash: []const u8) !bool {
     if (revoke_event_hash.len == 0) return false;
     if (std.mem.eql(u8, revoke_event_hash, grant_event_hash)) return true;
     if (grant_event_hash.len != 0 and try git.isAncestor(allocator, revoke_event_hash, grant_event_hash)) return false;
@@ -1696,7 +1735,7 @@ const IdentityDeviceEvent = struct {
 };
 
 fn reconcileIdentityDevice(allocator: Allocator, db: *SqliteDb, principal: []const u8, device: []const u8) !void {
-    var events = try loadIdentityDeviceEvents(allocator, db, principal, device, null);
+    var events = try loadIdentityDeviceEvents(allocator, db, principal, device, null, .causal_frontier);
     defer freeIdentityDeviceEvents(allocator, &events);
 
     if (try activeIdentityAddIndex(allocator, events.items)) |active_index| {
@@ -1718,20 +1757,20 @@ fn reconcileIdentityDevice(allocator: Allocator, db: *SqliteDb, principal: []con
 }
 
 fn identityDeviceActiveAtFrontier(allocator: Allocator, db: *SqliteDb, principal: []const u8, device: []const u8, event_hash: []const u8) !bool {
-    var events = try loadIdentityDeviceEvents(allocator, db, principal, device, event_hash);
+    var events = try loadIdentityDeviceEvents(allocator, db, principal, device, event_hash, .causal_frontier);
     defer freeIdentityDeviceEvents(allocator, &events);
     return (try activeIdentityAddIndex(allocator, events.items)) != null;
 }
 
 fn identityDeviceFingerprintAtFrontier(allocator: Allocator, db: *SqliteDb, principal: []const u8, device: []const u8, event_hash: []const u8) !?[]u8 {
-    var events = try loadIdentityDeviceEvents(allocator, db, principal, device, event_hash);
+    var events = try loadIdentityDeviceEvents(allocator, db, principal, device, event_hash, .causal_frontier);
     defer freeIdentityDeviceEvents(allocator, &events);
     const active_index = (try activeIdentityAddIndex(allocator, events.items)) orelse return null;
     return try allocator.dupe(u8, events.items[active_index].key_fingerprint);
 }
 
 fn identityDeviceFingerprintAtAuthFrontier(allocator: Allocator, db: *SqliteDb, principal: []const u8, device: []const u8, event_hash: []const u8) !?[]u8 {
-    var events = try loadIdentityDeviceEvents(allocator, db, principal, device, event_hash);
+    var events = try loadIdentityDeviceEvents(allocator, db, principal, device, event_hash, .known_revocations);
     defer freeIdentityDeviceEvents(allocator, &events);
     const active_index = (try activeIdentityAddIndex(allocator, events.items)) orelse return null;
     return try allocator.dupe(u8, events.items[active_index].key_fingerprint);
@@ -1743,6 +1782,7 @@ fn loadIdentityDeviceEvents(
     principal: []const u8,
     device: []const u8,
     before_event_hash: ?[]const u8,
+    visibility: AuthEventVisibility,
 ) !std.ArrayList(IdentityDeviceEvent) {
     var stmt = try db.prepare(
         \\SELECT event_hash, event_type, key_fingerprint, public_key
@@ -1761,12 +1801,15 @@ fn loadIdentityDeviceEvents(
         const event_hash = try stmt.columnTextDup(allocator, 0);
         var keep_event_hash = false;
         defer if (!keep_event_hash) allocator.free(event_hash);
-        if (!(try eventInAuthFrontier(allocator, event_hash, before_event_hash))) {
+        var event_type: ?[]u8 = try stmt.columnTextDup(allocator, 1);
+        errdefer if (event_type) |value| allocator.free(value);
+
+        if (!(try authEventVisible(allocator, event_hash, before_event_hash, event_type.?, "identity.device_revoked", visibility))) {
+            allocator.free(event_type.?);
+            event_type = null;
             continue;
         }
 
-        var event_type: ?[]u8 = try stmt.columnTextDup(allocator, 1);
-        errdefer if (event_type) |value| allocator.free(value);
         var key_fingerprint: ?[]u8 = try stmt.columnTextDup(allocator, 2);
         errdefer if (key_fingerprint) |value| allocator.free(value);
         var public_key: ?[]u8 = try stmt.columnTextDup(allocator, 3);
@@ -1839,10 +1882,7 @@ fn identityAddDisabledByRevocation(allocator: Allocator, events: []const Identit
 }
 
 fn identityRevocationDisablesAdd(allocator: Allocator, revoke_event_hash: []const u8, add_event_hash: []const u8) !bool {
-    if (revoke_event_hash.len == 0) return false;
-    if (std.mem.eql(u8, revoke_event_hash, add_event_hash)) return true;
-    if (add_event_hash.len != 0 and try git.isAncestor(allocator, revoke_event_hash, add_event_hash)) return false;
-    return true;
+    return authRevocationDisablesGrant(allocator, revoke_event_hash, add_event_hash);
 }
 
 fn insertIdentityHistory(
@@ -2178,6 +2218,27 @@ test "pull opened without metadata collections remains contributor allowed" {
     defer db.deinit();
 
     try std.testing.expect((try eventAuthorizationRejection(allocator, &db, "contributor", envelope, payload, null)) == null);
+}
+
+test "pull merged requires maintainer role" {
+    const allocator = std.testing.allocator;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator,
+        \\{
+        \\  "merge_oid": "cccccccccccccccccccccccccccccccccccccccc"
+        \\}
+    , .{});
+    defer parsed.deinit();
+    const payload = switch (parsed.value) {
+        .object => |object| object,
+        else => unreachable,
+    };
+    const envelope = try testEnvelopeForEventType(allocator, "pull.merged");
+    defer envelope.deinit();
+    var db = try SqliteDb.open(allocator, ":memory:", sqlite_db.sqlite.SQLITE_OPEN_READWRITE | sqlite_db.sqlite.SQLITE_OPEN_CREATE, true);
+    defer db.deinit();
+
+    try std.testing.expectEqualStrings("insufficient_role", (try eventAuthorizationRejection(allocator, &db, "contributor", envelope, payload, null)).?);
+    try std.testing.expect((try eventAuthorizationRejection(allocator, &db, "maintainer", envelope, payload, null)) == null);
 }
 
 test "own object authorization uses accepted creation events, not projection rows" {

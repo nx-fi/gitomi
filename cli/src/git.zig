@@ -25,6 +25,14 @@ pub const max_payload_atom_bytes = 256;
 pub const max_payload_ref_bytes = 512;
 pub const max_payload_collection_items = 128;
 
+pub fn isFullOid(value: []const u8) bool {
+    if (value.len != 40 and value.len != 64) return false;
+    for (value) |c| {
+        if (!std.ascii.isHex(c)) return false;
+    }
+    return true;
+}
+
 pub fn currentBranch(allocator: Allocator) ![]u8 {
     var branch_argv = [_][]const u8{ "git", "branch", "--show-current" };
     var branch_result = try runCommand(allocator, &branch_argv, null, 512 * 1024);
@@ -381,6 +389,13 @@ test "verify-commit output parser extracts SSH signing key fingerprint" {
     const fingerprint = (try signingKeyFingerprintFromVerifyOutput(std.testing.allocator, output)).?;
     defer std.testing.allocator.free(fingerprint);
     try std.testing.expectEqualStrings("SHA256:mNB85dy2QSJT677iHmnJzFXcYQWJatF8y3EUrFuHNYA", fingerprint);
+}
+
+test "full OID validation accepts SHA-1 and SHA-256 shapes" {
+    try std.testing.expect(isFullOid("abcdef1234567890abcdef1234567890abcdef12"));
+    try std.testing.expect(isFullOid("abcdef1234567890abcdef1234567890abcdef12abcdef1234567890abcdef12"));
+    try std.testing.expect(!isFullOid("abcdef1234567890abcdef1234567890abcde"));
+    try std.testing.expect(!isFullOid("not-a-git-object"));
 }
 
 test "verify-commit output parser extracts OpenPGP VALIDSIG fingerprint" {

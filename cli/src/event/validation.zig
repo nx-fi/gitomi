@@ -822,12 +822,13 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
     if (std.mem.eql(u8, event_type, "pull.reviewer_added") or std.mem.eql(u8, event_type, "pull.reviewer_removed")) return requirePayloadStringWithin(payload, event_type, "reviewer", git.max_payload_atom_bytes);
     if (std.mem.eql(u8, event_type, "pull.merged")) {
         if (!hasString(payload, "merge_oid") and !hasString(payload, "target_oid")) return "pull.merged payload.merge_oid or payload.target_oid must be a string";
-        if (!optionalStringWithin(payload, "merge_oid", git.max_payload_ref_bytes)) return "pull.merged payload.merge_oid exceeds v1 ref size limit";
-        if (!optionalStringWithin(payload, "target_oid", git.max_payload_ref_bytes)) return "pull.merged payload.target_oid exceeds v1 ref size limit";
-        if (!optionalStringWithin(payload, "base_oid", git.max_payload_ref_bytes)) return "pull.merged payload.base_oid exceeds v1 ref size limit";
-        if (!optionalStringWithin(payload, "head_oid", git.max_payload_ref_bytes)) return "pull.merged payload.head_oid exceeds v1 ref size limit";
+        if (!optionalCommitOid(payload, "merge_oid")) return "pull.merged payload.merge_oid must be a full Git commit OID";
+        if (!optionalCommitOid(payload, "target_oid")) return "pull.merged payload.target_oid must be a full Git commit OID";
+        if (!optionalCommitOid(payload, "base_oid")) return "pull.merged payload.base_oid must be a full Git commit OID";
+        if (!optionalCommitOid(payload, "head_oid")) return "pull.merged payload.head_oid must be a full Git commit OID";
         if (!optionalStringWithin(payload, "remote", git.max_payload_atom_bytes)) return "pull.merged payload.remote exceeds v1 field size limit";
         if (!optionalStringWithin(payload, "remote_ref", git.max_payload_ref_bytes)) return "pull.merged payload.remote_ref exceeds v1 ref size limit";
+        if (!optionalRemoteHeadRef(payload, "remote_ref")) return "pull.merged payload.remote_ref must be a refs/heads/* branch";
         return null;
     }
 
@@ -1227,6 +1228,24 @@ fn optionalStringWithin(object: std.json.ObjectMap, key: []const u8, max_bytes: 
         else => return false,
     };
     return string.len <= max_bytes;
+}
+
+fn optionalCommitOid(object: std.json.ObjectMap, key: []const u8) bool {
+    const value = object.get(key) orelse return true;
+    const string = switch (value) {
+        .string => |s| s,
+        else => return false,
+    };
+    return git.isFullOid(string);
+}
+
+fn optionalRemoteHeadRef(object: std.json.ObjectMap, key: []const u8) bool {
+    const value = object.get(key) orelse return true;
+    const string = switch (value) {
+        .string => |s| s,
+        else => return false,
+    };
+    return std.mem.startsWith(u8, string, "refs/heads/") and string.len > "refs/heads/".len;
 }
 
 fn optionalDateString(object: std.json.ObjectMap, key: []const u8) bool {

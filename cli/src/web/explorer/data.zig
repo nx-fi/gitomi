@@ -70,14 +70,14 @@ pub fn loadBranchSyncStatus(allocator: Allocator, repo: Repo, ref: []const u8) !
     const upstream_ref = try std.fmt.allocPrint(allocator, "{s}@{{upstream}}", .{branchish});
     defer allocator.free(upstream_ref);
 
-    const upstream_raw = try gitMaybeAt(allocator, root, &.{ "rev-parse", "--abbrev-ref", "--symbolic-full-name", upstream_ref }, 4096) orelse return null;
+    const upstream_raw = try gitMaybeAt(allocator, root, &.{ "rev-parse", "--verify", "--quiet", "--abbrev-ref", "--symbolic-full-name", "--end-of-options", upstream_ref }, 4096) orelse return null;
     defer allocator.free(upstream_raw);
     const upstream = std.mem.trim(u8, upstream_raw, " \t\r\n");
     if (upstream.len == 0) return null;
 
     const range = try std.fmt.allocPrint(allocator, "{s}...{s}", .{ upstream_ref, branchish });
     defer allocator.free(range);
-    const counts_raw = try gitMaybeAt(allocator, root, &.{ "rev-list", "--left-right", "--count", range }, 4096) orelse return null;
+    const counts_raw = try gitMaybeAt(allocator, root, &.{ "rev-list", "--left-right", "--count", "--end-of-options", range }, 4096) orelse return null;
     defer allocator.free(counts_raw);
 
     var fields = std.mem.tokenizeAny(u8, counts_raw, " \t\r\n");
@@ -320,7 +320,7 @@ pub fn loadRootEntryCounts(allocator: Allocator, repo: Repo, ref: []const u8) !?
 
     const spec = try objectSpec(allocator, ref, "");
     defer allocator.free(spec);
-    const raw = try gitMaybe(allocator, repo, &.{ "ls-tree", "-z", spec }, git.max_git_output) orelse return null;
+    const raw = try gitMaybe(allocator, repo, &.{ "ls-tree", "-z", "--end-of-options", spec }, git.max_git_output) orelse return null;
     defer allocator.free(raw);
 
     var counts = RootEntryCounts{};
@@ -472,7 +472,7 @@ pub fn loadTreeEntries(allocator: Allocator, repo: Repo, ref: []const u8, path: 
 
     const spec = try objectSpec(allocator, ref, path);
     defer allocator.free(spec);
-    const raw = try gitMaybe(allocator, repo, &.{ "ls-tree", "-z", "-l", spec }, git.max_git_output) orelse return null;
+    const raw = try gitMaybe(allocator, repo, &.{ "ls-tree", "-z", "-l", "--end-of-options", spec }, git.max_git_output) orelse return null;
     defer allocator.free(raw);
 
     var entries: std.ArrayList(TreeEntry) = .empty;
@@ -728,7 +728,7 @@ pub fn syntheticTreeEntryCommitOwned(allocator: Allocator, state: ChangeState) !
 
 const TreeEntryCommitLogArgs = struct {
     max_count_arg: []u8,
-    items: [7][]const u8,
+    items: [8][]const u8,
 
     fn deinit(self: TreeEntryCommitLogArgs, allocator: Allocator) void {
         allocator.free(self.max_count_arg);
@@ -739,7 +739,7 @@ fn treeEntryCommitLogArgs(allocator: Allocator, ref: []const u8, entry_count: us
     const max_count_arg = try std.fmt.allocPrint(allocator, "--max-count={d}", .{treeEntryCommitHistoryLimit(entry_count)});
     return .{
         .max_count_arg = max_count_arg,
-        .items = .{ "log", max_count_arg, tree_entry_commit_format, "--name-only", "-z", ref, "--" },
+        .items = .{ "log", max_count_arg, tree_entry_commit_format, "--name-only", "-z", "--end-of-options", ref, "--" },
     };
 }
 
@@ -989,11 +989,11 @@ pub fn loadCommitSummary(allocator: Allocator, repo: Repo, ref: []const u8, path
 
     const format = "--format=%H%x09%h%x09%an%x09%ae%x09%s%x09%cr";
     const raw = if (path.len == 0)
-        try gitMaybe(allocator, repo, &.{ "log", "-1", format, ref }, 1024 * 1024)
+        try gitMaybe(allocator, repo, &.{ "log", "-1", format, "--end-of-options", ref }, 1024 * 1024)
     else blk: {
         const pathspec = try std.fmt.allocPrint(allocator, ":(top){s}", .{path});
         defer allocator.free(pathspec);
-        break :blk try gitMaybe(allocator, repo, &.{ "log", "-1", format, ref, "--", pathspec }, 1024 * 1024);
+        break :blk try gitMaybe(allocator, repo, &.{ "log", "-1", format, "--end-of-options", ref, "--", pathspec }, 1024 * 1024);
     };
     const text = raw orelse return null;
     defer allocator.free(text);
@@ -1024,7 +1024,7 @@ pub fn loadCommitSummary(allocator: Allocator, repo: Repo, ref: []const u8, path
 pub fn loadCommitCount(allocator: Allocator, repo: Repo, ref: []const u8) !?usize {
     if (isFilesystemRef(ref)) return null;
 
-    const raw = try gitMaybe(allocator, repo, &.{ "rev-list", "--count", ref }, 1024) orelse return null;
+    const raw = try gitMaybe(allocator, repo, &.{ "rev-list", "--count", "--end-of-options", ref }, 1024) orelse return null;
     defer allocator.free(raw);
     const text = std.mem.trim(u8, raw, " \t\r\n");
     if (text.len == 0) return null;
@@ -1046,7 +1046,7 @@ pub fn loadRefCount(allocator: Allocator, repo: Repo, namespace: []const u8) !us
 pub fn loadTreeNavEntries(allocator: Allocator, repo: Repo, ref: []const u8) !?[]TreeNavEntry {
     if (isFilesystemRef(ref)) return loadWorktreeNavEntries(allocator, repo, ref);
 
-    const raw = try gitMaybe(allocator, repo, &.{ "ls-tree", "-z", "-r", "-t", ref }, git.max_git_output) orelse return null;
+    const raw = try gitMaybe(allocator, repo, &.{ "ls-tree", "-z", "-r", "-t", "--end-of-options", ref }, git.max_git_output) orelse return null;
     defer allocator.free(raw);
 
     var entries: std.ArrayList(TreeNavEntry) = .empty;
@@ -1559,7 +1559,7 @@ pub fn entrySortRank(name: []const u8, is_tree: bool) u8 {
 }
 
 pub fn objectType(allocator: Allocator, repo: Repo, spec: []const u8) !?[]u8 {
-    const raw = try gitMaybe(allocator, repo, &.{ "cat-file", "-t", spec }, 1024) orelse return null;
+    const raw = try gitMaybe(allocator, repo, &.{ "cat-file", "-t", "--end-of-options", spec }, 1024) orelse return null;
     return try trimOwned(allocator, raw);
 }
 
@@ -1575,7 +1575,7 @@ pub fn browseObjectType(allocator: Allocator, repo: Repo, ref: []const u8, path:
 }
 
 pub fn blobSize(allocator: Allocator, repo: Repo, spec: []const u8) !?usize {
-    const raw = try gitMaybe(allocator, repo, &.{ "cat-file", "-s", spec }, 1024) orelse return null;
+    const raw = try gitMaybe(allocator, repo, &.{ "cat-file", "-s", "--end-of-options", spec }, 1024) orelse return null;
     defer allocator.free(raw);
     const text = std.mem.trim(u8, raw, " \t\r\n");
     if (text.len == 0) return null;
@@ -1619,7 +1619,7 @@ pub fn targetRefOwned(allocator: Allocator, repo: Repo, target: []const u8) ![]u
     defer if (query_ref) |value| allocator.free(value);
     if (query_ref) |value| {
         const trimmed = std.mem.trim(u8, value, " \t\r\n");
-        if (trimmed.len != 0) return resolveBrowsableRefOwned(allocator, repo, trimmed);
+        if (trimmed.len != 0 and trimmed[0] != '-') return resolveBrowsableRefOwned(allocator, repo, trimmed);
     }
     return defaultRef(allocator, repo);
 }
@@ -1921,14 +1921,15 @@ test "web explorer tree entry commit log args are bounded and pathless" {
     var args = try treeEntryCommitLogArgs(allocator, "HEAD", 1);
     defer args.deinit(allocator);
 
-    try std.testing.expectEqual(@as(usize, 7), args.items.len);
+    try std.testing.expectEqual(@as(usize, 8), args.items.len);
     try std.testing.expectEqualStrings("log", args.items[0]);
     try std.testing.expectEqualStrings("--max-count=32", args.items[1]);
     try std.testing.expectEqualStrings(tree_entry_commit_format, args.items[2]);
     try std.testing.expectEqualStrings("--name-only", args.items[3]);
     try std.testing.expectEqualStrings("-z", args.items[4]);
-    try std.testing.expectEqualStrings("HEAD", args.items[5]);
-    try std.testing.expectEqualStrings("--", args.items[6]);
+    try std.testing.expectEqualStrings("--end-of-options", args.items[5]);
+    try std.testing.expectEqualStrings("HEAD", args.items[6]);
+    try std.testing.expectEqualStrings("--", args.items[7]);
     try std.testing.expect(max_tree_entry_commit_output < git.max_git_output);
     for (args.items) |arg| {
         try std.testing.expect(std.mem.indexOf(u8, arg, ":(top)") == null);
@@ -2108,6 +2109,17 @@ test "web explorer blob loading treats option-like refs as revisions" {
 
     try std.testing.expect(content == null);
     try std.testing.expectError(error.FileNotFound, tmp.dir.access("gitomi-poc:README.md", .{}));
+
+    const summary = try loadCommitSummary(allocator, repo, option_ref, "");
+    try std.testing.expect(summary == null);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("gitomi-poc", .{}));
+
+    const target = try std.fmt.allocPrint(allocator, "/code?ref={s}", .{option_ref});
+    defer allocator.free(target);
+    const target_ref = try targetRefOwned(allocator, repo, target);
+    defer allocator.free(target_ref);
+    try std.testing.expect(!std.mem.eql(u8, target_ref, option_ref));
+    try std.testing.expect(target_ref.len != 0 and target_ref[0] != '-');
 }
 
 fn writeTestFile(dir: std.fs.Dir, path: []const u8, bytes: []const u8) !void {

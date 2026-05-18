@@ -480,6 +480,16 @@ When ingesting an event, implementations MUST:
 
 Authorization MUST be evaluated from causal ancestry, not from wall-clock timestamps alone. `occurred_at` is for ordering and presentation, not for bypassing revocations or grants.
 
+Known ACL, delegation, and device revocations are security barriers, not merely
+ordinary concurrent updates. Once a replica has accepted an `acl.role_revoked`,
+`acl.delegation_revoked`, or `identity.device_revoked` event, authorization for
+later-ingested events MUST treat that revocation as effective unless the event's
+causal frontier contains a later grant, delegation, or device-add event for the
+same target that causally descends from the revocation. A signed event whose
+frontier omits an already accepted revocation of its actor role, delegated
+capability, or signing device MUST be rejected from the projection even if the
+actor was authorized at the stale frontier it names.
+
 Invalid, unverifiable, or unauthorized events MUST NOT affect the materialized projection.
 
 Implementations MUST distinguish:

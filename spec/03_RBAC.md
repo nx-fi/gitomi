@@ -453,6 +453,17 @@ The "causal frontier" of an event is the set of accepted events reachable throug
 
 This ensures that an actor who was authorized when they created the event is not retroactively rejected by a concurrent revocation they could not have observed.
 
+Revocation events are the exception to pure causal-frontier authorization. A
+replica that has already accepted an `acl.role_revoked`,
+`acl.delegation_revoked`, or `identity.device_revoked` event for the actor,
+delegation, or device being checked MUST apply a revocation-wins rule when
+validating any later-ingested event: the revocation disables all prior or
+concurrent grants/adds for that same authorization target, even when the event
+under validation omitted the revocation from its parents. A grant, delegation,
+or device-add becomes usable again only if it causally descends from the known
+revocation. This freshness rule prevents a revoked key from remaining
+indefinitely authorized by publishing events with stale cross-device frontiers.
+
 Because v1 bounds cross-device additional parents, an event is not required to
 name every observed inbox head. Security-sensitive events MUST still make the
 latest observed related ACL or identity event for the same target reachable

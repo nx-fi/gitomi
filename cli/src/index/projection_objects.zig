@@ -2568,7 +2568,7 @@ pub fn applyPullProjection(allocator: Allocator, db: *SqliteDb, event_hash: []co
         const reviewer = event_mod.jsonString(payload.get("reviewer")) orelse return "invalid_event_envelope";
         try deletePullCollectionValue(allocator, db, "SELECT add_hash FROM pull_reviewers WHERE pull_id = ? AND reviewer = ?", "DELETE FROM pull_reviewers WHERE pull_id = ? AND reviewer = ? AND add_hash = ?", envelope.object_id, reviewer, event_hash);
     } else if (std.mem.eql(u8, envelope.event_type, "pull.merged")) {
-        try applyPullMerged(allocator, db, envelope.object_id, event_mod.jsonString(payload.get("merge_oid")) orelse "", event_mod.jsonString(payload.get("target_oid")) orelse "", event_hash, envelope);
+        if (try applyPullMerged(allocator, db, envelope.object_id, payload, event_hash, envelope)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "pull.reaction_added")) {
         const emoji = event_mod.jsonString(payload.get("emoji")) orelse return "invalid_event_envelope";
         try insertReaction(db, "pull", envelope.object_id, emoji, envelope.actor_principal, event_hash, envelope.occurred_at);
@@ -2711,18 +2711,84 @@ fn applyPullMerged(
     allocator: Allocator,
     db: *SqliteDb,
     pull_id: []const u8,
-    merge_oid: []const u8,
-    target_oid: []const u8,
+    payload: std.json.ObjectMap,
     event_hash: []const u8,
     envelope: ValidatedEnvelope,
-) !void {
-    if (!(try updatePullScalar(allocator, db, pull_id, "merged", event_hash, envelope, "state", "state_occurred_at", "state_actor_principal", "state_event_hash"))) return;
+) !?[]const u8 {
+    const merge_oid = event_mod.jsonString(payload.get("merge_oid")) orelse "";
+    const target_oid = event_mod.jsonString(payload.get("target_oid")) orelse "";
+    if (merge_oid.len == 0 and target_oid.len == 0) return "invalid_merge_oid";
+
+    if (try pullMergeOidRejection(allocator, merge_oid, target_oid, payload)) |reason| return reason;
+
+    if (!(try updatePullScalar(allocator, db, pull_id, "merged", event_hash, envelope, "state", "state_occurred_at", "state_actor_principal", "state_event_hash"))) return null;
     var update = try db.prepare("UPDATE pulls SET merge_oid = ?, target_oid = ? WHERE id = ?");
     defer update.deinit();
     try update.bindText(1, merge_oid);
     try update.bindText(2, target_oid);
     try update.bindText(3, pull_id);
     try update.stepDone();
+    return null;
+}
+
+fn pullMergeOidRejection(allocator: Allocator, merge_oid: []const u8, target_oid: []const u8, payload: std.json.ObjectMap) !?[]const u8 {
+    if (merge_oid.len != 0 and !git.isFullOid(merge_oid)) return "invalid_merge_oid";
+    if (target_oid.len != 0 and !git.isFullOid(target_oid)) return "invalid_target_oid";
+    if (merge_oid.len != 0 and target_oid.len != 0 and !std.mem.eql(u8, merge_oid, target_oid)) return "invalid_target_oid";
+
+    const base_oid = event_mod.jsonString(payload.get("base_oid")) orelse "";
+    const head_oid = event_mod.jsonString(payload.get("head_oid")) orelse "";
+    if (base_oid.len != 0 and !git.isFullOid(base_oid)) return "invalid_base_oid";
+    if (head_oid.len != 0 and !git.isFullOid(head_oid)) return "invalid_head_oid";
+
+    if (merge_oid.len != 0 and !(try gitCommitExistsQuiet(allocator, merge_oid))) return "invalid_merge_oid";
+    if (target_oid.len != 0 and !(try gitCommitExistsQuiet(allocator, target_oid))) return "invalid_target_oid";
+    if (base_oid.len != 0 and !(try gitCommitExistsQuiet(allocator, base_oid))) return "invalid_base_oid";
+    if (head_oid.len != 0 and !(try gitCommitExistsQuiet(allocator, head_oid))) return "invalid_head_oid";
+
+    const effective_target_oid = if (target_oid.len != 0) target_oid else merge_oid;
+    if (base_oid.len != 0 and effective_target_oid.len != 0 and !(try gitIsAncestorQuiet(allocator, base_oid, effective_target_oid))) {
+        return "target_oid_not_descendant_of_base";
+    }
+    if (merge_oid.len != 0 and base_oid.len != 0 and head_oid.len != 0 and !(try mergeCommitHasParentsQuiet(allocator, merge_oid, base_oid, head_oid))) {
+        return "merge_oid_parent_mismatch";
+    }
+
+    return null;
+}
+
+fn gitCommitExistsQuiet(allocator: Allocator, oid: []const u8) !bool {
+    const commit_ref = try std.fmt.allocPrint(allocator, "{s}^{{commit}}", .{oid});
+    defer allocator.free(commit_ref);
+    var result = try git.runCommand(allocator, &.{ "git", "cat-file", "-e", commit_ref }, null, 1024 * 1024);
+    defer result.deinit();
+    return result.exitCode() == 0;
+}
+
+fn gitIsAncestorQuiet(allocator: Allocator, ancestor: []const u8, descendant: []const u8) !bool {
+    var result = try git.runCommand(allocator, &.{ "git", "merge-base", "--is-ancestor", ancestor, descendant }, null, 1024 * 1024);
+    defer result.deinit();
+    return result.exitCode() == 0;
+}
+
+fn mergeCommitHasParentsQuiet(allocator: Allocator, merge_oid: []const u8, base_oid: []const u8, head_oid: []const u8) !bool {
+    var result = try git.runCommand(allocator, &.{ "git", "cat-file", "-p", merge_oid }, null, 1024 * 1024);
+    defer result.deinit();
+    if (result.exitCode() != 0) return false;
+
+    var parent_count: usize = 0;
+    var has_base = false;
+    var has_head = false;
+    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) break;
+        if (!std.mem.startsWith(u8, line, "parent ")) continue;
+        const parent = line["parent ".len..];
+        parent_count += 1;
+        if (std.mem.eql(u8, parent, base_oid)) has_base = true;
+        if (std.mem.eql(u8, parent, head_oid)) has_head = true;
+    }
+    return parent_count >= 2 and has_base and has_head;
 }
 
 fn insertPullCollectionValue(db: *SqliteDb, comptime sql_text: []const u8, pull_id: []const u8, value: []const u8, event_hash: []const u8) !void {
@@ -3488,6 +3554,24 @@ test "issue updates require an accepted creation event in frontier" {
     const accepted = try applyIssueProjection(allocator, &db, "edit-event", envelope, body);
     try std.testing.expect(accepted == null);
     try expectIssueTitle(allocator, &db, "issue-1", "New title");
+}
+
+test "pull merged rejects syntactic OIDs that are not local commits" {
+    const allocator = std.testing.allocator;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator,
+        \\{
+        \\  "merge_oid": "0000000000000000000000000000000000000000"
+        \\}
+    , .{});
+    defer parsed.deinit();
+    const payload = switch (parsed.value) {
+        .object => |object| object,
+        else => unreachable,
+    };
+
+    const rejected = try pullMergeOidRejection(allocator, "0000000000000000000000000000000000000000", "", payload);
+    try std.testing.expect(rejected != null);
+    try std.testing.expectEqualStrings("invalid_merge_oid", rejected.?);
 }
 
 test "notification side effects subscribe and publish issue conversation events" {

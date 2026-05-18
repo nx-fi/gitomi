@@ -6,6 +6,7 @@ const builders = @import("builders.zig");
 const validation = @import("validation.zig");
 
 const Config = repo_mod.Config;
+const CliError = @import("../errors.zig").CliError;
 const event_schema = model.event_schema;
 const IssueProjectPlacement = model.IssueProjectPlacement;
 const buildIssueOpenedJson = builders.buildIssueOpenedJson;
@@ -189,6 +190,34 @@ test "pull merged event json records confirmed remote publication" {
     try std.testing.expectEqualStrings("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", payload.get("head_oid").?.string);
     try std.testing.expectEqualStrings("origin", payload.get("remote").?.string);
     try std.testing.expectEqualStrings("refs/heads/main", payload.get("remote_ref").?.string);
+}
+
+test "pull merged event rejects non-oid merge metadata" {
+    var cfg = Config{
+        .allocator = std.testing.allocator,
+        .repo_id = try std.testing.allocator.dupe(u8, "018f0000-0000-7000-8000-000000000001"),
+        .principal = try std.testing.allocator.dupe(u8, "alice"),
+        .device = try std.testing.allocator.dupe(u8, "laptop"),
+        .seq = 0,
+    };
+    defer cfg.deinit();
+
+    const body = try buildPullMergedJsonWithMetadata(
+        std.testing.allocator,
+        cfg,
+        1,
+        "018f0000-0000-7000-8000-000000000002",
+        "018f0000-0000-7000-8000-000000000003",
+        "018f0000-0000-7000-8000-000000000004",
+        "2026-05-13T18:30:59Z",
+        .{},
+        "not-a-git-object",
+        null,
+        .{},
+    );
+    defer std.testing.allocator.free(body);
+
+    try std.testing.expectError(CliError.UserError, validateEventEnvelope(std.testing.allocator, "test-commit", body));
 }
 
 test "issue updated event json supports milestone and projects" {

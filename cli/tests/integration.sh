@@ -1433,7 +1433,8 @@ init_repo "$pulls_repo"
   gt pr base "$pull_ref" --base trunk >/dev/null
   gt pr label "$pull_ref" add review >/dev/null
   gt pr reviewer "$pull_ref" add alice >/dev/null
-  gt pr merge "$pull_ref" --target-oid 0123456789abcdef0123456789abcdef01234567 >/dev/null
+  merge_target_oid="$(git rev-parse HEAD)"
+  gt pr merge "$pull_ref" --target-oid "$merge_target_oid" >/dev/null
   pulls_json="$(gt pr list --json)"
   assert_line_count "$pulls_json" 1
   assert_contains "$pulls_json" '"state":"merged"'
@@ -1441,7 +1442,7 @@ init_repo "$pulls_repo"
   assert_contains "$pulls_json" '"base_ref":"trunk"'
   assert_contains "$pulls_json" '"labels":["review"]'
   assert_contains "$pulls_json" '"reviewers":["alice"]'
-  assert_contains "$pulls_json" '"target_oid":"0123456789abcdef0123456789abcdef01234567"'
+  assert_contains "$pulls_json" '"target_oid":"'"$merge_target_oid"'"'
   gt fsck >/dev/null
 )
 
@@ -1854,7 +1855,7 @@ init_repo "$concurrent_rbac"
   gt fsck >/dev/null
 )
 
-echo "integration: authorization uses event causal frontier"
+echo "integration: known revocations reject stale authorization frontiers"
 frontier_auth="$ROOT/frontier-auth"
 init_repo "$frontier_auth"
 (
@@ -1892,12 +1893,27 @@ init_repo "$frontier_auth"
   git update-ref refs/gitomi/inbox/bob/desktop "$bob_issue_commit"
   events="$(gt events list --json)"
   bob_line="$(printf '%s\n' "$events" | grep '"actor_principal":"bob"')"
-  assert_contains "$bob_line" '"domain_status":"accepted"'
+  assert_contains "$bob_line" '"domain_status":"rejected"'
+  assert_contains "$bob_line" '"rejection_reason":"unauthorized_principal"'
   issues="$(gt issue list --json)"
-  assert_contains "$issues" '"title":"Bob concurrent issue"'
+  assert_not_contains "$issues" '"title":"Bob concurrent issue"'
   acl_json="$(gt acl list --json)"
   assert_not_contains "$acl_json" '"principal":"bob"'
-  gt fsck >/dev/null
+
+  gt identity add-device alice phone >/dev/null
+  phone_add_commit="$(git rev-parse refs/gitomi/inbox/alice/laptop)"
+  phone_revoke_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002007","event_type":"identity.device_revoked","object":{"kind":"identity","id":"identity:alice:phone"},"idempotency_key":"018f0000-0000-7000-8000-000000002207","actor":{"principal":"alice","device":"b"},"seq":3,"occurred_at":"2026-05-13T18:33:06Z","parent_hashes":{"log":"'"$revoke_commit"'","anchor":"","causal":["'"$phone_add_commit"'"],"related":["'"$phone_add_commit"'"]},"legacy":{},"payload":{"principal":"alice","device":"phone"}}'
+  phone_revoke_commit="$(git commit-tree -S -m "identity.device_revoked alice/phone stale frontier" -m "$phone_revoke_body" "$empty_tree" -p "$revoke_commit" -p "$phone_add_commit")"
+  phone_issue_body='{"$schema":"urn:gitomi:event:v1","repo_id":"'"$REPO_ID"'","event_uuid":"018f0000-0000-7000-8000-000000002008","event_type":"issue.opened","object":{"kind":"issue","id":"018f0000-0000-7000-8000-000000002104"},"idempotency_key":"018f0000-0000-7000-8000-000000002208","actor":{"principal":"alice","device":"phone"},"seq":1,"occurred_at":"2026-05-13T18:33:07Z","parent_hashes":{"log":"","anchor":"'"$genesis_head"'","causal":["'"$phone_add_commit"'"],"related":["'"$phone_add_commit"'"]},"legacy":{},"payload":{"title":"Phone stale issue"}}'
+  phone_issue_commit="$(git commit-tree -S -m "issue.opened phone stale frontier" -m "$phone_issue_body" "$empty_tree" -p "$genesis_head" -p "$phone_add_commit")"
+  git update-ref refs/gitomi/inbox/alice/b "$phone_revoke_commit" "$revoke_commit"
+  git update-ref refs/gitomi/inbox/alice/phone "$phone_issue_commit"
+  events="$(gt events list --json)"
+  phone_line="$(printf '%s\n' "$events" | grep '"actor_device":"phone"')"
+  assert_contains "$phone_line" '"domain_status":"rejected"'
+  assert_contains "$phone_line" '"rejection_reason":"unauthorized_device"'
+  issues="$(gt issue list --json)"
+  assert_not_contains "$issues" '"title":"Phone stale issue"'
 )
 
 echo "integration: related auth hashes do not authorize without causal ancestry"
