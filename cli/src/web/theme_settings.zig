@@ -20,6 +20,7 @@ const ThemeChoice = struct {
 const theme_choices = [_]ThemeChoice{
     .{ .id = "gitomi", .label = "Gitomi", .note = "Default", .swatch_class = "theme-swatch-gitomi" },
     .{ .id = "capucine", .label = "Capucine", .note = "Square", .swatch_class = "theme-swatch-capucine" },
+    .{ .id = "modern", .label = "Modern", .note = "Glass", .swatch_class = "theme-swatch-modern" },
 };
 
 pub fn renderThemePage(allocator: Allocator, repo: Repo) ![]u8 {

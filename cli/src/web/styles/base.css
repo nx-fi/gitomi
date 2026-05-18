@@ -8,6 +8,9 @@
   --theme-preview-capucine-surface: #fff8f5;
   --theme-preview-capucine-accent: #ff5e4d;
   --theme-preview-capucine-muted: #815178;
+  --theme-preview-modern-surface: #0b1422;
+  --theme-preview-modern-accent: #2f81ff;
+  --theme-preview-modern-muted: #7dd3fc;
 }
 * { box-sizing: border-box; }
 body {

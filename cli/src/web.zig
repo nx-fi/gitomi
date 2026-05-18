@@ -77,6 +77,7 @@ const routes = [_]Route{
     Route.static("/styles/shortcuts.css", "text/css", style_shortcuts_css),
     Route.static("/themes/gitomi.css", "text/css", gitomi_theme_css),
     Route.static("/themes/capucine.css", "text/css", capucine_theme_css),
+    Route.static("/themes/modern.css", "text/css", modern_theme_css),
     Route.static("/logo.svg", "image/svg+xml", logo_svg),
     Route.static("/theme.js", "application/javascript", theme_js),
     Route.static("/ui.js", "application/javascript", ui_js),
@@ -1039,6 +1040,7 @@ const style_responsive_css = @embedFile("web/styles/responsive.css");
 const style_shortcuts_css = @embedFile("web/styles/shortcuts.css");
 const gitomi_theme_css = @embedFile("web/themes/gitomi.css");
 const capucine_theme_css = @embedFile("web/themes/capucine.css");
+const modern_theme_css = @embedFile("web/themes/modern.css");
 const logo_svg = @embedFile("web/logo.svg");
 const theme_js = @embedFile("web/theme.js");
 const ui_js = @embedFile("web/ui.js");
@@ -1516,6 +1518,7 @@ test "web PDF preview assets are routed" {
 test "web theme stylesheets are routed" {
     try expectStaticRoute("/themes/gitomi.css", "text/css", false);
     try expectStaticRoute("/themes/capucine.css", "text/css", false);
+    try expectStaticRoute("/themes/modern.css", "text/css", false);
 }
 
 test "web split stylesheets are routed" {

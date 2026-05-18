@@ -1361,6 +1361,40 @@
   overflow-x: auto;
   background: var(--panel);
 }
+.project-issues-view {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  background: var(--panel);
+}
+.project-issues-list {
+  display: grid;
+}
+.project-issue-list-row {
+  border-right: 0;
+  border-left: 0;
+  border-radius: 0;
+}
+.project-issue-list-row:first-child {
+  border-top: 0;
+}
+.project-issues-empty {
+  display: grid;
+  justify-items: center;
+  gap: 14px;
+  padding: 52px 18px;
+  text-align: center;
+}
+.project-issues-empty h2 {
+  margin: 0;
+  font-size: 18px;
+}
+.project-issues-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
 .project-data-table {
   width: 100%;
   min-width: 980px;
@@ -1608,7 +1642,8 @@
 }
 .project-detail-panel > .kanban-board,
 .project-detail-panel > .project-table-view,
-.project-detail-panel > .project-roadmap-view {
+.project-detail-panel > .project-roadmap-view,
+.project-detail-panel > .project-issues-view {
   flex: 1 1 auto;
   min-height: 0;
 }

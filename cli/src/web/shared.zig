@@ -821,7 +821,7 @@ fn appendShellStartWithOptions(
         \\        var legacyMode = storedTheme === "light" || storedTheme === "dark" ? storedTheme : null;
         \\        var legacyCustomMode = localStorage.getItem("gitomi.theme.customMode");
         \\        var systemMode = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-        \\        var theme = storedTheme === "capucine" ? "capucine" : "gitomi";
+        \\        var theme = storedTheme === "capucine" || storedTheme === "modern" ? storedTheme : "gitomi";
         \\        var mode = storedMode === "light" || storedMode === "dark" ? storedMode :
         \\          legacyMode || (legacyCustomMode === "light" || legacyCustomMode === "dark" ? legacyCustomMode : systemMode);
         \\        document.documentElement.dataset.theme = theme;

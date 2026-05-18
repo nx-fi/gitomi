@@ -10,6 +10,7 @@
   const themes = {
     gitomi: { label: "Gitomi" },
     capucine: { label: "Capucine" },
+    modern: { label: "Modern" },
   };
 
   function isTheme(value) {

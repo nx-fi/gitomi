@@ -63,6 +63,8 @@ const ProjectMetrics = struct {
     issue_count: usize = 0,
     open_issue_count: usize = 0,
     closed_issue_count: usize = 0,
+    started_issue_count: usize = 0,
+    completed_issue_count: usize = 0,
     comment_count: usize = 0,
     member_count: usize = 0,
     label_count: usize = 0,
@@ -115,6 +117,7 @@ pub fn appendProjectOverview(
     );
     try appendProjectPropertiesPanel(buf, allocator, db, &summary, &metrics);
     try appendProjectMilestones(buf, allocator, db, &summary, &metrics, .sidebar);
+    try appendProjectProgressPanel(buf, allocator, &summary, &metrics);
     try appendProjectActivityPanel(buf, allocator, db, &summary, project);
     try buf.appendSlice(allocator,
         \\  </aside>
@@ -149,6 +152,7 @@ pub fn appendProjectActivityView(
     );
     try appendProjectPropertiesPanel(buf, allocator, db, &summary, &metrics);
     try appendProjectMilestones(buf, allocator, db, &summary, &metrics, .sidebar);
+    try appendProjectProgressPanel(buf, allocator, &summary, &metrics);
     try buf.appendSlice(allocator,
         \\  </aside>
         \\</div>
@@ -511,9 +515,16 @@ fn loadProjectIssueCounts(db: *SqliteDb, project: []const u8, metrics: *ProjectM
         \\  COUNT(DISTINCT i.id),
         \\  COUNT(DISTINCT CASE WHEN i.state = 'open' THEN i.id END),
         \\  COUNT(DISTINCT CASE WHEN i.state = 'closed' THEN i.id END),
+        \\  COUNT(DISTINCT CASE
+        \\    WHEN i.state = 'closed' OR COALESCE(m.status, '') IN ('WIP', 'Review', 'Done', 'Failed') THEN i.id
+        \\  END),
+        \\  COUNT(DISTINCT CASE
+        \\    WHEN i.state = 'closed' OR COALESCE(m.status, '') = 'Done' THEN i.id
+        \\  END),
         \\  COUNT(DISTINCT c.id)
         \\FROM project_items p
         \\JOIN issues i ON i.id = p.issue_id
+        \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
         \\LEFT JOIN comments c ON c.parent_kind = 'issue' AND c.parent_id = i.id
     ));
     defer stmt.deinit();
@@ -522,7 +533,9 @@ fn loadProjectIssueCounts(db: *SqliteDb, project: []const u8, metrics: *ProjectM
     metrics.issue_count = @intCast(stmt.columnInt64(0));
     metrics.open_issue_count = @intCast(stmt.columnInt64(1));
     metrics.closed_issue_count = @intCast(stmt.columnInt64(2));
-    metrics.comment_count = @intCast(stmt.columnInt64(3));
+    metrics.started_issue_count = @intCast(stmt.columnInt64(3));
+    metrics.completed_issue_count = @intCast(stmt.columnInt64(4));
+    metrics.comment_count = @intCast(stmt.columnInt64(5));
 }
 
 fn loadProjectMilestoneCounts(db: *SqliteDb, project_id: []const u8, metrics: *ProjectMetrics) !void {
