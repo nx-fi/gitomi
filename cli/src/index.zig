@@ -350,7 +350,7 @@ fn rebuildIndexUnlocked(allocator: Allocator, repo: Repo) !IndexStats {
     // cannot be trusted as authoritative projection state unless every covered event
     // has been replay-authenticated. Rebuild from signed event commits instead;
     // snapshots remain only a write-side cache until a verified loader exists.
-    var stats = try rebuildIndexFromScratch(allocator, repo, refs_raw, &admission, empty_tree, genesis_oid);
+    var stats = try rebuildIndexFromScratch(allocator, repo.index_path, refs_raw, &admission, empty_tree, genesis_oid, .{});
 
     // For snapshot creation policy, read only the manifest JSON of the newest snapshot
     // (no SQLite data is loaded) to determine whether inbox coverage has advanced.
@@ -464,13 +464,14 @@ fn writeCursorsAfterRebuild(allocator: Allocator, repo: Repo) !void {
 
 fn rebuildIndexFromScratch(
     allocator: Allocator,
-    repo: Repo,
+    index_path: []const u8,
     refs_raw: []const u8,
     admission: *IndexAdmission,
     empty_tree: []const u8,
     genesis_oid: ?[]const u8,
+    open_options: index_sqlite.OpenOptions,
 ) !IndexStats {
-    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READWRITE | sqlite.SQLITE_OPEN_CREATE, false);
+    var db = try SqliteDb.openWithOptions(allocator, index_path, sqlite.SQLITE_OPEN_READWRITE | sqlite.SQLITE_OPEN_CREATE, false, open_options);
     defer db.deinit();
 
     try db.exec("BEGIN IMMEDIATE");
@@ -524,6 +525,28 @@ fn rebuildIndexFromScratch(
     committed = true;
 
     return stats;
+}
+
+pub fn rebuildScratchIndexFromRefs(allocator: Allocator, repo: Repo, index_path: []const u8, refs_raw: []const u8) !IndexStats {
+    const expected_repo_id = try expectedRepoIdForIndex(allocator, repo);
+    defer if (expected_repo_id) |repo_id| allocator.free(repo_id);
+    const genesis_oid = try git.resolveOptionalRef(allocator, repo_mod.genesis_ref);
+    defer if (genesis_oid) |oid| allocator.free(oid);
+    var admission = IndexAdmission.init(allocator, expected_repo_id);
+    defer admission.deinit();
+
+    const empty_tree = try emptyTreeOid(allocator);
+    defer allocator.free(empty_tree);
+
+    return try rebuildIndexFromScratch(
+        allocator,
+        index_path,
+        refs_raw,
+        &admission,
+        empty_tree,
+        genesis_oid,
+        .{ .enable_wal = false },
+    );
 }
 
 fn rebuildWorkItemSearchIndex(db: *SqliteDb) !void {

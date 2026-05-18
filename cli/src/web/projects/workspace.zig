@@ -93,6 +93,7 @@ pub fn renderProjectWorkspace(
     project: []const u8,
     view_ref: []const u8,
     target: []const u8,
+    csrf_token: []const u8,
 ) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -106,12 +107,12 @@ pub fn renderProjectWorkspace(
     }
 
     if (view_ref.len == 0 or std.mem.eql(u8, view_ref, "overview")) {
-        try appendProjectOverview(&buf, allocator, repo, db, project);
+        try appendProjectOverview(&buf, allocator, repo, db, project, csrf_token);
         try appendShellEnd(&buf, allocator);
         return buf.toOwnedSlice(allocator);
     }
     if (std.mem.eql(u8, view_ref, "activity")) {
-        try appendProjectActivityView(&buf, allocator, repo, db, project);
+        try appendProjectActivityView(&buf, allocator, repo, db, project, csrf_token);
         try appendShellEnd(&buf, allocator);
         return buf.toOwnedSlice(allocator);
     }

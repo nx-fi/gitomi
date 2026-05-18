@@ -7,6 +7,7 @@ const repo_mod = @import("../repo.zig");
 const shared = @import("shared.zig");
 const issues_page = @import("issues.zig");
 const util = @import("../util.zig");
+const zwf = @import("../zwf.zig");
 
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
@@ -106,7 +107,7 @@ const MilestoneHrefOverride = struct {
     sort: ?MilestoneSort = null,
 };
 
-pub fn renderMilestonesPage(allocator: Allocator, repo: Repo, target: []const u8) ![]u8 {
+pub fn renderMilestonesPage(allocator: Allocator, repo: Repo, target: []const u8, csrf_token: []const u8) ![]u8 {
     if (try shared.renderIndexingPageIfStale(allocator, repo, "Milestones", "projects", target)) |body| return body;
     try index.ensureIndex(allocator, repo);
 
@@ -118,7 +119,7 @@ pub fn renderMilestonesPage(allocator: Allocator, repo: Repo, target: []const u8
     defer db.deinit();
     const counts = try loadMilestoneCounts(allocator, &db);
     const filters = try milestoneFiltersFromTarget(allocator, target, counts);
-    try appendMilestonesSummaryPage(&buf, allocator, &db, filters, counts);
+    try appendMilestonesSummaryPage(&buf, allocator, &db, filters, counts, csrf_token);
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
 }
@@ -190,7 +191,7 @@ fn loadMilestoneCounts(allocator: Allocator, db: *SqliteDb) !MilestoneCounts {
     return counts;
 }
 
-fn appendMilestonesSummaryPage(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, filters: MilestoneFilters, counts: MilestoneCounts) !void {
+fn appendMilestonesSummaryPage(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, filters: MilestoneFilters, counts: MilestoneCounts, csrf_token: []const u8) !void {
     try buf.appendSlice(allocator,
         \\<div class="issues-toolbar milestones-toolbar">
         \\  <div>
@@ -223,7 +224,7 @@ fn appendMilestonesSummaryPage(buf: *std.ArrayList(u8), allocator: Allocator, db
         const issue_count = @as(usize, @intCast(stmt.columnInt64(5)));
         const closed_count = @as(usize, @intCast(stmt.columnInt64(6)));
         const implicit = stmt.columnInt64(7) != 0;
-        try appendMilestoneSummaryRow(buf, allocator, id, title, description, due_at, state, issue_count, closed_count, implicit);
+        try appendMilestoneSummaryRow(buf, allocator, id, title, description, due_at, state, issue_count, closed_count, implicit, csrf_token);
         shown += 1;
     }
 
@@ -363,6 +364,7 @@ fn appendMilestoneSummaryRow(
     issue_count: usize,
     closed_count: usize,
     implicit: bool,
+    csrf_token: []const u8,
 ) !void {
     var ref_buf: [milestone_ref_len]u8 = undefined;
     const milestone_ref = if (implicit) "" else milestoneDisplayRef(&ref_buf, id);
@@ -417,14 +419,14 @@ fn appendMilestoneSummaryRow(
         .open_count = open_count,
         .closed_count = closed_count,
     });
-    if (!implicit) try appendMilestoneActionMenu(buf, allocator, milestone_ref, title, state);
+    if (!implicit) try appendMilestoneActionMenu(buf, allocator, milestone_ref, title, state, csrf_token);
     try buf.appendSlice(allocator,
         \\  </div>
         \\</article>
     );
 }
 
-fn appendMilestoneActionMenu(buf: *std.ArrayList(u8), allocator: Allocator, milestone_ref: []const u8, title: []const u8, state: []const u8) !void {
+fn appendMilestoneActionMenu(buf: *std.ArrayList(u8), allocator: Allocator, milestone_ref: []const u8, title: []const u8, state: []const u8, csrf_token: []const u8) !void {
     try appendTemplate(buf, allocator,
         \\<details class="milestone-action-menu" data-popover-menu>
         \\  <summary class="issue-kebab-button" aria-label="Milestone actions for {title}"></summary>
@@ -436,18 +438,23 @@ fn appendMilestoneActionMenu(buf: *std.ArrayList(u8), allocator: Allocator, mile
     try buf.appendSlice(allocator, "<form method=\"post\" action=\"/milestones/");
     try shared.appendUrlEncoded(buf, allocator, milestone_ref);
     try appendTemplate(buf, allocator,
-        \\"><input type="hidden" name="action" value="{action}"><button type="submit" role="menuitem"><span class="milestone-menu-icon milestone-menu-icon-state" aria-hidden="true"></span><span>{label}</span></button></form>
+        \\"><input type="hidden" name="{csrf_field}" value="{csrf_token}"><input type="hidden" name="action" value="{action}"><button type="submit" role="menuitem"><span class="milestone-menu-icon milestone-menu-icon-state" aria-hidden="true"></span><span>{label}</span></button></form>
     , .{
+        .csrf_field = zwf.csrf.field_name,
+        .csrf_token = csrf_token,
         .action = if (std.mem.eql(u8, state, "closed")) "reopen" else "close",
         .label = if (std.mem.eql(u8, state, "closed")) "Reopen" else "Close",
     });
     try buf.appendSlice(allocator, "<form method=\"post\" action=\"/milestones/");
     try shared.appendUrlEncoded(buf, allocator, milestone_ref);
-    try buf.appendSlice(allocator,
-        \\"><input type="hidden" name="action" value="delete"><button class="danger" type="submit" role="menuitem"><span class="milestone-menu-icon milestone-menu-icon-delete" aria-hidden="true"></span><span>Delete</span></button></form>
+    try appendTemplate(buf, allocator,
+        \\"><input type="hidden" name="{csrf_field}" value="{csrf_token}"><input type="hidden" name="action" value="delete"><button class="danger" type="submit" role="menuitem"><span class="milestone-menu-icon milestone-menu-icon-delete" aria-hidden="true"></span><span>Delete</span></button></form>
         \\  </div>
         \\</details>
-    );
+    , .{
+        .csrf_field = zwf.csrf.field_name,
+        .csrf_token = csrf_token,
+    });
 }
 
 fn milestoneStateValue(state: MilestoneStateFilter) []const u8 {
@@ -550,17 +557,21 @@ fn appendMilestoneStateButtonForm(
     state: []const u8,
     return_to: []const u8,
     button_class: []const u8,
+    csrf_token: []const u8,
 ) !void {
     const closed = std.mem.eql(u8, state, "closed");
     try buf.appendSlice(allocator, "<form class=\"milestone-state-form\" method=\"post\" action=\"/milestones/");
     try shared.appendUrlEncoded(buf, allocator, milestone_ref);
     try appendTemplate(buf, allocator,
         \\">
+        \\  <input type="hidden" name="{csrf_field}" value="{csrf_token}">
         \\  <input type="hidden" name="action" value="{action}">
         \\  <input type="hidden" name="return_to" value="{return_to}">
         \\  <button class="{button_class}" type="submit">{label}</button>
         \\</form>
     , .{
+        .csrf_field = zwf.csrf.field_name,
+        .csrf_token = csrf_token,
         .action = if (closed) "reopen" else "close",
         .return_to = return_to,
         .button_class = button_class,
@@ -572,7 +583,7 @@ fn issueWord(count: usize) []const u8 {
     return if (count == 1) "issue" else "issues";
 }
 
-pub fn renderMilestoneDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u8, target: []const u8) ![]u8 {
+pub fn renderMilestoneDetailPage(allocator: Allocator, repo: Repo, raw_ref: []const u8, target: []const u8, csrf_token: []const u8) ![]u8 {
     if (try shared.renderIndexingPageIfStale(allocator, repo, "Milestone", "projects", target)) |body| return body;
     try index.ensureIndex(allocator, repo);
 
@@ -595,7 +606,7 @@ pub fn renderMilestoneDetailPage(allocator: Allocator, repo: Repo, raw_ref: []co
     try appendShellStart(&buf, allocator, repo, data.title, "projects");
     try shared.appendDetailBackButton(&buf, allocator, shared.literalHref("/projects#milestones"), "Back to milestones");
     try buf.appendSlice(allocator, "<section class=\"milestone-detail-page\">");
-    try appendMilestoneDetailHeader(&buf, allocator, &db, milestone_ref, detail_path, data);
+    try appendMilestoneDetailHeader(&buf, allocator, &db, milestone_ref, detail_path, data, csrf_token);
     try appendMilestoneDetailDescription(&buf, allocator, data.description);
     try appendMilestoneDetailProgress(&buf, allocator, data.closed_count, data.issue_count);
     try appendMilestoneDetailIssues(&buf, allocator, &db, milestone_ref, data.title, issue_state, data.issue_count, data.closed_count);
@@ -611,6 +622,7 @@ fn appendMilestoneDetailHeader(
     milestone_ref: []const u8,
     return_to: []const u8,
     data: MilestoneDetailData,
+    csrf_token: []const u8,
 ) !void {
     try appendTemplate(buf, allocator,
         \\<header class="issue-page-head milestone-detail-head">
@@ -622,8 +634,8 @@ fn appendMilestoneDetailHeader(
         .title = data.title,
         .milestone_ref = milestone_ref,
     });
-    try appendMilestoneStateButtonForm(buf, allocator, milestone_ref, data.state, return_to, "button secondary");
-    try appendMilestoneAddIssueMenu(buf, allocator, db, milestone_ref, return_to, data.title);
+    try appendMilestoneStateButtonForm(buf, allocator, milestone_ref, data.state, return_to, "button secondary", csrf_token);
+    try appendMilestoneAddIssueMenu(buf, allocator, db, milestone_ref, return_to, data.title, csrf_token);
     try buf.appendSlice(allocator,
         \\    </div>
         \\  </div>
@@ -647,6 +659,7 @@ fn appendMilestoneAddIssueMenu(
     milestone_ref: []const u8,
     return_to: []const u8,
     milestone_title: []const u8,
+    csrf_token: []const u8,
 ) !void {
     try appendTemplate(buf, allocator,
         \\      <details class="milestone-add-issue-menu" data-popover-menu data-issue-sidebar-menu>
@@ -654,6 +667,7 @@ fn appendMilestoneAddIssueMenu(
         \\        <div class="issue-sidebar-popover milestone-add-issue-popover" role="dialog" aria-label="Add issue to milestone">
         \\          <div class="issue-sidebar-popover-title">Add issue</div>
         \\          <form class="milestone-add-issues-form" method="post" action="/milestones/{milestone_ref}">
+        \\            <input type="hidden" name="{csrf_field}" value="{csrf_token}">
         \\            <input type="hidden" name="action" value="add-issues">
         \\            <input type="hidden" name="return_to" value="{return_to}">
         \\            <div class="milestone-add-issue-controls">
@@ -667,6 +681,8 @@ fn appendMilestoneAddIssueMenu(
         \\            <div class="milestone-add-issue-list" role="group" aria-label="Issues">
     , .{
         .milestone_ref = milestone_ref,
+        .csrf_field = zwf.csrf.field_name,
+        .csrf_token = csrf_token,
         .return_to = return_to,
     });
 
@@ -980,7 +996,7 @@ fn loadMilestoneDetailData(allocator: Allocator, repo: Repo, raw_ref: []const u8
     };
 }
 
-pub fn appendMilestonesPanel(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb) !void {
+pub fn appendMilestonesPanel(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, csrf_token: []const u8) !void {
     try buf.appendSlice(allocator, "<section id=\"milestones\" class=\"panel milestones-panel project-page-panel\" role=\"tabpanel\" aria-labelledby=\"project-tab-milestones\" data-project-index-panel>");
     try appendSectionHead(buf, allocator, "Projects", "Milestones", .{
         .label = "New milestone",
@@ -1055,7 +1071,7 @@ pub fn appendMilestonesPanel(buf: *std.ArrayList(u8), allocator: Allocator, db: 
         const issue_count = @as(usize, @intCast(stmt.columnInt64(5)));
         const closed_count = @as(usize, @intCast(stmt.columnInt64(6)));
         const implicit = stmt.columnInt64(7) != 0;
-        try appendMilestoneRow(buf, allocator, id, title, description, due_at, state, issue_count, closed_count, implicit);
+        try appendMilestoneRow(buf, allocator, id, title, description, due_at, state, issue_count, closed_count, implicit, csrf_token);
         shown += 1;
     }
     if (shown == 0) {
@@ -1081,6 +1097,7 @@ fn appendMilestoneRow(
     issue_count: usize,
     closed_count: usize,
     implicit: bool,
+    csrf_token: []const u8,
 ) !void {
     var ref_buf: [milestone_ref_len]u8 = undefined;
     const milestone_ref = if (implicit) "" else milestoneDisplayRef(&ref_buf, id);
@@ -1115,19 +1132,19 @@ fn appendMilestoneRow(
     try buf.appendSlice(allocator, "</td><td>");
     try appendStatePill(buf, allocator, state);
     try buf.appendSlice(allocator, "</td><td><div class=\"milestone-actions\">");
-    if (!implicit) try appendMilestoneActionMenu(buf, allocator, milestone_ref, title, state);
+    if (!implicit) try appendMilestoneActionMenu(buf, allocator, milestone_ref, title, state, csrf_token);
     try buf.appendSlice(allocator, "</div></td></tr>");
 }
 
-pub fn renderMilestoneFormFromRef(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
+pub fn renderMilestoneFormFromRef(allocator: Allocator, repo: Repo, raw_ref: []const u8, csrf_token: []const u8) ![]u8 {
     try index.ensureIndex(allocator, repo);
     var data = loadMilestoneFormData(allocator, repo, raw_ref) catch return renderMilestoneNotFound(allocator, repo, raw_ref);
     defer data.deinit(allocator);
-    return renderMilestoneForm(allocator, repo, raw_ref, null, data.title, data.description, data.due_at, data.state);
+    return renderMilestoneForm(allocator, repo, raw_ref, null, data.title, data.description, data.due_at, data.state, csrf_token);
 }
 
-pub fn renderNewMilestoneForm(allocator: Allocator, repo: Repo) ![]u8 {
-    return renderMilestoneForm(allocator, repo, null, null, "", "", "", "open");
+pub fn renderNewMilestoneForm(allocator: Allocator, repo: Repo, csrf_token: []const u8) ![]u8 {
+    return renderMilestoneForm(allocator, repo, null, null, "", "", "", "open", csrf_token);
 }
 
 fn renderMilestoneForm(
@@ -1139,6 +1156,7 @@ fn renderMilestoneForm(
     description_value: []const u8,
     due_at_value: []const u8,
     state_value: []const u8,
+    csrf_token: []const u8,
 ) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -1166,9 +1184,12 @@ fn renderMilestoneForm(
     }
     try appendTemplate(&buf, allocator,
         \\">
+        \\  <input type="hidden" name="{csrf_field}" value="{csrf_token}">
         \\  <input type="hidden" name="action" value="{action}">
         \\  <label>Title<input name="title" value="{title_value}" required autofocus></label>
     , .{
+        .csrf_field = zwf.csrf.field_name,
+        .csrf_token = csrf_token,
         .action = if (editing) "update" else "create",
         .title_value = title_value,
     });
@@ -1194,7 +1215,7 @@ fn renderMilestoneForm(
         \\    <div class="milestone-form-state-slot">
     );
     if (raw_ref) |value| {
-        try appendMilestoneStateButtonForm(&buf, allocator, value, state_value, cancel_href, "button secondary");
+        try appendMilestoneStateButtonForm(&buf, allocator, value, state_value, cancel_href, "button secondary", csrf_token);
     }
     try appendTemplate(&buf, allocator,
         \\    </div>
@@ -1219,15 +1240,15 @@ fn appendStateOption(buf: *std.ArrayList(u8), allocator: Allocator, value: []con
     try appendTemplate(buf, allocator, ">{value}</option>", .{ .value = value });
 }
 
-pub fn handleMilestonePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: ?[]const u8, form_body: []const u8) !void {
+pub fn handleMilestonePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: ?[]const u8, csrf_token: []const u8, form_body: []const u8) !void {
     if (raw_ref) |milestone_ref| {
-        try handleMilestoneUpdatePost(allocator, repo, stream, milestone_ref, form_body);
+        try handleMilestoneUpdatePost(allocator, repo, stream, milestone_ref, csrf_token, form_body);
         return;
     }
-    try handleMilestoneCreatePost(allocator, repo, stream, form_body);
+    try handleMilestoneCreatePost(allocator, repo, stream, csrf_token, form_body);
 }
 
-fn handleMilestoneCreatePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
+fn handleMilestoneCreatePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, csrf_token: []const u8, form_body: []const u8) !void {
     const title_owned = (try formValueOwned(allocator, form_body, "title")) orelse try allocator.dupe(u8, "");
     defer allocator.free(title_owned);
     const description_owned = (try formValueOwned(allocator, form_body, "description")) orelse try allocator.dupe(u8, "");
@@ -1237,7 +1258,7 @@ fn handleMilestoneCreatePost(allocator: Allocator, repo: Repo, stream: std.net.S
 
     const title = std.mem.trim(u8, title_owned, " \t\r\n");
     if (title.len == 0) {
-        const body = try renderMilestoneForm(allocator, repo, null, "Title is required.", title_owned, description_owned, due_at_owned, "open");
+        const body = try renderMilestoneForm(allocator, repo, null, "Title is required.", title_owned, description_owned, due_at_owned, "open", csrf_token);
         defer allocator.free(body);
         try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", body, null);
         return;
@@ -1245,7 +1266,7 @@ fn handleMilestoneCreatePost(allocator: Allocator, repo: Repo, stream: std.net.S
 
     createMilestoneCreatedEvent(allocator, title, description_owned, due_at_owned) catch |err| {
         const message = shared.writeFailureMessage(err, "Could not create the milestone. Check that Gitomi is initialized and commit signing is configured.");
-        const body = try renderMilestoneForm(allocator, repo, null, message, title_owned, description_owned, due_at_owned, "open");
+        const body = try renderMilestoneForm(allocator, repo, null, message, title_owned, description_owned, due_at_owned, "open", csrf_token);
         defer allocator.free(body);
         try sendResponse(allocator, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), "text/html", body, null);
         return;
@@ -1254,7 +1275,7 @@ fn handleMilestoneCreatePost(allocator: Allocator, repo: Repo, stream: std.net.S
     try sendRedirect(allocator, stream, "/milestones");
 }
 
-fn handleMilestoneUpdatePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
+fn handleMilestoneUpdatePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, csrf_token: []const u8, form_body: []const u8) !void {
     try index.ensureIndex(allocator, repo);
     const milestone_id = index.resolveMilestoneId(allocator, repo, raw_ref) catch {
         try sendPlainResponse(allocator, stream, 404, "Not Found", "Milestone not found\n");
@@ -1301,13 +1322,13 @@ fn handleMilestoneUpdatePost(allocator: Allocator, repo: Repo, stream: std.net.S
     const title = std.mem.trim(u8, title_owned, " \t\r\n");
     const state = std.mem.trim(u8, state_owned, " \t\r\n");
     if (title.len == 0) {
-        const body = try renderMilestoneForm(allocator, repo, raw_ref, "Title is required.", title_owned, description_owned, due_at_owned, state_owned);
+        const body = try renderMilestoneForm(allocator, repo, raw_ref, "Title is required.", title_owned, description_owned, due_at_owned, state_owned, csrf_token);
         defer allocator.free(body);
         try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", body, null);
         return;
     }
     if (!validMilestoneState(state)) {
-        const body = try renderMilestoneForm(allocator, repo, raw_ref, "State must be open or closed.", title_owned, description_owned, due_at_owned, state_owned);
+        const body = try renderMilestoneForm(allocator, repo, raw_ref, "State must be open or closed.", title_owned, description_owned, due_at_owned, state_owned, csrf_token);
         defer allocator.free(body);
         try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", body, null);
         return;
@@ -1321,7 +1342,7 @@ fn handleMilestoneUpdatePost(allocator: Allocator, repo: Repo, stream: std.net.S
     };
     createMilestoneUpdatedEvent(allocator, milestone_id, update) catch |err| {
         const message = shared.writeFailureMessage(err, "Could not update the milestone. Check that your actor can manage milestones.");
-        const body = try renderMilestoneForm(allocator, repo, raw_ref, message, title_owned, description_owned, due_at_owned, state_owned);
+        const body = try renderMilestoneForm(allocator, repo, raw_ref, message, title_owned, description_owned, due_at_owned, state_owned, csrf_token);
         defer allocator.free(body);
         try sendResponse(allocator, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), "text/html", body, null);
         return;
@@ -1549,9 +1570,10 @@ test "milestone summary includes issue-only milestone assignments" {
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
-    try appendMilestonesSummaryPage(&buf, allocator, &db, .{ .state = .open, .sort = .updated }, counts);
+    try appendMilestonesSummaryPage(&buf, allocator, &db, .{ .state = .open, .sort = .updated }, counts, "token-123");
 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, ">Explicit</a>") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, ">Implicit</a>") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues?milestone=Implicit\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "name=\"_csrf\" value=\"token-123\"") != null);
 }

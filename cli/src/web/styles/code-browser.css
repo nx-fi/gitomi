@@ -2153,6 +2153,18 @@ a.root-file-commit:hover,
 .pdf-preview.failed .pdf-pages {
   display: none;
 }
+.pdf-preview-notice {
+  justify-self: center;
+  width: min(100%, 760px);
+  padding: 12px 14px;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+}
 .pdf-pages {
   display: grid;
   justify-items: center;

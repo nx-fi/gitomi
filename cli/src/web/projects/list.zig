@@ -18,7 +18,7 @@ const appendShellStart = shared.appendShellStart;
 const appendTemplate = shared.appendTemplate;
 const literalHref = shared.literalHref;
 
-pub fn renderProjectIndex(allocator: Allocator, repo: Repo, db: *SqliteDb) ![]u8 {
+pub fn renderProjectIndex(allocator: Allocator, repo: Repo, db: *SqliteDb, csrf_token: []const u8) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
@@ -170,7 +170,7 @@ pub fn renderProjectIndex(allocator: Allocator, repo: Repo, db: *SqliteDb) ![]u8
     }
     try buf.appendSlice(allocator, "</section>");
 
-    try milestones_page.appendMilestonesPanel(&buf, allocator, db);
+    try milestones_page.appendMilestonesPanel(&buf, allocator, db, csrf_token);
     try buf.appendSlice(allocator,
         \\  </div>
         \\</div>

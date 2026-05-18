@@ -582,6 +582,32 @@ pub fn validateInboxRange(
     return progress.count;
 }
 
+pub fn validateInboxRangeWithVerifier(
+    allocator: Allocator,
+    ref: []const u8,
+    expected_actor_ref: []const u8,
+    local_base: ?[]const u8,
+    empty_tree: []const u8,
+    genesis_oid: []const u8,
+    expected_repo_id: []const u8,
+    auth_verifier: *auth_binding.Verifier,
+) !usize {
+    var progress = InboxRangeProgress.init(allocator);
+    defer progress.deinit();
+    try validateInboxRangeIntoWithVerifier(
+        allocator,
+        ref,
+        expected_actor_ref,
+        local_base,
+        empty_tree,
+        genesis_oid,
+        expected_repo_id,
+        &progress,
+        auth_verifier,
+    );
+    return progress.count;
+}
+
 pub const InboxRangeProgress = struct {
     allocator: Allocator,
     count: usize = 0,
@@ -616,6 +642,32 @@ fn validateInboxRangeInto(
     expected_repo_id: []const u8,
     progress: *InboxRangeProgress,
 ) !void {
+    var auth_verifier = try auth_binding.Verifier.init(allocator);
+    defer auth_verifier.deinit();
+    try validateInboxRangeIntoWithVerifier(
+        allocator,
+        ref,
+        expected_actor_ref,
+        local_base,
+        empty_tree,
+        genesis_oid,
+        expected_repo_id,
+        progress,
+        &auth_verifier,
+    );
+}
+
+fn validateInboxRangeIntoWithVerifier(
+    allocator: Allocator,
+    ref: []const u8,
+    expected_actor_ref: []const u8,
+    local_base: ?[]const u8,
+    empty_tree: []const u8,
+    genesis_oid: []const u8,
+    expected_repo_id: []const u8,
+    progress: *InboxRangeProgress,
+    auth_verifier: *auth_binding.Verifier,
+) !void {
     const log = try inboxCommitLog(allocator, ref, local_base, genesis_oid);
     defer allocator.free(log);
     const expected_identity = inbox_commit.parseRefIdentity(expected_actor_ref) orelse {
@@ -627,8 +679,6 @@ fn validateInboxRangeInto(
     var actor_seqs = ActorSeqTracker.init(allocator);
     defer actor_seqs.deinit();
     try seedActorSeqsThroughCommit(allocator, &actor_seqs, local_base);
-    var auth_verifier = try auth_binding.Verifier.init(allocator);
-    defer auth_verifier.deinit();
     var records = std.mem.splitScalar(u8, log, 0x1e);
     while (records.next()) |record_raw| {
         const record = inbox_commit.parseRecord(record_raw) orelse {

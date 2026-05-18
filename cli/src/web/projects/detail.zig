@@ -11,7 +11,7 @@ const Repo = repo_mod.Repo;
 const SqliteDb = index.SqliteDb;
 const sqlite = index.sqlite;
 
-pub fn renderProjectsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]u8 {
+pub fn renderProjectsPage(allocator: Allocator, repo: Repo, target: []const u8, csrf_token: []const u8) ![]u8 {
     if (try shared.renderIndexingPageIfStale(allocator, repo, "Projects", "projects", target)) |body| return body;
     try index.ensureIndex(allocator, repo);
 
@@ -24,10 +24,10 @@ pub fn renderProjectsPage(allocator: Allocator, repo: Repo, target: []const u8) 
     defer db.deinit();
 
     if (project_query) |project| {
-        return workspace.renderProjectWorkspace(allocator, repo, &db, project, view_query orelse "", target);
+        return workspace.renderProjectWorkspace(allocator, repo, &db, project, view_query orelse "", target, csrf_token);
     }
 
-    return list.renderProjectIndex(allocator, repo, &db);
+    return list.renderProjectIndex(allocator, repo, &db, csrf_token);
 }
 
 fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const u8) !?[]u8 {

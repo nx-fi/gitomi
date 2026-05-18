@@ -201,20 +201,31 @@ fn localDelegationAuthorizesLegacyAliasWrite(allocator: Allocator, repo: Repo, e
 fn localDelegationAuthorizesSourceIdentityWrite(allocator: Allocator, repo: Repo, envelope: event_mod.ValidatedEnvelope, event_body: []const u8) !bool {
     if (!projection.importDelegatesEvent(envelope.event_type)) return false;
 
-    const providers = providerSourceIdentityMetadata(allocator, envelope.event_type, event_body) catch return false;
-    if (!providers.github and !providers.gitlab) return false;
+    const metadata = sourceIdentityMetadataAuthorization(allocator, envelope.event_type, event_body) catch return false;
+    if (!metadata.has_metadata) return false;
 
     var signing_key = repo_mod.configuredSigningKey(allocator) catch return false;
     defer signing_key.deinit();
 
-    if (providers.github and !(try hasActiveDelegation(allocator, repo, envelope.actor_principal, envelope.actor_device, "github.import", "github:*", signing_key.fingerprint))) return false;
-    if (providers.gitlab and !(try hasActiveDelegation(allocator, repo, envelope.actor_principal, envelope.actor_device, "gitlab.import", "gitlab:*", signing_key.fingerprint))) return false;
+    if (metadata.providers.github and !(try hasActiveDelegation(allocator, repo, envelope.actor_principal, envelope.actor_device, "github.import", "github:*", signing_key.fingerprint))) return false;
+    if (metadata.providers.gitlab and !(try hasActiveDelegation(allocator, repo, envelope.actor_principal, envelope.actor_device, "gitlab.import", "gitlab:*", signing_key.fingerprint))) return false;
+    if (!metadata.providers.github and !metadata.providers.gitlab) {
+        if (metadata.has_source_identity) return false;
+        return try hasActiveDelegation(allocator, repo, envelope.actor_principal, envelope.actor_device, "github.import", "github:*", signing_key.fingerprint) or
+            try hasActiveDelegation(allocator, repo, envelope.actor_principal, envelope.actor_device, "gitlab.import", "gitlab:*", signing_key.fingerprint);
+    }
     return true;
 }
 
 const ProviderLegacyAliases = struct {
     github: bool = false,
     gitlab: bool = false,
+};
+
+const SourceIdentityMetadataAuthorization = struct {
+    has_metadata: bool = false,
+    has_source_identity: bool = false,
+    providers: ProviderLegacyAliases = .{},
 };
 
 fn providerLegacyAliases(allocator: Allocator, event_type: []const u8, event_body: []const u8) !ProviderLegacyAliases {
@@ -227,7 +238,7 @@ fn providerLegacyAliases(allocator: Allocator, event_type: []const u8, event_bod
     return providerLegacyAliasesFromRoot(event_type, root);
 }
 
-fn providerSourceIdentityMetadata(allocator: Allocator, event_type: []const u8, event_body: []const u8) !ProviderLegacyAliases {
+fn sourceIdentityMetadataAuthorization(allocator: Allocator, event_type: []const u8, event_body: []const u8) !SourceIdentityMetadataAuthorization {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, event_body, .{});
     defer parsed.deinit();
     const root = switch (parsed.value) {
@@ -240,8 +251,17 @@ fn providerSourceIdentityMetadata(allocator: Allocator, event_type: []const u8, 
     };
     if (!payloadHasSourceIdentityMetadata(payload)) return .{};
     const source_identity = event_mod.jsonString(payload.get("source_identity")) orelse "";
-    if (source_identity.len != 0) return providersForSourceIdentity(source_identity);
-    return providerLegacyAliasesFromRoot(event_type, root);
+    if (source_identity.len != 0) {
+        return .{
+            .has_metadata = true,
+            .has_source_identity = true,
+            .providers = providersForSourceIdentity(source_identity),
+        };
+    }
+    return .{
+        .has_metadata = true,
+        .providers = providerLegacyAliasesFromRoot(event_type, root),
+    };
 }
 
 fn providerLegacyAliasesFromRoot(event_type: []const u8, root: std.json.ObjectMap) ProviderLegacyAliases {
@@ -282,7 +302,9 @@ fn providersForSourceIdentity(source_identity: []const u8) ProviderLegacyAliases
     if (split == 0 or split + 1 >= source_identity.len) return .{};
     const provider = source_identity[0..split];
     if (std.mem.eql(u8, provider, "github")) return .{ .github = true };
+    if (std.mem.eql(u8, provider, "github-node")) return .{ .github = true };
     if (std.mem.eql(u8, provider, "gitlab")) return .{ .gitlab = true };
+    if (std.mem.eql(u8, provider, "gitlab-node")) return .{ .gitlab = true };
     return .{};
 }
 
@@ -983,12 +1005,14 @@ fn lookupObjectIdByHashRefInDb(
     errdefer if (first) |value| allocator.free(value);
     while (try stmt.step()) {
         const id = try stmt.columnTextDup(allocator, 0);
-        errdefer allocator.free(id);
+        var id_owned = true;
+        errdefer if (id_owned) allocator.free(id);
 
         var ref_buf: [util.max_object_ref_len]u8 = undefined;
         const object_ref = util.objectRefPrefix(ref_buf[0..prefix.len], id);
         if (!std.mem.eql(u8, object_ref, prefix)) {
             allocator.free(id);
+            id_owned = false;
             continue;
         }
 
@@ -1001,16 +1025,34 @@ fn lookupObjectIdByHashRefInDb(
             try eprint("gt: ambiguous {s} reference #{s} matches #{s} ({s}) and #{s} ({s})\n", .{ noun, prefix, first_ref, first_id, second_ref, id });
             allocator.free(first_id);
             allocator.free(id);
+            id_owned = false;
             first = null;
             return CliError.AmbiguousReference;
         }
 
         first = id;
+        id_owned = false;
     }
 
     const result = first orelse return null;
     first = null;
     return result;
+}
+
+test "hash reference resolver reports ambiguity without double-freeing current candidate" {
+    const allocator = std.testing.allocator;
+    var db = try SqliteDb.openWithOptions(allocator, ":memory:", sqlite.SQLITE_OPEN_READWRITE | sqlite.SQLITE_OPEN_CREATE, true, .{ .enable_wal = false });
+    defer db.deinit();
+    try db.exec(
+        \\CREATE TABLE issues(id TEXT PRIMARY KEY);
+        \\INSERT INTO issues(id) VALUES ('14641b09-7334-4412-a928-f18807b8d598');
+        \\INSERT INTO issues(id) VALUES ('6781bfad-8590-4eac-8967-0175e7f8da42');
+    );
+
+    try std.testing.expectError(
+        CliError.AmbiguousReference,
+        lookupObjectIdByHashRefInDb(allocator, &db, "issues", "issue", "fd4afff"),
+    );
 }
 
 pub fn lookupLegacyGithubObjectId(allocator: Allocator, repo: Repo, object_kind: []const u8, number: i64) !?[]u8 {
@@ -2325,6 +2367,7 @@ test "write preflight enforces current RBAC" {
     try requireAuthorizedWrite(allocator, repo, test_issue_opened_body);
     try std.testing.expectError(CliError.Unauthorized, requireAuthorizedWrite(allocator, repo, test_github_issue_alias_body));
     try std.testing.expectError(CliError.Unauthorized, requireAuthorizedWrite(allocator, repo, test_github_issue_source_identity_body));
+    try std.testing.expectError(CliError.Unauthorized, requireAuthorizedWrite(allocator, repo, test_comment_source_author_body));
 
     var signing_key = try repo_mod.configuredSigningKey(allocator);
     defer signing_key.deinit();
@@ -2336,6 +2379,7 @@ test "write preflight enforces current RBAC" {
     try std.testing.expectError(CliError.Unauthorized, requireAuthorizedWrite(allocator, repo, test_github_issue_alias_body));
     try std.testing.expectError(CliError.Unauthorized, requireAuthorizedWrite(allocator, repo, test_github_issue_source_identity_body));
     try requireAuthorizedWrite(allocator, repo, test_gitlab_issue_alias_body);
+    try requireAuthorizedWrite(allocator, repo, test_comment_source_author_body);
 
     db = try SqliteDb.open(allocator, index_path, sqlite.SQLITE_OPEN_READWRITE, false);
     try insertTestDelegation(&db, "alice", "laptop", "github.import", "github:*", signing_key.fingerprint);
@@ -2463,6 +2507,39 @@ const test_github_issue_source_identity_body =
     \\    "source_identity": "github:123",
     \\    "source_email": "victim@example.test",
     \\    "source_avatar_url": "https://avatars.githubusercontent.com/u/123?v=4"
+    \\  }
+    \\}
+;
+
+const test_comment_source_author_body =
+    \\{
+    \\  "$schema": "urn:gitomi:event:v1",
+    \\  "repo_id": "018f0000-0000-7000-8000-000000000001",
+    \\  "event_uuid": "018f0000-0000-7000-8000-000000000308",
+    \\  "event_type": "comment.added",
+    \\  "object": {
+    \\    "kind": "comment",
+    \\    "id": "018f0000-0000-7000-8000-000000000309"
+    \\  },
+    \\  "idempotency_key": "018f0000-0000-7000-8000-00000000030a",
+    \\  "actor": {
+    \\    "principal": "alice",
+    \\    "device": "laptop"
+    \\  },
+    \\  "seq": 5,
+    \\  "occurred_at": "2026-05-16T00:00:03Z",
+    \\  "parent_hashes": {
+    \\    "log": "",
+    \\    "anchor": "",
+    \\    "causal": [],
+    \\    "related": []
+    \\  },
+    \\  "legacy": {},
+    \\  "payload": {
+    \\    "parent_kind": "issue",
+    \\    "parent_id": "018f0000-0000-7000-8000-000000000300",
+    \\    "body": "Imported comment",
+    \\    "source_author": "commenter"
     \\  }
     \\}
 ;

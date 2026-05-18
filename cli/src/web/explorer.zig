@@ -29,6 +29,11 @@ const sendResponse = shared.sendResponse;
 
 const max_blob_display_bytes = 512 * 1024;
 const max_raw_blob_bytes = git.max_git_output;
+const pdf_preview_page_limit = 20;
+const pdf_preview_canvas_pixel_limit = 4_000_000;
+const pdf_preview_total_pixel_limit = 40_000_000;
+const pdf_preview_css_width_limit = 1200;
+const pdf_preview_css_height_limit = 1800;
 const root_partial_priority_repository = 30;
 const root_partial_priority_branch = 30;
 const root_partial_priority_commit_count = 35;
@@ -1587,13 +1592,18 @@ fn appendPdfPreview(
     path: []const u8,
 ) !void {
     try appendTemplate(buf, allocator,
-        \\<div class="pdf-preview" data-pdf-preview data-pdf-url="{href}">
+        \\<div class="pdf-preview" data-pdf-preview data-pdf-url="{href}" data-pdf-max-pages="{max_pages}" data-pdf-max-canvas-pixels="{max_canvas_pixels}" data-pdf-max-total-pixels="{max_total_pixels}" data-pdf-max-css-width="{max_css_width}" data-pdf-max-css-height="{max_css_height}">
         \\  <div class="pdf-preview-toolbar"><strong>{name}</strong><span data-pdf-status>Loading PDF...</span></div>
         \\  <div class="pdf-pages" data-pdf-pages></div>
         \\</div>
     , .{
         .href = rawHref(ref, path),
         .name = baseName(path),
+        .max_pages = pdf_preview_page_limit,
+        .max_canvas_pixels = pdf_preview_canvas_pixel_limit,
+        .max_total_pixels = pdf_preview_total_pixel_limit,
+        .max_css_width = pdf_preview_css_width_limit,
+        .max_css_height = pdf_preview_css_height_limit,
     });
 }
 
@@ -2372,6 +2382,19 @@ test "web explorer renders PDF preview raw tabs" {
     try std.testing.expect(std.mem.indexOf(u8, buf.items, ">Preview</a>") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, ">Raw</a>") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "/raw?ref=HEAD&amp;path=docs/spec.pdf") != null);
+}
+
+test "web explorer emits PDF preview render limits" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendPdfPreview(&buf, std.testing.allocator, "HEAD", "docs/spec.pdf");
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-pdf-preview") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-pdf-url=\"/raw?ref=HEAD&amp;path=docs/spec.pdf\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-pdf-max-pages=\"20\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-pdf-max-canvas-pixels=\"4000000\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-pdf-max-total-pixels=\"40000000\"") != null);
 }
 
 test "web explorer maps supported file paths to devicon classes" {

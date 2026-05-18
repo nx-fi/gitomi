@@ -61,6 +61,45 @@ pub const Verifier = struct {
         };
     }
 
+    pub fn initExcludingRef(allocator: Allocator, excluded_ref: []const u8) !Verifier {
+        var repo = try repo_mod.discoverRepo(allocator);
+        errdefer repo.deinit();
+
+        const temp_id = try util.newUuidV7(allocator);
+        defer allocator.free(temp_id);
+
+        const temp_path = try std.fmt.allocPrint(allocator, "{s}/auth-binding-{s}.sqlite", .{ repo.gitomi_dir, temp_id });
+        errdefer allocator.free(temp_path);
+        errdefer std.fs.cwd().deleteFile(temp_path) catch {};
+
+        const refs_raw = try index.currentIndexRefsRaw(allocator);
+        defer allocator.free(refs_raw);
+        const filtered_refs_raw = try refsRawExcludingRef(allocator, refs_raw, excluded_ref);
+        defer allocator.free(filtered_refs_raw);
+
+        _ = try index.rebuildScratchIndexFromRefs(allocator, repo, temp_path, filtered_refs_raw);
+
+        var db = try index.SqliteDb.openWithOptions(allocator, temp_path, index.sqlite.SQLITE_OPEN_READWRITE, false, .{ .enable_wal = false });
+        errdefer db.deinit();
+
+        var insert_stmt = try db.prepare(
+            \\INSERT INTO events(
+            \\  ref, "commit", event_hash, tree, subject, body, empty_tree, valid_json,
+            \\  event_type, object_kind, object_id, actor_principal, actor_device, seq, occurred_at,
+            \\  domain_status, rejection_reason
+            \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        );
+        errdefer insert_stmt.deinit();
+
+        return .{
+            .allocator = allocator,
+            .repo = repo,
+            .temp_path = temp_path,
+            .db = db,
+            .insert_stmt = insert_stmt,
+        };
+    }
+
     pub fn deinit(self: *Verifier) void {
         self.insert_stmt.deinit();
         self.db.deinit();
@@ -106,6 +145,24 @@ fn indexedEventExists(db: *index.SqliteDb, event_hash: []const u8) !bool {
     return try stmt.step();
 }
 
+fn refsRawExcludingRef(allocator: Allocator, refs_raw: []const u8, excluded_ref: []const u8) ![]u8 {
+    var filtered: std.ArrayList(u8) = .empty;
+    errdefer filtered.deinit(allocator);
+
+    var it = std.mem.splitScalar(u8, refs_raw, '\n');
+    while (it.next()) |line_raw| {
+        const line = std.mem.trim(u8, line_raw, " \t\r\n");
+        if (line.len == 0) continue;
+        const tab = std.mem.indexOfScalar(u8, line, '\t') orelse continue;
+        const ref = line[0..tab];
+        if (std.mem.eql(u8, ref, excluded_ref)) continue;
+        try filtered.appendSlice(allocator, line);
+        try filtered.append(allocator, '\n');
+    }
+
+    return try filtered.toOwnedSlice(allocator);
+}
+
 test "auth verifier detects duplicate indexed event before insert" {
     const allocator = std.testing.allocator;
     var db = try index.SqliteDb.open(allocator, ":memory:", index.sqlite.SQLITE_OPEN_READWRITE | index.sqlite.SQLITE_OPEN_CREATE, true);
@@ -124,4 +181,20 @@ test "auth verifier detects duplicate indexed event before insert" {
 
     try std.testing.expect(try indexedEventExists(&db, "commit-1"));
     try std.testing.expect(!(try indexedEventExists(&db, "commit-2")));
+}
+
+test "refsRawExcludingRef removes only the selected ref" {
+    const refs_raw =
+        "refs/gitomi/genesis\t1111111111111111111111111111111111111111\n" ++
+        "refs/gitomi/inbox/alice/laptop\t2222222222222222222222222222222222222222\n" ++
+        "refs/gitomi/inbox/bob/desktop\t3333333333333333333333333333333333333333\n";
+
+    const filtered = try refsRawExcludingRef(std.testing.allocator, refs_raw, "refs/gitomi/inbox/alice/laptop");
+    defer std.testing.allocator.free(filtered);
+
+    try std.testing.expectEqualStrings(
+        "refs/gitomi/genesis\t1111111111111111111111111111111111111111\n" ++
+            "refs/gitomi/inbox/bob/desktop\t3333333333333333333333333333333333333333\n",
+        filtered,
+    );
 }

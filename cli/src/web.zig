@@ -636,7 +636,7 @@ fn handlePullActionPost(ctx: WebContext) !void {
 }
 
 fn handleProjectsPage(ctx: WebContext) !void {
-    try sendOwnedHtml(ctx, try projects_page.renderProjectsPage(ctx.allocator, ctx.repo, ctx.request.target));
+    try sendOwnedHtml(ctx, try projects_page.renderProjectsPage(ctx.allocator, ctx.repo, ctx.request.target, ctx.csrf_token));
 }
 
 fn handleNewProjectPage(ctx: WebContext) !void {
@@ -652,11 +652,12 @@ fn handleProjectItemPost(ctx: WebContext) !void {
 }
 
 fn handleProjectPropertiesPost(ctx: WebContext) !void {
+    if (!try requireCsrfToken(ctx)) return;
     try projects_page.handleProjectPropertiesPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
 }
 
 fn handleMilestonesPage(ctx: WebContext) !void {
-    try sendOwnedHtml(ctx, try milestones_page.renderMilestonesPage(ctx.allocator, ctx.repo, ctx.request.target));
+    try sendOwnedHtml(ctx, try milestones_page.renderMilestonesPage(ctx.allocator, ctx.repo, ctx.request.target, ctx.csrf_token));
 }
 
 fn handleMilestoneDetailPage(ctx: WebContext) !void {
@@ -664,7 +665,7 @@ fn handleMilestoneDetailPage(ctx: WebContext) !void {
         try sendPlainNotFound(ctx);
         return;
     };
-    try sendOwnedHtml(ctx, try milestones_page.renderMilestoneDetailPage(ctx.allocator, ctx.repo, milestone_ref, ctx.request.target));
+    try sendOwnedHtml(ctx, try milestones_page.renderMilestoneDetailPage(ctx.allocator, ctx.repo, milestone_ref, ctx.request.target, ctx.csrf_token));
 }
 
 fn handleMilestoneEditPage(ctx: WebContext) !void {
@@ -672,15 +673,16 @@ fn handleMilestoneEditPage(ctx: WebContext) !void {
         try sendPlainNotFound(ctx);
         return;
     };
-    try sendOwnedHtml(ctx, try milestones_page.renderMilestoneFormFromRef(ctx.allocator, ctx.repo, milestone_ref));
+    try sendOwnedHtml(ctx, try milestones_page.renderMilestoneFormFromRef(ctx.allocator, ctx.repo, milestone_ref, ctx.csrf_token));
 }
 
 fn handleNewMilestonePage(ctx: WebContext) !void {
-    try sendOwnedHtml(ctx, try milestones_page.renderNewMilestoneForm(ctx.allocator, ctx.repo));
+    try sendOwnedHtml(ctx, try milestones_page.renderNewMilestoneForm(ctx.allocator, ctx.repo, ctx.csrf_token));
 }
 
 fn handleMilestonePost(ctx: WebContext) !void {
-    try milestones_page.handleMilestonePost(ctx.allocator, ctx.repo, ctx.stream, null, ctx.request.body);
+    if (!try requireCsrfToken(ctx)) return;
+    try milestones_page.handleMilestonePost(ctx.allocator, ctx.repo, ctx.stream, null, ctx.csrf_token, ctx.request.body);
 }
 
 fn handleMilestoneRefPost(ctx: WebContext) !void {
@@ -688,7 +690,8 @@ fn handleMilestoneRefPost(ctx: WebContext) !void {
         try sendPlainNotFound(ctx);
         return;
     };
-    try milestones_page.handleMilestonePost(ctx.allocator, ctx.repo, ctx.stream, milestone_ref, ctx.request.body);
+    if (!try requireCsrfToken(ctx)) return;
+    try milestones_page.handleMilestonePost(ctx.allocator, ctx.repo, ctx.stream, milestone_ref, ctx.csrf_token, ctx.request.body);
 }
 
 fn handleAccessPage(ctx: WebContext) !void {
@@ -1517,6 +1520,62 @@ test "label csrf rejects form post without token" {
     const request = try parseHttpRequest(raw);
 
     try std.testing.expect(!try zwf.csrf.verifyRequest(std.testing.allocator, request, "local-token"));
+}
+
+test "project property posts require explicit csrf token" {
+    const body = "_csrf=local-token&action=save-description&project_id=p1&description=hello";
+    const raw =
+        "POST /projects/properties HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1:12655\r\n" ++
+        "Origin: http://127.0.0.1:12655\r\n" ++
+        "Content-Type: application/x-www-form-urlencoded\r\n" ++
+        "Content-Length: " ++ std.fmt.comptimePrint("{d}", .{body.len}) ++ "\r\n" ++
+        "\r\n" ++
+        body;
+    const request = try parseHttpRequest(raw);
+    try std.testing.expect(isValidCsrfRequest(request));
+    try std.testing.expect(requestHasValidCsrfToken(std.testing.allocator, request, "local-token"));
+
+    const missing_body = "action=save-description&project_id=p1&description=hello";
+    const missing_raw =
+        "POST /projects/properties HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1:12655\r\n" ++
+        "Origin: http://127.0.0.1:12655\r\n" ++
+        "Content-Type: application/x-www-form-urlencoded\r\n" ++
+        "Content-Length: " ++ std.fmt.comptimePrint("{d}", .{missing_body.len}) ++ "\r\n" ++
+        "\r\n" ++
+        missing_body;
+    const missing_request = try parseHttpRequest(missing_raw);
+    try std.testing.expect(isValidCsrfRequest(missing_request));
+    try std.testing.expect(!requestHasValidCsrfToken(std.testing.allocator, missing_request, "local-token"));
+}
+
+test "milestone posts require explicit csrf token" {
+    const body = "_csrf=local-token&action=add-issues&issue=i1";
+    const raw =
+        "POST /milestones/abc12345 HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1:12655\r\n" ++
+        "Origin: http://127.0.0.1:12655\r\n" ++
+        "Content-Type: application/x-www-form-urlencoded\r\n" ++
+        "Content-Length: " ++ std.fmt.comptimePrint("{d}", .{body.len}) ++ "\r\n" ++
+        "\r\n" ++
+        body;
+    const request = try parseHttpRequest(raw);
+    try std.testing.expect(isValidCsrfRequest(request));
+    try std.testing.expect(requestHasValidCsrfToken(std.testing.allocator, request, "local-token"));
+
+    const missing_body = "action=add-issues&issue=i1";
+    const missing_raw =
+        "POST /milestones/abc12345 HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1:12655\r\n" ++
+        "Origin: http://127.0.0.1:12655\r\n" ++
+        "Content-Type: application/x-www-form-urlencoded\r\n" ++
+        "Content-Length: " ++ std.fmt.comptimePrint("{d}", .{missing_body.len}) ++ "\r\n" ++
+        "\r\n" ++
+        missing_body;
+    const missing_request = try parseHttpRequest(missing_raw);
+    try std.testing.expect(isValidCsrfRequest(missing_request));
+    try std.testing.expect(!requestHasValidCsrfToken(std.testing.allocator, missing_request, "local-token"));
 }
 
 test "checklist posts require explicit csrf token" {

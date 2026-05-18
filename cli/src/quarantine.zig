@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const auth_binding = @import("auth_binding.zig");
 const errors = @import("errors.zig");
 const git = @import("git.zig");
 const inbox_commit = @import("inbox_commit.zig");
@@ -160,7 +161,8 @@ fn cmdAdopt(allocator: Allocator, args: []const []const u8) !void {
         return CliError.UserError;
     }
 
-    const admitted = try validateQuarantinedHead(allocator, item);
+    const validation_base: ?[]const u8 = if (replaces_local) null else local_oid;
+    const admitted = try validateQuarantinedHead(allocator, item, validation_base, replaces_local);
     if (!options.yes) {
         const phrase = try std.fmt.allocPrint(allocator, "adopt quarantined inbox {s}", .{item.local_ref});
         defer allocator.free(phrase);
@@ -411,7 +413,7 @@ fn relationshipToLocal(allocator: Allocator, local_oid: ?[]const u8, quarantine_
     return "diverged";
 }
 
-fn validateQuarantinedHead(allocator: Allocator, item: QuarantineRef) !usize {
+fn validateQuarantinedHead(allocator: Allocator, item: QuarantineRef, local_base: ?[]const u8, replacement_adoption: bool) !usize {
     const genesis_oid = (try git.resolveOptionalRef(allocator, repo_mod.genesis_ref)) orelse {
         try io.eprint("gt quarantine adopt: refusing to adopt without {s}\n", .{repo_mod.genesis_ref});
         return CliError.UserError;
@@ -424,7 +426,17 @@ fn validateQuarantinedHead(allocator: Allocator, item: QuarantineRef) !usize {
     const empty_tree = try git.emptyTreeOid(allocator);
     defer allocator.free(empty_tree);
 
-    return sync.validateInboxRange(allocator, item.ref, item.local_ref, null, empty_tree, genesis_oid, expected_repo_id);
+    if (local_base) |base| {
+        return sync.validateInboxRange(allocator, item.ref, item.local_ref, base, empty_tree, genesis_oid, expected_repo_id);
+    }
+
+    if (!replacement_adoption) {
+        return sync.validateInboxRange(allocator, item.ref, item.local_ref, null, empty_tree, genesis_oid, expected_repo_id);
+    }
+
+    var auth_verifier = try auth_binding.Verifier.initExcludingRef(allocator, item.local_ref);
+    defer auth_verifier.deinit();
+    return sync.validateInboxRangeWithVerifier(allocator, item.ref, item.local_ref, null, empty_tree, genesis_oid, expected_repo_id, &auth_verifier);
 }
 
 fn expectedRepoIdForAdmission(allocator: Allocator, genesis_oid: []const u8) ![]u8 {

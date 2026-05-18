@@ -88,65 +88,148 @@ fn orderEventHashesTopologically(allocator: Allocator, event_hashes: *std.ArrayL
         try input.append(allocator, '\n');
     }
 
-    const ordered_raw = try git.gitCheckedInput(allocator, &.{ "rev-list", "--topo-order", "--reverse", "--stdin" }, input.items);
+    const ordered_raw = try git.gitCheckedInput(allocator, &.{ "rev-list", "--topo-order", "--reverse", "--parents", "--stdin" }, input.items);
     defer allocator.free(ordered_raw);
 
-    var indexes = std.StringHashMap(usize).init(allocator);
-    defer indexes.deinit();
+    try orderEventHashesFromRevListParents(allocator, event_hashes, ordered_raw, auth_priorities);
+}
+
+const ProjectionOrderNode = struct {
+    hash: []const u8,
+    children: std.ArrayList(usize) = .empty,
+    indegree: usize = 0,
+    input_index: ?usize = null,
+    priority: u8 = 1,
+    topo_index: usize = 0,
+};
+
+const ProjectionOrderQueueContext = struct {
+    nodes: []const ProjectionOrderNode,
+};
+
+fn orderEventHashesFromRevListParents(
+    allocator: Allocator,
+    event_hashes: *std.ArrayList([]u8),
+    parents_raw: []const u8,
+    auth_priorities: ?*const std.StringHashMap(u8),
+) !void {
+    var event_indexes = std.StringHashMap(usize).init(allocator);
+    defer event_indexes.deinit();
     for (event_hashes.items, 0..) |event_hash, index| {
-        try indexes.put(event_hash, index);
+        try event_indexes.put(event_hash, index);
+    }
+
+    var nodes: std.ArrayList(ProjectionOrderNode) = .empty;
+    defer deinitProjectionOrderNodes(allocator, &nodes);
+
+    var node_indexes = std.StringHashMap(usize).init(allocator);
+    defer node_indexes.deinit();
+
+    var line_index: usize = 0;
+    var it = std.mem.tokenizeScalar(u8, parents_raw, '\n');
+    while (it.next()) |line_raw| : (line_index += 1) {
+        const line = std.mem.trim(u8, line_raw, " \t\r\n");
+        if (line.len == 0) continue;
+
+        var tokens = std.mem.tokenizeScalar(u8, line, ' ');
+        const hash = tokens.next() orelse continue;
+        if (node_indexes.get(hash) != null) continue;
+
+        const input_index = event_indexes.get(hash);
+        try nodes.append(allocator, .{
+            .hash = hash,
+            .input_index = input_index,
+            .priority = eventSortPriority(hash, auth_priorities),
+            .topo_index = line_index,
+        });
+        const node_index = nodes.items.len - 1;
+        try node_indexes.put(hash, node_index);
+    }
+
+    it = std.mem.tokenizeScalar(u8, parents_raw, '\n');
+    while (it.next()) |line_raw| {
+        const line = std.mem.trim(u8, line_raw, " \t\r\n");
+        if (line.len == 0) continue;
+
+        var tokens = std.mem.tokenizeScalar(u8, line, ' ');
+        const hash = tokens.next() orelse continue;
+        const node_index = node_indexes.get(hash) orelse continue;
+        while (tokens.next()) |parent_hash| {
+            const parent_index = node_indexes.get(parent_hash) orelse continue;
+            try nodes.items[parent_index].children.append(allocator, node_index);
+            nodes.items[node_index].indegree += 1;
+        }
     }
 
     const ordered = try allocator.alloc([]u8, event_hashes.items.len);
     defer allocator.free(ordered);
-    const used = try allocator.alloc(bool, event_hashes.items.len);
-    defer allocator.free(used);
-    @memset(used, false);
+    const emitted = try allocator.alloc(bool, event_hashes.items.len);
+    defer allocator.free(emitted);
+    @memset(emitted, false);
+
+    var ready = std.PriorityQueue(usize, ProjectionOrderQueueContext, compareProjectionOrderNodes).init(allocator, .{ .nodes = nodes.items });
+    defer ready.deinit();
+    for (nodes.items, 0..) |node, index| {
+        if (node.indegree == 0) try ready.add(index);
+    }
 
     var count: usize = 0;
-    var it = std.mem.tokenizeScalar(u8, ordered_raw, '\n');
-    while (it.next()) |line_raw| {
-        const line = std.mem.trim(u8, line_raw, " \t\r\n");
-        const index = indexes.get(line) orelse continue;
-        if (used[index]) continue;
-        ordered[count] = event_hashes.items[index];
-        used[index] = true;
-        count += 1;
+    while (ready.removeOrNull()) |node_index| {
+        const node = nodes.items[node_index];
+        if (node.input_index) |input_index| {
+            if (!emitted[input_index]) {
+                ordered[count] = event_hashes.items[input_index];
+                emitted[input_index] = true;
+                count += 1;
+            }
+        }
+
+        for (node.children.items) |child_index| {
+            nodes.items[child_index].indegree -= 1;
+            if (nodes.items[child_index].indegree == 0) try ready.add(child_index);
+        }
     }
+
     for (event_hashes.items, 0..) |event_hash, index| {
-        if (used[index]) continue;
+        if (emitted[index]) continue;
         ordered[count] = event_hash;
         count += 1;
     }
     @memcpy(event_hashes.items, ordered);
-    try orderConcurrentEventHashes(allocator, event_hashes.items, auth_priorities);
 }
 
-fn orderConcurrentEventHashes(allocator: Allocator, event_hashes: [][]u8, auth_priorities: ?*const std.StringHashMap(u8)) !void {
-    if (event_hashes.len < 2) return;
+fn deinitProjectionOrderNodes(allocator: Allocator, nodes: *std.ArrayList(ProjectionOrderNode)) void {
+    for (nodes.items) |*node| node.children.deinit(allocator);
+    nodes.deinit(allocator);
+}
 
-    var index: usize = 1;
-    while (index < event_hashes.len) : (index += 1) {
-        var swap_index = index;
-        while (swap_index > 0 and try eventShouldSortBefore(allocator, event_hashes[swap_index], event_hashes[swap_index - 1], auth_priorities)) {
-            std.mem.swap([]u8, &event_hashes[swap_index], &event_hashes[swap_index - 1]);
-            swap_index -= 1;
+fn compareProjectionOrderNodes(context: ProjectionOrderQueueContext, a_index: usize, b_index: usize) std.math.Order {
+    const a = context.nodes[a_index];
+    const b = context.nodes[b_index];
+    const a_is_event = a.input_index != null;
+    const b_is_event = b.input_index != null;
+
+    if (a_is_event and !b_is_event) return .gt;
+    if (!a_is_event and b_is_event) return .lt;
+
+    if (a_is_event and b_is_event) {
+        if (a.priority != b.priority) return std.math.order(a.priority, b.priority);
+        switch (std.mem.order(u8, a.hash, b.hash)) {
+            .gt => return .lt,
+            .lt => return .gt,
+            .eq => {},
         }
+        return std.math.order(a.input_index.?, b.input_index.?);
     }
+
+    return std.math.order(a.topo_index, b.topo_index);
 }
 
-fn eventShouldSortBefore(allocator: Allocator, candidate: []const u8, current: []const u8, auth_priorities: ?*const std.StringHashMap(u8)) !bool {
-    if (std.mem.eql(u8, candidate, current)) return false;
-    if (candidate.len != 0 and current.len != 0) {
-        if (try git.isAncestor(allocator, candidate, current)) return true;
-        if (try git.isAncestor(allocator, current, candidate)) return false;
-    }
+fn eventSortPriority(event_hash: []const u8, auth_priorities: ?*const std.StringHashMap(u8)) u8 {
     if (auth_priorities) |priorities| {
-        const candidate_priority = priorities.get(candidate) orelse 1;
-        const current_priority = priorities.get(current) orelse 1;
-        if (candidate_priority != current_priority) return candidate_priority < current_priority;
+        return priorities.get(event_hash) orelse 1;
     }
-    return std.mem.order(u8, candidate, current) == .gt;
+    return 1;
 }
 
 fn authEventSortPriority(event_type: []const u8) u8 {
@@ -157,6 +240,80 @@ fn authEventSortPriority(event_type: []const u8) u8 {
         return 0;
     }
     return 1;
+}
+
+test "projection ordering keeps ancestors before descendants while sorting concurrent hashes descending" {
+    const allocator = std.testing.allocator;
+    const ancestor = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const descendant = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const concurrent = "ffffffffffffffffffffffffffffffffffffffff";
+    const parents_raw =
+        ancestor ++ "\n" ++
+        descendant ++ " " ++ ancestor ++ "\n" ++
+        concurrent ++ "\n";
+
+    var hashes: std.ArrayList([]u8) = .empty;
+    defer freeStringArrayList(allocator, &hashes);
+    try appendTestEventHash(allocator, &hashes, descendant);
+    try appendTestEventHash(allocator, &hashes, ancestor);
+    try appendTestEventHash(allocator, &hashes, concurrent);
+
+    try orderEventHashesFromRevListParents(allocator, &hashes, parents_raw, null);
+
+    try std.testing.expectEqualStrings(concurrent, hashes.items[0]);
+    try std.testing.expectEqualStrings(ancestor, hashes.items[1]);
+    try std.testing.expectEqualStrings(descendant, hashes.items[2]);
+}
+
+test "projection ordering prioritizes concurrent auth revocations" {
+    const allocator = std.testing.allocator;
+    const add = "ffffffffffffffffffffffffffffffffffffffff";
+    const revoke = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const parents_raw =
+        add ++ "\n" ++
+        revoke ++ "\n";
+
+    var hashes: std.ArrayList([]u8) = .empty;
+    defer freeStringArrayList(allocator, &hashes);
+    try appendTestEventHash(allocator, &hashes, add);
+    try appendTestEventHash(allocator, &hashes, revoke);
+
+    var auth_priorities = std.StringHashMap(u8).init(allocator);
+    defer auth_priorities.deinit();
+    try auth_priorities.put(hashes.items[0], 1);
+    try auth_priorities.put(hashes.items[1], 0);
+
+    try orderEventHashesFromRevListParents(allocator, &hashes, parents_raw, &auth_priorities);
+
+    try std.testing.expectEqualStrings(revoke, hashes.items[0]);
+    try std.testing.expectEqualStrings(add, hashes.items[1]);
+}
+
+test "projection ordering exposes selected descendants through unselected commits before tie breaking" {
+    const allocator = std.testing.allocator;
+    const hidden_parent = "cccccccccccccccccccccccccccccccccccccccc";
+    const low_event = "1111111111111111111111111111111111111111";
+    const high_event = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    const parents_raw =
+        hidden_parent ++ "\n" ++
+        low_event ++ "\n" ++
+        high_event ++ " " ++ hidden_parent ++ "\n";
+
+    var hashes: std.ArrayList([]u8) = .empty;
+    defer freeStringArrayList(allocator, &hashes);
+    try appendTestEventHash(allocator, &hashes, low_event);
+    try appendTestEventHash(allocator, &hashes, high_event);
+
+    try orderEventHashesFromRevListParents(allocator, &hashes, parents_raw, null);
+
+    try std.testing.expectEqualStrings(high_event, hashes.items[0]);
+    try std.testing.expectEqualStrings(low_event, hashes.items[1]);
+}
+
+fn appendTestEventHash(allocator: Allocator, hashes: *std.ArrayList([]u8), hash: []const u8) !void {
+    const owned = try allocator.dupe(u8, hash);
+    errdefer allocator.free(owned);
+    try hashes.append(allocator, owned);
 }
 
 fn eventBodyByHash(allocator: Allocator, db: *SqliteDb, event_hash: []const u8) ![]u8 {
@@ -1093,15 +1250,18 @@ fn sourceIdentityMetadataAuthorizationRejection(
     payload: std.json.ObjectMap,
 ) !?[]const u8 {
     if (!payloadHasSourceIdentityMetadata(payload)) return null;
-    const capability = sourceIdentityImportCapability(envelope.event_type, root, payload) orelse return "unauthorized_source_identity";
-    return try delegatedImportCapabilityAuthorizationRejection(
-        allocator,
-        db,
-        envelope,
-        event_hash,
-        capability,
-        "unauthorized_source_identity",
-    );
+    if (sourceIdentityImportCapability(envelope.event_type, root, payload)) |capability| {
+        return try delegatedImportCapabilityAuthorizationRejection(
+            allocator,
+            db,
+            envelope,
+            event_hash,
+            capability,
+            "unauthorized_source_identity",
+        );
+    }
+    if (payloadHasNonEmptyString(payload, "source_identity")) return "unauthorized_source_identity";
+    return try delegatedAnyImportAuthorizationRejection(allocator, db, envelope, event_hash, "unauthorized_source_identity");
 }
 
 fn delegatedImportCapabilityAuthorizationRejection(
@@ -1120,6 +1280,30 @@ fn delegatedImportCapabilityAuthorizationRejection(
         envelope.actor_principal,
         envelope.actor_device,
         capability,
+        hash,
+    )) orelse return unauthorized_reason;
+    defer allocator.free(delegated_fingerprint);
+
+    const signer_fingerprint = (try git.verifiedCommitSigningKeyFingerprint(allocator, hash)) orelse return "signing_key_mismatch";
+    defer allocator.free(signer_fingerprint);
+    if (!std.mem.eql(u8, delegated_fingerprint, signer_fingerprint)) return "signing_key_mismatch";
+    return null;
+}
+
+fn delegatedAnyImportAuthorizationRejection(
+    allocator: Allocator,
+    db: *SqliteDb,
+    envelope: ValidatedEnvelope,
+    event_hash: ?[]const u8,
+    unauthorized_reason: []const u8,
+) !?[]const u8 {
+    const hash = event_hash orelse return unauthorized_reason;
+    if (!importDelegatesEvent(envelope.event_type)) return unauthorized_reason;
+    const delegated_fingerprint = (try importDelegationFingerprintAtAuthFrontier(
+        allocator,
+        db,
+        envelope.actor_principal,
+        envelope.actor_device,
         hash,
     )) orelse return unauthorized_reason;
     defer allocator.free(delegated_fingerprint);
@@ -1155,7 +1339,9 @@ fn capabilityForSourceIdentity(source_identity: []const u8) ?[]const u8 {
     if (split == 0 or split + 1 >= source_identity.len) return null;
     const provider = source_identity[0..split];
     if (std.mem.eql(u8, provider, "github")) return "github.import";
+    if (std.mem.eql(u8, provider, "github-node")) return "github.import";
     if (std.mem.eql(u8, provider, "gitlab")) return "gitlab.import";
+    if (std.mem.eql(u8, provider, "gitlab-node")) return "gitlab.import";
     return null;
 }
 

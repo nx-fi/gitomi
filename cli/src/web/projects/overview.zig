@@ -9,6 +9,7 @@ const util = @import("../../util.zig");
 const project_issue_render = @import("issue_render.zig");
 const project_views = @import("views.zig");
 const shared = @import("../shared.zig");
+const zwf = @import("../../zwf.zig");
 
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
@@ -45,6 +46,7 @@ const ProjectSummary = struct {
     end_at: []u8,
     created_at: []u8,
     author_principal: []u8,
+    csrf_token: []const u8,
 
     fn deinit(self: *ProjectSummary, allocator: Allocator) void {
         allocator.free(self.id);
@@ -96,9 +98,10 @@ pub fn appendProjectOverview(
     repo: Repo,
     db: *SqliteDb,
     project: []const u8,
+    csrf_token: []const u8,
 ) !void {
     _ = repo;
-    var summary = try loadProjectSummary(allocator, db, project);
+    var summary = try loadProjectSummary(allocator, db, project, csrf_token);
     defer summary.deinit(allocator);
     const metrics = try loadProjectMetrics(allocator, db, &summary);
     var update_note = try loadLatestProjectUpdateNote(allocator, db, &summary);
@@ -134,9 +137,10 @@ pub fn appendProjectActivityView(
     repo: Repo,
     db: *SqliteDb,
     project: []const u8,
+    csrf_token: []const u8,
 ) !void {
     _ = repo;
-    var summary = try loadProjectSummary(allocator, db, project);
+    var summary = try loadProjectSummary(allocator, db, project, csrf_token);
     defer summary.deinit(allocator);
     const metrics = try loadProjectMetrics(allocator, db, &summary);
 
@@ -454,7 +458,7 @@ fn isProjectDateValue(value: []const u8) bool {
     return true;
 }
 
-fn loadProjectSummary(allocator: Allocator, db: *SqliteDb, project: []const u8) !ProjectSummary {
+fn loadProjectSummary(allocator: Allocator, db: *SqliteDb, project: []const u8, csrf_token: []const u8) !ProjectSummary {
     var stmt = try db.prepare(
         \\SELECT id, name, description, state, status, status_occurred_at, priority, start_at, end_at, created_at, author_principal
         \\FROM projects
@@ -477,6 +481,7 @@ fn loadProjectSummary(allocator: Allocator, db: *SqliteDb, project: []const u8) 
             .end_at = try stmt.columnTextDup(allocator, 8),
             .created_at = try stmt.columnTextDup(allocator, 9),
             .author_principal = try stmt.columnTextDup(allocator, 10),
+            .csrf_token = csrf_token,
         };
     }
 
@@ -492,6 +497,7 @@ fn loadProjectSummary(allocator: Allocator, db: *SqliteDb, project: []const u8) 
         .end_at = try allocator.dupe(u8, ""),
         .created_at = try allocator.dupe(u8, ""),
         .author_principal = try allocator.dupe(u8, ""),
+        .csrf_token = csrf_token,
     };
 }
 
@@ -1845,8 +1851,10 @@ fn appendProjectSingleInputForm(
 
 fn appendProjectHiddenFields(buf: *std.ArrayList(u8), allocator: Allocator, summary: *const ProjectSummary) !void {
     try appendTemplate(buf, allocator,
-        \\<input type="hidden" name="project_id" value="{project_id}"><input type="hidden" name="project" value="{project}">
+        \\<input type="hidden" name="{csrf_field}" value="{csrf_token}"><input type="hidden" name="project_id" value="{project_id}"><input type="hidden" name="project" value="{project}">
     , .{
+        .csrf_field = zwf.csrf.field_name,
+        .csrf_token = summary.csrf_token,
         .project_id = summary.id,
         .project = summary.name,
     });
@@ -2294,6 +2302,7 @@ test "project overview header renders plain project name" {
         .end_at = try std.testing.allocator.dupe(u8, ""),
         .created_at = try std.testing.allocator.dupe(u8, ""),
         .author_principal = try std.testing.allocator.dupe(u8, ""),
+        .csrf_token = "token-123",
     };
     defer summary.deinit(std.testing.allocator);
     const metrics = ProjectMetrics{
@@ -2328,6 +2337,7 @@ test "project latest update renders update health instead of lifecycle status" {
         .end_at = try std.testing.allocator.dupe(u8, ""),
         .created_at = try std.testing.allocator.dupe(u8, ""),
         .author_principal = try std.testing.allocator.dupe(u8, ""),
+        .csrf_token = "token-123",
     };
     defer summary.deinit(std.testing.allocator);
     var note = ProjectUpdateNote{
@@ -2342,6 +2352,7 @@ test "project latest update renders update health instead of lifecycle status" {
 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "At risk") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "name=\"update_health\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "name=\"_csrf\" value=\"token-123\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "Planned") == null);
 }
 
@@ -2379,6 +2390,7 @@ test "project date row renders two individual date pickers" {
         .end_at = try std.testing.allocator.dupe(u8, "2026-05-28"),
         .created_at = try std.testing.allocator.dupe(u8, ""),
         .author_principal = try std.testing.allocator.dupe(u8, ""),
+        .csrf_token = "token-123",
     };
     defer summary.deinit(std.testing.allocator);
 

@@ -666,8 +666,7 @@ fn appendProjectTableRows(
         const group_count = @as(usize, @intCast(rows.columnInt64(14)));
 
         if (previous_group == null or !std.mem.eql(u8, previous_group.?, group_label)) {
-            if (previous_group) |value| allocator.free(value);
-            previous_group = try allocator.dupe(u8, group_label);
+            try replacePreviousProjectTableGroup(allocator, &previous_group, group_label);
             try appendProjectTableGroupHeader(buf, allocator, context, options.group, group_label, group_count);
         }
 
@@ -680,6 +679,12 @@ fn appendProjectTableRows(
             \\<tr class="project-table-empty-row"><td colspan="{colspan}">No issues</td></tr>
         , .{ .colspan = context.tableColspan() });
     }
+}
+
+fn replacePreviousProjectTableGroup(allocator: Allocator, previous_group: *?[]u8, group_label: []const u8) !void {
+    const next_group = try allocator.dupe(u8, group_label);
+    if (previous_group.*) |value| allocator.free(value);
+    previous_group.* = next_group;
 }
 
 fn appendProjectTableGroupHeader(
@@ -960,4 +965,16 @@ fn appendProjectTableIssueRow(
     });
     try appendRelativeTime(buf, allocator, opened_at);
     try buf.appendSlice(allocator, "</td></tr>");
+}
+
+test "project table group replacement keeps previous group on OOM" {
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    const allocator = failing_allocator.allocator();
+
+    var previous_group: ?[]u8 = try allocator.dupe(u8, "Todo");
+    defer if (previous_group) |value| allocator.free(value);
+
+    try std.testing.expectError(error.OutOfMemory, replacePreviousProjectTableGroup(allocator, &previous_group, "Done"));
+    try std.testing.expect(previous_group != null);
+    try std.testing.expectEqualStrings("Todo", previous_group.?);
 }
