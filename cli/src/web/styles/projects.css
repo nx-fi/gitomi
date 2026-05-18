@@ -771,6 +771,97 @@
 .project-overview-section h2 {
   margin: 0;
 }
+.project-markdown-section {
+  gap: 10px;
+}
+.project-markdown-preview {
+  min-width: 0;
+}
+.project-markdown-edit {
+  justify-self: start;
+}
+.project-markdown-edit > summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 10px;
+  color: var(--text);
+  background: var(--button-secondary-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  list-style: none;
+}
+.project-markdown-edit > summary::-webkit-details-marker {
+  display: none;
+}
+.project-markdown-edit > summary:hover {
+  background: var(--button-secondary-hover-bg);
+}
+.project-markdown-form {
+  display: none;
+  gap: 12px;
+  width: min(760px, 100%);
+  margin-top: 10px;
+}
+.project-markdown-edit[open] .project-markdown-form {
+  display: grid;
+}
+.project-markdown-section:has(.project-markdown-edit[open]) .project-markdown-preview {
+  display: none;
+}
+.project-markdown-actions {
+  display: flex;
+  justify-content: flex-start;
+}
+.project-markdown-actions button,
+.project-milestone-check-actions button {
+  min-height: 34px;
+  padding: 0 12px;
+  color: var(--text-on-accent);
+  background: var(--brand);
+  border: 1px solid var(--brand);
+  border-radius: var(--radius-md);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.project-markdown-empty {
+  margin: 0;
+  color: var(--muted);
+}
+.project-update-status-field {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+.project-update-status-field select {
+  width: min(260px, 100%);
+  min-height: 34px;
+  padding: 0 10px;
+  color: var(--text);
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font: inherit;
+}
+.project-update-status-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.project-update-status-line > span:not(.project-status-chip) {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
 .project-overview-section-title,
 .project-overview-side-panel-head {
   display: flex;
@@ -811,6 +902,67 @@
 .project-overview-add .project-add-icon {
   width: 14px;
   height: 14px;
+}
+.project-milestone-picker {
+  position: relative;
+}
+.project-milestone-picker > summary {
+  list-style: none;
+}
+.project-milestone-picker > summary::-webkit-details-marker {
+  display: none;
+}
+.project-milestone-popover {
+  width: min(380px, calc(100vw - 24px));
+}
+.project-milestone-picker-row {
+  grid-template-columns: 22px 18px minmax(0, 1fr) auto;
+}
+.project-milestone-check-form {
+  display: grid;
+  margin: 0;
+}
+.project-milestone-check-row {
+  display: grid;
+  grid-template-columns: 18px 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  min-height: 42px;
+  padding: 7px 14px;
+  color: var(--text);
+  cursor: pointer;
+}
+.project-milestone-check-row:hover,
+.project-milestone-check-row:focus-within {
+  background: var(--panel-strong);
+}
+.project-milestone-check-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--brand);
+  box-shadow: none;
+}
+.project-milestone-check-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.project-milestone-check-text strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-milestone-check-text span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.project-milestone-check-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--border);
 }
 .project-overview-resource-links {
   display: flex;
@@ -920,7 +1072,8 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
 }
-.project-overview-side-panel:has(.project-property-menu) {
+.project-overview-side-panel:has(.project-property-menu),
+.project-overview-side-panel:has(.project-milestone-picker) {
   overflow: visible;
 }
 .project-overview-side-panel-head {

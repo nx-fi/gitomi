@@ -150,6 +150,9 @@
   top: 50%;
   left: 10px;
 }
+.milestone-add-issue-controls .issue-sidebar-menu-input input {
+  background: var(--panel);
+}
 .milestone-add-issue-state-filter {
   min-width: 0;
   height: 34px;
