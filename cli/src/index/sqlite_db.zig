@@ -4,6 +4,8 @@ pub const sqlite = @cImport({
     @cInclude("sqlite3.h");
 });
 
+extern fn sqlite_bind_text_transient(stmt: ?*sqlite.sqlite3_stmt, index: c_int, value: [*c]const u8, len: c_int) c_int;
+
 const errors = @import("../errors.zig");
 const io = @import("../io.zig");
 
@@ -225,7 +227,7 @@ pub const SqliteStmt = struct {
     pub fn bindText(self: *SqliteStmt, index: c_int, value: []const u8) !void {
         if (value.len > std.math.maxInt(c_int)) return error.ValueTooLarge;
         const len: c_int = @intCast(value.len);
-        const rc = sqlite.sqlite3_bind_text(self.stmt, index, value.ptr, len, sqlite.SQLITE_TRANSIENT);
+        const rc = sqlite_bind_text_transient(self.stmt, index, value.ptr, len);
         if (rc != sqlite.SQLITE_OK) return sqliteFail(self.db, self.quiet, "bind text");
     }
 
