@@ -11,10 +11,14 @@
   align-items: center;
   justify-content: space-between;
   gap: 14px;
+  padding: 16px 18px;
+  background: var(--titlebar-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
 }
 .labels-page-head h1 {
   margin: 0;
-  font-size: 28px;
+  font-size: 22px;
   line-height: 1.2;
 }
 .labels-new-button {

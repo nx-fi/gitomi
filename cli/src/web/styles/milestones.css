@@ -22,11 +22,6 @@
   margin: 6px 0 0;
   max-width: 520px;
 }
-.milestones-toolbar h1 {
-  margin: 0;
-  font-size: 28px;
-  line-height: 1.2;
-}
 .milestones-summary-panel:has(.issues-filter-menu[open]),
 .milestones-summary-panel:has(.milestone-action-menu[open]),
 .milestones-panel:has(.milestone-action-menu[open]) {

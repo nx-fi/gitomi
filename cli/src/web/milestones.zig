@@ -119,9 +119,31 @@ pub fn renderMilestonesPage(allocator: Allocator, repo: Repo, target: []const u8
     defer db.deinit();
     const counts = try loadMilestoneCounts(allocator, &db);
     const filters = try milestoneFiltersFromTarget(allocator, target, counts);
+    try appendMilestoneProjectLayoutStart(&buf, allocator);
     try appendMilestonesSummaryPage(&buf, allocator, &db, filters, counts, csrf_token);
+    try appendMilestoneProjectLayoutEnd(&buf, allocator);
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
+}
+
+fn appendMilestoneProjectLayoutStart(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try buf.appendSlice(allocator,
+        \\<div class="project-page-layout">
+        \\  <aside class="project-page-sidebar">
+        \\    <nav class="project-page-tabs" aria-label="Projects sections">
+        \\      <a class="project-page-tab" href="/projects"><span class="button-icon icon-projects" aria-hidden="true"></span><span>Projects</span></a>
+        \\      <a class="project-page-tab active" href="/milestones"><span class="button-icon icon-milestones" aria-hidden="true"></span><span>Milestones</span></a>
+        \\    </nav>
+        \\  </aside>
+        \\  <div class="project-page-content">
+    );
+}
+
+fn appendMilestoneProjectLayoutEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try buf.appendSlice(allocator,
+        \\  </div>
+        \\</div>
+    );
 }
 
 fn milestoneFiltersFromTarget(allocator: Allocator, target: []const u8, counts: MilestoneCounts) !MilestoneFilters {
@@ -193,16 +215,13 @@ fn loadMilestoneCounts(allocator: Allocator, db: *SqliteDb) !MilestoneCounts {
 
 fn appendMilestonesSummaryPage(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, filters: MilestoneFilters, counts: MilestoneCounts, csrf_token: []const u8) !void {
     try buf.appendSlice(allocator,
-        \\<div class="issues-toolbar milestones-toolbar">
-        \\  <div>
-        \\    <h1>Milestones</h1>
-        \\  </div>
-        \\  <div class="issues-toolbar-actions">
-        \\    <a class="button primary" href="/new-milestone">New milestone</a>
-        \\  </div>
-        \\</div>
         \\<section class="panel issues-panel milestones-summary-panel">
     );
+    try appendSectionHead(buf, allocator, "Projects", "Milestones", .{
+        .label = "New milestone",
+        .href = literalHref("/new-milestone"),
+        .kind = "primary",
+    });
     try appendMilestonesListHeader(buf, allocator, filters, counts);
 
     var stmt = try prepareMilestoneSummaryStmt(allocator, db, filters);

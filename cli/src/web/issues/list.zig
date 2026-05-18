@@ -8,12 +8,15 @@ const work_items = @import("../../work_items.zig");
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
 const SqliteDb = index.SqliteDb;
+const Button = shared.Button;
 const appendEmptyState = shared.appendEmptyState;
 const appendRelativeTime = shared.appendRelativeTime;
+const appendSectionHead = shared.appendSectionHead;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
 const appendTemplate = shared.appendTemplate;
 const issueHref = shared.issueHref;
+const literalHref = shared.literalHref;
 const sqlite = index.sqlite;
 
 const IssueStateFilter = work_items.IssueStateFilter;
@@ -63,8 +66,14 @@ pub fn renderIssuesPage(allocator: Allocator, repo: Repo, target: []const u8) ![
     filters.offset = pagination.offset();
 
     try appendShellStart(&buf, allocator, repo, "Issues", "issues");
+    try shared.appendWorkItemsLayoutStart(&buf, allocator, "issues");
+    try buf.appendSlice(allocator, "<section class=\"panel issues-panel work-items-panel\">");
+    try appendSectionHead(&buf, allocator, "Issues", "Issues", Button{
+        .label = "New issue",
+        .href = literalHref("/new-issue"),
+        .kind = "primary",
+    });
     try appendIssuesToolbar(&buf, allocator, filters);
-    try buf.appendSlice(allocator, "<section class=\"panel issues-panel\">");
     try appendIssuesListHeader(&buf, allocator, &db, filters, counts);
 
     var stmt = try work_items.prepareIssueListStmt(allocator, &db, filters);
@@ -104,6 +113,7 @@ pub fn renderIssuesPage(allocator: Allocator, repo: Repo, target: []const u8) ![
     }
 
     try buf.appendSlice(allocator, "</section>");
+    try shared.appendWorkItemsLayoutEnd(&buf, allocator);
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
 }
@@ -182,7 +192,7 @@ fn appendIssuesToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filters: I
     const query = try work_items.issueFilterQueryOwned(allocator, filters);
     defer allocator.free(query);
     try appendTemplate(buf, allocator,
-        \\<div class="issues-toolbar">
+        \\<div class="issues-toolbar work-items-toolbar">
         \\  <form class="issues-search" action="/issues" method="get">
         \\    <span class="issues-search-icon" aria-hidden="true"></span>
         \\    <input type="search" name="q" value="{query}" aria-label="Search issues">
@@ -191,11 +201,6 @@ fn appendIssuesToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filters: I
     });
     try buf.appendSlice(allocator,
         \\  </form>
-        \\  <div class="issues-toolbar-actions">
-        \\    <a class="button secondary issue-tool-button" href="/settings/labels"><span class="button-icon icon-labels" aria-hidden="true"></span><span>Labels</span></a>
-        \\    <a class="button secondary issue-tool-button" href="/milestones"><span class="button-icon icon-milestones" aria-hidden="true"></span><span>Milestones</span></a>
-        \\    <a class="button primary" href="/new-issue">New issue</a>
-        \\  </div>
         \\</div>
     );
 }
@@ -814,10 +819,11 @@ test "issue list SQL includes selected filters" {
     try std.testing.expect(std.mem.indexOf(u8, sql, "ORDER BY i.state_occurred_at DESC") != null);
 }
 
-test "issues toolbar links labels to settings labels" {
+test "issues toolbar renders search form" {
     var filters = IssueFilters{
         .allocator = std.testing.allocator,
         .state = .open,
+        .q = try std.testing.allocator.dupe(u8, "label:bug crash"),
     };
     defer filters.deinit();
 
@@ -825,8 +831,9 @@ test "issues toolbar links labels to settings labels" {
     defer buf.deinit(std.testing.allocator);
     try appendIssuesToolbar(&buf, std.testing.allocator, filters);
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/settings/labels\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<span>Labels</span></a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "class=\"issues-toolbar work-items-toolbar\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "action=\"/issues\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "label:bug crash") != null);
 }
 
 test "issue filter hrefs preserve and clear parameters" {

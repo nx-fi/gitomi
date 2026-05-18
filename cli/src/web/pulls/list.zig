@@ -9,11 +9,14 @@ const shared = @import("../shared.zig");
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
 const SqliteDb = index.SqliteDb;
+const Button = shared.Button;
 const appendEmptyState = shared.appendEmptyState;
 const appendRelativeTime = shared.appendRelativeTime;
+const appendSectionHead = shared.appendSectionHead;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
 const appendTemplate = shared.appendTemplate;
+const literalHref = shared.literalHref;
 const pullHref = shared.pullHref;
 const sqlite = index.sqlite;
 
@@ -62,8 +65,14 @@ pub fn renderPullsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]
     filters.offset = pagination.offset();
 
     try appendShellStart(&buf, allocator, repo, "Pull Requests", "pulls");
+    try shared.appendWorkItemsLayoutStart(&buf, allocator, "pulls");
+    try buf.appendSlice(allocator, "<section class=\"panel pulls-panel work-items-panel\">");
+    try appendSectionHead(&buf, allocator, "Pull Requests", "Pull Requests", Button{
+        .label = "New pull request",
+        .href = literalHref("/new-pull"),
+        .kind = "primary",
+    });
     try appendPullsToolbar(&buf, allocator, filters);
-    try buf.appendSlice(allocator, "<section class=\"panel pulls-panel\">");
     try appendPullsListHeader(&buf, allocator, &db, filters, counts);
 
     var stmt = try work_items.preparePullListStmt(allocator, &db, filters);
@@ -104,6 +113,7 @@ pub fn renderPullsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]
     }
 
     try buf.appendSlice(allocator, "</section>");
+    try shared.appendWorkItemsLayoutEnd(&buf, allocator);
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
 }
@@ -177,16 +187,11 @@ fn appendPullsToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filters: Pu
     const query = try pullSearchInputValue(allocator, filters);
     defer allocator.free(query);
     try appendTemplate(buf, allocator,
-        \\<div class="pulls-toolbar issues-toolbar">
+        \\<div class="pulls-toolbar issues-toolbar work-items-toolbar">
         \\  <form class="issues-search" action="/pulls" method="get">
         \\    <span class="issues-search-icon" aria-hidden="true"></span>
         \\    <input type="search" name="q" value="{query}" aria-label="Search pull requests">
         \\  </form>
-        \\  <div class="issues-toolbar-actions">
-        \\    <a class="button secondary issue-tool-button" href="/settings/labels"><span class="button-icon icon-labels" aria-hidden="true"></span><span>Labels</span></a>
-        \\    <a class="button secondary issue-tool-button" href="/milestones"><span class="button-icon icon-milestones" aria-hidden="true"></span><span>Milestones</span></a>
-        \\    <a class="button primary" href="/new-pull">New pull request</a>
-        \\  </div>
         \\</div>
     , .{
         .query = query,
@@ -671,9 +676,10 @@ fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const
     return null;
 }
 
-test "pulls toolbar links management pages" {
+test "pulls toolbar renders search form" {
     var filters = PullFilters{
         .state = .open,
+        .q = try std.testing.allocator.dupe(u8, "reviewer:alice"),
     };
     defer pullFiltersDeinit(std.testing.allocator, &filters);
 
@@ -681,11 +687,9 @@ test "pulls toolbar links management pages" {
     defer buf.deinit(std.testing.allocator);
     try appendPullsToolbar(&buf, std.testing.allocator, filters);
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/settings/labels\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<span>Labels</span></a>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/milestones\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<span>Milestones</span></a>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Reviewers") == null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "class=\"pulls-toolbar issues-toolbar work-items-toolbar\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "action=\"/pulls\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "reviewer:alice") != null);
 }
 
 test "pull state tabs use pull request icons" {

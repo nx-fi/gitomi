@@ -24,7 +24,7 @@ const loadConfig = repo_mod.loadConfig;
 const default_web_shortcut_leader = "Space";
 const default_web_shortcut_keys = "A S D F J K L E R U I O W Q P Z X C V B N M G H Y T";
 const default_web_shortcut_timeout_ms: u64 = 900;
-const asset_version = "20260518-submit-spinner";
+const asset_version = "20260518-unified-layout";
 
 const WebStats = struct {
     inbox_refs: usize = 0,
@@ -1367,7 +1367,7 @@ pub fn appendSettingsLayoutStart(buf: *std.ArrayList(u8), allocator: Allocator, 
     try buf.appendSlice(allocator,
         \\    </nav>
         \\  </aside>
-        \\  <div class="settings-page-content">
+        \\  <div class="project-page-content settings-page-content">
     );
 }
 
@@ -1379,6 +1379,49 @@ pub fn appendSettingsLayoutEnd(buf: *std.ArrayList(u8), allocator: Allocator) !v
 }
 
 fn appendSettingsTab(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    active: []const u8,
+    id: []const u8,
+    href: []const u8,
+    icon: []const u8,
+    label: []const u8,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<a class="{classes}" href="{href}"><span class="button-icon {icon}" aria-hidden="true"></span><span>{label}</span></a>
+    , .{
+        .classes = classes("project-page-tab", &.{class("active", std.mem.eql(u8, active, id))}),
+        .href = href,
+        .icon = icon,
+        .label = label,
+    });
+}
+
+pub fn appendWorkItemsLayoutStart(buf: *std.ArrayList(u8), allocator: Allocator, active: []const u8) !void {
+    try buf.appendSlice(allocator,
+        \\<div class="project-page-layout work-items-layout">
+        \\  <aside class="project-page-sidebar work-items-sidebar">
+        \\    <nav class="project-page-tabs work-items-tabs" aria-label="Work item sections">
+    );
+    try appendWorkItemsTab(buf, allocator, active, "issues", "/issues", "icon-issues", "Issues");
+    try appendWorkItemsTab(buf, allocator, active, "pulls", "/pulls", "icon-pull-request", "Pull Requests");
+    try appendWorkItemsTab(buf, allocator, active, "milestones", "/milestones", "icon-milestones", "Milestones");
+    try appendWorkItemsTab(buf, allocator, active, "labels", "/settings/labels", "icon-labels", "Labels");
+    try buf.appendSlice(allocator,
+        \\    </nav>
+        \\  </aside>
+        \\  <div class="project-page-content work-items-content">
+    );
+}
+
+pub fn appendWorkItemsLayoutEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try buf.appendSlice(allocator,
+        \\  </div>
+        \\</div>
+    );
+}
+
+fn appendWorkItemsTab(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
     active: []const u8,
@@ -2351,6 +2394,20 @@ test "web issue linked text autolinks legacy and hash references" {
     try appendIssueLinkedText(&buf, std.testing.allocator, "Refs #42, #A1B2C3D, not #abc, #abcdef0g, or #018f0000-uuid.");
 
     try std.testing.expectEqualStrings("Refs <a href=\"/issues/42\">#42</a>, <a href=\"/issues/A1B2C3D\">#A1B2C3D</a>, not #abc, #abcdef0g, or #018f0000-uuid.", buf.items);
+}
+
+test "web work item layout links shared management pages" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendWorkItemsLayoutStart(&buf, std.testing.allocator, "pulls");
+    try appendWorkItemsLayoutEnd(&buf, std.testing.allocator);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/pulls\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/milestones\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/settings/labels\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "project-page-tab active") != null);
 }
 
 test "web internal reference linked text prefers work items before commits" {

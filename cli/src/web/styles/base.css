@@ -791,6 +791,7 @@ main.page-projects:has(.project-overview-page) {
   line-height: 1.2;
 }
 .hero h1 { font-size: 28px; }
+.section-head h1 { font-size: 22px; }
 .panel h2 { font-size: 18px; }
 .panel > h2 {
   padding: 16px 18px;
