@@ -382,7 +382,10 @@ fn writeExportAliasEvents(
                 idem,
                 occurred_at,
                 writer.stagedEventParents(),
-                .{ .github_issue_number = number_u64 },
+                .{
+                    .github_issue_number = number_u64,
+                    .github_issue_id = positiveI64ToU64(mapping.api_id),
+                },
             ),
             .pull => try event_mod.buildPullLegacyAliasJson(
                 allocator,
@@ -393,7 +396,10 @@ fn writeExportAliasEvents(
                 idem,
                 occurred_at,
                 writer.stagedEventParents(),
-                .{ .github_pull_number = number_u64 },
+                .{
+                    .github_pull_number = number_u64,
+                    .github_pull_id = positiveI64ToU64(mapping.api_id),
+                },
             ),
         };
         defer allocator.free(body);
@@ -426,6 +432,11 @@ fn exportAliasExists(db: *index.SqliteDb, kind: []const u8, object_id: []const u
     try stmt.bindText(2, object_id);
     try stmt.bindInt64(3, number);
     return try stmt.step();
+}
+
+fn positiveI64ToU64(value: ?i64) ?u64 {
+    const actual = value orelse return null;
+    return if (actual > 0) @intCast(actual) else null;
 }
 
 fn exportAliasKindName(kind: exporter.ExportAliasKind) []const u8 {

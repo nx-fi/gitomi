@@ -580,7 +580,7 @@ case "$method $endpoint" in
     echo '[]'
     ;;
   'POST repos/acme/export-alias/issues')
-    echo '{"number":88}'
+    echo '{"number":88,"id":880088}'
     ;;
   *)
     echo "unexpected request: $method $endpoint" >&2
@@ -660,6 +660,8 @@ SH
   assert_line_count "$issues" 1
   assert_contains "$issues" '"id":"'"$(cat "$github_export_alias/local_issue_id")"'"'
   assert_contains "$issues" '"legacy_github_issue_number":88'
+  events="$(gt events list --json)"
+  assert_contains "$events" '"metadata":{"github_issue_number":88,"github_issue_id":880088}'
   import_opened="$(gt events list --json | grep 'issue.opened' | grep 'import-bot' || true)"
   assert_equal "$import_opened" "" "expected GitHub import to reuse the exported local issue instead of opening a duplicate"
   second_sync="$(PATH="$fakebin:$PATH" gt github sync --repo acme/export-alias --use-gh --rest --no-comments --no-projects --remote origin)"

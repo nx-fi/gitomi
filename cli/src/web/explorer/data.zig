@@ -16,6 +16,7 @@ pub const unstaged_ref = "working tree";
 pub const worktree_ref_prefix = "worktree:";
 const max_blame_display_bytes = 16 * 1024 * 1024;
 const max_blame_display_epoch_seconds: i64 = 253_402_300_799;
+const max_git_path_output = 128 * 1024 * 1024;
 const min_tree_entry_commit_history = 32;
 const max_tree_entry_commit_history = 512;
 const tree_entry_commit_history_per_entry = 4;
@@ -54,6 +55,7 @@ pub fn loadRootGitStatus(allocator: Allocator, repo: Repo) !RootGitStatus {
     try loadRootDiffStats(allocator, repo, &status);
     status.worktree_count = loadWorktreeCount(allocator, repo) catch 1;
     if (status.worktree_count == 0) status.worktree_count = 1;
+    status.tracked_file_size_bytes = loadTrackedFileSizeBytes(allocator, repo) catch null;
     status.disk_size_bytes = loadDiskSizeBytes(allocator, repo) catch null;
     status.operation_state = loadRepositoryOperationState(allocator, repo) catch .clean;
 
@@ -248,6 +250,30 @@ pub fn loadDiskSizeBytes(allocator: Allocator, repo: Repo) !?usize {
     const max = std.math.maxInt(usize);
     if (kibibytes > max / 1024) return max;
     return kibibytes * 1024;
+}
+
+pub fn loadTrackedFileSizeBytes(allocator: Allocator, repo: Repo) !?usize {
+    const tracked = try gitMaybe(allocator, repo, &.{ "ls-files", "-z" }, max_git_path_output) orelse return null;
+    defer allocator.free(tracked);
+
+    var total: usize = 0;
+    var entries = std.mem.splitScalar(u8, tracked, 0);
+    while (entries.next()) |path| {
+        if (path.len == 0) continue;
+        const stat_opt = safeWorktreePathStat(allocator, repo.root, path) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => continue,
+        };
+        const stat = stat_opt orelse continue;
+        if (stat.kind != .file) continue;
+        const max = std.math.maxInt(usize);
+        if (stat.size > max - total) {
+            total = max;
+        } else {
+            total += stat.size;
+        }
+    }
+    return total;
 }
 
 pub fn loadRepositoryOperationState(allocator: Allocator, repo: Repo) !RepositoryOperationState {
@@ -1846,6 +1872,39 @@ test "web explorer handles extreme blame relative timestamps" {
     const future = try relativeTimeOwned(allocator, std.math.maxInt(i64), 0);
     defer allocator.free(future);
     try std.testing.expectEqualStrings("now", future);
+}
+
+test "web explorer sums tracked file sizes separately from untracked files" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makeDir("repo");
+    try tmp.dir.makeDir("repo/src");
+    try writeTestFile(tmp.dir, "repo/tracked.txt", "abcd");
+    try writeTestFile(tmp.dir, "repo/src/lib.zig", "xyz");
+    try writeTestFile(tmp.dir, "repo/untracked.log", "ignored");
+
+    const repo_root = try tmp.dir.realpathAlloc(allocator, "repo");
+    defer allocator.free(repo_root);
+
+    try expectGitOk(allocator, repo_root, &.{ "init", "-q" });
+    try expectGitOk(allocator, repo_root, &.{ "add", "tracked.txt", "src/lib.zig" });
+
+    var repo = Repo{
+        .allocator = allocator,
+        .root = try allocator.dupe(u8, repo_root),
+        .git_dir = try allocator.dupe(u8, ""),
+        .gitomi_dir = try allocator.dupe(u8, ""),
+        .config_path = try allocator.dupe(u8, ""),
+        .index_path = try allocator.dupe(u8, ""),
+        .cursors_path = try allocator.dupe(u8, ""),
+        .settings_path = try allocator.dupe(u8, ""),
+    };
+    defer repo.deinit();
+
+    try std.testing.expectEqual(@as(?usize, 7), try loadTrackedFileSizeBytes(allocator, repo));
 }
 
 test "web explorer bounds tree entry commit history window" {

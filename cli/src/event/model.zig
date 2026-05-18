@@ -13,13 +13,21 @@ pub const EventParents = struct {
 
 pub const LegacyInfo = struct {
     github_issue_number: ?u64 = null,
+    github_issue_id: ?u64 = null,
     github_pull_number: ?u64 = null,
+    github_pull_id: ?u64 = null,
+    github_project_id: ?u64 = null,
+    github_milestone_id: ?u64 = null,
     gitlab_issue_iid: ?u64 = null,
     gitlab_merge_request_iid: ?u64 = null,
 
     pub fn isEmpty(self: LegacyInfo) bool {
         return self.github_issue_number == null and
+            self.github_issue_id == null and
             self.github_pull_number == null and
+            self.github_pull_id == null and
+            self.github_project_id == null and
+            self.github_milestone_id == null and
             self.gitlab_issue_iid == null and
             self.gitlab_merge_request_iid == null;
     }

@@ -164,6 +164,7 @@ pub const RootGitStatus = struct {
     lines_added: u64 = 0,
     lines_removed: u64 = 0,
     worktree_count: usize = 0,
+    tracked_file_size_bytes: ?usize = null,
     disk_size_bytes: ?usize = null,
     operation_state: RepositoryOperationState = .clean,
 };

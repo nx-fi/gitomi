@@ -2037,11 +2037,18 @@ fn appendRootBranchSection(
 fn appendRootRepositoryStats(buf: *std.ArrayList(u8), allocator: Allocator, status: RootGitStatus) !void {
     try appendTemplate(buf, allocator,
         \\        <div><dt>Worktrees</dt><dd>{worktrees}</dd></div>
-        \\        <div><dt>Size</dt><dd>
     , .{
         .worktrees = shared.groupedUnsigned(@intCast(status.worktree_count)),
     });
-    if (status.disk_size_bytes) |bytes| {
+    try appendRepositorySizeRow(buf, allocator, "Tracked files", status.tracked_file_size_bytes);
+    try appendRepositorySizeRow(buf, allocator, "Directory", status.disk_size_bytes);
+}
+
+fn appendRepositorySizeRow(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, size: ?usize) !void {
+    try appendTemplate(buf, allocator,
+        \\        <div><dt>{label}</dt><dd>
+    , .{ .label = label });
+    if (size) |bytes| {
         try appendRepositoryDiskSize(buf, allocator, bytes);
     } else {
         try appendTemplate(buf, allocator, "Unknown", .{});
@@ -2050,6 +2057,7 @@ fn appendRootRepositoryStats(buf: *std.ArrayList(u8), allocator: Allocator, stat
 }
 
 fn appendRepositoryDiskSize(buf: *std.ArrayList(u8), allocator: Allocator, size: usize) !void {
+    const kib: u128 = 1024;
     const mib: u128 = 1024 * 1024;
     const gib: u128 = 1024 * mib;
     const bytes = @as(u128, size);
@@ -2060,9 +2068,18 @@ fn appendRepositoryDiskSize(buf: *std.ArrayList(u8), allocator: Allocator, size:
         return;
     }
 
-    var megabytes = bytes / mib;
-    if (megabytes == 0 and bytes != 0) megabytes = 1;
-    try appendFmt(buf, allocator, "{d} MB", .{megabytes});
+    if (bytes >= mib) {
+        try appendFmt(buf, allocator, "{d} MB", .{bytes / mib});
+        return;
+    }
+
+    if (bytes >= kib) {
+        const rounded = (bytes + kib - 1) / kib;
+        try appendFmt(buf, allocator, "{d} KB", .{rounded});
+        return;
+    }
+
+    try appendFmt(buf, allocator, "{d} B", .{bytes});
 }
 
 fn appendRootBranchSyncStatus(buf: *std.ArrayList(u8), allocator: Allocator, status: BranchSyncStatus) !void {
@@ -2501,12 +2518,34 @@ test "web explorer formats repository disk size as MB then GB" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
 
+    try appendRepositoryDiskSize(&buf, std.testing.allocator, 512);
+    try std.testing.expectEqualStrings("512 B", buf.items);
+
+    buf.clearRetainingCapacity();
+    try appendRepositoryDiskSize(&buf, std.testing.allocator, 1536);
+    try std.testing.expectEqualStrings("2 KB", buf.items);
+
+    buf.clearRetainingCapacity();
     try appendRepositoryDiskSize(&buf, std.testing.allocator, 123 * 1024 * 1024);
     try std.testing.expectEqualStrings("123 MB", buf.items);
 
     buf.clearRetainingCapacity();
     try appendRepositoryDiskSize(&buf, std.testing.allocator, 1536 * 1024 * 1024);
     try std.testing.expectEqualStrings("1.50 GB", buf.items);
+}
+
+test "web explorer renders repository size split" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendRootRepositoryStats(&buf, std.testing.allocator, .{
+        .worktree_count = 1,
+        .tracked_file_size_bytes = 4 * 1024,
+        .disk_size_bytes = 12 * 1024 * 1024,
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<dt>Tracked files</dt><dd>4 KB</dd>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<dt>Directory</dt><dd>12 MB</dd>") != null);
 }
 
 test "web explorer only falls back to remote tracking for branch shorthands" {

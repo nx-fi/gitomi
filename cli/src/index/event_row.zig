@@ -137,7 +137,8 @@ pub fn appendIndexedEventJson(buf: *std.ArrayList(u8), allocator: Allocator, eve
         try appendJsonFieldString(buf, allocator, "actor_device", event.actor_device, true);
         if (event.seq) |seq| try appendJsonFieldInteger(buf, allocator, "seq", seq, true);
         const has_run_completed_payload = std.mem.eql(u8, event.event_type, "action.run_completed");
-        try appendJsonFieldString(buf, allocator, "occurred_at", event.occurred_at, has_run_completed_payload);
+        try appendJsonFieldString(buf, allocator, "occurred_at", event.occurred_at, true);
+        _ = try appendEventMetadataJsonFields(buf, allocator, event.body);
         if (has_run_completed_payload) {
             const wrote_payload = try appendRunCompletedPayloadJsonFields(buf, allocator, event.body);
             if (!wrote_payload and buf.items[buf.items.len - 1] == ',') {
@@ -145,7 +146,60 @@ pub fn appendIndexedEventJson(buf: *std.ArrayList(u8), allocator: Allocator, eve
             }
         }
     }
+    if (buf.items[buf.items.len - 1] == ',') {
+        buf.items.len -= 1;
+    }
     try buf.append(allocator, '}');
+}
+
+fn appendEventMetadataJsonFields(buf: *std.ArrayList(u8), allocator: Allocator, body: []const u8) !bool {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return false;
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return false,
+    };
+
+    const legacy = switch (root.get("legacy") orelse return false) {
+        .object => |object| object,
+        else => return false,
+    };
+
+    var wrote = false;
+    try buf.appendSlice(allocator, "\"metadata\":{");
+    try appendMetadataIntegerField(buf, allocator, &wrote, "github_issue_number", legacy.get("github_issue_number"));
+    try appendMetadataIntegerField(buf, allocator, &wrote, "github_issue_id", legacy.get("github_issue_id"));
+    try appendMetadataIntegerField(buf, allocator, &wrote, "github_pull_number", legacy.get("github_pull_number"));
+    try appendMetadataIntegerField(buf, allocator, &wrote, "github_pull_id", legacy.get("github_pull_id"));
+    try appendMetadataIntegerField(buf, allocator, &wrote, "github_project_id", legacy.get("github_project_id"));
+    try appendMetadataIntegerField(buf, allocator, &wrote, "github_milestone_id", legacy.get("github_milestone_id"));
+    try appendMetadataIntegerField(buf, allocator, &wrote, "gitlab_issue_iid", legacy.get("gitlab_issue_iid"));
+    try appendMetadataIntegerField(buf, allocator, &wrote, "gitlab_merge_request_iid", legacy.get("gitlab_merge_request_iid"));
+    if (!wrote) {
+        buf.items.len -= "\"metadata\":{".len;
+        return false;
+    }
+    try buf.appendSlice(allocator, "},");
+    return true;
+}
+
+fn appendMetadataIntegerField(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    wrote_any: *bool,
+    key: []const u8,
+    value: ?std.json.Value,
+) !void {
+    const actual = switch (value orelse return) {
+        .integer => |integer| integer,
+        else => return,
+    };
+    if (actual <= 0) return;
+    if (wrote_any.*) try buf.append(allocator, ',');
+    try appendJsonString(buf, allocator, key);
+    try buf.append(allocator, ':');
+    try buf.writer(allocator).print("{d}", .{actual});
+    wrote_any.* = true;
 }
 
 fn appendRunCompletedPayloadJsonFields(buf: *std.ArrayList(u8), allocator: Allocator, body: []const u8) !bool {
@@ -240,4 +294,36 @@ test "indexed event json carries projection fields" {
     try std.testing.expectEqualStrings("accepted", root.get("domain_status").?.string);
     try std.testing.expectEqualStrings("issue.opened", root.get("event_type").?.string);
     try std.testing.expectEqual(@as(i64, 7), root.get("seq").?.integer);
+}
+
+test "indexed event json carries provider metadata" {
+    const event = IndexedEvent{
+        .ref = "refs/gitomi/inbox/import-bot/github",
+        .commit = "0123456789abcdef0123456789abcdef01234567",
+        .event_hash = "0123456789abcdef0123456789abcdef01234567",
+        .tree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+        .subject = "issue.updated #018f000 GitHub #88 alias",
+        .empty_tree = true,
+        .valid_json = true,
+        .event_type = "issue.updated",
+        .object_kind = "issue",
+        .object_id = "018f0000-0000-7000-8000-000000000002",
+        .actor_principal = "import-bot",
+        .actor_device = "github",
+        .seq = 9,
+        .occurred_at = "2026-05-13T18:30:59Z",
+        .domain_status = "accepted",
+        .rejection_reason = "",
+        .body = "{\"legacy\":{\"github_issue_number\":88,\"github_issue_id\":880088},\"payload\":{}}",
+    };
+
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(std.testing.allocator);
+    try appendIndexedEventJson(&line, std.testing.allocator, event);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, line.items, .{});
+    defer parsed.deinit();
+    const metadata = parsed.value.object.get("metadata").?.object;
+    try std.testing.expectEqual(@as(i64, 88), metadata.get("github_issue_number").?.integer);
+    try std.testing.expectEqual(@as(i64, 880088), metadata.get("github_issue_id").?.integer);
 }

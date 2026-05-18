@@ -62,15 +62,19 @@ pub const ExportResult = struct {
         self.* = .{};
     }
 
-    fn recordAliasMapping(self: *ExportResult, allocator: Allocator, kind: ExportAliasKind, object_id: []const u8, number: i64) !void {
+    fn recordAliasMapping(self: *ExportResult, allocator: Allocator, kind: ExportAliasKind, object_id: []const u8, number: i64, api_id: ?i64) !void {
         if (number <= 0) return;
-        for (self.alias_mappings.items) |mapping| {
-            if (mapping.kind == kind and mapping.number == number and std.mem.eql(u8, mapping.object_id, object_id)) return;
+        for (self.alias_mappings.items) |*mapping| {
+            if (mapping.kind == kind and mapping.number == number and std.mem.eql(u8, mapping.object_id, object_id)) {
+                if (mapping.api_id == null) mapping.api_id = positiveId(api_id);
+                return;
+            }
         }
         try self.alias_mappings.append(allocator, .{
             .kind = kind,
             .object_id = try allocator.dupe(u8, object_id),
             .number = number,
+            .api_id = positiveId(api_id),
         });
     }
 };
@@ -84,6 +88,17 @@ pub const ExportAliasMapping = struct {
     kind: ExportAliasKind,
     object_id: []u8,
     number: i64,
+    api_id: ?i64 = null,
+};
+
+const CreatedGithubObject = struct {
+    number: i64,
+    api_id: ?i64 = null,
+};
+
+const MappingValue = struct {
+    number: i64,
+    api_id: ?i64 = null,
 };
 
 pub fn cmdExport(allocator: Allocator, args: []const []const u8) !void {
@@ -175,7 +190,7 @@ const MappingStore = struct {
     dry_run: bool,
     lock_file: ?std.fs.File = null,
     next_synthetic: i64 = 1,
-    map: std.StringHashMap(i64),
+    map: std.StringHashMap(MappingValue),
 
     fn init(allocator: Allocator, repo: repo_mod.Repo, slug: RepoSlug, explicit_path: ?[]const u8, dry_run: bool) !MappingStore {
         const path = if (explicit_path) |value|
@@ -197,7 +212,7 @@ const MappingStore = struct {
             .path = path,
             .dry_run = dry_run,
             .lock_file = lock_file,
-            .map = std.StringHashMap(i64).init(allocator),
+            .map = std.StringHashMap(MappingValue).init(allocator),
         };
     }
 
@@ -245,42 +260,57 @@ const MappingStore = struct {
                 try eprint("gt github export: map file {s} line {d} is missing number\n", .{ self.path, line_number });
                 return CliError.UserError;
             };
-            try self.putMemory(kind, id, number);
+            const api_id = jsonInteger(root.get("api_id"));
+            try self.putMemory(kind, id, number, api_id);
             if (number >= self.next_synthetic) self.next_synthetic = number + 1;
         }
     }
 
     fn get(self: *MappingStore, kind: []const u8, id: []const u8) !?i64 {
+        const value = (try self.getValue(kind, id)) orelse return null;
+        return value.number;
+    }
+
+    fn getApiId(self: *MappingStore, kind: []const u8, id: []const u8) !?i64 {
+        const value = (try self.getValue(kind, id)) orelse return null;
+        return value.api_id;
+    }
+
+    fn getValue(self: *MappingStore, kind: []const u8, id: []const u8) !?MappingValue {
         const key = try mapKey(self.allocator, kind, id);
         defer self.allocator.free(key);
         return self.map.get(key);
     }
 
     fn put(self: *MappingStore, kind: []const u8, id: []const u8, number: i64) !void {
+        try self.putWithApiId(kind, id, number, null);
+    }
+
+    fn putWithApiId(self: *MappingStore, kind: []const u8, id: []const u8, number: i64, api_id: ?i64) !void {
         if (try self.get(kind, id) != null) return;
-        try self.putMemory(kind, id, number);
-        if (!self.dry_run) try self.append(kind, id, number);
+        try self.putMemory(kind, id, number, api_id);
+        if (!self.dry_run) try self.append(kind, id, number, api_id);
         if (number >= self.next_synthetic) self.next_synthetic = number + 1;
     }
 
     fn putSynthetic(self: *MappingStore, kind: []const u8, id: []const u8) !i64 {
         const number = self.next_synthetic;
         self.next_synthetic += 1;
-        try self.putMemory(kind, id, number);
+        try self.putMemory(kind, id, number, null);
         return number;
     }
 
-    fn putMemory(self: *MappingStore, kind: []const u8, id: []const u8, number: i64) !void {
+    fn putMemory(self: *MappingStore, kind: []const u8, id: []const u8, number: i64, api_id: ?i64) !void {
         const key = try mapKey(self.allocator, kind, id);
         errdefer self.allocator.free(key);
         const entry = try self.map.getOrPut(key);
         if (entry.found_existing) {
             self.allocator.free(key);
         }
-        entry.value_ptr.* = number;
+        entry.value_ptr.* = .{ .number = number, .api_id = positiveId(api_id) };
     }
 
-    fn append(self: *MappingStore, kind: []const u8, id: []const u8, number: i64) !void {
+    fn append(self: *MappingStore, kind: []const u8, id: []const u8, number: i64, api_id: ?i64) !void {
         if (std.fs.path.dirname(self.path)) |dir| try std.fs.cwd().makePath(dir);
         var file = std.fs.cwd().openFile(self.path, .{ .mode = .write_only }) catch |err| switch (err) {
             error.FileNotFound => try std.fs.cwd().createFile(self.path, .{ .mode = 0o600 }),
@@ -294,7 +324,8 @@ const MappingStore = struct {
         try line.append(self.allocator, '{');
         try appendJsonFieldString(&line, self.allocator, "kind", kind, true);
         try appendJsonFieldString(&line, self.allocator, "id", id, true);
-        try json_writer.appendJsonFieldInteger(&line, self.allocator, "number", number, false);
+        try json_writer.appendJsonFieldInteger(&line, self.allocator, "number", number, positiveId(api_id) != null);
+        if (positiveId(api_id)) |value| try json_writer.appendJsonFieldInteger(&line, self.allocator, "api_id", value, false);
         try line.appendSlice(self.allocator, "}\n");
         try file.writeAll(line.items);
         try file.sync();
@@ -303,6 +334,11 @@ const MappingStore = struct {
 
 fn mapKey(allocator: Allocator, kind: []const u8, id: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}\x1f{s}", .{ kind, id });
+}
+
+fn positiveId(value: ?i64) ?i64 {
+    const actual = value orelse return null;
+    return if (actual > 0) actual else null;
 }
 
 fn acquireMapLock(allocator: Allocator, map_path: []const u8) !std.fs.File {
@@ -542,8 +578,8 @@ fn collectMissingAliasMappings(allocator: Allocator, mappings: *MappingStore, db
         if (!std.mem.eql(u8, kind, "issue") and !std.mem.eql(u8, kind, "pull")) continue;
         const object_id = entry.key_ptr.*[separator + 1 ..];
         if (!try localObjectExists(db, kind, object_id)) continue;
-        if (try legacyAliasExists(db, kind, object_id, entry.value_ptr.*)) continue;
-        try result.recordAliasMapping(allocator, if (std.mem.eql(u8, kind, "issue")) .issue else .pull, object_id, entry.value_ptr.*);
+        if (try legacyAliasExists(db, kind, object_id, entry.value_ptr.number)) continue;
+        try result.recordAliasMapping(allocator, if (std.mem.eql(u8, kind, "issue")) .issue else .pull, object_id, entry.value_ptr.number, entry.value_ptr.api_id);
     }
 }
 
@@ -595,7 +631,7 @@ const graphql_pull_id_query =
 
 const graphql_create_issue_mutation =
     \\mutation GitomiCreateIssue($input: CreateIssueInput!) {
-    \\  createIssue(input: $input) { issue { number } }
+    \\  createIssue(input: $input) { issue { number databaseId } }
     \\}
 ;
 
@@ -607,7 +643,7 @@ const graphql_update_issue_mutation =
 
 const graphql_create_pull_mutation =
     \\mutation GitomiCreatePullRequest($input: CreatePullRequestInput!) {
-    \\  createPullRequest(input: $input) { pullRequest { number } }
+    \\  createPullRequest(input: $input) { pullRequest { number databaseId } }
     \\}
 ;
 
@@ -629,7 +665,7 @@ const graphql_add_comment_mutation =
     \\}
 ;
 
-fn createIssueGraphql(allocator: Allocator, client: GitHubClient, payload: std.json.ObjectMap) !?i64 {
+fn createIssueGraphql(allocator: Allocator, client: GitHubClient, payload: std.json.ObjectMap) !?CreatedGithubObject {
     const repo_id = try fetchRepositoryNodeId(allocator, client);
     defer allocator.free(repo_id);
     const input = try githubIssueCreateGraphqlInput(allocator, repo_id, payload);
@@ -644,7 +680,10 @@ fn createIssueGraphql(allocator: Allocator, client: GitHubClient, payload: std.j
     const data = graphqlData(parsed.value) orelse return CliError.UserError;
     const result = jsonObject(data.get("createIssue")) orelse return CliError.UserError;
     const issue = jsonObject(result.get("issue")) orelse return CliError.UserError;
-    return jsonInteger(issue.get("number")) orelse return CliError.UserError;
+    return .{
+        .number = jsonInteger(issue.get("number")) orelse return CliError.UserError,
+        .api_id = jsonInteger(issue.get("databaseId")),
+    };
 }
 
 fn updateIssueGraphql(allocator: Allocator, client: GitHubClient, number: i64, payload: std.json.ObjectMap) !void {
@@ -661,7 +700,7 @@ fn updateIssueGraphql(allocator: Allocator, client: GitHubClient, number: i64, p
     defer parsed.deinit();
 }
 
-fn createPullGraphql(allocator: Allocator, client: GitHubClient, payload: std.json.ObjectMap) !?i64 {
+fn createPullGraphql(allocator: Allocator, client: GitHubClient, payload: std.json.ObjectMap) !?CreatedGithubObject {
     const repo_id = try fetchRepositoryNodeId(allocator, client);
     defer allocator.free(repo_id);
     const input = try githubPullCreateGraphqlInput(allocator, repo_id, payload);
@@ -676,7 +715,10 @@ fn createPullGraphql(allocator: Allocator, client: GitHubClient, payload: std.js
     const data = graphqlData(parsed.value) orelse return CliError.UserError;
     const result = jsonObject(data.get("createPullRequest")) orelse return CliError.UserError;
     const pull = jsonObject(result.get("pullRequest")) orelse return CliError.UserError;
-    return jsonInteger(pull.get("number")) orelse return CliError.UserError;
+    return .{
+        .number = jsonInteger(pull.get("number")) orelse return CliError.UserError,
+        .api_id = jsonInteger(pull.get("databaseId")),
+    };
 }
 
 fn updatePullGraphql(allocator: Allocator, client: GitHubClient, number: i64, payload: std.json.ObjectMap) !void {
@@ -907,6 +949,19 @@ fn jsonObject(value: ?std.json.Value) ?std.json.ObjectMap {
     };
 }
 
+fn parseCreatedGithubObject(allocator: Allocator, raw: []const u8) ?CreatedGithubObject {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch return null;
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return null,
+    };
+    return .{
+        .number = jsonInteger(root.get("number")) orelse return null,
+        .api_id = jsonInteger(root.get("id")),
+    };
+}
+
 fn exportEvent(
     allocator: Allocator,
     client: GitHubClient,
@@ -954,7 +1009,7 @@ fn exportIssueEvent(
 ) !bool {
     if (std.mem.eql(u8, event_type, "issue.opened")) {
         if (try mappings.get("issue", issue_id)) |number| {
-            if (legacyNumber(root, "github_issue_number") == null) try result.recordAliasMapping(allocator, .issue, issue_id, number);
+            if (legacyNumber(root, "github_issue_number") == null) try result.recordAliasMapping(allocator, .issue, issue_id, number, try mappings.getApiId("issue", issue_id));
             return false;
         }
         if (options.reuse_legacy) {
@@ -963,8 +1018,8 @@ fn exportIssueEvent(
                 return false;
             }
         }
-        const number = if (options.mode == .graphql)
-            if (try createIssueGraphql(allocator, client, payload)) |created_number| created_number else try mappings.putSynthetic("issue", issue_id)
+        const created = if (options.mode == .graphql)
+            if (try createIssueGraphql(allocator, client, payload)) |created_object| created_object else CreatedGithubObject{ .number = try mappings.putSynthetic("issue", issue_id) }
         else blk: {
             const request_body = try githubIssueCreateBody(allocator, payload);
             defer allocator.free(request_body);
@@ -972,13 +1027,13 @@ fn exportIssueEvent(
             defer allocator.free(path);
             const raw = try client.request("POST", path, request_body);
             defer allocator.free(raw);
-            break :blk if (client.dry_run) try mappings.putSynthetic("issue", issue_id) else parseResponseNumber(allocator, raw, "number") orelse return CliError.UserError;
+            break :blk if (client.dry_run) CreatedGithubObject{ .number = try mappings.putSynthetic("issue", issue_id) } else parseCreatedGithubObject(allocator, raw) orelse return CliError.UserError;
         };
-        if (!client.dry_run) try mappings.put("issue", issue_id, number);
-        if (!client.dry_run and legacyNumber(root, "github_issue_number") == null) try result.recordAliasMapping(allocator, .issue, issue_id, number);
+        if (!client.dry_run) try mappings.putWithApiId("issue", issue_id, created.number, created.api_id);
+        if (!client.dry_run and legacyNumber(root, "github_issue_number") == null) try result.recordAliasMapping(allocator, .issue, issue_id, created.number, created.api_id);
         if (options.mode == .graphql) {
-            try replayStringArrayLabels(allocator, client, number, payload.get("labels"), true);
-            try replayStringArrayAssignees(allocator, client, number, payload.get("assignees"), true);
+            try replayStringArrayLabels(allocator, client, created.number, payload.get("labels"), true);
+            try replayStringArrayAssignees(allocator, client, created.number, payload.get("assignees"), true);
         }
         return true;
     }
@@ -1047,7 +1102,7 @@ fn exportPullEvent(
 ) !bool {
     if (std.mem.eql(u8, event_type, "pull.opened")) {
         if (try mappings.get("pull", pull_id)) |number| {
-            if (legacyNumber(root, "github_pull_number") == null) try result.recordAliasMapping(allocator, .pull, pull_id, number);
+            if (legacyNumber(root, "github_pull_number") == null) try result.recordAliasMapping(allocator, .pull, pull_id, number, try mappings.getApiId("pull", pull_id));
             return false;
         }
         if (options.reuse_legacy) {
@@ -1056,8 +1111,8 @@ fn exportPullEvent(
                 return false;
             }
         }
-        const number = if (options.mode == .graphql)
-            if (try createPullGraphql(allocator, client, payload)) |created_number| created_number else try mappings.putSynthetic("pull", pull_id)
+        const created = if (options.mode == .graphql)
+            if (try createPullGraphql(allocator, client, payload)) |created_object| created_object else CreatedGithubObject{ .number = try mappings.putSynthetic("pull", pull_id) }
         else blk: {
             const request_body = try githubPullCreateBody(allocator, payload);
             defer allocator.free(request_body);
@@ -1065,10 +1120,10 @@ fn exportPullEvent(
             defer allocator.free(path);
             const raw = try client.request("POST", path, request_body);
             defer allocator.free(raw);
-            break :blk if (client.dry_run) try mappings.putSynthetic("pull", pull_id) else parseResponseNumber(allocator, raw, "number") orelse return CliError.UserError;
+            break :blk if (client.dry_run) CreatedGithubObject{ .number = try mappings.putSynthetic("pull", pull_id) } else parseCreatedGithubObject(allocator, raw) orelse return CliError.UserError;
         };
-        if (!client.dry_run) try mappings.put("pull", pull_id, number);
-        if (!client.dry_run and legacyNumber(root, "github_pull_number") == null) try result.recordAliasMapping(allocator, .pull, pull_id, number);
+        if (!client.dry_run) try mappings.putWithApiId("pull", pull_id, created.number, created.api_id);
+        if (!client.dry_run and legacyNumber(root, "github_pull_number") == null) try result.recordAliasMapping(allocator, .pull, pull_id, created.number, created.api_id);
         return true;
     }
 

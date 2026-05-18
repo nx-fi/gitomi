@@ -1544,16 +1544,31 @@ fn appendLegacyInfo(buf: *std.ArrayList(u8), allocator: Allocator, legacy: Legac
 
     try buf.appendSlice(allocator, "\"legacy\":{");
     if (legacy.github_issue_number) |number| {
-        try appendJsonFieldUnsigned(buf, allocator, "github_issue_number", number, legacy.github_pull_number != null or legacy.gitlab_issue_iid != null or legacy.gitlab_merge_request_iid != null);
+        try appendJsonFieldUnsigned(buf, allocator, "github_issue_number", number, true);
+    }
+    if (legacy.github_issue_id) |number| {
+        try appendJsonFieldUnsigned(buf, allocator, "github_issue_id", number, true);
     }
     if (legacy.github_pull_number) |number| {
-        try appendJsonFieldUnsigned(buf, allocator, "github_pull_number", number, legacy.gitlab_issue_iid != null or legacy.gitlab_merge_request_iid != null);
+        try appendJsonFieldUnsigned(buf, allocator, "github_pull_number", number, true);
+    }
+    if (legacy.github_pull_id) |number| {
+        try appendJsonFieldUnsigned(buf, allocator, "github_pull_id", number, true);
+    }
+    if (legacy.github_project_id) |number| {
+        try appendJsonFieldUnsigned(buf, allocator, "github_project_id", number, true);
+    }
+    if (legacy.github_milestone_id) |number| {
+        try appendJsonFieldUnsigned(buf, allocator, "github_milestone_id", number, true);
     }
     if (legacy.gitlab_issue_iid) |number| {
-        try appendJsonFieldUnsigned(buf, allocator, "gitlab_issue_iid", number, legacy.gitlab_merge_request_iid != null);
+        try appendJsonFieldUnsigned(buf, allocator, "gitlab_issue_iid", number, true);
     }
     if (legacy.gitlab_merge_request_iid) |number| {
-        try appendJsonFieldUnsigned(buf, allocator, "gitlab_merge_request_iid", number, false);
+        try appendJsonFieldUnsigned(buf, allocator, "gitlab_merge_request_iid", number, true);
+    }
+    if (buf.items[buf.items.len - 1] == ',') {
+        buf.items.len -= 1;
     }
     try buf.appendSlice(allocator, "},");
 }
