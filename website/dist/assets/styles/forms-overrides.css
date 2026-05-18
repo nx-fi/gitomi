@@ -1,0 +1,343 @@
+.form-panel { max-width: 820px; }
+.issue-form {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+}
+.issue-form :is(input:not([type="hidden"]), textarea),
+.issue-form .markdown-editor textarea,
+.issue-form .issue-sidebar-add-form input,
+.issue-form-picker-menu > summary.issue-form-picker-control {
+  background: var(--bg);
+}
+.issue-form-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.issue-form-field-label {
+  color: var(--text);
+  font-weight: 700;
+}
+.issue-form-picker-menu {
+  position: relative;
+  display: block;
+  min-width: 0;
+  width: 100%;
+}
+.issue-form-picker-menu > summary.issue-form-picker-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  height: auto;
+  min-height: 60px;
+  padding: 8px 10px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-control-inset);
+  cursor: pointer;
+  list-style: none;
+}
+.issue-form-picker-menu > summary.issue-form-picker-control:hover {
+  color: var(--text);
+  background: var(--bg);
+  border-color: color-mix(in oklch, var(--border-strong) 76%, var(--text));
+}
+.issue-form-picker-menu > summary.issue-form-picker-control::-webkit-details-marker {
+  display: none;
+}
+.issue-form-picker-menu[open] > summary.issue-form-picker-control {
+  border-color: color-mix(in oklch, var(--brand) 54%, var(--border-strong));
+}
+.issue-form-picker-selected {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.issue-form-picker-placeholder {
+  color: var(--muted);
+  font-weight: 600;
+}
+.issue-form-picker-caret {
+  width: 0;
+  height: 0;
+  flex: 0 0 auto;
+  border-top: 5px solid var(--muted);
+  border-right: 5px solid transparent;
+  border-left: 5px solid transparent;
+}
+.issue-form-selected-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  max-width: 100%;
+}
+.issue-form-selected-person {
+  min-height: 28px;
+  padding: 2px 8px 2px 2px;
+  color: var(--text);
+  background: var(--button-secondary-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  font-size: 12px;
+  font-weight: 700;
+}
+.issue-form-selected-person .issue-avatar {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+}
+.issue-form-picker-popover {
+  width: min(380px, calc(100vw - 24px));
+}
+.issue-form-picker-add {
+  padding-top: 0;
+}
+.issue-form-picker-custom {
+  display: grid;
+  border-top: 1px solid var(--border);
+}
+.issue-form-picker-custom[hidden] {
+  display: none;
+}
+.issue-form-picker-option-content {
+  display: contents;
+}
+.issue-form-assignee-dot {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  color: var(--muted);
+  background: var(--panel-strong);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.issue-form-assignee-dot::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  background: currentColor;
+  border-radius: 50%;
+}
+label {
+  display: grid;
+  gap: 6px;
+  color: var(--text);
+  font-weight: 700;
+}
+.checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+}
+.checkbox-label input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--brand);
+}
+input,
+select,
+textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: 9px 10px;
+  color: var(--text);
+  background: var(--input-bg);
+  font: inherit;
+  box-shadow: var(--shadow-control-inset);
+}
+input:focus,
+select:focus,
+textarea:focus,
+.button:focus-visible,
+.theme-toggle:focus-visible,
+.topbar-sync-button:focus-visible,
+.live-mode-switch:focus-visible,
+.user-menu summary:focus-visible,
+.root-branch-summary:focus-visible,
+.issue-sidebar-menu summary:focus-visible,
+.issue-sidebar-relationship-back:focus-visible,
+.project-action-menu summary:focus-visible,
+.kanban-column-add-menu summary:focus-visible,
+.issue-sidebar-picker-row:focus-visible,
+.topbar a:focus-visible,
+.tree-link:focus-visible,
+.symbol-tree-toggle:focus-visible,
+.symbol-link:focus-visible {
+  outline: 2px solid color-mix(in oklch, var(--brand) 55%, transparent);
+  outline-offset: 2px;
+}
+textarea {
+  resize: vertical;
+  font-family: var(--mono);
+}
+select:not([multiple]) {
+  padding-right: 34px;
+  color: var(--text);
+  background-color: var(--dropdown-bg);
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 17px) 50%,
+    calc(100% - 12px) 50%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  border-color: var(--dropdown-border);
+  box-shadow: none;
+  appearance: none;
+}
+select:not([multiple]):hover {
+  border-color: color-mix(in oklch, var(--dropdown-border) 76%, var(--text));
+}
+select:not([multiple]):disabled {
+  color: var(--muted);
+  cursor: default;
+  opacity: 0.68;
+}
+button[class],
+summary[class],
+input[type="button"],
+input[type="submit"],
+input[type="reset"],
+.button,
+[role="button"] {
+  box-shadow: none;
+  transform: none;
+  transition-property: background, border-color, color, opacity;
+}
+button[class]:hover,
+summary[class]:hover,
+input[type="button"]:hover,
+input[type="submit"]:hover,
+input[type="reset"]:hover,
+.button:hover,
+[role="button"]:hover {
+  transform: none;
+}
+.root-branch-select {
+  background-image: none;
+}
+:is(
+  .topbar-sync-popover,
+  .user-menu-popover,
+  .issues-filter-popover,
+  .pull-merge-method-popover,
+  .issue-action-popover,
+  .reaction-popover,
+  .issue-sidebar-popover,
+  .project-property-popover,
+  .project-action-popover,
+  .kanban-column-popover,
+  .project-issue-search-menu,
+  .labels-row-popover,
+  .refs-filter-popover,
+  .actions-filter-popover,
+  .actions-run-popover,
+  .root-action-popover,
+  .root-sync-popover,
+  .tree-search-menu,
+  .markdown-toc-popover,
+  .commits-filter-popover,
+  .line-actions-menu
+) {
+  background: var(--dropdown-bg);
+  border-color: var(--dropdown-border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--dropdown-shadow);
+}
+:is(
+  .issues-filter-option,
+  .refs-filter-option,
+  .actions-filter-option,
+  .commits-filter-option,
+  .tree-search-result,
+  .project-issue-search-result,
+  .issue-action-popover button,
+  .root-action-popover button,
+  .actions-run-popover a,
+  .actions-run-popover button,
+  .line-actions-menu button,
+  .project-action-popover button,
+  .labels-row-popover form button
+):hover,
+:is(
+  .issues-filter-option,
+  .refs-filter-option,
+  .actions-filter-option,
+  .commits-filter-option,
+  .tree-search-result,
+  .project-issue-search-result
+).selected,
+.tree-search-result.active {
+  background: var(--dropdown-hover-bg);
+}
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.flash {
+  margin: 16px 16px 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  font-weight: 700;
+}
+.flash.error {
+  color: var(--red);
+  background: var(--red-bg);
+  border: 1px solid var(--tone-danger);
+}
+.flash.success {
+  color: var(--brand-strong);
+  background: color-mix(in oklch, var(--brand) 12%, transparent);
+  border: 1px solid color-mix(in oklch, var(--brand) 35%, transparent);
+}
+.gitomi-notification-bar {
+  position: fixed;
+  top: 14px;
+  left: 50%;
+  z-index: 1000;
+  display: flex;
+  width: min(560px, calc(100vw - 32px));
+  transform: translateX(-50%);
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+.gitomi-notification {
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-float);
+  font-weight: 700;
+  line-height: 1.35;
+  pointer-events: auto;
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+.gitomi-notification.error {
+  color: var(--red);
+  background: var(--red-bg);
+  border: 1px solid var(--tone-danger);
+}
+.gitomi-notification.success {
+  color: var(--brand-strong);
+  background: color-mix(in oklch, var(--brand) 12%, var(--panel));
+  border: 1px solid color-mix(in oklch, var(--brand) 35%, transparent);
+}
+.gitomi-notification.is-hiding {
+  opacity: 0;
+  transform: translateY(-6px);
+}

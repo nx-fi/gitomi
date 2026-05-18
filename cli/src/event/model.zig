@@ -151,6 +151,9 @@ pub const ProjectUpdate = struct {
     members_removed: []const []const u8 = &.{},
     labels_added: []const []const u8 = &.{},
     labels_removed: []const []const u8 = &.{},
+    milestones_added: []const []const u8 = &.{},
+    milestones_removed: []const []const u8 = &.{},
+    update_body: ?[]const u8 = null,
 
     pub fn hasChanges(self: ProjectUpdate) bool {
         return self.name != null or
@@ -165,7 +168,10 @@ pub const ProjectUpdate = struct {
             self.members_added.len != 0 or
             self.members_removed.len != 0 or
             self.labels_added.len != 0 or
-            self.labels_removed.len != 0;
+            self.labels_removed.len != 0 or
+            self.milestones_added.len != 0 or
+            self.milestones_removed.len != 0 or
+            self.update_body != null;
     }
 };
 

@@ -1,6 +1,7 @@
 const std = @import("std");
 const event_mod = @import("../event.zig");
 const index = @import("../index.zig");
+const issue_mod = @import("../issue.zig");
 const milestone_mod = @import("../milestone.zig");
 const repo_mod = @import("../repo.zig");
 const shared = @import("shared.zig");
@@ -22,8 +23,10 @@ const createMilestoneCreatedEvent = milestone_mod.createMilestoneCreatedEvent;
 const createMilestoneDeletedEvent = milestone_mod.createMilestoneDeletedEvent;
 const createMilestoneStringEvent = milestone_mod.createMilestoneStringEvent;
 const createMilestoneUpdatedEvent = milestone_mod.createMilestoneUpdatedEvent;
+const createIssueStringEvent = issue_mod.createIssueStringEvent;
 const formValueOwned = issues_page.formValueOwned;
 const literalHref = shared.literalHref;
+const percentDecodeForm = issues_page.percentDecodeForm;
 const sendRedirect = shared.sendRedirect;
 const sendResponse = shared.sendResponse;
 const sendPlainResponse = shared.sendPlainResponse;
@@ -545,7 +548,7 @@ pub fn renderMilestoneDetailPage(allocator: Allocator, repo: Repo, raw_ref: []co
     try appendShellStart(&buf, allocator, repo, data.title, "projects");
     try shared.appendDetailBackButton(&buf, allocator, shared.literalHref("/milestones"), "Back to milestones");
     try buf.appendSlice(allocator, "<section class=\"milestone-detail-page\">");
-    try appendMilestoneDetailHeader(&buf, allocator, milestone_ref, detail_path, data);
+    try appendMilestoneDetailHeader(&buf, allocator, &db, milestone_ref, detail_path, data);
     try appendMilestoneDetailDescription(&buf, allocator, data.description);
     try appendMilestoneDetailProgress(&buf, allocator, data.closed_count, data.issue_count);
     try appendMilestoneDetailIssues(&buf, allocator, &db, milestone_ref, data.title, issue_state, data.issue_count, data.closed_count);
@@ -557,6 +560,7 @@ pub fn renderMilestoneDetailPage(allocator: Allocator, repo: Repo, raw_ref: []co
 fn appendMilestoneDetailHeader(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
+    db: *SqliteDb,
     milestone_ref: []const u8,
     return_to: []const u8,
     data: MilestoneDetailData,
@@ -572,8 +576,8 @@ fn appendMilestoneDetailHeader(
         .milestone_ref = milestone_ref,
     });
     try appendMilestoneStateButtonForm(buf, allocator, milestone_ref, data.state, return_to, "button secondary");
+    try appendMilestoneAddIssueMenu(buf, allocator, db, milestone_ref, return_to, data.title);
     try buf.appendSlice(allocator,
-        \\      <a class="button primary" href="/new-issue">New issue</a>
         \\    </div>
         \\  </div>
         \\  <div class="issue-status-line milestone-detail-meta">
@@ -589,11 +593,126 @@ fn appendMilestoneDetailHeader(
     try buf.appendSlice(allocator, "</span></div></header>");
 }
 
+fn appendMilestoneAddIssueMenu(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    milestone_ref: []const u8,
+    return_to: []const u8,
+    milestone_title: []const u8,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\      <details class="milestone-add-issue-menu" data-popover-menu data-issue-sidebar-menu>
+        \\        <summary class="button primary">Add issue</summary>
+        \\        <div class="issue-sidebar-popover milestone-add-issue-popover" role="dialog" aria-label="Add issue to milestone">
+        \\          <div class="issue-sidebar-popover-title">Add issue</div>
+        \\          <form class="milestone-add-issues-form" method="post" action="/milestones/{milestone_ref}">
+        \\            <input type="hidden" name="action" value="add-issues">
+        \\            <input type="hidden" name="return_to" value="{return_to}">
+        \\            <div class="milestone-add-issue-controls">
+        \\              <label class="issue-sidebar-menu-input issue-sidebar-menu-filter"><span aria-hidden="true"></span><input placeholder="Search issues" aria-label="Search issues" autocomplete="off" data-issue-sidebar-filter></label>
+        \\              <select class="milestone-add-issue-state-filter" aria-label="Filter issues" data-issue-sidebar-state-filter>
+        \\                <option value="">All</option>
+        \\                <option value="open">Open</option>
+        \\                <option value="closed">Closed</option>
+        \\              </select>
+        \\            </div>
+        \\            <div class="milestone-add-issue-list" role="group" aria-label="Issues">
+    , .{
+        .milestone_ref = milestone_ref,
+        .return_to = return_to,
+    });
+
+    var stmt = try db.prepare(
+        \\SELECT i.id, i.title, i.state, COALESCE(im.milestone, ''), COALESCE(a.number, 0)
+        \\FROM issues i
+        \\LEFT JOIN issue_metadata im ON im.issue_id = i.id
+        \\LEFT JOIN legacy_aliases a
+        \\  ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
+        \\WHERE COALESCE(im.milestone, '') <> ?
+        \\ORDER BY CASE i.state WHEN 'open' THEN 0 ELSE 1 END,
+        \\         i.opened_at DESC,
+        \\         i.id DESC
+        \\LIMIT 80
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, milestone_title);
+
+    var shown = false;
+    while (try stmt.step()) {
+        const issue_id = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(issue_id);
+        const title = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(title);
+        const state = try stmt.columnTextDup(allocator, 2);
+        defer allocator.free(state);
+        const current_milestone = try stmt.columnTextDup(allocator, 3);
+        defer allocator.free(current_milestone);
+        const legacy_number = stmt.columnInt64(4);
+        try appendMilestoneAddIssueRow(buf, allocator, issue_id, title, state, current_milestone, legacy_number);
+        shown = true;
+    }
+    if (!shown) {
+        try appendEmptyState(buf, allocator, "No available issues.", "All issues are already in this milestone.");
+    }
+
+    try buf.appendSlice(allocator,
+        \\            </div>
+        \\            <div class="milestone-add-issue-actions"><button class="button primary" type="submit">Add</button></div>
+        \\          </form>
+        \\        </div>
+        \\      </details>
+    );
+}
+
+fn appendMilestoneAddIssueRow(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    issue_id: []const u8,
+    title: []const u8,
+    state: []const u8,
+    current_milestone: []const u8,
+    legacy_number: i64,
+) !void {
+    var issue_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const issue_ref = util.shortObjectRef(&issue_ref_buf, issue_id);
+    const number_text = try issueNumberTextOwned(allocator, issue_ref, legacy_number);
+    defer allocator.free(number_text);
+
+    try appendTemplate(buf, allocator,
+        \\<label class="milestone-add-issue-row" data-sidebar-filter-text="{title} {number_text} {current_milestone}" data-sidebar-state="{state}">
+        \\  <input type="checkbox" name="issue" value="{issue_ref}" aria-label="Add {number_text} {title}">
+        \\  <span class="{icon_classes}" aria-hidden="true"></span>
+        \\  <span class="issue-sidebar-picker-text"><span class="issue-sidebar-picker-primary">{title}</span>
+    , .{
+        .title = title,
+        .number_text = number_text,
+        .current_milestone = current_milestone,
+        .state = state,
+        .issue_ref = issue_ref,
+        .icon_classes = shared.classes("issue-sidebar-issue-icon", &.{
+            shared.class("is-open", std.mem.eql(u8, state, "open")),
+            shared.class("is-closed", std.mem.eql(u8, state, "closed")),
+        }),
+    });
+    if (current_milestone.len != 0) {
+        try appendTemplate(buf, allocator, "<span class=\"issue-sidebar-picker-secondary\">{current_milestone}</span>", .{ .current_milestone = current_milestone });
+    }
+    try appendTemplate(buf, allocator,
+        \\</span><span class="issue-sidebar-picker-secondary issue-sidebar-choice-ref">{number_text}</span></label>
+    , .{ .number_text = number_text });
+}
+
+fn issueNumberTextOwned(allocator: Allocator, issue_ref: []const u8, legacy_number: i64) ![]u8 {
+    if (legacy_number > 0) return try std.fmt.allocPrint(allocator, "#{d}", .{legacy_number});
+    return try std.fmt.allocPrint(allocator, "#{s}", .{issue_ref});
+}
+
 fn appendMilestoneDetailDescription(buf: *std.ArrayList(u8), allocator: Allocator, description: []const u8) !void {
     if (description.len == 0) return;
-    try appendTemplate(buf, allocator,
-        \\<section class="milestone-detail-description markdown-body">{description}</section>
-    , .{ .description = description });
+    try buf.appendSlice(allocator, "<section class=\"milestone-detail-description markdown-body\">");
+    try shared.appendMarkdownSource(buf, allocator, description, .{});
+    try buf.appendSlice(allocator, "</section>");
 }
 
 fn appendMilestoneDetailProgress(buf: *std.ArrayList(u8), allocator: Allocator, closed_count: usize, issue_count: usize) !void {
@@ -1083,6 +1202,10 @@ fn handleMilestoneUpdatePost(allocator: Allocator, repo: Repo, stream: std.net.S
         try sendRedirect(allocator, stream, "/milestones");
         return;
     }
+    if (std.mem.eql(u8, action, "add-issues")) {
+        try handleMilestoneAddIssuesPost(allocator, repo, stream, milestone_id, return_to, form_body);
+        return;
+    }
 
     const title_owned = (try formValueOwned(allocator, form_body, "title")) orelse try allocator.dupe(u8, "");
     defer allocator.free(title_owned);
@@ -1124,6 +1247,100 @@ fn handleMilestoneUpdatePost(allocator: Allocator, repo: Repo, stream: std.net.S
     try sendRedirect(allocator, stream, return_to);
 }
 
+fn handleMilestoneAddIssuesPost(
+    allocator: Allocator,
+    repo: Repo,
+    stream: std.net.Stream,
+    milestone_id: []const u8,
+    return_to: []const u8,
+    form_body: []const u8,
+) !void {
+    var issue_refs = try formValuesOwned(allocator, form_body, "issue");
+    defer {
+        for (issue_refs.items) |value| allocator.free(value);
+        issue_refs.deinit(allocator);
+    }
+    if (issue_refs.items.len == 0) {
+        try sendRedirect(allocator, stream, return_to);
+        return;
+    }
+
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    const milestone_title = loadMilestoneTitleByIdOwned(allocator, &db, milestone_id) catch {
+        try sendPlainResponse(allocator, stream, 404, "Not Found", "Milestone not found\n");
+        return;
+    };
+    defer allocator.free(milestone_title);
+
+    var issue_ids: std.ArrayList([]u8) = .empty;
+    defer {
+        for (issue_ids.items) |issue_id| allocator.free(issue_id);
+        issue_ids.deinit(allocator);
+    }
+
+    for (issue_refs.items) |raw_issue_ref| {
+        const issue_ref = std.mem.trim(u8, raw_issue_ref, " \t\r\n");
+        if (issue_ref.len == 0) continue;
+        const issue_id = index.resolveIssueId(allocator, repo, issue_ref) catch {
+            try sendPlainResponse(allocator, stream, 404, "Not Found", "Issue not found\n");
+            return;
+        };
+        if (containsString(issue_ids.items, issue_id)) {
+            allocator.free(issue_id);
+            continue;
+        }
+        issue_ids.append(allocator, issue_id) catch |err| {
+            allocator.free(issue_id);
+            return err;
+        };
+    }
+    if (issue_ids.items.len == 0) {
+        try sendRedirect(allocator, stream, return_to);
+        return;
+    }
+
+    for (issue_ids.items) |issue_id| {
+        createIssueStringEvent(allocator, issue_id, "issue.milestone_set", "milestone", milestone_title) catch |err| {
+            try sendPlainResponse(allocator, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), shared.writeFailureMessage(err, "Could not add issues to milestone\n"));
+            return;
+        };
+    }
+
+    try sendRedirect(allocator, stream, return_to);
+}
+
+fn formValuesOwned(allocator: Allocator, body: []const u8, wanted_key: []const u8) !std.ArrayList([]u8) {
+    var values: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (values.items) |value| allocator.free(value);
+        values.deinit(allocator);
+    }
+
+    var pairs = std.mem.splitScalar(u8, body, '&');
+    while (pairs.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
+        const raw_key = pair[0..eq];
+        const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
+        const key = try percentDecodeForm(allocator, raw_key);
+        defer allocator.free(key);
+        if (!std.mem.eql(u8, key, wanted_key)) continue;
+        const value = try percentDecodeForm(allocator, raw_value);
+        values.append(allocator, value) catch |err| {
+            allocator.free(value);
+            return err;
+        };
+    }
+    return values;
+}
+
+fn containsString(values: []const []u8, needle: []const u8) bool {
+    for (values) |value| {
+        if (std.mem.eql(u8, value, needle)) return true;
+    }
+    return false;
+}
+
 fn validMilestoneState(state: []const u8) bool {
     return std.mem.eql(u8, state, "open") or std.mem.eql(u8, state, "closed");
 }
@@ -1143,6 +1360,18 @@ fn isSafeMilestoneReturnTarget(value: []const u8) bool {
     if (value.len > 1 and value[1] == '/') return false;
     if (!std.mem.startsWith(u8, value, "/milestones")) return false;
     return std.mem.indexOfAny(u8, value, "\r\n") == null;
+}
+
+fn loadMilestoneTitleByIdOwned(allocator: Allocator, db: *SqliteDb, milestone_id: []const u8) ![]u8 {
+    var stmt = try db.prepare(
+        \\SELECT title
+        \\FROM milestones
+        \\WHERE id = ?
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, milestone_id);
+    if (!(try stmt.step())) return error.MilestoneNotFound;
+    return try stmt.columnTextDup(allocator, 0);
 }
 
 fn loadMilestoneFormData(allocator: Allocator, repo: Repo, raw_ref: []const u8) !MilestoneFormData {

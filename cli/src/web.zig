@@ -55,6 +55,26 @@ const Route = WebRouter.Route;
 
 const routes = [_]Route{
     Route.static("/style.css", "text/css", web_css),
+    Route.static("/styles/base.css", "text/css", style_base_css),
+    Route.static("/styles/issues-list.css", "text/css", style_issues_list_css),
+    Route.static("/styles/pulls.css", "text/css", style_pulls_css),
+    Route.static("/styles/merge-editor.css", "text/css", style_merge_editor_css),
+    Route.static("/styles/issues-detail.css", "text/css", style_issues_detail_css),
+    Route.static("/styles/projects.css", "text/css", style_projects_css),
+    Route.static("/styles/controls.css", "text/css", style_controls_css),
+    Route.static("/styles/labels.css", "text/css", style_labels_css),
+    Route.static("/styles/milestones.css", "text/css", style_milestones_css),
+    Route.static("/styles/settings.css", "text/css", style_settings_css),
+    Route.static("/styles/refs-worktrees.css", "text/css", style_refs_worktrees_css),
+    Route.static("/styles/actions.css", "text/css", style_actions_css),
+    Route.static("/styles/status-indexing.css", "text/css", style_status_indexing_css),
+    Route.static("/styles/code-browser.css", "text/css", style_code_browser_css),
+    Route.static("/styles/commits.css", "text/css", style_commits_css),
+    Route.static("/styles/diff.css", "text/css", style_diff_css),
+    Route.static("/styles/markdown.css", "text/css", style_markdown_css),
+    Route.static("/styles/forms-overrides.css", "text/css", style_forms_overrides_css),
+    Route.static("/styles/responsive.css", "text/css", style_responsive_css),
+    Route.static("/styles/shortcuts.css", "text/css", style_shortcuts_css),
     Route.static("/themes/gitomi.css", "text/css", gitomi_theme_css),
     Route.static("/themes/capucine.css", "text/css", capucine_theme_css),
     Route.static("/logo.svg", "image/svg+xml", logo_svg),
@@ -994,6 +1014,26 @@ pub fn isLoopbackHost(host: []const u8) bool {
 }
 
 const web_css = @embedFile("web/style.css");
+const style_base_css = @embedFile("web/styles/base.css");
+const style_issues_list_css = @embedFile("web/styles/issues-list.css");
+const style_pulls_css = @embedFile("web/styles/pulls.css");
+const style_merge_editor_css = @embedFile("web/styles/merge-editor.css");
+const style_issues_detail_css = @embedFile("web/styles/issues-detail.css");
+const style_projects_css = @embedFile("web/styles/projects.css");
+const style_controls_css = @embedFile("web/styles/controls.css");
+const style_labels_css = @embedFile("web/styles/labels.css");
+const style_milestones_css = @embedFile("web/styles/milestones.css");
+const style_settings_css = @embedFile("web/styles/settings.css");
+const style_refs_worktrees_css = @embedFile("web/styles/refs-worktrees.css");
+const style_actions_css = @embedFile("web/styles/actions.css");
+const style_status_indexing_css = @embedFile("web/styles/status-indexing.css");
+const style_code_browser_css = @embedFile("web/styles/code-browser.css");
+const style_commits_css = @embedFile("web/styles/commits.css");
+const style_diff_css = @embedFile("web/styles/diff.css");
+const style_markdown_css = @embedFile("web/styles/markdown.css");
+const style_forms_overrides_css = @embedFile("web/styles/forms-overrides.css");
+const style_responsive_css = @embedFile("web/styles/responsive.css");
+const style_shortcuts_css = @embedFile("web/styles/shortcuts.css");
 const gitomi_theme_css = @embedFile("web/themes/gitomi.css");
 const capucine_theme_css = @embedFile("web/themes/capucine.css");
 const logo_svg = @embedFile("web/logo.svg");
@@ -1473,6 +1513,30 @@ test "web PDF preview assets are routed" {
 test "web theme stylesheets are routed" {
     try expectStaticRoute("/themes/gitomi.css", "text/css", false);
     try expectStaticRoute("/themes/capucine.css", "text/css", false);
+}
+
+test "web split stylesheets are routed" {
+    try expectStaticRoute("/style.css", "text/css", false);
+    try expectStaticRoute("/styles/base.css", "text/css", false);
+    try expectStaticRoute("/styles/issues-list.css", "text/css", false);
+    try expectStaticRoute("/styles/pulls.css", "text/css", false);
+    try expectStaticRoute("/styles/merge-editor.css", "text/css", false);
+    try expectStaticRoute("/styles/issues-detail.css", "text/css", false);
+    try expectStaticRoute("/styles/projects.css", "text/css", false);
+    try expectStaticRoute("/styles/controls.css", "text/css", false);
+    try expectStaticRoute("/styles/labels.css", "text/css", false);
+    try expectStaticRoute("/styles/milestones.css", "text/css", false);
+    try expectStaticRoute("/styles/settings.css", "text/css", false);
+    try expectStaticRoute("/styles/refs-worktrees.css", "text/css", false);
+    try expectStaticRoute("/styles/actions.css", "text/css", false);
+    try expectStaticRoute("/styles/status-indexing.css", "text/css", false);
+    try expectStaticRoute("/styles/code-browser.css", "text/css", false);
+    try expectStaticRoute("/styles/commits.css", "text/css", false);
+    try expectStaticRoute("/styles/diff.css", "text/css", false);
+    try expectStaticRoute("/styles/markdown.css", "text/css", false);
+    try expectStaticRoute("/styles/forms-overrides.css", "text/css", false);
+    try expectStaticRoute("/styles/responsive.css", "text/css", false);
+    try expectStaticRoute("/styles/shortcuts.css", "text/css", false);
 }
 
 fn expectStaticRoute(path: []const u8, content_type: []const u8, binary: bool) !void {

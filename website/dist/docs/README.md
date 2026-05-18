@@ -72,7 +72,7 @@ Gitomi does not treat this endpoint as production-facing infrastructure.
 To run the web UI and GitHub live sync together:
 
 ```sh
-gt web --live --repo OWNER/REPO --webhook-url https://example.test/github/webhook --secret "$WEBHOOK_SECRET"
+gt web --live --repo OWNER/REPO --webhook-url https://example.test/github/webhook --secret-env WEBHOOK_SECRET
 ```
 
 ## Sync With a Remote
@@ -109,7 +109,7 @@ Workflow requests and completions are signed Gitomi events. Local logs and run
 diagnostics are retained separately under `refs/gitomi/runs/*` and can be
 pruned without losing the durable workflow result.
 
-## GitHub Import, Export, and Sync
+## GitHub and GitLab Import/Export/Sync
 
 Bring existing GitHub project history into Gitomi:
 
@@ -137,8 +137,39 @@ GitHub import/export/sync/live; pass `--rest` to use the older REST paths:
 gt github sync --repo OWNER/REPO
 ```
 
+GitHub sync uses one canonical delegated bridge inbox per GitHub repository,
+`refs/gitomi/inbox/import-bot/github` by default. Any maintainer may run the
+bridge: Gitomi grants that maintainer's signing key authority to append
+`import-bot/github` events, publishes the maintainer's local inbox, then pushes
+the bridge inbox fast-forward-only. If another maintainer wins the same bridge
+race, sync discards its unpublished bot commits, pulls the new remote bot head,
+and retries the import. Use `gt github sync --import-only` for decentralized
+GitHub-to-Gitomi refreshes without outbound GitHub writes. When sync creates a
+GitHub issue or pull request from a local Gitomi object, it publishes a
+durable alias event on the same bridge inbox before advancing its export state;
+other replicas use that alias to import or later export the GitHub object as
+the original Gitomi object instead of creating a duplicate. Keep a single
+shared Gitomi genesis; separate genesis refs create separate trust roots and
+are not a safe collaboration model. The alias is not a distributed lock for
+simultaneous outbound creates, and comment export receipts are still local, so
+run Gitomi-to-GitHub export from one designated runner or serialize exporters
+externally.
+
 Imports preserve GitHub issue and pull request numbers as secondary aliases, so
 references such as `#123`, `gh#123`, and `github:123` continue to work.
+
+GitLab projects can be imported, exported, or polled for two-way sync through
+the GitLab REST API:
+
+```sh
+gt gitlab import --project GROUP/PROJECT
+gt gitlab export --project GROUP/PROJECT --dry-run
+gt gitlab sync --project GROUP/PROJECT
+```
+
+GitLab credentials are read from `GITLAB_TOKEN`, `GL_TOKEN`, `--token-env`, or
+`--token-file`. Imported GitLab issue and merge request IIDs are preserved as
+aliases, so `gl#123` and `gitlab:123` references resolve locally.
 
 ## How It Works
 
@@ -161,6 +192,7 @@ cache and can be rebuilt from Git refs.
 - Optional: [`nektos/act`](https://github.com/nektos/act) for local execution
   of GitHub Actions-compatible workflows
 - Optional: GitHub CLI credentials for GitHub import/export and live sync
+- Optional: GitLab API token for GitLab import/export/sync
 
 ## CLI Reference
 
@@ -171,6 +203,7 @@ The implemented command set includes:
 - `gt project ...`, `gt milestone ...`
 - `gt actions ...`, `gt runs prune`
 - `gt github import`, `gt github export`, `gt github sync`, `gt github live`
+- `gt gitlab import`, `gt gitlab export`, `gt gitlab sync`
 - `gt web`
 
 See [cli/README.md](cli/README.md) for build instructions, command syntax, and

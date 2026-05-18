@@ -440,6 +440,9 @@ pub fn buildProjectUpdatedJson(
     if (update.members_removed.len != 0) try appendJsonFieldStringArray(&buf, allocator, "members_removed", update.members_removed, true);
     if (update.labels_added.len != 0) try appendJsonFieldStringArray(&buf, allocator, "labels_added", update.labels_added, true);
     if (update.labels_removed.len != 0) try appendJsonFieldStringArray(&buf, allocator, "labels_removed", update.labels_removed, true);
+    if (update.milestones_added.len != 0) try appendJsonFieldStringArray(&buf, allocator, "milestones_added", update.milestones_added, true);
+    if (update.milestones_removed.len != 0) try appendJsonFieldStringArray(&buf, allocator, "milestones_removed", update.milestones_removed, true);
+    if (update.update_body) |value| try appendJsonFieldString(&buf, allocator, "update_body", value, true);
     if (buf.items[buf.items.len - 1] == ',') {
         buf.items.len -= 1;
     }

@@ -289,12 +289,57 @@
   }
 
   function filterIssueSidebarMenu(input) {
-    const popover = input.closest(".issue-sidebar-popover");
+    const popover = input.closest("[data-issue-relationship-panel]") || input.closest(".issue-sidebar-popover");
     if (!popover) return;
-    const query = String(input.value || "").trim().toLowerCase();
+    const searchInput = popover.querySelector("[data-issue-sidebar-filter]");
+    const stateInput = popover.querySelector("[data-issue-sidebar-state-filter]");
+    const query = String(searchInput && searchInput.value || "").trim().toLowerCase();
+    const state = String(stateInput && stateInput.value || "").trim().toLowerCase();
     popover.querySelectorAll("[data-sidebar-filter-text]").forEach(function (row) {
       const text = String(row.getAttribute("data-sidebar-filter-text") || "").toLowerCase();
-      row.hidden = query.length > 0 && text.indexOf(query) === -1;
+      const rowState = String(row.getAttribute("data-sidebar-state") || "").toLowerCase();
+      const matchesQuery = query.length === 0 || text.indexOf(query) !== -1;
+      const matchesState = state.length === 0 || rowState === state;
+      row.hidden = !matchesQuery || !matchesState;
+    });
+  }
+
+  function firstVisibleSidebarFilter(menu) {
+    return Array.from(menu.querySelectorAll("[data-issue-sidebar-filter]")).find(function (input) {
+      return !input.closest("[hidden]");
+    }) || null;
+  }
+
+  function resetIssueRelationshipPanel(panel) {
+    panel.querySelectorAll("[data-issue-sidebar-filter]").forEach(function (input) {
+      input.value = "";
+      filterIssueSidebarMenu(input);
+    });
+  }
+
+  function focusIssueRelationshipPanel(panel) {
+    const focusTarget = firstVisibleSidebarFilter(panel) ||
+      panel.querySelector("[data-issue-relationship-panel-target], button, input, select, textarea, a");
+    if (focusTarget) window.setTimeout(function () { focusTarget.focus(); }, 0);
+  }
+
+  function showIssueRelationshipPanel(root, panelName, focus) {
+    let activePanel = null;
+    root.querySelectorAll("[data-issue-relationship-panel]").forEach(function (panel) {
+      const active = (panel.getAttribute("data-issue-relationship-panel") || "") === panelName;
+      panel.hidden = !active;
+      panel.classList.toggle("is-active", active);
+      if (active) {
+        activePanel = panel;
+        resetIssueRelationshipPanel(panel);
+      }
+    });
+    if (focus && activePanel) focusIssueRelationshipPanel(activePanel);
+  }
+
+  function resetIssueRelationshipMenus(menu) {
+    menu.querySelectorAll("[data-issue-relationship-menu]").forEach(function (root) {
+      showIssueRelationshipPanel(root, "actions", false);
     });
   }
 
@@ -309,12 +354,32 @@
         if (menu.open) {
           closeIssueMenus(null);
           closeIssueSidebarMenus(menu);
-          const input = menu.querySelector("[data-issue-sidebar-filter]");
+          resetIssueRelationshipMenus(menu);
+          const input = firstVisibleSidebarFilter(menu);
           if (input) window.setTimeout(function () { input.focus(); }, 0);
+          else {
+            const panel = menu.querySelector("[data-issue-relationship-panel]:not([hidden])");
+            if (panel) focusIssueRelationshipPanel(panel);
+          }
         }
+      });
+      menu.addEventListener("click", function (event) {
+        const target = event.target instanceof Element ? event.target : null;
+        if (!target) return;
+        const toggle = target.closest("[data-issue-relationship-panel-target]");
+        if (!toggle || !menu.contains(toggle)) return;
+        const root = toggle.closest("[data-issue-relationship-menu]");
+        if (!root) return;
+        event.preventDefault();
+        showIssueRelationshipPanel(root, toggle.getAttribute("data-issue-relationship-panel-target") || "actions", true);
       });
       menu.querySelectorAll("[data-issue-sidebar-filter]").forEach(function (input) {
         input.addEventListener("input", function () {
+          filterIssueSidebarMenu(input);
+        });
+      });
+      menu.querySelectorAll("[data-issue-sidebar-state-filter]").forEach(function (input) {
+        input.addEventListener("change", function () {
           filterIssueSidebarMenu(input);
         });
       });

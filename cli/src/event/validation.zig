@@ -602,7 +602,13 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         if (!optionalStringArrayWithin(payload, "labels_added", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "project.updated payload.labels_added exceeds v1 collection limits";
         if (!optionalStringArray(payload, "labels_removed")) return "project.updated payload.labels_removed must be an array of strings";
         if (!optionalStringArrayWithin(payload, "labels_removed", git.max_payload_collection_items, git.max_payload_atom_bytes)) return "project.updated payload.labels_removed exceeds v1 collection limits";
-        if (!hasAnyKey(payload, &.{ "name", "description", "state", "status", "priority", "start_at", "end_at", "leads_added", "leads_removed", "members_added", "members_removed", "labels_added", "labels_removed" })) return "project.updated payload must contain at least one update field";
+        if (!optionalStringArray(payload, "milestones_added")) return "project.updated payload.milestones_added must be an array of strings";
+        if (!optionalStringArrayWithin(payload, "milestones_added", git.max_payload_collection_items, git.max_payload_ref_bytes)) return "project.updated payload.milestones_added exceeds v1 collection limits";
+        if (!optionalStringArray(payload, "milestones_removed")) return "project.updated payload.milestones_removed must be an array of strings";
+        if (!optionalStringArrayWithin(payload, "milestones_removed", git.max_payload_collection_items, git.max_payload_ref_bytes)) return "project.updated payload.milestones_removed exceeds v1 collection limits";
+        if (!optionalString(payload, "update_body")) return "project.updated payload.update_body must be a string";
+        if (!optionalStringWithin(payload, "update_body", git.max_payload_text_bytes)) return "project.updated payload.update_body exceeds v1 text size limit";
+        if (!hasAnyKey(payload, &.{ "name", "description", "state", "status", "priority", "start_at", "end_at", "leads_added", "leads_removed", "members_added", "members_removed", "labels_added", "labels_removed", "milestones_added", "milestones_removed", "update_body" })) return "project.updated payload must contain at least one update field";
         return null;
     }
     if (std.mem.eql(u8, event_type, "project.column_added") or std.mem.eql(u8, event_type, "project.column_removed")) {

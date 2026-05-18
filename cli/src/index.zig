@@ -275,6 +275,8 @@ fn requiredIndexTablesExist(db: *SqliteDb) bool {
     defer project_members.deinit();
     var project_labels = db.prepare("SELECT project_id FROM project_labels LIMIT 0") catch return false;
     defer project_labels.deinit();
+    var project_milestones = db.prepare("SELECT project_id FROM project_milestones LIMIT 0") catch return false;
+    defer project_milestones.deinit();
     var project_fields = db.prepare("SELECT id FROM project_fields LIMIT 0") catch return false;
     defer project_fields.deinit();
     var project_field_options = db.prepare("SELECT id FROM project_field_options LIMIT 0") catch return false;
@@ -583,6 +585,7 @@ fn dropIndexSchemaTables(db: *SqliteDb) !void {
         \\DROP TABLE IF EXISTS project_leads;
         \\DROP TABLE IF EXISTS project_members;
         \\DROP TABLE IF EXISTS project_labels;
+        \\DROP TABLE IF EXISTS project_milestones;
         \\DROP TABLE IF EXISTS project_memberships;
         \\DROP TABLE IF EXISTS project_fields;
         \\DROP TABLE IF EXISTS project_field_options;

@@ -1,0 +1,177 @@
+.diff-section {
+  display: grid;
+  gap: 12px;
+}
+.diff-file {
+  overflow: hidden;
+}
+.diff-file-head {
+  padding: 8px 14px;
+  background: var(--panel-strong);
+  border-bottom: 1px solid var(--border);
+  font: 600 13px/1.4 var(--mono);
+  overflow-wrap: anywhere;
+}
+.diff-lines {
+  margin: 0;
+  overflow-x: auto;
+  background: var(--panel);
+  font: 12px/1.45 var(--mono);
+}
+.diff-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 56px 56px minmax(max-content, 1fr);
+  min-height: 19px;
+  white-space: pre;
+}
+.diff-num {
+  padding: 0 8px;
+  color: var(--muted);
+  background: var(--panel-strong);
+  border-right: 1px solid var(--border);
+  text-align: right;
+  user-select: none;
+}
+[data-diff-review-action] .diff-row:not(.hunk):not(.meta):not(.diff-expand) .diff-num {
+  cursor: crosshair;
+}
+.diff-code {
+  display: block;
+  min-width: max-content;
+  padding: 0 10px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  font: inherit;
+  white-space: pre;
+}
+.diff-row.meta {
+  color: var(--muted);
+  background: var(--subtle);
+}
+.diff-row.meta .diff-num,
+.diff-row.hunk .diff-num,
+.diff-row.diff-expand .diff-num {
+  background: inherit;
+}
+.diff-row.hunk {
+  color: var(--blue);
+  background: var(--info-bg);
+}
+.diff-row.add {
+  background: var(--green-bg);
+}
+.diff-row.del {
+  background: var(--red-bg);
+}
+.diff-row.add .diff-num {
+  background: color-mix(in oklch, var(--green-bg) 82%, var(--panel-strong));
+}
+.diff-row.del .diff-num {
+  background: color-mix(in oklch, var(--red-bg) 82%, var(--panel-strong));
+}
+.diff-row.is-range-selected {
+  background: color-mix(in oklch, var(--blue) 14%, var(--panel));
+}
+.diff-row.is-range-selected .diff-code {
+  background: color-mix(in oklch, var(--blue) 10%, transparent);
+}
+.diff-row.is-range-side-old .diff-num.old,
+.diff-row.is-range-side-new .diff-num.new {
+  color: var(--text);
+  background: color-mix(in oklch, var(--blue) 18%, var(--panel-strong));
+}
+.diff-row.is-range-boundary .diff-num.is-range-selected {
+  box-shadow: inset 0 0 0 1px var(--blue);
+}
+.diff-range-button {
+  position: fixed;
+  z-index: 60;
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: var(--text-on-accent);
+  background: var(--blue);
+  border: 1px solid color-mix(in oklch, var(--blue) 72%, var(--neutral-950));
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow);
+  font: 800 18px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  cursor: pointer;
+}
+.diff-range-button:hover,
+.diff-range-button:focus-visible {
+  background: color-mix(in oklch, var(--blue) 86%, var(--surface-panel));
+}
+.diff-review-row {
+  min-height: 0;
+  white-space: normal;
+  background: color-mix(in oklch, var(--blue) 8%, var(--panel));
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.diff-review-row .diff-num {
+  min-height: 100%;
+  background: color-mix(in oklch, var(--blue) 12%, var(--panel-strong));
+}
+.diff-review-form {
+  display: grid;
+  gap: 8px;
+  width: 620px;
+  max-width: calc(100vw - 150px);
+  margin: 8px;
+  padding: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow);
+}
+.diff-review-context {
+  margin: 0;
+  color: var(--muted);
+  font: 700 12px/1.4 var(--mono);
+  overflow-wrap: anywhere;
+}
+.diff-review-form textarea {
+  width: 100%;
+  min-height: 96px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  resize: vertical;
+}
+.diff-review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.diff-expand {
+  min-height: 26px;
+  background: var(--subtle);
+}
+.diff-expand a,
+.diff-expand span {
+  align-self: center;
+  width: fit-content;
+  min-height: 22px;
+  margin-left: 8px;
+  padding: 2px 8px;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font: 700 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.diff-file:hover .diff-expand a,
+.diff-file:hover .diff-expand span,
+.diff-expand:focus-within a {
+  opacity: 1;
+}
+.diff-expand a:hover {
+  color: var(--text);
+  text-decoration: none;
+  border-color: var(--border-strong);
+}

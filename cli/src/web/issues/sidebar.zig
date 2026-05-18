@@ -579,13 +579,66 @@ fn appendIssueSidebarStatusMenu(buf: *std.ArrayList(u8), allocator: Allocator, r
 }
 
 fn appendIssueSidebarRelationshipsMenu(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, raw_ref: []const u8, issue_id: []const u8) !void {
+    try buf.appendSlice(allocator, "<div class=\"issue-sidebar-relationship-menu\" data-issue-relationship-menu>");
+    try buf.appendSlice(allocator, "<div class=\"issue-sidebar-relationship-panel is-active\" data-issue-relationship-panel=\"actions\">");
+    try appendIssueSidebarRelationshipActionRow(buf, allocator, "parent", "Add parent");
+    try appendIssueSidebarRelationshipActionRow(buf, allocator, "sub-issue-create", "Create sub-issue");
+    try appendIssueSidebarRelationshipActionRow(buf, allocator, "sub-issue", "Add sub-issue");
+    try appendIssueSidebarRelationshipActionRow(buf, allocator, "blocked-by", "Mark as blocked by");
+    try appendIssueSidebarRelationshipActionRow(buf, allocator, "blocking", "Add or change blocking");
+    try appendIssueSidebarRelationshipActionRow(buf, allocator, "concurrent-group", "Add to group");
+    try buf.appendSlice(allocator, "</div>");
+
+    try appendIssueSidebarRelationshipPickerPanelStart(buf, allocator, "parent", "Add parent");
     try appendIssueSidebarMenuFilter(buf, allocator, "Search issues");
-    try appendIssueSidebarRelationshipIssueGroup(buf, allocator, db, raw_ref, issue_id, "Set parent issue", "add-parent", "Set parent");
+    try appendIssueSidebarRelationshipIssueGroup(buf, allocator, db, raw_ref, issue_id, "Issues", "add-parent", "Set parent");
+    try appendIssueSidebarRelationshipPanelEnd(buf, allocator);
+
+    try appendIssueSidebarRelationshipPickerPanelStart(buf, allocator, "sub-issue-create", "Create sub-issue");
     try appendIssueSidebarSingleInputForm(buf, allocator, raw_ref, "create-sub-issue", "title", "Create sub-issue", "Sub-issue title");
-    try appendIssueSidebarRelationshipIssueGroup(buf, allocator, db, raw_ref, issue_id, "Add sub-issue", "add-sub-issue", "Add sub-issue");
-    try appendIssueSidebarRelationshipIssueGroup(buf, allocator, db, raw_ref, issue_id, "Mark current issue as blocked by", "add-blocked-by", "Mark blocked by");
-    try appendIssueSidebarRelationshipIssueGroup(buf, allocator, db, raw_ref, issue_id, "Mark current issue as blocking", "add-blocking", "Mark as blocking");
+    try appendIssueSidebarRelationshipPanelEnd(buf, allocator);
+
+    try appendIssueSidebarRelationshipPickerPanelStart(buf, allocator, "sub-issue", "Add sub-issue");
+    try appendIssueSidebarMenuFilter(buf, allocator, "Search issues");
+    try appendIssueSidebarRelationshipIssueGroup(buf, allocator, db, raw_ref, issue_id, "Issues", "add-sub-issue", "Add sub-issue");
+    try appendIssueSidebarRelationshipPanelEnd(buf, allocator);
+
+    try appendIssueSidebarRelationshipPickerPanelStart(buf, allocator, "blocked-by", "Mark as blocked by");
+    try appendIssueSidebarMenuFilter(buf, allocator, "Search issues");
+    try appendIssueSidebarRelationshipIssueGroup(buf, allocator, db, raw_ref, issue_id, "Issues", "add-blocked-by", "Mark blocked by");
+    try appendIssueSidebarRelationshipPanelEnd(buf, allocator);
+
+    try appendIssueSidebarRelationshipPickerPanelStart(buf, allocator, "blocking", "Add or change blocking");
+    try appendIssueSidebarMenuFilter(buf, allocator, "Search issues");
+    try appendIssueSidebarRelationshipIssueGroup(buf, allocator, db, raw_ref, issue_id, "Issues", "add-blocking", "Mark as blocking");
+    try appendIssueSidebarRelationshipPanelEnd(buf, allocator);
+
+    try appendIssueSidebarRelationshipPickerPanelStart(buf, allocator, "concurrent-group", "Add to group");
     try appendIssueSidebarSingleInputForm(buf, allocator, raw_ref, "add-concurrent-group", "group", "Add to group", "Concurrent group");
+    try appendIssueSidebarRelationshipPanelEnd(buf, allocator);
+    try buf.appendSlice(allocator, "</div>");
+}
+
+fn appendIssueSidebarRelationshipActionRow(buf: *std.ArrayList(u8), allocator: Allocator, panel: []const u8, label: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<button class="issue-sidebar-picker-row issue-sidebar-relationship-action" type="button" data-issue-relationship-panel-target="{panel}"><span class="issue-sidebar-picker-primary">{label}</span><span class="issue-sidebar-action-caret" aria-hidden="true"></span></button>
+    , .{
+        .panel = panel,
+        .label = label,
+    });
+}
+
+fn appendIssueSidebarRelationshipPickerPanelStart(buf: *std.ArrayList(u8), allocator: Allocator, panel: []const u8, title: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="issue-sidebar-relationship-panel" data-issue-relationship-panel="{panel}" hidden><button class="issue-sidebar-relationship-back" type="button" data-issue-relationship-panel-target="actions"><span aria-hidden="true"></span>Back</button><div class="issue-sidebar-popover-subtitle">{title}</div>
+    , .{
+        .panel = panel,
+        .title = title,
+    });
+}
+
+fn appendIssueSidebarRelationshipPanelEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+    try buf.appendSlice(allocator, "</div>");
 }
 
 fn appendIssueSidebarRelationshipIssueGroup(

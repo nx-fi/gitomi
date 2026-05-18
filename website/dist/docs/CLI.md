@@ -105,8 +105,11 @@ gt runs prune [--dry-run] [--max-age-days N] [--max-count N] [--max-bytes N]
 gt sync [--remote REMOTE] [--pull-only|--push-only]
 gt github import [--repo OWNER/REPO] [--token-env NAME|--token-file PATH] [--from-file PATH] [--no-comments] [--no-projects] [--rest|--graphql]
 gt github export --repo OWNER/REPO [--token-env NAME|--token-file PATH|--use-gh] [--dry-run] [--map-file PATH] [--reuse-legacy] [--rest|--graphql]
-gt github sync [--repo OWNER/REPO] [--token-env NAME|--token-file PATH|--use-gh] [--remote REMOTE] [--interval-ms N] [--max-pages N] [--dry-run] [--no-git-sync] [--rest|--graphql]
+gt github sync [--repo OWNER/REPO] [--token-env NAME|--token-file PATH|--use-gh] [--remote REMOTE] [--interval-ms N] [--max-pages N] [--dry-run] [--no-git-sync] [--import-only] [--rest|--graphql]
 gt github live [--repo OWNER/REPO] --webhook-url URL (--secret-env NAME|--secret-file PATH) [--host 127.0.0.1] [--port 12656] [--path /github/webhook] [--remote REMOTE] [--interval-ms N] [--once] [--no-subscribe] [--dry-run] [--no-git-sync] [--rest|--graphql]
+gt gitlab import [--project GROUP/PROJECT] [--token-env NAME|--token-file PATH] [--from-file PATH] [--no-comments]
+gt gitlab export --project GROUP/PROJECT [--token-env NAME|--token-file PATH] [--dry-run] [--map-file PATH] [--reuse-legacy]
+gt gitlab sync --project GROUP/PROJECT [--token-env NAME|--token-file PATH] [--remote REMOTE] [--interval-ms N] [--max-pages N] [--dry-run] [--no-git-sync]
 gt web [--local] [--host 127.0.0.1] [--port 12655] [--once]
 gt web --live [--host 127.0.0.1] [--port 12655] [--repo OWNER/REPO] [--webhook-url URL] (--secret-env NAME|--secret-file PATH) [--live-host 127.0.0.1] [--live-port 12656] [--live-path /github/webhook] [--remote REMOTE] [--interval-ms N] [--no-subscribe] [--dry-run] [--no-git-sync] [--rest|--graphql]
 ```
@@ -271,13 +274,47 @@ issue, pull, and comment create/update operations, with REST still used for
 name-based label/assignee/reviewer deltas and comment edits that require
 database-number mappings; pass `--rest` to force the older REST replay path.
 
-`gt github sync` performs a polling two-way API sync: optional Gitomi `gt sync`
-pull, GitHub import, GitHub export of local accepted events since the last sync,
-and optional Gitomi `gt sync` push. It defaults to `--graphql`, batching issue
+`gt github sync` performs a polling API sync: optional Gitomi `gt sync` pull,
+GitHub import, optional GitHub export of local accepted events since the last
+sync, and optional Gitomi publication. It defaults to `--graphql`, batching issue
 and pull pages with nested fields through GitHub's GraphQL API and using the
 GraphQL export path by default; pass `--rest` to use the older REST path. State
-and mappings live under `.git/gitomi/github/<owner>/<repo>/`; pass
-`--no-git-sync` to skip surrounding Git transport steps.
+and the private export map live under `.git/gitomi/github/<owner>/<repo>/`; pass
+`--no-git-sync` to skip surrounding Git transport steps, or `--import-only` to
+skip outbound GitHub writes. Before exporting, the exporter seeds that private
+map from shared Gitomi GitHub aliases so a replica that has pulled bridge
+aliases does not recreate already-exported issues or pull requests.
+
+For GitHub-to-Gitomi imports, all maintainers share one canonical bridge actor:
+`import-bot/github` by default, stored at
+`refs/gitomi/inbox/import-bot/github`. A maintainer running `gt github sync`
+first pulls remote Gitomi refs, then imports GitHub changes through that bot
+actor. Before any outbound GitHub export, sync publishes the maintainer's own
+inbox (including any new delegation grant) and then pushes the bot inbox
+fast-forward-only. If another maintainer published the same bridge inbox first,
+sync restores its local GitHub mapping file, abandons only the unpublished local
+bot commits, pulls the remote bot head, and retries the import. Use
+`gt github sync --import-only` when any maintainer should be able to refresh
+GitHub state into Gitomi without also performing outbound GitHub writes. When
+outbound sync creates a GitHub issue or pull request from a local Gitomi object,
+it records the GitHub number as an alias-only `issue.updated` or `pull.updated`
+event on the bridge inbox and pushes that alias before advancing export state.
+Later importers resolve the GitHub object to the original Gitomi object even if
+their private map file is empty.
+
+Do not solve bridge concurrency by creating a different Gitomi genesis per user.
+That creates separate trust roots and separate repositories. Also avoid one bot
+device per maintainer for the same GitHub project unless the GitHub source IDs
+are made globally unique in the reducer: concurrent imports on separate bot
+devices can otherwise create duplicate native Gitomi objects for the same
+GitHub issue, pull, or comment. The intended model is one shared genesis, one
+canonical bridge inbox per upstream project, and fast-forward/retry publication
+by any maintainer authorized for that bridge. Shared aliases prevent later
+duplicate issue and pull exports, but they are not a distributed lock for
+simultaneous outbound creates; two exporters can still race before either has
+published the alias, and comment export receipts remain local. Run
+Gitomi-to-GitHub export from one designated runner or serialize exporters
+externally when outbound writes are enabled.
 
 `gt github live` runs the normal local Gitomi workflow with a two-way GitHub
 bridge. It subscribes the current repository to a GitHub webhook through
@@ -293,6 +330,26 @@ outbound export pass to GraphQL; pass `--rest` to force REST export. Live
 webhook imports require `--secret-env` or `--secret-file` so GitHub deliveries
 are authenticated with `X-Hub-Signature-256`; use the same secret when
 configuring an existing hook with `--no-subscribe`.
+
+`gt gitlab import` reads GitLab issues and merge requests from the GitLab REST
+API, or a fixture JSON object with `issues`, `merge_requests`/`pulls`, and
+optional `notes`/`comments` fields. It writes signed import events through a
+delegated `import-bot/gitlab` actor. GitLab credentials come from
+`GITLAB_TOKEN`, `GL_TOKEN`, `--token-env`, or `--token-file`. Imported issue and
+merge request IIDs are stored as `legacy.gitlab_issue_iid` and
+`legacy.gitlab_merge_request_iid`, materialized as `gitlab` aliases, and can be
+used as `gl#123`, `gl:123`, `gitlab#123`, or `gitlab:123` references.
+
+`gt gitlab export` replays accepted Gitomi issue, pull, and comment transitions
+through the GitLab REST API and stores UUID-to-IID mappings in
+`.git/gitomi/gitlab/<project>/map.jsonl`. `--reuse-legacy` maps previously
+imported GitLab objects instead of recreating them.
+
+`gt gitlab sync` performs a two-way API sync: optional Gitomi `gt sync` pull,
+GitLab import, GitLab export of local accepted events since the last sync, and
+optional Gitomi `gt sync` push. State and mappings live under
+`.git/gitomi/gitlab/<project>/`; set `--interval-ms N` to poll continuously or
+`--no-git-sync` to skip the surrounding Git transport steps.
 
 `gt web` starts a local-only GitHub-like web UI for the current repository. It
 binds to loopback on port 12655 by default, retrying nearby random ports if that

@@ -1,0 +1,300 @@
+.markdown-body {
+  font-size: 15px;
+  line-height: 1.65;
+}
+.markdown-body > :first-child {
+  margin-top: 0;
+}
+.markdown-body > :last-child {
+  margin-bottom: 0;
+}
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  margin: 24px 0 12px;
+  line-height: 1.25;
+}
+.markdown-body h1,
+.markdown-body h2 {
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.markdown-body hr {
+  height: 1px;
+  margin: 24px 0;
+  background: var(--border);
+  border: 0;
+}
+.markdown-body h1 { font-size: 28px; }
+.markdown-body h2 { font-size: 22px; }
+.markdown-body h3 { font-size: 18px; }
+.markdown-body p,
+.markdown-body ul,
+.markdown-body ol,
+.markdown-body blockquote,
+.markdown-body pre,
+.markdown-codeblock,
+.markdown-body .markdown-media,
+.markdown-table-wrap,
+.math-block,
+.mermaid-diagram {
+  margin: 0 0 16px;
+}
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 28px;
+}
+.markdown-body .task-list-item {
+  list-style: none;
+}
+.markdown-body .task-list-item[draggable="true"] {
+  position: relative;
+  border-radius: var(--radius-md);
+  cursor: grab;
+}
+.markdown-body .task-list-item[draggable="true"]:active {
+  cursor: grabbing;
+}
+.markdown-body .task-list-item.is-dragging {
+  opacity: 0.55;
+}
+.markdown-body .task-list-item.is-drop-before {
+  box-shadow: inset 0 2px 0 var(--blue);
+}
+.markdown-body .task-list-item.is-drop-after {
+  box-shadow: inset 0 -2px 0 var(--blue);
+}
+.markdown-body .task-list-checkbox {
+  width: 1em;
+  height: 1em;
+  margin: 0 0.45em 0 0;
+  vertical-align: -0.12em;
+  accent-color: var(--green);
+}
+.markdown-body[data-checklist-update-action] .task-list-checkbox:not(:disabled) {
+  cursor: pointer;
+}
+.markdown-body.markdown-checklist-saving .task-list-checkbox {
+  cursor: progress;
+}
+.markdown-body li + li {
+  margin-top: 4px;
+}
+.markdown-body blockquote {
+  padding: 0 16px;
+  color: var(--muted);
+  border-left: 4px solid var(--border);
+}
+.markdown-body pre {
+  padding: 12px;
+  overflow-x: auto;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.markdown-codeblock {
+  position: relative;
+}
+.markdown-body .markdown-codeblock pre {
+  margin: 0;
+  padding-right: 48px;
+}
+.markdown-copy-button {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  color: var(--text);
+  background: var(--button-secondary-bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-subtle);
+  cursor: pointer;
+}
+.markdown-copy-button:hover {
+  background: var(--panel);
+}
+.markdown-copy-button:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+.markdown-body pre code {
+  display: block;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  font: 13px/1.55 var(--mono);
+  white-space: pre;
+}
+.markdown-body code {
+  color: var(--text);
+}
+.markdown-body .markdown-media {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.markdown-body video.markdown-media {
+  width: min(100%, 920px);
+  max-height: 72vh;
+}
+.markdown-table-wrap {
+  overflow: auto;
+  border-radius: var(--radius-md);
+}
+.markdown-table {
+  --markdown-table-row-odd: var(--panel);
+  --markdown-table-row-even: var(--code-bg);
+  --markdown-table-row-highlight: var(--table-row-highlight);
+  width: max-content;
+  min-width: min(100%, 520px);
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 14px;
+}
+.markdown-table th,
+.markdown-table td {
+  padding: 6px 10px;
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-left: 1px solid var(--border);
+  background: var(--markdown-table-row-odd);
+  text-align: left;
+  vertical-align: top;
+}
+.markdown-table tr > :last-child {
+  border-right: 1px solid var(--border);
+}
+.markdown-table tr:last-child > * {
+  border-bottom: 1px solid var(--border);
+}
+.markdown-table tr:first-child {
+  background: var(--markdown-table-head-bg);
+}
+.markdown-table th {
+  background: transparent;
+  font-weight: 700;
+}
+.markdown-table tr:nth-child(even) td {
+  background: var(--markdown-table-row-even);
+}
+.markdown-table tr:hover td {
+  background: var(--markdown-table-row-highlight);
+}
+.markdown-table tr:first-child > :first-child {
+  border-top-left-radius: 6px;
+}
+.markdown-table tr:first-child > :last-child {
+  border-top-right-radius: 6px;
+}
+.markdown-table tr:last-child > :first-child {
+  border-bottom-left-radius: 6px;
+}
+.markdown-table tr:last-child > :last-child {
+  border-bottom-right-radius: 6px;
+}
+.math-inline,
+.math-block {
+  font-family: "Cambria Math", "STIX Two Math", "Times New Roman", serif;
+}
+.markdown-body .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 2px;
+}
+.math-inline {
+  padding: 0 2px;
+  color: var(--text);
+  white-space: nowrap;
+}
+.math-block {
+  overflow-x: auto;
+  padding: 12px 14px;
+  color: var(--text);
+  background: var(--subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 18px;
+  text-align: center;
+}
+.math-frac {
+  display: inline-grid;
+  grid-template-rows: auto auto;
+  align-items: center;
+  margin: 0 2px;
+  vertical-align: middle;
+}
+.math-frac span {
+  min-width: 18px;
+  padding: 0 4px;
+  text-align: center;
+}
+.math-frac span:first-child {
+  border-bottom: 1px solid currentColor;
+}
+.math-sqrt::before {
+  content: "\221A";
+  margin-right: 2px;
+}
+.math-sqrt {
+  display: inline-block;
+  padding: 0 4px 0 2px;
+  border-top: 1px solid currentColor;
+}
+.mermaid-source {
+  color: var(--muted);
+}
+.mermaid-diagram {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  padding: 12px;
+  overflow: visible;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.mermaid-diagram svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+.mermaid-edge {
+  stroke: var(--muted);
+  stroke-width: 1.7;
+}
+.mermaid-edge.dashed {
+  stroke-dasharray: 5 4;
+}
+.mermaid-arrow {
+  fill: var(--muted);
+}
+.mermaid-node {
+  fill: var(--panel-strong);
+  stroke: var(--border-strong);
+  stroke-width: 1.2;
+}
+.mermaid-label {
+  fill: var(--text);
+  font: 700 13px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+.mermaid-edge-label {
+  fill: var(--muted);
+  font: 700 11px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  paint-order: stroke;
+  stroke: var(--panel);
+  stroke-width: 4px;
+}

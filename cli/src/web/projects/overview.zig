@@ -20,6 +20,7 @@ const appendTemplate = shared.appendTemplate;
 const isIssuePriority = cmd_common.isIssuePriority;
 const sendPlainResponse = shared.sendPlainResponse;
 const sendRedirect = shared.sendRedirect;
+const percentDecodeForm = issues_page.percentDecodeForm;
 
 pub const ProjectPageTab = enum {
     overview,
@@ -70,6 +71,20 @@ const ProjectMetrics = struct {
     view_count: usize = 0,
 };
 
+const ProjectUpdateNote = struct {
+    body: []u8,
+    status: []u8,
+    occurred_at: []u8,
+    actor: []u8,
+
+    fn deinit(self: *ProjectUpdateNote, allocator: Allocator) void {
+        allocator.free(self.body);
+        allocator.free(self.status);
+        allocator.free(self.occurred_at);
+        allocator.free(self.actor);
+    }
+};
+
 pub fn appendProjectOverview(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -81,6 +96,8 @@ pub fn appendProjectOverview(
     var summary = try loadProjectSummary(allocator, db, project);
     defer summary.deinit(allocator);
     const metrics = try loadProjectMetrics(allocator, db, &summary);
+    var update_note = try loadLatestProjectUpdateNote(allocator, db, &summary);
+    defer update_note.deinit(allocator);
 
     try buf.appendSlice(allocator, "<section class=\"panel project-overview-page\">");
     try appendProjectOverviewHeader(buf, allocator, &summary, &metrics);
@@ -89,14 +106,14 @@ pub fn appendProjectOverview(
         \\<div class="project-overview-layout">
         \\  <div class="project-overview-main">
     );
+    try appendProjectUpdateSection(buf, allocator, &summary, &update_note);
     try appendProjectDescription(buf, allocator, &summary);
-    try appendProjectMilestones(buf, allocator, db, project, &metrics, .main);
     try buf.appendSlice(allocator,
         \\  </div>
         \\  <aside class="project-overview-sidebar">
     );
     try appendProjectPropertiesPanel(buf, allocator, db, &summary, &metrics);
-    try appendProjectMilestones(buf, allocator, db, project, &metrics, .sidebar);
+    try appendProjectMilestones(buf, allocator, db, &summary, &metrics, .sidebar);
     try appendProjectActivityPanel(buf, allocator, db, &summary, project);
     try buf.appendSlice(allocator,
         \\  </aside>
@@ -130,7 +147,7 @@ pub fn appendProjectActivityView(
         \\  <aside class="project-overview-sidebar">
     );
     try appendProjectPropertiesPanel(buf, allocator, db, &summary, &metrics);
-    try appendProjectMilestones(buf, allocator, db, project, &metrics, .sidebar);
+    try appendProjectMilestones(buf, allocator, db, &summary, &metrics, .sidebar);
     try buf.appendSlice(allocator,
         \\  </aside>
         \\</div>
@@ -165,7 +182,63 @@ pub fn handleProjectPropertiesPost(allocator: Allocator, repo: Repo, stream: std
     };
     defer allocator.free(project_id);
 
-    if (std.mem.eql(u8, action_owned, "set-status")) {
+    if (std.mem.eql(u8, action_owned, "save-description")) {
+        const description_owned = (try formValueOwned(allocator, form_body, "description")) orelse try allocator.dupe(u8, "");
+        defer allocator.free(description_owned);
+        if (!(try writeProjectUpdateOrFail(allocator, stream, project_id, .{ .description = description_owned }))) return;
+    } else if (std.mem.eql(u8, action_owned, "add-update")) {
+        const status_owned = try requiredProjectFormValue(allocator, stream, form_body, "status", "Status is required\n");
+        const status = status_owned orelse return;
+        defer allocator.free(status);
+        if (!project_views.isProjectStatusValue(status)) {
+            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Status must be Draft, Todo, WIP, Review, Done, or Failed\n");
+            return;
+        }
+        const body_owned = (try formValueOwned(allocator, form_body, "update_body")) orelse try allocator.dupe(u8, "");
+        defer allocator.free(body_owned);
+        const trimmed_body = std.mem.trim(u8, body_owned, " \t\r\n");
+        const update_body: ?[]const u8 = if (trimmed_body.len == 0) null else body_owned;
+        if (!(try writeProjectUpdateOrFail(allocator, stream, project_id, .{ .status = status, .update_body = update_body }))) return;
+    } else if (std.mem.eql(u8, action_owned, "add-milestones")) {
+        var milestone_refs = try formValuesOwned(allocator, form_body, "milestone");
+        defer freeStringList(allocator, &milestone_refs);
+        if (milestone_refs.items.len == 0) {
+            const location = try projectOverviewLocationOwned(allocator, project_name_owned, project_ref);
+            defer allocator.free(location);
+            try sendRedirect(allocator, stream, location);
+            return;
+        }
+        var milestone_ids: std.ArrayList([]const u8) = .empty;
+        defer freeConstStringList(allocator, &milestone_ids);
+        for (milestone_refs.items) |raw_milestone_ref| {
+            const milestone_ref = std.mem.trim(u8, raw_milestone_ref, " \t\r\n");
+            if (milestone_ref.len == 0) continue;
+            const milestone_id = index.resolveMilestoneId(allocator, repo, milestone_ref) catch {
+                try sendPlainResponse(allocator, stream, 404, "Not Found", "Milestone not found\n");
+                return;
+            };
+            errdefer allocator.free(milestone_id);
+            if (containsConstString(milestone_ids.items, milestone_id)) {
+                allocator.free(milestone_id);
+                continue;
+            }
+            try milestone_ids.append(allocator, milestone_id);
+        }
+        if (milestone_ids.items.len != 0) {
+            if (!(try writeProjectUpdateOrFail(allocator, stream, project_id, .{ .milestones_added = milestone_ids.items }))) return;
+        }
+    } else if (std.mem.eql(u8, action_owned, "remove-milestone")) {
+        const value_owned = try requiredProjectFormValue(allocator, stream, form_body, "value", "Milestone is required\n");
+        const value = value_owned orelse return;
+        defer allocator.free(value);
+        const milestone_id = index.resolveMilestoneId(allocator, repo, value) catch {
+            try sendPlainResponse(allocator, stream, 404, "Not Found", "Milestone not found\n");
+            return;
+        };
+        defer allocator.free(milestone_id);
+        const values = [_][]const u8{milestone_id};
+        if (!(try writeProjectUpdateOrFail(allocator, stream, project_id, .{ .milestones_removed = values[0..] }))) return;
+    } else if (std.mem.eql(u8, action_owned, "set-status")) {
         const status_owned = try requiredProjectFormValue(allocator, stream, form_body, "status", "Status is required\n");
         const status = status_owned orelse return;
         defer allocator.free(status);
@@ -249,6 +322,42 @@ fn formTrimmedOwned(allocator: Allocator, form_body: []const u8, wanted_key: []c
     defer allocator.free(owned);
     const trimmed = std.mem.trim(u8, owned, " \t\r\n");
     return try allocator.dupe(u8, trimmed);
+}
+
+fn formValuesOwned(allocator: Allocator, body: []const u8, wanted_key: []const u8) !std.ArrayList([]u8) {
+    var values: std.ArrayList([]u8) = .empty;
+    errdefer freeStringList(allocator, &values);
+
+    var pairs = std.mem.splitScalar(u8, body, '&');
+    while (pairs.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
+        const raw_key = pair[0..eq];
+        const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
+        const key = try percentDecodeForm(allocator, raw_key);
+        defer allocator.free(key);
+        if (!std.mem.eql(u8, key, wanted_key)) continue;
+        const value = try percentDecodeForm(allocator, raw_value);
+        errdefer allocator.free(value);
+        try values.append(allocator, value);
+    }
+    return values;
+}
+
+fn freeStringList(allocator: Allocator, values: *std.ArrayList([]u8)) void {
+    for (values.items) |value| allocator.free(value);
+    values.deinit(allocator);
+}
+
+fn freeConstStringList(allocator: Allocator, values: *std.ArrayList([]const u8)) void {
+    for (values.items) |value| allocator.free(value);
+    values.deinit(allocator);
+}
+
+fn containsConstString(values: []const []const u8, needle: []const u8) bool {
+    for (values) |value| {
+        if (std.mem.eql(u8, value, needle)) return true;
+    }
+    return false;
 }
 
 fn requiredProjectFormValue(allocator: Allocator, stream: std.net.Stream, form_body: []const u8, name: []const u8, message: []const u8) !?[]u8 {
@@ -340,7 +449,7 @@ fn loadProjectMetrics(allocator: Allocator, db: *SqliteDb, summary: *const Proje
     _ = allocator;
     var metrics = ProjectMetrics{};
     try loadProjectIssueCounts(db, summary.name, &metrics);
-    try loadProjectMilestoneCounts(db, summary.name, &metrics);
+    try loadProjectMilestoneCounts(db, summary.id, &metrics);
     try loadProjectPropertyCounts(db, summary.id, &metrics);
     if (summary.id.len != 0) {
         metrics.field_count = try countProjectRows(db, "project_fields", summary.id, "state != 'removed'");
@@ -384,27 +493,78 @@ fn loadProjectIssueCounts(db: *SqliteDb, project: []const u8, metrics: *ProjectM
     metrics.comment_count = @intCast(stmt.columnInt64(3));
 }
 
-fn loadProjectMilestoneCounts(db: *SqliteDb, project: []const u8, metrics: *ProjectMetrics) !void {
-    var stmt = try db.prepare(projectItemsCte(
-        \\,
-        \\project_milestones AS (
-        \\  SELECT lower(im.milestone) AS milestone_key,
-        \\         COUNT(DISTINCT i.id) AS issue_count,
-        \\         COUNT(DISTINCT CASE WHEN i.state = 'closed' THEN i.id END) AS closed_count
-        \\  FROM project_items p
-        \\  JOIN issues i ON i.id = p.issue_id
-        \\  JOIN issue_metadata im ON im.issue_id = i.id AND im.milestone <> ''
-        \\  GROUP BY lower(im.milestone)
-        \\)
-        \\SELECT COUNT(*),
-        \\       COUNT(CASE WHEN issue_count > 0 AND closed_count >= issue_count THEN 1 END)
-        \\FROM project_milestones
-    ));
+fn loadProjectMilestoneCounts(db: *SqliteDb, project_id: []const u8, metrics: *ProjectMetrics) !void {
+    if (project_id.len == 0) return;
+    var stmt = try db.prepare(
+        \\SELECT COUNT(DISTINCT pm.milestone_id),
+        \\       COUNT(DISTINCT CASE WHEN m.state = 'closed' THEN pm.milestone_id END)
+        \\FROM project_milestones pm
+        \\JOIN milestones m ON m.id = pm.milestone_id
+        \\WHERE pm.project_id = ?
+    );
     defer stmt.deinit();
-    try bindProjectNameTwice(&stmt, project);
+    try stmt.bindText(1, project_id);
     if (!(try stmt.step())) return;
     metrics.milestone_count = @intCast(stmt.columnInt64(0));
     metrics.closed_milestone_count = @intCast(stmt.columnInt64(1));
+}
+
+fn loadLatestProjectUpdateNote(allocator: Allocator, db: *SqliteDb, summary: *const ProjectSummary) !ProjectUpdateNote {
+    if (summary.id.len == 0) return emptyProjectUpdateNote(allocator);
+
+    var stmt = try db.prepare(
+        \\SELECT body, actor_principal, occurred_at
+        \\FROM events
+        \\WHERE valid_json != 0
+        \\  AND domain_status = 'accepted'
+        \\  AND event_type = 'project.updated'
+        \\  AND object_kind = 'project'
+        \\  AND object_id = ?
+        \\ORDER BY ordinal DESC
+        \\LIMIT 25
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, summary.id);
+
+    while (try stmt.step()) {
+        const body = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(body);
+        const actor = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(actor);
+        const occurred_at = try stmt.columnTextDup(allocator, 2);
+        defer allocator.free(occurred_at);
+
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch continue;
+        defer parsed.deinit();
+        const root = switch (parsed.value) {
+            .object => |object| object,
+            else => continue,
+        };
+        const payload = switch (root.get("payload") orelse continue) {
+            .object => |object| object,
+            else => continue,
+        };
+        const update_body = event_mod.jsonString(payload.get("update_body"));
+        const status = event_mod.jsonString(payload.get("status"));
+        if (update_body == null and status == null) continue;
+        return .{
+            .body = try allocator.dupe(u8, update_body orelse ""),
+            .status = try allocator.dupe(u8, status orelse ""),
+            .occurred_at = try allocator.dupe(u8, occurred_at),
+            .actor = try allocator.dupe(u8, actor),
+        };
+    }
+
+    return emptyProjectUpdateNote(allocator);
+}
+
+fn emptyProjectUpdateNote(allocator: Allocator) !ProjectUpdateNote {
+    return .{
+        .body = try allocator.dupe(u8, ""),
+        .status = try allocator.dupe(u8, ""),
+        .occurred_at = try allocator.dupe(u8, ""),
+        .actor = try allocator.dupe(u8, ""),
+    };
 }
 
 fn loadProjectPropertyCounts(db: *SqliteDb, project_id: []const u8, metrics: *ProjectMetrics) !void {
@@ -437,9 +597,7 @@ fn appendProjectOverviewHeader(buf: *std.ArrayList(u8), allocator: Allocator, su
         \\      <p class="eyebrow">Project</p>
         \\      <h1>{project}</h1>
     , .{ .project = summary.name });
-    if (summary.description.len == 0) {
-        try buf.appendSlice(allocator, "<p class=\"muted\">Add a short summary...</p>");
-    } else {
+    if (summary.description.len != 0) {
         try appendTemplate(buf, allocator, "<p>{description}</p>", .{ .description = summary.description });
     }
     try appendTemplate(buf, allocator,
@@ -685,23 +843,79 @@ fn appendProjectResourceLink(
     });
 }
 
-fn appendProjectUpdateBox(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+fn appendProjectUpdateSection(buf: *std.ArrayList(u8), allocator: Allocator, summary: *const ProjectSummary, note: *const ProjectUpdateNote) !void {
+    const effective_status = if (note.status.len != 0) note.status else summary.status;
     try buf.appendSlice(allocator,
-        \\<section class="project-overview-update-box" aria-label="Project updates">
-        \\  <span class="button-icon icon-history" aria-hidden="true"></span>
-        \\  <span>No project updates yet</span>
+        \\<section class="project-overview-section project-markdown-section project-update-section">
+        \\  <div class="project-overview-section-title"><h2>Update</h2></div>
+        \\  <details class="project-markdown-edit">
+        \\    <summary class="button secondary">Edit update</summary>
+        \\    <form class="project-markdown-form" method="post" action="/projects/properties">
+    );
+    try appendProjectHiddenFields(buf, allocator, summary);
+    try buf.appendSlice(allocator,
+        \\      <input type="hidden" name="action" value="add-update">
+        \\      <label class="project-update-status-field">Status
+    );
+    try appendProjectStatusSelect(buf, allocator, effective_status);
+    try buf.appendSlice(allocator, "</label>");
+    try shared.appendMarkdownEditor(buf, allocator, .{
+        .name = "update_body",
+        .rows = 6,
+        .placeholder = "Write a project update",
+        .value = note.body,
+        .required = false,
+    });
+    try buf.appendSlice(allocator,
+        \\      <div class="project-markdown-actions"><button type="submit">Save update</button></div>
+        \\    </form>
+        \\  </details>
+        \\  <div class="project-markdown-preview markdown-body">
+        \\    <div class="project-update-status-line">
+    );
+    try appendProjectStatusChip(buf, allocator, effective_status);
+    if (note.occurred_at.len != 0) {
+        try appendTemplate(buf, allocator, "<span>Updated by {actor} · ", .{ .actor = if (note.actor.len == 0) "Unknown" else note.actor });
+        try appendRelativeTime(buf, allocator, note.occurred_at);
+        try buf.appendSlice(allocator, "</span>");
+    }
+    try buf.appendSlice(allocator, "</div>");
+    if (note.body.len == 0) {
+        try buf.appendSlice(allocator, "<p class=\"project-markdown-empty\">No update yet.</p>");
+    } else {
+        try shared.appendMarkdownSource(buf, allocator, note.body, .{});
+    }
+    try buf.appendSlice(allocator,
+        \\  </div>
         \\</section>
     );
 }
 
 fn appendProjectDescription(buf: *std.ArrayList(u8), allocator: Allocator, summary: *const ProjectSummary) !void {
     try buf.appendSlice(allocator,
-        \\<section class="project-overview-section">
-        \\  <h2>Description</h2>
-        \\  <div class="project-overview-description markdown-body">
+        \\<section class="project-overview-section project-markdown-section">
+        \\  <div class="project-overview-section-title"><h2>Description</h2></div>
+        \\  <details class="project-markdown-edit">
+        \\    <summary class="button secondary">Edit description</summary>
+        \\    <form class="project-markdown-form" method="post" action="/projects/properties">
+    );
+    try appendProjectHiddenFields(buf, allocator, summary);
+    try buf.appendSlice(allocator, "<input type=\"hidden\" name=\"action\" value=\"save-description\">");
+    try shared.appendMarkdownEditor(buf, allocator, .{
+        .name = "description",
+        .rows = 8,
+        .placeholder = "Write a project description",
+        .value = summary.description,
+        .required = false,
+    });
+    try buf.appendSlice(allocator,
+        \\      <div class="project-markdown-actions"><button type="submit">Save description</button></div>
+        \\    </form>
+        \\  </details>
+        \\  <div class="project-overview-description project-markdown-preview markdown-body">
     );
     if (summary.description.len == 0) {
-        try buf.appendSlice(allocator, "<p class=\"muted\">Add description...</p>");
+        try buf.appendSlice(allocator, "<p class=\"project-markdown-empty\">No description yet.</p>");
     } else {
         try shared.appendMarkdownSource(buf, allocator, summary.description, .{});
     }
@@ -709,6 +923,16 @@ fn appendProjectDescription(buf: *std.ArrayList(u8), allocator: Allocator, summa
         \\  </div>
         \\</section>
     );
+}
+
+fn appendProjectStatusSelect(buf: *std.ArrayList(u8), allocator: Allocator, selected_status: []const u8) !void {
+    try buf.appendSlice(allocator, "<select name=\"status\" required>");
+    for (project_views.project_status_values) |status| {
+        try appendTemplate(buf, allocator, "<option value=\"{status}\"", .{ .status = status });
+        if (std.mem.eql(u8, selected_status, status)) try buf.appendSlice(allocator, " selected");
+        try appendTemplate(buf, allocator, ">{label}</option>", .{ .label = statusLabel(status) });
+    }
+    try buf.appendSlice(allocator, "</select>");
 }
 
 const MilestonePlacement = enum {
@@ -720,7 +944,7 @@ fn appendProjectMilestones(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
     db: *SqliteDb,
-    project: []const u8,
+    summary: *const ProjectSummary,
     metrics: *const ProjectMetrics,
     placement: MilestonePlacement,
 ) !void {
@@ -746,7 +970,7 @@ fn appendProjectMilestones(
             \\</span></div>
         ),
     }
-    try appendProjectMilestoneAddLink(buf, allocator);
+    try appendProjectMilestonePicker(buf, allocator, db, summary);
     switch (placement) {
         .main => try buf.appendSlice(allocator,
             \\  </div>
@@ -758,27 +982,37 @@ fn appendProjectMilestones(
         ),
     }
 
+    if (summary.id.len == 0) {
+        try buf.appendSlice(allocator, "<p class=\"project-overview-empty\">No milestones assigned.</p></div></section>");
+        return;
+    }
+
     var stmt = try db.prepare(projectItemsCte(
         \\SELECT
-        \\  im.milestone,
+        \\  m.title,
         \\  COUNT(DISTINCT i.id),
         \\  COUNT(DISTINCT CASE WHEN i.state = 'closed' THEN i.id END),
-        \\  COALESCE(MIN(NULLIF(m.due_at, '')), ''),
-        \\  COALESCE(MIN(m.id), '')
-        \\FROM project_items p
-        \\JOIN issues i ON i.id = p.issue_id
-        \\JOIN issue_metadata im ON im.issue_id = i.id AND im.milestone <> ''
-        \\LEFT JOIN milestones m ON lower(m.title) = lower(im.milestone)
-        \\GROUP BY lower(im.milestone), im.milestone
+        \\  COALESCE(NULLIF(m.due_at, ''), ''),
+        \\  m.id,
+        \\  m.state
+        \\FROM project_milestones pm
+        \\JOIN milestones m ON m.id = pm.milestone_id
+        \\LEFT JOIN issue_metadata im ON lower(im.milestone) = lower(m.title)
+        \\LEFT JOIN project_items p ON p.issue_id = im.issue_id
+        \\LEFT JOIN issues i ON i.id = p.issue_id
+        \\WHERE pm.project_id = ?
+        \\GROUP BY m.id, m.title, m.state, m.due_at
         \\ORDER BY
-        \\  CASE WHEN COALESCE(MIN(NULLIF(m.due_at, '')), '') = '' THEN 1 ELSE 0 END,
-        \\  COALESCE(MIN(NULLIF(m.due_at, '')), ''),
-        \\  lower(im.milestone),
-        \\  im.milestone
+        \\  CASE WHEN m.state = 'closed' THEN 1 ELSE 0 END,
+        \\  CASE WHEN COALESCE(NULLIF(m.due_at, ''), '') = '' THEN 1 ELSE 0 END,
+        \\  COALESCE(NULLIF(m.due_at, ''), ''),
+        \\  lower(m.title),
+        \\  m.title
         \\LIMIT 6
     ));
     defer stmt.deinit();
-    try bindProjectNameTwice(&stmt, project);
+    try bindProjectNameTwice(&stmt, summary.name);
+    try stmt.bindText(3, summary.id);
 
     var shown: usize = 0;
     while (try stmt.step()) {
@@ -790,7 +1024,9 @@ fn appendProjectMilestones(
         defer allocator.free(due_at);
         const milestone_id = try stmt.columnTextDup(allocator, 4);
         defer allocator.free(milestone_id);
-        try appendProjectMilestoneRow(buf, allocator, title, milestone_id, total, closed, due_at, placement);
+        const state = try stmt.columnTextDup(allocator, 5);
+        defer allocator.free(state);
+        try appendProjectMilestoneRow(buf, allocator, title, milestone_id, state, total, closed, due_at, placement);
         shown += 1;
     }
     if (shown == 0) {
@@ -799,10 +1035,138 @@ fn appendProjectMilestones(
     try buf.appendSlice(allocator, "</div></section>");
 }
 
-fn appendProjectMilestoneAddLink(buf: *std.ArrayList(u8), allocator: Allocator) !void {
+fn appendProjectMilestonePicker(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, summary: *const ProjectSummary) !void {
     try buf.appendSlice(allocator,
-        \\<a class="project-overview-add" href="/new-milestone" aria-label="New milestone" title="New milestone"><span class="project-add-icon" aria-hidden="true"></span></a>
+        \\<details class="project-milestone-picker" data-popover-menu data-issue-sidebar-menu>
+        \\  <summary class="project-overview-add" aria-label="Add milestones" title="Add milestones"><span class="project-add-icon" aria-hidden="true"></span></summary>
+        \\  <div class="issue-sidebar-popover project-milestone-popover" role="dialog" aria-label="Add milestones">
+        \\    <div class="issue-sidebar-popover-title">Add milestones</div>
+        \\    <label class="issue-sidebar-menu-input issue-sidebar-menu-filter"><span aria-hidden="true"></span><input placeholder="Filter milestones" aria-label="Filter milestones" autocomplete="off" data-issue-sidebar-filter></label>
     );
+    try appendProjectMilestoneSelectedGroup(buf, allocator, db, summary);
+    try appendProjectMilestoneCandidateForm(buf, allocator, db, summary);
+    try buf.appendSlice(allocator, "</div></details>");
+}
+
+fn appendProjectMilestoneSelectedGroup(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, summary: *const ProjectSummary) !void {
+    try appendProjectMenuGroupStart(buf, allocator, "Selected milestones");
+    if (summary.id.len == 0) {
+        try appendProjectMenuEmpty(buf, allocator, "No milestones selected.");
+        try appendProjectMenuGroupEnd(buf, allocator);
+        return;
+    }
+
+    var selected = try db.prepare(
+        \\SELECT m.id, m.title, m.state
+        \\FROM project_milestones pm
+        \\JOIN milestones m ON m.id = pm.milestone_id
+        \\WHERE pm.project_id = ?
+        \\ORDER BY
+        \\  CASE WHEN m.state = 'closed' THEN 1 ELSE 0 END,
+        \\  lower(m.title),
+        \\  m.title
+    );
+    defer selected.deinit();
+    try selected.bindText(1, summary.id);
+    var shown = false;
+    while (try selected.step()) {
+        const milestone_id = try selected.columnTextDup(allocator, 0);
+        defer allocator.free(milestone_id);
+        const title = try selected.columnTextDup(allocator, 1);
+        defer allocator.free(title);
+        const state = try selected.columnTextDup(allocator, 2);
+        defer allocator.free(state);
+        try appendProjectMilestoneRemoveRow(buf, allocator, summary, milestone_id, title, state);
+        shown = true;
+    }
+    if (!shown) try appendProjectMenuEmpty(buf, allocator, "No milestones selected.");
+    try appendProjectMenuGroupEnd(buf, allocator);
+}
+
+fn appendProjectMilestoneCandidateForm(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, summary: *const ProjectSummary) !void {
+    try buf.appendSlice(allocator, "<form class=\"project-milestone-check-form\" method=\"post\" action=\"/projects/properties\">");
+    try appendProjectHiddenFields(buf, allocator, summary);
+    try buf.appendSlice(allocator, "<input type=\"hidden\" name=\"action\" value=\"add-milestones\">");
+    try appendProjectMenuGroupStart(buf, allocator, "Milestones");
+
+    var candidates = try db.prepare(
+        \\SELECT id, title, state, COALESCE(NULLIF(due_at, ''), '')
+        \\FROM milestones
+        \\WHERE id NOT IN (SELECT milestone_id FROM project_milestones WHERE project_id = ?)
+        \\ORDER BY
+        \\  CASE WHEN state = 'closed' THEN 1 ELSE 0 END,
+        \\  CASE WHEN COALESCE(NULLIF(due_at, ''), '') = '' THEN 1 ELSE 0 END,
+        \\  COALESCE(NULLIF(due_at, ''), ''),
+        \\  lower(title),
+        \\  title
+        \\LIMIT 50
+    );
+    defer candidates.deinit();
+    try candidates.bindText(1, summary.id);
+    var shown = false;
+    while (try candidates.step()) {
+        const milestone_id = try candidates.columnTextDup(allocator, 0);
+        defer allocator.free(milestone_id);
+        const title = try candidates.columnTextDup(allocator, 1);
+        defer allocator.free(title);
+        const state = try candidates.columnTextDup(allocator, 2);
+        defer allocator.free(state);
+        const due_at = try candidates.columnTextDup(allocator, 3);
+        defer allocator.free(due_at);
+        try appendProjectMilestoneCheckRow(buf, allocator, milestone_id, title, state, due_at);
+        shown = true;
+    }
+    if (!shown) try appendProjectMenuEmpty(buf, allocator, "No available milestones.");
+    try appendProjectMenuGroupEnd(buf, allocator);
+    if (shown) {
+        try buf.appendSlice(allocator, "<div class=\"project-milestone-check-actions\"><button type=\"submit\">Add selected</button></div>");
+    }
+    try buf.appendSlice(allocator, "</form>");
+}
+
+fn appendProjectMilestoneRemoveRow(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    summary: *const ProjectSummary,
+    milestone_id: []const u8,
+    title: []const u8,
+    state: []const u8,
+) !void {
+    try buf.appendSlice(allocator, "<form class=\"issue-sidebar-picker-form\" method=\"post\" action=\"/projects/properties\">");
+    try appendProjectHiddenFields(buf, allocator, summary);
+    try appendTemplate(buf, allocator,
+        \\<input type="hidden" name="action" value="remove-milestone"><input type="hidden" name="value" value="{milestone_id}"><button class="issue-sidebar-picker-row is-selected project-milestone-picker-row" type="submit" data-sidebar-filter-text="{title} {state}"><span class="issue-sidebar-picker-check" aria-hidden="true"></span><span class="button-icon icon-milestones" aria-hidden="true"></span><span class="issue-sidebar-picker-primary">{title}</span><span class="issue-sidebar-picker-secondary">{state}</span></button></form>
+    , .{
+        .milestone_id = milestone_id,
+        .title = title,
+        .state = milestoneStateLabel(state),
+    });
+}
+
+fn appendProjectMilestoneCheckRow(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    milestone_id: []const u8,
+    title: []const u8,
+    state: []const u8,
+    due_at: []const u8,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<label class="project-milestone-check-row" data-sidebar-filter-text="{title} {state}">
+        \\  <input type="checkbox" name="milestone" value="{milestone_id}">
+        \\  <span class="button-icon icon-milestones" aria-hidden="true"></span>
+        \\  <span class="project-milestone-check-text"><strong>{title}</strong><span>{state}
+    , .{
+        .milestone_id = milestone_id,
+        .title = title,
+        .state = milestoneStateLabel(state),
+    });
+    if (due_at.len != 0) {
+        const due_label = try dateLabelOwned(allocator, due_at);
+        defer allocator.free(due_label);
+        try appendTemplate(buf, allocator, " · {due_label}", .{ .due_label = due_label });
+    }
+    try buf.appendSlice(allocator, "</span></span></label>");
 }
 
 fn appendProjectMilestoneRow(
@@ -810,13 +1174,14 @@ fn appendProjectMilestoneRow(
     allocator: Allocator,
     title: []const u8,
     milestone_id: []const u8,
+    state: []const u8,
     total: usize,
     closed: usize,
     due_at: []const u8,
     placement: MilestonePlacement,
 ) !void {
     const progress = if (total == 0) 0 else (closed * 100) / total;
-    const complete = total != 0 and closed >= total;
+    const complete = std.mem.eql(u8, state, "closed");
     try appendTemplate(buf, allocator,
         \\<article class="{classes}">
         \\  <span class="button-icon icon-milestones" aria-hidden="true"></span>
@@ -1443,6 +1808,12 @@ fn projectStateTone(state: []const u8) []const u8 {
     if (std.mem.eql(u8, state, "closed")) return "done";
     if (std.mem.eql(u8, state, "open")) return "progress";
     return "neutral";
+}
+
+fn milestoneStateLabel(state: []const u8) []const u8 {
+    if (std.mem.eql(u8, state, "closed")) return "Closed";
+    if (std.mem.eql(u8, state, "open")) return "Open";
+    return if (state.len == 0) "Open" else state;
 }
 
 fn statusLabel(status: []const u8) []const u8 {

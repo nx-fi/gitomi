@@ -227,6 +227,16 @@ pub fn createIndexSchema(db: *SqliteDb) !void {
         \\  PRIMARY KEY(project_id, label, add_hash)
         \\);
         \\CREATE INDEX project_labels_project_idx ON project_labels(project_id, label);
+        \\CREATE TABLE project_milestones (
+        \\  project_id TEXT NOT NULL,
+        \\  milestone_id TEXT NOT NULL,
+        \\  add_hash TEXT NOT NULL,
+        \\  created_at TEXT NOT NULL,
+        \\  actor_principal TEXT NOT NULL,
+        \\  PRIMARY KEY(project_id, milestone_id, add_hash)
+        \\);
+        \\CREATE INDEX project_milestones_project_idx ON project_milestones(project_id, milestone_id);
+        \\CREATE INDEX project_milestones_milestone_idx ON project_milestones(milestone_id, project_id);
         \\CREATE TABLE project_memberships (
         \\  project_id TEXT NOT NULL,
         \\  issue_id TEXT NOT NULL,

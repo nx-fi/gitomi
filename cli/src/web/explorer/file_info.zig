@@ -425,7 +425,7 @@ test "fallback file icons are monotone" {
     try appendFileIcon(&buf, std.testing.allocator, "sigid.example.toml", "blob");
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "class=\"file-icon file lang-toml\"") != null);
 
-    const css = @embedFile("../style.css");
+    const css = @embedFile("../styles/code-browser.css");
     try std.testing.expect(std.mem.indexOf(u8, css, ".file-icon.lang-") == null);
     try std.testing.expect(std.mem.indexOf(u8, css, ".file-icon.devicon-icon::before") != null);
     try std.testing.expect(std.mem.indexOf(u8, css, ".file-icon[class*=\"lang-\"]::before") != null);

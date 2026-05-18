@@ -19,6 +19,7 @@ const max_projected_participants: usize = 128;
 const max_projected_issue_relationships: usize = 512;
 const max_projected_concurrent_groups: usize = 128;
 const max_projected_project_columns: usize = 128;
+const max_projected_project_milestones: usize = 256;
 const max_projected_project_fields: usize = 128;
 const max_projected_project_field_options: usize = 512;
 const max_projected_project_views: usize = 64;
@@ -1101,6 +1102,8 @@ pub fn applyProjectProjection(allocator: Allocator, db: *SqliteDb, event_hash: [
         try deleteProjectPayloadStringArray(allocator, db, payload, "members_removed", "SELECT add_hash FROM project_members WHERE project_id = ? AND member = ?", "DELETE FROM project_members WHERE project_id = ? AND member = ? AND add_hash = ?", envelope.object_id, event_hash);
         try insertProjectPayloadStringArray(db, payload, "labels_added", "INSERT OR IGNORE INTO project_labels(project_id, label, add_hash, created_at, actor_principal) VALUES (?, ?, ?, ?, ?)", envelope.object_id, event_hash, envelope);
         try deleteProjectPayloadStringArray(allocator, db, payload, "labels_removed", "SELECT add_hash FROM project_labels WHERE project_id = ? AND label = ?", "DELETE FROM project_labels WHERE project_id = ? AND label = ? AND add_hash = ?", envelope.object_id, event_hash);
+        try insertProjectPayloadStringArray(db, payload, "milestones_added", "INSERT OR IGNORE INTO project_milestones(project_id, milestone_id, add_hash, created_at, actor_principal) VALUES (?, ?, ?, ?, ?)", envelope.object_id, event_hash, envelope);
+        try deleteProjectPayloadStringArray(allocator, db, payload, "milestones_removed", "SELECT add_hash FROM project_milestones WHERE project_id = ? AND milestone_id = ?", "DELETE FROM project_milestones WHERE project_id = ? AND milestone_id = ? AND add_hash = ?", envelope.object_id, event_hash);
         if (try projectPropertyLimitRejection(db, envelope.object_id)) |reason| return reason;
     } else if (std.mem.eql(u8, envelope.event_type, "project.column_added")) {
         const column = event_mod.jsonString(payload.get("column")) orelse return "invalid_event_envelope";
@@ -1533,6 +1536,9 @@ fn projectPropertyLimitRejection(db: *SqliteDb, project_id: []const u8) !?[]cons
         return "collection_limit_exceeded";
     }
     if (try collectionCountExceeds(db, "SELECT COUNT(DISTINCT label) FROM project_labels WHERE project_id = ?", project_id, max_projected_labels)) {
+        return "collection_limit_exceeded";
+    }
+    if (try collectionCountExceeds(db, "SELECT COUNT(DISTINCT milestone_id) FROM project_milestones WHERE project_id = ?", project_id, max_projected_project_milestones)) {
         return "collection_limit_exceeded";
     }
     return null;
