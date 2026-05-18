@@ -184,7 +184,7 @@ fn appendPullsToolbar(buf: *std.ArrayList(u8), allocator: Allocator, filters: Pu
         \\  </form>
         \\  <div class="issues-toolbar-actions">
         \\    <a class="button secondary issue-tool-button" href="/settings/labels"><span class="button-icon icon-labels" aria-hidden="true"></span><span>Labels</span></a>
-        \\    <button class="button secondary issue-tool-button" type="button" disabled><span class="button-icon icon-reviewers" aria-hidden="true"></span><span>Reviewers</span></button>
+        \\    <a class="button secondary issue-tool-button" href="/milestones"><span class="button-icon icon-milestones" aria-hidden="true"></span><span>Milestones</span></a>
         \\    <a class="button primary" href="/new-pull">New pull request</a>
         \\  </div>
         \\</div>
@@ -203,9 +203,9 @@ fn appendPullsListHeader(buf: *std.ArrayList(u8), allocator: Allocator, db: *Sql
         \\  <div class="issues-select-all"><input type="checkbox" aria-label="Select all pull requests" disabled></div>
         \\  <nav class="issues-state-tabs" aria-label="Pull request state">
     );
-    try appendPullStateTab(buf, allocator, "Open", counts.open, .open, filters, "issue-open-icon");
-    try appendPullStateTab(buf, allocator, "Merged", counts.merged, .merged, filters, "pull-merged-icon");
-    try appendPullStateTab(buf, allocator, "Closed", counts.closed, .closed, filters, "pull-closed-icon");
+    try appendPullStateTab(buf, allocator, "Open", counts.open, .open, filters, pullStateIconClass(.open));
+    try appendPullStateTab(buf, allocator, "Merged", counts.merged, .merged, filters, pullStateIconClass(.merged));
+    try appendPullStateTab(buf, allocator, "Closed", counts.closed, .closed, filters, pullStateIconClass(.closed));
     try buf.appendSlice(allocator,
         \\  </nav>
         \\  <div class="issues-filter-menus">
@@ -243,6 +243,14 @@ fn appendPullStateTab(
         .label = label,
         .count = count,
     });
+}
+
+fn pullStateIconClass(state: PullStateFilter) []const u8 {
+    return switch (state) {
+        .open, .all => "pull-open-icon",
+        .merged => "pull-merged-icon",
+        .closed => "pull-closed-icon",
+    };
 }
 
 fn appendPullFilterMenu(
@@ -663,7 +671,7 @@ fn queryValueOwned(allocator: Allocator, target: []const u8, wanted_key: []const
     return null;
 }
 
-test "pulls toolbar links labels to settings labels" {
+test "pulls toolbar links management pages" {
     var filters = PullFilters{
         .state = .open,
     };
@@ -675,4 +683,13 @@ test "pulls toolbar links labels to settings labels" {
 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/settings/labels\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<span>Labels</span></a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/milestones\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<span>Milestones</span></a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Reviewers") == null);
+}
+
+test "pull state tabs use pull request icons" {
+    try std.testing.expectEqualStrings("pull-open-icon", pullStateIconClass(.open));
+    try std.testing.expectEqualStrings("pull-merged-icon", pullStateIconClass(.merged));
+    try std.testing.expectEqualStrings("pull-closed-icon", pullStateIconClass(.closed));
 }
