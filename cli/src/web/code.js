@@ -336,6 +336,10 @@
 
   let activeLine = null;
   let activeLineButton = null;
+  let activeLineRange = [];
+  let rangeAnchorLine = null;
+  let lineDrag = null;
+  let suppressNextLineClick = false;
   let lineMenu = null;
   let lineDocumentHandlersBound = false;
 
@@ -345,6 +349,38 @@
 
   function lineContainer(row) {
     return row.closest("[data-code-lines]");
+  }
+
+  function lineSelectionContainer(row) {
+    return lineContainer(row) || row.closest(".blame-lines");
+  }
+
+  function numericLineNumber(row) {
+    const value = Number(lineNumber(row));
+    return Number.isInteger(value) && value > 0 ? value : null;
+  }
+
+  function lineRowByNumber(number) {
+    const row = document.getElementById(`L${number}`);
+    return row && row.matches("[data-line-row], .blame-row") ? row : null;
+  }
+
+  function lineRowsInContainer(container) {
+    return Array.prototype.slice.call(container.querySelectorAll("[data-line-row], .blame-row"));
+  }
+
+  function lineRowsBetween(startRow, endRow) {
+    const container = lineSelectionContainer(startRow);
+    if (!container || lineSelectionContainer(endRow) !== container) return [];
+    const start = numericLineNumber(startRow);
+    const end = numericLineNumber(endRow);
+    if (start === null || end === null) return [];
+    const first = Math.min(start, end);
+    const last = Math.max(start, end);
+    return lineRowsInContainer(container).filter(function (row) {
+      const number = numericLineNumber(row);
+      return number !== null && number >= first && number <= last;
+    });
   }
 
   function linePath(row) {
@@ -357,40 +393,75 @@
     return (code && code.textContent) || "";
   }
 
-  function lineUrl(row) {
+  function lineHashForRows(rows) {
+    if (!rows.length) return "";
+    const start = lineNumber(rows[0]);
+    const end = lineNumber(rows[rows.length - 1]);
+    return start === end ? `L${start}` : `L${start}-L${end}`;
+  }
+
+  function setLocationHashForRows(rows, replace) {
+    const hash = lineHashForRows(rows);
+    if (!hash) return;
     const url = new URL(window.location.href);
-    if (row.id) url.hash = row.id;
+    url.hash = hash;
+    if (url.href === window.location.href) return;
+    try {
+      if (replace) {
+        window.history.replaceState(null, "", url);
+      } else {
+        window.history.pushState(null, "", url);
+      }
+    } catch (_) {
+      window.location.hash = hash;
+    }
+  }
+
+  function lineSelectionUrl(rows) {
+    const url = new URL(window.location.href);
+    const hash = lineHashForRows(rows);
+    if (hash) url.hash = hash;
     return url;
   }
 
-  function linePermalinkUrl(row) {
-    const container = lineContainer(row);
+  function linePermalinkUrl(rows) {
+    const first = rows[0];
+    if (!first) return new URL(window.location.href);
+    const container = lineContainer(first);
     const href = (container && (container.dataset.permalinkHref || container.dataset.codeHref)) || "";
-    const url = href ? new URL(href, window.location.href) : lineUrl(row);
-    if (row.id) url.hash = row.id;
+    const url = href ? new URL(href, window.location.href) : lineSelectionUrl(rows);
+    const hash = lineHashForRows(rows);
+    if (hash) url.hash = hash;
     return url;
   }
 
-  function blameUrl(row) {
-    const container = lineContainer(row);
+  function blameUrl(rows) {
+    const first = rows[0];
+    if (!first) return new URL(window.location.href);
+    const container = lineContainer(first);
     const href = (container && container.dataset.blameHref) || "";
     const url = href ? new URL(href, window.location.href) : new URL(window.location.href);
     url.pathname = "/blame";
-    if (row.id) url.hash = row.id;
+    const hash = lineHashForRows(rows);
+    if (hash) url.hash = hash;
     return url;
   }
 
-  function lineReference(row) {
-    const path = linePath(row);
-    const number = lineNumber(row);
-    return path ? `${path}:${number}` : `line ${number}`;
+  function lineReference(rows) {
+    const first = rows[0];
+    if (!first) return "line";
+    const path = linePath(first);
+    const start = lineNumber(first);
+    const end = lineNumber(rows[rows.length - 1]);
+    const suffix = start === end ? start : `${start}-${end}`;
+    return path ? `${path}:${suffix}` : `line ${suffix}`;
   }
 
-  function newIssueUrl(row) {
+  function newIssueUrl(rows) {
     const params = new URLSearchParams();
-    const reference = lineReference(row);
+    const reference = lineReference(rows);
     params.set("title", `Reference ${reference}`);
-    params.set("body", `${reference}\n\n${linePermalinkUrl(row).href}`);
+    params.set("body", `${reference}\n\n${linePermalinkUrl(rows).href}`);
     return `/new-issue?${params.toString()}`;
   }
 
@@ -398,6 +469,26 @@
     if (!lineMenu) return;
     const item = lineMenu.querySelector(`[data-line-action="${action}"]`);
     if (item) item.disabled = disabled;
+  }
+
+  function setMenuItemLabel(action, label) {
+    if (!lineMenu) return;
+    const item = lineMenu.querySelector(`[data-line-action="${action}"] [data-line-action-label]`);
+    if (item) item.textContent = label;
+  }
+
+  function activeSelectionRows(fallbackRow) {
+    if (activeLineRange.length) return activeLineRange;
+    if (activeLine) return [activeLine];
+    return fallbackRow ? [fallbackRow] : [];
+  }
+
+  function updateLineMenuLabels() {
+    const isRange = activeLineRange.length > 1;
+    setMenuItemLabel("copy-line", isRange ? "Copy block" : "Copy line");
+    setMenuItemLabel("copy-permalink", isRange ? "Copy range permalink" : "Copy permalink");
+    setMenuItemLabel("view-blame", isRange ? "View git blame for range" : "View git blame");
+    setMenuItemLabel("new-issue", isRange ? "Reference range in new issue" : "Reference in new issue");
   }
 
   function ensureLineMenu() {
@@ -408,19 +499,19 @@
     lineMenu.setAttribute("role", "menu");
     lineMenu.hidden = true;
     lineMenu.innerHTML = [
-      '<button type="button" role="menuitem" data-line-action="copy-line">Copy line</button>',
-      '<button type="button" role="menuitem" data-line-action="copy-permalink">Copy permalink</button>',
-      '<button type="button" role="menuitem" data-line-action="view-blame">View git blame</button>',
-      '<button type="button" role="menuitem" data-line-action="new-issue">Reference in new issue</button>',
+      '<button type="button" role="menuitem" data-line-action="copy-line"><span data-line-action-label>Copy line</span></button>',
+      '<button type="button" role="menuitem" data-line-action="copy-permalink"><span data-line-action-label>Copy permalink</span></button>',
+      '<button type="button" role="menuitem" data-line-action="view-blame"><span data-line-action-label>View git blame</span></button>',
+      '<button type="button" role="menuitem" data-line-action="new-issue"><span data-line-action-label>Reference in new issue</span></button>',
       '<button type="button" role="menuitem" data-line-action="switch-ref"><span>View file in different branch/tag</span><kbd>W</kbd></button>',
     ].join("");
     document.body.appendChild(lineMenu);
 
     lineMenu.addEventListener("click", async function (event) {
       const item = event.target.closest("[data-line-action]");
-      if (!item || item.disabled || !activeLine) return;
+      if (!item || item.disabled || activeSelectionRows().length === 0) return;
       event.preventDefault();
-      await runLineAction(item.dataset.lineAction, activeLine);
+      await runLineAction(item.dataset.lineAction);
     });
 
     return lineMenu;
@@ -462,6 +553,7 @@
     ensureLineMenu();
     activeLineButton = button;
     button.setAttribute("aria-expanded", "true");
+    updateLineMenuLabels();
     setMenuItemDisabled("switch-ref", document.querySelector("[data-branch-switcher]") === null);
     lineMenu.hidden = false;
     positionLineMenu(button);
@@ -480,8 +572,44 @@
     activeLine = null;
   }
 
+  function clearActiveLineRange() {
+    activeLineRange.forEach(function (row) {
+      row.classList.remove("line-range-selected", "line-range-start", "line-range-end");
+      const button = row.querySelector("[data-line-menu-button]");
+      if (button) {
+        button.setAttribute("aria-expanded", "false");
+        button.tabIndex = -1;
+      }
+    });
+    activeLineRange = [];
+  }
+
+  function setActiveLineRange(rows, options) {
+    const opts = options || {};
+    if (rows.length <= 1) {
+      if (rows.length === 1) setActiveLine(rows[0], opts);
+      return;
+    }
+    closeLineMenu();
+    clearActiveLine();
+    clearActiveLineRange();
+    activeLineRange = rows;
+    rows.forEach(function (row, index) {
+      row.classList.add("line-range-selected");
+      if (index === 0) {
+        row.classList.add("line-range-start");
+        const button = row.querySelector("[data-line-menu-button]");
+        if (button) button.tabIndex = 0;
+      }
+      if (index === rows.length - 1) row.classList.add("line-range-end");
+    });
+    if (opts.setAnchor !== false) rangeAnchorLine = rows[0];
+    if (opts.updateHash !== false) setLocationHashForRows(rows, opts.replaceHash === true);
+  }
+
   function setActiveLine(row, options) {
     const opts = options || {};
+    clearActiveLineRange();
     if (activeLine !== row) {
       closeLineMenu();
       clearActiveLine();
@@ -491,16 +619,8 @@
       if (nextButton) nextButton.tabIndex = 0;
     }
 
-    if (opts.updateHash !== false && row.id) {
-      const url = lineUrl(row);
-      if (url.href !== window.location.href) {
-        try {
-          window.history.pushState(null, "", url);
-        } catch (_) {
-          window.location.hash = row.id;
-        }
-      }
-    }
+    if (opts.setAnchor !== false) rangeAnchorLine = row;
+    if (opts.updateHash !== false && row.id) setLocationHashForRows([row], opts.replaceHash === true);
 
     const button = row.querySelector("[data-line-menu-button]");
     if (opts.openMenu && button) {
@@ -508,17 +628,19 @@
     }
   }
 
-  async function runLineAction(action, row) {
+  async function runLineAction(action) {
+    const rows = activeSelectionRows();
+    if (rows.length === 0) return;
     if (action === "copy-line") {
-      await copyText(lineCode(row));
+      await copyText(rows.map(lineCode).join("\n"));
       closeLineMenu();
     } else if (action === "copy-permalink") {
-      await copyText(linePermalinkUrl(row).href);
+      await copyText(linePermalinkUrl(rows).href);
       closeLineMenu();
     } else if (action === "view-blame") {
-      window.location.href = blameUrl(row).href;
+      window.location.href = blameUrl(rows).href;
     } else if (action === "new-issue") {
-      window.location.href = newIssueUrl(row);
+      window.location.href = newIssueUrl(rows);
     } else if (action === "switch-ref") {
       focusBranchSwitcher();
     }
@@ -535,15 +657,39 @@
     }, 900);
   }
 
-  function lineFromCurrentHash() {
+  function lineRangeFromCurrentHash() {
     const id = window.location.hash.replace(/^#/, "");
     if (!id) return null;
     let decoded = id;
     try {
       decoded = decodeURIComponent(id);
     } catch (_) {}
-    const row = document.getElementById(decoded);
-    return row && row.matches("[data-line-row], .blame-row") ? row : null;
+    const match = /^L([1-9][0-9]*)(?:-L?([1-9][0-9]*))?$/.exec(decoded);
+    if (!match) return null;
+    const first = Number(match[1]);
+    const second = match[2] ? Number(match[2]) : first;
+    if (!Number.isSafeInteger(first) || !Number.isSafeInteger(second)) return null;
+    return {
+      start: Math.min(first, second),
+      end: Math.max(first, second),
+    };
+  }
+
+  function lineSelectionFromCurrentHash() {
+    const range = lineRangeFromCurrentHash();
+    if (!range) return null;
+
+    const startRow = lineRowByNumber(range.start);
+    const endRow = lineRowByNumber(range.end);
+    if (!startRow || !endRow) return null;
+
+    const rows = lineRowsBetween(startRow, endRow);
+    if (rows.length === 0) return null;
+    return {
+      rows: rows,
+      firstRow: rows[0],
+      isRange: range.start !== range.end,
+    };
   }
 
   function stickyBottom(element) {
@@ -584,19 +730,99 @@
   }
 
   function syncLineSelectionFromHash() {
-    const row = lineFromCurrentHash();
-    if (row) {
+    const selection = lineSelectionFromCurrentHash();
+    if (selection) {
+      const row = selection.firstRow;
       if (row.matches("[data-line-row]")) {
-        setActiveLine(row, { updateHash: false, openMenu: false });
+        if (selection.isRange) {
+          setActiveLineRange(selection.rows, { updateHash: false });
+        } else {
+          setActiveLine(row, { updateHash: false, openMenu: false });
+        }
       } else {
         closeLineMenu();
         clearActiveLine();
+        if (selection.isRange) {
+          setActiveLineRange(selection.rows, { updateHash: false });
+        } else {
+          clearActiveLineRange();
+        }
       }
       scrollLineIntoViewSoon(row);
     } else {
       closeLineMenu();
       clearActiveLine();
+      clearActiveLineRange();
     }
+  }
+
+  function selectLineRange(startRow, endRow, options) {
+    const rows = lineRowsBetween(startRow, endRow);
+    if (rows.length === 0) return;
+    setActiveLineRange(rows, options);
+  }
+
+  function selectLine(row, event) {
+    closeLineMenu();
+    const anchor = rangeAnchorLine && lineSelectionContainer(rangeAnchorLine) === lineSelectionContainer(row)
+      ? rangeAnchorLine
+      : activeLine;
+    if (event.shiftKey && anchor && anchor !== row) {
+      selectLineRange(anchor, row, { setAnchor: false });
+      return;
+    }
+    setActiveLine(row, { openMenu: false });
+  }
+
+  function rowAtPoint(event, container) {
+    const element = document.elementFromPoint(event.clientX, event.clientY);
+    if (!element) return null;
+    const row = element.closest("[data-line-row]");
+    return row && container.contains(row) ? row : null;
+  }
+
+  function beginLineDrag(event, container) {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+    const line = event.target.closest(".line-num");
+    if (!line || !container.contains(line)) return;
+    const row = line.closest("[data-line-row]");
+    if (!row) return;
+    lineDrag = {
+      container: container,
+      startRow: row,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      moved: false,
+    };
+    rangeAnchorLine = row;
+    try {
+      line.setPointerCapture(event.pointerId);
+    } catch (_) {}
+  }
+
+  function updateLineDrag(event) {
+    if (!lineDrag || event.pointerId !== lineDrag.pointerId) return;
+    const distanceX = Math.abs(event.clientX - lineDrag.startX);
+    const distanceY = Math.abs(event.clientY - lineDrag.startY);
+    if (!lineDrag.moved && distanceX < 4 && distanceY < 4) return;
+    const row = rowAtPoint(event, lineDrag.container);
+    if (!row) return;
+    lineDrag.moved = true;
+    event.preventDefault();
+    selectLineRange(lineDrag.startRow, row, { replaceHash: true, setAnchor: false });
+  }
+
+  function endLineDrag(event) {
+    if (!lineDrag || event.pointerId !== lineDrag.pointerId) return;
+    if (lineDrag.moved) {
+      suppressNextLineClick = true;
+      event.preventDefault();
+      window.setTimeout(function () {
+        suppressNextLineClick = false;
+      }, 0);
+    }
+    lineDrag = null;
   }
 
   function bindLineDocumentHandlers() {
@@ -632,6 +858,14 @@
   function initCodeLineActions(container) {
     bindLineDocumentHandlers();
 
+    container.addEventListener("pointerdown", function (event) {
+      beginLineDrag(event, container);
+    });
+
+    container.addEventListener("pointermove", updateLineDrag);
+    container.addEventListener("pointerup", endLineDrag);
+    container.addEventListener("pointercancel", endLineDrag);
+
     container.addEventListener("click", function (event) {
       const button = event.target.closest("[data-line-menu-button]");
       if (button && container.contains(button)) {
@@ -641,7 +875,10 @@
         event.stopPropagation();
         const shouldOpen = !lineMenu || lineMenu.hidden || activeLineButton !== button;
         if (shouldOpen) {
-          setActiveLine(row, { openMenu: true });
+          if (activeLineRange.indexOf(row) === -1 && activeLine !== row) {
+            setActiveLine(row, { openMenu: false });
+          }
+          openLineMenu(row, button);
         } else {
           closeLineMenu();
         }
@@ -654,7 +891,8 @@
       if (!row) return;
       event.preventDefault();
       event.stopPropagation();
-      setActiveLine(row, { openMenu: true });
+      if (suppressNextLineClick) return;
+      selectLine(row, event);
     });
   }
 

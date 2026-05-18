@@ -1,5 +1,6 @@
 (function () {
   const popoverMenuSelector = "details[data-popover-menu]";
+  const indexViewSnapshotKey = "gitomi.indexViewSnapshot.v1";
 
   function summaryFor(menu) {
     return menu.querySelector("summary");
@@ -533,12 +534,90 @@
     });
   }
 
+  function syncSnapshotFormState(sourceRoot, cloneRoot) {
+    const sourceControls = Array.from(sourceRoot.querySelectorAll("input, textarea, select, option"));
+    const cloneControls = Array.from(cloneRoot.querySelectorAll("input, textarea, select, option"));
+    sourceControls.forEach(function (control, index) {
+      const clone = cloneControls[index];
+      if (!clone || clone.tagName !== control.tagName) return;
+
+      if (control.tagName === "INPUT") {
+        const type = (control.getAttribute("type") || "text").toLowerCase();
+        if (type === "checkbox" || type === "radio") {
+          if (control.checked) clone.setAttribute("checked", "");
+          else clone.removeAttribute("checked");
+          return;
+        }
+        if (type !== "password") clone.setAttribute("value", control.value);
+        return;
+      }
+
+      if (control.tagName === "TEXTAREA") {
+        clone.textContent = control.value;
+        return;
+      }
+
+      if (control.tagName === "OPTION") {
+        if (control.selected) clone.setAttribute("selected", "");
+        else clone.removeAttribute("selected");
+      }
+    });
+  }
+
+  function cloneSnapshotNode(node) {
+    const clone = node.cloneNode(true);
+    syncSnapshotFormState(node, clone);
+    return clone;
+  }
+
+  function snapshotStorage() {
+    try {
+      return window.sessionStorage;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function saveIndexViewSnapshot() {
+    const storage = snapshotStorage();
+    if (!storage) return;
+    if (document.querySelector("[data-index-popover]")) return;
+
+    const header = document.querySelector(".topbar");
+    const main = document.querySelector("main.page");
+    if (!header || !main) return;
+
+    try {
+      const snapshot = {
+        version: 1,
+        url: window.location.pathname + window.location.search + window.location.hash,
+        title: document.title,
+        bodyClass: document.body.className || "",
+        header: cloneSnapshotNode(header).outerHTML,
+        main: cloneSnapshotNode(main).outerHTML,
+        scrollX: window.scrollX || 0,
+        scrollY: window.scrollY || 0,
+        savedAt: Date.now()
+      };
+      storage.setItem(indexViewSnapshotKey, JSON.stringify(snapshot));
+    } catch (_) {}
+  }
+
+  function initIndexViewSnapshot() {
+    saveIndexViewSnapshot();
+    window.addEventListener("pagehide", saveIndexViewSnapshot);
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState === "hidden") saveIndexViewSnapshot();
+    });
+  }
+
   function initUi() {
     initPopoverMenus();
     initNavStats();
     initLabelsPage();
     initPullMergeMethodMenus();
     initAvatars(document);
+    initIndexViewSnapshot();
   }
 
   document.addEventListener("gitomi:partial-refresh", function (event) {

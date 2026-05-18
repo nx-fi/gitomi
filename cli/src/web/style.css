@@ -1143,8 +1143,8 @@ main.page-projects:has(.project-overview-page) {
 }
 .issue-row-priority-p2 {
   color: var(--text-on-warning);
-  background: var(--tone-warning-bg);
-  border-color: var(--tone-warning-border);
+  background: var(--tone-warning);
+  border-color: var(--tone-warning);
 }
 .issue-row-priority-p3,
 .issue-row-priority-none {
@@ -5139,7 +5139,7 @@ main.page-projects:has(.project-overview-page) {
 }
 .project-priority-chip.tone-p0 { background: color-mix(in oklch, var(--danger-600) 16%, var(--panel)); border-color: color-mix(in oklch, var(--danger-600) 38%, var(--border)); }
 .project-priority-chip.tone-p1 { background: color-mix(in oklch, var(--sg-color-data-9) 16%, var(--panel)); border-color: color-mix(in oklch, var(--sg-color-data-9) 38%, var(--border)); }
-.project-priority-chip.tone-p2 { background: color-mix(in oklch, var(--warning-200) 14%, var(--panel)); border-color: color-mix(in oklch, var(--warning-200) 34%, var(--border)); }
+.project-priority-chip.tone-p2 { background: color-mix(in oklch, var(--tone-warning) 14%, var(--panel)); border-color: color-mix(in oklch, var(--tone-warning) 34%, var(--border)); }
 .project-priority-chip.tone-p3,
 .project-priority-chip.tone-none { background: color-mix(in oklch, var(--muted) 12%, var(--panel)); }
 .project-status-chip.tone-draft { background: color-mix(in oklch, var(--muted) 10%, var(--panel)); }
@@ -10064,6 +10064,7 @@ a.root-file-commit:hover,
   mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='black'%3E%3Ccircle cx='5' cy='12' r='2'/%3E%3Ccircle cx='12' cy='12' r='2'/%3E%3Ccircle cx='19' cy='12' r='2'/%3E%3C/g%3E%3C/svg%3E") center / contain no-repeat;
 }
 .blob-row.line-selected .line-menu-button,
+.blob-row.line-range-start .line-menu-button,
 .line-menu-button[aria-expanded="true"],
 .line-menu-button:focus-visible {
   visibility: visible;
@@ -10100,11 +10101,16 @@ a.root-file-commit:hover,
   background: var(--code-line-highlight);
 }
 .blob-lines li:target .line-num,
-.blob-lines li.line-selected .line-num {
+.blob-lines li.line-selected .line-num,
+.blob-lines li.line-range-selected .line-num {
   background: var(--code-line-highlight);
 }
-.blob-lines li.line-selected {
+.blob-lines li.line-selected,
+.blob-lines li.line-range-selected {
   background: var(--code-line-highlight);
+}
+.blob-lines li.line-selected,
+.blob-lines li.line-range-start {
   box-shadow: inset 3px 0 0 var(--code-line-highlight-border);
 }
 .line-actions-menu {
@@ -10289,6 +10295,16 @@ a.root-file-commit:hover,
 }
 .blame-row:hover .blame-meta {
   background: linear-gradient(90deg, var(--age-color) 0 5px, color-mix(in oklch, var(--age-bg) 68%, var(--subtle)) 5px);
+}
+.blame-row.line-range-selected .line-num,
+.blame-row.line-range-selected .blame-code {
+  background: var(--code-line-highlight);
+}
+.blame-row.line-range-selected .blame-meta {
+  background: linear-gradient(90deg, var(--code-line-highlight-border) 0 5px, var(--code-line-highlight) 5px);
+}
+.blame-row.line-range-start {
+  box-shadow: inset 3px 0 0 var(--code-line-highlight-border);
 }
 .blame-meta {
   position: sticky;

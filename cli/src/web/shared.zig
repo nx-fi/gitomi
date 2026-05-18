@@ -1513,6 +1513,50 @@ fn renderIndexingPopoverPage(
     try appendJsonString(&buf, allocator, return_target);
     try buf.appendSlice(allocator,
         \\;
+        \\  var popover = document.querySelector("[data-index-popover]");
+        \\  function restorePreviousView() {
+        \\    if (!popover) return;
+        \\    try {
+        \\      var storage = window.sessionStorage;
+        \\      if (!storage) return;
+        \\      var raw = storage.getItem("gitomi.indexViewSnapshot.v1");
+        \\      if (!raw) return;
+        \\      var snapshot = JSON.parse(raw);
+        \\      if (!snapshot || snapshot.version !== 1 || !snapshot.header || !snapshot.main) return;
+        \\      var headerTemplate = document.createElement("template");
+        \\      headerTemplate.innerHTML = snapshot.header;
+        \\      var restoredHeader = headerTemplate.content.firstElementChild;
+        \\      var mainTemplate = document.createElement("template");
+        \\      mainTemplate.innerHTML = snapshot.main;
+        \\      var restoredMain = mainTemplate.content.firstElementChild;
+        \\      if (!restoredHeader || !restoredHeader.matches(".topbar")) return;
+        \\      if (!restoredMain || !restoredMain.matches("main.page")) return;
+        \\      var header = document.querySelector(".topbar");
+        \\      var main = document.querySelector("main.page");
+        \\      if (header) header.replaceWith(restoredHeader);
+        \\      if (main) {
+        \\        Array.from(main.attributes).forEach(function (attribute) {
+        \\          main.removeAttribute(attribute.name);
+        \\        });
+        \\        Array.from(restoredMain.attributes).forEach(function (attribute) {
+        \\          main.setAttribute(attribute.name, attribute.value);
+        \\        });
+        \\        main.innerHTML = restoredMain.innerHTML;
+        \\      }
+        \\      document.body.className = snapshot.bodyClass || "";
+        \\      document.title = snapshot.title || document.title;
+        \\      (document.querySelector("main.page") || document.body).appendChild(popover);
+        \\      if (typeof snapshot.url === "string" && snapshot.url.charAt(0) === "/" && snapshot.url.charAt(1) !== "/" && window.history && window.history.replaceState) {
+        \\        window.history.replaceState(null, "", snapshot.url);
+        \\      }
+        \\      var restoreScroll = function () {
+        \\        window.scrollTo(Number(snapshot.scrollX) || 0, Number(snapshot.scrollY) || 0);
+        \\      };
+        \\      if (window.requestAnimationFrame) window.requestAnimationFrame(restoreScroll);
+        \\      else restoreScroll();
+        \\    } catch (_) {}
+        \\  }
+        \\  restorePreviousView();
         \\  var status = document.querySelector("[data-index-status]");
         \\  var startedAt = Date.now();
         \\  var messages = [
