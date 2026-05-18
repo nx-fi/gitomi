@@ -694,65 +694,21 @@
   color: var(--green);
 }
 .project-summary-progress-icon {
-  position: relative;
-  display: inline-block;
-  width: 18px;
-  height: 18px;
+  width: 14px;
+  height: 14px;
   flex: 0 0 auto;
-  color: inherit;
-  background: currentColor;
-  clip-path: polygon(50% 0, 90% 24%, 90% 76%, 50% 100%, 10% 76%, 10% 24%);
 }
-.project-summary-progress-icon::before {
-  content: "";
-  position: absolute;
-  inset: 3px;
-  background: var(--panel);
-  clip-path: inherit;
-}
-.project-summary-progress-icon::after {
-  content: "";
-  position: absolute;
-  inset: 7px;
-  background: currentColor;
-  border-radius: 50%;
-}
-.project-summary-health-icon {
-  position: relative;
-  display: inline-block;
-  width: 24px;
-  height: 24px;
-  color: var(--muted);
-  background: color-mix(in oklch, currentColor 18%, transparent);
-  border-radius: 50%;
-}
-.project-summary-health-icon::before {
-  content: "";
-  position: absolute;
-  left: 6px;
-  top: 12px;
-  width: 12px;
-  height: 7px;
-  border-left: 2px solid currentColor;
-  border-top: 2px solid currentColor;
-  transform: skew(-24deg) rotate(-34deg);
-}
-.project-summary-health-icon::after {
-  content: "";
-  position: absolute;
-  left: 14px;
-  top: 7px;
-  width: 4px;
-  height: 4px;
-  background: currentColor;
-  border-radius: 50%;
-}
-.project-summary-health-icon.tone-progress,
-.project-summary-health-icon.tone-done {
+.project-summary-health-icon.tone-progress {
   color: var(--green);
 }
+.project-summary-health-icon.tone-done {
+  color: var(--tone-merged);
+}
+.project-summary-health-icon.tone-risk {
+  color: var(--tone-warning);
+}
 .project-summary-health-icon.tone-failed {
-  color: var(--danger);
+  color: var(--red);
 }
 .project-summary-health-icon.tone-todo {
   color: var(--muted);
@@ -865,6 +821,151 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   font: inherit;
+}
+.project-update-section,
+.project-description-section {
+  position: relative;
+}
+.project-update-section-title,
+.project-description-section-title {
+  min-height: 32px;
+  padding-right: 112px;
+}
+.project-update-edit,
+.project-description-edit {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 20;
+}
+.project-update-edit > summary,
+.project-description-edit > summary {
+  gap: 7px;
+}
+.project-update-edit .project-markdown-form,
+.project-description-edit .project-markdown-form {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 25;
+  width: min(680px, calc(100vw - 56px));
+  padding: 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-elevated);
+}
+.project-update-button-icon {
+  --button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Cpath d='M12 20h9'/%3E%3Cpath d='M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z'/%3E%3C/g%3E%3C/svg%3E");
+}
+.project-update-card,
+.project-description-card {
+  display: grid;
+  min-width: 0;
+  overflow: hidden;
+  background: color-mix(in oklch, var(--panel) 92%, var(--panel-strong));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-hairline);
+}
+.project-update-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px 16px;
+  background: color-mix(in oklch, var(--titlebar-bg) 76%, var(--panel));
+  border-bottom: 1px solid var(--border);
+}
+.project-update-card-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+.project-update-card-meta > strong,
+.project-update-card-meta > span:not(.project-update-health-chip):not(.issue-avatar) {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+.project-update-card-meta strong {
+  color: var(--text);
+}
+.project-update-avatar {
+  width: 24px;
+  height: 24px;
+  font-size: 11px;
+}
+.project-update-health-chip {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 13px;
+  font-weight: 800;
+}
+.project-update-health-chip.tone-progress {
+  color: var(--text-on-accent);
+  background: var(--green);
+}
+.project-update-health-chip.tone-risk {
+  color: var(--text-on-warning);
+  background: var(--tone-warning);
+}
+.project-update-health-chip.tone-failed {
+  color: var(--text-on-accent);
+  background: var(--red);
+}
+.project-update-body,
+.project-description-body {
+  min-width: 0;
+  min-height: 84px;
+  padding: 16px;
+}
+.project-update-body > :first-child,
+.project-description-body > :first-child {
+  margin-top: 0;
+}
+.project-update-body > :last-child,
+.project-description-body > :last-child {
+  margin-bottom: 0;
+}
+.project-update-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 16px 14px;
+}
+.project-update-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 0 10px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.project-update-action:hover {
+  color: var(--text);
+  background: var(--button-secondary-bg);
+  border-color: var(--button-secondary-hover-border);
+}
+.project-update-action .issue-comments-icon {
+  width: 16px;
+  height: 14px;
+}
+.project-update-action .reaction-add-icon {
+  width: 17px;
+  height: 17px;
 }
 .project-update-status-line {
   display: flex;
@@ -1166,6 +1267,31 @@
 .project-property-menu[open] summary {
   color: var(--topbar-active);
 }
+.project-property-chip-menu summary {
+  justify-content: space-between;
+  width: 100%;
+}
+.project-property-chip-menu summary > :first-child {
+  flex: 0 0 auto;
+}
+.project-property-chip-menu summary > .project-property-menu-icon {
+  width: 16px;
+  min-width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+.project-property-empty {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .project-property-popover {
   right: 0;
   left: auto;
@@ -1212,6 +1338,123 @@
 .project-overview-milestones-side .project-overview-milestone-row {
   grid-template-columns: 22px minmax(0, 1fr);
   padding: 8px 0;
+}
+.project-progress-body {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding: 12px;
+}
+.project-progress-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.project-progress-stats div {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 3px 6px;
+  min-width: 0;
+}
+.project-progress-stats span:not(.project-progress-legend) {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-progress-stats strong {
+  grid-column: 2;
+  color: var(--text);
+  font-size: 16px;
+  line-height: 1.1;
+}
+.project-progress-legend {
+  width: 9px;
+  height: 9px;
+  margin-top: 4px;
+  border-radius: 2px;
+  background: var(--muted);
+}
+.project-progress-legend.started {
+  background: var(--tone-warning);
+}
+.project-progress-legend.completed {
+  background: var(--blue);
+}
+.project-progress-chart {
+  position: relative;
+  height: 122px;
+  overflow: hidden;
+  background:
+    linear-gradient(90deg, var(--soft-row) 1px, transparent 1px) 0 0 / 25% 100%,
+    linear-gradient(0deg, var(--soft-row) 1px, transparent 1px) 0 0 / 100% 33.333%,
+    color-mix(in oklch, var(--subtle) 52%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.project-progress-scope-line,
+.project-progress-started-line,
+.project-progress-completed-line {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  height: 3px;
+  border-radius: var(--radius-pill);
+}
+.project-progress-scope-line {
+  top: 24px;
+  background: color-mix(in oklch, var(--muted) 32%, transparent);
+}
+.project-progress-started-line,
+.project-progress-completed-line {
+  right: auto;
+  width: var(--started);
+  max-width: calc(100% - 24px);
+}
+.project-progress-started-line {
+  top: 70px;
+  background: var(--tone-warning);
+}
+.project-progress-completed-line {
+  top: 92px;
+  width: var(--completed);
+  background: var(--blue);
+}
+.project-progress-started-line::after,
+.project-progress-completed-line::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: -4px;
+  width: 9px;
+  height: 9px;
+  background: currentColor;
+  border: 2px solid var(--panel);
+  border-radius: 50%;
+  transform: translateY(-50%);
+}
+.project-progress-started-line::after {
+  color: var(--tone-warning);
+}
+.project-progress-completed-line::after {
+  color: var(--blue);
+}
+.project-progress-axis {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+.project-progress-axis span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .project-overview-empty {
   margin: 0;

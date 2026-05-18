@@ -605,6 +605,8 @@ pub fn projectStoredEvent(allocator: Allocator, db: *SqliteDb, event_hash: []con
         try projection_objects.applyLabelProjection(allocator, db, event_hash, envelope, body)
     else if (std.mem.startsWith(u8, envelope.event_type, "comment."))
         try projection_objects.applyCommentProjection(allocator, db, event_hash, envelope, body)
+    else if (std.mem.startsWith(u8, envelope.event_type, "notification."))
+        try projection_objects.applyNotificationProjection(allocator, db, event_hash, envelope, body)
     else
         null;
 
@@ -614,6 +616,9 @@ pub fn projectStoredEvent(allocator: Allocator, db: *SqliteDb, event_hash: []con
         savepoint_active = false;
         try markDomainRejected(db, event_hash, reason);
     } else {
+        if (!auth_phase) {
+            try projection_objects.applyNotificationSideEffects(allocator, db, event_hash, envelope, body);
+        }
         try db.exec("RELEASE " ++ savepoint);
         savepoint_active = false;
         try markDomainAccepted(db, event_hash);
@@ -898,6 +903,17 @@ fn eventAuthorizationRejection(
         std.mem.eql(u8, envelope.event_type, "comment.reaction_removed"))
     {
         return if (roleAtLeast(role, "reporter")) null else "insufficient_role";
+    }
+
+    if (std.mem.eql(u8, envelope.event_type, "notification.subscribed") or
+        std.mem.eql(u8, envelope.event_type, "notification.unsubscribed") or
+        std.mem.eql(u8, envelope.event_type, "notification.read") or
+        std.mem.eql(u8, envelope.event_type, "notification.read_all"))
+    {
+        if (!roleAtLeast(role, "reporter")) return "insufficient_role";
+        const principal = event_mod.jsonString(payload.get("principal")) orelse return "invalid_event_envelope";
+        if (std.mem.eql(u8, principal, envelope.actor_principal)) return null;
+        return if (roleAtLeast(role, "maintainer")) null else "insufficient_role";
     }
 
     if (std.mem.eql(u8, envelope.event_type, "acl.role_granted")) {

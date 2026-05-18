@@ -12,6 +12,7 @@ const index = @import("index.zig");
 const io = @import("io.zig");
 const issue = @import("issue.zig");
 const milestone = @import("milestone.zig");
+const notification = @import("notification.zig");
 const project = @import("project.zig");
 const quarantine = @import("quarantine.zig");
 const pr_mod = @import("pr.zig");
@@ -59,6 +60,9 @@ const command_dispatch = std.StaticStringMap(Command).initComptime(.{
     .{ "milestones", Command{ .handler = runMilestone, .command_name = "gt milestones" } },
     .{ "pr", Command{ .handler = runPr, .command_name = "gt pr" } },
     .{ "comment", Command{ .handler = runComment, .command_name = "gt comment" } },
+    .{ "inbox", Command{ .handler = runInbox, .command_name = "gt inbox" } },
+    .{ "notification", Command{ .handler = runNotification, .command_name = "gt notification" } },
+    .{ "notifications", Command{ .handler = runNotification, .command_name = "gt notifications" } },
     .{ "acl", Command{ .handler = runAcl, .command_name = "gt acl" } },
     .{ "identity", Command{ .handler = runIdentity, .command_name = "gt identity" } },
     .{ "actions", Command{ .handler = runActions, .command_name = "gt actions" } },
@@ -188,6 +192,14 @@ fn runComment(allocator: Allocator, args: []const []const u8, _: []const u8) !vo
     try comment.cmdComment(allocator, args);
 }
 
+fn runInbox(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
+    try notification.cmdInbox(allocator, args);
+}
+
+fn runNotification(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
+    try notification.cmdNotification(allocator, args);
+}
+
 fn runAcl(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
     try cmdAcl(allocator, args);
 }
@@ -283,6 +295,11 @@ fn printUsage() !void {
         \\  gt comment edit COMMENT --body BODY
         \\  gt comment redact COMMENT [--reason REASON]
         \\  gt comment react|unreact COMMENT EMOJI
+        \\  gt inbox [--json] [--all|--unread] [--principal PRINCIPAL] [--limit N]
+        \\  gt notification subscribe issue|pr OBJECT [--principal PRINCIPAL]
+        \\  gt notification unsubscribe issue|pr OBJECT [--principal PRINCIPAL]
+        \\  gt notification subscriptions [--json] [--principal PRINCIPAL]
+        \\  gt notification read EVENT|--all [--principal PRINCIPAL]
         \\  gt acl grant PRINCIPAL ROLE
         \\  gt acl revoke PRINCIPAL
         \\  gt acl list [--json]

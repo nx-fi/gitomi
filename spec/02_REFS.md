@@ -449,7 +449,7 @@ Every event body MUST be a single JSON object conforming to:
     "event_uuid": "<UUIDv7>",
     "event_type": "<family>.<action>",
     "object": {
-        "kind": "<issue|pull|project|milestone|comment|acl|identity|action>",
+        "kind": "<issue|pull|project|milestone|comment|acl|identity|action|notification>",
         "id": "<object-id>"
     },
     "idempotency_key": "<UUIDv7>",
@@ -479,7 +479,7 @@ Every event body MUST be a single JSON object conforming to:
 | `event_uuid`        | UUIDv7  | Client-generated idempotency/display label. MUST NOT be trusted as the event's authoritative identity. |
 | `event_type`        | string  | Dot-separated family and action (e.g., `issue.opened`). |
 | `object.kind`       | string  | Object type this event targets. MUST match the event family prefix. |
-| `object.id`         | string  | Stable identifier for the logical object. Issue, pull, project, milestone, comment, and action run IDs are UUIDv7. ACL IDs are `acl:<principal>`. Identity IDs are `identity:<principal>:<device>`. |
+| `object.id`         | string  | Stable identifier for the logical object. Issue, pull, project, milestone, comment, action run, and notification event IDs are UUIDv7. ACL IDs are `acl:<principal>`. Identity IDs are `identity:<principal>:<device>`. |
 | `idempotency_key`   | UUIDv7  | Deduplication key. Duplicate keys within the same `repo_id` MUST be suppressed. |
 | `actor.principal`   | string  | The acting principal. MUST match the commit signature identity. |
 | `actor.device`      | string  | The device that created the event. MUST be ref-safe. |
@@ -506,6 +506,7 @@ The `object.kind` MUST agree with the `event_type` prefix:
 | `acl.*`         | `acl`                  |
 | `identity.*`    | `identity`             |
 | `action.*`      | `action`               |
+| `notification.*`| `notification`         |
 
 Events with a mismatch MUST be rejected.
 
@@ -522,6 +523,7 @@ The `object.id` value MUST match the event family:
 | `identity.device_added` / `identity.device_revoked` | `identity:<payload.principal>:<payload.device>` |
 | `action.run_requested`    | UUIDv7 run id |
 | `action.run_completed`    | UUIDv7 run id equal to `payload.run_id` |
+| `notification.*`          | UUIDv7 notification event id |
 
 Events with an invalid object id for their family MUST be rejected.
 

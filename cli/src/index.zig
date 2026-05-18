@@ -289,6 +289,10 @@ fn requiredIndexTablesExist(db: *SqliteDb) bool {
     defer label_definitions.deinit();
     var work_item_search = db.prepare("SELECT object_id FROM work_item_search LIMIT 0") catch return false;
     defer work_item_search.deinit();
+    var notification_subscriptions = db.prepare("SELECT principal, object_kind, object_id FROM notification_subscriptions LIMIT 0") catch return false;
+    defer notification_subscriptions.deinit();
+    var notification_inbox = db.prepare("SELECT principal, event_hash, read_at FROM notification_inbox LIMIT 0") catch return false;
+    defer notification_inbox.deinit();
     return true;
 }
 
@@ -600,6 +604,8 @@ fn dropIndexSchemaTables(db: *SqliteDb) !void {
         \\DROP TABLE IF EXISTS pull_metadata;
         \\DROP TABLE IF EXISTS comments;
         \\DROP TABLE IF EXISTS reactions;
+        \\DROP TABLE IF EXISTS notification_subscriptions;
+        \\DROP TABLE IF EXISTS notification_inbox;
         \\DROP TABLE IF EXISTS commit_references;
         \\DROP TABLE IF EXISTS work_item_search;
         \\DROP TABLE IF EXISTS work_item_search_docs;

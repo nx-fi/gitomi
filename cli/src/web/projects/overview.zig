@@ -735,6 +735,7 @@ fn appendProjectInlineProperties(buf: *std.ArrayList(u8), allocator: Allocator, 
     const health_label = projectHealthLabel(summary.status, summary.state);
     const health_tone = projectHealthTone(summary.status, summary.state);
     const progress = projectProgressPercent(metrics);
+    const progress_degrees = projectProgressDegrees(metrics);
     const leads_label = try projectCollectionPreviewOwned(allocator, db, "project_leads", "lead", summary.id, "No lead");
     defer allocator.free(leads_label);
     const target_label = try projectTargetDateLabelOwned(allocator, summary);
@@ -742,10 +743,11 @@ fn appendProjectInlineProperties(buf: *std.ArrayList(u8), allocator: Allocator, 
     try appendTemplate(buf, allocator,
         \\<section class="panel project-summary-panel" aria-label="Project summary">
         \\  <article class="project-summary-row issue-list-row tone-{health_tone}">
-        \\    <div class="issue-state-cell"><span class="project-summary-health-icon tone-{health_tone}" aria-hidden="true"></span></div>
+        \\    <div class="issue-state-cell"><span class="issue-state-icon project-summary-health-icon {health_icon_state} tone-{health_tone}" title="{health_label}" aria-label="{health_label}"></span></div>
         \\    <div class="issue-row-content">
         \\      <div class="issue-row-title-line project-summary-title-line"><span class="project-summary-kicker">Health</span><strong class="project-summary-health-value tone-{health_tone}">{health_label}
     , .{
+        .health_icon_state = projectHealthIconState(health_tone),
         .health_tone = health_tone,
         .health_label = health_label,
     });
@@ -768,7 +770,7 @@ fn appendProjectInlineProperties(buf: *std.ArrayList(u8), allocator: Allocator, 
         \\      <span class="project-summary-side-label">Status</span>
     );
     try appendTemplate(buf, allocator,
-        \\      <strong class="project-summary-progress tone-{tone}" title="{closed_count} of {issue_count} issues closed"><span class="project-summary-progress-icon" aria-hidden="true"></span>{progress}%</strong>
+        \\      <strong class="project-summary-progress tone-{tone}" title="{closed_count} of {issue_count} issues closed" style="--issue-task-progress: {progress_degrees}deg"><span class="issue-task-progress-icon project-summary-progress-icon" aria-hidden="true"></span>{progress}%</strong>
         \\    </div>
         \\  </article>
         \\</section>
@@ -776,6 +778,7 @@ fn appendProjectInlineProperties(buf: *std.ArrayList(u8), allocator: Allocator, 
         .tone = projectProgressTone(metrics),
         .closed_count = metrics.closed_issue_count,
         .issue_count = metrics.issue_count,
+        .progress_degrees = progress_degrees,
         .progress = progress,
     });
 }
@@ -840,14 +843,28 @@ fn projectHealthTone(status: []const u8, state: []const u8) []const u8 {
 }
 
 fn projectProgressPercent(metrics: *const ProjectMetrics) usize {
-    if (metrics.issue_count == 0) return 0;
-    return (@min(metrics.closed_issue_count, metrics.issue_count) * 100) / metrics.issue_count;
+    return projectProgressPercentFrom(metrics.closed_issue_count, metrics.issue_count);
 }
 
 fn projectProgressTone(metrics: *const ProjectMetrics) []const u8 {
     if (metrics.issue_count != 0 and metrics.closed_issue_count >= metrics.issue_count) return "done";
     if (metrics.closed_issue_count == 0) return "todo";
     return "progress";
+}
+
+fn projectProgressDegrees(metrics: *const ProjectMetrics) usize {
+    if (metrics.issue_count == 0) return 0;
+    return (@min(metrics.closed_issue_count, metrics.issue_count) * 360) / metrics.issue_count;
+}
+
+fn projectHealthIconState(tone: []const u8) []const u8 {
+    if (std.mem.eql(u8, tone, "done")) return "closed";
+    return "open";
+}
+
+fn projectProgressPercentFrom(completed: usize, total: usize) usize {
+    if (total == 0) return 0;
+    return (@min(completed, total) * 100) / total;
 }
 
 fn appendProjectResources(buf: *std.ArrayList(u8), allocator: Allocator, project: []const u8) !void {
@@ -889,11 +906,12 @@ fn appendProjectResourceLink(
 
 fn appendProjectUpdateSection(buf: *std.ArrayList(u8), allocator: Allocator, summary: *const ProjectSummary, note: *const ProjectUpdateNote) !void {
     const effective_status = if (note.status.len != 0) note.status else summary.status;
+    const health_label = projectUpdateHealthLabel(effective_status, summary.state);
+    const health_tone = projectUpdateHealthTone(effective_status, summary.state);
     try buf.appendSlice(allocator,
         \\<section class="project-overview-section project-markdown-section project-update-section">
-        \\  <div class="project-overview-section-title"><h2>Update</h2></div>
-        \\  <details class="project-markdown-edit">
-        \\    <summary class="button secondary">Edit update</summary>
+        \\  <details class="project-markdown-edit project-update-edit">
+        \\    <summary class="button secondary project-update-button"><span class="button-icon project-update-button-icon" aria-hidden="true"></span><span>Update</span></summary>
         \\    <form class="project-markdown-form" method="post" action="/projects/properties" data-project-markdown-form data-project-content-kind="project-update">
     );
     try appendProjectHiddenFields(buf, allocator, summary);
@@ -911,37 +929,53 @@ fn appendProjectUpdateSection(buf: *std.ArrayList(u8), allocator: Allocator, sum
         .value = note.body,
         .required = false,
     });
-    try buf.appendSlice(allocator,
+    try appendTemplate(buf, allocator,
         \\      <div class="project-markdown-actions"><button class="project-markdown-cancel" type="button" data-project-markdown-cancel>Cancel</button><button type="submit">Save update</button></div>
         \\    </form>
         \\  </details>
-        \\  <div class="project-markdown-preview markdown-body">
-        \\    <div class="project-update-status-line">
-    );
-    try appendProjectStatusChip(buf, allocator, effective_status);
+        \\  <div class="project-overview-section-title project-update-section-title"><h2>Latest update</h2></div>
+        \\  <article class="project-update-card project-markdown-preview tone-{health_tone}">
+        \\    <header class="project-update-card-head">
+        \\      <div class="project-update-card-meta">
+    , .{ .health_tone = health_tone });
+    try appendProjectUpdateHealthChip(buf, allocator, health_label, health_tone);
+    if (note.actor.len != 0) {
+        try project_issue_render.appendIssueAvatar(buf, allocator, note.actor, "project-update-avatar");
+        try appendTemplate(buf, allocator, "<strong>{actor}</strong>", .{ .actor = note.actor });
+    } else if (note.occurred_at.len != 0) {
+        try buf.appendSlice(allocator, "<strong>Unknown</strong>");
+    }
     if (note.occurred_at.len != 0) {
-        try appendTemplate(buf, allocator, "<span>Updated by {actor} · ", .{ .actor = if (note.actor.len == 0) "Unknown" else note.actor });
+        try buf.appendSlice(allocator, "<span>");
         try appendRelativeTime(buf, allocator, note.occurred_at);
         try buf.appendSlice(allocator, "</span>");
     }
-    try buf.appendSlice(allocator, "</div>");
+    try buf.appendSlice(allocator,
+        \\      </div>
+        \\    </header>
+        \\    <div class="project-update-body markdown-body">
+    );
     if (note.body.len == 0) {
         try buf.appendSlice(allocator, "<p class=\"project-markdown-empty\">No update yet.</p>");
     } else {
         try shared.appendMarkdownSource(buf, allocator, note.body, .{});
     }
     try buf.appendSlice(allocator,
-        \\  </div>
+        \\    </div>
+        \\    <footer class="project-update-actions" aria-label="Update actions">
+        \\      <button class="project-update-action" type="button"><span class="issue-comments-icon" aria-hidden="true"></span><span>Reply</span></button>
+        \\      <button class="project-update-action" type="button"><span class="reaction-add-icon" aria-hidden="true"></span><span>React</span></button>
+        \\    </footer>
+        \\  </article>
         \\</section>
     );
 }
 
 fn appendProjectDescription(buf: *std.ArrayList(u8), allocator: Allocator, summary: *const ProjectSummary) !void {
     try buf.appendSlice(allocator,
-        \\<section class="project-overview-section project-markdown-section">
-        \\  <div class="project-overview-section-title"><h2>Description</h2></div>
-        \\  <details class="project-markdown-edit">
-        \\    <summary class="button secondary">Edit description</summary>
+        \\<section class="project-overview-section project-markdown-section project-description-section">
+        \\  <details class="project-markdown-edit project-description-edit">
+        \\    <summary class="button secondary project-update-button" aria-label="Edit description" title="Edit description"><span class="button-icon project-update-button-icon" aria-hidden="true"></span><span>Edit</span></summary>
         \\    <form class="project-markdown-form" method="post" action="/projects/properties" data-project-markdown-form data-project-content-kind="project-description">
     );
     try appendProjectHiddenFields(buf, allocator, summary);
@@ -958,7 +992,9 @@ fn appendProjectDescription(buf: *std.ArrayList(u8), allocator: Allocator, summa
         \\      <div class="project-markdown-actions"><button class="project-markdown-cancel" type="button" data-project-markdown-cancel>Cancel</button><button type="submit">Save description</button></div>
         \\    </form>
         \\  </details>
-        \\  <div class="project-overview-description project-markdown-preview markdown-body">
+        \\  <div class="project-overview-section-title project-description-section-title"><h2>Description</h2></div>
+        \\  <article class="project-description-card project-markdown-preview">
+        \\    <div class="project-overview-description project-description-body markdown-body">
     );
     if (summary.description.len == 0) {
         try buf.appendSlice(allocator, "<p class=\"project-markdown-empty\">No description yet.</p>");
@@ -966,19 +1002,60 @@ fn appendProjectDescription(buf: *std.ArrayList(u8), allocator: Allocator, summa
         try shared.appendMarkdownSource(buf, allocator, summary.description, .{});
     }
     try buf.appendSlice(allocator,
-        \\  </div>
+        \\    </div>
+        \\  </article>
         \\</section>
     );
 }
 
 fn appendProjectStatusSelect(buf: *std.ArrayList(u8), allocator: Allocator, selected_status: []const u8) !void {
+    const selected_health = projectUpdateHealthStatusValue(selected_status);
+    const options = [_]struct {
+        value: []const u8,
+        label: []const u8,
+    }{
+        .{ .value = "WIP", .label = "On track" },
+        .{ .value = "Review", .label = "At risk" },
+        .{ .value = "Failed", .label = "Off track" },
+    };
     try buf.appendSlice(allocator, "<select name=\"status\" required>");
-    for (project_views.project_status_values) |status| {
-        try appendTemplate(buf, allocator, "<option value=\"{status}\"", .{ .status = status });
-        if (std.mem.eql(u8, selected_status, status)) try buf.appendSlice(allocator, " selected");
-        try appendTemplate(buf, allocator, ">{label}</option>", .{ .label = statusLabel(status) });
+    for (options) |option| {
+        try appendTemplate(buf, allocator, "<option value=\"{status}\"", .{ .status = option.value });
+        if (std.mem.eql(u8, selected_health, option.value)) try buf.appendSlice(allocator, " selected");
+        try appendTemplate(buf, allocator, ">{label}</option>", .{ .label = option.label });
     }
     try buf.appendSlice(allocator, "</select>");
+}
+
+fn appendProjectUpdateHealthChip(buf: *std.ArrayList(u8), allocator: Allocator, label: []const u8, tone: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<span class="issue-state-badge project-update-health-chip tone-{tone}"><span class="issue-state-mark" aria-hidden="true"></span>{label}</span>
+    , .{
+        .tone = tone,
+        .label = label,
+    });
+}
+
+fn projectUpdateHealthStatusValue(status: []const u8) []const u8 {
+    if (std.mem.eql(u8, status, "Failed")) return "Failed";
+    if (std.mem.eql(u8, status, "Review") or std.mem.eql(u8, status, "Draft") or std.mem.eql(u8, status, "Todo")) return "Review";
+    return "WIP";
+}
+
+fn projectUpdateHealthLabel(status: []const u8, state: []const u8) []const u8 {
+    _ = state;
+    const health_status = projectUpdateHealthStatusValue(status);
+    if (std.mem.eql(u8, health_status, "Failed")) return "Off track";
+    if (std.mem.eql(u8, health_status, "Review")) return "At risk";
+    return "On track";
+}
+
+fn projectUpdateHealthTone(status: []const u8, state: []const u8) []const u8 {
+    _ = state;
+    const health_status = projectUpdateHealthStatusValue(status);
+    if (std.mem.eql(u8, health_status, "Failed")) return "failed";
+    if (std.mem.eql(u8, health_status, "Review")) return "risk";
+    return "progress";
 }
 
 fn appendProjectHashFields(buf: *std.ArrayList(u8), allocator: Allocator, kind: []const u8, status: []const u8, body: []const u8) !void {
@@ -1305,6 +1382,42 @@ fn appendProjectPropertiesPanel(buf: *std.ArrayList(u8), allocator: Allocator, d
     );
 }
 
+fn appendProjectProgressPanel(buf: *std.ArrayList(u8), allocator: Allocator, summary: *const ProjectSummary, metrics: *const ProjectMetrics) !void {
+    const progress = projectProgressPercentFrom(metrics.completed_issue_count, metrics.issue_count);
+    const start_label = if (summary.start_at.len != 0) try dateLabelOwned(allocator, summary.start_at) else try allocator.dupe(u8, "Start");
+    defer allocator.free(start_label);
+    const target_label = if (summary.end_at.len != 0) try dateLabelOwned(allocator, summary.end_at) else try allocator.dupe(u8, "Target");
+    defer allocator.free(target_label);
+
+    try appendTemplate(buf, allocator,
+        \\<section class="project-overview-side-panel project-progress-panel">
+        \\  <div class="project-overview-side-panel-head"><div><h2>Progress</h2><span class="project-overview-side-kicker">{progress}% complete</span></div></div>
+        \\  <div class="project-progress-body" style="--started: {started_percent}; --completed: {completed_percent};">
+        \\    <div class="project-progress-stats">
+        \\      <div><span class="project-progress-legend scope" aria-hidden="true"></span><span>Scope</span><strong>{scope}</strong></div>
+        \\      <div><span class="project-progress-legend started" aria-hidden="true"></span><span>Started</span><strong>{started}</strong></div>
+        \\      <div><span class="project-progress-legend completed" aria-hidden="true"></span><span>Completed</span><strong>{completed}</strong></div>
+        \\    </div>
+        \\    <div class="project-progress-chart" aria-label="{started} started and {completed} completed out of {scope} issues">
+        \\      <span class="project-progress-scope-line" aria-hidden="true"></span>
+        \\      <span class="project-progress-started-line" aria-hidden="true"></span>
+        \\      <span class="project-progress-completed-line" aria-hidden="true"></span>
+        \\    </div>
+        \\    <div class="project-progress-axis"><span>{start_label}</span><span>{target_label}</span></div>
+        \\  </div>
+        \\</section>
+    , .{
+        .progress = progress,
+        .started_percent = shared.percent(metrics.started_issue_count, metrics.issue_count),
+        .completed_percent = shared.percent(metrics.completed_issue_count, metrics.issue_count),
+        .scope = metrics.issue_count,
+        .started = metrics.started_issue_count,
+        .completed = metrics.completed_issue_count,
+        .start_label = start_label,
+        .target_label = target_label,
+    });
+}
+
 fn appendSidebarProperty(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -1325,7 +1438,13 @@ fn appendSidebarProperty(
 }
 
 fn appendProjectStatusProperty(buf: *std.ArrayList(u8), allocator: Allocator, summary: *const ProjectSummary) !void {
-    try appendProjectPropertyMenuStart(buf, allocator, "Status", "project-overview-status-icon", "Set status", statusLabel(summary.status));
+    try appendProjectPropertyChipMenuStart(buf, allocator, "Status", "Set status");
+    if (summary.status.len == 0) {
+        try buf.appendSlice(allocator, "<span class=\"project-property-empty\">No status</span>");
+    } else {
+        try appendProjectStatusChip(buf, allocator, summary.status);
+    }
+    try appendProjectPropertyChipMenuPopoverStart(buf, allocator, "Set status");
     try appendProjectMenuGroupStart(buf, allocator, "Statuses");
     for (project_views.project_status_values) |status| {
         try appendProjectValueActionRow(buf, allocator, summary, "set-status", "status", status, status, std.mem.eql(u8, summary.status, status), .status);
@@ -1335,13 +1454,41 @@ fn appendProjectStatusProperty(buf: *std.ArrayList(u8), allocator: Allocator, su
 }
 
 fn appendProjectPriorityProperty(buf: *std.ArrayList(u8), allocator: Allocator, summary: *const ProjectSummary) !void {
-    try appendProjectPropertyMenuStart(buf, allocator, "Priority", "project-overview-priority-icon", "Set priority", priorityLabel(summary.priority));
+    try appendProjectPropertyChipMenuStart(buf, allocator, "Priority", "Set priority");
+    if (summary.priority.len == 0) {
+        try buf.appendSlice(allocator, "<span class=\"project-property-empty\">No priority</span>");
+    } else {
+        try appendProjectPriorityChip(buf, allocator, summary.priority);
+    }
+    try appendProjectPropertyChipMenuPopoverStart(buf, allocator, "Set priority");
     try appendProjectMenuGroupStart(buf, allocator, "Priorities");
     for (project_views.project_priority_values) |priority| {
         try appendProjectValueActionRow(buf, allocator, summary, "set-priority", "priority", priority, priority, std.mem.eql(u8, summary.priority, priority), .priority);
     }
     try appendProjectMenuGroupEnd(buf, allocator);
     try appendProjectPropertyMenuEnd(buf, allocator);
+}
+
+fn appendProjectPropertyChipMenuStart(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    label: []const u8,
+    menu_label: []const u8,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="project-overview-property-chip-row">
+        \\  <dt>{label}</dt>
+        \\  <dd><details class="project-property-menu project-property-chip-menu" data-popover-menu data-issue-sidebar-menu><summary aria-label="{menu_label}" title="{menu_label}">
+    , .{
+        .label = label,
+        .menu_label = menu_label,
+    });
+}
+
+fn appendProjectPropertyChipMenuPopoverStart(buf: *std.ArrayList(u8), allocator: Allocator, menu_label: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<span class="issue-sidebar-menu-icon project-property-menu-icon" aria-hidden="true"></span></summary><div class="issue-sidebar-popover project-property-popover" role="dialog" aria-label="{menu_label}"><div class="issue-sidebar-popover-title">{menu_label}</div>
+    , .{ .menu_label = menu_label });
 }
 
 const ProjectValueKind = enum {

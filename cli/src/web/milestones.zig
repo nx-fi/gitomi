@@ -546,7 +546,7 @@ pub fn renderMilestoneDetailPage(allocator: Allocator, repo: Repo, raw_ref: []co
     defer allocator.free(detail_path);
 
     try appendShellStart(&buf, allocator, repo, data.title, "projects");
-    try shared.appendDetailBackButton(&buf, allocator, shared.literalHref("/milestones"), "Back to milestones");
+    try shared.appendDetailBackButton(&buf, allocator, shared.literalHref("/projects#milestones"), "Back to milestones");
     try buf.appendSlice(allocator, "<section class=\"milestone-detail-page\">");
     try appendMilestoneDetailHeader(&buf, allocator, &db, milestone_ref, detail_path, data);
     try appendMilestoneDetailDescription(&buf, allocator, data.description);

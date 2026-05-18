@@ -443,6 +443,32 @@ pub fn createIndexSchema(db: *SqliteDb) !void {
         \\);
         \\CREATE INDEX reactions_object_idx ON reactions(object_kind, object_id, emoji);
         \\CREATE INDEX reactions_actor_idx ON reactions(actor_principal, object_kind, object_id);
+        \\CREATE TABLE notification_subscriptions (
+        \\  principal TEXT NOT NULL,
+        \\  object_kind TEXT NOT NULL,
+        \\  object_id TEXT NOT NULL,
+        \\  active INTEGER NOT NULL,
+        \\  reason TEXT NOT NULL,
+        \\  updated_at TEXT NOT NULL,
+        \\  update_event_hash TEXT NOT NULL,
+        \\  PRIMARY KEY(principal, object_kind, object_id)
+        \\);
+        \\CREATE INDEX notification_subscriptions_object_idx ON notification_subscriptions(object_kind, object_id, active, principal);
+        \\CREATE TABLE notification_inbox (
+        \\  principal TEXT NOT NULL,
+        \\  event_hash TEXT NOT NULL,
+        \\  object_kind TEXT NOT NULL,
+        \\  object_id TEXT NOT NULL,
+        \\  event_type TEXT NOT NULL,
+        \\  actor_principal TEXT NOT NULL,
+        \\  occurred_at TEXT NOT NULL,
+        \\  reason TEXT NOT NULL,
+        \\  read_at TEXT NOT NULL,
+        \\  read_event_hash TEXT NOT NULL,
+        \\  PRIMARY KEY(principal, event_hash)
+        \\);
+        \\CREATE INDEX notification_inbox_principal_unread_idx ON notification_inbox(principal, read_at, occurred_at DESC, event_hash);
+        \\CREATE INDEX notification_inbox_object_idx ON notification_inbox(object_kind, object_id, occurred_at DESC);
         \\CREATE TABLE commit_references (
         \\  commit_oid TEXT NOT NULL,
         \\  object_kind TEXT NOT NULL,

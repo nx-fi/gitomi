@@ -32,6 +32,7 @@ const WebStats = struct {
     events: usize = 0,
     issues: usize = 0,
     pulls: usize = 0,
+    unread_notifications: usize = 0,
 };
 
 const ShellOptions = struct {
@@ -53,6 +54,28 @@ const CurrentUserRole = struct {
     fn deinit(self: *CurrentUserRole, allocator: Allocator) void {
         if (self.role) |value| allocator.free(value);
         self.* = .{};
+    }
+};
+
+const TopbarNotificationRow = struct {
+    event_hash: []u8,
+    object_kind: []u8,
+    object_id: []u8,
+    event_type: []u8,
+    actor_principal: []u8,
+    occurred_at: []u8,
+    read_at: []u8,
+    title: []u8,
+
+    fn deinit(self: *TopbarNotificationRow, allocator: Allocator) void {
+        allocator.free(self.event_hash);
+        allocator.free(self.object_kind);
+        allocator.free(self.object_id);
+        allocator.free(self.event_type);
+        allocator.free(self.actor_principal);
+        allocator.free(self.occurred_at);
+        allocator.free(self.read_at);
+        allocator.free(self.title);
     }
 };
 
@@ -865,6 +888,8 @@ fn appendShellStartWithOptions(
     );
     try appendLiveModeControl(buf, allocator, github_live.runtimeStatus());
     try appendTopbarSyncMenu(buf, allocator);
+    const topbar_principal: ?[]const u8 = if (cfg_opt) |cfg| cfg.principal else null;
+    try appendTopbarInboxMenu(buf, allocator, repo, topbar_principal, stats.unread_notifications);
     try appendTemplate(buf, allocator,
         \\  <button class="theme-toggle" type="button" data-theme-toggle aria-pressed="false" aria-label="Toggle dark mode" title="Toggle dark mode">
         \\    <span class="button-icon theme-toggle-icon theme-toggle-icon-light icon-sun" aria-hidden="true"></span>
@@ -902,6 +927,100 @@ fn appendTopbarSyncMenu(buf: *std.ArrayList(u8), allocator: Allocator) !void {
         \\  </form>
         \\</details>
     , .{});
+}
+
+fn appendTopbarInboxMenu(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    repo: Repo,
+    principal: ?[]const u8,
+    unread_count: usize,
+) !void {
+    const empty_rows: []TopbarNotificationRow = &.{};
+    var rows: []TopbarNotificationRow = empty_rows;
+    var rows_owned = false;
+    if (principal) |value| {
+        if (index.isIndexFresh(allocator, repo) catch false) {
+            if (loadTopbarNotificationRows(allocator, repo, value, 5) catch null) |loaded| {
+                rows = loaded;
+                rows_owned = true;
+            }
+        }
+    }
+    defer if (rows_owned) freeTopbarNotificationRows(allocator, rows);
+
+    try buf.appendSlice(allocator,
+        \\<details class="topbar-inbox-menu" data-popover-menu>
+        \\  <summary class="topbar-inbox-button" aria-label="Inbox" title="Inbox">
+        \\    <span class="button-icon icon-history" aria-hidden="true"></span>
+    );
+    if (unread_count != 0) {
+        try appendTemplate(buf, allocator,
+            \\    <span class="topbar-inbox-count">{count}</span>
+        , .{ .count = unread_count });
+    }
+    try buf.appendSlice(allocator,
+        \\  </summary>
+        \\  <div class="topbar-inbox-popover" role="menu">
+        \\    <div class="topbar-inbox-head">
+        \\      <strong>Inbox</strong>
+        \\      <span>
+    );
+    if (unread_count == 0) {
+        try buf.appendSlice(allocator, "No unread");
+    } else {
+        try appendTemplate(buf, allocator, "{count} unread", .{ .count = unread_count });
+    }
+    try buf.appendSlice(allocator,
+        \\</span>
+        \\    </div>
+    );
+    if (principal == null) {
+        try buf.appendSlice(allocator,
+            \\    <div class="topbar-inbox-empty">Initialize Gitomi to use notifications.</div>
+        );
+    } else if (rows.len == 0) {
+        try buf.appendSlice(allocator,
+            \\    <div class="topbar-inbox-empty">No notifications.</div>
+        );
+    } else {
+        for (rows) |row| try appendTopbarNotificationRow(buf, allocator, row);
+    }
+    try buf.appendSlice(allocator,
+        \\    <a class="topbar-inbox-all" href="/inbox" role="menuitem">Open inbox</a>
+        \\  </div>
+        \\</details>
+    );
+}
+
+fn appendTopbarNotificationRow(buf: *std.ArrayList(u8), allocator: Allocator, row: TopbarNotificationRow) !void {
+    const href = if (std.mem.eql(u8, row.object_kind, "pull"))
+        pullHref(row.object_id)
+    else
+        issueHref(row.object_id);
+    const kind_label = if (std.mem.eql(u8, row.object_kind, "pull")) "PR" else "Issue";
+    var object_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const object_ref = util.shortObjectRef(&object_ref_buf, row.object_id);
+    try appendTemplate(buf, allocator,
+        \\    <a class="topbar-inbox-row {read_class}" href="{href}" role="menuitem">
+        \\      <span class="topbar-inbox-row-kicker">{kind_label} #{object_ref}</span>
+        \\      <strong>{title}</strong>
+        \\      <span class="topbar-inbox-row-meta">{event_type} by {actor}</span>
+        \\      <span class="topbar-inbox-row-time">
+    , .{
+        .read_class = if (row.read_at.len == 0) "unread" else "read",
+        .href = href,
+        .kind_label = kind_label,
+        .object_ref = object_ref,
+        .title = if (row.title.len == 0) row.event_type else row.title,
+        .event_type = row.event_type,
+        .actor = row.actor_principal,
+    });
+    try appendRelativeTime(buf, allocator, row.occurred_at);
+    try buf.appendSlice(allocator,
+        \\</span>
+        \\    </a>
+    );
 }
 
 fn appendLiveModeControl(buf: *std.ArrayList(u8), allocator: Allocator, status: github_live.RuntimeStatus) !void {
@@ -1872,7 +1991,70 @@ fn loadWebStats(allocator: Allocator, repo: Repo) !WebStats {
     stats.events = countIndexedEvents(allocator, repo) catch 0;
     stats.issues = index.countOpenIssues(allocator, repo) catch 0;
     stats.pulls = index.countOpenPulls(allocator, repo) catch 0;
+    const principal = currentPrincipalOwned(allocator, repo) catch null;
+    defer if (principal) |value| allocator.free(value);
+    if (principal) |value| {
+        stats.unread_notifications = countUnreadNotifications(allocator, repo, value) catch 0;
+    }
     return stats;
+}
+
+fn countUnreadNotifications(allocator: Allocator, repo: Repo, principal: []const u8) !usize {
+    var db = try index.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    var stmt = try db.prepare(
+        \\SELECT COUNT(*)
+        \\FROM notification_inbox
+        \\WHERE principal = ?
+        \\  AND read_at = ''
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, principal);
+    if (!(try stmt.step())) return 0;
+    const count = stmt.columnInt64(0);
+    return if (count <= 0) 0 else @as(usize, @intCast(count));
+}
+
+fn loadTopbarNotificationRows(allocator: Allocator, repo: Repo, principal: []const u8, limit: usize) ![]TopbarNotificationRow {
+    var db = try index.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    var stmt = try db.prepare(
+        \\SELECT n.event_hash, n.object_kind, n.object_id, n.event_type, n.actor_principal,
+        \\       n.occurred_at, n.read_at, COALESCE(i.title, p.title, '')
+        \\FROM notification_inbox n
+        \\LEFT JOIN issues i ON n.object_kind = 'issue' AND i.id = n.object_id
+        \\LEFT JOIN pulls p ON n.object_kind = 'pull' AND p.id = n.object_id
+        \\WHERE n.principal = ?
+        \\ORDER BY CASE WHEN n.read_at = '' THEN 0 ELSE 1 END, n.occurred_at DESC, n.event_hash DESC
+        \\LIMIT ?
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, principal);
+    try stmt.bindInt64(2, @intCast(limit));
+
+    var rows: std.ArrayList(TopbarNotificationRow) = .empty;
+    errdefer {
+        for (rows.items) |*row| row.deinit(allocator);
+        rows.deinit(allocator);
+    }
+    while (try stmt.step()) {
+        try rows.append(allocator, .{
+            .event_hash = try stmt.columnTextDup(allocator, 0),
+            .object_kind = try stmt.columnTextDup(allocator, 1),
+            .object_id = try stmt.columnTextDup(allocator, 2),
+            .event_type = try stmt.columnTextDup(allocator, 3),
+            .actor_principal = try stmt.columnTextDup(allocator, 4),
+            .occurred_at = try stmt.columnTextDup(allocator, 5),
+            .read_at = try stmt.columnTextDup(allocator, 6),
+            .title = try stmt.columnTextDup(allocator, 7),
+        });
+    }
+    return try rows.toOwnedSlice(allocator);
+}
+
+fn freeTopbarNotificationRows(allocator: Allocator, rows: []TopbarNotificationRow) void {
+    for (rows) |*row| row.deinit(allocator);
+    allocator.free(rows);
 }
 
 fn countRefsWithPrefix(allocator: Allocator, prefix: []const u8) !usize {

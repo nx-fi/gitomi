@@ -214,6 +214,7 @@ fn appendProjectIndexRow(
     const health_tone = projectHealthTone(status, state);
     const progress = projectProgressPercent(issue_count, closed_issue_count);
     const progress_tone = projectProgressTone(issue_count, closed_issue_count);
+    const progress_degrees = projectProgressDegrees(issue_count, closed_issue_count);
     const lead_label = try projectLeadLabelOwned(allocator, lead, lead_count);
     defer allocator.free(lead_label);
     const target_label = try projectTargetDateLabelOwned(allocator, target_at);
@@ -248,8 +249,9 @@ fn appendProjectIndexRow(
         \\  <div class="project-index-health">
     );
     try appendTemplate(buf, allocator,
-        \\<span class="project-summary-health-icon tone-{health_tone}" aria-hidden="true"></span><strong class="project-summary-health-value tone-{health_tone}">{health_label}
+        \\<span class="issue-state-icon project-summary-health-icon {health_icon_state} tone-{health_tone}" title="{health_label}" aria-label="{health_label}"></span><strong class="project-summary-health-value tone-{health_tone}">{health_label}
     , .{
+        .health_icon_state = projectHealthIconState(health_tone),
         .health_tone = health_tone,
         .health_label = health_label,
     });
@@ -264,7 +266,7 @@ fn appendProjectIndexRow(
         \\  <div class="project-index-lead"><span class="button-icon icon-users" aria-hidden="true"></span><strong>{lead}</strong></div>
         \\  <div class="project-index-target"><span class="button-icon icon-calendar" aria-hidden="true"></span><strong>{target}</strong></div>
         \\  <div class="project-index-issues"><strong>{issue_count}</strong></div>
-        \\  <div class="project-index-progress"><strong class="project-summary-progress tone-{progress_tone}" title="{closed_issue_count} of {issue_count} issues closed"><span class="project-summary-progress-icon" aria-hidden="true"></span>{progress}%</strong></div>
+        \\  <div class="project-index-progress"><strong class="project-summary-progress tone-{progress_tone}" title="{closed_issue_count} of {issue_count} issues closed" style="--issue-task-progress: {progress_degrees}deg"><span class="issue-task-progress-icon project-summary-progress-icon" aria-hidden="true"></span>{progress}%</strong></div>
         \\</article>
     , .{
         .priority_class = projectIndexPriorityClass(priority),
@@ -274,6 +276,7 @@ fn appendProjectIndexRow(
         .issue_count = issue_count,
         .closed_issue_count = closed_issue_count,
         .progress_tone = progress_tone,
+        .progress_degrees = progress_degrees,
         .progress = progress,
     });
 }
@@ -301,6 +304,16 @@ fn projectProgressTone(issue_count: usize, closed_issue_count: usize) []const u8
     if (issue_count != 0 and closed_issue_count >= issue_count) return "done";
     if (closed_issue_count == 0) return "todo";
     return "progress";
+}
+
+fn projectProgressDegrees(issue_count: usize, closed_issue_count: usize) usize {
+    if (issue_count == 0) return 0;
+    return (@min(closed_issue_count, issue_count) * 360) / issue_count;
+}
+
+fn projectHealthIconState(tone: []const u8) []const u8 {
+    if (std.mem.eql(u8, tone, "done")) return "closed";
+    return "open";
 }
 
 fn projectLeadLabelOwned(allocator: Allocator, lead: []const u8, lead_count: usize) ![]u8 {

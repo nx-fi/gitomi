@@ -12,6 +12,8 @@ const issues_page = @import("web/issues.zig");
 const labels_page = @import("web/labels.zig");
 const models_page = @import("web/models.zig");
 const milestones_page = @import("web/milestones.zig");
+const notification_cli = @import("notification.zig");
+const notifications_page = @import("web/notifications.zig");
 const overview_page = @import("web/overview.zig");
 const projects_page = @import("web/projects.zig");
 const pulls_page = @import("web/pulls.zig");
@@ -108,6 +110,8 @@ const routes = [_]Route{
     Route.get("/commits", handleCommitsPage),
     Route.get("/commit", handleCommitPage),
     Route.get("/overview", handleOverviewPage),
+    Route.get("/inbox", handleInboxPage),
+    Route.post("/inbox/read", handleInboxReadPost),
     Route.get("/issues", handleIssuesPage),
     Route.get("/issues/:ref/edit", handleIssueEditPage),
     Route.get("/issues/:ref", handleIssueDetailPage),
@@ -485,6 +489,41 @@ fn handleCommitPage(ctx: WebContext) !void {
 
 fn handleOverviewPage(ctx: WebContext) !void {
     try sendOwnedHtml(ctx, try overview_page.renderHomePage(ctx.allocator, ctx.repo));
+}
+
+fn handleInboxPage(ctx: WebContext) !void {
+    try sendOwnedHtml(ctx, try notifications_page.renderInboxPage(ctx.allocator, ctx.repo, ctx.request.target, ctx.csrf_token));
+}
+
+fn handleInboxReadPost(ctx: WebContext) !void {
+    if (!try requireCsrfToken(ctx)) return;
+
+    var cfg = repo_mod.loadConfig(ctx.allocator, ctx.repo.config_path) catch |err| switch (err) {
+        CliError.ConfigNotFound, CliError.ConfigInvalid => {
+            try shared.sendPlainResponse(ctx.allocator, ctx.stream, 409, "Conflict", "Gitomi is not initialized\n");
+            return;
+        },
+        else => return err,
+    };
+    defer cfg.deinit();
+
+    var form = try ctx.request.formValues(ctx.allocator);
+    defer form.deinit();
+
+    const action = form.value("action") orelse "";
+    if (std.mem.eql(u8, action, "read-all")) {
+        try notification_cli.createNotificationReadAllEvent(ctx.allocator, cfg.principal);
+    } else {
+        const event_hash = form.value("event_hash") orelse {
+            try shared.sendPlainResponse(ctx.allocator, ctx.stream, 400, "Bad Request", "Missing event_hash\n");
+            return;
+        };
+        try notification_cli.createNotificationReadEvent(ctx.allocator, cfg.principal, event_hash);
+    }
+
+    const location = try sameOriginRefererTargetOwned(ctx.allocator, ctx.request, "/inbox");
+    defer ctx.allocator.free(location);
+    try shared.sendRedirect(ctx.allocator, ctx.stream, location);
 }
 
 fn handleIssuesPage(ctx: WebContext) !void {

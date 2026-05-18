@@ -444,6 +444,13 @@
     linear-gradient(180deg, #07111f 0%, #08121f 48%, #060d18 100%);
 }
 
+:root[data-theme="modern"] body,
+:root[data-theme="modern"][data-theme-mode="dark"] body {
+  min-height: 100dvh;
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+}
+
 :root[data-theme="modern"] .topbar {
   background:
     linear-gradient(90deg, rgb(47 129 255 / 8%), transparent 36%, rgb(6 182 212 / 7%)),

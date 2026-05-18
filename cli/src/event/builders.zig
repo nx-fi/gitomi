@@ -1027,6 +1027,78 @@ pub fn buildReactionJson(
     return try buf.toOwnedSlice(allocator);
 }
 
+pub fn buildNotificationSubscriptionJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    notification_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    event_type: []const u8,
+    principal: []const u8,
+    target_kind: []const u8,
+    target_id: []const u8,
+    reason: []const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, notification_id, event_uuid, idem, occurred_at, parents, event_type, "notification");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "principal", principal, true);
+    try appendJsonFieldString(&buf, allocator, "target_kind", target_kind, true);
+    try appendJsonFieldString(&buf, allocator, "target_id", target_id, reason.len != 0);
+    if (reason.len != 0) try appendJsonFieldString(&buf, allocator, "reason", reason, false);
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildNotificationReadJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    notification_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    principal: []const u8,
+    event_hash: []const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, notification_id, event_uuid, idem, occurred_at, parents, "notification.read", "notification");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "principal", principal, true);
+    try appendJsonFieldString(&buf, allocator, "event_hash", event_hash, false);
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildNotificationReadAllJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    notification_id: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    principal: []const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, notification_id, event_uuid, idem, occurred_at, parents, "notification.read_all", "notification");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "principal", principal, false);
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
 pub fn buildPullOpenedJson(
     allocator: Allocator,
     cfg: Config,

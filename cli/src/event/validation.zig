@@ -406,6 +406,7 @@ pub fn isKnownObjectKind(kind: []const u8) bool {
         std.mem.eql(u8, kind, "milestone") or
         std.mem.eql(u8, kind, "label") or
         std.mem.eql(u8, kind, "comment") or
+        std.mem.eql(u8, kind, "notification") or
         std.mem.eql(u8, kind, "acl") or
         std.mem.eql(u8, kind, "identity") or
         std.mem.eql(u8, kind, "action");
@@ -446,6 +447,9 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
     }
     if (std.mem.startsWith(u8, event_type, "comment.") and !std.mem.eql(u8, object_kind, "comment")) {
         return "comment event object.kind must be comment";
+    }
+    if (std.mem.startsWith(u8, event_type, "notification.") and !std.mem.eql(u8, object_kind, "notification")) {
+        return "notification event object.kind must be notification";
     }
     if (std.mem.startsWith(u8, event_type, "acl.") and !std.mem.eql(u8, object_kind, "acl")) {
         return "acl event object.kind must be acl";
@@ -846,6 +850,27 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         return null;
     }
 
+    if (std.mem.eql(u8, event_type, "notification.subscribed") or std.mem.eql(u8, event_type, "notification.unsubscribed")) {
+        if (!hasString(payload, "principal")) return "notification subscription payload.principal must be a string";
+        if (!stringWithin(payload, "principal", git.max_payload_atom_bytes)) return "notification subscription payload.principal exceeds v1 field size limit";
+        const target_kind = jsonString(payload.get("target_kind")) orelse return "notification subscription payload.target_kind must be a string";
+        if (!std.mem.eql(u8, target_kind, "issue") and !std.mem.eql(u8, target_kind, "pull")) return "notification subscription payload.target_kind must be issue or pull";
+        if (!hasUuidString(payload, "target_id")) return "notification subscription payload.target_id must be a UUID string";
+        if (!optionalStringWithin(payload, "reason", git.max_payload_atom_bytes)) return "notification subscription payload.reason exceeds v1 field size limit";
+        return null;
+    }
+    if (std.mem.eql(u8, event_type, "notification.read")) {
+        if (!hasString(payload, "principal")) return "notification.read payload.principal must be a string";
+        if (!stringWithin(payload, "principal", git.max_payload_atom_bytes)) return "notification.read payload.principal exceeds v1 field size limit";
+        if (!hasNonEmptyStringWithin(payload, "event_hash", git.max_payload_ref_bytes)) return "notification.read payload.event_hash must be a non-empty string within v1 ref size limit";
+        return null;
+    }
+    if (std.mem.eql(u8, event_type, "notification.read_all")) {
+        if (!hasString(payload, "principal")) return "notification.read_all payload.principal must be a string";
+        if (!stringWithin(payload, "principal", git.max_payload_atom_bytes)) return "notification.read_all payload.principal exceeds v1 field size limit";
+        return null;
+    }
+
     if (std.mem.eql(u8, event_type, "acl.role_granted") or std.mem.eql(u8, event_type, "acl.role_revoked")) {
         if (!hasString(payload, "principal")) return "acl role event payload.principal must be a string";
         if (!stringWithin(payload, "principal", git.max_payload_atom_bytes)) return "acl role event payload.principal exceeds v1 field size limit";
@@ -1065,6 +1090,10 @@ pub fn objectIdRequirementError(event_type: []const u8, object_kind: []const u8,
     }
     if (std.mem.startsWith(u8, event_type, "comment.") and std.mem.eql(u8, object_kind, "comment")) {
         if (!looksLikeUuid(object_id)) return "comment event object.id must be a UUID";
+        return null;
+    }
+    if (std.mem.startsWith(u8, event_type, "notification.") and std.mem.eql(u8, object_kind, "notification")) {
+        if (!looksLikeUuid(object_id)) return "notification event object.id must be a UUID";
         return null;
     }
     if (std.mem.startsWith(u8, event_type, "acl.") and std.mem.eql(u8, object_kind, "acl")) {

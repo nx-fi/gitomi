@@ -3,8 +3,8 @@
 ## 1. Introduction
 
 Gitomi is a local-first, Git-native forge that layers issues, pull requests,
-projects, milestones, ACLs, and workflow execution over a standard Git
-repository.
+projects, milestones, notifications, ACLs, and workflow execution over a
+standard Git repository.
 
 Gitomi separates:
 
@@ -122,7 +122,7 @@ Every event body MUST conform to the following envelope:
   "event_uuid": "string, UUIDv7",
   "event_type": "string",
   "object": {
-    "kind": "string (issue | pull | comment | acl | identity | action)",
+    "kind": "string (issue | pull | comment | acl | identity | action | notification)",
     "id": "string, UUIDv7 of the logical object"
   },
   "idempotency_key": "string, UUIDv7",
@@ -153,14 +153,17 @@ the derived event hash for those purposes.
 
 ### 4.3. Object Identifiers and Human References
 
-Issue, pull request, project, milestone, comment, and action run identifiers
-MUST be UUIDv7. ACL and identity events target stable system objects rather
-than user-facing content objects:
+Issue, pull request, project, milestone, comment, action run, and notification
+event identifiers MUST be UUIDv7. ACL and identity events target stable system
+objects rather than user-facing content objects:
 
 *   `acl.*`: `object.id` MUST be `acl:<principal>`, where `<principal>` is the
     canonical target principal in `payload.principal`.
 *   `identity.*`: `object.id` MUST be `identity:<principal>:<device>`, where
     the components match `payload.principal` and `payload.device`.
+*   `notification.*`: `object.id` MUST be a UUIDv7 notification event id. The
+    target issue or pull request is carried in `payload.target_kind` and
+    `payload.target_id` for subscription events.
 *   `action.run_requested` and `action.run_completed`: `object.id` MUST be the
     run UUID. For `action.run_completed`, `payload.run_id` MUST equal
     `object.id`.
@@ -212,6 +215,7 @@ Compliant implementations MUST understand the following event families:
 *   `acl.role_granted`, `acl.role_revoked`, `acl.delegation_granted`, `acl.delegation_revoked`
 *   `identity.device_added`, `identity.device_revoked`
 *   `action.run_requested`, `action.run_completed`
+*   `notification.subscribed`, `notification.unsubscribed`, `notification.read`, `notification.read_all`
 
 Implementations MAY support additional event types. Unknown event types MUST be preserved and SHOULD be ignored unless the implementation explicitly understands them.
 
@@ -260,8 +264,52 @@ The following payload members are REQUIRED for interoperable v1 implementations:
 *   `identity.device_revoked`: `principal`, `device`
 *   `action.run_requested`: `workflow`, `target_ref` or `target_oid`; OPTIONAL `event_name`, `gitomi_event_type`
 *   `action.run_completed`: `run_id`, `conclusion`, `target_ref` or `target_oid`; OPTIONAL `workflow`, `event_name`
+*   `notification.subscribed` / `notification.unsubscribed`: `principal`, `target_kind` (`issue` or `pull`), `target_id`; OPTIONAL `reason`
+*   `notification.read`: `principal`, `event_hash`
+*   `notification.read_all`: `principal`
 
-### 4.7. Pull Request Product Model
+### 4.7. Notification Product Model
+
+Gitomi notifications are a pub/sub projection over the accepted Control Plane
+event stream. Subscriptions and read markers are themselves signed events, so a
+replica can rebuild a user's inbox from Gitomi refs without a central server.
+
+The canonical subscription target in v1 is an issue or pull request. Explicit
+subscribe and unsubscribe operations are represented by `notification.subscribed`
+and `notification.unsubscribed` events. A subscription event MUST target an
+accepted issue or pull request by `payload.target_kind` and `payload.target_id`.
+Subscription events for missing targets MUST be domain-rejected with reason
+`object_not_created`.
+
+Reducers SHALL also derive subscriptions as part of normal issue and pull
+request event processing:
+
+*   the actor that opens an issue or pull request is subscribed as the author;
+*   principals assigned to an issue or pull request are subscribed as assignees;
+*   principals requested as pull request reviewers are subscribed as reviewers;
+*   the actor that comments on an issue or pull request is subscribed as a commenter; and
+*   principals mentioned as `@<principal>` in an issue or pull request comment body are subscribed as mentions.
+
+When an accepted issue, pull request, or attached comment event occurs, the
+notification reducer SHALL publish an inbox item to every active subscriber of
+that target except the event actor. The inbox item records the subscriber,
+source event hash, target kind, target id, source event type, source actor,
+timestamp, and subscription reason. Implementations MAY add richer display
+metadata in local indexes, but the event hash and target identity are the
+portable notification identity.
+
+Read state is event-sourced. `notification.read` marks one inbox item read for
+`payload.principal` by source `payload.event_hash`. `notification.read_all`
+marks all current inbox items read for `payload.principal`. Read events MUST
+NOT delete inbox rows or alter the source event.
+
+The command-line interface SHOULD expose listing unread and recent inbox
+events, subscribing and unsubscribing issue or pull request targets, listing
+subscriptions, and marking one or all notifications read. The web interface
+SHOULD expose a top-right inbox affordance that shows recent and unread
+notifications and links to an inbox view.
+
+### 4.8. Pull Request Product Model
 
 Gitomi pull requests are first-class Control Plane objects that coordinate a
 proposed Data Plane change. A pull request MUST NOT contain or own source code
@@ -314,7 +362,7 @@ on the pull request. General review discussion is represented by comments whose
 `parent_kind` is `pull`. Implementations MAY add future `review.*` events or
 line-scoped comment metadata while preserving this base pull request model.
 
-### 4.8. Issue and Pull Request Filter Language
+### 4.9. Issue and Pull Request Filter Language
 
 Issue and pull request list search boxes use one canonical, GitHub-like filter
 language. A query is a whitespace-separated sequence of terms. A term is either
@@ -625,7 +673,25 @@ but each accepted add remains auditable by event hash. Reaction removals affect
 only the removing actor's adds. They MUST NOT remove another principal's
 reaction.
 
-### 6.6. Projects and Kanban Boards
+### 6.6. Notifications
+
+Notification subscriptions are reduced before publishing inbox rows for the
+source event being processed. This means opening an issue or pull request can
+subscribe its author, assignees, and reviewers in the same event that creates
+the object; the actor still does not receive an inbox item for their own event.
+
+`notification.subscribed` and `notification.unsubscribed` are last-writer-wins
+register updates keyed by `(principal, target_kind, target_id)`, using causal
+order and deterministic event-hash order for concurrent changes. A subscription
+with `active = false` suppresses future inbox delivery until a later subscribed
+event wins for the same key.
+
+Inbox publication is deterministic and idempotent. A reducer MUST NOT create
+more than one inbox row for the same `(principal, source_event_hash)`. If a
+principal is subscribed through multiple reasons, the reducer MAY preserve one
+stable reason for display but MUST still deliver at most one inbox item.
+
+### 6.7. Projects and Kanban Boards
 
 A project is created by `project.created`.
 
@@ -673,7 +739,7 @@ A visible project projection MUST NOT expose more than 128 kanban columns. An
 event that would exceed this limit after reduction MUST be domain-rejected with
 reason `collection_limit_exceeded`.
 
-### 6.7. Milestones
+### 6.8. Milestones
 
 A milestone is created by `milestone.created`.
 
@@ -707,7 +773,7 @@ values clear those fields; `title` MUST NOT be empty. Convenience close/reopen
 surfaces SHOULD emit `milestone.state_set` with `state` set to `closed` or
 `open`.
 
-### 6.8. Derived References From Code Commits
+### 6.9. Derived References From Code Commits
 
 Implementations MUST parse Data Plane commit messages to derive links from code to Gitomi objects.
 
@@ -723,7 +789,7 @@ derive issue and pull relationships from accepted, non-redacted body/comment
 text that uses those directives. These relationships are presentation data and
 MUST NOT change object state or admission decisions.
 
-### 6.9. Cache Rebuild
+### 6.10. Cache Rebuild
 
 `.git/gitomi/index.sqlite` and `.git/gitomi/cursors.sqlite` are disposable caches.
 

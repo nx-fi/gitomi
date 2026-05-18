@@ -87,6 +87,7 @@ The following table defines the minimum permission set and the lowest role requi
 | `comment.add`               |        | ✓        | ✓           | ✓          | ✓     |
 | `reaction.add`              |        | ✓        | ✓           | ✓          | ✓     |
 | `reaction.remove_own`       |        | ✓        | ✓           | ✓          | ✓     |
+| `notification.manage_own`   |        | ✓        | ✓           | ✓          | ✓     |
 | `pull.open`                 |        |          | ✓           | ✓          | ✓     |
 | `issue.edit_own`            |        |          | ✓           | ✓          | ✓     |
 | `comment.edit_own`          |        |          | ✓           | ✓          | ✓     |
@@ -107,6 +108,7 @@ The following table defines the minimum permission set and the lowest role requi
 | `milestone.manage`          |        |          |             | ✓          | ✓     |
 | `label.manage`              |        |          |             | ✓          | ✓     |
 | `action.run_request`        |        |          |             | ✓          | ✓     |
+| `notification.manage_any`   |        |          |             | ✓          | ✓     |
 | `delegation.manage`         |        |          |             | ✓          | ✓     |
 | `acl.grant`                 |        |          |             |            | ✓     |
 | `acl.revoke`                |        |          |             |            | ✓     |
@@ -207,11 +209,18 @@ Every event type MUST map to a required permission. The following defines the ma
 | `identity.device_revoked` | `identity.manage`         | —       |
 | `action.run_requested`    | `action.run_request`      | —       |
 | `action.run_completed`    | `action.run_request`      | —       |
+| `notification.subscribed` | `notification.manage_own` or `notification.manage_any` | principal |
+| `notification.unsubscribed` | `notification.manage_own` or `notification.manage_any` | principal |
+| `notification.read`      | `notification.manage_own` or `notification.manage_any` | principal |
+| `notification.read_all`  | `notification.manage_own` or `notification.manage_any` | principal |
 
 When the scope column says "object", the reducer MUST check whether `_own` is sufficient (actor authored the object) or whether `_any` is required.
 When the scope column says "actor", the event is limited by event shape to the
 actor's own projection entries and MUST NOT remove or mutate another
 principal's reaction.
+When the scope column says "principal", `notification.manage_own` is sufficient
+only when `payload.principal` equals `actor.principal`; otherwise
+`notification.manage_any` is required.
 
 An `issue.opened` event that includes `payload.labels` MUST also require
 `issue.manage_labels`. An `issue.opened` event that includes
