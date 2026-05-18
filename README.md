@@ -137,6 +137,15 @@ GitHub import/export/sync/live; pass `--rest` to use the older REST paths:
 gt github sync --repo OWNER/REPO
 ```
 
+GitHub sync uses one canonical delegated bridge inbox per GitHub repository,
+`refs/gitomi/inbox/import-bot/github` by default. Any maintainer may run the
+bridge: Gitomi grants that maintainer's signing key authority to append
+`import-bot/github` events, publishes the maintainer's local inbox, then pushes
+the bridge inbox fast-forward-only. If another maintainer wins the same bridge
+race, sync discards its unpublished bot commits, pulls the new remote bot head,
+and retries the import. Keep a single shared Gitomi genesis; separate genesis
+refs create separate trust roots and are not a safe collaboration model.
+
 Imports preserve GitHub issue and pull request numbers as secondary aliases, so
 references such as `#123`, `gh#123`, and `github:123` continue to work.
 

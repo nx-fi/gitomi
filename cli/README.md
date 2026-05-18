@@ -282,6 +282,25 @@ GraphQL export path by default; pass `--rest` to use the older REST path. State
 and mappings live under `.git/gitomi/github/<owner>/<repo>/`; pass
 `--no-git-sync` to skip surrounding Git transport steps.
 
+For GitHub-to-Gitomi imports, all maintainers share one canonical bridge actor:
+`import-bot/github` by default, stored at
+`refs/gitomi/inbox/import-bot/github`. A maintainer running `gt github sync`
+first pulls remote Gitomi refs, then imports GitHub changes through that bot
+actor. Before exporting local Gitomi changes back to GitHub, sync publishes the
+maintainer's own inbox (including any new delegation grant) and then pushes the
+bot inbox fast-forward-only. If another maintainer published the same bridge
+inbox first, sync restores its local GitHub mapping file, abandons only the
+unpublished local bot commits, pulls the remote bot head, and retries the import.
+
+Do not solve bridge concurrency by creating a different Gitomi genesis per user.
+That creates separate trust roots and separate repositories. Also avoid one bot
+device per maintainer for the same GitHub project unless the GitHub source IDs
+are made globally unique in the reducer: concurrent imports on separate bot
+devices can otherwise create duplicate native Gitomi objects for the same
+GitHub issue, pull, or comment. The intended model is one shared genesis, one
+canonical bridge inbox per upstream project, and fast-forward/retry publication
+by any maintainer authorized for that bridge.
+
 `gt github live` runs the normal local Gitomi workflow with a two-way GitHub
 bridge. It subscribes the current repository to a GitHub webhook through
 `gh api`, listens locally for `issues`, `pull_request`, `issue_comment`, and

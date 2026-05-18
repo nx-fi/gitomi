@@ -1,5 +1,6 @@
 const std = @import("std");
 const errors = @import("../../errors.zig");
+const git = @import("../../git.zig");
 const index = @import("../../index.zig");
 const io = @import("../../io.zig");
 const repo_mod = @import("../../repo.zig");
@@ -19,6 +20,7 @@ const eprint = io.eprint;
 const out = io.out;
 
 const default_interval_ms: u64 = 0;
+const bridge_publish_attempts: usize = 3;
 
 const Options = struct {
     repo: RepoSlug,
@@ -177,6 +179,24 @@ pub fn cmdSync(allocator: Allocator, args: []const []const u8) !void {
 }
 
 fn runSyncOnce(allocator: Allocator, options: Options) !void {
+    var attempt: usize = 0;
+    while (true) : (attempt += 1) {
+        runSyncOnceAttempt(allocator, options) catch |err| switch (err) {
+            error.RemoteRejected => {
+                if (attempt + 1 >= bridge_publish_attempts) {
+                    try eprint("gt github sync: remote import bot inbox kept advancing; retry later after `gt sync --pull-only`\n", .{});
+                    return CliError.GitFailed;
+                }
+                try eprint("gt github sync: remote import bot inbox advanced during sync; retrying import ({d}/{d})\n", .{ attempt + 2, bridge_publish_attempts });
+                continue;
+            },
+            else => return err,
+        };
+        return;
+    }
+}
+
+fn runSyncOnceAttempt(allocator: Allocator, options: Options) !void {
     var repo = try repo_mod.discoverRepo(allocator);
     defer repo.deinit();
 
@@ -187,6 +207,13 @@ fn runSyncOnce(allocator: Allocator, options: Options) !void {
 
     const map_path = if (options.map_file) |path| try allocator.dupe(u8, path) else try githubMapPath(allocator, repo, options.repo);
     defer allocator.free(map_path);
+    var map_snapshot = try MapFileSnapshot.capture(allocator, map_path);
+    defer map_snapshot.deinit(allocator);
+
+    const bot_inbox_ref = try importBotInboxRef(allocator, options.bot_principal, options.bot_device);
+    defer allocator.free(bot_inbox_ref);
+    const bot_base_oid = try git.resolveOptionalRef(allocator, bot_inbox_ref);
+    defer if (bot_base_oid) |oid| allocator.free(oid);
 
     const client = GitHubClient{
         .allocator = allocator,
@@ -196,6 +223,10 @@ fn runSyncOnce(allocator: Allocator, options: Options) !void {
         .dry_run = options.dry_run,
         .use_gh = options.use_gh,
     };
+    if (!options.dry_run) {
+        try eprint("gt github sync: preparing delegated import actor {s}/{s}\n", .{ options.bot_principal, options.bot_device });
+        try importer.ensureImportDelegation(allocator, options.bot_principal, options.bot_device);
+    }
     var import_stats = importer.ImportStats{};
     try importer.importFromApi(allocator, client, .{
         .repo = options.repo,
@@ -212,6 +243,13 @@ fn runSyncOnce(allocator: Allocator, options: Options) !void {
     }, &import_stats);
 
     try index.ensureIndex(allocator, repo);
+    if (options.git_sync and !options.dry_run) {
+        publishGitomiBridgeRefs(allocator, options.remote, bot_inbox_ref, bot_base_oid, map_path, &map_snapshot) catch |err| switch (err) {
+            error.RemoteRejected => return err,
+            else => return err,
+        };
+    }
+
     var state = try loadState(allocator, repo, options.repo);
     const export_result = try exporter.exportToGithub(allocator, .{
         .repo = options.repo,
@@ -245,11 +283,78 @@ fn runSyncOnce(allocator: Allocator, options: Options) !void {
         if (export_result.exported == 1) "" else "s",
         modeName(options.mode),
     });
-
-    if (options.git_sync and !options.dry_run) {
-        try sync_mod.syncPush(allocator, options.remote);
-    }
 }
+
+fn publishGitomiBridgeRefs(
+    allocator: Allocator,
+    remote: []const u8,
+    bot_inbox_ref: []const u8,
+    bot_base_oid: ?[]const u8,
+    map_path: []const u8,
+    map_snapshot: *const MapFileSnapshot,
+) !void {
+    try sync_mod.syncPush(allocator, remote);
+    sync_mod.syncPushInboxRef(allocator, remote, bot_inbox_ref) catch |err| switch (err) {
+        error.RemoteRejected => {
+            try eprint("gt github sync: abandoning unpublished local {s} after remote fast-forward race\n", .{bot_inbox_ref});
+            try map_snapshot.restore(allocator, map_path);
+            try resetLocalRefTo(allocator, bot_inbox_ref, bot_base_oid);
+            return err;
+        },
+        else => return err,
+    };
+}
+
+fn importBotInboxRef(allocator: Allocator, principal: []const u8, device: []const u8) ![]u8 {
+    const checked_principal = try util.checkedRefSegment(allocator, principal, "principal");
+    defer allocator.free(checked_principal);
+    const checked_device = try util.checkedRefSegment(allocator, device, "device");
+    defer allocator.free(checked_device);
+    return try std.fmt.allocPrint(allocator, "refs/gitomi/inbox/{s}/{s}", .{ checked_principal, checked_device });
+}
+
+fn resetLocalRefTo(allocator: Allocator, ref: []const u8, oid: ?[]const u8) !void {
+    if (oid) |value| {
+        const updated = try git.gitChecked(allocator, &.{ "update-ref", ref, value });
+        allocator.free(updated);
+        return;
+    }
+
+    const existing = try git.resolveOptionalRef(allocator, ref);
+    defer if (existing) |value| allocator.free(value);
+    if (existing == null) return;
+    const deleted = try git.gitChecked(allocator, &.{ "update-ref", "-d", ref });
+    allocator.free(deleted);
+}
+
+const MapFileSnapshot = struct {
+    bytes: ?[]u8 = null,
+
+    fn capture(allocator: Allocator, path: []const u8) !MapFileSnapshot {
+        const bytes = std.fs.cwd().readFileAlloc(allocator, path, 8 * 1024 * 1024) catch |err| switch (err) {
+            error.FileNotFound => return .{},
+            else => return err,
+        };
+        return .{ .bytes = bytes };
+    }
+
+    fn deinit(self: *MapFileSnapshot, allocator: Allocator) void {
+        if (self.bytes) |bytes| allocator.free(bytes);
+        self.bytes = null;
+    }
+
+    fn restore(self: MapFileSnapshot, allocator: Allocator, path: []const u8) !void {
+        if (self.bytes) |bytes| {
+            if (std.fs.path.dirname(path)) |dir| try std.fs.cwd().makePath(dir);
+            try writeFileAtomic(allocator, path, bytes);
+            return;
+        }
+        std.fs.cwd().deleteFile(path) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
+    }
+};
 
 fn loadState(allocator: Allocator, repo: repo_mod.Repo, slug: RepoSlug) !SyncState {
     const path = try statePath(allocator, repo, slug);

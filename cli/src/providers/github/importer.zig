@@ -290,7 +290,7 @@ const ImportedCommentRef = struct {
     }
 };
 
-fn ensureImportDelegation(allocator: Allocator, principal: []const u8, device: []const u8) !void {
+pub fn ensureImportDelegation(allocator: Allocator, principal: []const u8, device: []const u8) !void {
     const checked_principal = try util.checkedRefSegment(allocator, principal, "principal");
     defer allocator.free(checked_principal);
     const checked_device = try util.checkedRefSegment(allocator, device, "device");

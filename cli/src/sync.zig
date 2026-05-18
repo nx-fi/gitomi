@@ -24,6 +24,10 @@ const validateEventEnvelope = event_mod.validateEventEnvelope;
 const parseValidatedEnvelope = event_mod.parseValidatedEnvelope;
 const ActorSeqTracker = event_mod.ActorSeqLastTracker;
 
+pub const InboxPushError = error{
+    RemoteRejected,
+};
+
 pub fn syncPull(allocator: Allocator, remote: []const u8) !void {
     const remote_segment = try stagingRemoteSegment(allocator, remote);
     defer allocator.free(remote_segment);
@@ -141,6 +145,23 @@ pub fn syncPush(allocator: Allocator, remote: []const u8) !void {
     try pushInboxRefs(allocator, remote, refs);
 }
 
+pub fn syncPushInboxRef(allocator: Allocator, remote: []const u8, ref: []const u8) !void {
+    if (!std.mem.startsWith(u8, ref, "refs/gitomi/inbox/")) {
+        try eprint("gt sync: refusing to push non-inbox ref {s}\n", .{ref});
+        return CliError.UserError;
+    }
+
+    const oid = try resolveOptionalRef(allocator, ref);
+    defer if (oid) |value| allocator.free(value);
+    if (oid == null) {
+        try out("no local Gitomi inbox ref {s} to push\n", .{ref});
+        return;
+    }
+
+    try out("pushing Gitomi inbox ref {s} to {s}\n", .{ ref, remote });
+    try pushInboxRef(allocator, remote, ref);
+}
+
 fn configuredInboxRefIfPresent(allocator: Allocator) !?[]u8 {
     var repo = try repo_mod.discoverRepo(allocator);
     defer repo.deinit();
@@ -189,6 +210,41 @@ fn pushInboxRefs(allocator: Allocator, remote: []const u8, refs: []const []const
     const pushed = try gitChecked(allocator, argv.items);
     defer allocator.free(pushed);
     if (pushed.len != 0) try out("{s}", .{pushed});
+}
+
+fn pushInboxRef(allocator: Allocator, remote: []const u8, ref: []const u8) !void {
+    const refspec = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ ref, ref });
+    defer allocator.free(refspec);
+    var argv = [_][]const u8{ "git", "push", remote, refspec };
+    var result = try runCommand(allocator, &argv, null, max_git_output);
+    defer result.deinit();
+    if (result.exitCode() == 0) {
+        if (result.stdout.len != 0) try out("{s}", .{result.stdout});
+        return;
+    }
+
+    const stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
+    if (isFastForwardPushRace(stderr)) {
+        if (stderr.len != 0) {
+            try eprint("git push rejected: {s}\n", .{stderr});
+        } else {
+            try eprint("git push rejected\n", .{});
+        }
+        return InboxPushError.RemoteRejected;
+    }
+
+    if (stderr.len != 0) {
+        try eprint("git push failed: {s}\n", .{stderr});
+    } else {
+        try eprint("git push failed\n", .{});
+    }
+    return CliError.GitFailed;
+}
+
+fn isFastForwardPushRace(stderr: []const u8) bool {
+    return std.mem.indexOf(u8, stderr, "non-fast-forward") != null or
+        std.mem.indexOf(u8, stderr, "fetch first") != null or
+        std.mem.indexOf(u8, stderr, "stale info") != null;
 }
 
 fn pushGenesisRef(allocator: Allocator, remote: []const u8) !void {
@@ -793,4 +849,11 @@ test "actor sequence tracker enforces strict per-actor monotonic order" {
         rememberActorSeq(&tracker, "commit-6", "refs/gitomi/inbox/ab/c", "ab", "c", 10),
     );
     try rememberActorSeq(&tracker, "commit-7", "refs/gitomi/inbox/ab/c", "ab", "c", 11);
+}
+
+test "push race detection recognizes fast-forward rejections" {
+    try std.testing.expect(isFastForwardPushRace("! [rejected] refs/gitomi/inbox/import-bot/github -> refs/gitomi/inbox/import-bot/github (fetch first)"));
+    try std.testing.expect(isFastForwardPushRace("Updates were rejected because the tip of your current branch is behind its remote counterpart; non-fast-forward"));
+    try std.testing.expect(isFastForwardPushRace("error: failed to push some refs\nhint: Updates were rejected because the push contains stale info."));
+    try std.testing.expect(!isFastForwardPushRace("ERROR: Repository not found."));
 }

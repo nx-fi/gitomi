@@ -417,7 +417,7 @@ JSON
   assert_contains "$pull_show_json" '"additions":40'
   assert_contains "$pull_show_json" '"deletions":4'
   assert_contains "$pull_show_json" '"commit_references":["'"$code_commit"'"]'
-  replay="$(gt github export --repo acme/project --dry-run --reuse-legacy)"
+  replay="$(gt github export --repo acme/project --dry-run --reuse-legacy --rest)"
   assert_contains "$replay" "PATCH /repos/acme/project/issues/42"
   assert_contains "$replay" "PUT /repos/acme/project/pulls/7/merge"
   assert_contains "$replay" "POST /repos/acme/project/issues/42/comments"
@@ -451,6 +451,70 @@ git -C "$github_sync/replica" remote add origin "$github_sync/remote.git"
   assert_contains "$delegation_line" '"domain_status":"accepted"'
   import_line="$(printf '%s\n' "$events" | grep 'issue.opened' | grep 'import-bot')"
   assert_contains "$import_line" '"domain_status":"accepted"'
+  gt fsck >/dev/null
+)
+
+echo "integration: github sync publishes delegated import bot inbox"
+github_bridge="$ROOT/github-bridge"
+mkdir -p "$github_bridge"
+git -C "$github_bridge" init --bare remote.git >/dev/null
+init_repo "$github_bridge/source"
+init_repo "$github_bridge/replica"
+git -C "$github_bridge/source" remote add origin "$github_bridge/remote.git"
+git -C "$github_bridge/replica" remote add origin "$github_bridge/remote.git"
+(
+  cd "$github_bridge/source"
+  gt init --repo-id "$REPO_ID" --principal alice --device laptop >/dev/null
+  fakebin="$PWD/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ "${1:-}" == "api" ]] || {
+  echo "expected gh api" >&2
+  exit 2
+}
+
+endpoint="${@: -1}"
+case "$endpoint" in
+  'repos/acme/bridge/issues?state=all&per_page=100&page=1')
+    cat <<'JSON'
+[
+  {
+    "number": 77,
+    "title": "Bridge synced issue",
+    "body": "Imported through gt github sync",
+    "state": "open",
+    "created_at": "2026-01-07T00:00:00Z",
+    "comments": 0,
+    "labels": [{ "name": "sync" }],
+    "assignees": []
+  }
+]
+JSON
+    ;;
+  'repos/acme/bridge/pulls?state=all&per_page=100&page=1')
+    echo '[]'
+    ;;
+  *)
+    echo "unexpected endpoint: $endpoint" >&2
+    exit 3
+    ;;
+esac
+SH
+  chmod +x "$fakebin/gh"
+  PATH="$fakebin:$PATH" gt github sync --repo acme/bridge --use-gh --rest --no-comments --no-projects --remote origin >/dev/null
+  git --git-dir="$github_bridge/remote.git" rev-parse --verify refs/gitomi/inbox/import-bot/github >/dev/null
+)
+(
+  cd "$github_bridge/replica"
+  gt sync --pull-only >/dev/null
+  issues="$(gt issue list --json)"
+  assert_contains "$issues" '"title":"Bridge synced issue"'
+  assert_contains "$issues" '"legacy_github_issue_number":77'
+  events="$(gt events list --json)"
+  assert_contains "$events" '"actor_principal":"import-bot"'
   gt fsck >/dev/null
 )
 
@@ -573,7 +637,7 @@ SH
   chmod +x "$fakebin/gh"
   export GH_CALL_LOG="$PWD/gh-calls.log"
   set +e
-  GH_FAIL_ISSUE_COMMENTS=1 PATH="$fakebin:$PATH" gt github import >/tmp/github-import-issue-comment-failure.log 2>&1
+  GH_FAIL_ISSUE_COMMENTS=1 PATH="$fakebin:$PATH" gt github import --rest >/tmp/github-import-issue-comment-failure.log 2>&1
   failed_status=$?
   set -e
   [[ "$failed_status" -ne 0 ]] || fail "expected github import to fail when issue comments fail"
@@ -584,7 +648,7 @@ SH
   : > "$GH_CALL_LOG"
 
   set +e
-  GH_FAIL_PULL_COMMENTS=1 PATH="$fakebin:$PATH" gt github import >/tmp/github-import-pull-comment-failure.log 2>&1
+  GH_FAIL_PULL_COMMENTS=1 PATH="$fakebin:$PATH" gt github import --rest >/tmp/github-import-pull-comment-failure.log 2>&1
   failed_status=$?
   set -e
   [[ "$failed_status" -ne 0 ]] || fail "expected github import to fail when pull comments fail"
@@ -594,7 +658,7 @@ SH
   assert_not_contains "$pulls" "Current repo pull"
   : > "$GH_CALL_LOG"
 
-  PATH="$fakebin:$PATH" gt github import >/dev/null
+  PATH="$fakebin:$PATH" gt github import --rest >/dev/null
   gh_calls="$(cat "$GH_CALL_LOG")"
   assert_contains "$gh_calls" "api --method GET"
   assert_contains "$gh_calls" 'repos/{owner}/{repo}/issues?state=all&per_page=100&page=1'
@@ -618,7 +682,7 @@ SH
   events="$(gt events list --json)"
   assert_contains "$events" '"event_type":"comment.added"'
   : > "$GH_CALL_LOG"
-  GH_FAIL_COMMENTS=1 PATH="$fakebin:$PATH" gt github import >/dev/null
+  GH_FAIL_COMMENTS=1 PATH="$fakebin:$PATH" gt github import --rest >/dev/null
   gh_calls="$(cat "$GH_CALL_LOG")"
   assert_contains "$gh_calls" 'repos/{owner}/{repo}/issues?state=all&per_page=100&page=1'
   assert_contains "$gh_calls" 'repos/{owner}/{repo}/pulls?state=all&per_page=100&page=1'
