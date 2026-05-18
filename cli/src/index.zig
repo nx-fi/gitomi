@@ -569,12 +569,15 @@ fn rebuildWorkItemSearchIndex(db: *SqliteDb) !void {
         \\      AND c.redacted = 0
         \\  ), ''),
         \\  ifnull(replace((SELECT group_concat(DISTINCT il.label) FROM issue_labels il WHERE il.issue_id = i.id), ',', ' '), ''),
-        \\  trim(ifnull(m.source_author, '') || ' ' || ifnull(m.source_identity, '') || ' ' ||
-        \\       ifnull(m.source_email, '') || ' ' || ifnull(m.milestone, '') || ' ' ||
+        \\  trim(ifnull(i.author_principal, '') || ' ' || ifnull(i.author_device, '') || ' ' ||
+        \\       ifnull(m.source_author, '') || ' ' || ifnull(m.source_identity, '') || ' ' ||
+        \\       ifnull(m.source_email, '') || ' ' || ifnull(si.display_name, '') || ' ' ||
+        \\       ifnull(si.email, '') || ' ' || ifnull(m.milestone, '') || ' ' ||
         \\       ifnull(m.issue_type, '') || ' ' || ifnull(m.priority, '') || ' ' ||
         \\       ifnull(m.status, ''))
         \\FROM issues i
-        \\LEFT JOIN issue_metadata m ON m.issue_id = i.id;
+        \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
+        \\LEFT JOIN identities si ON si.id = m.source_identity;
         \\INSERT INTO work_item_search_docs(object_kind, object_id, title, body, comments, labels, metadata)
         \\SELECT
         \\  'pull',
@@ -594,10 +597,13 @@ fn rebuildWorkItemSearchIndex(db: *SqliteDb) !void {
         \\    ifnull(replace((SELECT group_concat(DISTINCT pr.reviewer) FROM pull_reviewers pr WHERE pr.pull_id = p.id), ',', ' '), '')
         \\  ),
         \\  trim(p.base_ref || ' ' || p.head_ref || ' ' ||
+        \\       ifnull(p.author_principal, '') || ' ' || ifnull(p.author_device, '') || ' ' ||
         \\       ifnull(pm.source_author, '') || ' ' || ifnull(pm.source_identity, '') || ' ' ||
-        \\       ifnull(pm.source_email, ''))
+        \\       ifnull(pm.source_email, '') || ' ' || ifnull(sp.display_name, '') || ' ' ||
+        \\       ifnull(sp.email, ''))
         \\FROM pulls p
-        \\LEFT JOIN pull_metadata pm ON pm.pull_id = p.id;
+        \\LEFT JOIN pull_metadata pm ON pm.pull_id = p.id
+        \\LEFT JOIN identities sp ON sp.id = pm.source_identity;
         \\INSERT INTO work_item_search(work_item_search) VALUES('rebuild');
     );
 }

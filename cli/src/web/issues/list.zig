@@ -1231,10 +1231,12 @@ test "issue list SQL includes selected filters" {
     const sql = try work_items.issueListSql(std.testing.allocator, filters);
     defer std.testing.allocator.free(sql);
     try std.testing.expect(std.mem.indexOf(u8, sql, "i.state = ?") != null);
-    try std.testing.expect(std.mem.indexOf(u8, sql, "i.title LIKE ?") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "work_item_search MATCH ?") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "bm25(work_item_search") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "search.search_rank ASC") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "issue_labels") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "issue_assignees") != null);
-    try std.testing.expect(std.mem.indexOf(u8, sql, "ORDER BY i.state_occurred_at DESC") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "i.state_occurred_at DESC") != null);
 }
 
 test "issues toolbar renders search form" {

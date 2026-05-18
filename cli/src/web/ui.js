@@ -538,7 +538,7 @@
         params.set("order", Array.from(list.querySelectorAll("[data-label-row]")).map(function (row) {
           return row.dataset.labelName || "";
         }).filter(Boolean).join("\n"));
-        fetch("/settings/labels", {
+        fetch("/labels", {
           method: "POST",
           credentials: "same-origin",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },

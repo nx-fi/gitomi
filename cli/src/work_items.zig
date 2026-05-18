@@ -25,6 +25,8 @@ const pull_display_author_sql = "COALESCE(NULLIF(pm.source_author, ''), NULLIF(s
 const pull_avatar_url_sql = "COALESCE(NULLIF(pm.source_avatar_url, ''), NULLIF(sp.avatar_url, ''), '')";
 const comment_display_author_sql = "COALESCE(NULLIF(c.source_author, ''), NULLIF(sc.display_name, ''), c.author_principal)";
 const comment_avatar_url_sql = "COALESCE(NULLIF(c.source_avatar_url, ''), NULLIF(sc.avatar_url, ''), '')";
+const work_item_search_bm25_sql = "bm25(work_item_search, 0.0, 0.0, 10.0, 3.0, 2.0, 5.0, 2.0)";
+const work_item_no_match_token = "zzzzzzzzgitominomatchzzzzzzzz";
 
 pub const IssueStateFilter = enum {
     open,
@@ -778,26 +780,35 @@ pub fn issueListSql(allocator: Allocator, filters: IssueListOptions) ![]u8 {
         \\LEFT JOIN legacy_aliases a
         \\  ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
     );
+    if (filters.q != null) {
+        try sql.appendSlice(allocator,
+            \\
+            \\JOIN (
+            \\  SELECT object_id,
+            \\
+        ++ work_item_search_bm25_sql ++
+            \\ AS search_rank
+            \\  FROM work_item_search
+            \\  WHERE work_item_search MATCH ?
+            \\    AND object_kind = 'issue'
+            \\) search ON search.object_id = i.id
+        );
+    }
 
     var conditions: usize = 0;
     if (filters.state != .all) try appendIssueListCondition(&sql, allocator, &conditions, "i.state = ?");
-    if (filters.q != null) {
-        try appendIssueListCondition(&sql, allocator, &conditions,
-            \\(i.title LIKE ? ESCAPE '\' OR i.body LIKE ? ESCAPE '\' OR
-        ++ issue_display_author_sql ++
-            \\ LIKE ? ESCAPE '\' OR EXISTS (SELECT 1 FROM comments c WHERE c.parent_kind = 'issue' AND c.parent_id = i.id AND c.body LIKE ? ESCAPE '\'))
-        );
-    }
     if (filters.author != null) try appendIssueListCondition(&sql, allocator, &conditions, issue_display_author_sql ++ " = ?");
     if (filters.label != null) try appendIssueListCondition(&sql, allocator, &conditions, "EXISTS (SELECT 1 FROM issue_labels il WHERE il.issue_id = i.id AND il.label = ?)");
     if (filters.project != null) try appendIssueListCondition(&sql, allocator, &conditions, "EXISTS (SELECT 1 FROM issue_projects ip WHERE ip.issue_id = i.id AND ip.project = ?)");
     if (filters.milestone != null) try appendIssueListCondition(&sql, allocator, &conditions, "COALESCE(m.milestone, '') = ?");
     if (filters.assignee != null) try appendIssueListCondition(&sql, allocator, &conditions, "EXISTS (SELECT 1 FROM issue_assignees ia WHERE ia.issue_id = i.id AND ia.assignee = ?)");
 
+    try sql.appendSlice(allocator, "\nORDER BY ");
+    if (filters.q != null) try sql.appendSlice(allocator, "search.search_rank ASC, ");
     try sql.appendSlice(allocator, switch (filters.sort) {
-        .newest => "\nORDER BY i.opened_at DESC, i.id DESC",
-        .oldest => "\nORDER BY i.opened_at ASC, i.id ASC",
-        .updated => "\nORDER BY i.state_occurred_at DESC, i.opened_at DESC, i.id DESC",
+        .newest => "i.opened_at DESC, i.id DESC",
+        .oldest => "i.opened_at ASC, i.id ASC",
+        .updated => "i.state_occurred_at DESC, i.opened_at DESC, i.id DESC",
     });
     if (filters.limit) |_| try sql.appendSlice(allocator, "\nLIMIT ?");
     if (filters.limit != null and filters.offset != null) try sql.appendSlice(allocator, "\nOFFSET ?");
@@ -815,26 +826,20 @@ pub fn prepareIssueListStmt(allocator: Allocator, db: *SqliteDb, filters: IssueL
     defer allocator.free(sql);
     var stmt = try db.prepare(sql);
     errdefer stmt.deinit();
-    const search_pattern = if (filters.q) |query| try sqliteLikePatternOwned(allocator, query) else null;
-    defer if (search_pattern) |pattern| allocator.free(pattern);
-    try bindIssueListFilters(&stmt, filters, search_pattern);
+    const search_query = if (filters.q) |query| try workItemFtsQueryOwned(allocator, query) else null;
+    defer if (search_query) |query| allocator.free(query);
+    try bindIssueListFilters(&stmt, filters, search_query);
     return stmt;
 }
 
-pub fn bindIssueListFilters(stmt: *SqliteStmt, filters: IssueListOptions, search_pattern: ?[]const u8) !void {
+pub fn bindIssueListFilters(stmt: *SqliteStmt, filters: IssueListOptions, search_query: ?[]const u8) !void {
     var idx: c_int = 1;
-    if (filters.state != .all) {
-        try stmt.bindText(idx, issueStateValue(filters.state));
+    if (search_query) |query| {
+        try stmt.bindText(idx, query);
         idx += 1;
     }
-    if (search_pattern) |pattern| {
-        try stmt.bindText(idx, pattern);
-        idx += 1;
-        try stmt.bindText(idx, pattern);
-        idx += 1;
-        try stmt.bindText(idx, pattern);
-        idx += 1;
-        try stmt.bindText(idx, pattern);
+    if (filters.state != .all) {
+        try stmt.bindText(idx, issueStateValue(filters.state));
         idx += 1;
     }
     if (filters.author) |value| {
@@ -886,16 +891,27 @@ pub fn issueListRowFromStmt(allocator: Allocator, stmt: *SqliteStmt) !IssueListR
     };
 }
 
-pub fn sqliteLikePatternOwned(allocator: Allocator, value: []const u8) ![]u8 {
-    var pattern: std.ArrayList(u8) = .empty;
-    errdefer pattern.deinit(allocator);
-    try pattern.append(allocator, '%');
-    for (value) |c| {
-        if (c == '%' or c == '_' or c == '\\') try pattern.append(allocator, '\\');
-        try pattern.append(allocator, c);
+pub fn workItemFtsQueryOwned(allocator: Allocator, value: []const u8) ![]u8 {
+    var query: std.ArrayList(u8) = .empty;
+    errdefer query.deinit(allocator);
+
+    var cursor: usize = 0;
+    while (cursor < value.len) {
+        while (cursor < value.len and !isFtsTokenByte(value[cursor])) : (cursor += 1) {}
+        const start = cursor;
+        while (cursor < value.len and isFtsTokenByte(value[cursor])) : (cursor += 1) {}
+        if (start == cursor) continue;
+        if (query.items.len != 0) try query.append(allocator, ' ');
+        try query.appendSlice(allocator, value[start..cursor]);
+        try query.append(allocator, '*');
     }
-    try pattern.append(allocator, '%');
-    return pattern.toOwnedSlice(allocator);
+
+    if (query.items.len == 0) try query.appendSlice(allocator, work_item_no_match_token);
+    return query.toOwnedSlice(allocator);
+}
+
+fn isFtsTokenByte(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or byte >= 0x80;
 }
 
 pub fn loadIssueDetail(allocator: Allocator, db: *SqliteDb, issue_id: []const u8) !?IssueDetail {
@@ -981,16 +997,23 @@ pub fn pullListSql(allocator: Allocator, options: PullListOptions) ![]u8 {
         \\LEFT JOIN pull_metadata pm ON pm.pull_id = p.id
         \\LEFT JOIN identities sp ON sp.id = pm.source_identity
     );
+    if (options.q != null) {
+        try sql.appendSlice(allocator,
+            \\
+            \\JOIN (
+            \\  SELECT object_id,
+            \\
+        ++ work_item_search_bm25_sql ++
+            \\ AS search_rank
+            \\  FROM work_item_search
+            \\  WHERE work_item_search MATCH ?
+            \\    AND object_kind = 'pull'
+            \\) search ON search.object_id = p.id
+        );
+    }
 
     var conditions: usize = 0;
     if (options.state != .all) try appendPullListCondition(&sql, allocator, &conditions, "p.state = ?");
-    if (options.q != null) {
-        try appendPullListCondition(&sql, allocator, &conditions,
-            \\(p.title LIKE ? ESCAPE '\' OR p.body LIKE ? ESCAPE '\' OR
-        ++ pull_display_author_sql ++
-            \\ LIKE ? ESCAPE '\' OR p.base_ref LIKE ? ESCAPE '\' OR p.head_ref LIKE ? ESCAPE '\' OR EXISTS (SELECT 1 FROM comments c WHERE c.parent_kind = 'pull' AND c.parent_id = p.id AND c.body LIKE ? ESCAPE '\'))
-        );
-    }
     if (options.author != null) try appendPullListCondition(&sql, allocator, &conditions, pull_display_author_sql ++ " = ?");
     if (options.label != null) try appendPullListCondition(&sql, allocator, &conditions, "EXISTS (SELECT 1 FROM pull_labels pl WHERE pl.pull_id = p.id AND pl.label = ?)");
     if (options.assignee != null) try appendPullListCondition(&sql, allocator, &conditions, "EXISTS (SELECT 1 FROM pull_assignees pa WHERE pa.pull_id = p.id AND pa.assignee = ?)");
@@ -998,10 +1021,12 @@ pub fn pullListSql(allocator: Allocator, options: PullListOptions) ![]u8 {
     if (options.base != null) try appendPullListCondition(&sql, allocator, &conditions, "p.base_ref = ?");
     if (options.head != null) try appendPullListCondition(&sql, allocator, &conditions, "p.head_ref = ?");
 
+    try sql.appendSlice(allocator, "\nORDER BY ");
+    if (options.q != null) try sql.appendSlice(allocator, "search.search_rank ASC, ");
     try sql.appendSlice(allocator, switch (options.sort) {
-        .newest => "\nORDER BY p.opened_at DESC, p.id DESC",
-        .oldest => "\nORDER BY p.opened_at ASC, p.id ASC",
-        .updated => "\nORDER BY p.state_occurred_at DESC, p.opened_at DESC, p.id DESC",
+        .newest => "p.opened_at DESC, p.id DESC",
+        .oldest => "p.opened_at ASC, p.id ASC",
+        .updated => "p.state_occurred_at DESC, p.opened_at DESC, p.id DESC",
     });
     if (options.limit) |_| try sql.appendSlice(allocator, "\nLIMIT ?");
     if (options.limit != null and options.offset != null) try sql.appendSlice(allocator, "\nOFFSET ?");
@@ -1019,30 +1044,20 @@ pub fn preparePullListStmt(allocator: Allocator, db: *SqliteDb, options: PullLis
     defer allocator.free(sql);
     var stmt = try db.prepare(sql);
     errdefer stmt.deinit();
-    const search_pattern = if (options.q) |query| try sqliteLikePatternOwned(allocator, query) else null;
-    defer if (search_pattern) |pattern| allocator.free(pattern);
-    try bindPullListFilters(&stmt, options, search_pattern);
+    const search_query = if (options.q) |query| try workItemFtsQueryOwned(allocator, query) else null;
+    defer if (search_query) |query| allocator.free(query);
+    try bindPullListFilters(&stmt, options, search_query);
     return stmt;
 }
 
-pub fn bindPullListFilters(stmt: *SqliteStmt, filters: PullListOptions, search_pattern: ?[]const u8) !void {
+pub fn bindPullListFilters(stmt: *SqliteStmt, filters: PullListOptions, search_query: ?[]const u8) !void {
     var idx: c_int = 1;
-    if (filters.state != .all) {
-        try stmt.bindText(idx, pullStateValue(filters.state));
+    if (search_query) |query| {
+        try stmt.bindText(idx, query);
         idx += 1;
     }
-    if (search_pattern) |pattern| {
-        try stmt.bindText(idx, pattern);
-        idx += 1;
-        try stmt.bindText(idx, pattern);
-        idx += 1;
-        try stmt.bindText(idx, pattern);
-        idx += 1;
-        try stmt.bindText(idx, pattern);
-        idx += 1;
-        try stmt.bindText(idx, pattern);
-        idx += 1;
-        try stmt.bindText(idx, pattern);
+    if (filters.state != .all) {
+        try stmt.bindText(idx, pullStateValue(filters.state));
         idx += 1;
     }
     if (filters.author) |value| {
@@ -2203,6 +2218,16 @@ test "work item search query formatter emits canonical filters" {
     try std.testing.expectEqualStrings("is:pr state:all reviewer:bob head:\"feature branch\" sort:updated \"branch search\"", pull_query);
 }
 
+test "work item FTS query tokenizes punctuation as prefix terms" {
+    const query = try workItemFtsQueryOwned(std.testing.allocator, "feature/foo #123 \"quoted value\" !!!");
+    defer std.testing.allocator.free(query);
+    try std.testing.expectEqualStrings("feature* foo* 123* quoted* value*", query);
+
+    const empty = try workItemFtsQueryOwned(std.testing.allocator, "!!!");
+    defer std.testing.allocator.free(empty);
+    try std.testing.expectEqualStrings(work_item_no_match_token, empty);
+}
+
 test "work item filter JSON emits valid defaults" {
     var issue_buf: std.ArrayList(u8) = .empty;
     defer issue_buf.deinit(std.testing.allocator);
@@ -2242,12 +2267,54 @@ test "pull list SQL includes search filter" {
     });
     defer std.testing.allocator.free(sql);
     try std.testing.expect(std.mem.indexOf(u8, sql, "p.state = ?") != null);
-    try std.testing.expect(std.mem.indexOf(u8, sql, "p.title LIKE ?") != null);
-    try std.testing.expect(std.mem.indexOf(u8, sql, "p.base_ref LIKE ?") != null);
-    try std.testing.expect(std.mem.indexOf(u8, sql, "comments c") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "work_item_search MATCH ?") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "bm25(work_item_search") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "search.search_rank ASC") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "p.title LIKE ?") == null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "pull_labels") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "pull_reviewers") != null);
-    try std.testing.expect(std.mem.indexOf(u8, sql, "ORDER BY p.state_occurred_at DESC") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "p.state_occurred_at DESC") != null);
+}
+
+test "issue list search uses FTS BM25 ranking" {
+    var db = try SqliteDb.openWithOptions(std.testing.allocator, ":memory:", sqlite_db.sqlite.SQLITE_OPEN_READWRITE | sqlite_db.sqlite.SQLITE_OPEN_CREATE, true, .{ .enable_wal = false });
+    defer db.deinit();
+    try index_schema.createIndexSchema(&db);
+    try db.exec(
+        \\INSERT INTO issues(
+        \\  id, title, title_occurred_at, title_actor_principal, title_event_hash,
+        \\  body, body_occurred_at, body_actor_principal, body_event_hash,
+        \\  state, state_occurred_at, state_actor_principal, state_event_hash,
+        \\  opened_at, author_principal, author_device
+        \\) VALUES
+        \\('issue-title', 'Local search', '2024-01-01T00:00:00Z', 'alice', 'hash-title-title',
+        \\ 'plain body', '2024-01-01T00:00:00Z', 'alice', 'hash-title-body',
+        \\ 'open', '2024-01-01T00:00:00Z', 'alice', 'hash-title-state',
+        \\ '2024-01-01T00:00:00Z', 'alice', 'laptop'),
+        \\('issue-body', 'Unrelated', '2024-01-02T00:00:00Z', 'alice', 'hash-body-title',
+        \\ 'local search appears here', '2024-01-02T00:00:00Z', 'alice', 'hash-body-body',
+        \\ 'open', '2024-01-02T00:00:00Z', 'alice', 'hash-body-state',
+        \\ '2024-01-02T00:00:00Z', 'alice', 'laptop');
+        \\INSERT INTO work_item_search_docs(object_kind, object_id, title, body, comments, labels, metadata)
+        \\VALUES
+        \\('issue', 'issue-title', 'Local search', 'plain body', '', '', ''),
+        \\('issue', 'issue-body', 'Unrelated', 'local search appears here', '', '', '');
+        \\INSERT INTO work_item_search(work_item_search) VALUES('rebuild');
+    );
+
+    var filters = IssueListOptions{
+        .allocator = std.testing.allocator,
+        .state = .all,
+        .q = try std.testing.allocator.dupe(u8, "local search"),
+    };
+    defer filters.deinit();
+
+    var stmt = try prepareIssueListStmt(std.testing.allocator, &db, filters);
+    defer stmt.deinit();
+    try std.testing.expect(try stmt.step());
+    const first_id = try stmt.columnTextDup(std.testing.allocator, 0);
+    defer std.testing.allocator.free(first_id);
+    try std.testing.expectEqualStrings("issue-title", first_id);
 }
 
 test "work item list SQL supports limit and offset pagination" {

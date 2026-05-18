@@ -147,7 +147,7 @@ const routes = [_]Route{
     Route.get("/settings/theme", handleSettingsThemePage),
     Route.get("/settings/models", handleSettingsModelsPage),
     Route.post("/settings/models", handleSettingsModelsPost),
-    Route.get("/settings/labels", handleLabelsPage),
+    Route.get("/settings/labels", handleLabelsSettingsRedirect),
     Route.post("/settings/labels", handleLabelsPost),
     Route.get("/labels", handleLabelsPage),
     Route.post("/labels", handleLabelsPost),
@@ -690,6 +690,10 @@ fn handleSettingsModelsPost(ctx: WebContext) !void {
 
 fn handleLabelsPage(ctx: WebContext) !void {
     try sendOwnedHtml(ctx, try labels_page.renderLabelsPage(ctx.allocator, ctx.repo, ctx.csrf_token));
+}
+
+fn handleLabelsSettingsRedirect(ctx: WebContext) !void {
+    try sendRedirectReplacingPath(ctx, "/settings/labels", "/labels", false);
 }
 
 fn handleLabelsPost(ctx: WebContext) !void {

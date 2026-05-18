@@ -1365,7 +1365,7 @@ fn appendSettingsNavLink(buf: *std.ArrayList(u8), allocator: Allocator, active: 
 }
 
 fn isSettingsActive(active: []const u8) bool {
-    return std.mem.eql(u8, active, "theme") or std.mem.eql(u8, active, "models") or std.mem.eql(u8, active, "events") or std.mem.eql(u8, active, "labels") or std.mem.eql(u8, active, "access");
+    return std.mem.eql(u8, active, "theme") or std.mem.eql(u8, active, "models") or std.mem.eql(u8, active, "events") or std.mem.eql(u8, active, "access");
 }
 
 pub fn appendSettingsLayoutStart(buf: *std.ArrayList(u8), allocator: Allocator, active: []const u8) !void {
@@ -1375,7 +1375,6 @@ pub fn appendSettingsLayoutStart(buf: *std.ArrayList(u8), allocator: Allocator, 
         \\    <nav class="project-page-tabs settings-page-tabs" aria-label="Settings sections">
     );
     try appendSettingsTab(buf, allocator, active, "events", "/events", "icon-history", "Activity");
-    try appendSettingsTab(buf, allocator, active, "labels", "/settings/labels", "icon-labels", "Labels");
     try appendSettingsTab(buf, allocator, active, "theme", "/settings/theme", "icon-theme", "Theme");
     try appendSettingsTab(buf, allocator, active, "models", "/settings/models", "icon-models", "AI Models");
     try appendSettingsTab(buf, allocator, active, "access", "/access", "icon-users", "Access");
@@ -1420,8 +1419,8 @@ pub fn appendWorkItemsLayoutStart(buf: *std.ArrayList(u8), allocator: Allocator,
     );
     try appendWorkItemsTab(buf, allocator, active, "issues", "/issues", "icon-issues", "Issues");
     try appendWorkItemsTab(buf, allocator, active, "pulls", "/pulls", "icon-pull-request", "Pull Requests");
-    try appendWorkItemsTab(buf, allocator, active, "milestones", "/milestones", "icon-milestones", "Milestones");
-    try appendWorkItemsTab(buf, allocator, active, "labels", "/settings/labels", "icon-labels", "Labels");
+    try buf.appendSlice(allocator, "<hr class=\"work-items-tabs-separator\" aria-hidden=\"true\">");
+    try appendWorkItemsTab(buf, allocator, active, "labels", "/labels", "icon-labels", "Labels");
     try buf.appendSlice(allocator,
         \\    </nav>
         \\  </aside>
@@ -2492,8 +2491,9 @@ test "web work item layout links shared management pages" {
 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/pulls\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/milestones\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/settings/labels\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/milestones\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/labels\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "work-items-tabs-separator") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "project-page-tab active") != null);
 }
 
