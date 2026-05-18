@@ -182,12 +182,12 @@ fn appendPeopleSuggestions(
         \\  UNION
         \\  SELECT reviewer AS person FROM pull_reviewers
         \\  UNION
-        \\  SELECT COALESCE(NULLIF(sp.display_name, ''), NULLIF(pm.source_author, ''), p.author_principal) AS person
+        \\  SELECT COALESCE(NULLIF(pm.source_author, ''), NULLIF(sp.display_name, ''), p.author_principal) AS person
         \\  FROM pulls p
         \\  LEFT JOIN pull_metadata pm ON pm.pull_id = p.id
         \\  LEFT JOIN identities sp ON sp.id = pm.source_identity
         \\  UNION
-        \\  SELECT COALESCE(NULLIF(si.display_name, ''), NULLIF(im.source_author, ''), i.author_principal) AS person
+        \\  SELECT COALESCE(NULLIF(im.source_author, ''), NULLIF(si.display_name, ''), i.author_principal) AS person
         \\  FROM issues i
         \\  LEFT JOIN issue_metadata im ON im.issue_id = i.id
         \\  LEFT JOIN identities si ON si.id = im.source_identity

@@ -317,6 +317,8 @@ fn sendNotFound(ctx: WebContext) !void {
 }
 
 fn handleRaw(ctx: WebContext) !void {
+    if (!try requireSameOriginRawGet(ctx)) return;
+
     const raw_blob_opt = explorer.loadRawBlob(ctx.allocator, ctx.repo, ctx.request.target) catch |err| switch (err) {
         error.BlobTooLarge => {
             try shared.sendPlainResponse(ctx.allocator, ctx.stream, 413, "Payload Too Large", "Blob too large\n");
@@ -846,6 +848,35 @@ fn requestHasValidCsrfToken(allocator: Allocator, request: HttpRequest, expected
 fn requireSameOriginActionPost(ctx: WebContext) !bool {
     if (isSameOriginBrowserRequest(ctx.request)) return true;
     try shared.sendPlainResponse(ctx.allocator, ctx.stream, 403, "Forbidden", "Forbidden: same-origin request required\n");
+    return false;
+}
+
+fn requireSameOriginRawGet(ctx: WebContext) !bool {
+    if (isSameOriginRawGet(ctx.request)) return true;
+    try shared.sendPlainResponse(ctx.allocator, ctx.stream, 403, "Forbidden", "Forbidden: same-origin request required\n");
+    return false;
+}
+
+fn isSameOriginRawGet(request: HttpRequest) bool {
+    if (request.method != .GET) return false;
+
+    const host_header = request.headerValue("host") orelse return false;
+    const request_authority = parseAuthority(host_header) orelse return false;
+    if (!isLoopbackHost(request_authority.host)) return false;
+
+    if (request.headerValue("sec-fetch-site")) |site| {
+        const trimmed = std.mem.trim(u8, site, " \t");
+        if (std.ascii.eqlIgnoreCase(trimmed, "same-origin")) return true;
+        if (std.ascii.eqlIgnoreCase(trimmed, "none")) return true;
+        return false;
+    }
+
+    if (request.headerValue("origin")) |origin| {
+        return sourceUrlMatchesAuthority(origin, request_authority);
+    }
+    if (request.headerValue("referer")) |referer| {
+        return sourceUrlMatchesAuthority(referer, request_authority);
+    }
     return false;
 }
 
@@ -1382,6 +1413,56 @@ test "actions csrf guard rejects dns-rebound non-loopback host" {
         "\r\n";
     const dns_rebound_request = try parseHttpRequest(dns_rebound);
     try std.testing.expect(!isSameOriginBrowserRequest(dns_rebound_request));
+}
+
+test "raw blob GET requires same-origin fetch metadata or source headers" {
+    const same_origin_fetch = try parseHttpRequest(
+        "GET /raw?path=movie.mp4 HTTP/1.1\r\n" ++
+            "Host: 127.0.0.1:12655\r\n" ++
+            "Sec-Fetch-Site: same-origin\r\n" ++
+            "\r\n",
+    );
+    try std.testing.expect(isSameOriginRawGet(same_origin_fetch));
+
+    const direct_navigation = try parseHttpRequest(
+        "GET /raw?path=movie.mp4 HTTP/1.1\r\n" ++
+            "Host: 127.0.0.1:12655\r\n" ++
+            "Sec-Fetch-Site: none\r\n" ++
+            "\r\n",
+    );
+    try std.testing.expect(isSameOriginRawGet(direct_navigation));
+
+    const same_origin_referer = try parseHttpRequest(
+        "GET /raw?path=movie.mp4 HTTP/1.1\r\n" ++
+            "Host: localhost:12655\r\n" ++
+            "Referer: http://localhost:12655/code?path=movie.mp4\r\n" ++
+            "\r\n",
+    );
+    try std.testing.expect(isSameOriginRawGet(same_origin_referer));
+
+    const cross_site_fetch = try parseHttpRequest(
+        "GET /raw?path=movie.mp4 HTTP/1.1\r\n" ++
+            "Host: 127.0.0.1:12655\r\n" ++
+            "Sec-Fetch-Site: cross-site\r\n" ++
+            "Referer: https://attacker.example/page.html\r\n" ++
+            "\r\n",
+    );
+    try std.testing.expect(!isSameOriginRawGet(cross_site_fetch));
+
+    const missing_source = try parseHttpRequest(
+        "GET /raw?path=movie.mp4 HTTP/1.1\r\n" ++
+            "Host: 127.0.0.1:12655\r\n" ++
+            "\r\n",
+    );
+    try std.testing.expect(!isSameOriginRawGet(missing_source));
+
+    const dns_rebound = try parseHttpRequest(
+        "GET /raw?path=movie.mp4 HTTP/1.1\r\n" ++
+            "Host: evil.example:12655\r\n" ++
+            "Sec-Fetch-Site: same-origin\r\n" ++
+            "\r\n",
+    );
+    try std.testing.expect(!isSameOriginRawGet(dns_rebound));
 }
 
 test "web request parser accepts byte ranges" {

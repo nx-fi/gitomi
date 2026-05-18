@@ -253,7 +253,11 @@ fn isSchemaFresh(allocator: Allocator, db: *SqliteDb) !bool {
 }
 
 fn requiredIndexTablesExist(db: *SqliteDb) bool {
-    var pull_metadata = db.prepare("SELECT pull_id FROM pull_metadata LIMIT 0") catch return false;
+    var identities = db.prepare("SELECT id, provider, provider_user_id, display_name, email, avatar_url FROM identities LIMIT 0") catch return false;
+    defer identities.deinit();
+    var identity_aliases = db.prepare("SELECT alias_kind, alias_value, identity_id FROM identity_aliases LIMIT 0") catch return false;
+    defer identity_aliases.deinit();
+    var pull_metadata = db.prepare("SELECT pull_id, source_author, source_identity, source_email, source_avatar_url FROM pull_metadata LIMIT 0") catch return false;
     defer pull_metadata.deinit();
     var projects_slug = db.prepare("SELECT slug FROM projects LIMIT 0") catch return false;
     defer projects_slug.deinit();
@@ -261,7 +265,7 @@ fn requiredIndexTablesExist(db: *SqliteDb) bool {
     defer project_properties.deinit();
     var project_columns_ref = db.prepare("SELECT column_ref FROM project_columns LIMIT 0") catch return false;
     defer project_columns_ref.deinit();
-    var issue_metadata_fields = db.prepare("SELECT issue_type, priority, status, issue_type_event_hash, priority_event_hash, status_event_hash FROM issue_metadata LIMIT 0") catch return false;
+    var issue_metadata_fields = db.prepare("SELECT source_author, source_identity, source_email, source_avatar_url, issue_type, priority, status, issue_type_event_hash, priority_event_hash, status_event_hash FROM issue_metadata LIMIT 0") catch return false;
     defer issue_metadata_fields.deinit();
     var issue_relationships = db.prepare("SELECT source_issue_id, relationship, target_issue_id FROM issue_relationships LIMIT 0") catch return false;
     defer issue_relationships.deinit();
@@ -289,6 +293,8 @@ fn requiredIndexTablesExist(db: *SqliteDb) bool {
     defer label_definitions.deinit();
     var work_item_search = db.prepare("SELECT object_id FROM work_item_search LIMIT 0") catch return false;
     defer work_item_search.deinit();
+    var comments = db.prepare("SELECT id, source_author, source_identity, source_email, source_avatar_url FROM comments LIMIT 0") catch return false;
+    defer comments.deinit();
     var notification_subscriptions = db.prepare("SELECT principal, object_kind, object_id FROM notification_subscriptions LIMIT 0") catch return false;
     defer notification_subscriptions.deinit();
     var notification_inbox = db.prepare("SELECT principal, event_hash, read_at FROM notification_inbox LIMIT 0") catch return false;
@@ -773,6 +779,42 @@ test "index schema reset drops identity tables" {
     defer identities.deinit();
     var identity_aliases = try db.prepare("SELECT alias_kind FROM identity_aliases LIMIT 0");
     defer identity_aliases.deinit();
+}
+
+test "schema freshness requires identity tables and source identity columns" {
+    const allocator = std.testing.allocator;
+
+    var current = try SqliteDb.openWithOptions(allocator, ":memory:", sqlite.SQLITE_OPEN_READWRITE | sqlite.SQLITE_OPEN_CREATE, true, .{ .enable_wal = false });
+    defer current.deinit();
+    try createIndexSchema(&current);
+    try std.testing.expect(requiredIndexTablesExist(&current));
+
+    var missing_identity_tables = try SqliteDb.openWithOptions(allocator, ":memory:", sqlite.SQLITE_OPEN_READWRITE | sqlite.SQLITE_OPEN_CREATE, true, .{ .enable_wal = false });
+    defer missing_identity_tables.deinit();
+    try createIndexSchema(&missing_identity_tables);
+    try missing_identity_tables.exec(
+        \\DROP TABLE identities;
+        \\DROP TABLE identity_aliases;
+    );
+    try std.testing.expect(!requiredIndexTablesExist(&missing_identity_tables));
+
+    var missing_issue_identity = try SqliteDb.openWithOptions(allocator, ":memory:", sqlite.SQLITE_OPEN_READWRITE | sqlite.SQLITE_OPEN_CREATE, true, .{ .enable_wal = false });
+    defer missing_issue_identity.deinit();
+    try createIndexSchema(&missing_issue_identity);
+    try missing_issue_identity.exec("ALTER TABLE issue_metadata DROP COLUMN source_identity");
+    try std.testing.expect(!requiredIndexTablesExist(&missing_issue_identity));
+
+    var missing_pull_identity = try SqliteDb.openWithOptions(allocator, ":memory:", sqlite.SQLITE_OPEN_READWRITE | sqlite.SQLITE_OPEN_CREATE, true, .{ .enable_wal = false });
+    defer missing_pull_identity.deinit();
+    try createIndexSchema(&missing_pull_identity);
+    try missing_pull_identity.exec("ALTER TABLE pull_metadata DROP COLUMN source_identity");
+    try std.testing.expect(!requiredIndexTablesExist(&missing_pull_identity));
+
+    var missing_comment_identity = try SqliteDb.openWithOptions(allocator, ":memory:", sqlite.SQLITE_OPEN_READWRITE | sqlite.SQLITE_OPEN_CREATE, true, .{ .enable_wal = false });
+    defer missing_comment_identity.deinit();
+    try createIndexSchema(&missing_comment_identity);
+    try missing_comment_identity.exec("ALTER TABLE comments DROP COLUMN source_identity");
+    try std.testing.expect(!requiredIndexTablesExist(&missing_comment_identity));
 }
 
 test "index admission rejects repo, sequence, and idempotency conflicts" {

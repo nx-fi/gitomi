@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const git = @import("git.zig");
+const index_schema = @import("index/schema.zig");
 const json_writer = @import("json_writer.zig");
 const repo_mod = @import("repo.zig");
 const sqlite_db = @import("index/sqlite_db.zig");
@@ -18,12 +19,12 @@ const appendJsonString = json_writer.appendJsonString;
 
 pub const max_pull_diff_bytes = 8 * 1024 * 1024;
 
-const issue_display_author_sql = "COALESCE(NULLIF(si.display_name, ''), NULLIF(m.source_author, ''), i.author_principal)";
-const issue_avatar_url_sql = "COALESCE(NULLIF(si.avatar_url, ''), NULLIF(m.source_avatar_url, ''), '')";
-const pull_display_author_sql = "COALESCE(NULLIF(sp.display_name, ''), NULLIF(pm.source_author, ''), p.author_principal)";
-const pull_avatar_url_sql = "COALESCE(NULLIF(sp.avatar_url, ''), NULLIF(pm.source_avatar_url, ''), '')";
-const comment_display_author_sql = "COALESCE(NULLIF(sc.display_name, ''), NULLIF(c.source_author, ''), c.author_principal)";
-const comment_avatar_url_sql = "COALESCE(NULLIF(sc.avatar_url, ''), NULLIF(c.source_avatar_url, ''), '')";
+const issue_display_author_sql = "COALESCE(NULLIF(m.source_author, ''), NULLIF(si.display_name, ''), i.author_principal)";
+const issue_avatar_url_sql = "COALESCE(NULLIF(m.source_avatar_url, ''), NULLIF(si.avatar_url, ''), '')";
+const pull_display_author_sql = "COALESCE(NULLIF(pm.source_author, ''), NULLIF(sp.display_name, ''), p.author_principal)";
+const pull_avatar_url_sql = "COALESCE(NULLIF(pm.source_avatar_url, ''), NULLIF(sp.avatar_url, ''), '')";
+const comment_display_author_sql = "COALESCE(NULLIF(c.source_author, ''), NULLIF(sc.display_name, ''), c.author_principal)";
+const comment_avatar_url_sql = "COALESCE(NULLIF(c.source_avatar_url, ''), NULLIF(sc.avatar_url, ''), '')";
 
 pub const IssueStateFilter = enum {
     open,
@@ -2094,6 +2095,46 @@ test "formats single-line and range diff comments" {
     }, "Needs work");
     defer std.testing.allocator.free(range);
     try std.testing.expectEqualStrings("Review comment on `src/main.zig` (old lines 3-5).\n\nNeeds work", range);
+}
+
+test "issue detail display prefers event-local source identity metadata" {
+    const allocator = std.testing.allocator;
+    var db = try SqliteDb.open(allocator, ":memory:", sqlite_db.sqlite.SQLITE_OPEN_READWRITE | sqlite_db.sqlite.SQLITE_OPEN_CREATE, true);
+    defer db.deinit();
+    try index_schema.createIndexSchema(&db);
+    try db.exec(
+        \\INSERT INTO issues(
+        \\  id,
+        \\  title, title_occurred_at, title_actor_principal, title_event_hash,
+        \\  body, body_occurred_at, body_actor_principal, body_event_hash,
+        \\  state, state_occurred_at, state_actor_principal, state_event_hash,
+        \\  opened_at, author_principal, author_device
+        \\) VALUES (
+        \\  'issue-1',
+        \\  'Imported issue', '2026-05-16T00:00:00Z', 'did:key:victim', 'open-event',
+        \\  '', '2026-05-16T00:00:00Z', 'did:key:victim', 'open-event',
+        \\  'open', '2026-05-16T00:00:00Z', 'did:key:victim', 'open-event',
+        \\  '2026-05-16T00:00:00Z', 'did:key:victim', 'laptop'
+        \\);
+        \\INSERT INTO issue_metadata(
+        \\  issue_id, source_author, source_identity, source_email, source_avatar_url, milestone,
+        \\  issue_type, issue_type_occurred_at, issue_type_actor_principal, issue_type_event_hash,
+        \\  priority, priority_occurred_at, priority_actor_principal, priority_event_hash,
+        \\  status, status_occurred_at, status_actor_principal, status_event_hash
+        \\) VALUES (
+        \\  'issue-1', 'Victim', 'github:123', 'victim@example.test', 'https://avatars.githubusercontent.com/u/123?v=4', '',
+        \\  '', '', '', '',
+        \\  '', '', '', '',
+        \\  '', '', '', ''
+        \\);
+        \\INSERT INTO identities(id, provider, provider_user_id, display_name, email, avatar_url)
+        \\VALUES ('github:123', 'github', '123', 'Mallory', 'mallory@example.test', 'https://attacker.invalid/avatar.png');
+    );
+
+    const detail = (try loadIssueDetail(allocator, &db, "issue-1")).?;
+    defer detail.deinit(allocator);
+    try std.testing.expectEqualStrings("Victim", detail.display_author);
+    try std.testing.expectEqualStrings("https://avatars.githubusercontent.com/u/123?v=4", detail.source_avatar_url);
 }
 
 test "pull git refs derive local branch refs only from safe branch names" {

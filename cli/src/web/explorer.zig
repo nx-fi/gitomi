@@ -28,7 +28,7 @@ const sendRedirect = shared.sendRedirect;
 const sendResponse = shared.sendResponse;
 
 const max_blob_display_bytes = 512 * 1024;
-const max_raw_blob_bytes = 128 * 1024 * 1024;
+const max_raw_blob_bytes = git.max_git_output;
 const root_partial_priority_repository = 30;
 const root_partial_priority_branch = 30;
 const root_partial_priority_commit_count = 35;
@@ -2577,6 +2577,10 @@ test "web explorer maps media paths to preview metadata" {
     try std.testing.expectEqualStrings("image/gif", contentTypeForPath("animation.gif"));
     try std.testing.expectEqualStrings("image/webp", contentTypeForPath("image.webp"));
     try std.testing.expectEqualStrings("video/mp4", contentTypeForPath("demo.m4v"));
+}
+
+test "web explorer raw blob cap stays on shared git output limit" {
+    try std.testing.expectEqual(git.max_git_output, max_raw_blob_bytes);
 }
 
 test "web explorer counts physical lines" {

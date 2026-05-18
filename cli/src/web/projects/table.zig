@@ -596,7 +596,7 @@ fn appendProjectTableRows(
         \\),
         \\issue_rows AS (
         \\  SELECT DISTINCT i.id, i.title, i.state,
-        \\         COALESCE(NULLIF(si.display_name, ''), NULLIF(m.source_author, ''), i.author_principal) AS author,
+        \\         COALESCE(NULLIF(m.source_author, ''), NULLIF(si.display_name, ''), i.author_principal) AS author,
         \\         i.opened_at,
         \\         COALESCE(m.milestone, '') AS milestone,
         \\         COALESCE(m.priority, '') AS priority,
@@ -756,7 +756,7 @@ fn appendProjectTableGroup(
         \\  LEFT JOIN issue_metadata m ON m.issue_id = pi.issue_id
         \\)
         \\SELECT DISTINCT i.id, i.title, i.state,
-        \\       COALESCE(NULLIF(si.display_name, ''), NULLIF(m.source_author, ''), i.author_principal),
+        \\       COALESCE(NULLIF(m.source_author, ''), NULLIF(si.display_name, ''), i.author_principal),
         \\       i.opened_at,
         \\       COALESCE(m.milestone, ''),
         \\       COALESCE(m.priority, ''),
@@ -840,7 +840,7 @@ fn appendProjectPriorityTableGroup(
         \\  WHERE p.name = ?
         \\)
         \\SELECT DISTINCT i.id, i.title, i.state,
-        \\       COALESCE(NULLIF(si.display_name, ''), NULLIF(m.source_author, ''), i.author_principal),
+        \\       COALESCE(NULLIF(m.source_author, ''), NULLIF(si.display_name, ''), i.author_principal),
         \\       i.opened_at,
         \\       COALESCE(m.milestone, ''),
         \\       COALESCE(m.priority, ''),

@@ -141,6 +141,12 @@ pub fn requireAuthorizedWrite(allocator: Allocator, repo: Repo, event_body: []co
         if (std.mem.eql(u8, reason, "unauthorized_principal") and try localDelegationAuthorizesWrite(allocator, repo, envelope)) {
             return;
         }
+        if (std.mem.eql(u8, reason, "unauthorized_legacy_alias") and try localDelegationAuthorizesLegacyAliasWrite(allocator, repo, envelope, event_body)) {
+            return;
+        }
+        if (std.mem.eql(u8, reason, "unauthorized_source_identity") and try localDelegationAuthorizesSourceIdentityWrite(allocator, repo, envelope, event_body)) {
+            return;
+        }
         if (localDomainRejectionCanBeAudited(envelope.event_type, reason)) {
             return;
         }
@@ -176,6 +182,113 @@ fn localDelegationAuthorizesWrite(allocator: Allocator, repo: Repo, envelope: ev
     defer signing_key.deinit();
     return try hasActiveDelegation(allocator, repo, envelope.actor_principal, envelope.actor_device, "github.import", "github:*", signing_key.fingerprint) or
         try hasActiveDelegation(allocator, repo, envelope.actor_principal, envelope.actor_device, "gitlab.import", "gitlab:*", signing_key.fingerprint);
+}
+
+fn localDelegationAuthorizesLegacyAliasWrite(allocator: Allocator, repo: Repo, envelope: event_mod.ValidatedEnvelope, event_body: []const u8) !bool {
+    if (!projection.importDelegatesEvent(envelope.event_type)) return false;
+
+    const aliases = providerLegacyAliases(allocator, envelope.event_type, event_body) catch return false;
+    if (!aliases.github and !aliases.gitlab) return false;
+
+    var signing_key = repo_mod.configuredSigningKey(allocator) catch return false;
+    defer signing_key.deinit();
+
+    if (aliases.github and !(try hasActiveDelegation(allocator, repo, envelope.actor_principal, envelope.actor_device, "github.import", "github:*", signing_key.fingerprint))) return false;
+    if (aliases.gitlab and !(try hasActiveDelegation(allocator, repo, envelope.actor_principal, envelope.actor_device, "gitlab.import", "gitlab:*", signing_key.fingerprint))) return false;
+    return true;
+}
+
+fn localDelegationAuthorizesSourceIdentityWrite(allocator: Allocator, repo: Repo, envelope: event_mod.ValidatedEnvelope, event_body: []const u8) !bool {
+    if (!projection.importDelegatesEvent(envelope.event_type)) return false;
+
+    const providers = providerSourceIdentityMetadata(allocator, envelope.event_type, event_body) catch return false;
+    if (!providers.github and !providers.gitlab) return false;
+
+    var signing_key = repo_mod.configuredSigningKey(allocator) catch return false;
+    defer signing_key.deinit();
+
+    if (providers.github and !(try hasActiveDelegation(allocator, repo, envelope.actor_principal, envelope.actor_device, "github.import", "github:*", signing_key.fingerprint))) return false;
+    if (providers.gitlab and !(try hasActiveDelegation(allocator, repo, envelope.actor_principal, envelope.actor_device, "gitlab.import", "gitlab:*", signing_key.fingerprint))) return false;
+    return true;
+}
+
+const ProviderLegacyAliases = struct {
+    github: bool = false,
+    gitlab: bool = false,
+};
+
+fn providerLegacyAliases(allocator: Allocator, event_type: []const u8, event_body: []const u8) !ProviderLegacyAliases {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, event_body, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return .{},
+    };
+    return providerLegacyAliasesFromRoot(event_type, root);
+}
+
+fn providerSourceIdentityMetadata(allocator: Allocator, event_type: []const u8, event_body: []const u8) !ProviderLegacyAliases {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, event_body, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return .{},
+    };
+    const payload = switch (root.get("payload") orelse return .{}) {
+        .object => |object| object,
+        else => return .{},
+    };
+    if (!payloadHasSourceIdentityMetadata(payload)) return .{};
+    const source_identity = event_mod.jsonString(payload.get("source_identity")) orelse "";
+    if (source_identity.len != 0) return providersForSourceIdentity(source_identity);
+    return providerLegacyAliasesFromRoot(event_type, root);
+}
+
+fn providerLegacyAliasesFromRoot(event_type: []const u8, root: std.json.ObjectMap) ProviderLegacyAliases {
+    const legacy = switch (root.get("legacy") orelse return .{}) {
+        .object => |object| object,
+        else => return .{},
+    };
+
+    if (std.mem.startsWith(u8, event_type, "issue.")) {
+        return .{
+            .github = legacyPositiveInteger(legacy, "github_issue_number"),
+            .gitlab = legacyPositiveInteger(legacy, "gitlab_issue_iid"),
+        };
+    }
+    if (std.mem.startsWith(u8, event_type, "pull.")) {
+        return .{
+            .github = legacyPositiveInteger(legacy, "github_pull_number"),
+            .gitlab = legacyPositiveInteger(legacy, "gitlab_merge_request_iid"),
+        };
+    }
+    return .{};
+}
+
+fn payloadHasSourceIdentityMetadata(payload: std.json.ObjectMap) bool {
+    return payloadHasNonEmptyString(payload, "source_author") or
+        payloadHasNonEmptyString(payload, "source_identity") or
+        payloadHasNonEmptyString(payload, "source_email") or
+        payloadHasNonEmptyString(payload, "source_avatar_url");
+}
+
+fn payloadHasNonEmptyString(payload: std.json.ObjectMap, key: []const u8) bool {
+    const value = event_mod.jsonString(payload.get(key)) orelse return false;
+    return value.len != 0;
+}
+
+fn providersForSourceIdentity(source_identity: []const u8) ProviderLegacyAliases {
+    const split = std.mem.indexOfScalar(u8, source_identity, ':') orelse return .{};
+    if (split == 0 or split + 1 >= source_identity.len) return .{};
+    const provider = source_identity[0..split];
+    if (std.mem.eql(u8, provider, "github")) return .{ .github = true };
+    if (std.mem.eql(u8, provider, "gitlab")) return .{ .gitlab = true };
+    return .{};
+}
+
+fn legacyPositiveInteger(legacy: std.json.ObjectMap, key: []const u8) bool {
+    const number = event_mod.jsonInteger(legacy.get(key)) orelse return false;
+    return number > 0;
 }
 
 pub fn roleForPrincipal(allocator: Allocator, repo: Repo, principal: []const u8) !?[]u8 {
@@ -2210,6 +2323,26 @@ test "write preflight enforces current RBAC" {
     db.deinit();
 
     try requireAuthorizedWrite(allocator, repo, test_issue_opened_body);
+    try std.testing.expectError(CliError.Unauthorized, requireAuthorizedWrite(allocator, repo, test_github_issue_alias_body));
+    try std.testing.expectError(CliError.Unauthorized, requireAuthorizedWrite(allocator, repo, test_github_issue_source_identity_body));
+
+    var signing_key = try repo_mod.configuredSigningKey(allocator);
+    defer signing_key.deinit();
+
+    db = try SqliteDb.open(allocator, index_path, sqlite.SQLITE_OPEN_READWRITE, false);
+    try insertTestDelegation(&db, "alice", "laptop", "gitlab.import", "gitlab:*", signing_key.fingerprint);
+    db.deinit();
+
+    try std.testing.expectError(CliError.Unauthorized, requireAuthorizedWrite(allocator, repo, test_github_issue_alias_body));
+    try std.testing.expectError(CliError.Unauthorized, requireAuthorizedWrite(allocator, repo, test_github_issue_source_identity_body));
+    try requireAuthorizedWrite(allocator, repo, test_gitlab_issue_alias_body);
+
+    db = try SqliteDb.open(allocator, index_path, sqlite.SQLITE_OPEN_READWRITE, false);
+    try insertTestDelegation(&db, "alice", "laptop", "github.import", "github:*", signing_key.fingerprint);
+    db.deinit();
+
+    try requireAuthorizedWrite(allocator, repo, test_github_issue_alias_body);
+    try requireAuthorizedWrite(allocator, repo, test_github_issue_source_identity_body);
 }
 
 fn testRepo(allocator: Allocator, root: []const u8, index_path: []const u8) !Repo {
@@ -2223,6 +2356,21 @@ fn testRepo(allocator: Allocator, root: []const u8, index_path: []const u8) !Rep
         .cursors_path = try std.fs.path.join(allocator, &.{ root, "cursors.sqlite" }),
         .settings_path = try std.fs.path.join(allocator, &.{ root, "settings.sqlite" }),
     };
+}
+
+fn insertTestDelegation(db: *SqliteDb, principal: []const u8, device: []const u8, capability: []const u8, scope: []const u8, fingerprint: []const u8) !void {
+    var stmt = try db.prepare(
+        \\INSERT INTO acl_delegations(principal, device, capability, scope, key_fingerprint, public_key, grant_event_hash)
+        \\VALUES (?, ?, ?, ?, ?, '', ?)
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, principal);
+    try stmt.bindText(2, device);
+    try stmt.bindText(3, capability);
+    try stmt.bindText(4, scope);
+    try stmt.bindText(5, fingerprint);
+    try stmt.bindText(6, capability);
+    try stmt.stepDone();
 }
 
 const test_issue_opened_body =
@@ -2252,6 +2400,100 @@ const test_issue_opened_body =
     \\  "payload": {
     \\    "title": "Smoke"
     \\  }
+    \\}
+;
+
+const test_github_issue_alias_body =
+    \\{
+    \\  "$schema": "urn:gitomi:event:v1",
+    \\  "repo_id": "018f0000-0000-7000-8000-000000000001",
+    \\  "event_uuid": "018f0000-0000-7000-8000-000000000301",
+    \\  "event_type": "issue.updated",
+    \\  "object": {
+    \\    "kind": "issue",
+    \\    "id": "018f0000-0000-7000-8000-000000000300"
+    \\  },
+    \\  "idempotency_key": "018f0000-0000-7000-8000-000000000302",
+    \\  "actor": {
+    \\    "principal": "alice",
+    \\    "device": "laptop"
+    \\  },
+    \\  "seq": 2,
+    \\  "occurred_at": "2026-05-16T00:00:00Z",
+    \\  "parent_hashes": {
+    \\    "log": "",
+    \\    "anchor": "",
+    \\    "causal": [],
+    \\    "related": []
+    \\  },
+    \\  "legacy": {
+    \\    "github_issue_number": 31337
+    \\  },
+    \\  "payload": {}
+    \\}
+;
+
+const test_github_issue_source_identity_body =
+    \\{
+    \\  "$schema": "urn:gitomi:event:v1",
+    \\  "repo_id": "018f0000-0000-7000-8000-000000000001",
+    \\  "event_uuid": "018f0000-0000-7000-8000-000000000305",
+    \\  "event_type": "issue.opened",
+    \\  "object": {
+    \\    "kind": "issue",
+    \\    "id": "018f0000-0000-7000-8000-000000000306"
+    \\  },
+    \\  "idempotency_key": "018f0000-0000-7000-8000-000000000307",
+    \\  "actor": {
+    \\    "principal": "alice",
+    \\    "device": "laptop"
+    \\  },
+    \\  "seq": 4,
+    \\  "occurred_at": "2026-05-16T00:00:02Z",
+    \\  "parent_hashes": {
+    \\    "log": "",
+    \\    "anchor": "",
+    \\    "causal": [],
+    \\    "related": []
+    \\  },
+    \\  "legacy": {},
+    \\  "payload": {
+    \\    "title": "Imported",
+    \\    "source_author": "Victim",
+    \\    "source_identity": "github:123",
+    \\    "source_email": "victim@example.test",
+    \\    "source_avatar_url": "https://avatars.githubusercontent.com/u/123?v=4"
+    \\  }
+    \\}
+;
+
+const test_gitlab_issue_alias_body =
+    \\{
+    \\  "$schema": "urn:gitomi:event:v1",
+    \\  "repo_id": "018f0000-0000-7000-8000-000000000001",
+    \\  "event_uuid": "018f0000-0000-7000-8000-000000000303",
+    \\  "event_type": "issue.updated",
+    \\  "object": {
+    \\    "kind": "issue",
+    \\    "id": "018f0000-0000-7000-8000-000000000300"
+    \\  },
+    \\  "idempotency_key": "018f0000-0000-7000-8000-000000000304",
+    \\  "actor": {
+    \\    "principal": "alice",
+    \\    "device": "laptop"
+    \\  },
+    \\  "seq": 3,
+    \\  "occurred_at": "2026-05-16T00:00:01Z",
+    \\  "parent_hashes": {
+    \\    "log": "",
+    \\    "anchor": "",
+    \\    "causal": [],
+    \\    "related": []
+    \\  },
+    \\  "legacy": {
+    \\    "gitlab_issue_iid": 31338
+    \\  },
+    \\  "payload": {}
     \\}
 ;
 

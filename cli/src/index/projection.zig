@@ -766,6 +766,7 @@ pub fn authorizationRejection(allocator: Allocator, db: *SqliteDb, event_hash: ?
     if (hasGitLabLegacyAlias(envelope.event_type, root)) {
         if (try legacyAliasAuthorizationRejection(allocator, db, envelope, event_hash, "gitlab.import")) |reason| return reason;
     }
+    if (try sourceIdentityMetadataAuthorizationRejection(allocator, db, envelope, event_hash, root, payload)) |reason| return reason;
     if ((try accessModeFromDb(db)) == .open) {
         return try eventAuthorizationRejection(allocator, db, "owner", envelope, payload, event_hash);
     }
@@ -1060,6 +1061,12 @@ test "import delegation includes milestone creation" {
     try std.testing.expect(importDelegatesEvent("milestone.created"));
 }
 
+test "known import capabilities include GitHub and GitLab" {
+    try std.testing.expect(isKnownImportCapability("github.import"));
+    try std.testing.expect(isKnownImportCapability("gitlab.import"));
+    try std.testing.expect(!isKnownImportCapability("ci.run"));
+}
+
 fn legacyAliasAuthorizationRejection(
     allocator: Allocator,
     db: *SqliteDb,
@@ -1067,9 +1074,46 @@ fn legacyAliasAuthorizationRejection(
     event_hash: ?[]const u8,
     capability: []const u8,
 ) !?[]const u8 {
-    const hash = event_hash orelse return "unauthorized_legacy_alias";
-    if (!importDelegatesEvent(envelope.event_type)) return "unauthorized_legacy_alias";
+    return try delegatedImportCapabilityAuthorizationRejection(
+        allocator,
+        db,
+        envelope,
+        event_hash,
+        capability,
+        "unauthorized_legacy_alias",
+    );
+}
 
+fn sourceIdentityMetadataAuthorizationRejection(
+    allocator: Allocator,
+    db: *SqliteDb,
+    envelope: ValidatedEnvelope,
+    event_hash: ?[]const u8,
+    root: std.json.ObjectMap,
+    payload: std.json.ObjectMap,
+) !?[]const u8 {
+    if (!payloadHasSourceIdentityMetadata(payload)) return null;
+    const capability = sourceIdentityImportCapability(envelope.event_type, root, payload) orelse return "unauthorized_source_identity";
+    return try delegatedImportCapabilityAuthorizationRejection(
+        allocator,
+        db,
+        envelope,
+        event_hash,
+        capability,
+        "unauthorized_source_identity",
+    );
+}
+
+fn delegatedImportCapabilityAuthorizationRejection(
+    allocator: Allocator,
+    db: *SqliteDb,
+    envelope: ValidatedEnvelope,
+    event_hash: ?[]const u8,
+    capability: []const u8,
+    unauthorized_reason: []const u8,
+) !?[]const u8 {
+    const hash = event_hash orelse return unauthorized_reason;
+    if (!importDelegatesEvent(envelope.event_type)) return unauthorized_reason;
     const delegated_fingerprint = (try delegationFingerprintAtAuthFrontier(
         allocator,
         db,
@@ -1077,12 +1121,41 @@ fn legacyAliasAuthorizationRejection(
         envelope.actor_device,
         capability,
         hash,
-    )) orelse return "unauthorized_legacy_alias";
+    )) orelse return unauthorized_reason;
     defer allocator.free(delegated_fingerprint);
 
     const signer_fingerprint = (try git.verifiedCommitSigningKeyFingerprint(allocator, hash)) orelse return "signing_key_mismatch";
     defer allocator.free(signer_fingerprint);
     if (!std.mem.eql(u8, delegated_fingerprint, signer_fingerprint)) return "signing_key_mismatch";
+    return null;
+}
+
+fn payloadHasSourceIdentityMetadata(payload: std.json.ObjectMap) bool {
+    return payloadHasNonEmptyString(payload, "source_author") or
+        payloadHasNonEmptyString(payload, "source_identity") or
+        payloadHasNonEmptyString(payload, "source_email") or
+        payloadHasNonEmptyString(payload, "source_avatar_url");
+}
+
+fn payloadHasNonEmptyString(payload: std.json.ObjectMap, key: []const u8) bool {
+    const value = event_mod.jsonString(payload.get(key)) orelse return false;
+    return value.len != 0;
+}
+
+fn sourceIdentityImportCapability(event_type: []const u8, root: std.json.ObjectMap, payload: std.json.ObjectMap) ?[]const u8 {
+    const source_identity = event_mod.jsonString(payload.get("source_identity")) orelse "";
+    if (source_identity.len != 0) return capabilityForSourceIdentity(source_identity);
+    if (hasGitHubLegacyAlias(event_type, root)) return "github.import";
+    if (hasGitLabLegacyAlias(event_type, root)) return "gitlab.import";
+    return null;
+}
+
+fn capabilityForSourceIdentity(source_identity: []const u8) ?[]const u8 {
+    const split = std.mem.indexOfScalar(u8, source_identity, ':') orelse return null;
+    if (split == 0 or split + 1 >= source_identity.len) return null;
+    const provider = source_identity[0..split];
+    if (std.mem.eql(u8, provider, "github")) return "github.import";
+    if (std.mem.eql(u8, provider, "gitlab")) return "gitlab.import";
     return null;
 }
 
@@ -1263,7 +1336,7 @@ fn applyAclProjection(allocator: Allocator, db: *SqliteDb, event_hash: []const u
         const device = event_mod.jsonString(payload.get("device")) orelse return "invalid_event_envelope";
         const capability = event_mod.jsonString(payload.get("capability")) orelse return "invalid_event_envelope";
         const scope = event_mod.jsonString(payload.get("scope")) orelse return "invalid_event_envelope";
-        if (!std.mem.eql(u8, capability, "github.import")) return "unknown_capability";
+        if (!isKnownImportCapability(capability)) return "unknown_capability";
         const signing_key = switch (payload.get("signing_key") orelse return "invalid_event_envelope") {
             .object => |object| object,
             else => return "invalid_event_envelope",
@@ -1279,7 +1352,7 @@ fn applyAclProjection(allocator: Allocator, db: *SqliteDb, event_hash: []const u
         const device = event_mod.jsonString(payload.get("device")) orelse return "invalid_event_envelope";
         const capability = event_mod.jsonString(payload.get("capability")) orelse return "invalid_event_envelope";
         const scope = event_mod.jsonString(payload.get("scope")) orelse return "invalid_event_envelope";
-        if (!std.mem.eql(u8, capability, "github.import")) return "unknown_capability";
+        if (!isKnownImportCapability(capability)) return "unknown_capability";
         if (!(try delegationActiveAtFrontier(allocator, db, principal, device, capability, scope, event_hash))) return "delegation_not_active";
         try insertDelegationHistory(db, principal, device, capability, scope, "", "", event_hash, envelope.event_type);
         try reconcileDelegation(allocator, db, principal, device, capability, scope);
@@ -1641,6 +1714,10 @@ fn importDelegationFingerprintAtAuthFrontier(
 ) !?[]u8 {
     if (try delegationFingerprintAtAuthFrontier(allocator, db, principal, device, "github.import", before_event_hash)) |value| return value;
     return try delegationFingerprintAtAuthFrontier(allocator, db, principal, device, "gitlab.import", before_event_hash);
+}
+
+fn isKnownImportCapability(capability: []const u8) bool {
+    return std.mem.eql(u8, capability, "github.import") or std.mem.eql(u8, capability, "gitlab.import");
 }
 
 fn loadDelegationEvents(
@@ -2161,6 +2238,52 @@ test "role authorization rejects provider legacy aliases on work item events" {
     var pull_update_envelope = try parseValidatedEnvelope(allocator, pull_update_body);
     defer pull_update_envelope.deinit();
     try std.testing.expectEqualStrings("unauthorized_legacy_alias", (try authorizationRejection(allocator, &db, null, pull_update_envelope, pull_update_body)).?);
+}
+
+test "role authorization rejects source identity metadata without import delegation" {
+    const allocator = std.testing.allocator;
+    var db = try SqliteDb.open(allocator, ":memory:", sqlite_db.sqlite.SQLITE_OPEN_READWRITE | sqlite_db.sqlite.SQLITE_OPEN_CREATE, true);
+    defer db.deinit();
+    try index_schema.createIndexSchema(&db);
+    try upsertMeta(&db, "access_mode", "open");
+
+    var envelope = try testEnvelopeForObjectEventType(allocator, "issue.opened", "issue", "018f0000-0000-7000-8000-000000000100");
+    defer envelope.deinit();
+
+    const plain_body =
+        \\{
+        \\  "payload": {
+        \\    "title": "Smoke"
+        \\  },
+        \\  "legacy": {}
+        \\}
+    ;
+    try std.testing.expect((try authorizationRejection(allocator, &db, null, envelope, plain_body)) == null);
+
+    const identity_body =
+        \\{
+        \\  "payload": {
+        \\    "title": "Smoke",
+        \\    "source_author": "Mallory",
+        \\    "source_identity": "github:123",
+        \\    "source_email": "mallory@example.test",
+        \\    "source_avatar_url": "https://attacker.invalid/avatar.png"
+        \\  },
+        \\  "legacy": {}
+        \\}
+    ;
+    try std.testing.expectEqualStrings("unauthorized_source_identity", (try authorizationRejection(allocator, &db, null, envelope, identity_body)).?);
+
+    const display_only_body =
+        \\{
+        \\  "payload": {
+        \\    "title": "Smoke",
+        \\    "source_author": "Mallory"
+        \\  },
+        \\  "legacy": {}
+        \\}
+    ;
+    try std.testing.expectEqualStrings("unauthorized_source_identity", (try authorizationRejection(allocator, &db, null, envelope, display_only_body)).?);
 }
 
 test "open access self-registration fingerprint requires matching actor" {

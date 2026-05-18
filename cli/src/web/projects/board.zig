@@ -206,7 +206,7 @@ fn appendProjectColumn(
         \\  LEFT JOIN issue_metadata m ON m.issue_id = pi.issue_id
         \\)
         \\SELECT DISTINCT i.id, i.title, i.state,
-        \\       COALESCE(NULLIF(si.display_name, ''), NULLIF(m.source_author, ''), i.author_principal),
+        \\       COALESCE(NULLIF(m.source_author, ''), NULLIF(si.display_name, ''), i.author_principal),
         \\       i.opened_at,
         \\       COALESCE(m.priority, ''),
         \\       COALESCE(m.status, ''),

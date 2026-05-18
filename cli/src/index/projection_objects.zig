@@ -34,6 +34,12 @@ const ProjectedSourceIdentity = struct {
     avatar_url: []const u8,
 };
 
+const ExistingSourceIdentity = struct {
+    exists: bool = false,
+    display_name_empty: bool = true,
+    email_empty: bool = true,
+};
+
 fn sourceIdentityFromPayload(payload: std.json.ObjectMap) ProjectedSourceIdentity {
     return .{
         .identity = event_mod.jsonString(payload.get("source_identity")) orelse "",
@@ -45,6 +51,7 @@ fn sourceIdentityFromPayload(payload: std.json.ObjectMap) ProjectedSourceIdentit
 
 fn upsertSourceIdentity(db: *SqliteDb, source: ProjectedSourceIdentity) !void {
     if (source.identity.len == 0) return;
+    const existing = try existingSourceIdentity(db, source.identity);
     const split = std.mem.indexOfScalar(u8, source.identity, ':');
     const provider = if (split) |idx| source.identity[0..idx] else "";
     const provider_user_id = if (split) |idx| source.identity[idx + 1 ..] else source.identity;
@@ -53,11 +60,11 @@ fn upsertSourceIdentity(db: *SqliteDb, source: ProjectedSourceIdentity) !void {
         \\INSERT INTO identities(id, provider, provider_user_id, display_name, email, avatar_url)
         \\VALUES (?, ?, ?, ?, ?, ?)
         \\ON CONFLICT(id) DO UPDATE SET
-        \\  provider = COALESCE(NULLIF(excluded.provider, ''), identities.provider),
-        \\  provider_user_id = COALESCE(NULLIF(excluded.provider_user_id, ''), identities.provider_user_id),
-        \\  display_name = COALESCE(NULLIF(excluded.display_name, ''), identities.display_name),
-        \\  email = COALESCE(NULLIF(excluded.email, ''), identities.email),
-        \\  avatar_url = COALESCE(NULLIF(excluded.avatar_url, ''), identities.avatar_url)
+        \\  provider = COALESCE(NULLIF(identities.provider, ''), excluded.provider),
+        \\  provider_user_id = COALESCE(NULLIF(identities.provider_user_id, ''), excluded.provider_user_id),
+        \\  display_name = COALESCE(NULLIF(identities.display_name, ''), excluded.display_name),
+        \\  email = COALESCE(NULLIF(identities.email, ''), excluded.email),
+        \\  avatar_url = COALESCE(NULLIF(identities.avatar_url, ''), excluded.avatar_url)
     );
     defer stmt.deinit();
     try stmt.bindText(1, source.identity);
@@ -68,16 +75,39 @@ fn upsertSourceIdentity(db: *SqliteDb, source: ProjectedSourceIdentity) !void {
     try stmt.bindText(6, source.avatar_url);
     try stmt.stepDone();
 
-    try upsertIdentityAlias(db, "display", source.author, source.identity);
-    try upsertIdentityAlias(db, "email", source.email, source.identity);
+    if (!existing.exists or existing.display_name_empty) {
+        try insertIdentityAlias(db, "display", source.author, source.identity);
+    }
+    if (!existing.exists or existing.email_empty) {
+        try insertIdentityAlias(db, "email", source.email, source.identity);
+    }
 }
 
-fn upsertIdentityAlias(db: *SqliteDb, kind: []const u8, value: []const u8, identity: []const u8) !void {
+fn existingSourceIdentity(db: *SqliteDb, identity: []const u8) !ExistingSourceIdentity {
+    var stmt = try db.prepare(
+        \\SELECT display_name, email
+        \\FROM identities
+        \\WHERE id = ?
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, identity);
+    if (!(try stmt.step())) return .{};
+    const display_name = try stmt.columnTextDup(db.allocator, 0);
+    defer db.allocator.free(display_name);
+    const email = try stmt.columnTextDup(db.allocator, 1);
+    defer db.allocator.free(email);
+    return .{
+        .exists = true,
+        .display_name_empty = display_name.len == 0,
+        .email_empty = email.len == 0,
+    };
+}
+
+fn insertIdentityAlias(db: *SqliteDb, kind: []const u8, value: []const u8, identity: []const u8) !void {
     if (value.len == 0) return;
     var stmt = try db.prepare(
-        \\INSERT INTO identity_aliases(alias_kind, alias_value, identity_id)
+        \\INSERT OR IGNORE INTO identity_aliases(alias_kind, alias_value, identity_id)
         \\VALUES (?, ?, ?)
-        \\ON CONFLICT(alias_kind, alias_value) DO UPDATE SET identity_id = excluded.identity_id
     );
     defer stmt.deinit();
     try stmt.bindText(1, kind);
@@ -3511,6 +3541,47 @@ fn reactionCountExceeds(db: *SqliteDb, comptime sql_text: []const u8, object_kin
     return stmt.columnInt64(0) > @as(i64, @intCast(max_count));
 }
 
+test "source identity upsert preserves existing display fields and aliases" {
+    const allocator = std.testing.allocator;
+    var db = try SqliteDb.open(allocator, ":memory:", sqlite_db.sqlite.SQLITE_OPEN_READWRITE | sqlite_db.sqlite.SQLITE_OPEN_CREATE, true);
+    defer db.deinit();
+    try index_schema.createIndexSchema(&db);
+
+    try upsertSourceIdentity(&db, .{
+        .identity = "github:123",
+        .author = "Victim",
+        .email = "victim@example.test",
+        .avatar_url = "https://avatars.githubusercontent.com/u/123?v=4",
+    });
+    try upsertSourceIdentity(&db, .{
+        .identity = "github:123",
+        .author = "Mallory",
+        .email = "mallory@example.test",
+        .avatar_url = "https://attacker.invalid/avatar.png",
+    });
+
+    try expectSourceIdentity(
+        &db,
+        "github:123",
+        "Victim",
+        "victim@example.test",
+        "https://avatars.githubusercontent.com/u/123?v=4",
+    );
+    try expectIdentityAlias(&db, "display", "Victim", "github:123");
+    try expectIdentityAlias(&db, "email", "victim@example.test", "github:123");
+    try expectNoIdentityAlias(&db, "display", "Mallory");
+    try expectNoIdentityAlias(&db, "email", "mallory@example.test");
+
+    try upsertSourceIdentity(&db, .{
+        .identity = "github:999",
+        .author = "Victim",
+        .email = "victim@example.test",
+        .avatar_url = "https://avatars.githubusercontent.com/u/999?v=4",
+    });
+    try expectIdentityAlias(&db, "display", "Victim", "github:123");
+    try expectIdentityAlias(&db, "email", "victim@example.test", "github:123");
+}
+
 test "creation duplicate winner ignores rejected creation events" {
     const allocator = std.testing.allocator;
     var db = try SqliteDb.open(allocator, ":memory:", sqlite_db.sqlite.SQLITE_OPEN_READWRITE | sqlite_db.sqlite.SQLITE_OPEN_CREATE, true);
@@ -3729,6 +3800,41 @@ fn expectIssueTitle(allocator: Allocator, db: *SqliteDb, issue_id: []const u8, e
     const title = try stmt.columnTextDup(allocator, 0);
     defer allocator.free(title);
     try std.testing.expectEqualStrings(expected, title);
+}
+
+fn expectSourceIdentity(db: *SqliteDb, id: []const u8, display_name: []const u8, email: []const u8, avatar_url: []const u8) !void {
+    var stmt = try db.prepare("SELECT display_name, email, avatar_url FROM identities WHERE id = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, id);
+    try std.testing.expect(try stmt.step());
+    const actual_display_name = try stmt.columnTextDup(std.testing.allocator, 0);
+    defer std.testing.allocator.free(actual_display_name);
+    const actual_email = try stmt.columnTextDup(std.testing.allocator, 1);
+    defer std.testing.allocator.free(actual_email);
+    const actual_avatar_url = try stmt.columnTextDup(std.testing.allocator, 2);
+    defer std.testing.allocator.free(actual_avatar_url);
+    try std.testing.expectEqualStrings(display_name, actual_display_name);
+    try std.testing.expectEqualStrings(email, actual_email);
+    try std.testing.expectEqualStrings(avatar_url, actual_avatar_url);
+}
+
+fn expectIdentityAlias(db: *SqliteDb, kind: []const u8, value: []const u8, identity: []const u8) !void {
+    var stmt = try db.prepare("SELECT identity_id FROM identity_aliases WHERE alias_kind = ? AND alias_value = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, kind);
+    try stmt.bindText(2, value);
+    try std.testing.expect(try stmt.step());
+    const actual_identity = try stmt.columnTextDup(std.testing.allocator, 0);
+    defer std.testing.allocator.free(actual_identity);
+    try std.testing.expectEqualStrings(identity, actual_identity);
+}
+
+fn expectNoIdentityAlias(db: *SqliteDb, kind: []const u8, value: []const u8) !void {
+    var stmt = try db.prepare("SELECT 1 FROM identity_aliases WHERE alias_kind = ? AND alias_value = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, kind);
+    try stmt.bindText(2, value);
+    try std.testing.expect(!(try stmt.step()));
 }
 
 fn expectNotificationSubscription(db: *SqliteDb, principal: []const u8, object_kind: []const u8, object_id: []const u8, active: bool, reason: []const u8) !void {

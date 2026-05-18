@@ -137,7 +137,7 @@ fn appendProjectIssuesList(
         \\  WHERE p.name = ?
         \\)
         \\SELECT DISTINCT i.id, i.title, i.state,
-        \\       COALESCE(NULLIF(si.display_name, ''), NULLIF(m.source_author, ''), i.author_principal),
+        \\       COALESCE(NULLIF(m.source_author, ''), NULLIF(si.display_name, ''), i.author_principal),
         \\       i.opened_at,
         \\       COALESCE(m.milestone, ''),
         \\       COALESCE(m.priority, ''),

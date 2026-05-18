@@ -394,7 +394,7 @@ fn pullFilterOptionsSql(kind: PullFilterKind) []const u8 {
         .author =>
         \\SELECT author, COUNT(*)
         \\FROM (
-        \\  SELECT p.id, COALESCE(NULLIF(sp.display_name, ''), NULLIF(pm.source_author, ''), p.author_principal) AS author
+        \\  SELECT p.id, COALESCE(NULLIF(pm.source_author, ''), NULLIF(sp.display_name, ''), p.author_principal) AS author
         \\  FROM pulls p
         \\  LEFT JOIN pull_metadata pm ON pm.pull_id = p.id
         \\  LEFT JOIN identities sp ON sp.id = pm.source_identity

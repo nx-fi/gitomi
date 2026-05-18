@@ -381,7 +381,7 @@ fn appendIssueSidebarAssigneeMenu(buf: *std.ArrayList(u8), allocator: Allocator,
         \\FROM (
         \\  SELECT assignee AS assignee FROM issue_assignees
         \\  UNION
-        \\  SELECT COALESCE(NULLIF(si.display_name, ''), NULLIF(m.source_author, ''), i.author_principal) AS assignee
+        \\  SELECT COALESCE(NULLIF(m.source_author, ''), NULLIF(si.display_name, ''), i.author_principal) AS assignee
         \\  FROM issues i
         \\  LEFT JOIN issue_metadata m ON m.issue_id = i.id
         \\  LEFT JOIN identities si ON si.id = m.source_identity
