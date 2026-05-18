@@ -2590,6 +2590,13 @@ main.page-projects:has(.project-overview-page) {
   background: var(--button-secondary-bg);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.issue-copy-button:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--button-secondary-hover-bg);
+  border-color: var(--button-secondary-hover-border);
 }
 .issue-status-line {
   display: flex;
@@ -3045,11 +3052,19 @@ main.page-projects:has(.project-overview-page) {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
 }
+.markdown-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 38px;
+  background: var(--panel-strong);
+  border-bottom: 1px solid var(--border);
+}
 .markdown-editor-tabs {
   display: flex;
   align-items: center;
   background: var(--panel-strong);
-  border-bottom: 1px solid var(--border);
 }
 .markdown-editor-tabs button {
   min-height: 38px;
@@ -3071,17 +3086,18 @@ main.page-projects:has(.project-overview-page) {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 2px;
-  min-height: 40px;
-  padding: 5px 8px;
-  background: var(--panel-strong);
-  border-bottom: 1px solid var(--border);
+  min-width: 0;
+  margin-left: auto;
+  padding: 4px 8px;
+  background: transparent;
 }
 .markdown-editor-toolbar button {
   display: inline-grid;
   place-items: center;
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   color: var(--muted);
   background: transparent;
   border: 0;
@@ -3106,6 +3122,8 @@ main.page-projects:has(.project-overview-page) {
   min-height: 150px;
   border: 0;
   border-radius: 0;
+  background: var(--panel);
+  box-shadow: none;
 }
 .markdown-editor textarea:focus {
   outline: 2px solid var(--brand);
@@ -3150,6 +3168,7 @@ main.page-projects:has(.project-overview-page) {
 .issue-state-submit.is-close {
   color: var(--red);
   border-color: color-mix(in oklch, var(--red) 46%, var(--border-strong));
+  border-width: 2px;
 }
 .issue-state-submit.is-close:hover {
   color: var(--text-on-accent);
@@ -11326,6 +11345,130 @@ a.root-file-commit:hover,
   gap: 14px;
   padding: 18px;
 }
+.issue-form :is(input:not([type="hidden"]), textarea),
+.issue-form .markdown-editor textarea,
+.issue-form .issue-sidebar-add-form input,
+.issue-form-picker-menu > summary.issue-form-picker-control {
+  background: var(--bg);
+}
+.issue-form-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.issue-form-field-label {
+  color: var(--text);
+  font-weight: 700;
+}
+.issue-form-picker-menu {
+  position: relative;
+  display: block;
+  min-width: 0;
+  width: 100%;
+}
+.issue-form-picker-menu > summary.issue-form-picker-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  height: auto;
+  min-height: 60px;
+  padding: 8px 10px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-control-inset);
+  cursor: pointer;
+  list-style: none;
+}
+.issue-form-picker-menu > summary.issue-form-picker-control:hover {
+  color: var(--text);
+  background: var(--bg);
+  border-color: color-mix(in oklch, var(--border-strong) 76%, var(--text));
+}
+.issue-form-picker-menu > summary.issue-form-picker-control::-webkit-details-marker {
+  display: none;
+}
+.issue-form-picker-menu[open] > summary.issue-form-picker-control {
+  border-color: color-mix(in oklch, var(--brand) 54%, var(--border-strong));
+}
+.issue-form-picker-selected {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.issue-form-picker-placeholder {
+  color: var(--muted);
+  font-weight: 600;
+}
+.issue-form-picker-caret {
+  width: 0;
+  height: 0;
+  flex: 0 0 auto;
+  border-top: 5px solid var(--muted);
+  border-right: 5px solid transparent;
+  border-left: 5px solid transparent;
+}
+.issue-form-selected-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  max-width: 100%;
+}
+.issue-form-selected-person {
+  min-height: 28px;
+  padding: 2px 8px 2px 2px;
+  color: var(--text);
+  background: var(--button-secondary-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  font-size: 12px;
+  font-weight: 700;
+}
+.issue-form-selected-person .issue-avatar {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+}
+.issue-form-picker-popover {
+  width: min(380px, calc(100vw - 24px));
+}
+.issue-form-picker-add {
+  padding-top: 0;
+}
+.issue-form-picker-custom {
+  display: grid;
+  border-top: 1px solid var(--border);
+}
+.issue-form-picker-custom[hidden] {
+  display: none;
+}
+.issue-form-picker-option-content {
+  display: contents;
+}
+.issue-form-assignee-dot {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  color: var(--muted);
+  background: var(--panel-strong);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.issue-form-assignee-dot::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  background: currentColor;
+  border-radius: 50%;
+}
 label {
   display: grid;
   gap: 6px;
@@ -11502,6 +11645,41 @@ input[type="reset"]:hover,
   color: var(--brand-strong);
   background: color-mix(in oklch, var(--brand) 12%, transparent);
   border: 1px solid color-mix(in oklch, var(--brand) 35%, transparent);
+}
+.gitomi-notification-bar {
+  position: fixed;
+  top: 14px;
+  left: 50%;
+  z-index: 1000;
+  display: flex;
+  width: min(560px, calc(100vw - 32px));
+  transform: translateX(-50%);
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+.gitomi-notification {
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-float);
+  font-weight: 700;
+  line-height: 1.35;
+  pointer-events: auto;
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+.gitomi-notification.error {
+  color: var(--red);
+  background: var(--red-bg);
+  border: 1px solid var(--tone-danger);
+}
+.gitomi-notification.success {
+  color: var(--brand-strong);
+  background: color-mix(in oklch, var(--brand) 12%, var(--panel));
+  border: 1px solid color-mix(in oklch, var(--brand) 35%, transparent);
+}
+.gitomi-notification.is-hiding {
+  opacity: 0;
+  transform: translateY(-6px);
 }
 @media (max-width: 980px) {
   .actions-runs-filters {

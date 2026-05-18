@@ -141,6 +141,7 @@ pub const EventWriter = struct {
 
     pub fn write(self: *EventWriter, command_context: []const u8, subject: []const u8, event_body: []const u8) ![]u8 {
         const committed_seq = self.nextSeq();
+        try self.ensureEventFresh(command_context, event_body);
         try index.requireAuthorizedWrite(self.allocator, self.repo, event_body);
         const commit_oid = try writeSignedEvent(
             self.allocator,
@@ -163,6 +164,7 @@ pub const EventWriter = struct {
 
     pub fn stage(self: *EventWriter, command_context: []const u8, subject: []const u8, event_body: []const u8) ![]u8 {
         const committed_seq = self.nextSeq();
+        try self.ensureEventFresh(command_context, event_body);
         try index.requireAuthorizedWrite(self.allocator, self.repo, event_body);
 
         const parent_head = self.staged_head orelse self.prepared_parents.old_head;
@@ -190,12 +192,51 @@ pub const EventWriter = struct {
 
     pub fn commitStaged(self: *EventWriter) !void {
         const commit_oid = self.staged_head orelse return;
-        try updateEventRef(self.allocator, self.inbox_ref, commit_oid, self.prepared_parents.old_head);
+        try self.ensureInboxHeadUnchanged("gt");
+        try updateEventRef(self.allocator, "gt", self.inbox_ref, commit_oid, self.prepared_parents.old_head);
         if (self.persist_config) {
             try repo_mod.writeConfig(self.repo.config_path, self.cfg);
         }
         self.allocator.free(commit_oid);
         self.staged_head = null;
+    }
+
+    fn ensureEventFresh(self: *EventWriter, command_context: []const u8, event_body: []const u8) !void {
+        var envelope = event_mod.parseValidatedEnvelope(self.allocator, event_body) catch {
+            try eprint("{s}: refusing to write invalid event body\n", .{command_context});
+            return CliError.InvalidEvent;
+        };
+        defer envelope.deinit();
+
+        if (!std.mem.eql(u8, envelope.actor_principal, self.cfg.principal) or
+            !std.mem.eql(u8, envelope.actor_device, self.cfg.device))
+        {
+            try eprint(
+                "{s}: refusing to write event for actor {s}/{s} through inbox {s}/{s}\n",
+                .{ command_context, envelope.actor_principal, envelope.actor_device, self.cfg.principal, self.cfg.device },
+            );
+            return CliError.UserError;
+        }
+
+        const expected_seq = self.nextSeq();
+        if (envelope.seq < 0 or @as(u64, @intCast(envelope.seq)) != expected_seq) {
+            try eprint(
+                "{s}: refusing duplicate or stale event for {s}/{s}: event sequence {d} is not the next local sequence {d}\n",
+                .{ command_context, self.cfg.principal, self.cfg.device, envelope.seq, expected_seq },
+            );
+            return CliError.LocalInboxChanged;
+        }
+
+        try self.ensureInboxHeadUnchanged(command_context);
+    }
+
+    fn ensureInboxHeadUnchanged(self: *EventWriter, command_context: []const u8) !void {
+        if (try inboxHeadMatches(self.allocator, self.inbox_ref, self.prepared_parents.old_head)) return;
+        try eprint(
+            "{s}: local inbox {s} changed while creating an event; reload the page or rerun the command so Gitomi can choose the next sequence\n",
+            .{ command_context, self.inbox_ref },
+        );
+        return CliError.LocalInboxChanged;
     }
 };
 
@@ -307,7 +348,7 @@ pub fn writeSignedEvent(
     );
     errdefer allocator.free(commit_oid);
 
-    try updateEventRef(allocator, inbox_ref, commit_oid, old_head);
+    try updateEventRef(allocator, command_context, inbox_ref, commit_oid, old_head);
     return commit_oid;
 }
 
@@ -356,12 +397,39 @@ fn createSignedEventCommit(
     return commit_oid;
 }
 
-fn updateEventRef(allocator: Allocator, inbox_ref: []const u8, commit_oid: []const u8, old_head: ?[]const u8) !void {
-    if (old_head) |head| {
-        const updated = try git.gitChecked(allocator, &.{ "update-ref", inbox_ref, commit_oid, head });
-        defer allocator.free(updated);
-    } else {
-        const updated = try git.gitChecked(allocator, &.{ "update-ref", inbox_ref, commit_oid, "" });
-        defer allocator.free(updated);
+fn updateEventRef(allocator: Allocator, command_context: []const u8, inbox_ref: []const u8, commit_oid: []const u8, old_head: ?[]const u8) !void {
+    const expected = old_head orelse "";
+    var result = try git.runCommand(allocator, &.{ "git", "update-ref", inbox_ref, commit_oid, expected }, null, git.max_git_output);
+    defer result.deinit();
+    if (result.exitCode() == 0) return;
+
+    if (!(try inboxHeadMatches(allocator, inbox_ref, old_head))) {
+        try eprint(
+            "{s}: local inbox {s} changed while creating an event; duplicate submission was blocked, reload the page or rerun the command\n",
+            .{ command_context, inbox_ref },
+        );
+        return CliError.LocalInboxChanged;
     }
+
+    const stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
+    if (stderr.len != 0) {
+        try eprint("git update-ref failed: {s}\n", .{stderr});
+    } else {
+        try eprint("git update-ref failed\n", .{});
+    }
+    return CliError.GitFailed;
+}
+
+fn inboxHeadMatches(allocator: Allocator, inbox_ref: []const u8, expected_head: ?[]const u8) !bool {
+    const current = try git.resolveOptionalRef(allocator, inbox_ref);
+    defer if (current) |head| allocator.free(head);
+    return optionalHashEqual(current, expected_head);
+}
+
+fn optionalHashEqual(left: ?[]const u8, right: ?[]const u8) bool {
+    if (left) |left_value| {
+        if (right) |right_value| return std.mem.eql(u8, left_value, right_value);
+        return false;
+    }
+    return right == null;
 }

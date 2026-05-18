@@ -171,11 +171,11 @@ fn appendIssuePageHeader(
     try appendTemplate(buf, allocator,
         \\
         \\        <a class="button primary" href="/new-issue">New issue</a>
-        \\        <button class="issue-copy-button" type="button" disabled aria-label="Copy issue link"><span class="button-icon icon-copy" aria-hidden="true"></span></button>
+        \\        <button class="issue-copy-button" type="button" data-copy-work-item-link="{copy_href}" aria-label="Copy link" title="Copy link"><span class="button-icon icon-copy" aria-hidden="true"></span></button>
         \\      </div>
         \\    </div>
         \\    <div class="issue-status-line">
-    , .{});
+    , .{ .copy_href = shared.issueHref(raw_ref) });
     try appendIssueStateBadge(buf, allocator, state);
     try appendTemplate(buf, allocator,
         \\      <span><strong>{author}</strong> opened this issue

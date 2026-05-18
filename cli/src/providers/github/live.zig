@@ -402,7 +402,7 @@ fn runLiveTick(allocator: Allocator, options: Options) !void {
     var state = try loadState(allocator, repo, options.repo);
     const map_path = try liveMapPath(allocator, repo, options.repo);
     defer allocator.free(map_path);
-    const export_result = try exporter.exportToGithub(allocator, .{
+    var export_result = try exporter.exportToGithub(allocator, .{
         .repo = options.repo,
         .dry_run = options.dry_run,
         .map_file = map_path,
@@ -414,7 +414,9 @@ fn runLiveTick(allocator: Allocator, options: Options) !void {
         .max_events = max_export_events_per_tick,
         .quiet = true,
         .mode = options.mode,
+        .reuse_index_aliases = true,
     });
+    defer export_result.deinit(allocator);
     if (export_result.max_ordinal > state.last_export_ordinal) {
         state.last_export_ordinal = export_result.max_ordinal;
         if (!options.dry_run) try saveState(allocator, repo, options.repo, state);

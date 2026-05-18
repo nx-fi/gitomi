@@ -219,7 +219,13 @@ fn handleWebConnectionWithContext(allocator: Allocator, app_context: WebAppConte
     if (try router.match(request.method, request.path)) |route_match| {
         ctx.request = request.withParams(route_match.params);
         switch (route_match.route.action) {
-            .handler => |handler| try handler(ctx),
+            .handler => |handler| handler(ctx) catch |err| {
+                if (err == CliError.LocalInboxChanged) {
+                    try shared.sendPlainResponse(ctx.allocator, ctx.stream, 409, "Conflict", shared.localWriteBlockedMessage);
+                    return;
+                }
+                return err;
+            },
             .static_asset => |asset| try zwf.middleware.sendCachedAsset(ctx.response, ctx.request, asset),
         }
         return;

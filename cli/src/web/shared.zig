@@ -99,6 +99,21 @@ pub const sendResponse = response.sendResponse;
 pub const sendBinaryResponse = response.sendBinaryResponse;
 const appendUserAvatarFromGitIdentity = avatars.appendUserAvatarFromGitIdentity;
 
+pub const localWriteBlockedMessage =
+    "Gitomi blocked this write because the local inbox changed while the action was running. Refresh the page and try again; duplicate submission was not written.";
+
+pub fn writeFailureStatus(err: anyerror) u16 {
+    return if (err == CliError.LocalInboxChanged) 409 else 500;
+}
+
+pub fn writeFailureReason(err: anyerror) []const u8 {
+    return if (err == CliError.LocalInboxChanged) "Conflict" else "Internal Server Error";
+}
+
+pub fn writeFailureMessage(err: anyerror, fallback: []const u8) []const u8 {
+    return if (err == CliError.LocalInboxChanged) localWriteBlockedMessage else fallback;
+}
+
 pub const Button = struct {
     label: []const u8,
     href: Href,
@@ -129,10 +144,12 @@ pub const LegacyReference = struct {
 pub const LegacyRemoteLinks = struct {
     github_base: ?[]u8 = null,
     gitlab_base: ?[]u8 = null,
+    origin_repo_path: ?[]u8 = null,
 
     pub fn deinit(self: *LegacyRemoteLinks, allocator: Allocator) void {
         if (self.github_base) |value| allocator.free(value);
         if (self.gitlab_base) |value| allocator.free(value);
+        if (self.origin_repo_path) |value| allocator.free(value);
         self.* = .{};
     }
 };
@@ -350,38 +367,94 @@ pub fn appendPullReferenceLink(buf: *std.ArrayList(u8), allocator: Allocator, pu
     try buf.appendSlice(allocator, "</a>");
 }
 
+pub fn appendIssueReferenceText(buf: *std.ArrayList(u8), allocator: Allocator, issue_ref: []const u8) !void {
+    try buf.append(allocator, '#');
+    try appendHtml(buf, allocator, issue_ref);
+}
+
+pub fn appendPullReferenceText(buf: *std.ArrayList(u8), allocator: Allocator, pull_ref: []const u8) !void {
+    try buf.append(allocator, '#');
+    try appendHtml(buf, allocator, pull_ref);
+}
+
 pub fn loadLegacyRemoteLinks(allocator: Allocator, repo: Repo) LegacyRemoteLinks {
     var links: LegacyRemoteLinks = .{};
-    var result = git.runCommand(allocator, &.{ "git", "-C", repo.root, "remote", "-v" }, null, 512 * 1024) catch return links;
+    var result = git.runCommand(allocator, &.{ "git", "-C", repo.root, "remote", "get-url", "origin" }, null, 512 * 1024) catch return links;
     defer result.deinit();
     if (result.exitCode() != 0) return links;
 
-    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
-    while (lines.next()) |line| {
-        var fields = std.mem.tokenizeAny(u8, line, " \t");
-        _ = fields.next() orelse continue;
-        const raw_url = fields.next() orelse continue;
-        const parsed = remoteWebBaseOwned(allocator, raw_url) catch null;
-        if (parsed) |web_base| {
-            switch (web_base.provider) {
-                .github => {
-                    if (links.github_base == null) {
-                        links.github_base = web_base.base;
-                    } else {
-                        allocator.free(web_base.base);
-                    }
-                },
-                .gitlab => {
-                    if (links.gitlab_base == null) {
-                        links.gitlab_base = web_base.base;
-                    } else {
-                        allocator.free(web_base.base);
-                    }
-                },
-            }
+    const origin_url = std.mem.trim(u8, result.stdout, " \t\r\n");
+    const parsed = remoteWebBaseOwned(allocator, origin_url) catch null;
+    if (parsed) |web_base| {
+        switch (web_base.provider) {
+            .github => links.github_base = web_base.base,
+            .gitlab => links.gitlab_base = web_base.base,
+        }
+    }
+
+    if (remoteRepositoryPath(origin_url)) |path| {
+        if (isSafeRemotePath(path)) {
+            links.origin_repo_path = allocator.dupe(u8, path) catch null;
         }
     }
     return links;
+}
+
+fn remoteRepositoryPath(raw_url: []const u8) ?[]const u8 {
+    const url = std.mem.trim(u8, raw_url, " \t\r\n");
+    if (url.len == 0) return null;
+
+    var path: []const u8 = undefined;
+    if (std.mem.indexOf(u8, url, "://")) |scheme_end| {
+        const rest = url[scheme_end + 3 ..];
+        const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
+        path = rest[slash + 1 ..];
+    } else {
+        const at = std.mem.indexOfScalar(u8, url, '@') orelse return null;
+        const colon = std.mem.indexOfScalarPos(u8, url, at + 1, ':') orelse return null;
+        path = url[colon + 1 ..];
+    }
+
+    path = std.mem.trim(u8, path, " /\t\r\n");
+    if (std.mem.endsWith(u8, path, ".git")) path = path[0 .. path.len - ".git".len];
+    path = std.mem.trimRight(u8, path, "/");
+    return if (path.len == 0) null else path;
+}
+
+fn legacyFallbackWebBaseFromOriginPathOwned(allocator: Allocator, kind: LegacyProviderKind, path: []const u8) !?[]u8 {
+    return switch (kind) {
+        .github => {
+            if (!looksLikeGithubOwnerRepo(path)) return null;
+            return try std.fmt.allocPrint(allocator, "https://www.github.com/{s}", .{path});
+        },
+        .gitlab => {
+            if (!isSafeRemotePath(path)) return null;
+            return try std.fmt.allocPrint(allocator, "https://gitlab.com/{s}", .{path});
+        },
+    };
+}
+
+fn looksLikeGithubOwnerRepo(path: []const u8) bool {
+    var parts = std.mem.splitScalar(u8, path, '/');
+    const owner = parts.next() orelse return false;
+    const repo = parts.next() orelse return false;
+    if (parts.next() != null) return false;
+    return isSafeRemotePathSegment(owner) and isSafeRemotePathSegment(repo);
+}
+
+fn isSafeRemotePath(path: []const u8) bool {
+    var parts = std.mem.splitScalar(u8, path, '/');
+    var count: usize = 0;
+    while (parts.next()) |part| {
+        if (!isSafeRemotePathSegment(part)) return false;
+        count += 1;
+    }
+    return count >= 2;
+}
+
+fn isSafeRemotePathSegment(value: []const u8) bool {
+    if (value.len == 0 or std.mem.eql(u8, value, ".") or std.mem.eql(u8, value, "..")) return false;
+    return std.mem.indexOfAny(u8, value, " \t\r\n\x00\\?#") == null;
 }
 
 pub fn loadLegacyReference(allocator: Allocator, db: *index.SqliteDb, object_kind: []const u8, object_id: []const u8) !?LegacyReference {
@@ -537,7 +610,9 @@ fn appendLegacyReference(buf: *std.ArrayList(u8), allocator: Allocator, remote_l
         try std.fmt.format(buf.writer(allocator), "#{d}", .{number});
         try buf.appendSlice(allocator, " externally\">");
         try appendHtml(buf, allocator, label);
+        try std.fmt.format(buf.writer(allocator), "<span class=\"legacy-provider-number\">#{d}</span>", .{number});
         try buf.appendSlice(allocator, "<span class=\"legacy-external-icon\" aria-hidden=\"true\"></span></a>");
+        return;
     } else {
         try buf.appendSlice(allocator, "<span class=\"legacy-provider-label\">");
         try appendHtml(buf, allocator, label);
@@ -556,10 +631,24 @@ fn appendLegacyReference(buf: *std.ArrayList(u8), allocator: Allocator, remote_l
 
 fn legacyExternalUrlOwned(allocator: Allocator, remote_links: *const LegacyRemoteLinks, provider: []const u8, object_kind: []const u8, number: i64) !?[]u8 {
     if (legacyProviderKind(provider)) |kind| {
-        return switch (kind) {
-            .github => if (remote_links.github_base) |base| try githubLegacyUrlOwned(allocator, base, object_kind, number) else null,
-            .gitlab => if (remote_links.gitlab_base) |base| try gitlabLegacyUrlOwned(allocator, base, object_kind, number) else null,
-        };
+        switch (kind) {
+            .github => {
+                if (remote_links.github_base) |base| return try githubLegacyUrlOwned(allocator, base, object_kind, number);
+                if (remote_links.origin_repo_path) |path| {
+                    const base = (try legacyFallbackWebBaseFromOriginPathOwned(allocator, kind, path)) orelse return null;
+                    defer allocator.free(base);
+                    return try githubLegacyUrlOwned(allocator, base, object_kind, number);
+                }
+            },
+            .gitlab => {
+                if (remote_links.gitlab_base) |base| return try gitlabLegacyUrlOwned(allocator, base, object_kind, number);
+                if (remote_links.origin_repo_path) |path| {
+                    const base = (try legacyFallbackWebBaseFromOriginPathOwned(allocator, kind, path)) orelse return null;
+                    defer allocator.free(base);
+                    return try gitlabLegacyUrlOwned(allocator, base, object_kind, number);
+                }
+            },
+        }
     }
     return null;
 }
@@ -620,9 +709,15 @@ fn remoteWebBaseFromHostPathOwned(allocator: Allocator, scheme: []const u8, raw_
     if (std.mem.endsWith(u8, path, ".git")) path = path[0 .. path.len - ".git".len];
     path = std.mem.trimRight(u8, path, "/");
     if (path.len == 0) return null;
+    if (provider == .github) {
+        if (!looksLikeGithubOwnerRepo(path)) return null;
+    } else if (!isSafeRemotePath(path)) {
+        return null;
+    }
+    const web_host = if (provider == .github and isPublicGithubHost(host)) "www.github.com" else host;
     return .{
         .provider = provider,
-        .base = try std.fmt.allocPrint(allocator, "{s}://{s}/{s}", .{ scheme, host, path }),
+        .base = try std.fmt.allocPrint(allocator, "{s}://{s}/{s}", .{ scheme, web_host, path }),
     };
 }
 
@@ -630,6 +725,10 @@ fn legacyProviderKindForHost(host: []const u8) ?LegacyProviderKind {
     if (asciiContainsIgnoreCase(host, "github")) return .github;
     if (asciiContainsIgnoreCase(host, "gitlab")) return .gitlab;
     return null;
+}
+
+fn isPublicGithubHost(host: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(host, "github.com") or std.ascii.eqlIgnoreCase(host, "www.github.com");
 }
 
 fn asciiContainsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
@@ -953,6 +1052,36 @@ pub fn appendResolvedGitIdentityAvatar(
     const avatar_url = try identityAvatarUrlForGitIdentityOwned(allocator, name, email);
     defer if (avatar_url) |value| allocator.free(value);
     try appendGitIdentityAvatar(buf, allocator, name, email, avatar_url orelse "", extra_class);
+}
+
+pub const LocalDisplayIdentity = struct {
+    allocator: Allocator,
+    name: ?[]u8 = null,
+    email: ?[]u8 = null,
+
+    pub fn deinit(self: *LocalDisplayIdentity) void {
+        const allocator = self.allocator;
+        if (self.name) |value| self.allocator.free(value);
+        if (self.email) |value| self.allocator.free(value);
+        self.* = .{ .allocator = allocator };
+    }
+
+    pub fn displayNameFor(self: LocalDisplayIdentity, actor: []const u8) []const u8 {
+        if (self.name) |name| {
+            if (self.email) |email| {
+                if (std.ascii.eqlIgnoreCase(actor, email)) return name;
+            }
+        }
+        return actor;
+    }
+};
+
+pub fn loadLocalDisplayIdentity(allocator: Allocator) !LocalDisplayIdentity {
+    var identity = LocalDisplayIdentity{ .allocator = allocator };
+    errdefer identity.deinit();
+    identity.name = try gitUserNameOwned(allocator);
+    identity.email = try gitUserEmailOwned(allocator);
+    return identity;
 }
 
 fn gitUserNameOwned(allocator: Allocator) !?[]u8 {
@@ -1335,26 +1464,28 @@ pub fn appendMarkdownSource(
 pub fn appendMarkdownEditor(buf: *std.ArrayList(u8), allocator: Allocator, options: MarkdownEditorOptions) !void {
     try appendTemplate(buf, allocator,
         \\    <div class="markdown-editor" data-markdown-editor>
-        \\      <div class="markdown-editor-tabs" role="tablist" aria-label="Markdown editor mode">
-        \\        <button class="active" type="button" role="tab" aria-selected="true" data-markdown-tab="write">Write</button>
-        \\        <button type="button" role="tab" aria-selected="false" data-markdown-tab="preview">Preview</button>
-        \\      </div>
-        \\      <div class="markdown-editor-toolbar" aria-label="Markdown formatting">
-        \\        <button type="button" data-markdown-action="heading" aria-label="Heading" title="Heading">H</button>
-        \\        <button type="button" data-markdown-action="bold" aria-label="Bold" title="Bold"><strong>B</strong></button>
-        \\        <button type="button" data-markdown-action="italic" aria-label="Italic" title="Italic"><em>I</em></button>
-        \\        <button type="button" data-markdown-action="quote" aria-label="Quote" title="Quote"><span class="md-icon md-icon-quote" aria-hidden="true"></span></button>
-        \\        <button type="button" data-markdown-action="code" aria-label="Code" title="Code"><span class="md-icon md-icon-code" aria-hidden="true"></span></button>
-        \\        <button type="button" data-markdown-action="link" aria-label="Link" title="Link"><span class="md-icon md-icon-link" aria-hidden="true"></span></button>
-        \\        <span class="markdown-editor-divider" aria-hidden="true"></span>
-        \\        <button type="button" data-markdown-action="unordered-list" aria-label="Bulleted list" title="Bulleted list"><span class="md-icon md-icon-ul" aria-hidden="true"></span></button>
-        \\        <button type="button" data-markdown-action="ordered-list" aria-label="Numbered list" title="Numbered list"><span class="md-icon md-icon-ol" aria-hidden="true"></span></button>
-        \\        <button type="button" data-markdown-action="task-list" aria-label="Task list" title="Task list"><span class="md-icon md-icon-task" aria-hidden="true"></span></button>
-        \\        <span class="markdown-editor-divider" aria-hidden="true"></span>
-        \\        <button type="button" data-markdown-action="mention" aria-label="Mention" title="Mention">@</button>
-        \\        <button type="button" data-markdown-action="reference" aria-label="Issue reference" title="Issue reference">#</button>
+        \\      <div class="markdown-editor-head">
+        \\        <div class="markdown-editor-tabs" role="tablist" aria-label="Markdown editor mode">
+        \\          <button class="active" type="button" role="tab" aria-selected="true" data-markdown-tab="write">Write</button>
+        \\          <button type="button" role="tab" aria-selected="false" data-markdown-tab="preview">Preview</button>
+        \\        </div>
+        \\        <div class="markdown-editor-toolbar" aria-label="Markdown formatting">
+        \\          <button type="button" data-markdown-action="heading" aria-label="Heading" title="Heading">H</button>
+        \\          <button type="button" data-markdown-action="bold" aria-label="Bold" title="Bold"><strong>B</strong></button>
+        \\          <button type="button" data-markdown-action="italic" aria-label="Italic" title="Italic"><em>I</em></button>
+        \\          <button type="button" data-markdown-action="quote" aria-label="Quote" title="Quote"><span class="md-icon md-icon-quote" aria-hidden="true"></span></button>
+        \\          <button type="button" data-markdown-action="code" aria-label="Code" title="Code"><span class="md-icon md-icon-code" aria-hidden="true"></span></button>
+        \\          <button type="button" data-markdown-action="link" aria-label="Link" title="Link"><span class="md-icon md-icon-link" aria-hidden="true"></span></button>
+        \\          <span class="markdown-editor-divider" aria-hidden="true"></span>
+        \\          <button type="button" data-markdown-action="unordered-list" aria-label="Bulleted list" title="Bulleted list"><span class="md-icon md-icon-ul" aria-hidden="true"></span></button>
+        \\          <button type="button" data-markdown-action="ordered-list" aria-label="Numbered list" title="Numbered list"><span class="md-icon md-icon-ol" aria-hidden="true"></span></button>
+        \\          <button type="button" data-markdown-action="task-list" aria-label="Task list" title="Task list"><span class="md-icon md-icon-task" aria-hidden="true"></span></button>
+        \\          <span class="markdown-editor-divider" aria-hidden="true"></span>
+        \\          <button type="button" data-markdown-action="mention" aria-label="Mention" title="Mention">@</button>
+        \\          <button type="button" data-markdown-action="reference" aria-label="Issue reference" title="Issue reference">#</button>
     , .{});
     try appendTemplate(buf, allocator,
+        \\        </div>
         \\      </div>
         \\      <textarea name="{name}" rows="{rows}" placeholder="{placeholder}"
     , .{
@@ -1931,11 +2062,34 @@ test "web work item reference links point to detail pages" {
     try std.testing.expectEqualStrings("<a href=\"/issues/abc1234\">#abc1234</a> <a href=\"/pulls/def5678\">#def5678</a>", buf.items);
 }
 
-test "web legacy references split external provider and internal number links" {
+test "web work item reference text omits self links" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+
+    try appendIssueReferenceText(&buf, std.testing.allocator, "abc1234");
+    try buf.append(std.testing.allocator, ' ');
+    try appendPullReferenceText(&buf, std.testing.allocator, "def5678");
+
+    try std.testing.expectEqualStrings("#abc1234 #def5678", buf.items);
+}
+
+test "local display identity maps current email to username" {
+    var identity = LocalDisplayIdentity{
+        .allocator = std.testing.allocator,
+        .name = try std.testing.allocator.dupe(u8, "0kenx"),
+        .email = try std.testing.allocator.dupe(u8, "km@nxfi.app"),
+    };
+    defer identity.deinit();
+
+    try std.testing.expectEqualStrings("0kenx", identity.displayNameFor("KM@NXFI.APP"));
+    try std.testing.expectEqualStrings("import-bot", identity.displayNameFor("import-bot"));
+}
+
+test "web legacy references link provider and number externally" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
     var remotes = LegacyRemoteLinks{
-        .github_base = try std.testing.allocator.dupe(u8, "https://github.com/Owner/Repo"),
+        .github_base = try std.testing.allocator.dupe(u8, "https://www.github.com/Owner/Repo"),
         .gitlab_base = try std.testing.allocator.dupe(u8, "https://gitlab.com/group/repo"),
     };
     defer remotes.deinit(std.testing.allocator);
@@ -1944,24 +2098,64 @@ test "web legacy references split external provider and internal number links" {
     try buf.append(std.testing.allocator, ' ');
     try appendLegacyPullReference(&buf, std.testing.allocator, &remotes, "gitlab", 4);
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"https://github.com/Owner/Repo/issues/3\" target=\"_blank\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, ">GitHub<span class=\"legacy-external-icon\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues/3\">#3</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"https://www.github.com/Owner/Repo/issues/3\" target=\"_blank\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, ">GitHub<span class=\"legacy-provider-number\">#3</span><span class=\"legacy-external-icon\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues/3\">#3</a>") == null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"https://gitlab.com/group/repo/-/merge_requests/4\" target=\"_blank\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, ">GitLab<span class=\"legacy-external-icon\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/pulls/4\">#4</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, ">GitLab<span class=\"legacy-provider-number\">#4</span><span class=\"legacy-external-icon\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/pulls/4\">#4</a>") == null);
 }
 
 test "web remote url parsing finds GitHub and GitLab web bases" {
     const github = (try remoteWebBaseOwned(std.testing.allocator, "git@GitHub.com:Owner/Repo.git")).?;
     defer std.testing.allocator.free(github.base);
     try std.testing.expectEqual(LegacyProviderKind.github, github.provider);
-    try std.testing.expectEqualStrings("https://GitHub.com/Owner/Repo", github.base);
+    try std.testing.expectEqualStrings("https://www.github.com/Owner/Repo", github.base);
 
     const gitlab = (try remoteWebBaseOwned(std.testing.allocator, "https://gitlab.com/group/sub/repo.git")).?;
     defer std.testing.allocator.free(gitlab.base);
     try std.testing.expectEqual(LegacyProviderKind.gitlab, gitlab.provider);
     try std.testing.expectEqualStrings("https://gitlab.com/group/sub/repo", gitlab.base);
+}
+
+test "web provider origin fallback derives repo paths from SSH aliases" {
+    try std.testing.expectEqualStrings("nx-fi/gitomi", remoteRepositoryPath("git@nx-fi:nx-fi/gitomi.git").?);
+    try std.testing.expectEqualStrings("group/sub/repo", remoteRepositoryPath("git@gitlab-alias:group/sub/repo.git").?);
+
+    const github_base = (try legacyFallbackWebBaseFromOriginPathOwned(std.testing.allocator, .github, "nx-fi/gitomi")).?;
+    defer std.testing.allocator.free(github_base);
+    try std.testing.expectEqualStrings("https://www.github.com/nx-fi/gitomi", github_base);
+
+    const gitlab_base = (try legacyFallbackWebBaseFromOriginPathOwned(std.testing.allocator, .gitlab, "group/sub/repo")).?;
+    defer std.testing.allocator.free(gitlab_base);
+    try std.testing.expectEqualStrings("https://gitlab.com/group/sub/repo", gitlab_base);
+
+    try std.testing.expect((try legacyFallbackWebBaseFromOriginPathOwned(std.testing.allocator, .github, "group/sub/repo")) == null);
+}
+
+test "web legacy references use import provider with origin path fallback" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    var github_remotes = LegacyRemoteLinks{
+        .origin_repo_path = try std.testing.allocator.dupe(u8, "nx-fi/gitomi"),
+    };
+    defer github_remotes.deinit(std.testing.allocator);
+
+    try appendLegacyIssueReference(&buf, std.testing.allocator, &github_remotes, "github", 23);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"https://www.github.com/nx-fi/gitomi/issues/23\" target=\"_blank\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, ">GitHub<span class=\"legacy-provider-number\">#23</span><span class=\"legacy-external-icon\"") != null);
+
+    buf.clearRetainingCapacity();
+    var gitlab_remotes = LegacyRemoteLinks{
+        .origin_repo_path = try std.testing.allocator.dupe(u8, "group/sub/repo"),
+    };
+    defer gitlab_remotes.deinit(std.testing.allocator);
+
+    try appendLegacyPullReference(&buf, std.testing.allocator, &gitlab_remotes, "gitlab", 7);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"https://gitlab.com/group/sub/repo/-/merge_requests/7\" target=\"_blank\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, ">GitLab<span class=\"legacy-provider-number\">#7</span><span class=\"legacy-external-icon\"") != null);
 }
 
 test "web issue linked text autolinks legacy and hash references" {

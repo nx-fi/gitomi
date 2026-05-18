@@ -237,12 +237,12 @@ fn appendPullPageHeader(buf: *std.ArrayList(u8), allocator: Allocator, detail: P
             \\      <a class="button secondary pull-conflicts-button" href="/pulls/{pull_ref}/conflicts"><span class="button-icon icon-conflict" aria-hidden="true"></span><span>Resolve conflicts</span></a>
         , .{ .pull_ref = pull_ref });
     }
-    try buf.appendSlice(allocator,
-        \\      <button class="issue-copy-button" type="button" disabled aria-label="Copy pull request link"><span class="button-icon icon-copy" aria-hidden="true"></span></button>
+    try appendTemplate(buf, allocator,
+        \\      <button class="issue-copy-button" type="button" data-copy-work-item-link="{copy_href}" aria-label="Copy link" title="Copy link"><span class="button-icon icon-copy" aria-hidden="true"></span></button>
         \\    </div>
         \\  </div>
         \\  <div class="issue-status-line pull-status-line">
-    );
+    , .{ .copy_href = pullHref(pull_ref) });
     try appendPullStateBadge(buf, allocator, detail.state, detail.draft);
     try appendPullHeaderSummary(buf, allocator, detail, counts);
     try buf.appendSlice(allocator, "</div></header>");

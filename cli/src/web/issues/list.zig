@@ -69,6 +69,8 @@ pub fn renderIssuesPage(allocator: Allocator, repo: Repo, target: []const u8) ![
 
     var stmt = try work_items.prepareIssueListStmt(allocator, &db, filters);
     defer stmt.deinit();
+    var local_display_identity = try shared.loadLocalDisplayIdentity(allocator);
+    defer local_display_identity.deinit();
 
     var shown: usize = 0;
     var has_next_page = false;
@@ -80,7 +82,8 @@ pub fn renderIssuesPage(allocator: Allocator, repo: Repo, target: []const u8) ![
         const row = try work_items.issueListRowFromStmt(allocator, &stmt);
         defer row.deinit(allocator);
         const task_summary = shared.markdownTaskSummary(row.body);
-        try appendIssueListRow(&buf, allocator, &db, &legacy_links, row.id, row.title, row.state, row.author, row.author_avatar_url, row.opened_at, row.state_at, row.milestone, row.issue_type, row.priority, row.comment_count, task_summary);
+        const author = local_display_identity.displayNameFor(row.author);
+        try appendIssueListRow(&buf, allocator, &db, &legacy_links, row.id, row.title, row.state, author, row.author_avatar_url, row.opened_at, row.state_at, row.milestone, row.issue_type, row.priority, row.comment_count, task_summary);
         shown += 1;
     }
 
@@ -531,7 +534,7 @@ fn appendIssueListRow(
     try appendIssueRowRelationshipBadges(buf, allocator, db, id);
     try appendIssueRowLabels(buf, allocator, db, id);
     try buf.appendSlice(allocator, "</div><p class=\"issue-row-meta\">");
-    try shared.appendIssueReferenceLink(buf, allocator, issue_ref);
+    try shared.appendIssueReferenceText(buf, allocator, issue_ref);
     var legacy_ref = try shared.loadLegacyReference(allocator, db, "issue", id);
     defer if (legacy_ref) |*value| value.deinit(allocator);
     if (legacy_ref) |value| {

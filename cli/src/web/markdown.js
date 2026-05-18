@@ -159,6 +159,50 @@
     }, 1200);
   }
 
+  function copyLinkUrl(value) {
+    return new URL(value || window.location.pathname, window.location.href).href;
+  }
+
+  function notifyCopyResult(message, kind) {
+    if (typeof window.gitomiNotify === "function") {
+      window.gitomiNotify(message, kind);
+    }
+  }
+
+  async function copyWorkItemLink(button) {
+    if (button.disabled) return;
+    const originalLabel = button.getAttribute("aria-label") || "Copy link";
+    button.disabled = true;
+    button.setAttribute("aria-label", "Copying");
+    button.title = "Copying";
+    try {
+      await copyText(copyLinkUrl(button.dataset.copyWorkItemLink));
+      button.setAttribute("aria-label", "Copied");
+      button.title = "Copied";
+      notifyCopyResult("Link copied.", "success");
+    } catch (_) {
+      button.setAttribute("aria-label", "Copy failed");
+      button.title = "Copy failed";
+      notifyCopyResult("Could not copy link.", "error");
+    } finally {
+      window.setTimeout(function () {
+        button.disabled = false;
+        button.setAttribute("aria-label", originalLabel);
+        button.title = originalLabel;
+      }, 1200);
+    }
+  }
+
+  function initWorkItemCopyButtons() {
+    document.querySelectorAll("[data-copy-work-item-link]").forEach(function (button) {
+      if (button.dataset.copyWorkItemReady === "yes") return;
+      button.dataset.copyWorkItemReady = "yes";
+      button.addEventListener("click", function () {
+        copyWorkItemLink(button);
+      });
+    });
+  }
+
   function closeIssueMenus(except) {
     document.querySelectorAll("details[data-issue-menu][open]").forEach(function (menu) {
       if (menu !== except) menu.open = false;
@@ -1450,6 +1494,7 @@
     renderCodeCopyButtons(document);
     renderMarkdownOutlines();
     renderRelativeTimes();
+    initWorkItemCopyButtons();
     initIssueActionMenus();
     initIssueSidebarMenus();
     initMarkdownEditors();

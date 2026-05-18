@@ -110,12 +110,13 @@ pub fn handlePullPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, 
         return;
     }
 
-    pull.createPullOpenedEvent(allocator, title, body_owned, base_ref, head_ref, draft) catch {
+    pull.createPullOpenedEvent(allocator, title, body_owned, base_ref, head_ref, draft) catch |err| {
+        const message = shared.writeFailureMessage(err, "Could not create the pull request. Check that Gitomi is initialized and Git commit signing is configured.");
         const body = try renderPullForm(
             allocator,
             repo,
             csrf_token,
-            "Could not create the pull request. Check that Gitomi is initialized and Git commit signing is configured.",
+            message,
             title_owned,
             body_owned,
             base_owned,
@@ -123,7 +124,7 @@ pub fn handlePullPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, 
             draft,
         );
         defer allocator.free(body);
-        try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", body, null);
+        try sendResponse(allocator, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), "text/html", body, null);
         return;
     };
 

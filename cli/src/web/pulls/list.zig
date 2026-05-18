@@ -68,6 +68,8 @@ pub fn renderPullsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]
 
     var stmt = try work_items.preparePullListStmt(allocator, &db, filters);
     defer stmt.deinit();
+    var local_display_identity = try shared.loadLocalDisplayIdentity(allocator);
+    defer local_display_identity.deinit();
 
     var shown: usize = 0;
     var has_next_page = false;
@@ -79,7 +81,8 @@ pub fn renderPullsPage(allocator: Allocator, repo: Repo, target: []const u8) ![]
         const row = try work_items.pullListRowFromStmt(allocator, &stmt);
         defer row.deinit(allocator);
         const task_summary = shared.markdownTaskSummary(row.body);
-        try appendPullListRow(&buf, allocator, &db, &legacy_links, row.id, row.title, row.state, row.author, row.author_avatar_url, row.opened_at, row.state_at, row.base_ref, row.head_ref, row.draft, row.comment_count, task_summary);
+        const author = local_display_identity.displayNameFor(row.author);
+        try appendPullListRow(&buf, allocator, &db, &legacy_links, row.id, row.title, row.state, author, row.author_avatar_url, row.opened_at, row.state_at, row.base_ref, row.head_ref, row.draft, row.comment_count, task_summary);
         shown += 1;
     }
 
@@ -524,7 +527,7 @@ fn appendPullListRow(
     if (draft) try buf.appendSlice(allocator, "<span class=\"issue-label label-default\">Draft</span>");
     try appendPullRowCollection(buf, allocator, db, "SELECT DISTINCT label FROM pull_labels WHERE pull_id = ? ORDER BY label", id, "issue-row-labels", true);
     try buf.appendSlice(allocator, "</div><p class=\"issue-row-meta\">");
-    try shared.appendPullReferenceLink(buf, allocator, pull_ref);
+    try shared.appendPullReferenceText(buf, allocator, pull_ref);
     var legacy_ref = try shared.loadLegacyReference(allocator, db, "pull", id);
     defer if (legacy_ref) |*value| value.deinit(allocator);
     if (legacy_ref) |value| {

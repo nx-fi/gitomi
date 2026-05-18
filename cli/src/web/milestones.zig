@@ -659,10 +659,11 @@ fn handleMilestoneCreatePost(allocator: Allocator, repo: Repo, stream: std.net.S
         return;
     }
 
-    createMilestoneCreatedEvent(allocator, title, description_owned, due_at_owned) catch {
-        const body = try renderMilestoneForm(allocator, repo, null, "Could not create the milestone. Check that Gitomi is initialized and commit signing is configured.", title_owned, description_owned, due_at_owned, "open");
+    createMilestoneCreatedEvent(allocator, title, description_owned, due_at_owned) catch |err| {
+        const message = shared.writeFailureMessage(err, "Could not create the milestone. Check that Gitomi is initialized and commit signing is configured.");
+        const body = try renderMilestoneForm(allocator, repo, null, message, title_owned, description_owned, due_at_owned, "open");
         defer allocator.free(body);
-        try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", body, null);
+        try sendResponse(allocator, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), "text/html", body, null);
         return;
     };
 
@@ -682,16 +683,16 @@ fn handleMilestoneUpdatePost(allocator: Allocator, repo: Repo, stream: std.net.S
     const action = std.mem.trim(u8, action_owned, " \t\r\n");
     if (std.mem.eql(u8, action, "close") or std.mem.eql(u8, action, "reopen")) {
         const state: []const u8 = if (std.mem.eql(u8, action, "close")) "closed" else "open";
-        createMilestoneStringEvent(allocator, milestone_id, "milestone.state_set", "state", state) catch {
-            try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update milestone state\n");
+        createMilestoneStringEvent(allocator, milestone_id, "milestone.state_set", "state", state) catch |err| {
+            try sendPlainResponse(allocator, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), shared.writeFailureMessage(err, "Could not update milestone state\n"));
             return;
         };
         try sendRedirect(allocator, stream, "/milestones");
         return;
     }
     if (std.mem.eql(u8, action, "delete")) {
-        createMilestoneDeletedEvent(allocator, milestone_id) catch {
-            try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not delete milestone\n");
+        createMilestoneDeletedEvent(allocator, milestone_id) catch |err| {
+            try sendPlainResponse(allocator, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), shared.writeFailureMessage(err, "Could not delete milestone\n"));
             return;
         };
         try sendRedirect(allocator, stream, "/milestones");
@@ -728,10 +729,11 @@ fn handleMilestoneUpdatePost(allocator: Allocator, repo: Repo, stream: std.net.S
         .due_at = due_at_owned,
         .state = state,
     };
-    createMilestoneUpdatedEvent(allocator, milestone_id, update) catch {
-        const body = try renderMilestoneForm(allocator, repo, raw_ref, "Could not update the milestone. Check that your actor can manage milestones.", title_owned, description_owned, due_at_owned, state_owned);
+    createMilestoneUpdatedEvent(allocator, milestone_id, update) catch |err| {
+        const message = shared.writeFailureMessage(err, "Could not update the milestone. Check that your actor can manage milestones.");
+        const body = try renderMilestoneForm(allocator, repo, raw_ref, message, title_owned, description_owned, due_at_owned, state_owned);
         defer allocator.free(body);
-        try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", body, null);
+        try sendResponse(allocator, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), "text/html", body, null);
         return;
     };
     try sendRedirect(allocator, stream, "/milestones");

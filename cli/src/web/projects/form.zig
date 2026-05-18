@@ -61,7 +61,6 @@ pub fn renderProjectForm(
         \\</div>
         \\</section>
     );
-    try appendProjectSubmitScript(&buf, allocator);
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
 }
@@ -101,22 +100,23 @@ pub fn handleProjectPost(allocator: Allocator, repo: Repo, stream: std.net.Strea
 
     var attempt: usize = 0;
     while (attempt < 2) : (attempt += 1) {
-        createProject(allocator, project_id, name) catch {
+        createProject(allocator, project_id, name) catch |err| {
             if (projectExistsAfterIndex(allocator, repo, project_id) catch false) {
                 const location = try projectOverviewLocationOwned(allocator, name);
                 defer allocator.free(location);
                 try sendRedirect(allocator, stream, location);
                 return;
             }
-            if (attempt == 0) continue;
+            if (attempt == 0 and shared.writeFailureStatus(err) != 409) continue;
+            const message = shared.writeFailureMessage(err, "Could not create the project. Check that Gitomi is initialized and Git commit signing is configured.");
             const body = try renderProjectForm(
                 allocator,
                 repo,
-                "Could not create the project. Check that Gitomi is initialized and Git commit signing is configured.",
+                message,
                 name_owned,
             );
             defer allocator.free(body);
-            try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", body, null);
+            try sendResponse(allocator, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), "text/html", body, null);
             return;
         };
 
@@ -202,29 +202,6 @@ fn appendProjectConfigForm(
         \\    </div>
         \\  </form>
         \\</div>
-    );
-}
-
-fn appendProjectSubmitScript(buf: *std.ArrayList(u8), allocator: Allocator) !void {
-    try buf.appendSlice(allocator,
-        \\<script>
-        \\(function () {
-        \\  var form = document.querySelector(".project-form");
-        \\  if (!form) return;
-        \\  form.addEventListener("submit", function (event) {
-        \\    if (form.dataset.projectSubmitState === "pending") {
-        \\      event.preventDefault();
-        \\      return;
-        \\    }
-        \\    form.dataset.projectSubmitState = "pending";
-        \\    var submit = form.querySelector("button[type=submit]");
-        \\    if (submit) {
-        \\      submit.disabled = true;
-        \\      submit.textContent = "Creating...";
-        \\    }
-        \\  });
-        \\}());
-        \\</script>
     );
 }
 

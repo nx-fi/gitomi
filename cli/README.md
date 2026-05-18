@@ -279,9 +279,11 @@ GitHub import, optional GitHub export of local accepted events since the last
 sync, and optional Gitomi publication. It defaults to `--graphql`, batching issue
 and pull pages with nested fields through GitHub's GraphQL API and using the
 GraphQL export path by default; pass `--rest` to use the older REST path. State
-and mappings live under `.git/gitomi/github/<owner>/<repo>/`; pass
+and the private export map live under `.git/gitomi/github/<owner>/<repo>/`; pass
 `--no-git-sync` to skip surrounding Git transport steps, or `--import-only` to
-skip outbound GitHub writes.
+skip outbound GitHub writes. Before exporting, the exporter seeds that private
+map from shared Gitomi GitHub aliases so a replica that has pulled bridge
+aliases does not recreate already-exported issues or pull requests.
 
 For GitHub-to-Gitomi imports, all maintainers share one canonical bridge actor:
 `import-bot/github` by default, stored at
@@ -293,7 +295,12 @@ fast-forward-only. If another maintainer published the same bridge inbox first,
 sync restores its local GitHub mapping file, abandons only the unpublished local
 bot commits, pulls the remote bot head, and retries the import. Use
 `gt github sync --import-only` when any maintainer should be able to refresh
-GitHub state into Gitomi without also performing outbound GitHub writes.
+GitHub state into Gitomi without also performing outbound GitHub writes. When
+outbound sync creates a GitHub issue or pull request from a local Gitomi object,
+it records the GitHub number as an alias-only `issue.updated` or `pull.updated`
+event on the bridge inbox and pushes that alias before advancing export state.
+Later importers resolve the GitHub object to the original Gitomi object even if
+their private map file is empty.
 
 Do not solve bridge concurrency by creating a different Gitomi genesis per user.
 That creates separate trust roots and separate repositories. Also avoid one bot
@@ -302,10 +309,12 @@ are made globally unique in the reducer: concurrent imports on separate bot
 devices can otherwise create duplicate native Gitomi objects for the same
 GitHub issue, pull, or comment. The intended model is one shared genesis, one
 canonical bridge inbox per upstream project, and fast-forward/retry publication
-by any maintainer authorized for that bridge. Until outbound export receipts are
-shared through Gitomi refs, run Gitomi-to-GitHub export from one designated
-runner; otherwise two runners can race to create the same GitHub issue or
-comment from local Gitomi events.
+by any maintainer authorized for that bridge. Shared aliases prevent later
+duplicate issue and pull exports, but they are not a distributed lock for
+simultaneous outbound creates; two exporters can still race before either has
+published the alias, and comment export receipts remain local. Run
+Gitomi-to-GitHub export from one designated runner or serialize exporters
+externally when outbound writes are enabled.
 
 `gt github live` runs the normal local Gitomi workflow with a two-way GitHub
 bridge. It subscribes the current repository to a GitHub webhook through

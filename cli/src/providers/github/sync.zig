@@ -272,6 +272,7 @@ fn runSyncOnceAttempt(allocator: Allocator, options: Options) !void {
             .max_events = 100,
             .quiet = true,
             .mode = options.mode,
+            .reuse_index_aliases = true,
         });
         if (!options.dry_run and export_result.alias_mappings.items.len != 0) {
             if (options.git_sync) {

@@ -158,8 +158,8 @@ pub fn handleLabelsPost(allocator: Allocator, repo: Repo, stream: std.net.Stream
         }
         const position = try nextLabelPosition(&db);
 
-        writeLabelCreatedEvent(allocator, new_label, description, color, position) catch {
-            try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not create label\n");
+        writeLabelCreatedEvent(allocator, new_label, description, color, position) catch |err| {
+            try sendPlainResponse(allocator, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), shared.writeFailureMessage(err, "Could not create label\n"));
             return;
         };
         try sendRedirect(allocator, stream, "/settings/labels");
@@ -219,15 +219,15 @@ pub fn handleLabelsPost(allocator: Allocator, repo: Repo, stream: std.net.Stream
             if (!std.mem.eql(u8, existing.description, description)) update.description = description;
             if (!std.mem.eql(u8, existing.color, color)) update.color = color;
             if (update.hasChanges()) {
-                writeLabelUpdatedEvent(allocator, existing.id, update) catch {
-                    try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update label\n");
+                writeLabelUpdatedEvent(allocator, existing.id, update) catch |err| {
+                    try sendPlainResponse(allocator, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), shared.writeFailureMessage(err, "Could not update label\n"));
                     return;
                 };
             }
         } else {
             const position = try nextLabelPosition(&db);
-            writeLabelCreatedEvent(allocator, new_label, description, color, position) catch {
-                try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update label\n");
+            writeLabelCreatedEvent(allocator, new_label, description, color, position) catch |err| {
+                try sendPlainResponse(allocator, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), shared.writeFailureMessage(err, "Could not update label\n"));
                 return;
             };
         }
@@ -244,8 +244,8 @@ pub fn handleLabelsPost(allocator: Allocator, repo: Repo, stream: std.net.Stream
         var definition = try loadLabelDefinitionByName(allocator, &db, label);
         defer if (definition) |*value| value.deinit(allocator);
         if (definition) |existing| {
-            writeLabelDeletedEvent(allocator, existing.id) catch {
-                try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not delete label\n");
+            writeLabelDeletedEvent(allocator, existing.id) catch |err| {
+                try sendPlainResponse(allocator, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), shared.writeFailureMessage(err, "Could not delete label\n"));
                 return;
             };
         }

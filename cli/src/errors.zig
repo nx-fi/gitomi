@@ -7,6 +7,7 @@ pub const CliError = error{
     AmbiguousReference,
     Unauthorized,
     InvalidEvent,
+    LocalInboxChanged,
     GitFailed,
     ConfigNotFound,
     ConfigInvalid,
@@ -24,6 +25,7 @@ pub fn isUserError(err: anyerror) bool {
         CliError.AmbiguousReference,
         CliError.Unauthorized,
         CliError.InvalidEvent,
+        CliError.LocalInboxChanged,
         => true,
         else => false,
     };

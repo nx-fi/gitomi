@@ -947,3 +947,16 @@ When exporting to GitHub:
 1.  Data Plane refs are pushed with standard Git;
 2.  Gitomi UUIDs MUST be mapped to GitHub-assigned numeric identifiers for the target repository; and
 3.  accepted Gitomi state transitions SHOULD be replayed through the GitHub API.
+
+When a Gitomi issue or pull request is first created in GitHub, the resulting
+GitHub number SHOULD be published back into Gitomi as durable compatibility
+metadata on the shared bridge actor, for example as an alias-only
+`issue.updated` or `pull.updated` event carrying `legacy.github_issue_number`
+or `legacy.github_pull_number`. Importers and later exporters MUST treat that
+alias as the identity mapping for the target GitHub repository so replicas with
+empty private map files do not create duplicate native objects or duplicate
+GitHub issues/pulls after they have pulled the bridge event.
+
+This alias publication is not a distributed lock for simultaneous outbound
+creates. Operators that enable Gitomi-to-GitHub export from multiple machines
+SHOULD serialize those writers or otherwise use an external lease.

@@ -662,8 +662,8 @@ SH
   assert_contains "$issues" '"legacy_github_issue_number":88'
   import_opened="$(gt events list --json | grep 'issue.opened' | grep 'import-bot' || true)"
   assert_equal "$import_opened" "" "expected GitHub import to reuse the exported local issue instead of opening a duplicate"
-  replay="$(PATH="$fakebin:$PATH" gt github export --repo acme/export-alias --use-gh --rest)"
-  assert_contains "$replay" "github export: replayed 0 events"
+  second_sync="$(PATH="$fakebin:$PATH" gt github sync --repo acme/export-alias --use-gh --rest --no-comments --no-projects --remote origin)"
+  assert_contains "$second_sync" "exported 0 events via REST"
   gt fsck >/dev/null
 )
 

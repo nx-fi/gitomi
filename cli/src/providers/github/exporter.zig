@@ -47,6 +47,7 @@ pub const ExportOptions = struct {
     max_events: usize = 0,
     quiet: bool = false,
     mode: ApiMode = .graphql,
+    reuse_index_aliases: bool = false,
 };
 
 pub const ExportResult = struct {
@@ -460,7 +461,7 @@ pub fn exportToGithub(allocator: Allocator, options: ExportOptions) !ExportResul
     defer db.deinit();
     var result = ExportResult{};
     errdefer result.deinit(allocator);
-    try loadIndexLegacyAliases(&mappings, &db);
+    if (options.reuse_index_aliases) try loadIndexLegacyAliases(&mappings, &db);
     try collectMissingAliasMappings(allocator, &mappings, &db, &result);
 
     var stmt = try db.prepare(

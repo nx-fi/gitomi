@@ -68,13 +68,13 @@ pub fn handleAccessRolePost(allocator: Allocator, repo: Repo, stream: std.net.St
             try sendAccessError(allocator, repo, stream, 422, "Unprocessable Entity", "Role must be reader, reporter, contributor, maintainer, or owner.", csrf_token);
             return;
         }
-        rbac.createAclGrantEvent(allocator, principal, role) catch {
-            try sendAccessError(allocator, repo, stream, 500, "Internal Server Error", "Could not grant the role. Check that your actor is an owner and the target role is allowed.", csrf_token);
+        rbac.createAclGrantEvent(allocator, principal, role) catch |err| {
+            try sendAccessError(allocator, repo, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), shared.writeFailureMessage(err, "Could not grant the role. Check that your actor is an owner and the target role is allowed."), csrf_token);
             return;
         };
     } else if (std.mem.eql(u8, action, "revoke-role")) {
-        rbac.createAclRevokeEvent(allocator, principal) catch {
-            try sendAccessError(allocator, repo, stream, 500, "Internal Server Error", "Could not revoke the role. The principal may have no role or this may be the last owner.", csrf_token);
+        rbac.createAclRevokeEvent(allocator, principal) catch |err| {
+            try sendAccessError(allocator, repo, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), shared.writeFailureMessage(err, "Could not revoke the role. The principal may have no role or this may be the last owner."), csrf_token);
             return;
         };
     } else {
@@ -130,13 +130,13 @@ pub fn handleAccessDevicePost(allocator: Allocator, repo: Repo, stream: std.net.
             public_key,
             if (fingerprint.len == 0) null else fingerprint,
             scheme,
-        ) catch {
-            try sendAccessError(allocator, repo, stream, 500, "Internal Server Error", "Could not add the device. Check that your actor is an owner and the signing key is valid.", csrf_token);
+        ) catch |err| {
+            try sendAccessError(allocator, repo, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), shared.writeFailureMessage(err, "Could not add the device. Check that your actor is an owner and the signing key is valid."), csrf_token);
             return;
         };
     } else if (std.mem.eql(u8, action, "revoke-device")) {
-        rbac.createIdentityDeviceRevokedEvent(allocator, principal, device) catch {
-            try sendAccessError(allocator, repo, stream, 500, "Internal Server Error", "Could not revoke the device. It may already be inactive or your actor may not be an owner.", csrf_token);
+        rbac.createIdentityDeviceRevokedEvent(allocator, principal, device) catch |err| {
+            try sendAccessError(allocator, repo, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), shared.writeFailureMessage(err, "Could not revoke the device. It may already be inactive or your actor may not be an owner."), csrf_token);
             return;
         };
     } else {
