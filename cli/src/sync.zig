@@ -146,8 +146,8 @@ pub fn syncPush(allocator: Allocator, remote: []const u8) !void {
 }
 
 pub fn syncPushInboxRef(allocator: Allocator, remote: []const u8, ref: []const u8) !void {
-    if (!std.mem.startsWith(u8, ref, "refs/gitomi/inbox/")) {
-        try eprint("gt sync: refusing to push non-inbox ref {s}\n", .{ref});
+    if (inbox_commit.parseRefIdentity(ref) == null) {
+        try eprint("gt sync: refusing to push invalid inbox ref {s}\n", .{ref});
         return CliError.UserError;
     }
 

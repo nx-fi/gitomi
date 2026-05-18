@@ -105,7 +105,7 @@ gt runs prune [--dry-run] [--max-age-days N] [--max-count N] [--max-bytes N]
 gt sync [--remote REMOTE] [--pull-only|--push-only]
 gt github import [--repo OWNER/REPO] [--token-env NAME|--token-file PATH] [--from-file PATH] [--no-comments] [--no-projects] [--rest|--graphql]
 gt github export --repo OWNER/REPO [--token-env NAME|--token-file PATH|--use-gh] [--dry-run] [--map-file PATH] [--reuse-legacy] [--rest|--graphql]
-gt github sync [--repo OWNER/REPO] [--token-env NAME|--token-file PATH|--use-gh] [--remote REMOTE] [--interval-ms N] [--max-pages N] [--dry-run] [--no-git-sync] [--rest|--graphql]
+gt github sync [--repo OWNER/REPO] [--token-env NAME|--token-file PATH|--use-gh] [--remote REMOTE] [--interval-ms N] [--max-pages N] [--dry-run] [--no-git-sync] [--import-only] [--rest|--graphql]
 gt github live [--repo OWNER/REPO] --webhook-url URL (--secret-env NAME|--secret-file PATH) [--host 127.0.0.1] [--port 12656] [--path /github/webhook] [--remote REMOTE] [--interval-ms N] [--once] [--no-subscribe] [--dry-run] [--no-git-sync] [--rest|--graphql]
 gt gitlab import [--project GROUP/PROJECT] [--token-env NAME|--token-file PATH] [--from-file PATH] [--no-comments]
 gt gitlab export --project GROUP/PROJECT [--token-env NAME|--token-file PATH] [--dry-run] [--map-file PATH] [--reuse-legacy]
@@ -274,23 +274,26 @@ issue, pull, and comment create/update operations, with REST still used for
 name-based label/assignee/reviewer deltas and comment edits that require
 database-number mappings; pass `--rest` to force the older REST replay path.
 
-`gt github sync` performs a polling two-way API sync: optional Gitomi `gt sync`
-pull, GitHub import, GitHub export of local accepted events since the last sync,
-and optional Gitomi `gt sync` push. It defaults to `--graphql`, batching issue
+`gt github sync` performs a polling API sync: optional Gitomi `gt sync` pull,
+GitHub import, optional GitHub export of local accepted events since the last
+sync, and optional Gitomi publication. It defaults to `--graphql`, batching issue
 and pull pages with nested fields through GitHub's GraphQL API and using the
 GraphQL export path by default; pass `--rest` to use the older REST path. State
 and mappings live under `.git/gitomi/github/<owner>/<repo>/`; pass
-`--no-git-sync` to skip surrounding Git transport steps.
+`--no-git-sync` to skip surrounding Git transport steps, or `--import-only` to
+skip outbound GitHub writes.
 
 For GitHub-to-Gitomi imports, all maintainers share one canonical bridge actor:
 `import-bot/github` by default, stored at
 `refs/gitomi/inbox/import-bot/github`. A maintainer running `gt github sync`
 first pulls remote Gitomi refs, then imports GitHub changes through that bot
-actor. Before exporting local Gitomi changes back to GitHub, sync publishes the
-maintainer's own inbox (including any new delegation grant) and then pushes the
-bot inbox fast-forward-only. If another maintainer published the same bridge
-inbox first, sync restores its local GitHub mapping file, abandons only the
-unpublished local bot commits, pulls the remote bot head, and retries the import.
+actor. Before any outbound GitHub export, sync publishes the maintainer's own
+inbox (including any new delegation grant) and then pushes the bot inbox
+fast-forward-only. If another maintainer published the same bridge inbox first,
+sync restores its local GitHub mapping file, abandons only the unpublished local
+bot commits, pulls the remote bot head, and retries the import. Use
+`gt github sync --import-only` when any maintainer should be able to refresh
+GitHub state into Gitomi without also performing outbound GitHub writes.
 
 Do not solve bridge concurrency by creating a different Gitomi genesis per user.
 That creates separate trust roots and separate repositories. Also avoid one bot
@@ -299,7 +302,10 @@ are made globally unique in the reducer: concurrent imports on separate bot
 devices can otherwise create duplicate native Gitomi objects for the same
 GitHub issue, pull, or comment. The intended model is one shared genesis, one
 canonical bridge inbox per upstream project, and fast-forward/retry publication
-by any maintainer authorized for that bridge.
+by any maintainer authorized for that bridge. Until outbound export receipts are
+shared through Gitomi refs, run Gitomi-to-GitHub export from one designated
+runner; otherwise two runners can race to create the same GitHub issue or
+comment from local Gitomi events.
 
 `gt github live` runs the normal local Gitomi workflow with a two-way GitHub
 bridge. It subscribes the current repository to a GitHub webhook through

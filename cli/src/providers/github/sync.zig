@@ -36,6 +36,7 @@ const Options = struct {
     map_file: ?[]const u8 = null,
     include_comments: bool = true,
     include_projects: bool = true,
+    export_enabled: bool = true,
     mode: ApiMode = .graphql,
     use_gh: bool = false,
 };
@@ -62,6 +63,7 @@ pub fn cmdSync(allocator: Allocator, args: []const []const u8) !void {
     var map_file_arg: ?[]const u8 = null;
     var include_comments = true;
     var include_projects = true;
+    var export_enabled = true;
     var mode: ApiMode = .graphql;
     var use_gh = false;
 
@@ -116,6 +118,8 @@ pub fn cmdSync(allocator: Allocator, args: []const []const u8) !void {
             include_comments = false;
         } else if (std.mem.eql(u8, arg, "--no-projects")) {
             include_projects = false;
+        } else if (std.mem.eql(u8, arg, "--import-only") or std.mem.eql(u8, arg, "--no-export")) {
+            export_enabled = false;
         } else if (std.mem.eql(u8, arg, "--rest")) {
             mode = .rest;
         } else if (std.mem.eql(u8, arg, "--graphql")) {
@@ -162,6 +166,7 @@ pub fn cmdSync(allocator: Allocator, args: []const []const u8) !void {
         .map_file = map_file_arg,
         .include_comments = include_comments,
         .include_projects = include_projects,
+        .export_enabled = export_enabled,
         .mode = mode,
         .use_gh = use_gh,
     };
@@ -244,31 +249,31 @@ fn runSyncOnceAttempt(allocator: Allocator, options: Options) !void {
 
     try index.ensureIndex(allocator, repo);
     if (options.git_sync and !options.dry_run) {
-        publishGitomiBridgeRefs(allocator, options.remote, bot_inbox_ref, bot_base_oid, map_path, &map_snapshot) catch |err| switch (err) {
-            error.RemoteRejected => return err,
-            else => return err,
-        };
+        try publishGitomiBridgeRefs(allocator, options.remote, bot_inbox_ref, bot_base_oid, map_path, &map_snapshot);
     }
 
-    var state = try loadState(allocator, repo, options.repo);
-    const export_result = try exporter.exportToGithub(allocator, .{
-        .repo = options.repo,
-        .api_url = options.api_url,
-        .token_arg = options.token,
-        .dry_run = options.dry_run,
-        .map_file = map_path,
-        .reuse_legacy = true,
-        .use_gh = options.use_gh,
-        .after_ordinal = state.last_export_ordinal,
-        .skip_actor_principal = options.bot_principal,
-        .skip_actor_device = options.bot_device,
-        .max_events = 100,
-        .quiet = true,
-        .mode = options.mode,
-    });
-    if (export_result.max_ordinal > state.last_export_ordinal) {
-        state.last_export_ordinal = export_result.max_ordinal;
-        if (!options.dry_run) try saveState(allocator, repo, options.repo, state);
+    var export_result = exporter.ExportResult{};
+    if (options.export_enabled) {
+        var state = try loadState(allocator, repo, options.repo);
+        export_result = try exporter.exportToGithub(allocator, .{
+            .repo = options.repo,
+            .api_url = options.api_url,
+            .token_arg = options.token,
+            .dry_run = options.dry_run,
+            .map_file = map_path,
+            .reuse_legacy = true,
+            .use_gh = options.use_gh,
+            .after_ordinal = state.last_export_ordinal,
+            .skip_actor_principal = options.bot_principal,
+            .skip_actor_device = options.bot_device,
+            .max_events = 100,
+            .quiet = true,
+            .mode = options.mode,
+        });
+        if (export_result.max_ordinal > state.last_export_ordinal) {
+            state.last_export_ordinal = export_result.max_ordinal;
+            if (!options.dry_run) try saveState(allocator, repo, options.repo, state);
+        }
     }
     try out("github sync: imported {d} issue{s}, {d} pull{s}, {d} comment{s}, {d} project card{s}; exported {d} event{s} via {s}\n", .{
         import_stats.issues,

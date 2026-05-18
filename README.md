@@ -143,8 +143,11 @@ bridge: Gitomi grants that maintainer's signing key authority to append
 `import-bot/github` events, publishes the maintainer's local inbox, then pushes
 the bridge inbox fast-forward-only. If another maintainer wins the same bridge
 race, sync discards its unpublished bot commits, pulls the new remote bot head,
-and retries the import. Keep a single shared Gitomi genesis; separate genesis
-refs create separate trust roots and are not a safe collaboration model.
+and retries the import. Use `gt github sync --import-only` for decentralized
+GitHub-to-Gitomi refreshes without outbound GitHub writes. Keep a single shared
+Gitomi genesis; separate genesis refs create separate trust roots and are not a
+safe collaboration model. Until outbound export receipts are shared through
+Gitomi refs, run Gitomi-to-GitHub export from one designated runner.
 
 Imports preserve GitHub issue and pull request numbers as secondary aliases, so
 references such as `#123`, `gh#123`, and `github:123` continue to work.

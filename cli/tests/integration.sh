@@ -504,7 +504,7 @@ JSON
 esac
 SH
   chmod +x "$fakebin/gh"
-  PATH="$fakebin:$PATH" gt github sync --repo acme/bridge --use-gh --rest --no-comments --no-projects --remote origin >/dev/null
+  PATH="$fakebin:$PATH" gt github sync --repo acme/bridge --use-gh --rest --no-comments --no-projects --import-only --remote origin >/dev/null
   git --git-dir="$github_bridge/remote.git" rev-parse --verify refs/gitomi/inbox/import-bot/github >/dev/null
 )
 (
