@@ -849,20 +849,20 @@ test "job-controlled result conclusion does not override backend failure" {
     defer std.fs.deleteTreeAbsolute(base_path) catch {};
     try std.fs.cwd().makePath(base_path);
 
-    const worktree_path = try std.fs.path.join(allocator, &.{ base_path, "worktree" });
-    defer allocator.free(worktree_path);
-    try std.fs.cwd().makePath(worktree_path);
-
     const output_root = try std.fs.path.join(allocator, &.{ base_path, "outputs" });
     defer allocator.free(output_root);
     try std.fs.cwd().makePath(output_root);
 
-    const event_path = try std.fs.path.join(allocator, &.{ base_path, "event.json" });
-    defer allocator.free(event_path);
+    const forged_output_dir = try std.fs.path.join(allocator, &.{ output_root, "forged" });
+    defer allocator.free(forged_output_dir);
+    try std.fs.cwd().makePath(forged_output_dir);
+
+    const result_path = try std.fs.path.join(allocator, &.{ forged_output_dir, "result.json" });
+    defer allocator.free(result_path);
     {
-        const file = try std.fs.createFileAbsolute(event_path, .{ .truncate = true });
+        const file = try std.fs.createFileAbsolute(result_path, .{ .truncate = true });
         defer file.close();
-        try file.writeAll("{}");
+        try file.writeAll("{\"conclusion\":\"success\",\"payload\":true}");
     }
 
     var repo = repo_mod.Repo{
@@ -882,9 +882,7 @@ test "job-controlled result conclusion does not override backend failure" {
         \\on: push
         \\jobs:
         \\  forged:
-        \\    backend: shell
-        \\    steps:
-        \\      - run: printf '%s' '{"conclusion":"success","payload":true}' > "$GITOMI_OUTPUT_DIR/result.json"; exit 1
+        \\    backend: container
     ;
     var workflow = try workflows_mod.parseWorkflow(allocator, "workflow-oid", ".gitomi/workflows/forgery.yml", workflow_bytes);
     defer workflow.deinit();
@@ -916,9 +914,9 @@ test "job-controlled result conclusion does not override backend failure" {
         workflow.jobs[0],
         "push",
         "push",
-        event_path,
-        worktree_path,
-        worktree_path,
+        "/tmp/gitomi-forgery-event.json",
+        base_path,
+        base_path,
         output_root,
         "{}",
         .{},
