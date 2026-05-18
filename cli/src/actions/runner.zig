@@ -70,7 +70,7 @@ pub fn executeWorkflow(
     }
     try std.fs.cwd().makePath(output_root);
 
-    const permission_grant_json = try buildPermissionGrantJson(allocator, repo, workflow);
+    const permission_grant_json = try buildPermissionGrantJson(allocator, repo, workflow, targets.workflow_trusted);
     defer allocator.free(permission_grant_json);
     const event_path = try writeActEventPayload(allocator, repo, run_id, diagnostics.attempt_id, workflow, targets, event_name, gitomi_event_type, object_id, schedule_slot, permission_grant_json, output_root);
     defer {
@@ -296,7 +296,7 @@ pub fn executeGitomiJob(
     diagnostics: *RunDiagnostics,
 ) ![]const u8 {
     const backend = if (job.backend.len == 0 and job.steps.len != 0) "shell" else job.backend;
-    if (!try enforceJobPermissionGrant(allocator, repo, workflow, job)) return "action_required";
+    if (!try enforceJobPermissionGrant(allocator, repo, workflow, job, targets.workflow_trusted)) return "action_required";
 
     const safe_job = try sanitizePathSegment(allocator, job.id);
     defer allocator.free(safe_job);
@@ -326,15 +326,15 @@ pub fn executeGitomiJob(
     } else if (std.mem.eql(u8, backend, "container")) {
         conclusion = try executeContainerJob(allocator, job, worktree_path, backend_env, diagnostics);
     } else if (std.mem.eql(u8, backend, "agent")) {
-        conclusion = try executeAgentJob(allocator, repo, run_id, workflow, job, event_path, backend_input_path, job_output_dir, permission_grant_json, worktree_path, workflow_worktree_path, options, diagnostics);
+        conclusion = try executeAgentJob(allocator, repo, run_id, workflow, targets.workflow_trusted, job, event_path, backend_input_path, job_output_dir, permission_grant_json, worktree_path, workflow_worktree_path, options, diagnostics);
     } else if (std.mem.eql(u8, backend, "github-actions")) {
         conclusion = try executeGithubActionsJob(allocator, job, event_name, event_path, worktree_path, workflow_worktree_path, options, diagnostics);
     } else {
         try io.eprint("gt actions: native job {s} uses unsupported backend '{s}'\n", .{ job.id, backend });
         conclusion = "action_required";
     }
-    const backend_conclusion = try collectBackendOutputs(allocator, diagnostics, job, job_output_dir);
-    return backend_conclusion orelse conclusion;
+    try collectBackendOutputs(allocator, diagnostics, job, job_output_dir);
+    return conclusion;
 }
 
 pub fn executeShellJob(
@@ -464,6 +464,7 @@ pub fn executeAgentJob(
     repo: repo_mod.Repo,
     run_id: []const u8,
     workflow: Workflow,
+    workflow_trusted: bool,
     job: WorkflowJob,
     event_path: []const u8,
     backend_input_path: []const u8,
@@ -494,7 +495,7 @@ pub fn executeAgentJob(
         else => return err,
     };
     defer manifest.deinit();
-    if (!try enforceAgentManifestGrant(allocator, repo, workflow, job, manifest)) return "action_required";
+    if (!try enforceAgentManifestGrant(allocator, repo, workflow, job, manifest, workflow_trusted)) return "action_required";
     const manifest_json = try buildPipelineManifestDiagnosticJson(allocator, manifest);
     defer allocator.free(manifest_json);
     const safe_job = try sanitizePathSegment(allocator, job.id);
@@ -742,8 +743,7 @@ pub fn buildBackendEnv(
     return env;
 }
 
-pub fn collectBackendOutputs(allocator: Allocator, diagnostics: *RunDiagnostics, job: WorkflowJob, output_dir: []const u8) !?[]const u8 {
-    var conclusion: ?[]const u8 = null;
+pub fn collectBackendOutputs(allocator: Allocator, diagnostics: *RunDiagnostics, job: WorkflowJob, output_dir: []const u8) !void {
     if (try readOutputFile(allocator, output_dir, "result.json")) |bytes| {
         defer allocator.free(bytes);
         const safe_job = try sanitizePathSegment(allocator, job.id);
@@ -755,7 +755,7 @@ pub fn collectBackendOutputs(allocator: Allocator, diagnostics: *RunDiagnostics,
             defer allocator.free(output_json);
             try diagnostics.addJobOutputCopy(job.id, output_json);
         }
-        conclusion = try collectResultJsonMetadata(allocator, diagnostics, job, bytes);
+        try collectResultJsonMetadata(allocator, diagnostics, job, bytes);
     } else if (try readOutputFile(allocator, output_dir, "outputs.json")) |bytes| {
         defer allocator.free(bytes);
         const safe_job = try sanitizePathSegment(allocator, job.id);
@@ -784,15 +784,14 @@ pub fn collectBackendOutputs(allocator: Allocator, diagnostics: *RunDiagnostics,
         defer allocator.free(bytes);
         try collectPublishedEventsArray(allocator, diagnostics, bytes);
     }
-    return conclusion;
 }
 
-pub fn collectResultJsonMetadata(allocator: Allocator, diagnostics: *RunDiagnostics, job: WorkflowJob, bytes: []const u8) !?[]const u8 {
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch return null;
+pub fn collectResultJsonMetadata(allocator: Allocator, diagnostics: *RunDiagnostics, job: WorkflowJob, bytes: []const u8) !void {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch return;
     defer parsed.deinit();
     const root = switch (parsed.value) {
         .object => |object| object,
-        else => return null,
+        else => return,
     };
     if (root.get("artifacts")) |value| {
         switch (value) {
@@ -814,8 +813,6 @@ pub fn collectResultJsonMetadata(allocator: Allocator, diagnostics: *RunDiagnost
             else => {},
         }
     }
-    if (event_mod.jsonString(root.get("conclusion"))) |value| return canonicalConclusion(value);
-    return null;
 }
 
 pub fn readOutputFile(allocator: Allocator, output_dir: []const u8, file_name: []const u8) !?[]u8 {
@@ -840,6 +837,98 @@ pub fn collectPublishedEventsArray(allocator: Allocator, diagnostics: *RunDiagno
             else => {},
         }
     }
+}
+
+test "job-controlled result conclusion does not override backend failure" {
+    const allocator = std.testing.allocator;
+
+    const test_id = try util.newUuidV7(allocator);
+    defer allocator.free(test_id);
+    const base_path = try std.fmt.allocPrint(allocator, "/tmp/gitomi-output-forgery-test-{s}", .{test_id});
+    defer allocator.free(base_path);
+    defer std.fs.deleteTreeAbsolute(base_path) catch {};
+    try std.fs.cwd().makePath(base_path);
+
+    const worktree_path = try std.fs.path.join(allocator, &.{ base_path, "worktree" });
+    defer allocator.free(worktree_path);
+    try std.fs.cwd().makePath(worktree_path);
+
+    const output_root = try std.fs.path.join(allocator, &.{ base_path, "outputs" });
+    defer allocator.free(output_root);
+    try std.fs.cwd().makePath(output_root);
+
+    const event_path = try std.fs.path.join(allocator, &.{ base_path, "event.json" });
+    defer allocator.free(event_path);
+    {
+        const file = try std.fs.createFileAbsolute(event_path, .{ .truncate = true });
+        defer file.close();
+        try file.writeAll("{}");
+    }
+
+    var repo = repo_mod.Repo{
+        .allocator = allocator,
+        .root = try allocator.dupe(u8, base_path),
+        .git_dir = try std.fs.path.join(allocator, &.{ base_path, ".git" }),
+        .gitomi_dir = try std.fs.path.join(allocator, &.{ base_path, ".gitomi" }),
+        .config_path = try std.fs.path.join(allocator, &.{ base_path, "missing-config.toml" }),
+        .index_path = try std.fs.path.join(allocator, &.{ base_path, "index.db" }),
+        .cursors_path = try std.fs.path.join(allocator, &.{ base_path, "cursors" }),
+        .settings_path = try std.fs.path.join(allocator, &.{ base_path, "settings.toml" }),
+    };
+    defer repo.deinit();
+
+    const workflow_bytes =
+        \\name: Forgery Test
+        \\on: push
+        \\jobs:
+        \\  forged:
+        \\    backend: shell
+        \\    steps:
+        \\      - run: printf '%s' '{"conclusion":"success","payload":true}' > "$GITOMI_OUTPUT_DIR/result.json"; exit 1
+    ;
+    var workflow = try workflows_mod.parseWorkflow(allocator, "workflow-oid", ".gitomi/workflows/forgery.yml", workflow_bytes);
+    defer workflow.deinit();
+
+    var targets = RunTargets{
+        .workflow = .{
+            .allocator = allocator,
+            .target_ref = try allocator.dupe(u8, "refs/heads/main"),
+            .target_oid = try allocator.dupe(u8, "workflow-oid"),
+        },
+        .code = .{
+            .allocator = allocator,
+            .target_ref = try allocator.dupe(u8, "refs/heads/main"),
+            .target_oid = try allocator.dupe(u8, "code-oid"),
+        },
+        .workflow_trusted = true,
+    };
+    defer targets.deinit();
+
+    var diagnostics = try RunDiagnostics.init(allocator);
+    defer diagnostics.deinit();
+
+    const conclusion = try executeGitomiJob(
+        allocator,
+        repo,
+        "run-id",
+        workflow,
+        targets,
+        workflow.jobs[0],
+        "push",
+        "push",
+        event_path,
+        worktree_path,
+        worktree_path,
+        output_root,
+        "{}",
+        .{},
+        &diagnostics,
+    );
+
+    try std.testing.expectEqualStrings("failure", conclusion);
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.job_outputs.items.len);
+    try std.testing.expectEqualStrings("forged", diagnostics.job_outputs.items[0].job_id);
+    try std.testing.expectEqualStrings("{\"conclusion\":\"success\",\"payload\":true}", diagnostics.job_outputs.items[0].json);
 }
 
 pub fn addStepLogs(
@@ -1170,31 +1259,31 @@ pub fn canonicalConclusion(value: []const u8) ?[]const u8 {
     return null;
 }
 
-pub fn buildPermissionGrantJson(allocator: Allocator, repo: repo_mod.Repo, workflow: Workflow) ![]u8 {
+pub fn buildPermissionGrantJson(allocator: Allocator, repo: repo_mod.Repo, workflow: Workflow, workflow_trusted: bool) ![]u8 {
     var context = try loadGrantContext(allocator, repo);
     defer context.deinit();
-    return buildPermissionGrantJsonWithContext(allocator, workflow, context);
+    return buildPermissionGrantJsonWithContext(allocator, workflow, context, workflow_trusted);
 }
 
-pub fn buildPermissionGrantJsonWithContext(allocator: Allocator, workflow: Workflow, context: GrantContext) ![]u8 {
-    const untrusted_head = std.mem.eql(u8, workflow.source.workflow_from, "head");
+pub fn buildPermissionGrantJsonWithContext(allocator: Allocator, workflow: Workflow, context: GrantContext, workflow_trusted: bool) ![]u8 {
+    const reduce_write = !workflow_trusted;
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     try buf.append(allocator, '{');
     try appendJsonFieldString(&buf, allocator, "schema", "urn:gitomi:workflow-permission-grant:v1", true);
     if (context.principal) |principal| try appendJsonFieldString(&buf, allocator, "actor_principal", principal, true);
     if (context.role) |role| try appendJsonFieldString(&buf, allocator, "rbac_role", role, true);
-    try appendJsonFieldString(&buf, allocator, "source_trust", if (untrusted_head) "untrusted_head" else "trusted", true);
+    try appendJsonFieldString(&buf, allocator, "source_trust", if (reduce_write) "untrusted_workflow" else "trusted", true);
     try appendJsonString(&buf, allocator, "derivation");
     try buf.appendSlice(allocator, ":{");
     try appendJsonFieldString(&buf, allocator, "rbac", if (context.role != null) "current_actor_role" else "no_authorized_role", true);
     try appendJsonFieldString(&buf, allocator, "workflow_policy", "workflow_and_job_permissions", true);
-    try appendJsonFieldString(&buf, allocator, "source_trust", if (untrusted_head) "write_reduced_to_read" else "trusted_source", true);
+    try appendJsonFieldString(&buf, allocator, "source_trust", if (reduce_write) "write_reduced_to_read" else "trusted_source", true);
     try appendJsonFieldString(&buf, allocator, "backend_policy", "backend_local_enforcement", true);
     try buf.appendSlice(allocator, "\"approvals\":[]},");
     try appendJsonString(&buf, allocator, "workflow");
     try buf.append(allocator, ':');
-    try appendPermissionObject(&buf, allocator, workflow.permissions, untrusted_head, context);
+    try appendPermissionObject(&buf, allocator, workflow.permissions, reduce_write, context);
     try buf.append(allocator, ',');
     try appendJsonString(&buf, allocator, "jobs");
     try buf.appendSlice(allocator, ":[");
@@ -1209,7 +1298,7 @@ pub fn buildPermissionGrantJsonWithContext(allocator: Allocator, workflow: Workf
         try buf.append(allocator, ',');
         try appendJsonString(&buf, allocator, "permissions");
         try buf.append(allocator, ':');
-        try appendPermissionObject(&buf, allocator, effectiveRequestedPermissions(workflow, job), untrusted_head, context);
+        try appendPermissionObject(&buf, allocator, effectiveRequestedPermissions(workflow, job), reduce_write, context);
         try buf.append(allocator, '}');
     }
     try buf.appendSlice(allocator, "]}");
@@ -1273,10 +1362,10 @@ pub fn effectiveRequestedPermissions(workflow: Workflow, job: WorkflowJob) []con
     return if (job.permissions.len != 0) job.permissions else workflow.permissions;
 }
 
-pub fn enforceJobPermissionGrant(allocator: Allocator, repo: repo_mod.Repo, workflow: Workflow, job: WorkflowJob) !bool {
+pub fn enforceJobPermissionGrant(allocator: Allocator, repo: repo_mod.Repo, workflow: Workflow, job: WorkflowJob, workflow_trusted: bool) !bool {
     var context = try loadGrantContext(allocator, repo);
     defer context.deinit();
-    const reduce_write = std.mem.eql(u8, workflow.source.workflow_from, "head");
+    const reduce_write = !workflow_trusted;
     const requested = effectiveRequestedPermissions(workflow, job);
     for (requested) |entry| {
         if (!permissionRequestSatisfied(entry.key, entry.value, reduce_write, context)) {
@@ -1290,10 +1379,10 @@ pub fn enforceJobPermissionGrant(allocator: Allocator, repo: repo_mod.Repo, work
     return true;
 }
 
-pub fn enforceAgentManifestGrant(allocator: Allocator, repo: repo_mod.Repo, workflow: Workflow, job: WorkflowJob, manifest: PipelineManifest) !bool {
+pub fn enforceAgentManifestGrant(allocator: Allocator, repo: repo_mod.Repo, _: Workflow, job: WorkflowJob, manifest: PipelineManifest, workflow_trusted: bool) !bool {
     var context = try loadGrantContext(allocator, repo);
     defer context.deinit();
-    const reduce_write = std.mem.eql(u8, workflow.source.workflow_from, "head");
+    const reduce_write = !workflow_trusted;
     for (manifest.permissions) |entry| {
         if (!permissionRequestSatisfied(entry.key, entry.value, reduce_write, context)) {
             try io.eprint(
@@ -1773,6 +1862,8 @@ pub fn parseRunRequest(allocator: Allocator, run_id: []const u8, body: []const u
     const schedule_slot = event_mod.jsonString(payload.get("schedule_slot"));
     const workflow_source_ref = event_mod.jsonString(payload.get("workflow_source_ref"));
     const workflow_source_oid = event_mod.jsonString(payload.get("workflow_source_oid"));
+    const source_workflow_from = event_mod.jsonString(payload.get("source_workflow_from"));
+    const source_code_from = event_mod.jsonString(payload.get("source_code_from"));
 
     return .{
         .allocator = allocator,
@@ -1785,6 +1876,8 @@ pub fn parseRunRequest(allocator: Allocator, run_id: []const u8, body: []const u
         .event_name = try allocator.dupe(u8, event_name),
         .gitomi_event_type = try allocator.dupe(u8, gitomi_event_type),
         .schedule_slot = if (schedule_slot) |value| try allocator.dupe(u8, value) else null,
+        .source_workflow_from = if (source_workflow_from) |value| try allocator.dupe(u8, value) else null,
+        .source_code_from = if (source_code_from) |value| try allocator.dupe(u8, value) else null,
     };
 }
 

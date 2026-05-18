@@ -263,6 +263,7 @@ fn runRequestedWithRepo(allocator: Allocator, repo: repo_mod.Repo, run_filter: ?
         var run_targets = RunTargets{
             .workflow = workflow_target,
             .code = try duplicateTarget(allocator, target),
+            .workflow_trusted = storedRequestWorkflowTrusted(request),
         };
         defer run_targets.deinit();
 
@@ -508,6 +509,7 @@ fn scheduleDueWorkflows(
                 var run_targets = RunTargets{
                     .workflow = try duplicateTarget(allocator, target),
                     .code = try duplicateTarget(allocator, target),
+                    .workflow_trusted = true,
                 };
                 defer run_targets.deinit();
                 if (try requestAndExecuteWorkflow(
@@ -550,7 +552,7 @@ fn requestAndExecuteWorkflow(
     metadata_extra: RunMetadata,
     options: Options,
 ) !bool {
-    const permission_grant_json = try buildPermissionGrantJson(allocator, repo, workflow);
+    const permission_grant_json = try buildPermissionGrantJson(allocator, repo, workflow, targets.workflow_trusted);
     defer allocator.free(permission_grant_json);
     const metadata = RunMetadata{
         .workflow_name = workflow.name,
@@ -716,9 +718,16 @@ fn resolveRunTargetsForWorkflow(
     pull_refs: ?PullRefs,
     workflow: Workflow,
 ) !RunTargets {
+    const workflow_source = try resolvePolicyTarget(allocator, selected, pull_refs, workflow.source.workflow_from);
+    errdefer {
+        var cleanup = workflow_source;
+        cleanup.deinit();
+    }
+    const code_source = try resolvePolicyTarget(allocator, selected, pull_refs, workflow.source.code_from);
     return .{
-        .workflow = try resolvePolicyTarget(allocator, selected, pull_refs, workflow.source.workflow_from),
-        .code = try resolvePolicyTarget(allocator, selected, pull_refs, workflow.source.code_from),
+        .workflow = workflow_source,
+        .code = code_source,
+        .workflow_trusted = !policySelectsUntrustedHead(workflow.source.workflow_from, pull_refs),
     };
 }
 
@@ -745,6 +754,15 @@ fn resolvePolicyTarget(
     }
     try io.eprint("gt actions: unsupported workflow source policy '{s}'\n", .{policy});
     return CliError.UserError;
+}
+
+fn policySelectsUntrustedHead(policy: []const u8, pull_refs: ?PullRefs) bool {
+    return pull_refs != null and std.mem.eql(u8, policy, "head");
+}
+
+fn storedRequestWorkflowTrusted(request: RunRequest) bool {
+    const source = request.source_workflow_from orelse return false;
+    return request.workflow_source_oid != null and !std.mem.eql(u8, source, "head");
 }
 
 fn branchNameFromRef(ref: ?[]const u8) ?[]const u8 {
@@ -1256,6 +1274,24 @@ test "workflow parser initializes optional policy fields" {
     try std.testing.expectEqual(@as(usize, 0), workflow.permissions.len);
 }
 
+test "loaded workflows reject unsupported source policy values" {
+    const bytes =
+        \\name: Invalid Source
+        \\on: workflow_dispatch
+        \\source:
+        \\  workflow_from: trusted-typo
+        \\  code_from: target
+        \\jobs:
+        \\  test:
+        \\    backend: shell
+        \\    steps:
+        \\      - run: echo test
+    ;
+    var workflow = try parseWorkflow(std.testing.allocator, "test-source", ".gitomi/workflows/invalid.yml", bytes);
+    defer workflow.deinit();
+    try std.testing.expectError(CliError.UserError, workflows_mod.validateLoadedWorkflow(workflow));
+}
+
 test "pull events default workflow source to base and code source to head" {
     const bytes =
         \\name: Pull Review
@@ -1340,6 +1376,45 @@ test "native workflow parser supports source permissions and job metadata" {
     try std.testing.expectEqualStrings("quick", workflow.jobs[1].with[0].value);
     try std.testing.expectEqualStrings("1", workflow.jobs[1].env[0].value);
     try std.testing.expectEqualStrings("write", workflow.jobs[1].permissions[0].value);
+}
+
+test "permission grant trust is supplied by resolved run context" {
+    const bytes =
+        \\name: Context Trust
+        \\on: workflow_dispatch
+        \\permissions:
+        \\  contents: write-all
+        \\source:
+        \\  workflow_from: base
+        \\  code_from: head
+        \\jobs:
+        \\  review:
+        \\    backend: shell
+        \\    permissions:
+        \\      issues: write
+        \\    steps:
+        \\      - run: echo review
+    ;
+    var workflow = try parseWorkflow(std.testing.allocator, "test-source", ".gitomi/workflows/context.yml", bytes);
+    defer workflow.deinit();
+
+    var context = runner_mod.GrantContext{
+        .allocator = std.testing.allocator,
+        .role = try std.testing.allocator.dupe(u8, "owner"),
+    };
+    defer context.deinit();
+
+    const untrusted = try runner_mod.buildPermissionGrantJsonWithContext(std.testing.allocator, workflow, context, false);
+    defer std.testing.allocator.free(untrusted);
+    try std.testing.expect(std.mem.indexOf(u8, untrusted, "\"source_trust\":\"untrusted_workflow\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, untrusted, "\"contents\":\"read\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, untrusted, "\"issues\":\"read\"") != null);
+
+    const trusted = try runner_mod.buildPermissionGrantJsonWithContext(std.testing.allocator, workflow, context, true);
+    defer std.testing.allocator.free(trusted);
+    try std.testing.expect(std.mem.indexOf(u8, trusted, "\"source_trust\":\"trusted\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trusted, "\"contents\":\"write-all\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trusted, "\"issues\":\"write\"") != null);
 }
 
 test "workflow runtime helpers are semantically checked" {

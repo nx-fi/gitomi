@@ -1226,7 +1226,7 @@ fn appendRootSearchIndexSlot(buf: *std.ArrayList(u8), allocator: Allocator, ref:
     , .{});
     try shared.appendUrlEncoded(buf, allocator, ref);
     try appendTemplate(buf, allocator,
-        \\" data-root-partial-label="File search index" data-root-partial-priority="{priority}" data-root-partial-timeout-ms="{timeout_ms}" data-root-partial-silent></div>
+        \\" data-root-partial-owner="gitomi" data-root-partial-label="File search index" data-root-partial-priority="{priority}" data-root-partial-timeout-ms="{timeout_ms}" data-root-partial-silent></div>
     , .{ .priority = root_partial_priority_search, .timeout_ms = root_partial_timeout_stats_ms });
 }
 
@@ -1901,7 +1901,7 @@ fn appendRootPartialAttrs(
     , .{ .component = component });
     try shared.appendUrlEncoded(buf, allocator, ref);
     try appendTemplate(buf, allocator,
-        \\" data-root-partial-label="{label}" data-root-partial-priority="{priority}" data-root-partial-timeout-ms="{timeout_ms}" aria-live="polite"
+        \\" data-root-partial-owner="gitomi" data-root-partial-label="{label}" data-root-partial-priority="{priority}" data-root-partial-timeout-ms="{timeout_ms}" aria-live="polite"
     , .{ .label = label, .priority = priority, .timeout_ms = timeout_ms });
 }
 

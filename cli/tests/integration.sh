@@ -102,10 +102,17 @@ configure_bob_signing() {
   git -C "$repo" config gpg.ssh.allowedSignersFile "$ALLOWED_SIGNERS"
 }
 
+trust_repo() {
+  local repo="$1"
+  mkdir -p "$repo/.git/gitomi"
+  : > "$repo/.git/gitomi/trust"
+}
+
 init_repo() {
   local repo="$1"
   mkdir -p "$repo"
   git -C "$repo" init >/dev/null
+  trust_repo "$repo"
   configure_signing "$repo"
 }
 
@@ -121,6 +128,33 @@ BOB_FINGERPRINT="$(ssh-keygen -lf "$BOB_KEY.pub" -E sha256 | awk '{ print $2 }')
   awk '{ print "alice@example.com " $1 " " $2 }' "$KEY.pub"
   awk '{ print "bob@example.com " $1 " " $2 }' "$BOB_KEY.pub"
 } > "$ALLOWED_SIGNERS"
+
+echo "integration: startup requires git repo and one-time trust"
+not_repo="$ROOT/not-repo"
+mkdir -p "$not_repo"
+(
+  cd "$not_repo"
+  if gt status >not-repo.out 2>&1; then
+    fail "expected status outside git repo to fail"
+  fi
+  assert_contains "$(cat not-repo.out)" "not a git repo"
+)
+trust_prompt="$ROOT/trust-prompt"
+mkdir -p "$trust_prompt"
+git -C "$trust_prompt" init >/dev/null
+(
+  cd "$trust_prompt"
+  if printf 'yes\n' | gt status >trust-prompt.out 2>&1; then
+    fail "expected status before gt init to fail"
+  fi
+  assert_contains "$(cat trust-prompt.out)" "do you trust contents of this git repo?"
+  assert_contains "$(cat trust-prompt.out)" "Gitomi is not initialized; run \`gt init\`"
+  assert_file ".git/gitomi/trust"
+  if gt status >trusted-status.out 2>&1; then
+    fail "expected status before gt init to fail"
+  fi
+  assert_not_contains "$(cat trusted-status.out)" "do you trust contents of this git repo?"
+)
 
 echo "integration: init, issue open, events list --json"
 single="$ROOT/single"

@@ -581,7 +581,7 @@
   }
 
   function requestRootSearchIndex(panel) {
-    if (!panel.querySelector("[data-root-partial-deferred]")) return;
+    if (!panel.querySelector("[data-root-partial-owner=\"gitomi\"][data-root-partial-deferred]")) return;
     document.dispatchEvent(new CustomEvent("gitomi:root-partial-load", {
       detail: { root: panel },
     }));

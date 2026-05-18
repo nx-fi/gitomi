@@ -1001,9 +1001,25 @@
     }, 0);
   }
 
+  function isServerRootPartialSlot(slot) {
+    return slot && slot.dataset.rootPartialOwner === "gitomi";
+  }
+
+  function isAllowedRootPartialUrl(url) {
+    if (!url) return false;
+    try {
+      const parsed = new URL(url, window.location.href);
+      if (parsed.origin !== window.location.origin) return false;
+      return /^\/code\/root\/(?:about|repository|branch|stats|contributors|docs|search|commit-count)$/.test(parsed.pathname);
+    } catch (_) {
+      return false;
+    }
+  }
+
   function scheduleRootPartial(slot, retrying) {
+    if (!isServerRootPartialSlot(slot)) return;
     const url = slot.dataset.rootPartial;
-    if (!url) return;
+    if (!isAllowedRootPartialUrl(url)) return;
     if (slot.dataset.rootPartialState === "queued" || slot.dataset.rootPartialState === "loading") return;
     if (!retrying && slot.dataset.rootPartialReady === "yes") return;
     slot.dataset.rootPartialReady = "yes";
@@ -1018,8 +1034,9 @@
   }
 
   function promoteDeferredRootPartial(slot) {
+    if (!isServerRootPartialSlot(slot)) return;
     const url = slot.dataset.rootPartialDeferred;
-    if (!url || slot.dataset.rootPartial) return;
+    if (!isAllowedRootPartialUrl(url) || slot.dataset.rootPartial) return;
     slot.dataset.rootPartial = url;
     delete slot.dataset.rootPartialDeferred;
     scheduleRootPartial(slot, false);
@@ -1043,8 +1060,9 @@
   }
 
   async function loadRootPartial(slot) {
+    if (!isServerRootPartialSlot(slot)) return;
     const url = slot.dataset.rootPartial;
-    if (!url) return;
+    if (!isAllowedRootPartialUrl(url)) return;
     slot.setAttribute("aria-busy", "true");
     const controller = "AbortController" in window ? new AbortController() : null;
     const timeout = window.setTimeout(function () {
@@ -1084,7 +1102,7 @@
 
   function initRootPartials(root) {
     const scope = root || document;
-    scope.querySelectorAll("[data-root-partial]").forEach(function (slot) {
+    scope.querySelectorAll("[data-root-partial-owner=\"gitomi\"][data-root-partial]").forEach(function (slot) {
       scheduleRootPartial(slot, false);
     });
   }
@@ -1112,7 +1130,7 @@
   document.addEventListener("gitomi:root-partial-load", function (event) {
     const detail = event.detail || {};
     const scope = detail.root || document;
-    scope.querySelectorAll("[data-root-partial-deferred]").forEach(promoteDeferredRootPartial);
+    scope.querySelectorAll("[data-root-partial-owner=\"gitomi\"][data-root-partial-deferred]").forEach(promoteDeferredRootPartial);
   });
 
   window.addEventListener("resize", function () {

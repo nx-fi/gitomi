@@ -211,6 +211,8 @@ pub const RunRequest = struct {
     event_name: []u8,
     gitomi_event_type: []u8,
     schedule_slot: ?[]u8 = null,
+    source_workflow_from: ?[]u8 = null,
+    source_code_from: ?[]u8 = null,
 
     pub fn deinit(self: *RunRequest) void {
         self.allocator.free(self.run_id);
@@ -222,6 +224,8 @@ pub const RunRequest = struct {
         self.allocator.free(self.event_name);
         self.allocator.free(self.gitomi_event_type);
         if (self.schedule_slot) |value| self.allocator.free(value);
+        if (self.source_workflow_from) |value| self.allocator.free(value);
+        if (self.source_code_from) |value| self.allocator.free(value);
     }
 };
 
@@ -328,6 +332,7 @@ pub const PullRefs = struct {
 pub const RunTargets = struct {
     workflow: ResolvedTarget,
     code: ResolvedTarget,
+    workflow_trusted: bool,
 
     pub fn deinit(self: *RunTargets) void {
         self.workflow.deinit();

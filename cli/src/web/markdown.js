@@ -432,6 +432,7 @@
     if (!window.DOMPurify) return "<pre>" + escapeHtml(html) + "</pre>";
     return window.DOMPurify.sanitize(html, {
       USE_PROFILES: { html: true },
+      ALLOW_DATA_ATTR: false,
       ADD_TAGS: ["input", "source", "video"],
       ADD_ATTR: [
         "aria-hidden",

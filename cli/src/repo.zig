@@ -114,7 +114,7 @@ pub const SigningKey = struct {
 pub fn discoverRepo(allocator: Allocator) !Repo {
     const root_raw = gitChecked(allocator, &.{ "rev-parse", "--show-toplevel" }) catch |err| {
         if (err == CliError.GitFailed) {
-            try eprint("gt: not inside a Git repository\n", .{});
+            try eprint("not a git repo\n", .{});
             return CliError.NotGitRepository;
         }
         return err;

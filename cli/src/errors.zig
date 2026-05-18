@@ -26,6 +26,7 @@ pub fn isUserError(err: anyerror) bool {
         CliError.Unauthorized,
         CliError.InvalidEvent,
         CliError.LocalInboxChanged,
+        CliError.NotGitRepository,
         => true,
         else => false,
     };

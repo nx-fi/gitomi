@@ -90,6 +90,10 @@ fn realMain() !void {
     defer std.process.argsFree(allocator, args);
     scrubSensitiveProcessArgs();
 
+    var repo = try repo_mod.discoverRepo(allocator);
+    defer repo.deinit();
+    try ensureTrustedRepo(allocator, repo);
+
     if (args.len <= 1) {
         try printUsage();
         return;
@@ -107,6 +111,54 @@ fn realMain() !void {
     };
 
     try command.handler(allocator, args[2..], command.command_name);
+}
+
+fn ensureTrustedRepo(allocator: Allocator, repo: repo_mod.Repo) !void {
+    const trust_path = try std.fs.path.join(allocator, &.{ repo.gitomi_dir, "trust" });
+    defer allocator.free(trust_path);
+
+    if (util.fileExists(trust_path)) return;
+
+    try io.eprint("do you trust contents of this git repo? [y/N] ", .{});
+    const answer = try readStdinLine(allocator, 1024);
+    defer allocator.free(answer);
+
+    if (!answerIsYes(std.mem.trim(u8, answer, " \t\r\n"))) {
+        try io.eprint("gt: repository not trusted\n", .{});
+        return CliError.UserError;
+    }
+
+    try std.fs.cwd().makePath(repo.gitomi_dir);
+    const file = try std.fs.createFileAbsolute(trust_path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll("trusted\n");
+}
+
+fn answerIsYes(answer: []const u8) bool {
+    if (answer.len == 1) return std.ascii.toLower(answer[0]) == 'y';
+    if (answer.len != 3) return false;
+    return std.ascii.toLower(answer[0]) == 'y' and
+        std.ascii.toLower(answer[1]) == 'e' and
+        std.ascii.toLower(answer[2]) == 's';
+}
+
+fn readStdinLine(allocator: Allocator, max_bytes: usize) ![]u8 {
+    var line: std.ArrayList(u8) = .empty;
+    errdefer line.deinit(allocator);
+
+    const stdin = std.fs.File.stdin();
+    var byte: [1]u8 = undefined;
+    while (true) {
+        const read_len = try stdin.read(&byte);
+        if (read_len == 0 or byte[0] == '\n') break;
+        if (line.items.len >= max_bytes) {
+            try io.eprint("input is too long\n", .{});
+            return CliError.UserError;
+        }
+        if (byte[0] != '\r') try line.append(allocator, byte[0]);
+    }
+
+    return try line.toOwnedSlice(allocator);
 }
 
 fn scrubSensitiveProcessArgs() void {

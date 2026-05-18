@@ -155,6 +155,7 @@ pub fn workflowDialect(path: []const u8) WorkflowDialect {
 }
 
 pub fn validateLoadedWorkflow(workflow: Workflow) !void {
+    try validateWorkflowSourcePolicy(workflow);
     if (workflow.triggers.len == 0) {
         try io.eprint("gt actions: workflow {s} must declare at least one trigger\n", .{workflow.path});
         return CliError.UserError;
@@ -188,6 +189,23 @@ pub fn validateLoadedWorkflow(workflow: Workflow) !void {
             return CliError.UserError;
         }
     }
+}
+
+fn validateWorkflowSourcePolicy(workflow: Workflow) !void {
+    if (!isValidSourcePolicyValue(workflow.source.workflow_from)) {
+        try io.eprint("gt actions: workflow {s} has unsupported source.workflow_from '{s}'\n", .{ workflow.path, workflow.source.workflow_from });
+        return CliError.UserError;
+    }
+    if (!isValidSourcePolicyValue(workflow.source.code_from)) {
+        try io.eprint("gt actions: workflow {s} has unsupported source.code_from '{s}'\n", .{ workflow.path, workflow.source.code_from });
+        return CliError.UserError;
+    }
+}
+
+fn isValidSourcePolicyValue(value: []const u8) bool {
+    return std.mem.eql(u8, value, "target") or
+        std.mem.eql(u8, value, "base") or
+        std.mem.eql(u8, value, "head");
 }
 
 pub fn parseWorkflow(allocator: Allocator, source_oid: []const u8, path: []const u8, bytes: []const u8) !Workflow {
