@@ -1,0 +1,131 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  ZIG_VERSION: "0.15.2"
+  GH_REPO: ${{ github.repository }}
+
+jobs:
+  create-release:
+    name: Create draft release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" \
+              --draft \
+              --verify-tag \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes
+          fi
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: create-release
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-linux-musl
+            bin_ext: ""
+            archive_ext: tar.gz
+          - target: aarch64-linux-musl
+            bin_ext: ""
+            archive_ext: tar.gz
+          - target: x86_64-macos
+            bin_ext: ""
+            archive_ext: tar.gz
+          - target: aarch64-macos
+            bin_ext: ""
+            archive_ext: tar.gz
+          - target: x86_64-windows-gnu
+            bin_ext: ".exe"
+            archive_ext: zip
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: release-${{ matrix.target }}
+
+      - name: Build ReleaseSafe binary
+        working-directory: cli
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }}
+
+      - name: Package artifact
+        id: package
+        env:
+          TARGET: ${{ matrix.target }}
+          BIN_EXT: ${{ matrix.bin_ext }}
+          ARCHIVE_EXT: ${{ matrix.archive_ext }}
+        run: |
+          set -euo pipefail
+          safe_ref_name="${GITHUB_REF_NAME//\//-}"
+          archive_base="gitomi-${safe_ref_name}-${TARGET}"
+          staging="dist/${archive_base}"
+          binary="cli/zig-out/bin/gt${BIN_EXT}"
+
+          mkdir -p "$staging"
+          cp "$binary" "$staging/"
+          cp README.md LICENSE "$staging/"
+          if [[ "$BIN_EXT" != ".exe" ]]; then
+            chmod 755 "$staging/gt"
+          fi
+
+          if [[ "$ARCHIVE_EXT" == "zip" ]]; then
+            (cd dist && zip -r "${archive_base}.zip" "${archive_base}")
+            artifact="dist/${archive_base}.zip"
+          else
+            artifact="dist/${archive_base}.tar.gz"
+            tar -czf "$artifact" -C dist "${archive_base}"
+          fi
+
+          checksum="${artifact}.sha256"
+          (cd "$(dirname "$artifact")" && sha256sum "$(basename "$artifact")") > "$checksum"
+          echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
+          echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "$GITHUB_REF_NAME" \
+            "${{ steps.package.outputs.artifact }}" \
+            "${{ steps.package.outputs.checksum }}" \
+            --clobber
+
+  publish-release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" --jq .id)"
+          gh api \
+            --method PATCH \
+            "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            -F draft=false

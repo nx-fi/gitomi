@@ -10,6 +10,8 @@ zig-out/
 # Local agent state
 /.claude
 /.codex
+.wrangler/
+website/.wrangler/
 
 # Editor and OS files
 .DS_Store
