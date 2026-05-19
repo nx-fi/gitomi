@@ -80,7 +80,7 @@ function renderHeroBoard() {
         <span class="window-dot red"></span>
         <span class="window-dot amber"></span>
         <span class="window-dot green"></span>
-        <code>127.0.0.1:12655/projects?project=Portable%20v1&amp;view=board</code>
+        <code>gitomi.localhost:12655/projects</code>
       </div>
       <div class="app-sim">
         <aside class="sim-sidebar">
@@ -97,7 +97,6 @@ function renderHeroBoard() {
               <p>Project</p>
               <strong>Portable v1</strong>
             </div>
-            <span class="sim-button">Sync refs</span>
           </div>
           <div class="kanban-grid">
             <div class="kanban-lane">
@@ -137,7 +136,6 @@ function renderHeroBoard() {
           </div>
         </section>
       </div>
-      <div class="click-cursor" aria-hidden="true"><span></span></div>
     </div>
   `;
 }
@@ -249,7 +247,7 @@ export function renderSite() {
             <span></span>
             <strong>alice@repo</strong>
           </div>
-          <pre><code data-terminal-demo data-commands="gt issue open --title &quot;Write release notes&quot;|gt sync --remote origin|gt web" data-primary-labels="wrote|synced|serving" data-primary-lines="signed issue.opened event|signed Gitomi refs through origin|local web UI on 127.0.0.1:12655" data-secondary-labels="index|projection|pages" data-secondary-lines="rebuilt from refs/gitomi/inbox/*|updated issues, PRs, projects, and runs|code, issues, projects, pipelines"><span class="prompt" aria-hidden="true">$</span> <span data-terminal-command>gt issue open --title &quot;Write release notes&quot;</span><span class="typing-caret"></span><span data-terminal-output-lines><span data-terminal-primary-output>
+          <pre><code data-terminal-demo data-commands="gt issue open --title &quot;Write release notes&quot;|gt sync --remote origin|gt web" data-primary-labels="wrote|synced|serving" data-primary-lines="signed issue.opened event|signed Gitomi refs through origin|local web UI on gitomi.localhost:12655" data-secondary-labels="index|projection|pages" data-secondary-lines="rebuilt from refs/gitomi/inbox/*|updated issues, PRs, projects, and runs|code, issues, projects, pipelines"><span class="prompt" aria-hidden="true">$</span> <span data-terminal-command>gt issue open --title &quot;Write release notes&quot;</span><span class="typing-caret"></span><span data-terminal-output-lines><span data-terminal-primary-output>
 <span class="ok" data-terminal-primary-label>wrote</span> <span data-terminal-primary-line>signed issue.opened event</span></span><span data-terminal-secondary-output>
 <span class="muted" data-terminal-secondary-label>index</span> <span data-terminal-secondary-line>rebuilt from refs/gitomi/inbox/*</span></span></span></code></pre>
         </div>

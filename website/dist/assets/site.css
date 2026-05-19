@@ -714,41 +714,6 @@ body.site-shell::after {
   border-color: color-mix(in oklch, var(--site-violet) 24%, transparent);
 }
 
-.click-cursor {
-  position: absolute;
-  z-index: 8;
-  top: 0;
-  left: 0;
-  width: 32px;
-  height: 32px;
-  animation: cursorTravel 5.6s ease-in-out infinite;
-}
-
-.click-cursor::before {
-  content: "";
-  position: absolute;
-  top: 3px;
-  left: 4px;
-  width: 0;
-  height: 0;
-  border-top: 8px solid transparent;
-  border-bottom: 8px solid transparent;
-  border-left: 16px solid #ffffff;
-  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.45));
-  transform: rotate(-18deg);
-}
-
-.click-cursor span {
-  position: absolute;
-  top: 8px;
-  left: 16px;
-  width: 12px;
-  height: 12px;
-  border: 2px solid var(--site-green);
-  border-radius: 50%;
-  animation: clickPulse 5.6s ease-in-out infinite;
-}
-
 .terminal-shot {
   --tilt: 1.8deg;
   position: absolute;
@@ -2329,38 +2294,6 @@ body.site-shell::after {
   }
 }
 
-@keyframes cursorTravel {
-  0%,
-  14% {
-    transform: translate(398px, 79px);
-  }
-  44%,
-  58% {
-    transform: translate(520px, 73px);
-  }
-  78%,
-  100% {
-    transform: translate(363px, 254px);
-  }
-}
-
-@keyframes clickPulse {
-  0%,
-  44%,
-  100% {
-    opacity: 0;
-    transform: scale(0.4);
-  }
-  51% {
-    opacity: 1;
-    transform: scale(1.8);
-  }
-  60% {
-    opacity: 0;
-    transform: scale(2.7);
-  }
-}
-
 @keyframes barScan {
   0%,
   100% {
@@ -2491,10 +2424,6 @@ body.site-shell::after {
 
   .kanban-lane {
     min-height: 0;
-  }
-
-  .click-cursor {
-    display: none;
   }
 
   .sync-map {
@@ -2634,10 +2563,6 @@ body.site-shell::after {
   .projection-bars span {
     transition: none;
     animation: none;
-  }
-
-  .click-cursor {
-    display: none;
   }
 
   .typing-caret {

@@ -115,8 +115,8 @@ gt github live [--repo OWNER/REPO] --webhook-url URL (--secret-env NAME|--secret
 gt gitlab import [--project GROUP/PROJECT] [--token-env NAME|--token-file PATH] [--from-file PATH] [--no-comments]
 gt gitlab export --project GROUP/PROJECT [--token-env NAME|--token-file PATH] [--dry-run] [--map-file PATH] [--reuse-legacy]
 gt gitlab sync --project GROUP/PROJECT [--token-env NAME|--token-file PATH] [--remote REMOTE] [--interval-ms N] [--max-pages N] [--dry-run] [--no-git-sync]
-gt web [--local] [--host 127.0.0.1] [--port 12655] [--once]
-gt web --live [--host 127.0.0.1] [--port 12655] [--repo OWNER/REPO] [--webhook-url URL] (--secret-env NAME|--secret-file PATH) [--live-host 127.0.0.1] [--live-port 12656] [--live-path /github/webhook] [--remote REMOTE] [--interval-ms N] [--no-subscribe] [--dry-run] [--no-git-sync] [--rest|--graphql]
+gt web [--local] [--host gitomi.localhost] [--port 12655] [--once]
+gt web --live [--host gitomi.localhost] [--port 12655] [--repo OWNER/REPO] [--webhook-url URL] (--secret-env NAME|--secret-file PATH) [--live-host 127.0.0.1] [--live-port 12656] [--live-path /github/webhook] [--remote REMOTE] [--interval-ms N] [--no-subscribe] [--dry-run] [--no-git-sync] [--rest|--graphql]
 ```
 
 `gt init` writes a signed genesis manifest to `refs/gitomi/genesis`, including
@@ -363,10 +363,11 @@ optional Gitomi `gt sync` push. State and mappings live under
 `--no-git-sync` to skip the surrounding Git transport steps.
 
 `gt web` starts a local-only GitHub-like web UI for the current repository. It
-binds to loopback on port 12655 by default, retrying nearby random ports if that
-port is occupied. `--local` is the default mode. `--live` starts the web UI and a
-GitHub live sync daemon in the same process; the web UI remains loopback-only,
-while the live webhook listener uses `--live-host`, `--live-port`, and
+opens as `http://gitomi.localhost:12655/` by default while binding to loopback,
+retrying nearby random ports if that port is occupied. `--local` is the default
+mode. `--live` starts the web UI and a GitHub live sync daemon in the same
+process; the web UI remains loopback-only, while the live webhook listener uses
+`--live-host`, `--live-port`, and
 `--live-path`, defaults its outbound GitHub export pass to GraphQL, accepts
 `--rest` to force REST export, requires `--webhook-url` unless `--no-subscribe`
 is used, and requires `--secret-env` or `--secret-file` for authenticated
