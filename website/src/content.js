@@ -13,7 +13,7 @@
  * @property {StartCommand[]} commands
  */
 
-const installCommand = "curl -fsSL https://raw.githubusercontent.com/nx-fi/gitomi/main/install.sh | sh";
+const installCommand = "curl -fsSL https://www.gitomi.com/install.sh | sh";
 
 /** @type {StartStep[]} */
 const startSteps = [
@@ -592,9 +592,7 @@ export function renderSite() {
     <section class="docs-section">
       <div class="docs-panel">
         <div>
-          <p class="eyebrow">Reference</p>
-          <h2>Reference documentation.</h2>
-          <p>Read the product, ref layout, workflow, merge, and CLI documentation directly in the GitHub repository.</p>
+          <h2>Reference documentation</h2>
         </div>
         <div class="docs-links" aria-label="Documentation links">
           <a href="${githubDocsBase}/README.md" target="_blank" rel="noreferrer"><span class="button-icon icon-book" aria-hidden="true"></span> README</a>

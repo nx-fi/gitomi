@@ -2156,6 +2156,8 @@ body.site-shell::after {
 
 .start-notebook {
   display: grid;
+  width: min(100%, 1120px);
+  justify-self: start;
   min-width: 0;
   overflow: hidden;
 }
@@ -2276,9 +2278,11 @@ body.site-shell::after {
 
 .docs-panel {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 340px;
-  gap: 20px;
-  padding: 20px;
+  grid-template-columns: 1fr;
+  gap: 16px;
+  justify-self: start;
+  width: min(100%, 760px);
+  padding: 22px;
   background:
     linear-gradient(120deg, color-mix(in oklch, var(--site-green) 8%, transparent), transparent 40%),
     var(--site-panel);
@@ -2286,7 +2290,7 @@ body.site-shell::after {
 
 .docs-panel > div:first-child {
   display: grid;
-  gap: 10px;
+  gap: 0;
 }
 
 .docs-links {
