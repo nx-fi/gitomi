@@ -34,11 +34,14 @@ const pdf_preview_canvas_pixel_limit = 4_000_000;
 const pdf_preview_total_pixel_limit = 40_000_000;
 const pdf_preview_css_width_limit = 1200;
 const pdf_preview_css_height_limit = 1800;
+const root_partial_priority_toolbar_refs = 20;
 const root_partial_priority_repository = 30;
 const root_partial_priority_branch = 30;
 const root_partial_priority_file_commits = 25;
+const root_partial_priority_about = 35;
 const root_partial_priority_commit_count = 35;
 const root_partial_priority_stats = 40;
+const root_partial_priority_docs = 55;
 const root_partial_priority_contributors = 45;
 const root_partial_priority_search = 50;
 const root_partial_timeout_fast_ms = 2_500;
@@ -207,6 +210,8 @@ pub fn renderCodeRootComponent(allocator: Allocator, repo: Repo, target: []const
 
     if (std.mem.eql(u8, component, "about")) {
         try appendRootAboutComponent(&buf, allocator, repo, ref);
+    } else if (std.mem.eql(u8, component, "toolbar-refs")) {
+        try appendRootToolbarRefsComponent(&buf, allocator, repo, ref);
     } else if (std.mem.eql(u8, component, "repository")) {
         try appendRootRepositoryComponent(&buf, allocator, repo, ref);
     } else if (std.mem.eql(u8, component, "repository-tracked-size")) {
@@ -458,19 +463,8 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
         defer if (summary_opt) |summary| summary.deinit(allocator);
 
         if (is_root) {
-            const branches = try loadBranchRefs(allocator, repo);
-            defer freeBranchRefs(allocator, branches);
-            const worktrees = try loadWorktreeRefs(allocator, repo);
-            defer freeWorktreeRefs(allocator, worktrees);
-            const branch_count = countRealBranches(branches);
-            const tag_count = loadRefCount(allocator, repo, "refs/tags") catch |err| switch (err) {
-                error.OutOfMemory => return err,
-                else => 0,
-            };
-            const worktree_count = worktrees.len;
-
             try appendRootPageGridStart(&buf, allocator);
-            try appendRootCodeToolbar(&buf, allocator, ref, branches, worktrees, branch_count, tag_count, worktree_count);
+            try appendRootCodeToolbar(&buf, allocator, ref);
             if (sync_flash) |flash| try appendCodeSyncFlash(&buf, allocator, flash);
             try appendRootCodePanelStart(&buf, allocator);
             try appendRootCommitBar(&buf, allocator, ref, summary_opt, null);
@@ -487,7 +481,7 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
         }
 
         if (is_root) {
-            try appendRootDocsComponent(&buf, allocator, repo, ref);
+            try appendRootDocsSlot(&buf, allocator, ref);
             try appendRootPageMainEnd(&buf, allocator);
             try appendRootSidebar(&buf, allocator, repo, ref);
             try appendRootPageGridEnd(&buf, allocator);
@@ -1198,6 +1192,66 @@ fn appendRootCodeToolbar(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
     ref: []const u8,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="root-code-toolbar">
+    , .{});
+    try appendRootCodeToolbarRefsSlot(buf, allocator, ref);
+    try appendTemplate(buf, allocator,
+        \\  <div class="root-code-toolbar-right">
+        \\    <div class="root-file-search-wrap">
+        \\      <label class="root-file-search" aria-label="Go to file">
+        \\        <span class="button-icon icon-search" aria-hidden="true"></span>
+        \\        <input type="search" data-root-file-search placeholder="Go to file" autocomplete="off" spellcheck="false">
+        \\        <kbd>T</kbd>
+        \\      </label>
+    , .{});
+    try appendRootSearchIndexSlot(buf, allocator, ref);
+    try appendTemplate(buf, allocator,
+        \\    </div>
+        \\  </div>
+        \\</div>
+    , .{});
+}
+
+fn appendRootCodeToolbarRefsSlot(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\  <div class="root-code-toolbar-left root-partial-slot"
+    , .{});
+    try appendRootPartialAttrs(buf, allocator, ref, "toolbar-refs", "Repository refs", root_partial_priority_toolbar_refs, root_partial_timeout_git_ms);
+    try appendTemplate(buf, allocator, " data-root-partial-inline>", .{});
+    try appendRootCodeToolbarRefsFallback(buf, allocator, ref);
+    try appendTemplate(buf, allocator, "</div>", .{});
+}
+
+fn appendRootCodeToolbarRefsFallback(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\    <details class="root-branch-select-wrap root-branch-menu" data-popover-menu>
+        \\      <summary class="root-branch-summary" aria-label="Branch">
+        \\        <span class="button-icon icon-branch" aria-hidden="true"></span>
+        \\        <span class="root-branch-current">
+    , .{});
+    try appendRootBranchLabelParts(buf, allocator, ref, "selected ref");
+    try appendTemplate(buf, allocator,
+        \\        </span>
+        \\        <span class="root-caret" aria-hidden="true"></span>
+        \\      </summary>
+        \\      <div class="root-branch-popover" role="menu" aria-label="Branches">
+    , .{});
+    try appendRootBranchMenuItem(buf, allocator, ref, ref, "selected ref", true);
+    try appendTemplate(buf, allocator,
+        \\      </div>
+        \\    </details>
+        \\    <a class="root-ref-link" href="/refs?type=branches"><span class="button-icon icon-branch" aria-hidden="true"></span><strong>...</strong> Branches</a>
+        \\    <a class="root-ref-link" href="/refs?type=tags"><span class="button-icon icon-tag" aria-hidden="true"></span><strong>...</strong> Tags</a>
+        \\    <a class="root-ref-link" href="/worktrees"><span class="button-icon icon-worktree" aria-hidden="true"></span><strong>...</strong> Worktrees</a>
+    , .{});
+}
+
+fn appendRootCodeToolbarRefs(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    ref: []const u8,
     branches: []const BranchRef,
     worktrees: []const WorktreeRef,
     branch_count: usize,
@@ -1205,7 +1259,6 @@ fn appendRootCodeToolbar(
     worktree_count: usize,
 ) !void {
     try appendTemplate(buf, allocator,
-        \\<div class="root-code-toolbar">
         \\  <div class="root-code-toolbar-left">
     , .{});
     try appendRootBranchMenu(buf, allocator, ref, branches, worktrees);
@@ -1214,13 +1267,6 @@ fn appendRootCodeToolbar(
         \\    <a class="root-ref-link" href="/refs?type=tags"><span class="button-icon icon-tag" aria-hidden="true"></span><strong>{tag_count}</strong> {tag_label}</a>
         \\    <a class="root-ref-link" href="/worktrees"><span class="button-icon icon-worktree" aria-hidden="true"></span><strong>{worktree_count}</strong> {worktree_label}</a>
         \\  </div>
-        \\  <div class="root-code-toolbar-right">
-        \\    <div class="root-file-search-wrap">
-        \\      <label class="root-file-search" aria-label="Go to file">
-        \\        <span class="button-icon icon-search" aria-hidden="true"></span>
-        \\        <input type="search" data-root-file-search placeholder="Go to file" autocomplete="off" spellcheck="false">
-        \\        <kbd>T</kbd>
-        \\      </label>
     , .{
         .branch_count = shared.groupedUnsigned(@intCast(branch_count)),
         .branch_label = if (branch_count == 1) "Branch" else "Branches",
@@ -1229,12 +1275,6 @@ fn appendRootCodeToolbar(
         .worktree_count = shared.groupedUnsigned(@intCast(worktree_count)),
         .worktree_label = if (worktree_count == 1) "Worktree" else "Worktrees",
     });
-    try appendRootSearchIndexSlot(buf, allocator, ref);
-    try appendTemplate(buf, allocator,
-        \\    </div>
-        \\  </div>
-        \\</div>
-    , .{});
 }
 
 fn appendCodeSyncFlash(buf: *std.ArrayList(u8), allocator: Allocator, flash: CodeSyncFlash) !void {
@@ -1257,6 +1297,20 @@ fn appendRootSearchIndexSlot(buf: *std.ArrayList(u8), allocator: Allocator, ref:
     try appendTemplate(buf, allocator,
         \\" data-root-partial-owner="gitomi" data-root-partial-label="File search index" data-root-partial-priority="{priority}" data-root-partial-timeout-ms="{timeout_ms}" data-root-partial-silent></div>
     , .{ .priority = root_partial_priority_search, .timeout_ms = root_partial_timeout_stats_ms });
+}
+
+fn appendRootDocsSlot(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="root-partial-slot root-docs-slot"
+    , .{});
+    try appendRootPartialAttrs(buf, allocator, ref, "docs", "Repository documents", root_partial_priority_docs, root_partial_timeout_stats_ms);
+    try appendTemplate(buf, allocator,
+        \\>
+        \\  <section class="panel readme-panel root-docs-panel root-docs-loading" aria-busy="true">
+        \\    <p class="root-sidebar-empty">Loading README...</p>
+        \\  </section>
+        \\</div>
+    , .{});
 }
 
 fn appendRootSearchIndex(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8, entries: []const TreeNavEntry) !void {
@@ -1877,7 +1931,8 @@ fn appendRootSidebar(
         \\<aside class="root-sidebar" aria-label="Repository details">
         \\  <section class="panel root-sidebar-panel">
     , .{});
-    try appendRootAboutComponent(buf, allocator, repo, ref);
+    _ = repo;
+    try appendRootSidebarSlot(buf, allocator, ref, "about", "About", "Loading repository summary...", root_partial_priority_about, root_partial_timeout_stats_ms);
     try appendRootSidebarSlot(buf, allocator, ref, "repository", "Repository", "Loading repository details...", root_partial_priority_repository, root_partial_timeout_git_ms);
     try appendRootSidebarSlot(buf, allocator, ref, "branch", "Branch", "Loading branch details...", root_partial_priority_branch, root_partial_timeout_git_ms);
     try appendRootStatsSlot(buf, allocator, ref);
@@ -2029,6 +2084,19 @@ fn appendRootAboutComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo:
     const about_summary = if (readme_doc) |doc| markdownSummaryOwned(allocator, doc.content) catch null else null;
     defer if (about_summary) |summary| allocator.free(summary);
     try appendRootAboutSection(buf, allocator, about_summary orelse root_about_fallback);
+}
+
+fn appendRootToolbarRefsComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8) !void {
+    const branches = try loadBranchRefs(allocator, repo);
+    defer freeBranchRefs(allocator, branches);
+    const worktrees = try loadWorktreeRefs(allocator, repo);
+    defer freeWorktreeRefs(allocator, worktrees);
+    const branch_count = countRealBranches(branches);
+    const tag_count = loadRefCount(allocator, repo, "refs/tags") catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => 0,
+    };
+    try appendRootCodeToolbarRefs(buf, allocator, ref, branches, worktrees, branch_count, tag_count, worktrees.len);
 }
 
 fn appendRootRepositoryComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8) !void {

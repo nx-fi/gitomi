@@ -952,7 +952,7 @@
   }
 
   function partialErrorNode(slot, error) {
-    if (slot.hasAttribute("data-root-partial-field")) {
+    if (slot.hasAttribute("data-root-partial-field") || slot.hasAttribute("data-root-partial-inline")) {
       const wrap = document.createElement("span");
       wrap.className = "root-partial-field-error";
 
@@ -1077,7 +1077,7 @@
     try {
       const parsed = new URL(url, window.location.href);
       if (parsed.origin !== window.location.origin) return false;
-      return /^\/code\/root\/(?:about|repository|repository-tracked-size|repository-directory-size|branch|branch-sync|branch-changes|branch-diff|branch-state|file-list|stats|contributors|docs|search|commit-count)$/.test(parsed.pathname);
+      return /^\/code\/root\/(?:about|toolbar-refs|repository|repository-tracked-size|repository-directory-size|branch|branch-sync|branch-changes|branch-diff|branch-state|file-list|stats|contributors|docs|search|commit-count)$/.test(parsed.pathname);
     } catch (_) {
       return false;
     }

@@ -24,7 +24,7 @@ const loadConfig = repo_mod.loadConfig;
 const default_web_shortcut_leader = "Space";
 const default_web_shortcut_keys = "A S D F J K L E R U I O W Q P Z X C V B N M G H Y T";
 const default_web_shortcut_timeout_ms: u64 = 900;
-const asset_version = "20260519-root-file-commits";
+const asset_version = "20260519-root-fast-load";
 
 const WebStats = struct {
     inbox_refs: usize = 0,
@@ -1295,27 +1295,27 @@ fn appendShortcutConfigScript(buf: *std.ArrayList(u8), allocator: Allocator, cfg
 pub fn appendShellEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
     try appendTemplate(buf, allocator,
         \\</main>
-        \\<script src="/theme.js?v={asset_version}"></script>
-        \\<script src="/ui.js?v={asset_version}"></script>
-        \\<script src="/shortcuts.js?v={asset_version}"></script>
-        \\<script src="/fuzzy-search.js?v={asset_version}"></script>
-        \\<script src="/tree.js?v={asset_version}"></script>
-        \\<script src="/code.js?v={asset_version}"></script>
-        \\<script src="/pdf.js?v={asset_version}"></script>
-        \\<script src="/projects.js?v={asset_version}"></script>
-        \\<script src="/vendor/marked/marked.umd.min.js"></script>
-        \\<script src="/vendor/dompurify/purify.min.js"></script>
-        \\<script src="/vendor/katex/katex.min.js"></script>
-        \\<script src="/vendor/katex/auto-render.min.js"></script>
-        \\<script src="/vendor/mermaid/mermaid.min.js"></script>
-        \\<script src="/markdown.js?v={asset_version}"></script>
-        \\<script src="/vendor/hljs/all-languages.min.js"></script>
-        \\<script src="/highlight/zig.js?v={asset_version}"></script>
-        \\<script src="/highlight/solidity.js?v={asset_version}"></script>
-        \\<script src="/highlight/tla.js?v={asset_version}"></script>
-        \\<script src="/highlight/init.js?v={asset_version}"></script>
-        \\<script src="/diff.js?v={asset_version}"></script>
-        \\<script src="/merge.js?v={asset_version}"></script>
+        \\<script defer src="/theme.js?v={asset_version}"></script>
+        \\<script defer src="/ui.js?v={asset_version}"></script>
+        \\<script defer src="/shortcuts.js?v={asset_version}"></script>
+        \\<script defer src="/fuzzy-search.js?v={asset_version}"></script>
+        \\<script defer src="/tree.js?v={asset_version}"></script>
+        \\<script defer src="/code.js?v={asset_version}"></script>
+        \\<script defer src="/pdf.js?v={asset_version}"></script>
+        \\<script defer src="/projects.js?v={asset_version}"></script>
+        \\<script defer src="/vendor/marked/marked.umd.min.js"></script>
+        \\<script defer src="/vendor/dompurify/purify.min.js"></script>
+        \\<script defer src="/vendor/katex/katex.min.js"></script>
+        \\<script defer src="/vendor/katex/auto-render.min.js"></script>
+        \\<script defer src="/vendor/mermaid/mermaid.min.js"></script>
+        \\<script defer src="/markdown.js?v={asset_version}"></script>
+        \\<script defer src="/vendor/hljs/all-languages.min.js"></script>
+        \\<script defer src="/highlight/zig.js?v={asset_version}"></script>
+        \\<script defer src="/highlight/solidity.js?v={asset_version}"></script>
+        \\<script defer src="/highlight/tla.js?v={asset_version}"></script>
+        \\<script defer src="/highlight/init.js?v={asset_version}"></script>
+        \\<script defer src="/diff.js?v={asset_version}"></script>
+        \\<script defer src="/merge.js?v={asset_version}"></script>
         \\</body>
         \\</html>
     , .{ .asset_version = asset_version });
