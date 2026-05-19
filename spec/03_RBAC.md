@@ -70,6 +70,22 @@ owner > maintainer > contributor > reporter > reader
 
 A principal with a higher role implicitly holds all permissions of every lower role. Implementations MUST enforce this inheritance when evaluating permissions.
 
+### 2.3. Teams
+
+Teams are repository-local RBAC groups. A team is identified by a ref-safe slug
+and receives ACL grants through the canonical team principal `@<slug>`, for
+example `@core`.
+
+A user principal's effective write role is the highest ranked role from:
+
+*   the user's direct ACL grant; and
+*   all active team ACL grants for teams where the user is an active member.
+
+Team membership does not bind signing keys and teams do not sign events. Device
+authorization remains scoped to the user principal and device in the event
+actor. v1 teams are not nested and are not issue assignees, pull reviewers, or
+project members.
+
 ## 3. Permission Matrix
 
 ### 3.1. Permissions
@@ -213,6 +229,10 @@ Every event type MUST map to a required permission. The following defines the ma
 | `notification.unsubscribed` | `notification.manage_own` or `notification.manage_any` | principal |
 | `notification.read`      | `notification.manage_own` or `notification.manage_any` | principal |
 | `notification.read_all`  | `notification.manage_own` or `notification.manage_any` | principal |
+| `team.created`           | `identity.manage`         | —       |
+| `team.updated`           | `identity.manage`         | —       |
+| `team.member_added`      | `identity.manage`         | —       |
+| `team.member_removed`    | `identity.manage`         | —       |
 
 When the scope column says "object", the reducer MUST check whether `_own` is sufficient (actor authored the object) or whether `_any` is required.
 When the scope column says "actor", the event is limited by event shape to the

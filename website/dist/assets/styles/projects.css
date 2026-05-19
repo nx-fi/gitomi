@@ -1,3 +1,7 @@
+:root {
+  --project-dataset-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='4' y='4' width='16' height='16' rx='2' fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'/%3E%3Crect x='7' y='8' width='4' height='4' rx='.4' fill='black'/%3E%3Crect x='13' y='8' width='4' height='4' rx='.4' fill='black'/%3E%3Crect x='7' y='14' width='4' height='4' rx='.4' fill='black'/%3E%3Crect x='13' y='14' width='4' height='4' rx='.4' fill='black'/%3E%3C/svg%3E");
+}
+
 .project-create-panel,
 .kanban-panel {
   overflow: hidden;
@@ -243,13 +247,13 @@
   min-width: 0;
 }
 .project-index-icon {
-  position: relative;
   width: 18px;
   height: 18px;
+  flex: 0 0 auto;
   color: var(--muted);
-  border: 2px solid currentColor;
-  border-radius: 5px;
-  transform: rotate(45deg) skew(-8deg, -8deg);
+  background: currentColor;
+  -webkit-mask: var(--project-dataset-icon) center / contain no-repeat;
+  mask: var(--project-dataset-icon) center / contain no-repeat;
 }
 .project-index-health,
 .project-index-lead,
@@ -357,9 +361,10 @@
 .project-view-board-icon {
   width: 16px;
   height: 16px;
-  border: 2px solid currentColor;
-  border-radius: var(--radius-xs);
-  box-shadow: inset 5px 0 0 color-mix(in oklch, currentColor 45%, transparent);
+  flex: 0 0 auto;
+  background: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Crect x='4' y='5' width='16' height='14' rx='2'/%3E%3Cpath d='M9 8v8M12 8v8M15 8v8'/%3E%3C/g%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Crect x='4' y='5' width='16' height='14' rx='2'/%3E%3Cpath d='M9 8v8M12 8v8M15 8v8'/%3E%3C/g%3E%3C/svg%3E") center / contain no-repeat;
 }
 .project-view-overview-icon {
   width: 16px;
@@ -479,22 +484,13 @@
   overflow-wrap: anywhere;
 }
 .project-overview-icon {
-  position: relative;
   width: 34px;
   height: 34px;
   flex: 0 0 auto;
   color: var(--muted);
-  background: var(--panel-strong);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-}
-.project-overview-icon::before {
-  content: "";
-  position: absolute;
-  inset: 8px;
-  border: 2px solid currentColor;
-  border-radius: var(--radius-sm);
-  transform: rotate(45deg) skew(-8deg, -8deg);
+  background: currentColor;
+  -webkit-mask: var(--project-dataset-icon) center / contain no-repeat;
+  mask: var(--project-dataset-icon) center / contain no-repeat;
 }
 .project-overview-head-stats {
   display: flex;
@@ -1228,8 +1224,8 @@
   border-color: var(--button-secondary-hover-border);
 }
 .project-update-action .issue-comments-icon {
-  width: 16px;
-  height: 14px;
+  width: 17px;
+  height: 17px;
 }
 .project-update-action .reaction-add-icon {
   width: 17px;
@@ -2807,10 +2803,11 @@
 }
 .kanban-card-comments::before {
   content: "";
-  width: 12px;
-  height: 10px;
-  border: 2px solid currentColor;
-  border-radius: var(--radius-xs);
+  width: 14px;
+  height: 14px;
+  background: currentColor;
+  -webkit-mask: var(--issue-comments-icon) center / contain no-repeat;
+  mask: var(--issue-comments-icon) center / contain no-repeat;
 }
 .kanban-empty-drop {
   min-height: 68px;

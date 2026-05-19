@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const common = @import("common.zig");
+const reactions = @import("reactions.zig");
 
 const event_json = common.event_json;
 const git = common.git;
@@ -27,6 +28,9 @@ const max_projected_project_fields = common.max_projected_project_fields;
 const max_projected_project_field_options = common.max_projected_project_field_options;
 const max_projected_project_views = common.max_projected_project_views;
 const default_project_status = common.default_project_status;
+const insertReaction = reactions.insertReaction;
+const deleteReaction = reactions.deleteReaction;
+const reactionLimitRejection = reactions.reactionLimitRejection;
 
 pub fn applyProjectProjection(allocator: Allocator, db: *SqliteDb, event_hash: []const u8, envelope: ValidatedEnvelope, body: []const u8) !?[]const u8 {
     if (!std.mem.startsWith(u8, envelope.event_type, "project.")) return null;
@@ -119,6 +123,13 @@ pub fn applyProjectProjection(allocator: Allocator, db: *SqliteDb, event_hash: [
     } else if (std.mem.eql(u8, envelope.event_type, "project.view_removed")) {
         const view_id = event_json.jsonString(payload.get("view_id")) orelse return "invalid_event_envelope";
         try updateProjectViewState(allocator, db, envelope.object_id, view_id, "removed", event_hash, envelope);
+    } else if (std.mem.eql(u8, envelope.event_type, "project.reaction_added")) {
+        const emoji = event_json.jsonString(payload.get("emoji")) orelse return "invalid_event_envelope";
+        try insertReaction(db, "project", envelope.object_id, emoji, envelope.actor_principal, event_hash, envelope.occurred_at);
+        if (try reactionLimitRejection(db, "project", envelope.object_id)) |reason| return reason;
+    } else if (std.mem.eql(u8, envelope.event_type, "project.reaction_removed")) {
+        const emoji = event_json.jsonString(payload.get("emoji")) orelse return "invalid_event_envelope";
+        try deleteReaction(allocator, db, "project", envelope.object_id, emoji, envelope.actor_principal, event_hash, payload);
     }
     return null;
 }

@@ -108,7 +108,7 @@ fn renderIssueDetailPageWithCommentForm(
     try buf.append(allocator, ' ');
     try appendRelativeTime(&buf, allocator, detail.opened_at);
     try buf.appendSlice(allocator, "</span></div>");
-    try appendIssueActionMenu(&buf, allocator, "issue-description", "", detail.body, detail.body.len != 0, issue_edit_href);
+    try appendIssueActionMenu(&buf, allocator, "issue-description", "issue", detail.body, detail.body.len != 0, issue_edit_href);
     try buf.appendSlice(allocator,
         \\          </header>
         \\          <div class="markdown-body"
@@ -129,7 +129,7 @@ fn renderIssueDetailPageWithCommentForm(
     try buf.appendSlice(allocator,
         \\          </div>
     );
-    try issue_reactions.appendBar(&buf, allocator, &db, "issue", detail.id, raw_ref, "", current_actor, csrf_token);
+    try issue_reactions.appendBar(&buf, allocator, &db, "issue", detail.id, raw_ref, "issue", current_actor, csrf_token);
     try buf.appendSlice(allocator,
         \\        </article>
         \\      </div>
@@ -137,6 +137,7 @@ fn renderIssueDetailPageWithCommentForm(
     try appendIssueComments(&buf, allocator, &db, raw_ref, detail.id, current_actor, current_role, csrf_token);
     try issue_timeline.append(&buf, allocator, &db, detail.id);
     try appendIssueCommentForm(&buf, allocator, raw_ref, detail.state, current_actor, csrf_token, comment_error, comment_value);
+    try appendIssueInlineReplyTemplate(&buf, allocator, raw_ref, csrf_token);
     try buf.appendSlice(allocator, "    </div><aside class=\"issue-meta-sidebar\">");
     try issue_sidebar.append(&buf, allocator, &db, raw_ref, detail.id, display_author, detail.milestone, detail.issue_type, detail.priority, detail.status, detail.body);
     try buf.appendSlice(allocator, "</aside></div></section>");
@@ -483,59 +484,146 @@ fn appendIssueComments(
 ) !void {
     var stmt = try work_items.prepareCommentsStmt(db, "issue", issue_id);
     defer stmt.deinit();
+    var rows: std.ArrayList(work_items.CommentRow) = .empty;
+    defer {
+        for (rows.items) |row| row.deinit(allocator);
+        rows.deinit(allocator);
+    }
     while (try stmt.step()) {
         const row = try work_items.commentRowFromStmt(allocator, &stmt);
-        defer row.deinit(allocator);
-        const anchor = try std.fmt.allocPrint(allocator, "comment-{s}", .{row.id[0..@min(row.id.len, 7)]});
-        defer allocator.free(anchor);
-        var comment_ref_buf: [util.short_object_ref_len]u8 = undefined;
-        const comment_ref = util.shortObjectRef(&comment_ref_buf, row.id);
-        const comment_ref_value = try std.fmt.allocPrint(allocator, "comment:{s}", .{comment_ref});
-        defer allocator.free(comment_ref_value);
-        const can_edit_comment = !row.redacted and currentActorCanEditAuthor(current_actor, current_role, row.author_principal);
-        const comment_edit_href = if (can_edit_comment) try issueEditHrefOwned(allocator, raw_ref, comment_ref_value) else "";
-        defer if (can_edit_comment) allocator.free(comment_edit_href);
-
-        try appendTemplate(buf, allocator,
-            \\<div class="{classes}" id="{anchor}"><div class="issue-timeline-avatar">
-        , .{
-            .classes = shared.classes("issue-timeline-item", &.{shared.class("is-reply", row.isReply())}),
-            .anchor = anchor,
-        });
-        try appendIssueAvatar(buf, allocator, row.display_author, row.source_avatar_url, "issue-detail-avatar");
-        try appendTemplate(buf, allocator,
-            \\</div><article class="issue-comment-box"><header class="issue-comment-head"><div><strong>{author}</strong><span>commented
-        , .{
-            .author = row.display_author,
-        });
-        try buf.append(allocator, ' ');
-        try appendRelativeTime(buf, allocator, row.created_at);
-        try buf.appendSlice(allocator, "</span></div>");
-        try appendIssueActionMenu(buf, allocator, anchor, comment_ref_value, row.body, !row.redacted and row.body.len != 0, comment_edit_href);
-        try buf.appendSlice(allocator, "</header>");
-        if (row.isReply()) {
-            try buf.appendSlice(allocator, "<p class=\"reply-note\">Reply to ");
-            if (row.reply_parent_id.len != 0) {
-                try appendTemplate(buf, allocator, "#{reply_parent_id}", .{
-                    .reply_parent_id = row.reply_parent_id[0..@min(row.reply_parent_id.len, 7)],
-                });
-            } else {
-                try appendTemplate(buf, allocator, "{reply_parent_hash}", .{
-                    .reply_parent_hash = row.reply_parent_hash[0..@min(row.reply_parent_hash.len, 12)],
-                });
-            }
-            try buf.appendSlice(allocator, "</p>");
-        }
-        try buf.appendSlice(allocator, "<div class=\"markdown-body\">");
-        if (row.redacted) {
-            try buf.appendSlice(allocator, "<p class=\"muted\">Comment redacted.</p>");
-        } else {
-            try shared.appendMarkdownSource(buf, allocator, row.body, .{});
-        }
-        try buf.appendSlice(allocator, "</div>");
-        try issue_reactions.appendBar(buf, allocator, db, "comment", row.id, raw_ref, comment_ref_value, current_actor, csrf_token);
-        try buf.appendSlice(allocator, "</article></div>");
+        errdefer row.deinit(allocator);
+        try rows.append(allocator, row);
     }
+    if (rows.items.len == 0) return;
+
+    const rendered = try allocator.alloc(bool, rows.items.len);
+    defer allocator.free(rendered);
+    @memset(rendered, false);
+
+    for (rows.items, 0..) |row, row_index| {
+        if (repliesToThreadRoot(row, issue_id)) {
+            try appendIssueCommentBranch(buf, allocator, db, rows.items, rendered, row_index, 1, issue_id, raw_ref, current_actor, current_role, csrf_token);
+        }
+    }
+    for (rows.items, 0..) |row, row_index| {
+        if (!rendered[row_index] and row.reply_parent_id.len == 0) {
+            try appendIssueCommentBranch(buf, allocator, db, rows.items, rendered, row_index, 0, issue_id, raw_ref, current_actor, current_role, csrf_token);
+        }
+    }
+    for (rows.items, 0..) |_, row_index| {
+        if (!rendered[row_index]) {
+            try appendIssueCommentBranch(buf, allocator, db, rows.items, rendered, row_index, 0, issue_id, raw_ref, current_actor, current_role, csrf_token);
+        }
+    }
+}
+
+fn repliesToThreadRoot(row: work_items.CommentRow, thread_root_id: []const u8) bool {
+    return row.reply_parent_id.len != 0 and std.mem.eql(u8, row.reply_parent_id, thread_root_id);
+}
+
+fn appendIssueCommentBranch(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    rows: []const work_items.CommentRow,
+    rendered: []bool,
+    row_index: usize,
+    depth: usize,
+    thread_root_id: []const u8,
+    raw_ref: []const u8,
+    current_actor: ?[]const u8,
+    current_role: ?[]const u8,
+    csrf_token: []const u8,
+) !void {
+    if (rendered[row_index]) return;
+    rendered[row_index] = true;
+
+    const row = rows[row_index];
+    try appendIssueCommentRow(buf, allocator, db, row, depth, thread_root_id, raw_ref, current_actor, current_role, csrf_token);
+
+    for (rows, 0..) |child, child_index| {
+        if (!rendered[child_index] and child.reply_parent_id.len != 0 and std.mem.eql(u8, child.reply_parent_id, row.id)) {
+            try appendIssueCommentBranch(buf, allocator, db, rows, rendered, child_index, depth + 1, thread_root_id, raw_ref, current_actor, current_role, csrf_token);
+        }
+    }
+}
+
+fn appendIssueCommentRow(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    row: work_items.CommentRow,
+    depth: usize,
+    thread_root_id: []const u8,
+    raw_ref: []const u8,
+    current_actor: ?[]const u8,
+    current_role: ?[]const u8,
+    csrf_token: []const u8,
+) !void {
+    const anchor = try std.fmt.allocPrint(allocator, "comment-{s}", .{row.id[0..@min(row.id.len, 7)]});
+    defer allocator.free(anchor);
+    var comment_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const comment_ref = util.shortObjectRef(&comment_ref_buf, row.id);
+    const comment_ref_value = try std.fmt.allocPrint(allocator, "comment:{s}", .{comment_ref});
+    defer allocator.free(comment_ref_value);
+    const can_edit_comment = !row.redacted and currentActorCanEditAuthor(current_actor, current_role, row.author_principal);
+    const comment_edit_href = if (can_edit_comment) try issueEditHrefOwned(allocator, raw_ref, comment_ref_value) else "";
+    defer if (can_edit_comment) allocator.free(comment_edit_href);
+    const depth_class = commentDepthClass(depth);
+
+    try appendTemplate(buf, allocator,
+        \\<div class="{classes}" id="{anchor}"><div class="issue-timeline-avatar">
+    , .{
+        .classes = shared.classes("issue-timeline-item", &.{
+            shared.class("is-reply", row.isReply() or depth > 0),
+            shared.class(depth_class, depth_class.len != 0),
+        }),
+        .anchor = anchor,
+    });
+    try appendIssueAvatar(buf, allocator, row.display_author, row.source_avatar_url, "issue-detail-avatar");
+    try appendTemplate(buf, allocator,
+        \\</div><article class="issue-comment-box"><header class="issue-comment-head"><div><strong>{author}</strong><span>commented
+    , .{
+        .author = row.display_author,
+    });
+    try buf.append(allocator, ' ');
+    try appendRelativeTime(buf, allocator, row.created_at);
+    try buf.appendSlice(allocator, "</span></div>");
+    try appendIssueActionMenu(buf, allocator, anchor, comment_ref_value, row.body, !row.redacted and row.body.len != 0, comment_edit_href);
+    try buf.appendSlice(allocator, "</header>");
+    if (row.isReply()) {
+        try buf.appendSlice(allocator, "<p class=\"reply-note\">Reply to ");
+        if (std.mem.eql(u8, row.reply_parent_id, thread_root_id)) {
+            try buf.appendSlice(allocator, "issue description");
+        } else if (row.reply_parent_id.len != 0) {
+            try appendTemplate(buf, allocator, "#{reply_parent_id}", .{
+                .reply_parent_id = row.reply_parent_id[0..@min(row.reply_parent_id.len, 7)],
+            });
+        } else {
+            try appendTemplate(buf, allocator, "{reply_parent_hash}", .{
+                .reply_parent_hash = row.reply_parent_hash[0..@min(row.reply_parent_hash.len, 12)],
+            });
+        }
+        try buf.appendSlice(allocator, "</p>");
+    }
+    try buf.appendSlice(allocator, "<div class=\"markdown-body\">");
+    if (row.redacted) {
+        try buf.appendSlice(allocator, "<p class=\"muted\">Comment redacted.</p>");
+    } else {
+        try shared.appendMarkdownSource(buf, allocator, row.body, .{});
+    }
+    try buf.appendSlice(allocator, "</div>");
+    try issue_reactions.appendBar(buf, allocator, db, "comment", row.id, raw_ref, comment_ref_value, current_actor, csrf_token);
+    try buf.appendSlice(allocator, "</article></div>");
+}
+
+fn commentDepthClass(depth: usize) []const u8 {
+    return switch (@min(depth, 3)) {
+        0 => "",
+        1 => "comment-depth-1",
+        2 => "comment-depth-2",
+        else => "comment-depth-3",
+    };
 }
 
 pub fn appendIssueActionMenu(
@@ -676,7 +764,7 @@ fn appendIssueCommentForm(
     const state_class = if (std.mem.eql(u8, state, "closed")) "primary is-reopen" else "secondary is-close";
     try buf.appendSlice(allocator,
         \\    <div class="issue-comment-form-actions">
-        \\      <button class="button secondary" type="submit" name="action" value="comment">Comment</button>
+        \\      <button class="button secondary" type="submit" name="action" value="comment">Reply</button>
     );
     try appendTemplate(buf, allocator,
         \\      <button class="button {state_class} issue-state-submit" type="submit" name="action" value="{state_action}" formnovalidate>{state_label}</button>
@@ -689,6 +777,26 @@ fn appendIssueCommentForm(
         \\    </div>
         \\  </form>
         \\</div>
+    );
+}
+
+fn appendIssueInlineReplyTemplate(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8, csrf_token: []const u8) !void {
+    try buf.appendSlice(allocator, "<template data-comment-reply-form-template>");
+    try buf.appendSlice(allocator, "<form class=\"inline-comment-reply-form issue-comment-form\" method=\"post\" action=\"/issues/");
+    try shared.appendUrlEncoded(buf, allocator, raw_ref);
+    try appendTemplate(buf, allocator,
+        \\/comments" data-inline-comment-reply-form>
+        \\  <input type="hidden" name="{csrf_field}" value="{csrf_token}">
+        \\  <input type="hidden" name="action" value="comment">
+        \\  <input type="hidden" name="reply_parent_ref" value="" data-reply-parent-ref>
+    , .{ .csrf_field = zwf.csrf.field_name, .csrf_token = csrf_token });
+    try shared.appendMarkdownEditor(buf, allocator, .{ .rows = 4 });
+    try buf.appendSlice(allocator,
+        \\  <div class="issue-comment-form-actions">
+        \\    <button class="button secondary" type="button" data-comment-reply-cancel>Cancel</button>
+        \\    <button class="button primary" type="submit">Reply</button>
+        \\  </div>
+        \\</form></template>
     );
 }
 
@@ -995,22 +1103,42 @@ pub fn handleIssueCommentPost(allocator: Allocator, repo: Repo, stream: std.net.
         defer if (reply_ref_owned) |value| allocator.free(value);
         const reply_ref = if (reply_ref_owned) |value| std.mem.trim(u8, value, " \t\r\n") else "";
         if (reply_ref.len != 0) {
-            const reply_parent_id = index.resolveCommentId(allocator, repo, reply_ref) catch {
-                const page = try renderIssueDetailPageWithCommentForm(allocator, repo, raw_ref, csrf_token, "Reply target was not found.", body_owned);
-                defer allocator.free(page);
-                try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", page, null);
-                return;
+            const root_hash_owned: ?[]u8 = if (isIssueDescriptionReplyRef(reply_ref))
+                try index.workItemBodyEventHash(allocator, repo, "issue", issue_id)
+            else
+                null;
+            defer if (root_hash_owned) |value| allocator.free(value);
+
+            const ReplyTarget = struct {
+                id: []const u8,
+                hash: []const u8,
+                owned: bool,
             };
-            defer allocator.free(reply_parent_id);
-            var parent = try index.commentParentInfo(allocator, repo, reply_parent_id);
-            defer parent.deinit();
-            if (!std.mem.eql(u8, parent.parent_kind, "issue") or !std.mem.eql(u8, parent.parent_id, issue_id)) {
-                const page = try renderIssueDetailPageWithCommentForm(allocator, repo, raw_ref, csrf_token, "Reply target is not in this issue.", body_owned);
-                defer allocator.free(page);
-                try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", page, null);
-                return;
-            }
-            createCommentReplyEvent(allocator, "issue", issue_id, reply_parent_id, parent.add_hash, body_owned) catch {
+            const reply_target: ReplyTarget = if (root_hash_owned) |root_hash|
+                .{ .id = issue_id, .hash = root_hash, .owned = false }
+            else blk: {
+                const comment_id = index.resolveCommentId(allocator, repo, reply_ref) catch {
+                    const page = try renderIssueDetailPageWithCommentForm(allocator, repo, raw_ref, csrf_token, "Reply target was not found.", body_owned);
+                    defer allocator.free(page);
+                    try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", page, null);
+                    return;
+                };
+                errdefer allocator.free(comment_id);
+                var parent = try index.commentParentInfo(allocator, repo, comment_id);
+                defer parent.deinit();
+                if (!std.mem.eql(u8, parent.parent_kind, "issue") or !std.mem.eql(u8, parent.parent_id, issue_id)) {
+                    allocator.free(comment_id);
+                    const page = try renderIssueDetailPageWithCommentForm(allocator, repo, raw_ref, csrf_token, "Reply target is not in this issue.", body_owned);
+                    defer allocator.free(page);
+                    try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", page, null);
+                    return;
+                }
+                break :blk .{ .id = comment_id, .hash = try allocator.dupe(u8, parent.add_hash), .owned = true };
+            };
+            defer if (reply_target.owned) allocator.free(reply_target.id);
+            defer if (reply_target.owned) allocator.free(reply_target.hash);
+
+            createCommentReplyEvent(allocator, "issue", issue_id, reply_target.id, reply_target.hash, body_owned) catch {
                 const page = try renderIssueDetailPageWithCommentForm(
                     allocator,
                     repo,
@@ -1062,6 +1190,10 @@ pub fn handleIssueCommentPost(allocator: Allocator, repo: Repo, stream: std.net.
     const location = try std.fmt.allocPrint(allocator, "/issues/{s}", .{raw_ref});
     defer allocator.free(location);
     try sendRedirect(allocator, stream, location);
+}
+
+fn isIssueDescriptionReplyRef(reply_ref: []const u8) bool {
+    return std.mem.eql(u8, reply_ref, "issue") or std.mem.eql(u8, reply_ref, "issue-description");
 }
 
 pub fn handleIssueNotificationPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {

@@ -1,6 +1,7 @@
 const std = @import("std");
 const index = @import("../../index.zig");
 const repo_mod = @import("../../repo.zig");
+const settings = @import("../../settings.zig");
 const util = @import("../../util.zig");
 const project_chrome = @import("chrome.zig");
 const project_data = @import("data.zig");
@@ -70,6 +71,7 @@ const activeBuiltinProjectView = project_data.activeBuiltinProjectView;
 const projectTableFieldsFromConfig = project_data.projectTableFieldsFromConfig;
 const bindProjectIssueFilter = project_data.bindProjectIssueFilter;
 const projectExists = project_data.projectExists;
+const projectIdOwned = project_data.projectIdOwned;
 const appendProjectWorkspaceChromeStart = project_chrome.appendProjectWorkspaceChromeStart;
 const appendProjectColumnOptions = project_chrome.appendProjectColumnOptions;
 const appendProjectPriorityOptions = project_chrome.appendProjectPriorityOptions;
@@ -106,27 +108,36 @@ pub fn renderProjectWorkspace(
         return buf.toOwnedSlice(allocator);
     }
 
-    if (view_ref.len == 0 or std.mem.eql(u8, view_ref, "overview")) {
+    const project_id = try projectIdOwned(allocator, db, project);
+    defer if (project_id) |value| allocator.free(value);
+    const saved_view = if (view_ref.len == 0 and project_id != null)
+        settings.loadProjectDefaultView(allocator, repo, project_id.?) catch null
+    else
+        null;
+    defer if (saved_view) |value| allocator.free(value);
+    const effective_view_ref = if (view_ref.len == 0) (saved_view orelse "overview") else view_ref;
+
+    if (std.mem.eql(u8, effective_view_ref, "overview")) {
         try appendProjectOverview(&buf, allocator, repo, db, project, csrf_token);
         try appendShellEnd(&buf, allocator);
         return buf.toOwnedSlice(allocator);
     }
-    if (std.mem.eql(u8, view_ref, "activity")) {
+    if (std.mem.eql(u8, effective_view_ref, "activity")) {
         try appendProjectActivityView(&buf, allocator, repo, db, project, csrf_token);
         try appendShellEnd(&buf, allocator);
         return buf.toOwnedSlice(allocator);
     }
 
-    var active_view = try resolveActiveProjectView(allocator, db, project, view_ref);
+    var active_view = try resolveActiveProjectView(allocator, db, project, effective_view_ref);
     defer active_view.deinit(allocator);
     const current_principal = (try shared.currentPrincipalOwned(allocator, repo)) orelse try allocator.dupe(u8, "");
     defer allocator.free(current_principal);
 
     switch (active_view.layout) {
-        .table => try project_table.appendProjectTable(&buf, allocator, db, project, &active_view, current_principal, target),
-        .board => try project_board.appendProjectBoard(&buf, allocator, db, project, &active_view, current_principal),
-        .roadmap => try project_roadmap.appendProjectRoadmap(&buf, allocator, db, project, &active_view, current_principal),
-        .issues => try project_issues.appendProjectIssues(&buf, allocator, db, project, &active_view, current_principal),
+        .table => try project_table.appendProjectTable(&buf, allocator, db, project, &active_view, current_principal, target, csrf_token),
+        .board => try project_board.appendProjectBoard(&buf, allocator, db, project, &active_view, current_principal, csrf_token),
+        .roadmap => try project_roadmap.appendProjectRoadmap(&buf, allocator, db, project, &active_view, current_principal, csrf_token),
+        .issues => try project_issues.appendProjectIssues(&buf, allocator, db, project, &active_view, current_principal, csrf_token),
     }
 
     try appendShellEnd(&buf, allocator);
@@ -161,7 +172,7 @@ test "project workspace title does not prepend at sign" {
     defer active_view.deinit(std.testing.allocator);
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
-    try appendProjectWorkspaceChromeStart(&buf, std.testing.allocator, &db, "Release & Plan", 0, &active_view);
+    try appendProjectWorkspaceChromeStart(&buf, std.testing.allocator, &db, "Release & Plan", 0, &active_view, "csrf-test");
 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<h1>Release &amp; Plan</h1>") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<h1>@Release") == null);

@@ -74,6 +74,40 @@ pub fn createIndexSchema(db: *SqliteDb) !void {
         \\  PRIMARY KEY(alias_kind, alias_value)
         \\);
         \\CREATE INDEX identity_aliases_identity_idx ON identity_aliases(identity_id);
+        \\CREATE TABLE teams (
+        \\  slug TEXT PRIMARY KEY,
+        \\  name TEXT NOT NULL,
+        \\  name_occurred_at TEXT NOT NULL,
+        \\  name_actor_principal TEXT NOT NULL,
+        \\  name_event_hash TEXT NOT NULL,
+        \\  description TEXT NOT NULL,
+        \\  description_occurred_at TEXT NOT NULL,
+        \\  description_actor_principal TEXT NOT NULL,
+        \\  description_event_hash TEXT NOT NULL,
+        \\  created_at TEXT NOT NULL,
+        \\  actor_principal TEXT NOT NULL,
+        \\  event_hash TEXT NOT NULL
+        \\);
+        \\CREATE TABLE team_members (
+        \\  slug TEXT NOT NULL,
+        \\  principal TEXT NOT NULL,
+        \\  add_hash TEXT NOT NULL,
+        \\  created_at TEXT NOT NULL,
+        \\  actor_principal TEXT NOT NULL,
+        \\  PRIMARY KEY(slug, principal, add_hash)
+        \\);
+        \\CREATE INDEX team_members_slug_idx ON team_members(slug, principal);
+        \\CREATE INDEX team_members_principal_idx ON team_members(principal, slug);
+        \\CREATE TABLE team_member_events (
+        \\  slug TEXT NOT NULL,
+        \\  principal TEXT NOT NULL,
+        \\  event_hash TEXT NOT NULL,
+        \\  event_type TEXT NOT NULL,
+        \\  created_at TEXT NOT NULL,
+        \\  actor_principal TEXT NOT NULL,
+        \\  PRIMARY KEY(slug, principal, event_hash)
+        \\);
+        \\CREATE INDEX team_member_events_principal_idx ON team_member_events(principal, slug);
         \\CREATE TABLE issues (
         \\  id TEXT PRIMARY KEY,
         \\  title TEXT NOT NULL,

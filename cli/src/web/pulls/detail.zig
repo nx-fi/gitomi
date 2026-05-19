@@ -551,7 +551,7 @@ fn appendPullConversation(
     try appendTemplate(buf, allocator,
         \\</span></div>
     , .{});
-    try issues_page.appendIssueActionMenu(buf, allocator, "pull-description", "", detail.body, detail.body.len != 0, "");
+    try issues_page.appendIssueActionMenu(buf, allocator, "pull-description", "pull", detail.body, detail.body.len != 0, "");
     try buf.appendSlice(allocator,
         \\</header>
         \\  <div class="markdown-body"
@@ -570,12 +570,13 @@ fn appendPullConversation(
         try shared.appendMarkdownSource(buf, allocator, detail.body, .{});
     }
     try buf.appendSlice(allocator, "</div>");
-    try pull_comments.appendReactionBar(buf, allocator, db, "pull", detail.id, raw_ref, "", current_actor);
+    try pull_comments.appendReactionBar(buf, allocator, db, "pull", detail.id, raw_ref, "pull", current_actor);
     try buf.appendSlice(allocator, "</article></div>");
     try pull_comments.appendComments(buf, allocator, db, raw_ref, detail.id, current_actor);
     try appendPullMergeabilityTimeline(buf, allocator, detail, raw_ref, counts.commits, merge_status, csrf_token, merge_error);
     try appendPullResolutionTimeline(buf, allocator, detail);
     try pull_comments.appendCommentForm(buf, allocator, raw_ref, current_actor);
+    try pull_comments.appendInlineReplyTemplate(buf, allocator, raw_ref);
     try buf.appendSlice(allocator, "</div>");
 }
 
@@ -1128,18 +1129,38 @@ pub fn handlePullCommentPost(allocator: Allocator, repo: Repo, stream: std.net.S
 
     const reply_ref = std.mem.trim(u8, findFormField(fields, "reply_parent_ref") orelse "", " \t\r\n");
     if (reply_ref.len != 0) {
-        const reply_parent_id = index.resolveCommentId(allocator, repo, reply_ref) catch {
-            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Reply target was not found\n");
-            return;
+        const root_hash_owned: ?[]u8 = if (isPullDescriptionReplyRef(reply_ref))
+            try index.workItemBodyEventHash(allocator, repo, "pull", pull_id)
+        else
+            null;
+        defer if (root_hash_owned) |value| allocator.free(value);
+
+        const ReplyTarget = struct {
+            id: []const u8,
+            hash: []const u8,
+            owned: bool,
         };
-        defer allocator.free(reply_parent_id);
-        var parent = try index.commentParentInfo(allocator, repo, reply_parent_id);
-        defer parent.deinit();
-        if (!std.mem.eql(u8, parent.parent_kind, "pull") or !std.mem.eql(u8, parent.parent_id, pull_id)) {
-            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Reply target is not in this pull request\n");
-            return;
-        }
-        createCommentReplyEvent(allocator, "pull", pull_id, reply_parent_id, parent.add_hash, body_value) catch {
+        const reply_target: ReplyTarget = if (root_hash_owned) |root_hash|
+            .{ .id = pull_id, .hash = root_hash, .owned = false }
+        else blk: {
+            const comment_id = index.resolveCommentId(allocator, repo, reply_ref) catch {
+                try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Reply target was not found\n");
+                return;
+            };
+            errdefer allocator.free(comment_id);
+            var parent = try index.commentParentInfo(allocator, repo, comment_id);
+            defer parent.deinit();
+            if (!std.mem.eql(u8, parent.parent_kind, "pull") or !std.mem.eql(u8, parent.parent_id, pull_id)) {
+                allocator.free(comment_id);
+                try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Reply target is not in this pull request\n");
+                return;
+            }
+            break :blk .{ .id = comment_id, .hash = try allocator.dupe(u8, parent.add_hash), .owned = true };
+        };
+        defer if (reply_target.owned) allocator.free(reply_target.id);
+        defer if (reply_target.owned) allocator.free(reply_target.hash);
+
+        createCommentReplyEvent(allocator, "pull", pull_id, reply_target.id, reply_target.hash, body_value) catch {
             try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not add the reply\n");
             return;
         };
@@ -1161,6 +1182,10 @@ pub fn handlePullCommentPost(allocator: Allocator, repo: Repo, stream: std.net.S
     const location = try std.fmt.allocPrint(allocator, "/pulls/{s}", .{raw_ref});
     defer allocator.free(location);
     try sendRedirect(allocator, stream, location);
+}
+
+fn isPullDescriptionReplyRef(reply_ref: []const u8) bool {
+    return std.mem.eql(u8, reply_ref, "pull") or std.mem.eql(u8, reply_ref, "pull-description");
 }
 
 pub fn handlePullNotificationPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {

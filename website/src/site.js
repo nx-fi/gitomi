@@ -135,6 +135,127 @@
     });
   }
 
+  function splitDemoAttribute(target, name) {
+    return (target.getAttribute(name) || "")
+      .split("|")
+      .map((value) => value.trim())
+      .filter(Boolean);
+  }
+
+  function initTerminalDemos() {
+    document.querySelectorAll("[data-terminal-demo]").forEach((demo) => {
+      const commands = splitDemoAttribute(demo, "data-commands");
+      if (!commands.length) return;
+
+      const commandTarget = demo.querySelector("[data-terminal-command]");
+      const primaryLabelTarget = demo.querySelector("[data-terminal-primary-label]");
+      const primaryLineTarget = demo.querySelector("[data-terminal-primary-line]");
+      const secondaryLabelTarget = demo.querySelector("[data-terminal-secondary-label]");
+      const secondaryLineTarget = demo.querySelector("[data-terminal-secondary-line]");
+      const outputGroupTarget = demo.querySelector("[data-terminal-output-lines]");
+      const primaryOutputTarget = demo.querySelector("[data-terminal-primary-output]");
+      const secondaryOutputTarget = demo.querySelector("[data-terminal-secondary-output]");
+      if (!commandTarget) return;
+
+      const primaryLabels = splitDemoAttribute(demo, "data-primary-labels");
+      const primaryLines = splitDemoAttribute(demo, "data-primary-lines");
+      const secondaryLabels = splitDemoAttribute(demo, "data-secondary-labels");
+      const secondaryLines = splitDemoAttribute(demo, "data-secondary-lines");
+
+      function valueAt(values, index) {
+        return values[index] || values[0] || "";
+      }
+
+      function setOutput(index) {
+        if (primaryLabelTarget) primaryLabelTarget.textContent = valueAt(primaryLabels, index);
+        if (primaryLineTarget) primaryLineTarget.textContent = valueAt(primaryLines, index);
+        if (secondaryLabelTarget) secondaryLabelTarget.textContent = valueAt(secondaryLabels, index);
+        if (secondaryLineTarget) secondaryLineTarget.textContent = valueAt(secondaryLines, index);
+      }
+
+      function hideOutput() {
+        if (outputGroupTarget) outputGroupTarget.removeAttribute("aria-live");
+        if (primaryOutputTarget) primaryOutputTarget.classList.remove("is-visible");
+        if (secondaryOutputTarget) secondaryOutputTarget.classList.remove("is-visible");
+      }
+
+      function showOutputLine(target) {
+        if (outputGroupTarget) outputGroupTarget.setAttribute("aria-live", "polite");
+        if (target) target.classList.add("is-visible");
+      }
+
+      let commandIndex = Math.max(commands.indexOf(commandTarget.textContent.trim()), 0);
+      setOutput(commandIndex);
+
+      if (reduceMotion) {
+        commandTarget.textContent = commands[commandIndex];
+        if (primaryOutputTarget) primaryOutputTarget.classList.add("is-visible");
+        if (secondaryOutputTarget) secondaryOutputTarget.classList.add("is-visible");
+        return;
+      }
+
+      let charIndex = 0;
+      let phase = "typing";
+      let timeoutId = 0;
+      commandTarget.textContent = "";
+      hideOutput();
+
+      function schedule(delay) {
+        if (timeoutId) window.clearTimeout(timeoutId);
+        if (document.hidden) {
+          timeoutId = 0;
+          return;
+        }
+        timeoutId = window.setTimeout(tick, delay);
+      }
+
+      function tick() {
+        timeoutId = 0;
+        const command = commands[commandIndex];
+
+        if (phase === "typing") {
+          charIndex += 1;
+          commandTarget.textContent = command.slice(0, charIndex);
+          if (charIndex < command.length) {
+            schedule(58);
+            return;
+          }
+          phase = "show-primary";
+          schedule(420);
+          return;
+        }
+
+        if (phase === "show-primary") {
+          showOutputLine(primaryOutputTarget);
+          phase = "show-secondary";
+          schedule(560);
+          return;
+        }
+
+        if (phase === "show-secondary") {
+          showOutputLine(secondaryOutputTarget);
+          phase = "pause";
+          schedule(1500);
+          return;
+        }
+
+        commandIndex = (commandIndex + 1) % commands.length;
+        charIndex = 0;
+        phase = "typing";
+        commandTarget.textContent = "";
+        setOutput(commandIndex);
+        hideOutput();
+        schedule(320);
+      }
+
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden && !timeoutId) schedule(240);
+      });
+
+      schedule(900);
+    });
+  }
+
   function initFloatingBrand() {
     const brand = document.querySelector("[data-floating-brand]");
     const slot = document.querySelector("[data-brand-slot]");
@@ -203,5 +324,6 @@
 
   initCopyButtons();
   initTypewriter();
+  initTerminalDemos();
   initFloatingBrand();
 })();

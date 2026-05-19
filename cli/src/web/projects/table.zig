@@ -443,6 +443,7 @@ pub fn appendProjectTable(
     active_view: *const ActiveProjectView,
     current_principal: []const u8,
     target: []const u8,
+    csrf_token: []const u8,
 ) !void {
     const context = projectRenderContextFromView(allocator, active_view, current_principal);
     const issue_count = try projectIssueCount(db, project, context.filter);
@@ -451,7 +452,7 @@ pub fn appendProjectTable(
     defer table_fields.deinit(allocator);
     var table_context = context;
     table_context.table_fields = &table_fields;
-    try appendProjectWorkspaceChromeStart(buf, allocator, db, project, issue_count, active_view);
+    try appendProjectWorkspaceChromeStart(buf, allocator, db, project, issue_count, active_view, csrf_token);
     try buf.appendSlice(allocator, "  <div class=\"project-table-view\">");
     try appendProjectTableControls(buf, allocator, project, active_view.ref, options);
     try buf.appendSlice(allocator,

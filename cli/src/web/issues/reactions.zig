@@ -1,5 +1,6 @@
 const std = @import("std");
 const index = @import("../../index.zig");
+const reaction_choices = @import("../reaction_choices.zig");
 const shared = @import("../shared.zig");
 const zwf = @import("../../zwf.zig");
 
@@ -7,11 +8,7 @@ const Allocator = std.mem.Allocator;
 const SqliteDb = index.SqliteDb;
 const appendTemplate = shared.appendTemplate;
 
-const ReactionChoice = struct {
-    value: []const u8,
-    label: []const u8,
-    title: []const u8,
-};
+const ReactionChoice = reaction_choices.Choice;
 
 const ReactionSummary = struct {
     emoji: []u8,
@@ -21,17 +18,6 @@ const ReactionSummary = struct {
     fn deinit(self: *ReactionSummary, allocator: Allocator) void {
         allocator.free(self.emoji);
     }
-};
-
-const reaction_choices = [_]ReactionChoice{
-    .{ .value = "\xF0\x9F\x91\x8D", .label = "\xF0\x9F\x91\x8D", .title = "Thumbs up" },
-    .{ .value = "\xF0\x9F\x91\x8E", .label = "\xF0\x9F\x91\x8E", .title = "Thumbs down" },
-    .{ .value = "\xF0\x9F\x98\x84", .label = "\xF0\x9F\x98\x84", .title = "Laugh" },
-    .{ .value = "\xF0\x9F\x8E\x89", .label = "\xF0\x9F\x8E\x89", .title = "Hooray" },
-    .{ .value = "\xF0\x9F\x98\x95", .label = "\xF0\x9F\x98\x95", .title = "Confused" },
-    .{ .value = "\xE2\x9D\xA4\xEF\xB8\x8F", .label = "\xE2\x9D\xA4\xEF\xB8\x8F", .title = "Heart" },
-    .{ .value = "\xF0\x9F\x9A\x80", .label = "\xF0\x9F\x9A\x80", .title = "Rocket" },
-    .{ .value = "\xF0\x9F\x91\x80", .label = "\xF0\x9F\x91\x80", .title = "Eyes" },
 };
 
 pub fn appendBar(
@@ -52,6 +38,7 @@ pub fn appendBar(
     }
 
     try buf.appendSlice(allocator, "<div class=\"reaction-bar\">");
+    if (target_ref.len != 0) try appendReplyButton(buf, allocator, target_ref);
     var stmt = try db.prepare(
         \\SELECT emoji, COUNT(DISTINCT actor_principal),
         \\       SUM(CASE WHEN actor_principal = ? THEN 1 ELSE 0 END)
@@ -84,6 +71,12 @@ pub fn appendBar(
     try buf.appendSlice(allocator, "</div>");
 }
 
+fn appendReplyButton(buf: *std.ArrayList(u8), allocator: Allocator, target_ref: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<button class="comment-reply-button" type="button" data-comment-reply-ref="{target_ref}" aria-label="Reply" title="Reply"><span class="issue-comments-icon" aria-hidden="true"></span></button>
+    , .{ .target_ref = target_ref });
+}
+
 fn appendPicker(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -98,7 +91,7 @@ fn appendPicker(
         \\  <summary class="reaction-add-button" aria-label="Add reaction" title="Add reaction"><span class="reaction-add-icon" aria-hidden="true"></span></summary>
         \\  <div class="reaction-popover" role="menu" aria-label="Add reaction">
     );
-    for (reaction_choices) |choice| {
+    for (reaction_choices.choices) |choice| {
         try appendChoiceButton(buf, allocator, raw_issue_ref, object_kind, target_ref, choice, reactionWasSelected(reactions, choice.value), csrf_token);
     }
     try buf.appendSlice(allocator, "</div></details>");

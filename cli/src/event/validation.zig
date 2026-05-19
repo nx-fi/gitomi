@@ -407,6 +407,7 @@ pub fn isKnownObjectKind(kind: []const u8) bool {
         std.mem.eql(u8, kind, "label") or
         std.mem.eql(u8, kind, "comment") or
         std.mem.eql(u8, kind, "notification") or
+        std.mem.eql(u8, kind, "team") or
         std.mem.eql(u8, kind, "acl") or
         std.mem.eql(u8, kind, "identity") or
         std.mem.eql(u8, kind, "action");
@@ -450,6 +451,9 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
     }
     if (std.mem.startsWith(u8, event_type, "notification.") and !std.mem.eql(u8, object_kind, "notification")) {
         return "notification event object.kind must be notification";
+    }
+    if (std.mem.startsWith(u8, event_type, "team.") and !std.mem.eql(u8, object_kind, "team")) {
+        return "team event object.kind must be team";
     }
     if (std.mem.startsWith(u8, event_type, "acl.") and !std.mem.eql(u8, object_kind, "acl")) {
         return "acl event object.kind must be acl";
@@ -875,6 +879,32 @@ pub fn payloadRequirementError(event_type: []const u8, object_kind: []const u8, 
         return null;
     }
 
+    if (std.mem.eql(u8, event_type, "team.created")) {
+        const slug = jsonString(payload.get("slug")) orelse return "team.created payload.slug must be a string";
+        if (!isValidTeamSlug(slug)) return "team.created payload.slug must be a ref-safe team slug";
+        if (!optionalString(payload, "name")) return "team.created payload.name must be a string";
+        if (!optionalStringWithin(payload, "name", git.max_payload_atom_bytes)) return "team.created payload.name exceeds v1 field size limit";
+        if (!optionalString(payload, "description")) return "team.created payload.description must be a string";
+        if (!optionalStringWithin(payload, "description", git.max_payload_text_bytes)) return "team.created payload.description exceeds v1 text size limit";
+        return null;
+    }
+    if (std.mem.eql(u8, event_type, "team.updated")) {
+        if (!payloadHasAny(payload, &.{ "name", "description" })) return "team.updated payload must include at least one mutable field";
+        if (!optionalString(payload, "name")) return "team.updated payload.name must be a string";
+        if (!optionalStringWithin(payload, "name", git.max_payload_atom_bytes)) return "team.updated payload.name exceeds v1 field size limit";
+        if (!optionalString(payload, "description")) return "team.updated payload.description must be a string";
+        if (!optionalStringWithin(payload, "description", git.max_payload_text_bytes)) return "team.updated payload.description exceeds v1 text size limit";
+        return null;
+    }
+    if (std.mem.eql(u8, event_type, "team.member_added") or std.mem.eql(u8, event_type, "team.member_removed")) {
+        const slug = jsonString(payload.get("slug")) orelse return "team member event payload.slug must be a string";
+        if (!isValidTeamSlug(slug)) return "team member event payload.slug must be a ref-safe team slug";
+        const principal = jsonString(payload.get("principal")) orelse return "team member event payload.principal must be a string";
+        if (!stringWithin(payload, "principal", git.max_payload_atom_bytes)) return "team member event payload.principal exceeds v1 field size limit";
+        if (std.mem.startsWith(u8, principal, "@")) return "team member event payload.principal must be a user principal";
+        return null;
+    }
+
     if (std.mem.eql(u8, event_type, "acl.role_granted") or std.mem.eql(u8, event_type, "acl.role_revoked")) {
         if (!hasString(payload, "principal")) return "acl role event payload.principal must be a string";
         if (!stringWithin(payload, "principal", git.max_payload_atom_bytes)) return "acl role event payload.principal exceeds v1 field size limit";
@@ -964,6 +994,8 @@ fn isReactionEvent(event_type: []const u8) bool {
         std.mem.eql(u8, event_type, "issue.reaction_removed") or
         std.mem.eql(u8, event_type, "pull.reaction_added") or
         std.mem.eql(u8, event_type, "pull.reaction_removed") or
+        std.mem.eql(u8, event_type, "project.reaction_added") or
+        std.mem.eql(u8, event_type, "project.reaction_removed") or
         std.mem.eql(u8, event_type, "comment.reaction_added") or
         std.mem.eql(u8, event_type, "comment.reaction_removed");
 }
@@ -1126,6 +1158,16 @@ pub fn objectIdRequirementError(event_type: []const u8, object_kind: []const u8,
         if (!looksLikeUuid(object_id)) return "notification event object.id must be a UUID";
         return null;
     }
+    if (std.mem.startsWith(u8, event_type, "team.") and std.mem.eql(u8, object_kind, "team")) {
+        if (!std.mem.startsWith(u8, object_id, "team:")) return "team event object.id must be team:<slug>";
+        const object_slug = object_id["team:".len..];
+        if (!isValidTeamSlug(object_slug)) return "team event object.id must use a ref-safe team slug";
+        if (payload.get("slug")) |_| {
+            const slug = jsonString(payload.get("slug")) orelse return "team event payload.slug must be a string";
+            if (!std.mem.eql(u8, object_slug, slug)) return "team event object.id must match payload.slug";
+        }
+        return null;
+    }
     if (std.mem.startsWith(u8, event_type, "acl.") and std.mem.eql(u8, object_kind, "acl")) {
         const principal = jsonString(payload.get("principal")) orelse return "acl event payload.principal must be a string";
         if (!std.mem.startsWith(u8, object_id, "acl:")) return "acl event object.id must be acl:<principal>";
@@ -1206,6 +1248,18 @@ fn hasNonEmptyStringWithin(object: std.json.ObjectMap, key: []const u8, max_byte
 fn stringWithin(object: std.json.ObjectMap, key: []const u8, max_bytes: usize) bool {
     const value = jsonString(object.get(key)) orelse return false;
     return value.len <= max_bytes;
+}
+
+fn payloadHasAny(object: std.json.ObjectMap, keys: []const []const u8) bool {
+    for (keys) |key| {
+        if (object.get(key) != null) return true;
+    }
+    return false;
+}
+
+fn isValidTeamSlug(value: []const u8) bool {
+    if (std.mem.indexOfScalar(u8, value, '@') != null) return false;
+    return util.isRefSafeSegment(value);
 }
 
 fn objectValue(object: std.json.ObjectMap, key: []const u8) ?std.json.ObjectMap {
@@ -1425,4 +1479,23 @@ test "UTC RFC3339 timestamp validation is structural" {
     try std.testing.expect(!isUtcRfc3339Timestamp("2026-05-13T18:30:59+00:00"));
     try std.testing.expect(!isUtcRfc3339Timestamp("2026-05-13 18:30:59Z"));
     try std.testing.expect(!isUtcRfc3339Timestamp("2026-05-13T18:30:59.Z"));
+}
+
+test "team payload validation accepts slugs and rejects nested members" {
+    var created = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{"payload":{"slug":"core","name":"Core","description":"Core team"},"legacy":{}}
+    , .{});
+    defer created.deinit();
+    const created_root = created.value.object;
+    try std.testing.expect(payloadRequirementError("team.created", "team", created_root.get("payload").?.object, created_root.get("legacy").?.object) == null);
+
+    var nested = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{"payload":{"slug":"core","principal":"@ops"},"legacy":{}}
+    , .{});
+    defer nested.deinit();
+    const nested_root = nested.value.object;
+    try std.testing.expectEqualStrings(
+        "team member event payload.principal must be a user principal",
+        payloadRequirementError("team.member_added", "team", nested_root.get("payload").?.object, nested_root.get("legacy").?.object).?,
+    );
 }

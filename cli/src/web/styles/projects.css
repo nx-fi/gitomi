@@ -1,3 +1,7 @@
+:root {
+  --project-dataset-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='4' y='4' width='16' height='16' rx='2' fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'/%3E%3Crect x='7' y='8' width='4' height='4' rx='.4' fill='black'/%3E%3Crect x='13' y='8' width='4' height='4' rx='.4' fill='black'/%3E%3Crect x='7' y='14' width='4' height='4' rx='.4' fill='black'/%3E%3Crect x='13' y='14' width='4' height='4' rx='.4' fill='black'/%3E%3C/svg%3E");
+}
+
 .project-create-panel,
 .kanban-panel {
   overflow: hidden;
@@ -250,13 +254,13 @@
   min-width: 0;
 }
 .project-index-icon {
-  position: relative;
   width: 18px;
   height: 18px;
+  flex: 0 0 auto;
   color: var(--muted);
-  border: 2px solid currentColor;
-  border-radius: 5px;
-  transform: rotate(45deg) skew(-8deg, -8deg);
+  background: currentColor;
+  -webkit-mask: var(--project-dataset-icon) center / contain no-repeat;
+  mask: var(--project-dataset-icon) center / contain no-repeat;
 }
 .project-index-health,
 .project-index-lead,
@@ -317,11 +321,9 @@
 .project-overview-icon {
   flex: 0 0 auto;
   color: var(--muted);
-  border: 2px solid currentColor;
-  border-radius: var(--radius-sm);
-  background:
-    linear-gradient(currentColor, currentColor) 50% 0 / 2px 100% no-repeat,
-    linear-gradient(currentColor, currentColor) 0 50% / 100% 2px no-repeat;
+  background: currentColor;
+  -webkit-mask: var(--project-dataset-icon) center / contain no-repeat;
+  mask: var(--project-dataset-icon) center / contain no-repeat;
 }
 .project-view-tabs {
   display: flex;
@@ -358,9 +360,10 @@
 .project-view-board-icon {
   width: 16px;
   height: 16px;
-  border: 2px solid currentColor;
-  border-radius: var(--radius-xs);
-  box-shadow: inset 5px 0 0 color-mix(in oklch, currentColor 45%, transparent);
+  flex: 0 0 auto;
+  background: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Crect x='4' y='5' width='16' height='14' rx='2'/%3E%3Cpath d='M9 8v8M12 8v8M15 8v8'/%3E%3C/g%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Crect x='4' y='5' width='16' height='14' rx='2'/%3E%3Cpath d='M9 8v8M12 8v8M15 8v8'/%3E%3C/g%3E%3C/svg%3E") center / contain no-repeat;
 }
 .project-view-overview-icon {
   width: 16px;
@@ -515,7 +518,7 @@
   display: flex;
   align-items: center;
   min-width: 0;
-  overflow-x: auto;
+  overflow: visible;
   scrollbar-width: none;
 }
 .project-overview-primary-tabs::-webkit-scrollbar,
@@ -535,14 +538,88 @@
   font-weight: 700;
   white-space: nowrap;
 }
+.project-overview-tab-form,
+.project-view-switcher-form {
+  display: inline-flex;
+  margin: 0;
+}
+.project-overview-tab-form .project-overview-tab,
+.project-view-switcher-form .project-view-switcher-item {
+  font: inherit;
+  cursor: pointer;
+}
+.project-overview-tab-form .project-overview-tab {
+  background: transparent;
+  border-top: 0;
+  border-right: 0;
+  border-left: 0;
+}
 .project-overview-tab:hover,
 .project-overview-view-tab:hover,
 .project-overview-tab.active {
   color: var(--text);
   text-decoration: none;
 }
-.project-overview-tab.active {
+.project-overview-tab.active,
+.project-view-switcher.active > .project-view-switcher-summary {
   border-bottom-color: var(--nav-active-border);
+}
+.project-view-switcher {
+  position: relative;
+  display: inline-flex;
+}
+.project-view-switcher > summary {
+  cursor: pointer;
+  list-style: none;
+}
+.project-view-switcher > summary::-webkit-details-marker {
+  display: none;
+}
+.project-view-switcher.active > .project-view-switcher-summary,
+.project-view-switcher[open] > .project-view-switcher-summary {
+  color: var(--text);
+}
+.project-choice-caret {
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: translateY(-2px) rotate(45deg);
+  opacity: 0.78;
+}
+.project-view-switcher-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 44;
+  display: grid;
+  min-width: 180px;
+  padding: 6px;
+  background: var(--panel-strong);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-float);
+}
+.project-view-switcher-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 34px;
+  padding: 0 10px;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  font-weight: 800;
+  text-align: left;
+}
+.project-view-switcher-item:hover,
+.project-view-switcher-item.active {
+  color: var(--text);
+  background: var(--button-secondary-bg);
+  text-decoration: none;
 }
 .project-overview-tab .project-view-overview-icon,
 .project-overview-tab .project-view-table-icon,
@@ -1187,18 +1264,15 @@
   padding: 0 16px 14px;
 }
 .project-update-action {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  min-height: 32px;
-  padding: 0 10px;
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
   color: var(--muted);
   background: transparent;
   border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
+  border-radius: 50%;
   font: inherit;
-  font-size: 12px;
-  font-weight: 800;
   cursor: pointer;
 }
 .project-update-action:hover {
@@ -1207,12 +1281,46 @@
   border-color: var(--button-secondary-hover-border);
 }
 .project-update-action .issue-comments-icon {
-  width: 16px;
-  height: 14px;
+  width: 17px;
+  height: 17px;
 }
 .project-update-action .reaction-add-icon {
   width: 17px;
   height: 17px;
+}
+.project-update-thread {
+  display: grid;
+  gap: 14px;
+  margin-top: 16px;
+}
+.project-update-thread > .issue-timeline-item:last-child::before {
+  display: none;
+}
+.project-update-comment-form-item {
+  margin-top: 2px;
+}
+.project-update-comment-item.is-reply {
+  margin-left: 24px;
+}
+.project-update-comment-item.comment-depth-2 {
+  margin-left: 48px;
+}
+.project-update-comment-item.comment-depth-3 {
+  margin-left: 72px;
+}
+.project-update-comment-box .markdown-body {
+  padding: 16px;
+}
+.project-update-comment-form.inline-comment-reply-form {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.project-update-comment-form.inline-comment-reply-form .markdown-editor textarea {
+  min-height: 120px;
+}
+.project-comment-reaction-bar {
+  padding-bottom: 14px;
 }
 .project-update-status-line {
   display: flex;
@@ -2989,10 +3097,11 @@
 }
 .kanban-card-comments::before {
   content: "";
-  width: 12px;
-  height: 10px;
-  border: 2px solid currentColor;
-  border-radius: var(--radius-xs);
+  width: 14px;
+  height: 14px;
+  background: currentColor;
+  -webkit-mask: var(--issue-comments-icon) center / contain no-repeat;
+  mask: var(--issue-comments-icon) center / contain no-repeat;
 }
 .kanban-empty-drop {
   min-height: 68px;

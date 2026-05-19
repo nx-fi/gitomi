@@ -65,6 +65,7 @@ const activeBuiltinProjectView = project_data.activeBuiltinProjectView;
 const projectTableFieldsFromConfig = project_data.projectTableFieldsFromConfig;
 const bindProjectIssueFilter = project_data.bindProjectIssueFilter;
 const projectExists = project_data.projectExists;
+const projectIdOwned = project_data.projectIdOwned;
 const columnTone = project_issue_render.columnTone;
 const priorityTone = project_issue_render.priorityTone;
 
@@ -75,6 +76,7 @@ pub fn appendProjectWorkspaceChromeStart(
     project: []const u8,
     issue_count: usize,
     active_view: *const ActiveProjectView,
+    csrf_token: []const u8,
 ) !void {
     try appendTemplate(buf, allocator,
         \\<section class="panel kanban-panel project-board-panel project-detail-panel project-detail-{view}">
@@ -92,7 +94,7 @@ pub fn appendProjectWorkspaceChromeStart(
         .project = project,
     });
     try buf.appendSlice(allocator, "</div>");
-    try appendProjectViewTabs(buf, allocator, db, project, active_view, issue_count);
+    try appendProjectViewTabs(buf, allocator, db, project, active_view, issue_count, csrf_token);
     try appendProjectItemActions(buf, allocator, db, project, active_view);
     try appendProjectIssueSearchIndex(buf, allocator, db);
     try appendTemplate(buf, allocator,
@@ -326,15 +328,17 @@ fn appendProjectViewTabs(
     project: []const u8,
     active_view: *const ActiveProjectView,
     issue_count: usize,
+    csrf_token: []const u8,
 ) !void {
-    _ = db;
     const active_tab: project_overview.ProjectPageTab = switch (active_view.layout) {
         .table => .table,
         .board => .board,
         .roadmap => .roadmap,
         .issues => .issues,
     };
-    try project_overview.appendProjectPageTabs(buf, allocator, project, active_tab, issue_count);
+    const project_id = try projectIdOwned(allocator, db, project);
+    defer if (project_id) |value| allocator.free(value);
+    try project_overview.appendProjectPageTabs(buf, allocator, project, project_id orelse "", active_tab, issue_count, csrf_token);
 }
 
 fn appendProjectItemActions(

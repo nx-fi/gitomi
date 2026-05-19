@@ -132,6 +132,8 @@ const routes = [_]Route{
     Route.get("/projects", handleProjectsPage),
     Route.get("/new-project", handleNewProjectPage),
     Route.post("/projects", handleProjectPost),
+    Route.post("/projects/default-view", handleProjectDefaultViewPost),
+    Route.post("/projects/comments", handleProjectCommentPost),
     Route.post("/projects/properties", handleProjectPropertiesPost),
     Route.post("/projects/items", handleProjectItemPost),
     Route.get("/milestones", handleMilestonesPage),
@@ -143,6 +145,7 @@ const routes = [_]Route{
     Route.get("/access", handleAccessPage),
     Route.post("/access/roles", handleAccessRolePost),
     Route.post("/access/devices", handleAccessDevicePost),
+    Route.post("/access/teams", handleAccessTeamPost),
     Route.get("/settings", handleSettingsPage),
     Route.get("/settings/theme", handleSettingsThemePage),
     Route.get("/settings/models", handleSettingsModelsPage),
@@ -625,6 +628,16 @@ fn handleProjectItemPost(ctx: WebContext) !void {
     try projects_page.handleProjectItemPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
 }
 
+fn handleProjectDefaultViewPost(ctx: WebContext) !void {
+    if (!try requireCsrfToken(ctx)) return;
+    try projects_page.handleProjectDefaultViewPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
+}
+
+fn handleProjectCommentPost(ctx: WebContext) !void {
+    if (!try requireCsrfToken(ctx)) return;
+    try projects_page.handleProjectCommentPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
+}
+
 fn handleProjectPropertiesPost(ctx: WebContext) !void {
     if (!try requireCsrfToken(ctx)) return;
     try projects_page.handleProjectPropertiesPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
@@ -710,6 +723,10 @@ fn handleAccessRolePost(ctx: WebContext) !void {
 
 fn handleAccessDevicePost(ctx: WebContext) !void {
     try access_page.handleAccessDevicePost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body, ctx.csrf_token[0..]);
+}
+
+fn handleAccessTeamPost(ctx: WebContext) !void {
+    try access_page.handleAccessTeamPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body, ctx.csrf_token[0..]);
 }
 
 fn handleActionsPage(ctx: WebContext) !void {

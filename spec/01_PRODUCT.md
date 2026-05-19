@@ -214,6 +214,7 @@ Compliant implementations MUST understand the following event families:
 *   `comment.added`, `comment.body_set`, `comment.redacted`, `comment.reaction_added`, `comment.reaction_removed`
 *   `acl.role_granted`, `acl.role_revoked`, `acl.delegation_granted`, `acl.delegation_revoked`
 *   `identity.device_added`, `identity.device_revoked`
+*   `team.created`, `team.updated`, `team.member_added`, `team.member_removed`
 *   `action.run_requested`, `action.run_completed`
 *   `notification.subscribed`, `notification.unsubscribed`, `notification.read`, `notification.read_all`
 
@@ -262,6 +263,9 @@ The following payload members are REQUIRED for interoperable v1 implementations:
 *   `acl.delegation_revoked`: `principal`, `device`, `capability`, `scope`
 *   `identity.device_added`: `principal`, `device`, `signing_key.public_key`, `signing_key.fingerprint`
 *   `identity.device_revoked`: `principal`, `device`
+*   `team.created`: `slug`; OPTIONAL `name`, `description`
+*   `team.updated`: OPTIONAL `name`, `description`; at least one field MUST be present
+*   `team.member_added` / `team.member_removed`: `slug`, `principal`
 *   `action.run_requested`: `workflow`, `target_ref` or `target_oid`; OPTIONAL `event_name`, `gitomi_event_type`
 *   `action.run_completed`: `run_id`, `conclusion`, `target_ref` or `target_oid`; OPTIONAL `workflow`, `event_name`
 *   `notification.subscribed` / `notification.unsubscribed`: `principal`, `target_kind` (`issue` or `pull`), `target_id`; OPTIONAL `reason`

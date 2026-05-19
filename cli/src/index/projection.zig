@@ -42,13 +42,13 @@ fn isDataPlaneIndexRef(ref: []const u8) bool {
 pub fn projectIndexedEvents(allocator: Allocator, db: *SqliteDb) !void {
     try seedGenesisAuthorization(allocator, db);
 
-    try projectEventQuery(allocator, db, "SELECT event_hash, event_type FROM events WHERE valid_json != 0 AND (event_type LIKE 'acl.%' OR event_type LIKE 'identity.%') ORDER BY ordinal", true);
-    try projectEventQuery(allocator, db, "SELECT event_hash, event_type FROM events WHERE valid_json != 0 AND event_type NOT LIKE 'acl.%' AND event_type NOT LIKE 'identity.%' ORDER BY ordinal", false);
+    try projectEventQuery(allocator, db, "SELECT event_hash, event_type FROM events WHERE valid_json != 0 AND (event_type LIKE 'acl.%' OR event_type LIKE 'identity.%' OR event_type LIKE 'team.%') ORDER BY ordinal", true);
+    try projectEventQuery(allocator, db, "SELECT event_hash, event_type FROM events WHERE valid_json != 0 AND event_type NOT LIKE 'acl.%' AND event_type NOT LIKE 'identity.%' AND event_type NOT LIKE 'team.%' ORDER BY ordinal", false);
 }
 
 pub fn projectNewIndexedEvents(allocator: Allocator, db: *SqliteDb) !void {
-    try projectEventQuery(allocator, db, "SELECT event_hash, event_type FROM events WHERE valid_json != 0 AND domain_status = 'pending' AND (event_type LIKE 'acl.%' OR event_type LIKE 'identity.%') ORDER BY ordinal", true);
-    try projectEventQuery(allocator, db, "SELECT event_hash, event_type FROM events WHERE valid_json != 0 AND domain_status = 'pending' AND event_type NOT LIKE 'acl.%' AND event_type NOT LIKE 'identity.%' ORDER BY ordinal", false);
+    try projectEventQuery(allocator, db, "SELECT event_hash, event_type FROM events WHERE valid_json != 0 AND domain_status = 'pending' AND (event_type LIKE 'acl.%' OR event_type LIKE 'identity.%' OR event_type LIKE 'team.%') ORDER BY ordinal", true);
+    try projectEventQuery(allocator, db, "SELECT event_hash, event_type FROM events WHERE valid_json != 0 AND domain_status = 'pending' AND event_type NOT LIKE 'acl.%' AND event_type NOT LIKE 'identity.%' AND event_type NOT LIKE 'team.%' ORDER BY ordinal", false);
 }
 
 fn projectEventQuery(allocator: Allocator, db: *SqliteDb, comptime sql_text: []const u8, auth_phase: bool) !void {
@@ -238,7 +238,8 @@ fn eventSortPriority(event_hash: []const u8, auth_priorities: ?*const std.String
 fn authEventSortPriority(event_type: []const u8) u8 {
     if (std.mem.eql(u8, event_type, "acl.role_revoked") or
         std.mem.eql(u8, event_type, "acl.delegation_revoked") or
-        std.mem.eql(u8, event_type, "identity.device_revoked"))
+        std.mem.eql(u8, event_type, "identity.device_revoked") or
+        std.mem.eql(u8, event_type, "team.member_removed"))
     {
         return 0;
     }
@@ -782,6 +783,8 @@ pub fn projectStoredEvent(allocator: Allocator, db: *SqliteDb, event_hash: []con
     const rejection = if (auth_phase)
         if (std.mem.startsWith(u8, envelope.event_type, "acl."))
             try applyAclProjection(allocator, db, event_hash, envelope, body)
+        else if (std.mem.startsWith(u8, envelope.event_type, "team."))
+            try applyTeamProjection(allocator, db, event_hash, envelope, body)
         else
             try applyIdentityProjection(allocator, db, event_hash, envelope, body)
     else if (std.mem.startsWith(u8, envelope.event_type, "issue."))
@@ -827,7 +830,7 @@ pub fn signingKeyBindingRejection(allocator: Allocator, db: *SqliteDb, event_has
         return null;
     }
 
-    const role = try aclRoleAtAuthFrontier(allocator, db, envelope.actor_principal, event_hash);
+    const role = try effectiveRoleAtAuthFrontier(allocator, db, envelope.actor_principal, event_hash);
     if (role) |value| {
         allocator.free(value);
         return "unauthorized_device";
@@ -932,9 +935,9 @@ pub fn authorizationRejection(allocator: Allocator, db: *SqliteDb, event_hash: ?
     }
 
     const role = if (event_hash) |hash|
-        try aclRoleAtAuthFrontier(allocator, db, envelope.actor_principal, hash)
+        try effectiveRoleAtAuthFrontier(allocator, db, envelope.actor_principal, hash)
     else
-        try currentRole(allocator, db, envelope.actor_principal);
+        try effectiveCurrentRole(allocator, db, envelope.actor_principal);
     if (role) |value| {
         defer allocator.free(value);
         if (event_hash == null and !(try currentDeviceActive(db, envelope.actor_principal, envelope.actor_device))) {
@@ -1087,6 +1090,12 @@ fn eventAuthorizationRejection(
         return if (roleAtLeast(role, "reporter")) null else "insufficient_role";
     }
 
+    if (std.mem.eql(u8, envelope.event_type, "project.reaction_added") or
+        std.mem.eql(u8, envelope.event_type, "project.reaction_removed"))
+    {
+        return if (roleAtLeast(role, "reporter")) null else "insufficient_role";
+    }
+
     if (std.mem.startsWith(u8, envelope.event_type, "project.") or
         std.mem.startsWith(u8, envelope.event_type, "milestone."))
     {
@@ -1124,6 +1133,10 @@ fn eventAuthorizationRejection(
         const principal = event_json.jsonString(payload.get("principal")) orelse return "invalid_event_envelope";
         if (std.mem.eql(u8, principal, envelope.actor_principal)) return null;
         return if (roleAtLeast(role, "maintainer")) null else "insufficient_role";
+    }
+
+    if (std.mem.startsWith(u8, envelope.event_type, "team.")) {
+        return if (roleAtLeast(role, "owner")) null else "insufficient_role";
     }
 
     if (std.mem.eql(u8, envelope.event_type, "acl.role_granted")) {
@@ -1448,6 +1461,34 @@ pub fn currentRole(allocator: Allocator, db: *SqliteDb, principal: []const u8) !
     return try stmt.columnTextDup(allocator, 0);
 }
 
+pub fn effectiveCurrentRole(allocator: Allocator, db: *SqliteDb, principal: []const u8) !?[]u8 {
+    var best_role = try currentRole(allocator, db, principal);
+    errdefer if (best_role) |role| allocator.free(role);
+
+    var stmt = try db.prepare(
+        \\SELECT r.role
+        \\FROM team_members tm
+        \\JOIN acl_roles r ON r.principal = '@' || tm.slug
+        \\WHERE tm.principal = ?
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, principal);
+    while (try stmt.step()) {
+        const role = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(role);
+        try keepHigherRole(allocator, &best_role, role);
+    }
+
+    return best_role;
+}
+
+fn keepHigherRole(allocator: Allocator, best_role: *?[]u8, candidate: []const u8) !void {
+    if (best_role.* == null or event_validation.roleRank(candidate) > event_validation.roleRank(best_role.*.?)) {
+        if (best_role.*) |old| allocator.free(old);
+        best_role.* = try allocator.dupe(u8, candidate);
+    }
+}
+
 pub fn currentDeviceActive(db: *SqliteDb, principal: []const u8, device: []const u8) !bool {
     var stmt = try db.prepare("SELECT 1 FROM identity_devices WHERE principal = ? AND device = ? AND revoked_event_hash IS NULL");
     defer stmt.deinit();
@@ -1480,6 +1521,317 @@ fn markDomainRejected(db: *SqliteDb, event_hash: []const u8, reason: []const u8)
     try stmt.stepDone();
 }
 
+fn applyTeamProjection(allocator: Allocator, db: *SqliteDb, event_hash: []const u8, envelope: ValidatedEnvelope, body: []const u8) !?[]const u8 {
+    if (!std.mem.startsWith(u8, envelope.event_type, "team.")) return null;
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return "invalid_event_envelope",
+    };
+    const payload = switch (root.get("payload") orelse return "invalid_event_envelope") {
+        .object => |object| object,
+        else => return "invalid_event_envelope",
+    };
+    const slug = teamSlugFromObjectId(envelope.object_id) orelse return "invalid_event_envelope";
+
+    if (std.mem.eql(u8, envelope.event_type, "team.created")) {
+        if (try currentTeamExists(db, slug)) return "duplicate_object_id";
+        const name = event_json.jsonString(payload.get("name")) orelse slug;
+        const description = event_json.jsonString(payload.get("description")) orelse "";
+        try insertTeamCreated(db, slug, name, description, event_hash, envelope);
+        return null;
+    }
+
+    if (!(try teamCreatedAtFrontier(allocator, db, slug, event_hash))) return "object_not_created";
+
+    if (std.mem.eql(u8, envelope.event_type, "team.updated")) {
+        if (event_json.jsonString(payload.get("name"))) |name| {
+            try updateTeamScalar(allocator, db, slug, name, event_hash, envelope, "name", "name_occurred_at", "name_actor_principal", "name_event_hash");
+        }
+        if (event_json.jsonString(payload.get("description"))) |description| {
+            try updateTeamScalar(allocator, db, slug, description, event_hash, envelope, "description", "description_occurred_at", "description_actor_principal", "description_event_hash");
+        }
+        return null;
+    }
+
+    if (std.mem.eql(u8, envelope.event_type, "team.member_added")) {
+        const principal = event_json.jsonString(payload.get("principal")) orelse return "invalid_event_envelope";
+        if (std.mem.startsWith(u8, principal, "@")) return "nested_team_membership";
+        try insertTeamMemberHistory(db, slug, principal, event_hash, envelope.event_type, envelope.occurred_at, envelope.actor_principal);
+        try reconcileTeamMember(allocator, db, slug, principal);
+        return null;
+    }
+
+    if (std.mem.eql(u8, envelope.event_type, "team.member_removed")) {
+        const principal = event_json.jsonString(payload.get("principal")) orelse return "invalid_event_envelope";
+        if (!(try teamMemberActiveAtFrontier(allocator, db, slug, principal, event_hash))) return "member_not_active";
+        if (try removingTeamMemberWouldRemoveLastOwner(allocator, db, slug, principal, event_hash)) return "last_owner";
+        try insertTeamMemberHistory(db, slug, principal, event_hash, envelope.event_type, envelope.occurred_at, envelope.actor_principal);
+        try reconcileTeamMember(allocator, db, slug, principal);
+        return null;
+    }
+
+    return "unknown_event_type";
+}
+
+fn teamSlugFromObjectId(object_id: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, object_id, "team:")) return null;
+    const slug = object_id["team:".len..];
+    return if (slug.len == 0) null else slug;
+}
+
+fn currentTeamExists(db: *SqliteDb, slug: []const u8) !bool {
+    var stmt = try db.prepare("SELECT 1 FROM teams WHERE slug = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, slug);
+    return try stmt.step();
+}
+
+fn teamCreatedAtFrontier(allocator: Allocator, db: *SqliteDb, slug: []const u8, before_event_hash: []const u8) !bool {
+    const object_id = try std.fmt.allocPrint(allocator, "team:{s}", .{slug});
+    defer allocator.free(object_id);
+    var stmt = try db.prepare(
+        \\SELECT event_hash
+        \\FROM events
+        \\WHERE event_type = 'team.created'
+        \\  AND object_id = ?
+        \\  AND domain_status = 'accepted'
+        \\ORDER BY event_hash DESC
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, object_id);
+    while (try stmt.step()) {
+        const creation_hash = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(creation_hash);
+        if (try eventInFrontier(allocator, creation_hash, before_event_hash)) return true;
+    }
+    return false;
+}
+
+fn insertTeamCreated(db: *SqliteDb, slug: []const u8, name: []const u8, description: []const u8, event_hash: []const u8, envelope: ValidatedEnvelope) !void {
+    var stmt = try db.prepare(
+        \\INSERT INTO teams(
+        \\  slug, name, name_occurred_at, name_actor_principal, name_event_hash,
+        \\  description, description_occurred_at, description_actor_principal, description_event_hash,
+        \\  created_at, actor_principal, event_hash
+        \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, slug);
+    try stmt.bindText(2, name);
+    try stmt.bindText(3, envelope.occurred_at);
+    try stmt.bindText(4, envelope.actor_principal);
+    try stmt.bindText(5, event_hash);
+    try stmt.bindText(6, description);
+    try stmt.bindText(7, envelope.occurred_at);
+    try stmt.bindText(8, envelope.actor_principal);
+    try stmt.bindText(9, event_hash);
+    try stmt.bindText(10, envelope.occurred_at);
+    try stmt.bindText(11, envelope.actor_principal);
+    try stmt.bindText(12, event_hash);
+    try stmt.stepDone();
+}
+
+fn updateTeamScalar(
+    allocator: Allocator,
+    db: *SqliteDb,
+    slug: []const u8,
+    value: []const u8,
+    event_hash: []const u8,
+    envelope: ValidatedEnvelope,
+    comptime value_column: []const u8,
+    comptime occurred_column: []const u8,
+    comptime actor_column: []const u8,
+    comptime hash_column: []const u8,
+) !void {
+    var select = try db.prepare("SELECT " ++ hash_column ++ " FROM teams WHERE slug = ?");
+    defer select.deinit();
+    try select.bindText(1, slug);
+    if (!(try select.step())) return;
+    const current_hash = try select.columnTextDup(allocator, 0);
+    defer allocator.free(current_hash);
+    if (!(try eventWins(allocator, event_hash, current_hash))) return;
+
+    var update = try db.prepare("UPDATE teams SET " ++ value_column ++ " = ?, " ++ occurred_column ++ " = ?, " ++ actor_column ++ " = ?, " ++ hash_column ++ " = ? WHERE slug = ?");
+    defer update.deinit();
+    try update.bindText(1, value);
+    try update.bindText(2, envelope.occurred_at);
+    try update.bindText(3, envelope.actor_principal);
+    try update.bindText(4, event_hash);
+    try update.bindText(5, slug);
+    try update.stepDone();
+}
+
+fn insertTeamMember(db: *SqliteDb, slug: []const u8, principal: []const u8, add_hash: []const u8, created_at: []const u8, actor_principal: []const u8) !void {
+    var stmt = try db.prepare(
+        \\INSERT OR IGNORE INTO team_members(slug, principal, add_hash, created_at, actor_principal)
+        \\VALUES (?, ?, ?, ?, ?)
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, slug);
+    try stmt.bindText(2, principal);
+    try stmt.bindText(3, add_hash);
+    try stmt.bindText(4, created_at);
+    try stmt.bindText(5, actor_principal);
+    try stmt.stepDone();
+}
+
+fn deleteTeamMember(db: *SqliteDb, slug: []const u8, principal: []const u8) !void {
+    var stmt = try db.prepare("DELETE FROM team_members WHERE slug = ? AND principal = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, slug);
+    try stmt.bindText(2, principal);
+    try stmt.stepDone();
+}
+
+fn insertTeamMemberHistory(
+    db: *SqliteDb,
+    slug: []const u8,
+    principal: []const u8,
+    event_hash: []const u8,
+    event_type: []const u8,
+    created_at: []const u8,
+    actor_principal: []const u8,
+) !void {
+    var stmt = try db.prepare(
+        \\INSERT OR IGNORE INTO team_member_events(slug, principal, event_hash, event_type, created_at, actor_principal)
+        \\VALUES (?, ?, ?, ?, ?, ?)
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, slug);
+    try stmt.bindText(2, principal);
+    try stmt.bindText(3, event_hash);
+    try stmt.bindText(4, event_type);
+    try stmt.bindText(5, created_at);
+    try stmt.bindText(6, actor_principal);
+    try stmt.stepDone();
+}
+
+const TeamMemberEvent = struct {
+    allocator: Allocator,
+    event_hash: []u8,
+    event_type: []u8,
+    created_at: []u8,
+    actor_principal: []u8,
+
+    fn deinit(self: *TeamMemberEvent) void {
+        self.allocator.free(self.event_hash);
+        self.allocator.free(self.event_type);
+        self.allocator.free(self.created_at);
+        self.allocator.free(self.actor_principal);
+    }
+};
+
+fn reconcileTeamMember(allocator: Allocator, db: *SqliteDb, slug: []const u8, principal: []const u8) !void {
+    var events = try loadTeamMemberEvents(allocator, db, slug, principal, null, .causal_frontier);
+    defer freeTeamMemberEvents(allocator, &events);
+
+    if (try activeTeamMemberAddIndex(allocator, events.items)) |active_index| {
+        const active = events.items[active_index];
+        try deleteTeamMember(db, slug, principal);
+        try insertTeamMember(db, slug, principal, active.event_hash, active.created_at, active.actor_principal);
+        return;
+    }
+
+    try deleteTeamMember(db, slug, principal);
+}
+
+fn teamMemberActiveAtFrontier(allocator: Allocator, db: *SqliteDb, slug: []const u8, principal: []const u8, event_hash: []const u8) !bool {
+    var events = try loadTeamMemberEvents(allocator, db, slug, principal, event_hash, .causal_frontier);
+    defer freeTeamMemberEvents(allocator, &events);
+    return (try activeTeamMemberAddIndex(allocator, events.items)) != null;
+}
+
+fn teamMemberActiveAtAuthFrontier(allocator: Allocator, db: *SqliteDb, slug: []const u8, principal: []const u8, event_hash: []const u8) !bool {
+    var events = try loadTeamMemberEvents(allocator, db, slug, principal, event_hash, .known_revocations);
+    defer freeTeamMemberEvents(allocator, &events);
+    return (try activeTeamMemberAddIndex(allocator, events.items)) != null;
+}
+
+fn loadTeamMemberEvents(
+    allocator: Allocator,
+    db: *SqliteDb,
+    slug: []const u8,
+    principal: []const u8,
+    before_event_hash: ?[]const u8,
+    visibility: AuthEventVisibility,
+) !std.ArrayList(TeamMemberEvent) {
+    var stmt = try db.prepare(
+        \\SELECT event_hash, event_type, created_at, actor_principal
+        \\FROM team_member_events
+        \\WHERE slug = ? AND principal = ?
+        \\ORDER BY event_hash
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, slug);
+    try stmt.bindText(2, principal);
+
+    var events: std.ArrayList(TeamMemberEvent) = .empty;
+    errdefer freeTeamMemberEvents(allocator, &events);
+
+    while (try stmt.step()) {
+        const event_hash = try stmt.columnTextDup(allocator, 0);
+        var keep_event_hash = false;
+        defer if (!keep_event_hash) allocator.free(event_hash);
+        var event_type: ?[]u8 = try stmt.columnTextDup(allocator, 1);
+        errdefer if (event_type) |value| allocator.free(value);
+
+        if (!(try authEventVisible(allocator, event_hash, before_event_hash, event_type.?, "team.member_removed", visibility))) {
+            allocator.free(event_type.?);
+            event_type = null;
+            continue;
+        }
+
+        var created_at: ?[]u8 = try stmt.columnTextDup(allocator, 2);
+        errdefer if (created_at) |value| allocator.free(value);
+        var actor_principal: ?[]u8 = try stmt.columnTextDup(allocator, 3);
+        errdefer if (actor_principal) |value| allocator.free(value);
+
+        var event = TeamMemberEvent{
+            .allocator = allocator,
+            .event_hash = event_hash,
+            .event_type = event_type.?,
+            .created_at = created_at.?,
+            .actor_principal = actor_principal.?,
+        };
+        event_type = null;
+        created_at = null;
+        actor_principal = null;
+        keep_event_hash = true;
+        errdefer event.deinit();
+        try events.append(allocator, event);
+    }
+
+    return events;
+}
+
+fn freeTeamMemberEvents(allocator: Allocator, events: *std.ArrayList(TeamMemberEvent)) void {
+    for (events.items) |*event| event.deinit();
+    events.deinit(allocator);
+}
+
+fn activeTeamMemberAddIndex(allocator: Allocator, events: []const TeamMemberEvent) !?usize {
+    var winner: ?usize = null;
+    for (events, 0..) |event, index| {
+        if (!std.mem.eql(u8, event.event_type, "team.member_added")) continue;
+        if (try teamMemberAddDisabledByRemoval(allocator, events, event.event_hash)) continue;
+        if (winner == null or try eventWins(allocator, event.event_hash, events[winner.?].event_hash)) {
+            winner = index;
+        }
+    }
+    return winner;
+}
+
+fn teamMemberAddDisabledByRemoval(allocator: Allocator, events: []const TeamMemberEvent, add_event_hash: []const u8) !bool {
+    for (events) |event| {
+        if (!std.mem.eql(u8, event.event_type, "team.member_removed")) continue;
+        if (try authRevocationDisablesGrant(allocator, event.event_hash, add_event_hash)) return true;
+    }
+    return false;
+}
+
 fn applyAclProjection(allocator: Allocator, db: *SqliteDb, event_hash: []const u8, envelope: ValidatedEnvelope, body: []const u8) !?[]const u8 {
     if (!std.mem.startsWith(u8, envelope.event_type, "acl.")) return null;
 
@@ -1498,7 +1850,7 @@ fn applyAclProjection(allocator: Allocator, db: *SqliteDb, event_hash: []const u
     if (std.mem.eql(u8, envelope.event_type, "acl.role_granted")) {
         const role = event_json.jsonString(payload.get("role")) orelse return "invalid_event_envelope";
         if (!event_validation.isKnownRole(role)) return "invalid_role";
-        const actor_role = (try aclRoleAtAuthFrontier(allocator, db, envelope.actor_principal, event_hash)) orelse return "unauthorized_principal";
+        const actor_role = (try effectiveRoleAtAuthFrontier(allocator, db, envelope.actor_principal, event_hash)) orelse return "unauthorized_principal";
         defer allocator.free(actor_role);
         if (!roleAtLeast(actor_role, role)) return "privilege_escalation";
         try insertAclHistory(db, principal, role, event_hash, envelope.event_type);
@@ -1667,6 +2019,28 @@ fn aclRoleAtAuthFrontier(allocator: Allocator, db: *SqliteDb, principal: []const
     return try allocator.dupe(u8, winner.role);
 }
 
+fn effectiveRoleAtAuthFrontier(allocator: Allocator, db: *SqliteDb, principal: []const u8, event_hash: []const u8) !?[]u8 {
+    var best_role = try aclRoleAtAuthFrontier(allocator, db, principal, event_hash);
+    errdefer if (best_role) |role| allocator.free(role);
+
+    var stmt = try db.prepare("SELECT DISTINCT slug FROM team_member_events WHERE principal = ? ORDER BY slug");
+    defer stmt.deinit();
+    try stmt.bindText(1, principal);
+    while (try stmt.step()) {
+        const slug = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(slug);
+        if (!(try teamMemberActiveAtAuthFrontier(allocator, db, slug, principal, event_hash))) continue;
+
+        const team_principal = try std.fmt.allocPrint(allocator, "@{s}", .{slug});
+        defer allocator.free(team_principal);
+        const team_role = try aclRoleAtAuthFrontier(allocator, db, team_principal, event_hash);
+        defer if (team_role) |role| allocator.free(role);
+        if (team_role) |role| try keepHigherRole(allocator, &best_role, role);
+    }
+
+    return best_role;
+}
+
 fn loadAclRoleEvents(
     allocator: Allocator,
     db: *SqliteDb,
@@ -1743,27 +2117,117 @@ fn aclRoleGrantDisabledByRevocation(allocator: Allocator, events: []const AclRol
     return false;
 }
 
-pub fn countCurrentOwners(db: *SqliteDb) !usize {
-    var stmt = try db.prepare("SELECT COUNT(*) FROM acl_roles WHERE role = 'owner'");
-    defer stmt.deinit();
-    if (!(try stmt.step())) return 0;
-    const count = stmt.columnInt64(0);
-    return if (count <= 0) 0 else @as(usize, @intCast(count));
-}
-
-fn countOwnersAtFrontier(allocator: Allocator, db: *SqliteDb, event_hash: []const u8) !usize {
-    var stmt = try db.prepare("SELECT DISTINCT principal FROM acl_role_events");
-    defer stmt.deinit();
+pub fn countCurrentOwners(allocator: Allocator, db: *SqliteDb) !usize {
+    var principals = std.StringHashMap(void).init(allocator);
+    defer freePrincipalSet(allocator, &principals);
+    try collectCurrentRolePrincipals(allocator, db, &principals);
+    try collectCurrentTeamMemberPrincipals(allocator, db, &principals);
 
     var count: usize = 0;
-    while (try stmt.step()) {
-        const principal = try stmt.columnTextDup(allocator, 0);
-        defer allocator.free(principal);
-        const role = try aclRoleAtFrontier(allocator, db, principal, event_hash);
+    var it = principals.keyIterator();
+    while (it.next()) |principal| {
+        const role = try effectiveCurrentRole(allocator, db, principal.*);
         defer if (role) |value| allocator.free(value);
         if (role != null and std.mem.eql(u8, role.?, "owner")) count += 1;
     }
     return count;
+}
+
+fn collectCurrentRolePrincipals(allocator: Allocator, db: *SqliteDb, principals: *std.StringHashMap(void)) !void {
+    var stmt = try db.prepare("SELECT principal FROM acl_roles WHERE principal NOT LIKE '@%'");
+    defer stmt.deinit();
+    while (try stmt.step()) {
+        const principal = try stmt.columnTextDup(allocator, 0);
+        errdefer allocator.free(principal);
+        const result = try principals.getOrPut(principal);
+        if (result.found_existing) allocator.free(principal);
+    }
+}
+
+fn collectCurrentTeamMemberPrincipals(allocator: Allocator, db: *SqliteDb, principals: *std.StringHashMap(void)) !void {
+    var stmt = try db.prepare("SELECT DISTINCT principal FROM team_members");
+    defer stmt.deinit();
+    while (try stmt.step()) {
+        const principal = try stmt.columnTextDup(allocator, 0);
+        errdefer allocator.free(principal);
+        const result = try principals.getOrPut(principal);
+        if (result.found_existing) allocator.free(principal);
+    }
+}
+
+fn countOwnersAtFrontier(allocator: Allocator, db: *SqliteDb, event_hash: []const u8) !usize {
+    var principals = std.StringHashMap(void).init(allocator);
+    defer freePrincipalSet(allocator, &principals);
+
+    var stmt = try db.prepare("SELECT DISTINCT principal FROM acl_role_events WHERE principal NOT LIKE '@%'");
+    defer stmt.deinit();
+    while (try stmt.step()) {
+        const principal = try stmt.columnTextDup(allocator, 0);
+        errdefer allocator.free(principal);
+        const result = try principals.getOrPut(principal);
+        if (result.found_existing) allocator.free(principal);
+    }
+
+    var members = try db.prepare("SELECT DISTINCT principal FROM team_member_events");
+    defer members.deinit();
+    while (try members.step()) {
+        const principal = try members.columnTextDup(allocator, 0);
+        errdefer allocator.free(principal);
+        const result = try principals.getOrPut(principal);
+        if (result.found_existing) allocator.free(principal);
+    }
+
+    var count: usize = 0;
+    var it = principals.keyIterator();
+    while (it.next()) |principal| {
+        const role = try effectiveRoleAtFrontierCausal(allocator, db, principal.*, event_hash);
+        defer if (role) |value| allocator.free(value);
+        if (role != null and std.mem.eql(u8, role.?, "owner")) count += 1;
+    }
+    return count;
+}
+
+fn freePrincipalSet(allocator: Allocator, principals: *std.StringHashMap(void)) void {
+    var it = principals.keyIterator();
+    while (it.next()) |principal| allocator.free(principal.*);
+    principals.deinit();
+}
+
+fn effectiveRoleAtFrontierCausal(allocator: Allocator, db: *SqliteDb, principal: []const u8, event_hash: []const u8) !?[]u8 {
+    var best_role = try aclRoleAtFrontier(allocator, db, principal, event_hash);
+    errdefer if (best_role) |role| allocator.free(role);
+
+    var stmt = try db.prepare("SELECT DISTINCT slug FROM team_member_events WHERE principal = ? ORDER BY slug");
+    defer stmt.deinit();
+    try stmt.bindText(1, principal);
+    while (try stmt.step()) {
+        const slug = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(slug);
+        if (!(try teamMemberActiveAtFrontier(allocator, db, slug, principal, event_hash))) continue;
+
+        const team_principal = try std.fmt.allocPrint(allocator, "@{s}", .{slug});
+        defer allocator.free(team_principal);
+        const team_role = try aclRoleAtFrontier(allocator, db, team_principal, event_hash);
+        defer if (team_role) |role| allocator.free(role);
+        if (team_role) |role| try keepHigherRole(allocator, &best_role, role);
+    }
+
+    return best_role;
+}
+
+fn removingTeamMemberWouldRemoveLastOwner(allocator: Allocator, db: *SqliteDb, slug: []const u8, principal: []const u8, event_hash: []const u8) !bool {
+    const before_role = try effectiveRoleAtFrontierCausal(allocator, db, principal, event_hash);
+    defer if (before_role) |role| allocator.free(role);
+    if (before_role == null or !std.mem.eql(u8, before_role.?, "owner")) return false;
+
+    const team_principal = try std.fmt.allocPrint(allocator, "@{s}", .{slug});
+    defer allocator.free(team_principal);
+    const team_role = try aclRoleAtFrontier(allocator, db, team_principal, event_hash);
+    defer if (team_role) |role| allocator.free(role);
+    if (team_role == null or !std.mem.eql(u8, team_role.?, "owner")) return false;
+
+    const owners = try countOwnersAtFrontier(allocator, db, event_hash);
+    return owners <= 1;
 }
 
 fn upsertDelegation(

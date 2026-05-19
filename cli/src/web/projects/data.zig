@@ -351,6 +351,27 @@ pub fn projectExists(db: *SqliteDb, project: []const u8) !bool {
     return try stmt.step();
 }
 
+pub fn projectIdOwned(allocator: Allocator, db: *SqliteDb, project: []const u8) !?[]u8 {
+    var stmt = try db.prepare(
+        \\SELECT id
+        \\FROM projects
+        \\WHERE name = ?
+        \\ORDER BY created_at DESC, id DESC
+        \\LIMIT 1
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, project);
+    if (!(try stmt.step())) return null;
+    return try stmt.columnTextDup(allocator, 0);
+}
+
+pub fn projectIdExists(db: *SqliteDb, project_id: []const u8) !bool {
+    var stmt = try db.prepare("SELECT 1 FROM projects WHERE id = ? LIMIT 1");
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    return try stmt.step();
+}
+
 test "project view config loads project table fields" {
     var db = try SqliteDb.openWithOptions(
         std.testing.allocator,

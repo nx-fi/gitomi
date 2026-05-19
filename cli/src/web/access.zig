@@ -146,6 +146,72 @@ pub fn handleAccessDevicePost(allocator: Allocator, repo: Repo, stream: std.net.
     try sendRedirect(allocator, stream, "/access");
 }
 
+pub fn handleAccessTeamPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8, csrf_token: []const u8) !void {
+    if (!try validateCsrfToken(allocator, form_body, csrf_token)) {
+        try sendAccessError(allocator, repo, stream, 403, "Forbidden", "Invalid access form token. Reload the page and try again.", csrf_token);
+        return;
+    }
+
+    const action_owned = (try formValueOwned(allocator, form_body, "action")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(action_owned);
+    const action = std.mem.trim(u8, action_owned, " \t\r\n");
+    const slug_owned = (try formValueOwned(allocator, form_body, "slug")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(slug_owned);
+    const slug = std.mem.trim(u8, slug_owned, " \t\r\n");
+    if (slug.len == 0) {
+        try sendAccessError(allocator, repo, stream, 422, "Unprocessable Entity", "Team slug is required.", csrf_token);
+        return;
+    }
+
+    if (std.mem.eql(u8, action, "create-team")) {
+        const name_owned = (try formValueOwned(allocator, form_body, "name")) orelse try allocator.dupe(u8, "");
+        defer allocator.free(name_owned);
+        const description_owned = (try formValueOwned(allocator, form_body, "description")) orelse try allocator.dupe(u8, "");
+        defer allocator.free(description_owned);
+        const name = std.mem.trim(u8, name_owned, " \t\r\n");
+        const description = std.mem.trim(u8, description_owned, " \t\r\n");
+        rbac.createTeamCreatedEvent(allocator, slug, if (name.len == 0) null else name, if (description.len == 0) null else description) catch |err| {
+            try sendAccessError(allocator, repo, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), shared.writeFailureMessage(err, "Could not create the team. Check that your actor is an owner and the slug is available."), csrf_token);
+            return;
+        };
+    } else if (std.mem.eql(u8, action, "edit-team")) {
+        const name_owned = (try formValueOwned(allocator, form_body, "name")) orelse try allocator.dupe(u8, "");
+        defer allocator.free(name_owned);
+        const description_owned = (try formValueOwned(allocator, form_body, "description")) orelse try allocator.dupe(u8, "");
+        defer allocator.free(description_owned);
+        const name = std.mem.trim(u8, name_owned, " \t\r\n");
+        const description = std.mem.trim(u8, description_owned, " \t\r\n");
+        rbac.createTeamUpdatedEvent(allocator, slug, name, description) catch |err| {
+            try sendAccessError(allocator, repo, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), shared.writeFailureMessage(err, "Could not update the team. Check that your actor is an owner and the team exists."), csrf_token);
+            return;
+        };
+    } else if (std.mem.eql(u8, action, "add-member") or std.mem.eql(u8, action, "remove-member")) {
+        const principal_owned = (try formValueOwned(allocator, form_body, "principal")) orelse try allocator.dupe(u8, "");
+        defer allocator.free(principal_owned);
+        const principal = std.mem.trim(u8, principal_owned, " \t\r\n");
+        if (principal.len == 0) {
+            try sendAccessError(allocator, repo, stream, 422, "Unprocessable Entity", "Principal is required.", csrf_token);
+            return;
+        }
+        if (std.mem.eql(u8, action, "add-member")) {
+            rbac.createTeamMemberAddedEvent(allocator, slug, principal) catch |err| {
+                try sendAccessError(allocator, repo, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), shared.writeFailureMessage(err, "Could not add the team member. Check that your actor is an owner and the team exists."), csrf_token);
+                return;
+            };
+        } else {
+            rbac.createTeamMemberRemovedEvent(allocator, slug, principal) catch |err| {
+                try sendAccessError(allocator, repo, stream, shared.writeFailureStatus(err), shared.writeFailureReason(err), shared.writeFailureMessage(err, "Could not remove the team member. They may not be an active member or this may remove the last owner."), csrf_token);
+                return;
+            };
+        }
+    } else {
+        try sendAccessError(allocator, repo, stream, 422, "Unprocessable Entity", "Unknown team action.", csrf_token);
+        return;
+    }
+
+    try sendRedirect(allocator, stream, "/access");
+}
+
 fn validateCsrfToken(allocator: Allocator, form_body: []const u8, csrf_token: []const u8) !bool {
     const submitted_owned = (try formValueOwned(allocator, form_body, csrf_field_name)) orelse return false;
     defer allocator.free(submitted_owned);
@@ -192,10 +258,13 @@ fn renderAccessPageWithFlash(allocator: Allocator, repo: Repo, csrf_token: []con
     try buf.appendSlice(allocator, "<div class=\"access-grid\">");
     try appendGrantRoleForm(&buf, allocator, csrf_token);
     try appendAddDeviceForm(&buf, allocator, csrf_token);
+    try appendCreateTeamForm(&buf, allocator, csrf_token);
+    try appendAddTeamMemberForm(&buf, allocator, csrf_token);
     try buf.appendSlice(allocator, "</div></section>");
 
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
+    try appendTeamTable(&buf, allocator, &db, csrf_token);
     try appendRoleTable(&buf, allocator, &db, csrf_token);
     try appendDeviceTable(&buf, allocator, &db, csrf_token);
 
@@ -249,6 +318,131 @@ fn appendAddDeviceForm(buf: *std.ArrayList(u8), allocator: Allocator, csrf_token
         \\  </form>
         \\</section>
     );
+}
+
+fn appendCreateTeamForm(buf: *std.ArrayList(u8), allocator: Allocator, csrf_token: []const u8) !void {
+    try buf.appendSlice(allocator,
+        \\<section class="access-card">
+        \\  <h2>Create team</h2>
+        \\  <form class="issue-form access-form" method="post" action="/access/teams">
+        \\    <input type="hidden" name="action" value="create-team">
+    );
+    try appendCsrfInput(buf, allocator, csrf_token);
+    try buf.appendSlice(allocator,
+        \\    <div class="access-form-row">
+        \\      <label>Slug<input name="slug" required></label>
+        \\      <label>Name<input name="name"></label>
+        \\    </div>
+        \\    <label>Description<textarea name="description" rows="3"></textarea></label>
+        \\    <div class="form-actions"><button class="button primary" type="submit">Create team</button></div>
+        \\  </form>
+        \\</section>
+    );
+}
+
+fn appendAddTeamMemberForm(buf: *std.ArrayList(u8), allocator: Allocator, csrf_token: []const u8) !void {
+    try buf.appendSlice(allocator,
+        \\<section class="access-card">
+        \\  <h2>Add team member</h2>
+        \\  <form class="issue-form access-form" method="post" action="/access/teams">
+        \\    <input type="hidden" name="action" value="add-member">
+    );
+    try appendCsrfInput(buf, allocator, csrf_token);
+    try buf.appendSlice(allocator,
+        \\    <div class="access-form-row">
+        \\      <label>Team slug<input name="slug" required></label>
+        \\      <label>Principal<input name="principal" required></label>
+        \\    </div>
+        \\    <div class="form-actions"><button class="button primary" type="submit">Add member</button></div>
+        \\  </form>
+        \\</section>
+    );
+}
+
+fn appendTeamTable(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, csrf_token: []const u8) !void {
+    try buf.appendSlice(allocator,
+        \\<section class="panel access-table-panel">
+        \\  <div class="section-head"><div><p class="eyebrow">Teams</p><h1>Permission Groups</h1></div></div>
+        \\  <div class="table-wrap">
+        \\    <table>
+        \\      <thead><tr><th>Team</th><th>Role</th><th>Description</th><th>Members</th><th>Actions</th></tr></thead>
+        \\      <tbody>
+    );
+    var stmt = try db.prepare(
+        \\SELECT t.slug, t.name, t.description, COALESCE(r.role, '')
+        \\FROM teams t
+        \\LEFT JOIN acl_roles r ON r.principal = '@' || t.slug
+        \\ORDER BY t.slug
+    );
+    defer stmt.deinit();
+    var shown: usize = 0;
+    while (try stmt.step()) {
+        const slug = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(slug);
+        const name = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(name);
+        const description = try stmt.columnTextDup(allocator, 2);
+        defer allocator.free(description);
+        const role = try stmt.columnTextDup(allocator, 3);
+        defer allocator.free(role);
+        try appendTemplate(buf, allocator,
+            \\<tr><td><strong>@{slug}</strong><br><span class="muted">{name}</span></td><td>
+        , .{ .slug = slug, .name = name });
+        if (role.len == 0) {
+            try buf.appendSlice(allocator, "<span class=\"muted\">No role</span>");
+        } else {
+            try appendTemplate(buf, allocator, "<span class=\"access-role-pill\">{role}</span>", .{ .role = role });
+        }
+        try appendTemplate(buf, allocator, "</td><td>{description}</td><td>", .{ .description = description });
+        try appendTeamMembersCell(buf, allocator, db, slug, csrf_token);
+        try buf.appendSlice(allocator, "</td><td>");
+        try appendTeamEditForm(buf, allocator, slug, name, description, csrf_token);
+        try buf.appendSlice(allocator, "</td></tr>");
+        shown += 1;
+    }
+    if (shown == 0) try appendEmptyCell(buf, allocator, 5, "No teams found.");
+    try buf.appendSlice(allocator,
+        \\      </tbody>
+        \\    </table>
+        \\  </div>
+        \\</section>
+    );
+}
+
+fn appendTeamMembersCell(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, slug: []const u8, csrf_token: []const u8) !void {
+    var stmt = try db.prepare("SELECT principal FROM team_members WHERE slug = ? ORDER BY principal");
+    defer stmt.deinit();
+    try stmt.bindText(1, slug);
+    var shown: usize = 0;
+    try buf.appendSlice(allocator, "<div class=\"access-member-list\">");
+    while (try stmt.step()) {
+        const principal = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(principal);
+        try buf.appendSlice(allocator, "<form class=\"access-member-chip\" method=\"post\" action=\"/access/teams\"><input type=\"hidden\" name=\"action\" value=\"remove-member\">");
+        try appendCsrfInput(buf, allocator, csrf_token);
+        try buf.appendSlice(allocator, "<input type=\"hidden\" name=\"slug\" value=\"");
+        try shared.appendHtml(buf, allocator, slug);
+        try buf.appendSlice(allocator, "\"><input type=\"hidden\" name=\"principal\" value=\"");
+        try shared.appendHtml(buf, allocator, principal);
+        try buf.appendSlice(allocator, "\"><span>");
+        try shared.appendHtml(buf, allocator, principal);
+        try buf.appendSlice(allocator, "</span><button class=\"button secondary\" type=\"submit\">Remove</button></form>");
+        shown += 1;
+    }
+    if (shown == 0) try buf.appendSlice(allocator, "<span class=\"muted\">No members</span>");
+    try buf.appendSlice(allocator, "</div>");
+}
+
+fn appendTeamEditForm(buf: *std.ArrayList(u8), allocator: Allocator, slug: []const u8, name: []const u8, description: []const u8, csrf_token: []const u8) !void {
+    try buf.appendSlice(allocator, "<form class=\"access-team-edit\" method=\"post\" action=\"/access/teams\"><input type=\"hidden\" name=\"action\" value=\"edit-team\">");
+    try appendCsrfInput(buf, allocator, csrf_token);
+    try buf.appendSlice(allocator, "<input type=\"hidden\" name=\"slug\" value=\"");
+    try shared.appendHtml(buf, allocator, slug);
+    try buf.appendSlice(allocator, "\"><label>Name<input name=\"name\" value=\"");
+    try shared.appendHtml(buf, allocator, name);
+    try buf.appendSlice(allocator, "\"></label><label>Description<input name=\"description\" value=\"");
+    try shared.appendHtml(buf, allocator, description);
+    try buf.appendSlice(allocator, "\"></label><button class=\"button secondary\" type=\"submit\">Update</button></form>");
 }
 
 fn appendRoleTable(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, csrf_token: []const u8) !void {

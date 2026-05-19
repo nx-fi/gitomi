@@ -21,7 +21,7 @@ pub fn createReactionEvent(
     add: bool,
 ) !void {
     if (!isReactableKind(object_kind)) {
-        try eprint("gt reaction: target kind must be issue, pr, pull, or comment\n", .{});
+        try eprint("gt reaction: target kind must be issue, pr, pull, project, or comment\n", .{});
         return CliError.InvalidArgument;
     }
     const canonical_kind: []const u8 = if (std.mem.eql(u8, object_kind, "pr")) "pull" else object_kind;
@@ -74,6 +74,7 @@ fn isReactableKind(value: []const u8) bool {
     return std.mem.eql(u8, value, "issue") or
         std.mem.eql(u8, value, "pull") or
         std.mem.eql(u8, value, "pr") or
+        std.mem.eql(u8, value, "project") or
         std.mem.eql(u8, value, "comment");
 }
 

@@ -1470,6 +1470,84 @@ pub fn buildIdentityDeviceRevokedJson(
     return try buf.toOwnedSlice(allocator);
 }
 
+pub fn buildTeamCreatedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    slug: []const u8,
+    name: ?[]const u8,
+    description: ?[]const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    const object_id = try std.fmt.allocPrint(allocator, "team:{s}", .{slug});
+    defer allocator.free(object_id);
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, object_id, event_uuid, idem, occurred_at, parents, "team.created", "team");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "slug", slug, true);
+    if (name) |value| try appendJsonFieldString(&buf, allocator, "name", value, true);
+    if (description) |value| try appendJsonFieldString(&buf, allocator, "description", value, true);
+    if (buf.items[buf.items.len - 1] == ',') buf.items.len -= 1;
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildTeamUpdatedJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    slug: []const u8,
+    name: ?[]const u8,
+    description: ?[]const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    const object_id = try std.fmt.allocPrint(allocator, "team:{s}", .{slug});
+    defer allocator.free(object_id);
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, object_id, event_uuid, idem, occurred_at, parents, "team.updated", "team");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    if (name) |value| try appendJsonFieldString(&buf, allocator, "name", value, true);
+    if (description) |value| try appendJsonFieldString(&buf, allocator, "description", value, true);
+    if (buf.items[buf.items.len - 1] == ',') buf.items.len -= 1;
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn buildTeamMemberJson(
+    allocator: Allocator,
+    cfg: Config,
+    seq: u64,
+    slug: []const u8,
+    principal: []const u8,
+    event_uuid: []const u8,
+    idem: []const u8,
+    occurred_at: []const u8,
+    parents: EventParents,
+    add: bool,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    const object_id = try std.fmt.allocPrint(allocator, "team:{s}", .{slug});
+    defer allocator.free(object_id);
+    try appendEnvelopePrefix(&buf, allocator, cfg, seq, object_id, event_uuid, idem, occurred_at, parents, if (add) "team.member_added" else "team.member_removed", "team");
+    try buf.appendSlice(allocator, "\"payload\":{");
+    try appendJsonFieldString(&buf, allocator, "slug", slug, true);
+    try appendJsonFieldString(&buf, allocator, "principal", principal, false);
+    try buf.appendSlice(allocator, "}}");
+    return try buf.toOwnedSlice(allocator);
+}
+
 pub fn buildActionRunRequestedJson(
     allocator: Allocator,
     cfg: Config,

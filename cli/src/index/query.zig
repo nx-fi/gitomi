@@ -318,20 +318,27 @@ fn legacyPositiveInteger(legacy: std.json.ObjectMap, key: []const u8) bool {
 pub fn roleForPrincipal(allocator: Allocator, repo: Repo, principal: []const u8) !?[]u8 {
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
+    if ((try accessModeFromDb(allocator, &db)) == .open) return try allocator.dupe(u8, "owner");
+    return try projection.effectiveCurrentRole(allocator, &db, principal);
+}
+
+pub fn directRoleForPrincipal(allocator: Allocator, repo: Repo, principal: []const u8) !?[]u8 {
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
     return try projection.currentRole(allocator, &db, principal);
 }
 
 pub fn countOwners(allocator: Allocator, repo: Repo) !usize {
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
-    return try projection.countCurrentOwners(&db);
+    return try projection.countCurrentOwners(allocator, &db);
 }
 
 pub fn effectiveWriteRoleForPrincipal(allocator: Allocator, repo: Repo, principal: []const u8) !?[]u8 {
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();
     if ((try accessModeFromDb(allocator, &db)) == .open) return try allocator.dupe(u8, "owner");
-    return try projection.currentRole(allocator, &db, principal);
+    return try projection.effectiveCurrentRole(allocator, &db, principal);
 }
 
 pub fn actorDeviceAuthorizedForWrite(allocator: Allocator, repo: Repo, principal: []const u8, device: []const u8) !bool {
@@ -395,6 +402,7 @@ pub fn authRelatedEventHashes(allocator: Allocator, repo: Repo, principal: []con
         "SELECT grant_event_hash FROM acl_roles WHERE principal = ?",
         &.{principal},
     );
+    try appendTeamAuthRelatedHashes(allocator, &db, &hashes, principal);
     try appendSingleHashQuery(
         allocator,
         &db,
@@ -413,6 +421,26 @@ pub fn authRelatedEventHashes(allocator: Allocator, repo: Repo, principal: []con
     return try hashes.toOwnedSlice(allocator);
 }
 
+fn appendTeamAuthRelatedHashes(allocator: Allocator, db: *SqliteDb, hashes: *std.ArrayList([]u8), principal: []const u8) !void {
+    var stmt = try db.prepare(
+        \\SELECT tm.add_hash, r.grant_event_hash
+        \\FROM team_members tm
+        \\JOIN acl_roles r ON r.principal = '@' || tm.slug
+        \\WHERE tm.principal = ?
+        \\ORDER BY tm.slug
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, principal);
+    while (try stmt.step()) {
+        const member_hash = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(member_hash);
+        const role_hash = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(role_hash);
+        try appendUniqueHash(allocator, hashes, member_hash);
+        try appendUniqueHash(allocator, hashes, role_hash);
+    }
+}
+
 fn appendSingleHashQuery(
     allocator: Allocator,
     db: *SqliteDb,
@@ -425,8 +453,20 @@ fn appendSingleHashQuery(
     for (params, 0..) |param, idx| try stmt.bindText(@intCast(idx + 1), param);
     if (!(try stmt.step())) return;
     const hash = try stmt.columnTextDup(allocator, 0);
-    errdefer allocator.free(hash);
+    try appendOwnedUniqueHash(allocator, hashes, hash);
+}
+
+fn appendUniqueHash(allocator: Allocator, hashes: *std.ArrayList([]u8), hash: []const u8) !void {
     if (hash.len == 0) return;
+    try appendOwnedUniqueHash(allocator, hashes, try allocator.dupe(u8, hash));
+}
+
+fn appendOwnedUniqueHash(allocator: Allocator, hashes: *std.ArrayList([]u8), hash: []u8) !void {
+    errdefer allocator.free(hash);
+    if (hash.len == 0) {
+        allocator.free(hash);
+        return;
+    }
     for (hashes.items) |existing| {
         if (std.mem.eql(u8, existing, hash)) {
             allocator.free(hash);
@@ -516,6 +556,92 @@ pub fn listIdentityFromIndex(allocator: Allocator, repo: Repo, json: bool) !void
             try out("{s}/{s}\t{s}\t{s}\n", .{ principal, device, if (active) "active" else "revoked", fingerprint });
         }
     }
+}
+
+pub fn teamExists(allocator: Allocator, repo: Repo, slug: []const u8) !bool {
+    if (!fileExists(repo.index_path)) return false;
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    var stmt = try db.prepare("SELECT 1 FROM teams WHERE slug = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, slug);
+    return try stmt.step();
+}
+
+pub fn teamMemberActive(allocator: Allocator, repo: Repo, slug: []const u8, principal: []const u8) !bool {
+    if (!fileExists(repo.index_path)) return false;
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    var stmt = try db.prepare("SELECT 1 FROM team_members WHERE slug = ? AND principal = ? LIMIT 1");
+    defer stmt.deinit();
+    try stmt.bindText(1, slug);
+    try stmt.bindText(2, principal);
+    return try stmt.step();
+}
+
+pub fn listTeamsFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {
+    if (!fileExists(repo.index_path)) return;
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
+    var stmt = try db.prepare(
+        \\SELECT t.slug, t.name, t.description, COALESCE(r.role, ''), t.event_hash
+        \\FROM teams t
+        \\LEFT JOIN acl_roles r ON r.principal = '@' || t.slug
+        \\ORDER BY t.slug
+    );
+    defer stmt.deinit();
+    while (try stmt.step()) {
+        const slug = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(slug);
+        const name = try stmt.columnTextDup(allocator, 1);
+        defer allocator.free(name);
+        const description = try stmt.columnTextDup(allocator, 2);
+        defer allocator.free(description);
+        const role = try stmt.columnTextDup(allocator, 3);
+        defer allocator.free(role);
+        const event_hash = try stmt.columnTextDup(allocator, 4);
+        defer allocator.free(event_hash);
+        const members = try teamMembersCsv(allocator, &db, slug);
+        defer allocator.free(members);
+        if (json) {
+            const team_principal = try tryTeamPrincipal(allocator, slug);
+            defer allocator.free(team_principal);
+            var line: std.ArrayList(u8) = .empty;
+            defer line.deinit(allocator);
+            try line.append(allocator, '{');
+            try appendJsonFieldString(&line, allocator, "slug", slug, true);
+            try appendJsonFieldString(&line, allocator, "principal", team_principal, true);
+            try appendJsonFieldString(&line, allocator, "name", name, true);
+            try appendJsonFieldString(&line, allocator, "description", description, true);
+            try appendJsonFieldString(&line, allocator, "role", role, true);
+            try appendJsonFieldString(&line, allocator, "members", members, true);
+            try appendJsonFieldString(&line, allocator, "event_hash", event_hash, false);
+            try line.append(allocator, '}');
+            try out("{s}\n", .{line.items});
+        } else {
+            try out("@{s}\t{s}\t{s}\n", .{ slug, if (role.len == 0) "no-role" else role, members });
+        }
+    }
+}
+
+fn tryTeamPrincipal(allocator: Allocator, slug: []const u8) ![]u8 {
+    return try std.fmt.allocPrint(allocator, "@{s}", .{slug});
+}
+
+fn teamMembersCsv(allocator: Allocator, db: *SqliteDb, slug: []const u8) ![]u8 {
+    var stmt = try db.prepare("SELECT principal FROM team_members WHERE slug = ? ORDER BY principal");
+    defer stmt.deinit();
+    try stmt.bindText(1, slug);
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    while (try stmt.step()) {
+        const principal = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(principal);
+        if (buf.items.len != 0) try buf.append(allocator, ',');
+        try buf.appendSlice(allocator, principal);
+    }
+    return try buf.toOwnedSlice(allocator);
 }
 
 pub fn resolveIssueId(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![]u8 {
@@ -1199,6 +1325,29 @@ pub fn commentParentInfo(allocator: Allocator, repo: Repo, comment_id: []const u
         .parent_id = try stmt.columnTextDup(allocator, 1),
         .add_hash = try stmt.columnTextDup(allocator, 2),
     };
+}
+
+pub fn workItemBodyEventHash(allocator: Allocator, repo: Repo, object_kind: []const u8, object_id: []const u8) ![]u8 {
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+
+    const sql = if (std.mem.eql(u8, object_kind, "issue"))
+        "SELECT body_event_hash FROM issues WHERE id = ?"
+    else if (std.mem.eql(u8, object_kind, "pull"))
+        "SELECT body_event_hash FROM pulls WHERE id = ?"
+    else {
+        try eprint("gt comment: {s} body replies are not supported\n", .{object_kind});
+        return CliError.UserError;
+    };
+
+    var stmt = try db.prepare(sql);
+    defer stmt.deinit();
+    try stmt.bindText(1, object_id);
+    if (!(try stmt.step())) {
+        try eprint("gt comment: no {s} matches {s}\n", .{ object_kind, object_id });
+        return CliError.NotFound;
+    }
+    return try stmt.columnTextDup(allocator, 0);
 }
 
 pub fn listIssuesFromIndex(allocator: Allocator, repo: Repo, json: bool) !void {

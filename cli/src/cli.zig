@@ -62,6 +62,8 @@ const command_dispatch = std.StaticStringMap(Command).initComptime(.{
     .{ "inbox", Command{ .handler = runInbox, .command_name = "gt inbox" } },
     .{ "notification", Command{ .handler = runNotification, .command_name = "gt notification" } },
     .{ "notifications", Command{ .handler = runNotification, .command_name = "gt notifications" } },
+    .{ "team", Command{ .handler = runTeam, .command_name = "gt team" } },
+    .{ "teams", Command{ .handler = runTeam, .command_name = "gt teams" } },
     .{ "acl", Command{ .handler = runAcl, .command_name = "gt acl" } },
     .{ "identity", Command{ .handler = runIdentity, .command_name = "gt identity" } },
     .{ "actions", Command{ .handler = runActions, .command_name = "gt actions" } },
@@ -251,6 +253,10 @@ fn runNotification(allocator: Allocator, args: []const []const u8, _: []const u8
     try notification.cmdNotification(allocator, args);
 }
 
+fn runTeam(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
+    try cmdTeam(allocator, args);
+}
+
 fn runAcl(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
     try cmdAcl(allocator, args);
 }
@@ -351,6 +357,11 @@ fn printUsage() !void {
         \\  gt notification unsubscribe issue|pr OBJECT [--principal PRINCIPAL]
         \\  gt notification subscriptions [--json] [--principal PRINCIPAL]
         \\  gt notification read EVENT|--all [--principal PRINCIPAL]
+        \\  gt team create SLUG [--name NAME] [--description BODY]
+        \\  gt team edit SLUG [--name NAME] [--description BODY]
+        \\  gt team add-member SLUG PRINCIPAL
+        \\  gt team remove-member SLUG PRINCIPAL
+        \\  gt team list [--json]
         \\  gt acl grant PRINCIPAL ROLE
         \\  gt acl revoke PRINCIPAL
         \\  gt acl list [--json]
@@ -737,6 +748,96 @@ fn cmdEvents(allocator: Allocator, args: []const []const u8) !void {
     defer repo.deinit();
     try index.ensureIndex(allocator, repo);
     try index.listEventsFromIndex(allocator, repo, json, limit, one_ref);
+}
+
+fn cmdTeam(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len == 0) {
+        try io.eprint("gt team: expected subcommand 'create', 'edit', 'add-member', 'remove-member', or 'list'\n", .{});
+        return CliError.UserError;
+    }
+
+    if (std.mem.eql(u8, args[0], "list")) {
+        var json = false;
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--json")) {
+                json = true;
+            } else {
+                try io.eprint("gt team list: unknown option '{s}'\n", .{args[i]});
+                return CliError.UserError;
+            }
+        }
+        var repo = try repo_mod.discoverRepo(allocator);
+        defer repo.deinit();
+        try index.ensureIndex(allocator, repo);
+        try index.listTeamsFromIndex(allocator, repo, json);
+        return;
+    }
+
+    if (std.mem.eql(u8, args[0], "create")) {
+        if (args.len < 2) {
+            try io.eprint("gt team create: expected SLUG\n", .{});
+            return CliError.UserError;
+        }
+        var name: ?[]const u8 = null;
+        var description: ?[]const u8 = null;
+        var i: usize = 2;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--name")) {
+                name = try util.requireValue(args, &i, "--name");
+            } else if (std.mem.eql(u8, args[i], "--description")) {
+                description = try util.requireValue(args, &i, "--description");
+            } else {
+                try io.eprint("gt team create: unknown option '{s}'\n", .{args[i]});
+                return CliError.UserError;
+            }
+        }
+        try rbac.createTeamCreatedEvent(allocator, args[1], name, description);
+        return;
+    }
+
+    if (std.mem.eql(u8, args[0], "edit")) {
+        if (args.len < 2) {
+            try io.eprint("gt team edit: expected SLUG\n", .{});
+            return CliError.UserError;
+        }
+        var name: ?[]const u8 = null;
+        var description: ?[]const u8 = null;
+        var i: usize = 2;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--name")) {
+                name = try util.requireValue(args, &i, "--name");
+            } else if (std.mem.eql(u8, args[i], "--description")) {
+                description = try util.requireValue(args, &i, "--description");
+            } else {
+                try io.eprint("gt team edit: unknown option '{s}'\n", .{args[i]});
+                return CliError.UserError;
+            }
+        }
+        try rbac.createTeamUpdatedEvent(allocator, args[1], name, description);
+        return;
+    }
+
+    if (std.mem.eql(u8, args[0], "add-member")) {
+        if (args.len != 3) {
+            try io.eprint("gt team add-member: expected SLUG PRINCIPAL\n", .{});
+            return CliError.UserError;
+        }
+        try rbac.createTeamMemberAddedEvent(allocator, args[1], args[2]);
+        return;
+    }
+
+    if (std.mem.eql(u8, args[0], "remove-member")) {
+        if (args.len != 3) {
+            try io.eprint("gt team remove-member: expected SLUG PRINCIPAL\n", .{});
+            return CliError.UserError;
+        }
+        try rbac.createTeamMemberRemovedEvent(allocator, args[1], args[2]);
+        return;
+    }
+
+    try io.eprint("gt team: expected subcommand 'create', 'edit', 'add-member', 'remove-member', or 'list'\n", .{});
+    return CliError.UserError;
 }
 
 fn cmdAcl(allocator: Allocator, args: []const []const u8) !void {

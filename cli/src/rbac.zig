@@ -59,8 +59,8 @@ pub fn createAclRevokeEvent(allocator: Allocator, raw_principal: []const u8) !vo
     defer allocator.free(actor_role);
     try requireActorRoleAtLeast(&writer, actor_role, "owner", "gt acl revoke", "revoke ACL roles");
 
-    const role = (try index.roleForPrincipal(allocator, writer.repo, principal)) orelse {
-        try eprint("gt acl revoke: {s} has no effective role\n", .{principal});
+    const role = (try index.directRoleForPrincipal(allocator, writer.repo, principal)) orelse {
+        try eprint("gt acl revoke: {s} has no direct role\n", .{principal});
         return CliError.NotFound;
     };
     defer allocator.free(role);
@@ -80,6 +80,80 @@ pub fn createAclRevokeEvent(allocator: Allocator, raw_principal: []const u8) !vo
     try out("revoked {s} from {s}\n", .{ role, principal });
     try out("  commit: {s}\n", .{commit_oid});
     try out("  ref:    {s}\n", .{writer.inbox_ref});
+}
+
+pub fn createTeamCreatedEvent(allocator: Allocator, raw_slug: []const u8, name_arg: ?[]const u8, description_arg: ?[]const u8) !void {
+    const slug = try checkedTeamSlug(allocator, raw_slug, "gt team create");
+    defer allocator.free(slug);
+
+    var writer = try EventWriter.init(allocator, "gt team create");
+    defer writer.deinit();
+    try requireActorOwner(allocator, &writer, "gt team create", "create teams");
+
+    if (try index.teamExists(allocator, writer.repo, slug)) {
+        try eprint("gt team create: team {s} already exists\n", .{slug});
+        return CliError.UserError;
+    }
+
+    const name = try normalizedOptional(allocator, name_arg);
+    defer if (name) |value| allocator.free(value);
+    const description = try normalizedOptional(allocator, description_arg);
+    defer if (description) |value| allocator.free(value);
+
+    const event_body = try buildTeamCreatedEvent(allocator, &writer, slug, name orelse slug, description);
+    defer allocator.free(event_body);
+
+    const subject = try std.fmt.allocPrint(allocator, "team.created {s}", .{slug});
+    defer allocator.free(subject);
+    const commit_oid = try writer.write("gt team", subject, event_body);
+    defer allocator.free(commit_oid);
+
+    try out("created team @{s}\n", .{slug});
+    try out("  commit: {s}\n", .{commit_oid});
+    try out("  ref:    {s}\n", .{writer.inbox_ref});
+}
+
+pub fn createTeamUpdatedEvent(allocator: Allocator, raw_slug: []const u8, name_arg: ?[]const u8, description_arg: ?[]const u8) !void {
+    const slug = try checkedTeamSlug(allocator, raw_slug, "gt team edit");
+    defer allocator.free(slug);
+
+    var writer = try EventWriter.init(allocator, "gt team edit");
+    defer writer.deinit();
+    try requireActorOwner(allocator, &writer, "gt team edit", "edit teams");
+
+    if (!(try index.teamExists(allocator, writer.repo, slug))) {
+        try eprint("gt team edit: team {s} does not exist\n", .{slug});
+        return CliError.NotFound;
+    }
+
+    const name = try normalizedOptional(allocator, name_arg);
+    defer if (name) |value| allocator.free(value);
+    const description = try normalizedOptional(allocator, description_arg);
+    defer if (description) |value| allocator.free(value);
+    if (name == null and description == null) {
+        try eprint("gt team edit: expected --name or --description\n", .{});
+        return CliError.MissingArgument;
+    }
+
+    const event_body = try buildTeamUpdatedEvent(allocator, &writer, slug, name, description);
+    defer allocator.free(event_body);
+
+    const subject = try std.fmt.allocPrint(allocator, "team.updated {s}", .{slug});
+    defer allocator.free(subject);
+    const commit_oid = try writer.write("gt team", subject, event_body);
+    defer allocator.free(commit_oid);
+
+    try out("updated team @{s}\n", .{slug});
+    try out("  commit: {s}\n", .{commit_oid});
+    try out("  ref:    {s}\n", .{writer.inbox_ref});
+}
+
+pub fn createTeamMemberAddedEvent(allocator: Allocator, raw_slug: []const u8, raw_principal: []const u8) !void {
+    try createTeamMemberEvent(allocator, raw_slug, raw_principal, true);
+}
+
+pub fn createTeamMemberRemovedEvent(allocator: Allocator, raw_slug: []const u8, raw_principal: []const u8) !void {
+    try createTeamMemberEvent(allocator, raw_slug, raw_principal, false);
 }
 
 pub fn createIdentityDeviceAddedEvent(
@@ -225,4 +299,86 @@ fn buildIdentityRevokedEvent(allocator: Allocator, writer: *const EventWriter, p
     const occurred_at = try rfc3339Now(allocator);
     defer allocator.free(occurred_at);
     return try event_builders.buildIdentityDeviceRevokedJson(allocator, writer.cfg, writer.nextSeq(), principal, device, event_uuid, idem, occurred_at, writer.eventParents());
+}
+
+fn createTeamMemberEvent(allocator: Allocator, raw_slug: []const u8, raw_principal: []const u8, add: bool) !void {
+    const command_context = if (add) "gt team add-member" else "gt team remove-member";
+    const slug = try checkedTeamSlug(allocator, raw_slug, command_context);
+    defer allocator.free(slug);
+    const principal = try util.checkedRefSegment(allocator, raw_principal, "principal");
+    defer allocator.free(principal);
+    if (std.mem.startsWith(u8, principal, "@")) {
+        try eprint("{s}: nested team membership is not supported\n", .{command_context});
+        return CliError.InvalidArgument;
+    }
+
+    var writer = try EventWriter.init(allocator, command_context);
+    defer writer.deinit();
+    try requireActorOwner(allocator, &writer, command_context, if (add) "add team members" else "remove team members");
+
+    if (!(try index.teamExists(allocator, writer.repo, slug))) {
+        try eprint("{s}: team {s} does not exist\n", .{ command_context, slug });
+        return CliError.NotFound;
+    }
+    if (!add and !(try index.teamMemberActive(allocator, writer.repo, slug, principal))) {
+        try eprint("{s}: {s} is not an active member of {s}\n", .{ command_context, principal, slug });
+        return CliError.NotFound;
+    }
+
+    const event_body = try buildTeamMemberEvent(allocator, &writer, slug, principal, add);
+    defer allocator.free(event_body);
+
+    const subject = try std.fmt.allocPrint(allocator, "{s} {s} {s}", .{ if (add) "team.member_added" else "team.member_removed", slug, principal });
+    defer allocator.free(subject);
+    const commit_oid = try writer.write("gt team", subject, event_body);
+    defer allocator.free(commit_oid);
+
+    try out("{s} {s} {s} team @{s}\n", .{ if (add) "added" else "removed", principal, if (add) "to" else "from", slug });
+    try out("  commit: {s}\n", .{commit_oid});
+    try out("  ref:    {s}\n", .{writer.inbox_ref});
+}
+
+fn checkedTeamSlug(allocator: Allocator, raw_slug: []const u8, command_context: []const u8) ![]u8 {
+    const slug = std.mem.trim(u8, raw_slug, " \t\r\n");
+    if (!util.isRefSafeSegment(slug) or std.mem.indexOfScalar(u8, slug, '@') != null) {
+        try eprint("{s}: team slug must be a ref-safe segment without '@'\n", .{command_context});
+        return CliError.InvalidArgument;
+    }
+    return try allocator.dupe(u8, slug);
+}
+
+fn normalizedOptional(allocator: Allocator, value: ?[]const u8) !?[]u8 {
+    const raw = value orelse return null;
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    return try allocator.dupe(u8, trimmed);
+}
+
+fn buildTeamCreatedEvent(allocator: Allocator, writer: *const EventWriter, slug: []const u8, name: []const u8, description: ?[]const u8) ![]u8 {
+    const event_uuid = try newUuidV7(allocator);
+    defer allocator.free(event_uuid);
+    const idem = try newUuidV7(allocator);
+    defer allocator.free(idem);
+    const occurred_at = try rfc3339Now(allocator);
+    defer allocator.free(occurred_at);
+    return try event_builders.buildTeamCreatedJson(allocator, writer.cfg, writer.nextSeq(), slug, name, description, event_uuid, idem, occurred_at, writer.eventParents());
+}
+
+fn buildTeamUpdatedEvent(allocator: Allocator, writer: *const EventWriter, slug: []const u8, name: ?[]const u8, description: ?[]const u8) ![]u8 {
+    const event_uuid = try newUuidV7(allocator);
+    defer allocator.free(event_uuid);
+    const idem = try newUuidV7(allocator);
+    defer allocator.free(idem);
+    const occurred_at = try rfc3339Now(allocator);
+    defer allocator.free(occurred_at);
+    return try event_builders.buildTeamUpdatedJson(allocator, writer.cfg, writer.nextSeq(), slug, name, description, event_uuid, idem, occurred_at, writer.eventParents());
+}
+
+fn buildTeamMemberEvent(allocator: Allocator, writer: *const EventWriter, slug: []const u8, principal: []const u8, add: bool) ![]u8 {
+    const event_uuid = try newUuidV7(allocator);
+    defer allocator.free(event_uuid);
+    const idem = try newUuidV7(allocator);
+    defer allocator.free(idem);
+    const occurred_at = try rfc3339Now(allocator);
+    defer allocator.free(occurred_at);
+    return try event_builders.buildTeamMemberJson(allocator, writer.cfg, writer.nextSeq(), slug, principal, event_uuid, idem, occurred_at, writer.eventParents(), add);
 }

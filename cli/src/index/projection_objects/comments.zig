@@ -13,6 +13,7 @@ const upsertSourceIdentity = common.upsertSourceIdentity;
 const creationEventWins = common.creationEventWins;
 const acceptedCreationInFrontier = common.acceptedCreationInFrontier;
 const acceptedCreationHashInFrontier = common.acceptedCreationHashInFrontier;
+const eventInFrontier = common.eventInFrontier;
 const eventWins = common.eventWins;
 const insertReaction = reactions.insertReaction;
 const deleteReaction = reactions.deleteReaction;
@@ -41,6 +42,8 @@ pub fn applyCommentProjection(allocator: Allocator, db: *SqliteDb, event_hash: [
             if (!(try acceptedCreationInFrontier(allocator, db, "issue.opened", parent_id, event_hash))) return "parent_not_created";
         } else if (std.mem.eql(u8, parent_kind, "pull")) {
             if (!(try acceptedCreationInFrontier(allocator, db, "pull.opened", parent_id, event_hash))) return "parent_not_created";
+        } else if (std.mem.eql(u8, parent_kind, "project")) {
+            if (!(try acceptedCreationInFrontier(allocator, db, "project.created", parent_id, event_hash))) return "parent_not_created";
         }
         const comment_body = event_json.jsonString(payload.get("body")) orelse return "invalid_event_envelope";
         const source_author = event_json.jsonString(payload.get("source_author")) orelse "";
@@ -48,9 +51,13 @@ pub fn applyCommentProjection(allocator: Allocator, db: *SqliteDb, event_hash: [
         const reply_parent_id = try commentReplyParentId(allocator, db, event_json.jsonString(payload.get("reply_parent_id")) orelse "", reply_parent_hash);
         defer allocator.free(reply_parent_id);
         if (reply_parent_hash.len != 0 and reply_parent_id.len == 0) return "parent_not_created";
-        if (reply_parent_id.len != 0 and !(try acceptedCreationInFrontier(allocator, db, "comment.added", reply_parent_id, event_hash))) return "parent_not_created";
-        if (reply_parent_id.len != 0 and !(try commentInParent(db, reply_parent_id, parent_kind, parent_id))) return "parent_not_created";
-        if (reply_parent_id.len != 0 and reply_parent_hash.len != 0 and !(try acceptedCreationHashInFrontier(allocator, db, "comment.added", reply_parent_id, reply_parent_hash, event_hash))) return "parent_not_created";
+        if (reply_parent_id.len != 0 and isThreadRootReply(parent_kind, parent_id, reply_parent_id)) {
+            if (reply_parent_hash.len == 0 or !(try acceptedThreadRootHashInFrontier(allocator, db, parent_kind, parent_id, reply_parent_hash, event_hash))) return "parent_not_created";
+        } else if (reply_parent_id.len != 0) {
+            if (!(try acceptedCreationInFrontier(allocator, db, "comment.added", reply_parent_id, event_hash))) return "parent_not_created";
+            if (!(try commentInParent(db, reply_parent_id, parent_kind, parent_id))) return "parent_not_created";
+            if (reply_parent_hash.len != 0 and !(try acceptedCreationHashInFrontier(allocator, db, "comment.added", reply_parent_id, reply_parent_hash, event_hash))) return "parent_not_created";
+        }
         const source_identity = sourceIdentityFromPayload(payload);
         try upsertSourceIdentity(db, source_identity);
         try insertCommentAdded(db, event_hash, envelope, parent_kind, parent_id, comment_body, source_author, source_identity, reply_parent_id, reply_parent_hash);
@@ -136,6 +143,51 @@ fn commentReplyParentId(allocator: Allocator, db: *SqliteDb, payload_parent_id: 
     try stmt.bindText(1, reply_parent_hash);
     if (!(try stmt.step())) return allocator.dupe(u8, "");
     return try stmt.columnTextDup(allocator, 0);
+}
+
+fn isThreadRootReply(parent_kind: []const u8, parent_id: []const u8, reply_parent_id: []const u8) bool {
+    return (std.mem.eql(u8, parent_kind, "issue") or std.mem.eql(u8, parent_kind, "pull")) and
+        std.mem.eql(u8, parent_id, reply_parent_id);
+}
+
+fn acceptedThreadRootHashInFrontier(
+    allocator: Allocator,
+    db: *SqliteDb,
+    parent_kind: []const u8,
+    parent_id: []const u8,
+    reply_parent_hash: []const u8,
+    before_event_hash: ?[]const u8,
+) !bool {
+    var stmt = try db.prepare(
+        \\SELECT event_type
+        \\FROM events
+        \\WHERE object_id = ?
+        \\  AND event_hash = ?
+        \\  AND domain_status = 'accepted'
+        \\LIMIT 1
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, parent_id);
+    try stmt.bindText(2, reply_parent_hash);
+    if (!(try stmt.step())) return false;
+    const event_type = try stmt.columnTextDup(allocator, 0);
+    defer allocator.free(event_type);
+    if (!isThreadRootBodyEvent(parent_kind, event_type)) return false;
+    return try eventInFrontier(allocator, reply_parent_hash, before_event_hash);
+}
+
+fn isThreadRootBodyEvent(parent_kind: []const u8, event_type: []const u8) bool {
+    if (std.mem.eql(u8, parent_kind, "issue")) {
+        return std.mem.eql(u8, event_type, "issue.opened") or
+            std.mem.eql(u8, event_type, "issue.updated") or
+            std.mem.eql(u8, event_type, "issue.body_set");
+    }
+    if (std.mem.eql(u8, parent_kind, "pull")) {
+        return std.mem.eql(u8, event_type, "pull.opened") or
+            std.mem.eql(u8, event_type, "pull.updated") or
+            std.mem.eql(u8, event_type, "pull.body_set");
+    }
+    return false;
 }
 
 fn commentInParent(db: *SqliteDb, comment_id: []const u8, parent_kind: []const u8, parent_id: []const u8) !bool {

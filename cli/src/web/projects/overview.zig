@@ -1,20 +1,30 @@
 const std = @import("std");
+const comment_mod = @import("../../comment.zig");
 const cmd_common = @import("../../cmd_common.zig");
 const event_model = @import("../../event/model.zig");
 const event_json = @import("../../event/json.zig");
 const index = @import("../../index.zig");
 const project_mod = @import("../../project.zig");
+const reaction_mod = @import("../../reaction.zig");
+const settings = @import("../../settings.zig");
 const repo_mod = @import("../../repo.zig");
 const util = @import("../../util.zig");
+const work_items = @import("../../work_items.zig");
+const issues_page = @import("../issues.zig");
+const reaction_choices = @import("../reaction_choices.zig");
 const project_issue_render = @import("issue_render.zig");
 const project_views = @import("views.zig");
+const project_data = @import("data.zig");
 const shared = @import("../shared.zig");
 const zwf = @import("../../zwf.zig");
 
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
 const SqliteDb = index.SqliteDb;
+const createCommentAddedEvent = comment_mod.createCommentAddedEvent;
+const createCommentReplyEvent = comment_mod.createCommentReplyEvent;
 const createProjectUpdatedEvent = project_mod.createProjectUpdatedEvent;
+const createReactionEvent = reaction_mod.createReactionEvent;
 const formValueOwned = shared.formValueOwned;
 const formValuesOwned = shared.formValuesOwned;
 const appendRelativeTime = shared.appendRelativeTime;
@@ -24,6 +34,7 @@ const isProjectStatus = cmd_common.isProjectStatus;
 const isProjectUpdateHealth = cmd_common.isProjectUpdateHealth;
 const sendPlainResponse = shared.sendPlainResponse;
 const sendRedirect = shared.sendRedirect;
+const projectIdExists = project_data.projectIdExists;
 
 pub const ProjectPageTab = enum {
     overview,
@@ -92,6 +103,18 @@ const ProjectUpdateNote = struct {
     }
 };
 
+const ReactionChoice = reaction_choices.Choice;
+
+const ReactionSummary = struct {
+    emoji: []u8,
+    count: i64,
+    reacted: bool,
+
+    fn deinit(self: *ReactionSummary, allocator: Allocator) void {
+        allocator.free(self.emoji);
+    }
+};
+
 pub fn appendProjectOverview(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -100,21 +123,22 @@ pub fn appendProjectOverview(
     project: []const u8,
     csrf_token: []const u8,
 ) !void {
-    _ = repo;
     var summary = try loadProjectSummary(allocator, db, project, csrf_token);
     defer summary.deinit(allocator);
     const metrics = try loadProjectMetrics(allocator, db, &summary);
     var update_note = try loadLatestProjectUpdateNote(allocator, db, &summary);
     defer update_note.deinit(allocator);
+    const current_actor = try shared.currentPrincipalOwned(allocator, repo);
+    defer if (current_actor) |actor| allocator.free(actor);
 
     try buf.appendSlice(allocator, "<section class=\"panel project-overview-page\">");
     try appendProjectOverviewHeader(buf, allocator, &summary, &metrics);
-    try appendProjectPageTabs(buf, allocator, project, .overview, metrics.issue_count);
+    try appendProjectPageTabs(buf, allocator, project, summary.id, .overview, metrics.issue_count, csrf_token);
     try buf.appendSlice(allocator,
         \\<div class="project-overview-layout">
         \\  <div class="project-overview-main">
     );
-    try appendProjectUpdateSection(buf, allocator, &summary, &update_note);
+    try appendProjectUpdateSection(buf, allocator, db, &summary, &update_note, current_actor);
     try appendProjectDescription(buf, allocator, &summary);
     try buf.appendSlice(allocator,
         \\  </div>
@@ -146,7 +170,7 @@ pub fn appendProjectActivityView(
 
     try buf.appendSlice(allocator, "<section class=\"panel project-overview-page project-activity-page\">");
     try appendProjectOverviewHeader(buf, allocator, &summary, &metrics);
-    try appendProjectPageTabs(buf, allocator, project, .activity, metrics.issue_count);
+    try appendProjectPageTabs(buf, allocator, project, summary.id, .activity, metrics.issue_count, csrf_token);
     try buf.appendSlice(allocator,
         \\<div class="project-overview-layout">
         \\  <div class="project-overview-main">
@@ -345,6 +369,156 @@ pub fn handleProjectPropertiesPost(allocator: Allocator, repo: Repo, stream: std
     try redirectProjectOverview(allocator, stream, project_name_owned, project_ref);
 }
 
+pub fn handleProjectDefaultViewPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
+    try index.ensureIndex(allocator, repo);
+
+    const project_id_owned = try formTrimmedOwned(allocator, form_body, "project_id");
+    defer allocator.free(project_id_owned);
+    const project_owned = try formTrimmedOwned(allocator, form_body, "project");
+    defer allocator.free(project_owned);
+    const view_owned = try formTrimmedOwned(allocator, form_body, "view");
+    defer allocator.free(view_owned);
+
+    if (project_id_owned.len == 0 or project_owned.len == 0) {
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Project is required\n");
+        return;
+    }
+    if (!settings.isProjectDefaultViewValue(view_owned)) {
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Unknown project view\n");
+        return;
+    }
+
+    var db = try SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    if (!(try projectIdExists(&db, project_id_owned))) {
+        try sendPlainResponse(allocator, stream, 404, "Not Found", "Project not found\n");
+        return;
+    }
+
+    settings.saveProjectDefaultView(allocator, repo, project_id_owned, view_owned) catch {
+        try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not save project view preference\n");
+        return;
+    };
+
+    const location = try projectViewLocationOwned(allocator, project_owned, view_owned);
+    defer allocator.free(location);
+    try sendRedirect(allocator, stream, location);
+}
+
+pub fn handleProjectCommentPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
+    try index.ensureIndex(allocator, repo);
+
+    const project_id_owned = try formTrimmedOwned(allocator, form_body, "project_id");
+    defer allocator.free(project_id_owned);
+    const project_name_owned = try formTrimmedOwned(allocator, form_body, "project");
+    defer allocator.free(project_name_owned);
+    if (project_id_owned.len == 0 or project_name_owned.len == 0) {
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Project is required\n");
+        return;
+    }
+
+    var db = try SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    if (!(try projectIdExists(&db, project_id_owned))) {
+        try sendPlainResponse(allocator, stream, 404, "Not Found", "Project not found\n");
+        return;
+    }
+
+    const action_owned = try formTrimmedOwned(allocator, form_body, "action");
+    defer allocator.free(action_owned);
+    if (std.mem.eql(u8, action_owned, "add-reaction") or std.mem.eql(u8, action_owned, "remove-reaction")) {
+        const emoji_owned = try formTrimmedOwned(allocator, form_body, "emoji");
+        defer allocator.free(emoji_owned);
+        if (emoji_owned.len == 0) {
+            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Emoji is required\n");
+            return;
+        }
+
+        const target_kind_owned = try formTrimmedOwned(allocator, form_body, "target_kind");
+        defer allocator.free(target_kind_owned);
+        const target_kind = if (target_kind_owned.len == 0) "project" else target_kind_owned;
+        const add = std.mem.eql(u8, action_owned, "add-reaction");
+        if (std.mem.eql(u8, target_kind, "project")) {
+            createReactionEvent(allocator, "project", project_id_owned, emoji_owned, add) catch {
+                try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update reaction\n");
+                return;
+            };
+        } else if (std.mem.eql(u8, target_kind, "comment")) {
+            const target_ref_owned = try formTrimmedOwned(allocator, form_body, "target_ref");
+            defer allocator.free(target_ref_owned);
+            if (target_ref_owned.len == 0) {
+                try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Comment target is required\n");
+                return;
+            }
+            const comment_id = index.resolveCommentId(allocator, repo, target_ref_owned) catch {
+                try sendPlainResponse(allocator, stream, 404, "Not Found", "Comment not found\n");
+                return;
+            };
+            defer allocator.free(comment_id);
+            var parent = try index.commentParentInfo(allocator, repo, comment_id);
+            defer parent.deinit();
+            if (!std.mem.eql(u8, parent.parent_kind, "project") or !std.mem.eql(u8, parent.parent_id, project_id_owned)) {
+                try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Comment is not in this project\n");
+                return;
+            }
+            createReactionEvent(allocator, "comment", comment_id, emoji_owned, add) catch {
+                try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update reaction\n");
+                return;
+            };
+        } else {
+            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Unknown reaction target\n");
+            return;
+        }
+
+        const location = try projectUpdateThreadLocationOwned(allocator, project_name_owned, project_id_owned);
+        defer allocator.free(location);
+        try sendRedirect(allocator, stream, location);
+        return;
+    }
+
+    if (action_owned.len != 0 and !std.mem.eql(u8, action_owned, "comment")) {
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Unknown project comment action\n");
+        return;
+    }
+
+    const body_owned = (try formValueOwned(allocator, form_body, "body")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(body_owned);
+    const body = std.mem.trim(u8, body_owned, " \t\r\n");
+    if (body.len == 0) {
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Comment is required\n");
+        return;
+    }
+
+    const reply_ref_owned = try formTrimmedOwned(allocator, form_body, "reply_parent_ref");
+    defer allocator.free(reply_ref_owned);
+    if (reply_ref_owned.len != 0) {
+        const reply_parent_id = index.resolveCommentId(allocator, repo, reply_ref_owned) catch {
+            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Reply target was not found\n");
+            return;
+        };
+        defer allocator.free(reply_parent_id);
+        var parent = try index.commentParentInfo(allocator, repo, reply_parent_id);
+        defer parent.deinit();
+        if (!std.mem.eql(u8, parent.parent_kind, "project") or !std.mem.eql(u8, parent.parent_id, project_id_owned)) {
+            try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Reply target is not in this project\n");
+            return;
+        }
+        createCommentReplyEvent(allocator, "project", project_id_owned, reply_parent_id, parent.add_hash, body_owned) catch {
+            try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not add the reply\n");
+            return;
+        };
+    } else {
+        createCommentAddedEvent(allocator, "project", project_id_owned, body_owned) catch {
+            try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not add the comment\n");
+            return;
+        };
+    }
+
+    const location = try projectUpdateThreadLocationOwned(allocator, project_name_owned, project_id_owned);
+    defer allocator.free(location);
+    try sendRedirect(allocator, stream, location);
+}
+
 fn formTrimmedOwned(allocator: Allocator, form_body: []const u8, wanted_key: []const u8) ![]u8 {
     const owned = (try formValueOwned(allocator, form_body, wanted_key)) orelse try allocator.dupe(u8, "");
     defer allocator.free(owned);
@@ -404,6 +578,24 @@ fn projectOverviewLocationOwned(allocator: Allocator, project_name: []const u8, 
         try shared.appendUrlEncoded(&location, allocator, fallback_ref);
     }
     return location.toOwnedSlice(allocator);
+}
+
+fn projectViewLocationOwned(allocator: Allocator, project_name: []const u8, view_ref: []const u8) ![]u8 {
+    var location: std.ArrayList(u8) = .empty;
+    errdefer location.deinit(allocator);
+    try location.appendSlice(allocator, "/projects?project=");
+    try shared.appendUrlEncoded(&location, allocator, project_name);
+    try location.appendSlice(allocator, "&view=");
+    try shared.appendUrlEncoded(&location, allocator, view_ref);
+    return location.toOwnedSlice(allocator);
+}
+
+fn projectUpdateThreadLocationOwned(allocator: Allocator, project_name: []const u8, fallback_ref: []const u8) ![]u8 {
+    const location = try projectOverviewLocationOwned(allocator, project_name, fallback_ref);
+    errdefer allocator.free(location);
+    const with_anchor = try std.fmt.allocPrint(allocator, "{s}#project-update-thread", .{location});
+    allocator.free(location);
+    return with_anchor;
 }
 
 fn projectFormHashUnchanged(allocator: Allocator, form_body: []const u8, kind: []const u8, marker: []const u8, body: []const u8) !bool {
@@ -667,20 +859,18 @@ pub fn appendProjectPageTabs(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
     project: []const u8,
+    project_id: []const u8,
     active: ProjectPageTab,
     issue_count: usize,
+    csrf_token: []const u8,
 ) !void {
     try buf.appendSlice(allocator,
         \\<div class="project-overview-tabs">
         \\  <nav class="project-overview-primary-tabs" aria-label="Project tabs">
     );
-    try appendProjectPageTab(buf, allocator, project, active, .overview, "Overview", "project-view-overview-icon", "overview");
-    try appendProjectPageTab(buf, allocator, project, active, .table, "Table", "project-view-table-icon", project_views.projectViewValue(.table));
-    try appendProjectPageTab(buf, allocator, project, active, .board, "Board", "project-view-board-icon", project_views.projectViewValue(.board));
-    try appendProjectPageTab(buf, allocator, project, active, .roadmap, "Roadmap", "project-view-roadmap-icon", project_views.projectViewValue(.roadmap));
-    try appendProjectPageTab(buf, allocator, project, active, .issues, "Issues", "button-icon icon-issues", project_views.projectViewValue(.issues));
-    try appendProjectPageTab(buf, allocator, project, active, .activity, "Activity", "button-icon icon-history", "activity");
-    _ = issue_count;
+    try appendProjectPageTab(buf, allocator, project, project_id, active, .overview, "Overview", "project-view-overview-icon", "overview", csrf_token);
+    try appendProjectViewSwitcher(buf, allocator, project, project_id, active, issue_count, csrf_token);
+    try appendProjectPageTab(buf, allocator, project, project_id, active, .activity, "Activity", "button-icon icon-history", "activity", csrf_token);
     try buf.appendSlice(allocator,
         \\  </nav>
         \\</div>
@@ -691,15 +881,28 @@ fn appendProjectPageTab(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
     project: []const u8,
+    project_id: []const u8,
     active: ProjectPageTab,
     tab: ProjectPageTab,
     label: []const u8,
     icon_class: []const u8,
     view_ref: []const u8,
+    csrf_token: []const u8,
 ) !void {
     if (active == tab) {
         try appendTemplate(buf, allocator,
             \\<span class="project-overview-tab active"><span class="{icon_class}" aria-hidden="true"></span>{label}</span>
+        , .{
+            .icon_class = icon_class,
+            .label = label,
+        });
+        return;
+    }
+
+    if (project_id.len != 0) {
+        try appendProjectDefaultViewFormOpen(buf, allocator, project, project_id, view_ref, csrf_token, "project-overview-tab-form");
+        try appendTemplate(buf, allocator,
+            \\<button class="project-overview-tab" type="submit"><span class="{icon_class}" aria-hidden="true"></span>{label}</button></form>
         , .{
             .icon_class = icon_class,
             .label = label,
@@ -720,6 +923,116 @@ fn appendProjectPageTab(
         .icon_class = icon_class,
         .label = label,
     });
+}
+
+fn appendProjectViewSwitcher(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    project: []const u8,
+    project_id: []const u8,
+    active: ProjectPageTab,
+    issue_count: usize,
+    csrf_token: []const u8,
+) !void {
+    _ = issue_count;
+    const active_label = projectSwitcherActiveLabel(active);
+    const active_icon = projectSwitcherActiveIcon(active);
+    try appendTemplate(buf, allocator,
+        \\<details class="{classes}" data-popover-menu>
+        \\  <summary class="project-overview-tab project-view-switcher-summary" aria-label="Project view switcher"><span class="{icon_class}" aria-hidden="true"></span><span>{label}</span><span class="project-choice-caret" aria-hidden="true"></span></summary>
+        \\  <div class="project-view-switcher-menu" role="menu">
+    , .{
+        .classes = shared.classes("project-view-switcher", &.{shared.class("active", isProjectSwitcherActive(active))}),
+        .icon_class = active_icon,
+        .label = active_label,
+    });
+    try appendProjectSwitcherItem(buf, allocator, project, project_id, active, .table, "Table", "project-view-table-icon", project_views.projectViewValue(.table), csrf_token);
+    try appendProjectSwitcherItem(buf, allocator, project, project_id, active, .board, "Board", "project-view-board-icon", project_views.projectViewValue(.board), csrf_token);
+    try appendProjectSwitcherItem(buf, allocator, project, project_id, active, .roadmap, "Roadmap", "project-view-roadmap-icon", project_views.projectViewValue(.roadmap), csrf_token);
+    try appendProjectSwitcherItem(buf, allocator, project, project_id, active, .issues, "Issues", "button-icon icon-issues", project_views.projectViewValue(.issues), csrf_token);
+    try buf.appendSlice(allocator, "</div></details>");
+}
+
+fn appendProjectSwitcherItem(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    project: []const u8,
+    project_id: []const u8,
+    active: ProjectPageTab,
+    tab: ProjectPageTab,
+    label: []const u8,
+    icon_class: []const u8,
+    view_ref: []const u8,
+    csrf_token: []const u8,
+) !void {
+    if (project_id.len != 0) {
+        try appendProjectDefaultViewFormOpen(buf, allocator, project, project_id, view_ref, csrf_token, "project-view-switcher-form");
+        try appendTemplate(buf, allocator,
+            \\<button class="{classes}" type="submit" role="menuitem"><span class="{icon_class}" aria-hidden="true"></span><span>{label}</span></button></form>
+        , .{
+            .classes = shared.classes("project-view-switcher-item", &.{shared.class("active", active == tab)}),
+            .icon_class = icon_class,
+            .label = label,
+        });
+        return;
+    }
+
+    try appendTemplate(buf, allocator,
+        \\<a class="{classes}" role="menuitem" href="
+    , .{ .classes = shared.classes("project-view-switcher-item", &.{shared.class("active", active == tab)}) });
+    try appendProjectViewHref(buf, allocator, project, view_ref);
+    try buf.appendSlice(allocator, "\">");
+    try appendTemplate(buf, allocator,
+        \\<span class="{icon_class}" aria-hidden="true"></span><span>{label}</span></a>
+    , .{
+        .icon_class = icon_class,
+        .label = label,
+    });
+}
+
+fn appendProjectDefaultViewFormOpen(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    project: []const u8,
+    project_id: []const u8,
+    view_ref: []const u8,
+    csrf_token: []const u8,
+    class_name: []const u8,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<form class="{class_name}" method="post" action="/projects/default-view"><input type="hidden" name="{csrf_field}" value="{csrf_token}"><input type="hidden" name="project" value="{project}"><input type="hidden" name="project_id" value="{project_id}"><input type="hidden" name="view" value="{view_ref}">
+    , .{
+        .class_name = class_name,
+        .csrf_field = zwf.csrf.field_name,
+        .csrf_token = csrf_token,
+        .project = project,
+        .project_id = project_id,
+        .view_ref = view_ref,
+    });
+}
+
+fn isProjectSwitcherActive(active: ProjectPageTab) bool {
+    return active == .table or active == .board or active == .roadmap or active == .issues;
+}
+
+fn projectSwitcherActiveLabel(active: ProjectPageTab) []const u8 {
+    return switch (active) {
+        .table => "Table",
+        .board => "Board",
+        .roadmap => "Roadmap",
+        .issues => "Issues",
+        else => "Views",
+    };
+}
+
+fn projectSwitcherActiveIcon(active: ProjectPageTab) []const u8 {
+    return switch (active) {
+        .table => "project-view-table-icon",
+        .board => "project-view-board-icon",
+        .roadmap => "project-view-roadmap-icon",
+        .issues => "button-icon icon-issues",
+        else => "project-view-board-icon",
+    };
 }
 
 fn appendProjectInlineProperties(buf: *std.ArrayList(u8), allocator: Allocator, db: *SqliteDb, summary: *const ProjectSummary, metrics: *const ProjectMetrics) !void {
@@ -897,7 +1210,14 @@ fn appendProjectResourceLink(
     });
 }
 
-fn appendProjectUpdateSection(buf: *std.ArrayList(u8), allocator: Allocator, summary: *const ProjectSummary, note: *const ProjectUpdateNote) !void {
+fn appendProjectUpdateSection(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: ?*SqliteDb,
+    summary: *const ProjectSummary,
+    note: *const ProjectUpdateNote,
+    current_actor: ?[]const u8,
+) !void {
     const note_has_update = projectUpdateNoteHasUpdate(note);
     const selected_health = projectUpdateHealthValue(if (note.health.len != 0) note.health else cmd_common.default_project_update_health);
     const health_tone = projectUpdateHealthTone(selected_health);
@@ -955,15 +1275,384 @@ fn appendProjectUpdateSection(buf: *std.ArrayList(u8), allocator: Allocator, sum
     } else {
         try shared.appendMarkdownSource(buf, allocator, note.body, .{});
     }
+    try buf.appendSlice(allocator, "</div>");
+    if (db) |project_db| {
+        try appendProjectReactionBar(buf, allocator, project_db, "project", summary.id, summary, "", current_actor, "project-update-actions reaction-bar", true, "Reply to update");
+    }
+    try buf.appendSlice(allocator, "</article>");
+    if (db) |project_db| {
+        try appendProjectUpdateThread(buf, allocator, project_db, summary, current_actor);
+    }
+    try buf.appendSlice(allocator, "</section>");
+}
+
+fn appendProjectUpdateThread(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    summary: *const ProjectSummary,
+    current_actor: ?[]const u8,
+) !void {
+    try buf.appendSlice(allocator, "<div id=\"project-update-thread\" class=\"project-update-thread issue-timeline\">");
+    try appendProjectUpdateComments(buf, allocator, db, summary, current_actor);
+    try appendProjectUpdateCommentForm(buf, allocator, summary, current_actor);
+    try appendProjectUpdateInlineReplyTemplate(buf, allocator, summary);
+    try buf.appendSlice(allocator, "</div>");
+}
+
+fn appendProjectUpdateComments(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    summary: *const ProjectSummary,
+    current_actor: ?[]const u8,
+) !void {
+    if (summary.id.len == 0) return;
+    var stmt = try work_items.prepareCommentsStmt(db, "project", summary.id);
+    defer stmt.deinit();
+    var rows: std.ArrayList(work_items.CommentRow) = .empty;
+    defer {
+        for (rows.items) |row| row.deinit(allocator);
+        rows.deinit(allocator);
+    }
+    while (try stmt.step()) {
+        const row = try work_items.commentRowFromStmt(allocator, &stmt);
+        errdefer row.deinit(allocator);
+        try rows.append(allocator, row);
+    }
+    if (rows.items.len == 0) return;
+
+    const rendered = try allocator.alloc(bool, rows.items.len);
+    defer allocator.free(rendered);
+    @memset(rendered, false);
+
+    for (rows.items, 0..) |row, row_index| {
+        if (isProjectThreadRootComment(rows.items, row)) {
+            try appendProjectUpdateCommentBranch(buf, allocator, db, rows.items, rendered, row_index, 0, summary, current_actor);
+        }
+    }
+    for (rows.items, 0..) |_, row_index| {
+        if (!rendered[row_index]) {
+            try appendProjectUpdateCommentBranch(buf, allocator, db, rows.items, rendered, row_index, 0, summary, current_actor);
+        }
+    }
+}
+
+fn isProjectThreadRootComment(rows: []const work_items.CommentRow, row: work_items.CommentRow) bool {
+    if (row.reply_parent_id.len == 0) return true;
+    return projectCommentIndexById(rows, row.reply_parent_id) == null;
+}
+
+fn projectCommentIndexById(rows: []const work_items.CommentRow, id: []const u8) ?usize {
+    for (rows, 0..) |row, row_index| {
+        if (std.mem.eql(u8, row.id, id)) return row_index;
+    }
+    return null;
+}
+
+fn appendProjectUpdateCommentBranch(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    rows: []const work_items.CommentRow,
+    rendered: []bool,
+    row_index: usize,
+    depth: usize,
+    summary: *const ProjectSummary,
+    current_actor: ?[]const u8,
+) !void {
+    if (rendered[row_index]) return;
+    rendered[row_index] = true;
+
+    const row = rows[row_index];
+    try appendProjectUpdateCommentRow(buf, allocator, db, row, depth, summary, current_actor);
+
+    for (rows, 0..) |child, child_index| {
+        if (!rendered[child_index] and child.reply_parent_id.len != 0 and std.mem.eql(u8, child.reply_parent_id, row.id)) {
+            try appendProjectUpdateCommentBranch(buf, allocator, db, rows, rendered, child_index, depth + 1, summary, current_actor);
+        }
+    }
+}
+
+fn appendProjectUpdateCommentRow(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    row: work_items.CommentRow,
+    depth: usize,
+    summary: *const ProjectSummary,
+    current_actor: ?[]const u8,
+) !void {
+    const anchor = try std.fmt.allocPrint(allocator, "comment-{s}", .{row.id[0..@min(row.id.len, 7)]});
+    defer allocator.free(anchor);
+    var comment_ref_buf: [util.short_object_ref_len]u8 = undefined;
+    const comment_ref = util.shortObjectRef(&comment_ref_buf, row.id);
+    const comment_ref_value = try std.fmt.allocPrint(allocator, "comment:{s}", .{comment_ref});
+    defer allocator.free(comment_ref_value);
+    const depth_class = projectCommentDepthClass(depth);
+
+    try appendTemplate(buf, allocator,
+        \\<div class="{classes}" id="{anchor}"><div class="issue-timeline-avatar">
+    , .{
+        .classes = shared.classes("issue-timeline-item project-update-comment-item", &.{
+            shared.class("is-reply", row.isReply() or depth > 0),
+            shared.class(depth_class, depth_class.len != 0),
+        }),
+        .anchor = anchor,
+    });
+    try shared.appendAvatarWithUrl(buf, allocator, row.display_author, row.source_avatar_url, "issue-detail-avatar");
+    try appendTemplate(buf, allocator,
+        \\</div><article class="issue-comment-box project-update-comment-box"><header class="issue-comment-head"><div><strong>{author}</strong><span>commented
+    , .{ .author = row.display_author });
+    try buf.append(allocator, ' ');
+    try appendRelativeTime(buf, allocator, row.created_at);
+    try buf.appendSlice(allocator, "</span></div>");
+    try issues_page.appendIssueActionMenu(buf, allocator, anchor, comment_ref_value, row.body, !row.redacted and row.body.len != 0, "");
+    try buf.appendSlice(allocator, "</header>");
+    if (row.isReply()) {
+        try buf.appendSlice(allocator, "<p class=\"reply-note\">Reply to ");
+        if (row.reply_parent_id.len != 0) {
+            var reply_ref_buf: [util.short_object_ref_len]u8 = undefined;
+            const reply_ref = util.shortObjectRef(&reply_ref_buf, row.reply_parent_id);
+            try appendTemplate(buf, allocator, "comment:{reply_ref}", .{ .reply_ref = reply_ref });
+        } else {
+            try appendTemplate(buf, allocator, "{reply_parent_hash}", .{ .reply_parent_hash = row.reply_parent_hash[0..@min(row.reply_parent_hash.len, 12)] });
+        }
+        try buf.appendSlice(allocator, "</p>");
+    }
+    try buf.appendSlice(allocator, "<div class=\"markdown-body\">");
+    if (row.redacted) {
+        try buf.appendSlice(allocator, "<p class=\"muted\">Comment redacted.</p>");
+    } else {
+        try shared.appendMarkdownSource(buf, allocator, row.body, .{});
+    }
+    try buf.appendSlice(allocator, "</div>");
+    try appendProjectReactionBar(buf, allocator, db, "comment", row.id, summary, comment_ref_value, current_actor, "reaction-bar project-comment-reaction-bar", true, "Reply");
+    try buf.appendSlice(allocator, "</article></div>");
+}
+
+fn projectCommentDepthClass(depth: usize) []const u8 {
+    return switch (@min(depth, 3)) {
+        0 => "",
+        1 => "comment-depth-1",
+        2 => "comment-depth-2",
+        else => "comment-depth-3",
+    };
+}
+
+fn appendProjectUpdateCommentForm(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    summary: *const ProjectSummary,
+    current_actor: ?[]const u8,
+) !void {
     try buf.appendSlice(allocator,
-        \\    </div>
-        \\    <footer class="project-update-actions" aria-label="Update actions">
-        \\      <button class="project-update-action" type="button"><span class="issue-comments-icon" aria-hidden="true"></span><span>Reply</span></button>
-        \\      <button class="project-update-action" type="button"><span class="reaction-add-icon" aria-hidden="true"></span><span>React</span></button>
-        \\    </footer>
-        \\  </article>
-        \\</section>
+        \\<div class="issue-timeline-item issue-comment-form-item project-update-comment-form-item">
+        \\  <div class="issue-timeline-avatar">
     );
+    try shared.appendCurrentActorAvatar(buf, allocator, current_actor, "issue-detail-avatar issue-comment-form-avatar");
+    try buf.appendSlice(allocator,
+        \\  </div>
+        \\  <form class="issue-comment-box issue-comment-form project-update-comment-form" method="post" action="/projects/comments">
+    );
+    try appendProjectHiddenFields(buf, allocator, summary);
+    try buf.appendSlice(allocator,
+        \\    <input type="hidden" name="action" value="comment">
+        \\    <input type="hidden" name="reply_parent_ref" value="" data-reply-parent-ref>
+    );
+    try shared.appendMarkdownEditor(buf, allocator, .{ .placeholder = "Reply to the update" });
+    try buf.appendSlice(allocator,
+        \\    <div class="issue-comment-form-actions">
+        \\      <button class="button primary" type="submit">Reply</button>
+        \\    </div>
+        \\  </form>
+        \\</div>
+    );
+}
+
+fn appendProjectUpdateInlineReplyTemplate(buf: *std.ArrayList(u8), allocator: Allocator, summary: *const ProjectSummary) !void {
+    try buf.appendSlice(allocator, "<template data-comment-reply-form-template>");
+    try buf.appendSlice(allocator, "<form class=\"inline-comment-reply-form issue-comment-form project-update-comment-form\" method=\"post\" action=\"/projects/comments\" data-inline-comment-reply-form>");
+    try appendProjectHiddenFields(buf, allocator, summary);
+    try buf.appendSlice(allocator,
+        \\    <input type="hidden" name="action" value="comment">
+        \\    <input type="hidden" name="reply_parent_ref" value="" data-reply-parent-ref>
+    );
+    try shared.appendMarkdownEditor(buf, allocator, .{ .rows = 4, .placeholder = "Reply" });
+    try buf.appendSlice(allocator,
+        \\    <div class="issue-comment-form-actions">
+        \\      <button class="button secondary" type="button" data-comment-reply-cancel>Cancel</button>
+        \\      <button class="button primary" type="submit">Reply</button>
+        \\    </div>
+        \\  </form>
+        \\</template>
+    );
+}
+
+fn appendProjectReactionBar(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    db: *SqliteDb,
+    object_kind: []const u8,
+    object_id: []const u8,
+    summary: *const ProjectSummary,
+    target_ref: []const u8,
+    current_actor: ?[]const u8,
+    class_name: []const u8,
+    include_reply: bool,
+    reply_label: []const u8,
+) !void {
+    var reactions: std.ArrayList(ReactionSummary) = .empty;
+    defer {
+        for (reactions.items) |*item| item.deinit(allocator);
+        reactions.deinit(allocator);
+    }
+
+    try appendTemplate(buf, allocator, "<div class=\"{class_name}\">", .{ .class_name = class_name });
+    if (include_reply) try appendProjectReplyButton(buf, allocator, target_ref, reply_label);
+    var stmt = try db.prepare(
+        \\SELECT emoji, COUNT(DISTINCT actor_principal),
+        \\       SUM(CASE WHEN actor_principal = ? THEN 1 ELSE 0 END)
+        \\FROM reactions
+        \\WHERE object_kind = ? AND object_id = ?
+        \\GROUP BY emoji
+        \\ORDER BY MIN(created_at), emoji
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, current_actor orelse "");
+    try stmt.bindText(2, object_kind);
+    try stmt.bindText(3, object_id);
+
+    while (try stmt.step()) {
+        const emoji = try stmt.columnTextDup(allocator, 0);
+        const count = stmt.columnInt64(1);
+        const reacted = current_actor != null and stmt.columnInt64(2) > 0;
+        errdefer allocator.free(emoji);
+        try reactions.append(allocator, .{
+            .emoji = emoji,
+            .count = count,
+            .reacted = reacted,
+        });
+    }
+
+    try appendProjectReactionPicker(buf, allocator, summary, object_kind, target_ref, reactions.items);
+    for (reactions.items) |item| {
+        try appendProjectReactionButton(buf, allocator, summary, object_kind, target_ref, item.emoji, item.emoji, item.count, item.reacted);
+    }
+    try buf.appendSlice(allocator, "</div>");
+}
+
+fn appendProjectReplyButton(buf: *std.ArrayList(u8), allocator: Allocator, target_ref: []const u8, label: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<button class="comment-reply-button project-update-action" type="button" data-comment-reply-ref="{target_ref}" aria-label="{label}" title="{label}"><span class="issue-comments-icon" aria-hidden="true"></span></button>
+    , .{
+        .target_ref = target_ref,
+        .label = label,
+    });
+}
+
+fn appendProjectReactionPicker(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    summary: *const ProjectSummary,
+    object_kind: []const u8,
+    target_ref: []const u8,
+    reactions: []const ReactionSummary,
+) !void {
+    try buf.appendSlice(allocator,
+        \\<details class="reaction-picker" data-popover-menu>
+        \\  <summary class="reaction-add-button project-update-action" aria-label="Add reaction" title="Add reaction"><span class="reaction-add-icon" aria-hidden="true"></span></summary>
+        \\  <div class="reaction-popover" role="menu" aria-label="Add reaction">
+    );
+    for (reaction_choices.choices) |choice| {
+        try appendProjectReactionChoiceButton(buf, allocator, summary, object_kind, target_ref, choice, reactionWasSelected(reactions, choice.value));
+    }
+    try buf.appendSlice(allocator, "</div></details>");
+}
+
+fn appendProjectReactionChoiceButton(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    summary: *const ProjectSummary,
+    object_kind: []const u8,
+    target_ref: []const u8,
+    choice: ReactionChoice,
+    reacted: bool,
+) !void {
+    try appendProjectReactionFormOpen(buf, allocator, summary, "reaction-choice-form", if (reacted) "remove-reaction" else "add-reaction", object_kind, target_ref, choice.value);
+    try appendTemplate(buf, allocator,
+        \\<button{class_attr} type="submit" role="menuitem" aria-pressed="{pressed}" title="{title}"><span class="reaction-emoji">
+    , .{
+        .class_attr = shared.classAttr("reaction-choice-button", &.{
+            shared.class("selected", reacted),
+            shared.class("is-selected", reacted),
+        }),
+        .pressed = reacted,
+        .title = if (reacted) "Remove your reaction" else choice.title,
+    });
+    try shared.appendHtml(buf, allocator, choice.label);
+    try buf.appendSlice(allocator, "</span></button></form>");
+}
+
+fn appendProjectReactionButton(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    summary: *const ProjectSummary,
+    object_kind: []const u8,
+    target_ref: []const u8,
+    emoji_value: []const u8,
+    emoji_label: []const u8,
+    count: i64,
+    reacted: bool,
+) !void {
+    try appendProjectReactionFormOpen(buf, allocator, summary, "reaction-form", if (reacted) "remove-reaction" else "add-reaction", object_kind, target_ref, emoji_value);
+    try appendTemplate(buf, allocator,
+        \\<button{class_attr} type="submit" aria-pressed="{pressed}" title="{title}"><span class="reaction-emoji">
+    , .{
+        .class_attr = shared.classAttr("reaction-button", &.{
+            shared.class("selected", reacted),
+            shared.class("is-selected", reacted),
+        }),
+        .pressed = reacted,
+        .title = if (reacted) "Remove your reaction" else "Add reaction",
+    });
+    try shared.appendHtml(buf, allocator, emoji_label);
+    try appendTemplate(buf, allocator, "</span><span class=\"reaction-count\">{count}</span></button></form>", .{ .count = count });
+}
+
+fn appendProjectReactionFormOpen(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    summary: *const ProjectSummary,
+    form_class: []const u8,
+    action: []const u8,
+    object_kind: []const u8,
+    target_ref: []const u8,
+    emoji_value: []const u8,
+) !void {
+    try appendTemplate(buf, allocator, "<form class=\"{form_class}\" method=\"post\" action=\"/projects/comments\">", .{ .form_class = form_class });
+    try appendProjectHiddenFields(buf, allocator, summary);
+    try appendTemplate(buf, allocator,
+        \\<input type="hidden" name="action" value="{action}"><input type="hidden" name="target_kind" value="{object_kind}">
+    , .{
+        .action = action,
+        .object_kind = object_kind,
+    });
+    if (target_ref.len != 0) {
+        try appendTemplate(buf, allocator,
+            \\<input type="hidden" name="target_ref" value="{target_ref}">
+        , .{ .target_ref = target_ref });
+    }
+    try appendTemplate(buf, allocator,
+        \\<input type="hidden" name="emoji" value="{emoji_value}">
+    , .{ .emoji_value = emoji_value });
+}
+
+fn reactionWasSelected(reactions: []const ReactionSummary, emoji: []const u8) bool {
+    for (reactions) |item| {
+        if (std.mem.eql(u8, item.emoji, emoji)) return item.reacted;
+    }
+    return false;
 }
 
 fn appendProjectDescription(buf: *std.ArrayList(u8), allocator: Allocator, summary: *const ProjectSummary) !void {
@@ -2329,7 +3018,7 @@ test "project latest update renders update health instead of lifecycle status" {
     };
     defer note.deinit(std.testing.allocator);
 
-    try appendProjectUpdateSection(&buf, std.testing.allocator, &summary, &note);
+    try appendProjectUpdateSection(&buf, std.testing.allocator, null, &summary, &note, null);
 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "At risk") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "name=\"update_health\"") != null);
@@ -2341,7 +3030,7 @@ test "project issues tab stays in project workspace" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
 
-    try appendProjectPageTabs(&buf, std.testing.allocator, "Release Plan", .overview, 3);
+    try appendProjectPageTabs(&buf, std.testing.allocator, "Release Plan", "", .overview, 3, "token-123");
 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/projects?project=Release%20Plan&amp;view=issues\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues?project=") == null);

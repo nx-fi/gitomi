@@ -2178,14 +2178,14 @@ fn appendRootFileListComponent(buf: *std.ArrayList(u8), allocator: Allocator, re
 }
 
 fn appendRootStatsComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo) !void {
-    var languages_opt = source_stats.loadRepositoryStats(allocator, repo) catch null;
+    var languages_opt = source_stats.loadRepositoryStatsCached(allocator, repo) catch null;
     defer if (languages_opt) |*stats| stats.deinit(allocator);
     try appendRootLanguages(buf, allocator, languages_opt);
     try appendRootSloc(buf, allocator, languages_opt);
 }
 
 fn appendRootContributorsComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo) !void {
-    var contributors_opt = source_stats.loadRepositoryContributors(allocator, repo) catch null;
+    var contributors_opt = source_stats.loadRepositoryContributorsCached(allocator, repo) catch null;
     defer if (contributors_opt) |*contributors| contributors.deinit(allocator);
     try appendRootContributors(buf, allocator, contributors_opt);
 }

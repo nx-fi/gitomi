@@ -1,14 +1,20 @@
 const std = @import("std");
 const git = @import("../git.zig");
+const index = @import("../index.zig");
 const repo_mod = @import("../repo.zig");
 const hljs_languages = @import("hljs_languages.zig");
 const sloc_lang_plugins = @import("source_lang_plugins.zig");
 
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
+const SqliteDb = index.SqliteDb;
+const sqlite = index.sqlite;
 
 const max_git_path_output = 128 * 1024 * 1024;
 const max_source_file_bytes = 128 * 1024 * 1024;
+const max_cached_scope_depth = 2;
+const max_commit_oid_output = 1024 * 1024;
+const source_stats_cache_file = "source-stats.sqlite";
 
 const empty_strings = [_][]const u8{};
 const empty_blocks = [_]sloc_lang_plugins.BlockComment{};
@@ -215,6 +221,24 @@ pub const Contributors = struct {
     }
 };
 
+const SourceScopeResult = struct {
+    stats: Stats,
+    contributors: Contributors,
+
+    fn deinit(self: *SourceScopeResult, allocator: Allocator) void {
+        self.stats.deinit(allocator);
+        self.contributors.deinit(allocator);
+    }
+};
+
+const CacheScope = struct {
+    commit_oid: ?[]u8,
+
+    fn deinit(self: *CacheScope, allocator: Allocator) void {
+        if (self.commit_oid) |oid| allocator.free(oid);
+    }
+};
+
 pub fn loadRepositoryStats(allocator: Allocator, repo: Repo) !?Stats {
     const paths = try collectRepositoryPaths(allocator, repo) orelse return null;
     defer git.freeStringList(allocator, paths);
@@ -296,6 +320,192 @@ pub fn loadRepositoryContributors(allocator: Allocator, repo: Repo) !?Contributo
     }.lessThan);
 
     return .{ .rows = try rows.toOwnedSlice(allocator) };
+}
+
+pub fn loadRepositoryStatsCached(allocator: Allocator, repo: Repo) !?Stats {
+    const paths = try collectRepositoryPaths(allocator, repo) orelse return null;
+    defer git.freeStringList(allocator, paths);
+
+    var db = openSourceStatsCache(allocator, repo) catch return loadRepositoryStats(allocator, repo);
+    defer db.deinit();
+
+    return loadStatsScope(allocator, repo, &db, paths, "", 0) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return loadRepositoryStats(allocator, repo),
+    };
+}
+
+pub fn loadRepositoryContributorsCached(allocator: Allocator, repo: Repo) !?Contributors {
+    const paths = try collectTrackedRepositoryPaths(allocator, repo) orelse return null;
+    defer git.freeStringList(allocator, paths);
+
+    var db = openSourceStatsCache(allocator, repo) catch return loadRepositoryContributors(allocator, repo);
+    defer db.deinit();
+
+    var result = loadContributorsScope(allocator, repo, &db, paths, "", 0) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return loadRepositoryContributors(allocator, repo),
+    };
+    result.stats.deinit(allocator);
+    return result.contributors;
+}
+
+fn loadStatsScope(
+    allocator: Allocator,
+    repo: Repo,
+    db: *SqliteDb,
+    paths: []const []const u8,
+    scope_path: []const u8,
+    depth: usize,
+) !Stats {
+    var cache_scope = try cacheScopeForPath(allocator, repo, scope_path);
+    defer cache_scope.deinit(allocator);
+
+    if (cache_scope.commit_oid) |commit_oid| {
+        if (try loadCachedStats(allocator, db, scope_path, commit_oid)) |stats| return stats;
+    }
+
+    var rows: std.ArrayList(LanguageRow) = .empty;
+    errdefer rows.deinit(allocator);
+    var row_index = std.StringHashMap(usize).init(allocator);
+    defer row_index.deinit();
+
+    var total_code: u64 = 0;
+    var total_test: u64 = 0;
+    var total_comment: u64 = 0;
+
+    if (depth < max_cached_scope_depth) {
+        const child_dirs = try immediateChildScopes(allocator, paths, scope_path);
+        defer git.freeStringList(allocator, child_dirs);
+        for (child_dirs) |child_scope| {
+            var child_stats = try loadStatsScope(allocator, repo, db, paths, child_scope, depth + 1);
+            defer child_stats.deinit(allocator);
+            try addStatsRows(&rows, &row_index, allocator, child_stats.rows);
+            total_code +|= child_stats.total_code;
+            total_test +|= child_stats.total_test;
+            total_comment +|= child_stats.total_comment;
+        }
+        try addStatsForFilesInScope(&rows, &row_index, allocator, repo, paths, scope_path, .direct, &total_code, &total_test, &total_comment);
+    } else {
+        try addStatsForFilesInScope(&rows, &row_index, allocator, repo, paths, scope_path, .recursive, &total_code, &total_test, &total_comment);
+    }
+
+    sortLanguageRows(rows.items);
+
+    const stats = Stats{
+        .rows = try rows.toOwnedSlice(allocator),
+        .total_code = total_code,
+        .total_test = total_test,
+        .total_comment = total_comment,
+    };
+    errdefer allocator.free(stats.rows);
+
+    if (cache_scope.commit_oid) |commit_oid| {
+        storeCachedStats(db, scope_path, commit_oid, stats) catch {};
+    }
+    return stats;
+}
+
+fn loadContributorsScope(
+    allocator: Allocator,
+    repo: Repo,
+    db: *SqliteDb,
+    paths: []const []const u8,
+    scope_path: []const u8,
+    depth: usize,
+) !SourceScopeResult {
+    var cache_scope = try cacheScopeForPath(allocator, repo, scope_path);
+    defer cache_scope.deinit(allocator);
+
+    if (cache_scope.commit_oid) |commit_oid| {
+        if (try loadCachedSourceScope(allocator, db, scope_path, commit_oid)) |result| return result;
+    }
+
+    var language_rows: std.ArrayList(LanguageRow) = .empty;
+    errdefer language_rows.deinit(allocator);
+    var language_index = std.StringHashMap(usize).init(allocator);
+    defer language_index.deinit();
+
+    var contributor_rows: std.ArrayList(ContributorRow) = .empty;
+    errdefer {
+        freeContributorRows(allocator, contributor_rows.items);
+        contributor_rows.deinit(allocator);
+    }
+    var contributor_index = std.StringHashMap(usize).init(allocator);
+    defer contributor_index.deinit();
+
+    var total_code: u64 = 0;
+    var total_test: u64 = 0;
+    var total_comment: u64 = 0;
+
+    if (depth < max_cached_scope_depth) {
+        const child_dirs = try immediateChildScopes(allocator, paths, scope_path);
+        defer git.freeStringList(allocator, child_dirs);
+        for (child_dirs) |child_scope| {
+            var child = try loadContributorsScope(allocator, repo, db, paths, child_scope, depth + 1);
+            defer child.deinit(allocator);
+            try addStatsRows(&language_rows, &language_index, allocator, child.stats.rows);
+            try addContributorRows(allocator, &contributor_rows, &contributor_index, child.contributors.rows);
+            total_code +|= child.stats.total_code;
+            total_test +|= child.stats.total_test;
+            total_comment +|= child.stats.total_comment;
+        }
+        try addContributorFilesInScope(
+            &language_rows,
+            &language_index,
+            &contributor_rows,
+            &contributor_index,
+            allocator,
+            repo,
+            paths,
+            scope_path,
+            .direct,
+            &total_code,
+            &total_test,
+            &total_comment,
+        );
+    } else {
+        try addContributorFilesInScope(
+            &language_rows,
+            &language_index,
+            &contributor_rows,
+            &contributor_index,
+            allocator,
+            repo,
+            paths,
+            scope_path,
+            .recursive,
+            &total_code,
+            &total_test,
+            &total_comment,
+        );
+    }
+
+    sortLanguageRows(language_rows.items);
+    sortContributorRows(contributor_rows.items);
+
+    const stats_rows = try language_rows.toOwnedSlice(allocator);
+    errdefer allocator.free(stats_rows);
+    const contributor_slice = try contributor_rows.toOwnedSlice(allocator);
+    errdefer {
+        freeContributorRows(allocator, contributor_slice);
+        allocator.free(contributor_slice);
+    }
+
+    const result = SourceScopeResult{
+        .stats = .{
+            .rows = stats_rows,
+            .total_code = total_code,
+            .total_test = total_test,
+            .total_comment = total_comment,
+        },
+        .contributors = .{ .rows = contributor_slice },
+    };
+
+    if (cache_scope.commit_oid) |commit_oid| {
+        storeCachedSourceScope(db, scope_path, commit_oid, result) catch {};
+    }
+    return result;
 }
 
 pub fn countBlob(path: []const u8, content: []const u8) ?Counts {
@@ -425,6 +635,486 @@ fn appendGitPaths(
         try paths.append(allocator, copy);
         try seen.put(copy, {});
     }
+}
+
+const FileScopeMode = enum {
+    direct,
+    recursive,
+};
+
+fn addStatsForFilesInScope(
+    rows: *std.ArrayList(LanguageRow),
+    row_index: *std.StringHashMap(usize),
+    allocator: Allocator,
+    repo: Repo,
+    paths: []const []const u8,
+    scope_path: []const u8,
+    mode: FileScopeMode,
+    total_code: *u64,
+    total_test: *u64,
+    total_comment: *u64,
+) !void {
+    for (paths) |path| {
+        if (!pathMatchesScope(path, scope_path, mode)) continue;
+        const content = readWorktreeFile(allocator, repo, path) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => continue,
+        };
+        defer allocator.free(content);
+
+        const counts = countBlob(path, content) orelse continue;
+        if (counts.total() == 0) continue;
+
+        const language = languageForPath(path);
+        try addLanguageCounts(rows, row_index, allocator, language, counts);
+        total_code.* +|= counts.code;
+        total_test.* +|= counts.test_count;
+        total_comment.* +|= counts.comment;
+    }
+}
+
+fn addContributorFilesInScope(
+    language_rows: *std.ArrayList(LanguageRow),
+    language_index: *std.StringHashMap(usize),
+    contributor_rows: *std.ArrayList(ContributorRow),
+    contributor_index: *std.StringHashMap(usize),
+    allocator: Allocator,
+    repo: Repo,
+    paths: []const []const u8,
+    scope_path: []const u8,
+    mode: FileScopeMode,
+    total_code: *u64,
+    total_test: *u64,
+    total_comment: *u64,
+) !void {
+    for (paths) |path| {
+        if (!pathMatchesScope(path, scope_path, mode)) continue;
+        const content = readWorktreeFile(allocator, repo, path) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => continue,
+        };
+        defer allocator.free(content);
+
+        const counts = countBlob(path, content) orelse continue;
+        if (counts.total() == 0) continue;
+
+        const language = languageForPath(path);
+        try addLanguageCounts(language_rows, language_index, allocator, language, counts);
+        total_code.* +|= counts.code;
+        total_test.* +|= counts.test_count;
+        total_comment.* +|= counts.comment;
+
+        const plugin = pluginForPath(path, language);
+        const force_test = sloc_lang_plugins.isTestPath(path, plugin);
+        const line_kinds = try sloc_lang_plugins.classifyFileLines(allocator, content, force_test, plugin, .{});
+        defer allocator.free(line_kinds);
+
+        const blame = gitMaybe(allocator, repo, &.{ "blame", "--incremental", "--", path }, max_git_path_output) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => continue,
+        } orelse continue;
+        defer allocator.free(blame);
+
+        try parseBlameIncrementalOutput(allocator, contributor_rows, contributor_index, line_kinds, blame);
+    }
+}
+
+fn addStatsRows(
+    rows: *std.ArrayList(LanguageRow),
+    row_index: *std.StringHashMap(usize),
+    allocator: Allocator,
+    source_rows: []const LanguageRow,
+) !void {
+    for (source_rows) |row| {
+        try addLanguageCounts(rows, row_index, allocator, row.language, .{
+            .code = row.code,
+            .test_count = row.test_count,
+            .comment = row.comment,
+        });
+    }
+}
+
+fn addContributorRows(
+    allocator: Allocator,
+    rows: *std.ArrayList(ContributorRow),
+    row_index: *std.StringHashMap(usize),
+    source_rows: []const ContributorRow,
+) !void {
+    for (source_rows) |row| {
+        try addContributorCounts(allocator, rows, row_index, row.name, row.email, .{
+            .code = row.code,
+            .test_count = row.test_count,
+            .comment = row.comment,
+        });
+    }
+}
+
+fn sortLanguageRows(rows: []LanguageRow) void {
+    std.mem.sort(LanguageRow, rows, {}, struct {
+        fn lessThan(_: void, a: LanguageRow, b: LanguageRow) bool {
+            if (a.total() != b.total()) return a.total() > b.total();
+            return std.mem.lessThan(u8, a.language, b.language);
+        }
+    }.lessThan);
+}
+
+fn sortContributorRows(rows: []ContributorRow) void {
+    std.mem.sort(ContributorRow, rows, {}, struct {
+        fn lessThan(_: void, a: ContributorRow, b: ContributorRow) bool {
+            if (a.total() != b.total()) return a.total() > b.total();
+            return std.mem.lessThan(u8, a.name, b.name);
+        }
+    }.lessThan);
+}
+
+fn pathMatchesScope(path: []const u8, scope_path: []const u8, mode: FileScopeMode) bool {
+    const rest = pathRestInScope(path, scope_path) orelse return false;
+    if (rest.len == 0) return false;
+    return switch (mode) {
+        .recursive => true,
+        .direct => std.mem.indexOfScalar(u8, rest, '/') == null,
+    };
+}
+
+fn immediateChildScopes(allocator: Allocator, paths: []const []const u8, scope_path: []const u8) ![][]u8 {
+    var scopes: std.ArrayList([]u8) = .empty;
+    errdefer git.freeStringList(allocator, scopes.items);
+
+    var seen = std.StringHashMap(void).init(allocator);
+    defer seen.deinit();
+
+    for (paths) |path| {
+        const rest = pathRestInScope(path, scope_path) orelse continue;
+        if (rest.len == 0) continue;
+        const slash = std.mem.indexOfScalar(u8, rest, '/') orelse continue;
+        if (slash == 0) continue;
+
+        const child_name = rest[0..slash];
+        const child_scope = if (scope_path.len == 0)
+            try allocator.dupe(u8, child_name)
+        else
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ scope_path, child_name });
+        errdefer allocator.free(child_scope);
+
+        if (seen.contains(child_scope)) {
+            allocator.free(child_scope);
+            continue;
+        }
+        try seen.put(child_scope, {});
+        try scopes.append(allocator, child_scope);
+    }
+
+    std.mem.sort([]u8, scopes.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+    return try scopes.toOwnedSlice(allocator);
+}
+
+fn pathRestInScope(path: []const u8, scope_path: []const u8) ?[]const u8 {
+    if (scope_path.len == 0) return path;
+    if (!std.mem.startsWith(u8, path, scope_path)) return null;
+    if (path.len == scope_path.len) return "";
+    if (path[scope_path.len] != '/') return null;
+    return path[scope_path.len + 1 ..];
+}
+
+fn openSourceStatsCache(allocator: Allocator, repo: Repo) !SqliteDb {
+    if (repo.gitomi_dir.len == 0) return error.CacheUnavailable;
+    try std.fs.cwd().makePath(repo.gitomi_dir);
+    const cache_path = try std.fs.path.join(allocator, &.{ repo.gitomi_dir, source_stats_cache_file });
+    defer allocator.free(cache_path);
+
+    var db = try SqliteDb.open(allocator, cache_path, sqlite.SQLITE_OPEN_READWRITE | sqlite.SQLITE_OPEN_CREATE, false);
+    errdefer db.deinit();
+    try createSourceStatsCacheSchema(&db);
+    return db;
+}
+
+fn createSourceStatsCacheSchema(db: *SqliteDb) !void {
+    try db.exec(
+        \\CREATE TABLE IF NOT EXISTS source_stats_scopes (
+        \\  path TEXT PRIMARY KEY,
+        \\  commit_oid TEXT NOT NULL,
+        \\  sloc_complete INTEGER NOT NULL DEFAULT 0,
+        \\  contributors_complete INTEGER NOT NULL DEFAULT 0,
+        \\  updated_at INTEGER NOT NULL DEFAULT 0
+        \\);
+        \\CREATE TABLE IF NOT EXISTS source_stats_languages (
+        \\  path TEXT NOT NULL,
+        \\  language TEXT NOT NULL,
+        \\  code INTEGER NOT NULL,
+        \\  test_count INTEGER NOT NULL,
+        \\  comment INTEGER NOT NULL,
+        \\  PRIMARY KEY(path, language)
+        \\);
+        \\CREATE TABLE IF NOT EXISTS source_stats_contributors (
+        \\  path TEXT NOT NULL,
+        \\  name TEXT NOT NULL,
+        \\  email TEXT NOT NULL,
+        \\  code INTEGER NOT NULL,
+        \\  test_count INTEGER NOT NULL,
+        \\  comment INTEGER NOT NULL,
+        \\  PRIMARY KEY(path, name, email)
+        \\);
+    );
+}
+
+fn cacheScopeForPath(allocator: Allocator, repo: Repo, path: []const u8) !CacheScope {
+    const dirty = scopeHasWorktreeChanges(allocator, repo, path) catch true;
+    if (dirty) return .{ .commit_oid = null };
+    return .{ .commit_oid = try lastCommitForScope(allocator, repo, path) };
+}
+
+fn scopeHasWorktreeChanges(allocator: Allocator, repo: Repo, path: []const u8) !bool {
+    const raw = if (path.len == 0)
+        try gitMaybe(allocator, repo, &.{ "status", "--porcelain=v1", "-z" }, max_git_path_output)
+    else blk: {
+        const pathspec = try std.fmt.allocPrint(allocator, ":(top){s}", .{path});
+        defer allocator.free(pathspec);
+        break :blk try gitMaybe(allocator, repo, &.{ "status", "--porcelain=v1", "-z", "--", pathspec }, max_git_path_output);
+    };
+    const text = raw orelse return true;
+    defer allocator.free(text);
+    return text.len != 0;
+}
+
+fn lastCommitForScope(allocator: Allocator, repo: Repo, path: []const u8) !?[]u8 {
+    const raw = if (path.len == 0)
+        try gitMaybe(allocator, repo, &.{ "rev-parse", "--verify", "HEAD" }, max_commit_oid_output)
+    else
+        try gitMaybe(allocator, repo, &.{ "log", "-1", "--format=%H", "--end-of-options", "HEAD", "--", path }, max_commit_oid_output);
+    const text = raw orelse return null;
+    defer allocator.free(text);
+    const oid = std.mem.trim(u8, text, " \t\r\n");
+    if (oid.len == 0) return null;
+    return try allocator.dupe(u8, oid);
+}
+
+fn loadCachedStats(allocator: Allocator, db: *SqliteDb, path: []const u8, commit_oid: []const u8) !?Stats {
+    if (!(try cachedScopeComplete(db, path, commit_oid, .sloc))) return null;
+    return try loadCachedStatsRows(allocator, db, path);
+}
+
+fn loadCachedSourceScope(allocator: Allocator, db: *SqliteDb, path: []const u8, commit_oid: []const u8) !?SourceScopeResult {
+    if (!(try cachedScopeComplete(db, path, commit_oid, .contributors))) return null;
+    var stats = try loadCachedStatsRows(allocator, db, path);
+    errdefer stats.deinit(allocator);
+    const contributors = try loadCachedContributorRows(allocator, db, path);
+    return .{
+        .stats = stats,
+        .contributors = contributors,
+    };
+}
+
+const CachedCompleteKind = enum {
+    sloc,
+    contributors,
+};
+
+fn cachedScopeComplete(db: *SqliteDb, path: []const u8, commit_oid: []const u8, kind: CachedCompleteKind) !bool {
+    var stmt = try db.prepare(
+        \\SELECT sloc_complete, contributors_complete
+        \\FROM source_stats_scopes
+        \\WHERE path = ? AND commit_oid = ?
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, path);
+    try stmt.bindText(2, commit_oid);
+    if (!(try stmt.step())) return false;
+    return switch (kind) {
+        .sloc => stmt.columnInt(0) != 0,
+        .contributors => stmt.columnInt(1) != 0,
+    };
+}
+
+fn loadCachedStatsRows(allocator: Allocator, db: *SqliteDb, path: []const u8) !Stats {
+    var rows: std.ArrayList(LanguageRow) = .empty;
+    errdefer rows.deinit(allocator);
+
+    var stmt = try db.prepare(
+        \\SELECT language, code, test_count, comment
+        \\FROM source_stats_languages
+        \\WHERE path = ?
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, path);
+
+    var total_code: u64 = 0;
+    var total_test: u64 = 0;
+    var total_comment: u64 = 0;
+    while (try stmt.step()) {
+        const language_owned = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(language_owned);
+        const language = cachedLanguageId(language_owned) orelse continue;
+        const code = sqliteUnsigned(stmt.columnInt64(1));
+        const test_count = sqliteUnsigned(stmt.columnInt64(2));
+        const comment = sqliteUnsigned(stmt.columnInt64(3));
+        try rows.append(allocator, .{
+            .language = language,
+            .code = code,
+            .test_count = test_count,
+            .comment = comment,
+        });
+        total_code +|= code;
+        total_test +|= test_count;
+        total_comment +|= comment;
+    }
+    sortLanguageRows(rows.items);
+    return .{
+        .rows = try rows.toOwnedSlice(allocator),
+        .total_code = total_code,
+        .total_test = total_test,
+        .total_comment = total_comment,
+    };
+}
+
+fn loadCachedContributorRows(allocator: Allocator, db: *SqliteDb, path: []const u8) !Contributors {
+    var rows: std.ArrayList(ContributorRow) = .empty;
+    errdefer {
+        freeContributorRows(allocator, rows.items);
+        rows.deinit(allocator);
+    }
+
+    var stmt = try db.prepare(
+        \\SELECT name, email, code, test_count, comment
+        \\FROM source_stats_contributors
+        \\WHERE path = ?
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, path);
+
+    while (try stmt.step()) {
+        const name = try stmt.columnTextDup(allocator, 0);
+        errdefer allocator.free(name);
+        const email = try stmt.columnTextDup(allocator, 1);
+        errdefer allocator.free(email);
+        try rows.append(allocator, .{
+            .name = name,
+            .email = email,
+            .code = sqliteUnsigned(stmt.columnInt64(2)),
+            .test_count = sqliteUnsigned(stmt.columnInt64(3)),
+            .comment = sqliteUnsigned(stmt.columnInt64(4)),
+        });
+    }
+    sortContributorRows(rows.items);
+    return .{ .rows = try rows.toOwnedSlice(allocator) };
+}
+
+fn storeCachedStats(db: *SqliteDb, path: []const u8, commit_oid: []const u8, stats: Stats) !void {
+    try db.exec("BEGIN IMMEDIATE");
+    var committed = false;
+    errdefer if (!committed) db.exec("ROLLBACK") catch {};
+
+    const keep_contributors = try cachedScopeComplete(db, path, commit_oid, .contributors);
+    try replaceCachedStatsRows(db, path, stats);
+    if (!keep_contributors) try deleteCachedContributorRows(db, path);
+    try upsertCachedScope(db, path, commit_oid, true, keep_contributors);
+    try db.exec("COMMIT");
+    committed = true;
+}
+
+fn storeCachedSourceScope(db: *SqliteDb, path: []const u8, commit_oid: []const u8, result: SourceScopeResult) !void {
+    try db.exec("BEGIN IMMEDIATE");
+    var committed = false;
+    errdefer if (!committed) db.exec("ROLLBACK") catch {};
+
+    try replaceCachedStatsRows(db, path, result.stats);
+    try replaceCachedContributorRows(db, path, result.contributors);
+    try upsertCachedScope(db, path, commit_oid, true, true);
+    try db.exec("COMMIT");
+    committed = true;
+}
+
+fn replaceCachedStatsRows(db: *SqliteDb, path: []const u8, stats: Stats) !void {
+    var delete_stmt = try db.prepare("DELETE FROM source_stats_languages WHERE path = ?");
+    defer delete_stmt.deinit();
+    try delete_stmt.bindText(1, path);
+    try delete_stmt.stepDone();
+
+    var insert_stmt = try db.prepare(
+        \\INSERT INTO source_stats_languages(path, language, code, test_count, comment)
+        \\VALUES (?, ?, ?, ?, ?)
+    );
+    defer insert_stmt.deinit();
+    for (stats.rows) |row| {
+        try insert_stmt.reset();
+        try insert_stmt.bindText(1, path);
+        try insert_stmt.bindText(2, row.language);
+        try insert_stmt.bindInt64(3, sqliteCount(row.code));
+        try insert_stmt.bindInt64(4, sqliteCount(row.test_count));
+        try insert_stmt.bindInt64(5, sqliteCount(row.comment));
+        try insert_stmt.stepDone();
+    }
+}
+
+fn replaceCachedContributorRows(db: *SqliteDb, path: []const u8, contributors: Contributors) !void {
+    try deleteCachedContributorRows(db, path);
+
+    var insert_stmt = try db.prepare(
+        \\INSERT INTO source_stats_contributors(path, name, email, code, test_count, comment)
+        \\VALUES (?, ?, ?, ?, ?, ?)
+    );
+    defer insert_stmt.deinit();
+    for (contributors.rows) |row| {
+        try insert_stmt.reset();
+        try insert_stmt.bindText(1, path);
+        try insert_stmt.bindText(2, row.name);
+        try insert_stmt.bindText(3, row.email);
+        try insert_stmt.bindInt64(4, sqliteCount(row.code));
+        try insert_stmt.bindInt64(5, sqliteCount(row.test_count));
+        try insert_stmt.bindInt64(6, sqliteCount(row.comment));
+        try insert_stmt.stepDone();
+    }
+}
+
+fn deleteCachedContributorRows(db: *SqliteDb, path: []const u8) !void {
+    var delete_stmt = try db.prepare("DELETE FROM source_stats_contributors WHERE path = ?");
+    defer delete_stmt.deinit();
+    try delete_stmt.bindText(1, path);
+    try delete_stmt.stepDone();
+}
+
+fn upsertCachedScope(db: *SqliteDb, path: []const u8, commit_oid: []const u8, sloc_complete: bool, contributors_complete: bool) !void {
+    var stmt = try db.prepare(
+        \\INSERT INTO source_stats_scopes(path, commit_oid, sloc_complete, contributors_complete, updated_at)
+        \\VALUES (?, ?, ?, ?, ?)
+        \\ON CONFLICT(path) DO UPDATE SET
+        \\  commit_oid = excluded.commit_oid,
+        \\  sloc_complete = excluded.sloc_complete,
+        \\  contributors_complete = excluded.contributors_complete,
+        \\  updated_at = excluded.updated_at
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, path);
+    try stmt.bindText(2, commit_oid);
+    try stmt.bindInt(3, if (sloc_complete) 1 else 0);
+    try stmt.bindInt(4, if (contributors_complete) 1 else 0);
+    try stmt.bindInt64(5, std.time.timestamp());
+    try stmt.stepDone();
+}
+
+fn sqliteCount(value: u64) i64 {
+    return if (value > @as(u64, @intCast(std.math.maxInt(i64))))
+        std.math.maxInt(i64)
+    else
+        @intCast(value);
+}
+
+fn sqliteUnsigned(value: i64) u64 {
+    return if (value <= 0) 0 else @intCast(value);
+}
+
+fn cachedLanguageId(language: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, language, "markdown")) return "markdown";
+    if (std.mem.eql(u8, language, "cmake")) return "cmake";
+    if (std.mem.eql(u8, language, "dockerfile")) return "dockerfile";
+    if (std.mem.eql(u8, language, "makefile")) return "makefile";
+    for (hljs_languages.languages) |entry| {
+        if (std.mem.eql(u8, language, entry.id)) return entry.id;
+    }
+    return null;
 }
 
 fn addLanguageCounts(
@@ -706,6 +1396,93 @@ test "source stats counts blob lines without the sloc binary" {
     try std.testing.expect(countBlob("LICENSE", "plain text\n") == null);
 }
 
+test "source stats scopes root children up to direct files" {
+    const allocator = std.testing.allocator;
+    const paths = [_][]const u8{
+        "build.zig",
+        "src/main.zig",
+        "src/web/app.zig",
+        "src/web/view.zig",
+        "docs/readme.md",
+    };
+
+    const root_children = try immediateChildScopes(allocator, &paths, "");
+    defer git.freeStringList(allocator, root_children);
+    try std.testing.expectEqual(@as(usize, 2), root_children.len);
+    try std.testing.expectEqualStrings("docs", root_children[0]);
+    try std.testing.expectEqualStrings("src", root_children[1]);
+
+    const src_children = try immediateChildScopes(allocator, &paths, "src");
+    defer git.freeStringList(allocator, src_children);
+    try std.testing.expectEqual(@as(usize, 1), src_children.len);
+    try std.testing.expectEqualStrings("src/web", src_children[0]);
+
+    try std.testing.expect(pathMatchesScope("build.zig", "", .direct));
+    try std.testing.expect(!pathMatchesScope("src/main.zig", "", .direct));
+    try std.testing.expect(pathMatchesScope("src/main.zig", "src", .direct));
+    try std.testing.expect(!pathMatchesScope("src/web/app.zig", "src", .direct));
+    try std.testing.expect(pathMatchesScope("src/web/app.zig", "src", .recursive));
+}
+
+test "source stats cached SLOC populates local sqlite cache" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("repo/src/web");
+    try writeTestFile(tmp.dir, "repo/src/main.zig",
+        \\const value = 1;
+        \\// comment
+        \\
+    );
+    try writeTestFile(tmp.dir, "repo/src/web/app.zig",
+        \\pub fn app() void {}
+        \\
+    );
+
+    const repo_root = try tmp.dir.realpathAlloc(allocator, "repo");
+    defer allocator.free(repo_root);
+
+    try expectGitOk(allocator, repo_root, &.{ "init", "-q" });
+    try expectGitOk(allocator, repo_root, &.{ "config", "user.name", "Gitomi Test" });
+    try expectGitOk(allocator, repo_root, &.{ "config", "user.email", "gitomi-test@example.invalid" });
+    try expectGitOk(allocator, repo_root, &.{ "config", "commit.gpgsign", "false" });
+    try expectGitOk(allocator, repo_root, &.{ "add", "src/main.zig", "src/web/app.zig" });
+    try expectGitOk(allocator, repo_root, &.{ "commit", "-q", "-m", "initial" });
+
+    const git_dir_raw = try gitCheckedAt(allocator, repo_root, &.{ "rev-parse", "--path-format=absolute", "--git-common-dir" });
+    defer allocator.free(git_dir_raw);
+    const git_dir = std.mem.trim(u8, git_dir_raw, " \t\r\n");
+    const gitomi_dir = try std.fs.path.join(allocator, &.{ git_dir, "gitomi" });
+    defer allocator.free(gitomi_dir);
+
+    var repo = Repo{
+        .allocator = allocator,
+        .root = try allocator.dupe(u8, repo_root),
+        .git_dir = try allocator.dupe(u8, git_dir),
+        .gitomi_dir = try allocator.dupe(u8, gitomi_dir),
+        .config_path = try std.fs.path.join(allocator, &.{ gitomi_dir, "config.toml" }),
+        .index_path = try std.fs.path.join(allocator, &.{ gitomi_dir, "index.sqlite" }),
+        .cursors_path = try std.fs.path.join(allocator, &.{ gitomi_dir, "cursors.sqlite" }),
+        .settings_path = try std.fs.path.join(allocator, &.{ gitomi_dir, "settings.sqlite" }),
+    };
+    defer repo.deinit();
+
+    var stats = (try loadRepositoryStatsCached(allocator, repo)).?;
+    defer stats.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 2), stats.total_code);
+    try std.testing.expectEqual(@as(u64, 1), stats.total_comment);
+
+    var db = try openSourceStatsCache(allocator, repo);
+    defer db.deinit();
+    var stmt = try db.prepare("SELECT sloc_complete, contributors_complete FROM source_stats_scopes WHERE path = ''");
+    defer stmt.deinit();
+    try std.testing.expect(try stmt.step());
+    try std.testing.expectEqual(@as(c_int, 1), stmt.columnInt(0));
+    try std.testing.expectEqual(@as(c_int, 0), stmt.columnInt(1));
+}
+
 test "source stats aggregates contributor blame ranges by counted line kind" {
     const allocator = std.testing.allocator;
     const kinds = [_]sloc_lang_plugins.LineKind{ .comment, .code, .test_line, .blank };
@@ -738,4 +1515,33 @@ test "source stats aggregates contributor blame ranges by counted line kind" {
     try std.testing.expectEqual(@as(u64, 0), rows.items[1].code);
     try std.testing.expectEqual(@as(u64, 1), rows.items[1].test_count);
     try std.testing.expectEqual(@as(u64, 0), rows.items[1].comment);
+}
+
+fn writeTestFile(dir: std.fs.Dir, path: []const u8, bytes: []const u8) !void {
+    var file = try dir.createFile(path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(bytes);
+}
+
+fn expectGitOk(allocator: Allocator, root: []const u8, args: []const []const u8) !void {
+    const output = try gitCheckedAt(allocator, root, args);
+    allocator.free(output);
+}
+
+fn gitCheckedAt(allocator: Allocator, root: []const u8, args: []const []const u8) ![]u8 {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.append(allocator, "git");
+    try argv.append(allocator, "-C");
+    try argv.append(allocator, root);
+    for (args) |arg| try argv.append(allocator, arg);
+
+    var result = try git.runCommand(allocator, argv.items, null, git.max_git_output);
+    if (result.exitCode() == 0) {
+        const stdout = result.stdout;
+        allocator.free(result.stderr);
+        return stdout;
+    }
+    result.deinit();
+    return error.GitCommandFailed;
 }

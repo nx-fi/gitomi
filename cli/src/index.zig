@@ -260,6 +260,12 @@ fn requiredIndexTablesExist(db: *SqliteDb) bool {
     defer identities.deinit();
     var identity_aliases = db.prepare("SELECT alias_kind, alias_value, identity_id FROM identity_aliases LIMIT 0") catch return false;
     defer identity_aliases.deinit();
+    var teams = db.prepare("SELECT slug, name, description FROM teams LIMIT 0") catch return false;
+    defer teams.deinit();
+    var team_members = db.prepare("SELECT slug, principal, add_hash FROM team_members LIMIT 0") catch return false;
+    defer team_members.deinit();
+    var team_member_events = db.prepare("SELECT slug, principal, event_hash, event_type FROM team_member_events LIMIT 0") catch return false;
+    defer team_member_events.deinit();
     var pull_metadata = db.prepare("SELECT pull_id, source_author, source_identity, source_email, source_avatar_url FROM pull_metadata LIMIT 0") catch return false;
     defer pull_metadata.deinit();
     var projects_slug = db.prepare("SELECT slug FROM projects LIMIT 0") catch return false;
@@ -615,6 +621,9 @@ fn dropIndexSchemaTables(db: *SqliteDb) !void {
         \\DROP TABLE IF EXISTS events;
         \\DROP TABLE IF EXISTS identities;
         \\DROP TABLE IF EXISTS identity_aliases;
+        \\DROP TABLE IF EXISTS teams;
+        \\DROP TABLE IF EXISTS team_members;
+        \\DROP TABLE IF EXISTS team_member_events;
         \\DROP TABLE IF EXISTS issues;
         \\DROP TABLE IF EXISTS issue_labels;
         \\DROP TABLE IF EXISTS issue_assignees;
@@ -1414,6 +1423,9 @@ pub const countOpenPulls = index_query.countOpenPulls;
 pub const countIndexedEventsInDb = index_query.countIndexedEventsInDb;
 pub const listAclFromIndex = index_query.listAclFromIndex;
 pub const listIdentityFromIndex = index_query.listIdentityFromIndex;
+pub const listTeamsFromIndex = index_query.listTeamsFromIndex;
+pub const teamExists = index_query.teamExists;
+pub const teamMemberActive = index_query.teamMemberActive;
 pub const listIssuesFromIndex = index_query.listIssuesFromIndex;
 pub const showIssueFromIndex = index_query.showIssueFromIndex;
 pub const listProjectsFromIndex = index_query.listProjectsFromIndex;
@@ -1441,6 +1453,11 @@ pub fn requireAuthorizedWrite(allocator: Allocator, repo: Repo, event_body: []co
 pub fn roleForPrincipal(allocator: Allocator, repo: Repo, principal: []const u8) !?[]u8 {
     try ensureIndex(allocator, repo);
     return try index_query.roleForPrincipal(allocator, repo, principal);
+}
+
+pub fn directRoleForPrincipal(allocator: Allocator, repo: Repo, principal: []const u8) !?[]u8 {
+    try ensureIndex(allocator, repo);
+    return try index_query.directRoleForPrincipal(allocator, repo, principal);
 }
 
 pub fn countOwners(allocator: Allocator, repo: Repo) !usize {
@@ -1519,4 +1536,9 @@ pub fn resolveCommentId(allocator: Allocator, repo: Repo, raw_ref: []const u8) !
 pub fn commentParentInfo(allocator: Allocator, repo: Repo, comment_id: []const u8) !index_query.CommentParentInfo {
     try ensureIndex(allocator, repo);
     return try index_query.commentParentInfo(allocator, repo, comment_id);
+}
+
+pub fn workItemBodyEventHash(allocator: Allocator, repo: Repo, object_kind: []const u8, object_id: []const u8) ![]u8 {
+    try ensureIndex(allocator, repo);
+    return try index_query.workItemBodyEventHash(allocator, repo, object_kind, object_id);
 }

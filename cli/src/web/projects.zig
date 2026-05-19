@@ -9,3 +9,5 @@ pub const renderProjectFormFromTarget = form.renderProjectFormFromTarget;
 pub const handleProjectPost = form.handleProjectPost;
 pub const handleProjectItemPost = items.handleProjectItemPost;
 pub const handleProjectPropertiesPost = overview.handleProjectPropertiesPost;
+pub const handleProjectDefaultViewPost = overview.handleProjectDefaultViewPost;
+pub const handleProjectCommentPost = overview.handleProjectCommentPost;

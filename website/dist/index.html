@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Gitomi keeps your entire development workflow - issues, PRs, projects, workflows, and agent activity - inside your Git repository.">
+  <meta name="description" content="Gitomi keeps issues, pull requests, projects, pipeline run records, notifications, and access-control events inside your Git repository.">
   <meta name="theme-color" content="#009c8f">
   <title>Gitomi - Own your project, not just your code</title>
   <link rel="icon" href="./assets/logo.svg" type="image/svg+xml">
@@ -74,10 +74,10 @@
           <span class="hero-title-line"><span class="hero-title-prefix">Own your </span><span class="hero-word-frame"><span class="hero-rotator" data-typewriter data-words="project|tasks|workflows|collaboration">project</span><span class="hero-title-caret" aria-hidden="true"></span><span class="hero-comma">,</span></span></span>
           <span class="hero-title-line">not just your code.</span>
         </h1>
-        <p class="hero-lede">Gitomi keeps issues, pull requests, Kanban boards, workflows, and agent activity inside your Git repository - so you can work offline, sync with any Git remote, or self-host without losing your collaboration history.</p>
+        <p class="hero-lede">Gitomi keeps issues, pull requests, project boards, milestones, comments, pipeline run records, notifications, and access-control events inside your Git repository - so you can work offline, sync with any Git remote, or self-host without losing your collaboration history.</p>
         <div class="hero-install command-code">
-          <pre><code>curl gitomi.com/install.sh</code></pre>
-          <button class="command-copy install-copy" type="button" data-copy-command title="Copy install command" aria-label="Copy install command">
+          <pre><code>cd cli && zig build</code></pre>
+          <button class="command-copy install-copy" type="button" data-copy-command title="Copy build command" aria-label="Copy build command">
             <span class="button-icon icon-copy" aria-hidden="true"></span>
           </button>
         </div>
@@ -100,58 +100,58 @@
         <span class="window-dot red"></span>
         <span class="window-dot amber"></span>
         <span class="window-dot green"></span>
-        <code>localhost:3821/projects/portable-v1</code>
+        <code>127.0.0.1:12655/projects?project=Portable%20v1&amp;view=board</code>
       </div>
       <div class="app-sim">
         <aside class="sim-sidebar">
           <strong>Gitomi</strong>
-          <span class="is-active"><span class="button-icon icon-projects" aria-hidden="true"></span> Board</span>
+          <span><span class="button-icon icon-code" aria-hidden="true"></span> Code</span>
           <span><span class="button-icon icon-issues" aria-hidden="true"></span> Issues</span>
-          <span><span class="button-icon icon-pull-request" aria-hidden="true"></span> PRs</span>
-          <span><span class="button-icon icon-workflow" aria-hidden="true"></span> Runs</span>
-          <span><span class="button-icon icon-branch" aria-hidden="true"></span> Refs</span>
+          <span><span class="button-icon icon-pull-request" aria-hidden="true"></span> Pull Requests</span>
+          <span><span class="button-icon icon-workflow" aria-hidden="true"></span> Pipelines</span>
+          <span class="is-active"><span class="button-icon icon-projects" aria-hidden="true"></span> Projects</span>
         </aside>
         <section class="sim-board" aria-label="Simulated Gitomi project board">
           <div class="sim-toolbar">
             <div>
               <p>Project</p>
-              <strong>Own the workflow</strong>
+              <strong>Portable v1</strong>
             </div>
             <span class="sim-button">Sync refs</span>
           </div>
           <div class="kanban-grid">
             <div class="kanban-lane">
-              <h3>Local queue</h3>
+              <h3>Todo</h3>
               <article>
-                <span class="issue-id">#128</span>
-                <strong>Agent trace belongs in repo history</strong>
-                <small>signed by alice/laptop</small>
+                <span class="issue-id">#9f2a1c4</span>
+                <strong>Document the signed event format</strong>
+                <small>issue.opened by alice/laptop</small>
               </article>
               <article>
-                <span class="issue-id green">#129</span>
-                <strong>Offline PR review from train Wi-Fi</strong>
-                <small>3 comments pending sync</small>
+                <span class="issue-id green">#37b40e1</span>
+                <strong>Import GitHub labels into local index</strong>
+                <small>labels and milestone projected</small>
               </article>
             </div>
             <div class="kanban-lane is-hot">
               <h3>Review</h3>
               <article class="is-selected">
-                <span class="issue-id coral">PR-44</span>
-                <strong>Replace hosted issue sync</strong>
-                <small>checks passed locally</small>
+                <span class="issue-id coral">#a81f2d0</span>
+                <strong>Render pull request file comments</strong>
+                <small>review note stored as comment.added</small>
               </article>
               <article>
                 <span class="issue-id amber">RUN</span>
-                <strong>workflow: release-notes</strong>
-                <small>artifact stored with event</small>
+                <strong>pipeline: release.yml</strong>
+                <small>action.run_completed accepted</small>
               </article>
             </div>
             <div class="kanban-lane">
-              <h3>Accepted</h3>
+              <h3>Done</h3>
               <article>
                 <span class="issue-id cyan">ACL</span>
-                <strong>RBAC reducer verified</strong>
-                <small>projection rebuilt</small>
+                <strong>Team role grant projects correctly</strong>
+                <small>index rebuilt from inbox refs</small>
               </article>
             </div>
           </div>
@@ -165,9 +165,9 @@
             <span></span>
             <strong>alice@repo</strong>
           </div>
-          <pre><code><span class="prompt" aria-hidden="true">$</span> <span data-typewriter data-words="gt issue open --title own-the-workflow|git fetch origin refs/gitomi/*|gt web --offline-ready">gt issue open --title own-the-workflow</span><span class="typing-caret"></span>
-<span class="ok">accepted</span> event 9f2a1c4 projected locally
-<span class="muted">sync</span> ordinary git transport ready</code></pre>
+          <pre><code data-terminal-demo data-commands="gt issue open --title &quot;Write release notes&quot;|gt sync --remote origin|gt web" data-primary-labels="wrote|synced|serving" data-primary-lines="signed issue.opened event|signed Gitomi refs through origin|local web UI on 127.0.0.1:12655" data-secondary-labels="index|projection|pages" data-secondary-lines="rebuilt from refs/gitomi/inbox/*|updated issues, PRs, projects, and runs|code, issues, projects, pipelines"><span class="prompt" aria-hidden="true">$</span> <span data-terminal-command>gt issue open --title &quot;Write release notes&quot;</span><span class="typing-caret"></span><span data-terminal-output-lines><span data-terminal-primary-output>
+<span class="ok" data-terminal-primary-label>wrote</span> <span data-terminal-primary-line>signed issue.opened event</span></span><span data-terminal-secondary-output>
+<span class="muted" data-terminal-secondary-label>index</span> <span data-terminal-secondary-line>rebuilt from refs/gitomi/inbox/*</span></span></span></code></pre>
         </div>
       </div>
     </section>
@@ -175,8 +175,8 @@
     <section id="how" class="proof-section">
       <div class="section-copy">
         <p class="eyebrow">Repository-owned collaboration</p>
-        <h2>All project data lives in Git.</h2>
-        <p>Issues, pull requests, comments, milestones, project Kanban, workflow runs, and agent activity are stored as Git-backed project history. Your repo becomes the source of truth for both code and collaboration.</p>
+        <h2>All project metadata lives in the same Git repo.</h2>
+        <p>Issues, pull requests, comments, milestones, project boards, notifications, access-control changes, and pipeline run records are stored as Git-backed project history. Your repo becomes the source of truth for both code and collaboration.</p>
       </div>
       <div class="repo-proof" aria-label="Repository ref layout">
         <div class="repo-window">
@@ -191,32 +191,32 @@
             <div class="repo-tree">
               <div><span class="tree-glyph">main</span><strong>code branches</strong><small>normal Git</small></div>
               <div><span class="tree-glyph">v1.0</span><strong>tags</strong><small>normal Git</small></div>
-              <div class="is-live"><span class="tree-glyph">refs/gitomi</span><strong>project history</strong><small>signed commits</small></div>
-              <div><span class="tree-glyph sub">issues</span><strong>#128, #129, #131</strong><small>events</small></div>
-              <div><span class="tree-glyph sub">pulls</span><strong>PR-44, PR-45</strong><small>reviews</small></div>
-              <div><span class="tree-glyph sub">runs</span><strong>workflows + agents</strong><small>outputs</small></div>
+              <div class="is-live"><span class="tree-glyph">refs/gitomi/genesis</span><strong>trust anchor</strong><small>signed manifest</small></div>
+              <div><span class="tree-glyph sub">inbox/alice/laptop</span><strong>issues, pulls, projects</strong><small>event commits</small></div>
+              <div><span class="tree-glyph sub">staging/origin/inbox</span><strong>fetched remote events</strong><small>validated before admit</small></div>
+              <div><span class="tree-glyph sub">runs/local-runner</span><strong>pipeline diagnostics</strong><small>retention-managed</small></div>
             </div>
             <div class="event-stack">
               <article>
                 <span class="event-kind">issue.opened</span>
-                <strong>Move workflow into Git</strong>
+                <strong>Write the release notes</strong>
                 <small>alice/laptop signed 9f2a1c4</small>
               </article>
               <article>
-                <span class="event-kind green">project.card.moved</span>
-                <strong>Kanban state projected locally</strong>
-                <small>refs fetched, index rebuilt</small>
+                <span class="event-kind green">issue.status_set</span>
+                <strong>Move issue to Review</strong>
+                <small>board rebuilt from accepted events</small>
               </article>
               <article>
-                <span class="event-kind violet">agent.run.finished</span>
-                <strong>Trace and artifact attached</strong>
-                <small>durable result in repo history</small>
+                <span class="event-kind violet">action.run_completed</span>
+                <strong>Pipeline result recorded</strong>
+                <small>diagnostics ref linked when present</small>
               </article>
             </div>
           </div>
         </div>
         <div class="proof-chips">
-          <span>Issues</span><span>Pull requests</span><span>Comments</span><span>Milestones</span><span>Project Kanban</span><span>Workflow runs</span><span>Agent activity</span>
+          <span>Issues</span><span>Pull requests</span><span>Comments</span><span>Milestones</span><span>Project boards</span><span>Pipeline runs</span><span>Notifications</span>
         </div>
       </div>
     </section>
@@ -233,15 +233,15 @@
             <span></span>
             <strong>git transport</strong>
           </div>
-          <pre><code><span class="prompt" aria-hidden="true">$</span> git fetch origin 'refs/gitomi/*:refs/gitomi/staging/*'
-<span class="ok">remote</span> 42 project events received
-<span class="prompt" aria-hidden="true">$</span> gt sync --admit
-<span class="ok">accepted</span> signatures, RBAC, chains
-<span class="muted">projection</span> issues + PRs + boards rebuilt</code></pre>
+          <pre><code><span class="prompt" aria-hidden="true">$</span> gt github import
+<span class="ok">imported</span> 42 issues, 7 pull requests, 118 comments
+<span class="prompt" aria-hidden="true">$</span> gt sync
+<span class="ok">synced</span> signed Gitomi refs through origin
+<span class="muted">rebuilt</span> issues, PRs, projects, and pipeline status</code></pre>
           <div class="sync-feed">
-            <span><b>refs/gitomi/inbox/alice</b><em>fast-forward</em></span>
-            <span><b>refs/gitomi/inbox/agent-7</b><em>signed</em></span>
-            <span><b>refs/gitomi/projects/portable-v1</b><em>projected</em></span>
+            <span><b>refs/gitomi/genesis</b></span>
+            <span><b>refs/gitomi/inbox/&lt;principal&gt;/&lt;device&gt;</b></span>
+            <span><b>refs/gitomi/inbox/import-bot/github</b></span>
           </div>
         </div>
         <div class="remote-stack">
@@ -279,7 +279,7 @@
       <div class="section-copy">
         <p class="eyebrow">Local-first work</p>
         <h2>Work offline. Sync later.</h2>
-        <p>Open issues, review pull requests, move cards, inspect workflow results, and continue working from your local clone. Reconnect when you are ready. Gitomi syncs project state through Git.</p>
+        <p>Open issues, comment on pull requests, move project cards, inspect pipeline results already in your clone, and keep working locally. Reconnect when you are ready. Gitomi syncs project state through Git.</p>
       </div>
       <div class="offline-lab" aria-hidden="true">
         <article class="device-panel">
@@ -289,9 +289,9 @@
             <em>3 events queued</em>
           </div>
           <ul>
-            <li><b>#131</b><span>Open issue</span><small>local</small></li>
-            <li><b>PR-45</b><span>Review changes</span><small>local</small></li>
-            <li><b>RUN</b><span>Inspect workflow result</span><small>local</small></li>
+            <li><b>#c09b2aa</b><span>Open issue</span><small>signed</small></li>
+            <li><b>#a81f2d0</b><span>Add PR comment</span><small>local</small></li>
+            <li><b>RUN</b><span>Read pipeline result</span><small>cached</small></li>
           </ul>
         </article>
         <article class="device-panel is-online">
@@ -313,52 +313,98 @@
 
     <section class="agent-section">
       <div class="section-copy">
-        <p class="eyebrow">Agent-native project record</p>
-        <h2>Built for agents, not just humans.</h2>
-        <p>Agent work should be reviewable, traceable, and part of the project record. Gitomi gives agents a native workflow: tasks, permissions, traces, outputs, and durable results tied to your repository.</p>
+        <p class="eyebrow">Local CI/CD ownership</p>
+        <h2>Own your CI/CD workflows locally.</h2>
+        <p>Import your existing GitHub Actions workflows or define new ones, then run them on infrastructure you control. Gitomi gives you the flexibility to use your local setup and plug AI coding agents into CI/CD, while keeping workflow history and traceability in the repository.</p>
       </div>
       <div class="agent-console" aria-hidden="true">
         <div class="console-title">
           <span class="button-icon icon-workflow"></span>
-          <strong>agent-run/issue-128</strong>
-          <em>signed output</em>
+          <strong>resolve-conflict.yml workflow</strong>
+          <em>runs locally</em>
         </div>
-        <ol>
-          <li><span>context</span><code>refs/heads/main + issue #128</code></li>
-          <li><span>permission</span><code>write inbox only</code></li>
-          <li><span>trace</span><code>tests, diff, review notes</code></li>
-          <li><span>result</span><code>durable event commit</code></li>
-        </ol>
+        <div class="agent-workflow-demo">
+          <div class="workflow-pane">
+            <div class="workflow-pane-head">
+              <span class="workflow-status"></span>
+              <div>
+                <strong>Resolve merge conflict</strong>
+                <small>.github/workflows/resolve-conflict.yml</small>
+              </div>
+              <code>#142</code>
+            </div>
+            <ul class="workflow-steps">
+              <li class="is-done"><b>1</b><span><strong>Checkout</strong></span></li>
+              <li class="is-active"><b>2</b><span><strong>Local coding agent</strong></span></li>
+              <li><b>3</b><span><strong>Publish</strong></span></li>
+            </ul>
+          </div>
+          <div class="agent-bridge">
+            <svg viewBox="0 0 48 14" aria-hidden="true" focusable="false">
+              <path d="M6 7h36"></path>
+              <path d="M11 2 6 7l5 5"></path>
+              <path d="m37 2 5 5-5 5"></path>
+            </svg>
+          </div>
+          <div class="agent-terminal-pane">
+            <div class="terminal-head">
+              <span></span>
+              <strong>local coding agent</strong>
+            </div>
+            <div class="agent-session">
+              <div class="agent-session-head">
+                <span class="agent-avatar"></span>
+                <div>
+                  <strong>Mythos Coding Agent</strong>
+                </div>
+              </div>
+              <div class="agent-code-block">
+                <p><strong>Resolved conflict</strong> <span class="diff-add">(+3</span> <span class="diff-remove">-5)</span></p>
+                <p class="agent-code-file">src/auth/session.ts <span class="diff-add">(+3</span> <span class="diff-remove">-5)</span></p>
+                <div class="agent-code-row is-remove"><span>-</span><code>&lt;&lt;&lt;&lt;&lt;&lt;&lt; HEAD</code></div>
+                <div class="agent-code-row is-remove"><span>-</span><code>return cachedSession ?? await refresh();</code></div>
+                <div class="agent-code-row is-remove"><span>-</span><code>=======</code></div>
+                <div class="agent-code-row is-add"><span>+</span><code>return await loadSession({ cache: true });</code></div>
+                <div class="agent-code-row is-remove"><span>-</span><code>&gt;&gt;&gt;&gt;&gt;&gt;&gt; origin/main</code></div>
+                <p><strong>Ran</strong> merge checks and unit tests</p>
+              </div>
+              <div class="agent-input-line"><span>&gt;</span><p>resolve merge conflict</p></div>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
 
     <section class="workflow-section">
       <div class="section-copy">
         <p class="eyebrow">Familiar model, different ownership</p>
-        <h2>Replace the platform. Keep the workflow.</h2>
-        <p>Use the familiar model: issues, pull requests, comments, labels, milestones, boards, workflows, and a local web UI. The difference is that your team owns the data, the workflow, and the history.</p>
+        <h2>Keep the workflow close to the repo.</h2>
+        <p>Use the familiar model: issues, pull requests, comments, labels, milestones, boards, pipeline runs, notifications, access control, and a local web UI. The difference is that your team owns the data and the history.</p>
       </div>
-      <div class="workflow-grid">
-        <article>
-          <span class="button-icon icon-issues" aria-hidden="true"></span>
-          <strong>Issues and comments</strong>
-          <p>Portable project discussion with signed history.</p>
-        </article>
-        <article>
-          <span class="button-icon icon-pull-request" aria-hidden="true"></span>
-          <strong>Pull request reviews</strong>
-          <p>Review state travels with the repository.</p>
-        </article>
-        <article>
-          <span class="button-icon icon-projects" aria-hidden="true"></span>
-          <strong>Kanban and milestones</strong>
-          <p>Planning state is rebuilt from Git events.</p>
-        </article>
-        <article>
-          <span class="button-icon icon-workflow" aria-hidden="true"></span>
-          <strong>Workflows and agents</strong>
-          <p>Runs, traces, and outputs join project history.</p>
-        </article>
+      <div class="workflow-pr-screen" aria-hidden="true">
+        <div class="pr-screen-head">
+          <span class="button-icon icon-pull-request"></span>
+          <div>
+            <strong>Resolve auth session conflict</strong>
+            <small>feature/session-cache into main</small>
+          </div>
+          <em>Ready to merge</em>
+        </div>
+        <div class="pr-status-band">
+          <span class="is-resolved">Conflicts resolved</span>
+          <span>3 checks passed</span>
+          <span>Approved</span>
+        </div>
+        <div class="pr-file-preview">
+          <div><b>src/auth/session.ts</b><small>conflict markers removed</small></div>
+          <code><span class="diff-remove">-</span> &lt;&lt;&lt;&lt;&lt;&lt;&lt; HEAD</code>
+          <code><span class="diff-add">+</span> return await loadSession({ cache: true });</code>
+          <code><span class="diff-remove">-</span> &gt;&gt;&gt;&gt;&gt;&gt;&gt; origin/main</code>
+        </div>
+        <div class="pr-merge-row">
+          <p>Branch is up to date. Merge commit can be created locally and synced through Git.</p>
+          <strong>Merge pull request</strong>
+        </div>
       </div>
     </section>
 
@@ -395,7 +441,7 @@ zig build
           <span class="button-icon icon-copy" aria-hidden="true"></span>
         </button>
         <pre><code>gt init --principal alice --device laptop
-gt issue open --title &quot;Move workflow into Git&quot;
+gt issue open --title &quot;Write the release notes&quot; --body &quot;Collect highlights for v1.&quot;
 gt issue list</code></pre>
       </div>
     </article>
@@ -403,7 +449,7 @@ gt issue list</code></pre>
     <article class="command-card">
       <div>
         <p class="eyebrow">Browse</p>
-        <p>Start the loopback web UI for code, issues, projects, events, workflows, and refs.</p>
+        <p>Start the loopback web UI for code, issues, pull requests, projects, pipelines, events, and refs.</p>
       </div>
       <div class="command-code">
         <button class="command-copy" type="button" data-copy-command title="Copy Browse command" aria-label="Copy Browse command">
@@ -436,7 +482,7 @@ gt issue list</code></pre>
 
   <footer class="site-footer">
     <img src="./assets/logo.svg" alt="" width="47" height="32">
-    <span>Gitomi keeps your entire development workflow inside your Git repository.</span>
+    <span>Gitomi keeps project collaboration records inside your Git repository.</span>
   </footer>
 
   <script src="./assets/site.js"></script>

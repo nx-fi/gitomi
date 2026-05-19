@@ -87,11 +87,12 @@ pub fn appendProjectRoadmap(
     project: []const u8,
     active_view: *const ActiveProjectView,
     current_principal: []const u8,
+    csrf_token: []const u8,
 ) !void {
     const context = projectRenderContextFromView(allocator, active_view, current_principal);
     const issue_count = try projectIssueCount(db, project, context.filter);
     const group_field = projectGroupFieldFromConfig(allocator, active_view.config_json);
-    try appendProjectWorkspaceChromeStart(buf, allocator, db, project, issue_count, active_view);
+    try appendProjectWorkspaceChromeStart(buf, allocator, db, project, issue_count, active_view, csrf_token);
     try buf.appendSlice(allocator,
         \\  <div class="project-roadmap-view">
         \\    <div class="project-roadmap-scale" aria-hidden="true"><span>Unscheduled</span><span>Now</span><span>Next</span><span>Later</span></div>

@@ -119,11 +119,13 @@
     }).join("\n") + "\n\n";
   }
 
-  function commentTextarea() {
+  function commentTextarea(form) {
+    if (form) return form.querySelector("textarea[name='body']");
     return document.querySelector(".issue-comment-form textarea[name='body']");
   }
 
-  function commentReplyInput() {
+  function commentReplyInput(form) {
+    if (form) return form.querySelector("input[name='reply_parent_ref']");
     return document.querySelector(".issue-comment-form input[name='reply_parent_ref']");
   }
 
@@ -132,18 +134,74 @@
     if (!textarea || !value) return false;
     const current = textarea.value.replace(/\s+$/g, "");
     textarea.value = current ? current + "\n\n" + value : value;
-    textarea.focus();
-    textarea.scrollIntoView({ block: "center" });
+    focusCommentForm();
     const end = textarea.value.length;
     textarea.setSelectionRange(end, end);
     textarea.dispatchEvent(new Event("input", { bubbles: true }));
     return true;
   }
 
-  function setReplyTarget(ref) {
-    const input = commentReplyInput();
-    if (!input) return;
+  function setReplyTarget(ref, form) {
+    const input = commentReplyInput(form);
+    if (!input) return false;
     input.value = ref || "";
+    return true;
+  }
+
+  function focusCommentForm(form) {
+    const textarea = commentTextarea(form);
+    if (!textarea) return false;
+    textarea.focus();
+    textarea.scrollIntoView({ block: "center" });
+    return true;
+  }
+
+  function clearInlineReplyForm(form) {
+    const textarea = commentTextarea(form);
+    if (textarea) {
+      textarea.value = "";
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    setReplyTarget("", form);
+  }
+
+  function removeInlineReplyForm(form) {
+    if (!form) return;
+    clearInlineReplyForm(form);
+    form.remove();
+  }
+
+  function inlineReplyAnchor(button) {
+    if (!button) return null;
+    return button.closest(".reaction-bar") || button;
+  }
+
+  function ensureInlineReplyForm(button, ref) {
+    const template = document.querySelector("template[data-comment-reply-form-template]");
+    const anchor = inlineReplyAnchor(button);
+    if (!template || !anchor) return null;
+
+    let form = document.querySelector("[data-inline-comment-reply-form]");
+    if (!form) {
+      const fragment = template.content ? template.content.cloneNode(true) : null;
+      form = fragment ? fragment.querySelector("[data-inline-comment-reply-form]") : null;
+      if (!form) return null;
+      anchor.insertAdjacentElement("afterend", form);
+    } else if (form.previousElementSibling !== anchor) {
+      anchor.insertAdjacentElement("afterend", form);
+    }
+    if ((form.dataset.replyRef || "") !== (ref || "")) clearInlineReplyForm(form);
+    form.dataset.replyRef = ref || "";
+    setReplyTarget(ref || "", form);
+    initMarkdownEditors();
+    return form;
+  }
+
+  function startCommentReply(ref, button) {
+    const inlineForm = ensureInlineReplyForm(button, ref);
+    if (inlineForm) return focusCommentForm(inlineForm);
+    if (!setReplyTarget(ref || "")) return false;
+    return focusCommentForm();
   }
 
   function issueMenuLabel(button) {
@@ -285,6 +343,27 @@
     });
     document.addEventListener("keydown", function (event) {
       if (event.key === "Escape") closeIssueMenus(null);
+    });
+  }
+
+  function initCommentReplyButtons() {
+    if (document.body.dataset.commentReplyButtonsReady === "yes") return;
+    document.body.dataset.commentReplyButtonsReady = "yes";
+    document.addEventListener("click", function (event) {
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target) return;
+      const button = target.closest("[data-comment-reply-ref]");
+      if (!button) return;
+      event.preventDefault();
+      startCommentReply(button.getAttribute("data-comment-reply-ref") || "", button);
+    });
+    document.addEventListener("click", function (event) {
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target) return;
+      const button = target.closest("[data-comment-reply-cancel]");
+      if (!button) return;
+      event.preventDefault();
+      removeInlineReplyForm(button.closest("[data-inline-comment-reply-form]"));
     });
   }
 
@@ -1643,6 +1722,7 @@
     renderRelativeTimes();
     initWorkItemCopyButtons();
     initIssueActionMenus();
+    initCommentReplyButtons();
     initIssueSidebarMenus();
     initMarkdownEditors();
     initProjectMarkdownForms();

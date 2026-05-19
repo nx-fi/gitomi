@@ -246,6 +246,33 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
 }
+.access-member-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.access-member-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 4px 6px 4px 8px;
+  background: var(--subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.access-member-chip .button {
+  min-height: 26px;
+  padding: 0 8px;
+}
+.access-team-edit {
+  display: grid;
+  min-width: 240px;
+  gap: 8px;
+}
+.access-team-edit label {
+  margin: 0;
+}
 .access-role-pill,
 .access-device-status {
   display: inline-flex;

@@ -2,6 +2,7 @@ const std = @import("std");
 
 const index = @import("index.zig");
 const repo_mod = @import("repo.zig");
+const util = @import("util.zig");
 
 const Allocator = std.mem.Allocator;
 const Repo = repo_mod.Repo;
@@ -10,6 +11,7 @@ const sqlite = index.sqlite;
 
 const settings_schema_version = "1";
 const default_ollama_endpoint = "http://localhost:11434";
+const default_project_view_values = [_][]const u8{ "overview", "table", "board", "roadmap", "issues", "activity" };
 
 pub const AiModel = struct {
     id: []u8,
@@ -121,6 +123,60 @@ pub fn updateOllamaModel(allocator: Allocator, repo: Repo, update: OllamaUpdate)
     try stmt.stepDone();
 }
 
+pub fn loadProjectDefaultView(allocator: Allocator, repo: Repo, project_id: []const u8) !?[]u8 {
+    if (project_id.len == 0) return null;
+    var db = try openSettingsDb(allocator, repo);
+    defer db.deinit();
+    try ensureSettingsSchema(&db);
+
+    var stmt = try db.prepare(
+        \\SELECT view
+        \\FROM project_view_preferences
+        \\WHERE project_id = ?
+        \\LIMIT 1
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    if (!(try stmt.step())) return null;
+
+    const view = try stmt.columnTextDup(allocator, 0);
+    errdefer allocator.free(view);
+    if (!isProjectDefaultViewValue(view)) {
+        allocator.free(view);
+        return null;
+    }
+    return view;
+}
+
+pub fn saveProjectDefaultView(allocator: Allocator, repo: Repo, project_id: []const u8, view: []const u8) !void {
+    if (project_id.len == 0 or !isProjectDefaultViewValue(view)) return error.InvalidProjectDefaultView;
+    var db = try openSettingsDb(allocator, repo);
+    defer db.deinit();
+    try ensureSettingsSchema(&db);
+
+    const now = try util.rfc3339Now(allocator);
+    defer allocator.free(now);
+    var stmt = try db.prepare(
+        \\INSERT INTO project_view_preferences(project_id, view, updated_at)
+        \\VALUES (?, ?, ?)
+        \\ON CONFLICT(project_id) DO UPDATE SET
+        \\  view = excluded.view,
+        \\  updated_at = excluded.updated_at
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+    try stmt.bindText(2, view);
+    try stmt.bindText(3, now);
+    try stmt.stepDone();
+}
+
+pub fn isProjectDefaultViewValue(value: []const u8) bool {
+    for (default_project_view_values) |candidate| {
+        if (std.mem.eql(u8, value, candidate)) return true;
+    }
+    return false;
+}
+
 fn openSettingsDb(allocator: Allocator, repo: Repo) !SqliteDb {
     try std.fs.cwd().makePath(repo.gitomi_dir);
     return try SqliteDb.open(allocator, repo.settings_path, sqlite.SQLITE_OPEN_READWRITE | sqlite.SQLITE_OPEN_CREATE, false);
@@ -140,6 +196,7 @@ fn ensureSettingsSchema(db: *SqliteDb) !void {
     }
 
     try seedAiModelDefaults(db);
+    try ensureProjectViewPreferencesSchema(db);
 }
 
 fn schemaVersionMatches(db: *SqliteDb) !bool {
@@ -153,6 +210,7 @@ fn schemaVersionMatches(db: *SqliteDb) !bool {
 
 fn dropSettingsSchema(db: *SqliteDb) !void {
     try db.exec(
+        \\DROP TABLE IF EXISTS project_view_preferences;
         \\DROP TABLE IF EXISTS ai_models;
         \\DROP TABLE IF EXISTS meta;
     );
@@ -178,7 +236,22 @@ fn createSettingsSchema(db: *SqliteDb) !void {
         \\  notes TEXT NOT NULL
         \\);
         \\CREATE INDEX ai_models_kind_idx ON ai_models(provider_kind, provider);
+        \\CREATE TABLE project_view_preferences (
+        \\  project_id TEXT PRIMARY KEY,
+        \\  view TEXT NOT NULL,
+        \\  updated_at TEXT NOT NULL
+        \\);
         \\INSERT INTO meta(key, value) VALUES ('schema_version', '1');
+    );
+}
+
+fn ensureProjectViewPreferencesSchema(db: *SqliteDb) !void {
+    try db.exec(
+        \\CREATE TABLE IF NOT EXISTS project_view_preferences (
+        \\  project_id TEXT PRIMARY KEY,
+        \\  view TEXT NOT NULL,
+        \\  updated_at TEXT NOT NULL
+        \\);
     );
 }
 

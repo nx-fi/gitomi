@@ -36,10 +36,11 @@ pub fn appendProjectIssues(
     project: []const u8,
     active_view: *const ActiveProjectView,
     current_principal: []const u8,
+    csrf_token: []const u8,
 ) !void {
     const context = projectRenderContextFromView(allocator, active_view, current_principal);
     const issue_count = try projectIssueCount(db, project, context.filter);
-    try appendProjectWorkspaceChromeStart(buf, allocator, db, project, issue_count, active_view);
+    try appendProjectWorkspaceChromeStart(buf, allocator, db, project, issue_count, active_view, csrf_token);
     try buf.appendSlice(allocator, "<div class=\"project-issues-view\">");
     if (issue_count == 0) {
         try appendProjectIssuesEmptyState(buf, allocator, db, project, &context);
