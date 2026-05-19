@@ -995,6 +995,45 @@
     return section;
   }
 
+  function clearRootFileListNotice(slot) {
+    const notice = slot.previousElementSibling;
+    if (notice && notice.hasAttribute("data-root-file-list-notice")) notice.remove();
+  }
+
+  function setRootFileCommitPlaceholders(slot, message, isError) {
+    slot.querySelectorAll(".root-file-commit-deferred").forEach(function (node) {
+      node.textContent = message;
+      node.classList.toggle("root-file-commit-error", Boolean(isError));
+    });
+  }
+
+  function handleRootFileListPartialError(slot, error) {
+    if (!slot.hasAttribute("data-root-file-list")) return false;
+    setRootFileCommitPlaceholders(slot, "Commit history unavailable", true);
+    if (slot.previousElementSibling && slot.previousElementSibling.hasAttribute("data-root-file-list-notice")) return true;
+
+    const notice = document.createElement("div");
+    notice.className = "root-file-list-notice";
+    notice.setAttribute("data-root-file-list-notice", "");
+
+    const message = document.createElement("span");
+    message.textContent = partialErrorMessage(slot, error);
+    notice.appendChild(message);
+
+    const retry = document.createElement("button");
+    retry.className = "button secondary root-partial-retry root-file-list-retry";
+    retry.type = "button";
+    retry.textContent = "Retry";
+    retry.addEventListener("click", function () {
+      clearRootFileListNotice(slot);
+      setRootFileCommitPlaceholders(slot, "Loading commit...", false);
+      scheduleRootPartial(slot, true);
+    });
+    notice.appendChild(retry);
+    slot.before(notice);
+    return true;
+  }
+
   const rootPartialMaxConcurrent = 2;
   const rootPartialDefaultTimeoutMs = 15000;
   const rootContributorLargeSlocThreshold = 200000;
@@ -1038,7 +1077,7 @@
     try {
       const parsed = new URL(url, window.location.href);
       if (parsed.origin !== window.location.origin) return false;
-      return /^\/code\/root\/(?:about|repository|repository-tracked-size|repository-directory-size|branch|branch-sync|branch-changes|branch-diff|branch-state|stats|contributors|docs|search|commit-count)$/.test(parsed.pathname);
+      return /^\/code\/root\/(?:about|repository|repository-tracked-size|repository-directory-size|branch|branch-sync|branch-changes|branch-diff|branch-state|file-list|stats|contributors|docs|search|commit-count)$/.test(parsed.pathname);
     } catch (_) {
       return false;
     }
@@ -1115,12 +1154,14 @@
 
       const template = document.createElement("template");
       template.innerHTML = html;
+      if (slot.hasAttribute("data-root-file-list")) clearRootFileListNotice(slot);
       slot.replaceWith(template.content);
       notifyPartialRefresh(parent);
     } catch (error) {
       if (!slot.isConnected) return;
       slot.dataset.rootPartialState = "error";
       slot.removeAttribute("aria-busy");
+      if (handleRootFileListPartialError(slot, error)) return;
       if (slot.hasAttribute("data-root-partial-silent")) return;
       slot.replaceChildren(partialErrorNode(slot, error));
     } finally {

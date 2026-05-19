@@ -576,6 +576,14 @@ a.root-file-commit:hover,
   opacity: 0.7;
   text-align: left;
 }
+.root-file-commit-deferred {
+  font-weight: 500;
+  opacity: 0.72;
+}
+.root-file-commit-error {
+  color: var(--danger);
+  opacity: 1;
+}
 .root-file-time {
   justify-self: end;
   color: var(--muted);
@@ -583,6 +591,20 @@ a.root-file-commit:hover,
   font-weight: 500;
   line-height: 20px;
   white-space: nowrap;
+}
+.root-file-list-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 42px;
+  padding: 7px 16px;
+  color: var(--muted);
+  background: var(--panel-bg);
+  border-top: 1px solid var(--border);
+}
+.root-file-list-retry {
+  flex: 0 0 auto;
 }
 @media (min-width: 1200px) {
   .root-file-row {

@@ -36,6 +36,7 @@ const pdf_preview_css_width_limit = 1200;
 const pdf_preview_css_height_limit = 1800;
 const root_partial_priority_repository = 30;
 const root_partial_priority_branch = 30;
+const root_partial_priority_file_commits = 32;
 const root_partial_priority_commit_count = 35;
 const root_partial_priority_stats = 40;
 const root_partial_priority_contributors = 45;
@@ -96,6 +97,7 @@ const markdownSummaryOwned = explorer_data.markdownSummaryOwned;
 const appendRepositoryMarkdown = explorer_data.appendRepositoryMarkdown;
 const physicalLineCount = explorer_data.physicalLineCount;
 const loadTreeEntries = explorer_data.loadTreeEntries;
+const loadTreeEntriesShallow = explorer_data.loadTreeEntriesShallow;
 const loadBlameLines = explorer_data.loadBlameLines;
 const loadCommitSummary = explorer_data.loadCommitSummary;
 const loadCommitCount = explorer_data.loadCommitCount;
@@ -221,6 +223,8 @@ pub fn renderCodeRootComponent(allocator: Allocator, repo: Repo, target: []const
         try appendRootBranchDiffComponent(&buf, allocator, repo);
     } else if (std.mem.eql(u8, component, "branch-state")) {
         try appendRootBranchStateComponent(&buf, allocator, repo);
+    } else if (std.mem.eql(u8, component, "file-list")) {
+        try appendRootFileListComponent(&buf, allocator, repo, ref);
     } else if (std.mem.eql(u8, component, "stats")) {
         try appendRootStatsComponent(&buf, allocator, repo);
     } else if (std.mem.eql(u8, component, "contributors")) {
@@ -443,12 +447,15 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     try appendRepoHeader(&buf, allocator, repo, ref);
     try appendCodeLayoutStart(&buf, allocator, repo, ref, path);
 
-    const entries_opt = try loadTreeEntries(allocator, repo, ref, path);
+    const is_root = path.len == 0;
+    const entries_opt = if (is_root)
+        try loadTreeEntriesShallow(allocator, repo, ref, path)
+    else
+        try loadTreeEntries(allocator, repo, ref, path);
     if (entries_opt) |entries| {
         defer freeTreeEntries(allocator, entries);
         const summary_opt = try loadCommitSummary(allocator, repo, ref, path);
         defer if (summary_opt) |summary| summary.deinit(allocator);
-        const is_root = path.len == 0;
 
         if (is_root) {
             const branches = try loadBranchRefs(allocator, repo);
@@ -467,7 +474,7 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
             if (sync_flash) |flash| try appendCodeSyncFlash(&buf, allocator, flash);
             try appendRootCodePanelStart(&buf, allocator);
             try appendRootCommitBar(&buf, allocator, ref, summary_opt, null);
-            try appendRootTreeListing(&buf, allocator, ref, entries, true);
+            try appendRootTreeListing(&buf, allocator, ref, entries, false);
             try appendCodePanelEnd(&buf, allocator);
         } else {
             try appendCodePanelStart(&buf, allocator, repo, ref, path);
@@ -1339,7 +1346,11 @@ fn appendRootTreeListing(
     entries: []const TreeEntry,
     commit_history_loaded: bool,
 ) !void {
-    try appendTemplate(buf, allocator, "<div class=\"root-file-list\" data-root-file-list>", .{});
+    try appendTemplate(buf, allocator, "<div class=\"root-file-list\" data-root-file-list", .{});
+    if (!commit_history_loaded) {
+        try appendRootPartialAttrs(buf, allocator, ref, "file-list", "File commit history", root_partial_priority_file_commits, root_partial_timeout_stats_ms);
+    }
+    try appendTemplate(buf, allocator, ">", .{});
     for (entries) |entry| {
         try appendRootTreeEntryRow(buf, allocator, ref, entry, commit_history_loaded);
     }
@@ -1403,7 +1414,7 @@ fn appendRootTreeEntryRow(
         , .{});
     } else {
         try appendTemplate(buf, allocator,
-            \\<span class="root-file-commit root-file-commit-deferred" aria-label="Commit history not loaded"></span><span class="root-file-time"></span>
+            \\<span class="root-file-commit root-file-commit-deferred">Loading commit...</span><span class="root-file-time"></span>
         , .{});
     }
 
@@ -2088,6 +2099,14 @@ fn appendRootBranchStateComponent(buf: *std.ArrayList(u8), allocator: Allocator,
         try appendTemplate(buf, allocator, "Unavailable", .{});
     }
     try appendTemplate(buf, allocator, "</dd>", .{});
+}
+
+fn appendRootFileListComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8) !void {
+    const entries_opt = try loadTreeEntries(allocator, repo, ref, "");
+    if (entries_opt) |entries| {
+        defer freeTreeEntries(allocator, entries);
+        try appendRootTreeListing(buf, allocator, ref, entries, true);
+    }
 }
 
 fn appendRootStatsComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo) !void {

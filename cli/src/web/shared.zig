@@ -24,7 +24,7 @@ const loadConfig = repo_mod.loadConfig;
 const default_web_shortcut_leader = "Space";
 const default_web_shortcut_keys = "A S D F J K L E R U I O W Q P Z X C V B N M G H Y T";
 const default_web_shortcut_timeout_ms: u64 = 900;
-const asset_version = "20260519-contributors-threshold";
+const asset_version = "20260519-root-file-commits";
 
 const WebStats = struct {
     inbox_refs: usize = 0,

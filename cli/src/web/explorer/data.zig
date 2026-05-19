@@ -495,6 +495,26 @@ pub fn physicalLineCount(content: []const u8) usize {
 pub fn loadTreeEntries(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?[]TreeEntry {
     if (isFilesystemRef(ref)) return loadWorktreeEntries(allocator, repo, ref, path);
 
+    const entries = (try loadGitTreeEntries(allocator, repo, ref, path)) orelse return null;
+    errdefer freeTreeEntries(allocator, entries);
+
+    if (entries.len != 0) {
+        loadTreeEntryCommits(allocator, repo, ref, path, entries) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => {},
+        };
+    }
+
+    return entries;
+}
+
+pub fn loadTreeEntriesShallow(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?[]TreeEntry {
+    if (isFilesystemRef(ref)) return loadWorktreeEntriesShallow(allocator, repo, ref, path);
+
+    return loadGitTreeEntries(allocator, repo, ref, path);
+}
+
+fn loadGitTreeEntries(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?[]TreeEntry {
     const spec = try objectSpec(allocator, ref, path);
     defer allocator.free(spec);
     const raw = try gitMaybe(allocator, repo, &.{ "ls-tree", "-z", "-l", "--end-of-options", spec }, git.max_git_output) orelse return null;
@@ -526,12 +546,6 @@ pub fn loadTreeEntries(allocator: Allocator, repo: Repo, ref: []const u8, path: 
         });
     }
     std.mem.sort(TreeEntry, entries.items, {}, treeEntryLessThan);
-    if (entries.items.len != 0) {
-        loadTreeEntryCommits(allocator, repo, ref, path, entries.items) catch |err| switch (err) {
-            error.OutOfMemory => return err,
-            else => {},
-        };
-    }
 
     return try entries.toOwnedSlice(allocator);
 }
@@ -1102,6 +1116,27 @@ pub fn loadTreeNavEntries(allocator: Allocator, repo: Repo, ref: []const u8) !?[
 pub fn loadWorktreeEntries(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?[]TreeEntry {
     const root = try worktreeRootOwned(allocator, repo, ref) orelse return null;
     defer allocator.free(root);
+
+    const entries = (try loadWorktreeEntriesAt(allocator, root, path)) orelse return null;
+    errdefer freeTreeEntries(allocator, entries);
+
+    if (entries.len != 0) {
+        loadFilesystemTreeEntryCommits(allocator, root, path, entries) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => {},
+        };
+    }
+    return entries;
+}
+
+pub fn loadWorktreeEntriesShallow(allocator: Allocator, repo: Repo, ref: []const u8, path: []const u8) !?[]TreeEntry {
+    const root = try worktreeRootOwned(allocator, repo, ref) orelse return null;
+    defer allocator.free(root);
+
+    return loadWorktreeEntriesAt(allocator, root, path);
+}
+
+fn loadWorktreeEntriesAt(allocator: Allocator, root: []const u8, path: []const u8) !?[]TreeEntry {
     const raw = try listWorktreePaths(allocator, root) orelse return null;
     defer allocator.free(raw);
 
@@ -1129,12 +1164,6 @@ pub fn loadWorktreeEntries(allocator: Allocator, repo: Repo, ref: []const u8, pa
     }
 
     std.mem.sort(TreeEntry, entries.items, {}, treeEntryLessThan);
-    if (entries.items.len != 0) {
-        loadFilesystemTreeEntryCommits(allocator, root, path, entries.items) catch |err| switch (err) {
-            error.OutOfMemory => return err,
-            else => {},
-        };
-    }
     return try entries.toOwnedSlice(allocator);
 }
 
