@@ -931,6 +931,13 @@ a.root-file-commit:hover,
   color: var(--muted);
   font-size: 13px;
 }
+.root-partial-field-error {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  color: var(--muted);
+}
 .root-sidebar-loading,
 .root-docs-loading {
   color: var(--muted);
@@ -938,6 +945,10 @@ a.root-file-commit:hover,
 .root-partial-retry {
   justify-self: start;
   min-height: 32px;
+}
+.root-partial-field-retry {
+  min-height: 28px;
+  padding-inline: 10px;
 }
 .tree-sidebar,
 .symbols-sidebar,

@@ -387,6 +387,11 @@
   main.page-code:has(.root-page-grid) {
     width: min(100vw - 24px, 1180px);
   }
+  main.page-code,
+  main.page-code:has(.root-page-grid) {
+    width: 100%;
+    padding-inline: 12px;
+  }
   main.page-projects:has(.project-detail-panel) {
     width: calc(100vw - 24px);
   }
@@ -453,6 +458,9 @@
     scrollbar-width: none;
   }
   .project-page-tabs::-webkit-scrollbar {
+    display: none;
+  }
+  .work-items-tabs-separator {
     display: none;
   }
   .project-page-tab {
@@ -611,6 +619,13 @@
     gap: 8px;
     padding-left: 0;
     padding-top: 8px;
+  }
+  .issue-list-row.issue-list-selectable-row {
+    grid-template-columns: 38px 26px minmax(0, 1fr);
+  }
+  .issue-list-selectable-row .issue-row-content,
+  .issue-list-selectable-row .issue-row-side {
+    grid-column: 3;
   }
   .issue-author-avatar {
     display: none;

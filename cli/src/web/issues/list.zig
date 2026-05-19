@@ -462,7 +462,7 @@ fn appendIssueFiltersPopover(buf: *std.ArrayList(u8), allocator: Allocator, db: 
 }
 
 fn appendIssueStateFilterSection(buf: *std.ArrayList(u8), allocator: Allocator, filters: IssueFilters) !void {
-    try buf.appendSlice(allocator, "<section class=\"work-items-filter-section\"><span class=\"work-items-filter-section-title\">State</span>");
+    try buf.appendSlice(allocator, "<section class=\"work-items-filter-section\"><span class=\"work-items-filter-section-title\"><span class=\"button-icon icon-issues\" aria-hidden=\"true\"></span><span>State</span></span>");
     try appendIssueStateMenuLink(buf, allocator, filters, .open);
     try appendIssueStateMenuLink(buf, allocator, filters, .closed);
     try appendIssueStateMenuLink(buf, allocator, filters, .all);
@@ -472,11 +472,14 @@ fn appendIssueStateFilterSection(buf: *std.ArrayList(u8), allocator: Allocator, 
 fn appendIssueStateMenuLink(buf: *std.ArrayList(u8), allocator: Allocator, filters: IssueFilters, state: IssueStateFilter) !void {
     try appendTemplate(buf, allocator,
         \\<a class="{classes}" role="menuitem" href="
-    , .{ .classes = shared.classes("issues-filter-option", &.{shared.class("selected", filters.state == state)}) });
+    , .{ .classes = shared.classes("issues-filter-option work-items-filter-option", &.{shared.class("selected", filters.state == state)}) });
     try appendIssuesHref(buf, allocator, filters, .{ .state = state });
     try appendTemplate(buf, allocator,
-        \\"><span>{label}</span></a>
-    , .{ .label = issueStateFilterLabel(state) });
+        \\"><span class="{icon_class}" aria-hidden="true"></span><span>{label}</span></a>
+    , .{
+        .icon_class = issueStateFilterIconClass(state),
+        .label = issueStateFilterLabel(state),
+    });
 }
 
 fn appendIssueFilterSection(
@@ -488,8 +491,11 @@ fn appendIssueFilterSection(
 ) !void {
     const active = issueFilterValue(filters, kind);
     try appendTemplate(buf, allocator,
-        \\<section class="work-items-filter-section"><span class="work-items-filter-section-title">{label}</span>
-    , .{ .label = issueFilterLabel(kind) });
+        \\<section class="work-items-filter-section"><span class="work-items-filter-section-title"><span class="button-icon {icon_class}" aria-hidden="true"></span><span>{label}</span></span>
+    , .{
+        .icon_class = issueFilterIconClass(kind),
+        .label = issueFilterLabel(kind),
+    });
     try appendIssueFilterMenuLink(buf, allocator, filters, kind, null, issueFilterAllLabel(kind), null, active == null);
 
     var stmt = try db.prepare(issueFilterOptionsSql(kind));
@@ -520,7 +526,7 @@ fn appendIssueFilterSection(
 }
 
 fn appendIssueSortFilterSection(buf: *std.ArrayList(u8), allocator: Allocator, filters: IssueFilters) !void {
-    try buf.appendSlice(allocator, "<section class=\"work-items-filter-section\"><span class=\"work-items-filter-section-title\">Sort</span>");
+    try buf.appendSlice(allocator, "<section class=\"work-items-filter-section\"><span class=\"work-items-filter-section-title\"><span class=\"button-icon icon-sort\" aria-hidden=\"true\"></span><span>Sort</span></span>");
     try appendIssueSortMenuLink(buf, allocator, filters, .newest);
     try appendIssueSortMenuLink(buf, allocator, filters, .oldest);
     try appendIssueSortMenuLink(buf, allocator, filters, .updated);
@@ -532,6 +538,14 @@ fn issueStateFilterLabel(state: IssueStateFilter) []const u8 {
         .open => "Open",
         .closed => "Closed",
         .all => "All",
+    };
+}
+
+fn issueStateFilterIconClass(state: IssueStateFilter) []const u8 {
+    return switch (state) {
+        .open => "issue-tab-icon work-items-filter-option-icon issue-open-icon",
+        .closed => "issue-tab-icon work-items-filter-option-icon issue-closed-icon",
+        .all => "button-icon work-items-filter-option-icon icon-issues",
     };
 }
 
@@ -571,14 +585,17 @@ fn appendIssueFilterMenuLink(
 ) !void {
     try appendTemplate(buf, allocator,
         \\<a class="{classes}" role="menuitem" href="
-    , .{ .classes = shared.classes("issues-filter-option", &.{shared.class("selected", selected)}) });
+    , .{ .classes = shared.classes("issues-filter-option work-items-filter-option", &.{shared.class("selected", selected)}) });
     try appendIssuesHref(buf, allocator, filters, .{
         .param_name = issueFilterParamName(kind),
         .param_value = value,
     });
     try appendTemplate(buf, allocator,
-        \\"><span>{label}</span>
-    , .{ .label = label });
+        \\"><span class="button-icon work-items-filter-option-icon {icon_class}" aria-hidden="true"></span><span>{label}</span>
+    , .{
+        .icon_class = issueFilterIconClass(kind),
+        .label = label,
+    });
     if (count) |value_count| {
         try appendTemplate(buf, allocator,
             \\<small>{count}</small>
@@ -590,10 +607,10 @@ fn appendIssueFilterMenuLink(
 fn appendIssueSortMenuLink(buf: *std.ArrayList(u8), allocator: Allocator, filters: IssueFilters, sort: IssueSort) !void {
     try appendTemplate(buf, allocator,
         \\<a class="{classes}" role="menuitem" href="
-    , .{ .classes = shared.classes("issues-filter-option", &.{shared.class("selected", filters.sort == sort)}) });
+    , .{ .classes = shared.classes("issues-filter-option work-items-filter-option", &.{shared.class("selected", filters.sort == sort)}) });
     try appendIssuesHref(buf, allocator, filters, .{ .sort = sort });
     try appendTemplate(buf, allocator,
-        \\"><span>{label}</span></a>
+        \\"><span class="button-icon work-items-filter-option-icon icon-sort" aria-hidden="true"></span><span>{label}</span></a>
     , .{ .label = issueSortLabel(sort) });
 }
 
@@ -634,6 +651,16 @@ fn issueFilterParamName(kind: IssueFilterKind) []const u8 {
         .project => "project",
         .milestone => "milestone",
         .assignee => "assignee",
+    };
+}
+
+fn issueFilterIconClass(kind: IssueFilterKind) []const u8 {
+    return switch (kind) {
+        .author => "icon-users",
+        .label => "icon-labels",
+        .project => "icon-projects",
+        .milestone => "icon-milestones",
+        .assignee => "icon-users",
     };
 }
 

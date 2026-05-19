@@ -40,10 +40,11 @@ const root_partial_priority_commit_count = 35;
 const root_partial_priority_stats = 40;
 const root_partial_priority_contributors = 45;
 const root_partial_priority_search = 50;
-const root_partial_timeout_fast_ms = 10_000;
-const root_partial_timeout_git_ms = 12_000;
-const root_partial_timeout_stats_ms = 20_000;
-const root_partial_timeout_contributors_ms = 30_000;
+const root_partial_timeout_fast_ms = 2_500;
+const root_partial_timeout_git_ms = 3_000;
+const root_partial_timeout_stats_ms = 8_000;
+const root_partial_timeout_contributors_ms = 8_000;
+const root_contributor_large_sloc_threshold = 200_000;
 const root_other_contributor_avatar_limit = 12;
 const root_readme_candidates = [_][]const u8{ "README.md", "README", "Readme.md", "readme.md" };
 const root_license_candidates = [_][]const u8{ "LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING", "COPYING.md", "COPYING.txt" };
@@ -81,6 +82,12 @@ const root_about_fallback = "Browse this repository's files, documentation, and 
 
 const loadRootGitStatus = explorer_data.loadRootGitStatus;
 const loadBranchSyncStatus = explorer_data.loadBranchSyncStatus;
+const loadDiskSizeBytes = explorer_data.loadDiskSizeBytes;
+const loadRepositoryOperationState = explorer_data.loadRepositoryOperationState;
+const loadRootDiffStats = explorer_data.loadRootDiffStats;
+const loadRootStatusSummary = explorer_data.loadRootStatusSummary;
+const loadTrackedFileSizeBytes = explorer_data.loadTrackedFileSizeBytes;
+const loadWorktreeCount = explorer_data.loadWorktreeCount;
 const parseRootGitStatusV2 = explorer_data.parseRootGitStatusV2;
 const parseRootDiffNumstat = explorer_data.parseRootDiffNumstat;
 const countNonEmptyLines = explorer_data.countNonEmptyLines;
@@ -199,9 +206,21 @@ pub fn renderCodeRootComponent(allocator: Allocator, repo: Repo, target: []const
     if (std.mem.eql(u8, component, "about")) {
         try appendRootAboutComponent(&buf, allocator, repo, ref);
     } else if (std.mem.eql(u8, component, "repository")) {
-        try appendRootRepositoryComponent(&buf, allocator, repo);
+        try appendRootRepositoryComponent(&buf, allocator, repo, ref);
+    } else if (std.mem.eql(u8, component, "repository-tracked-size")) {
+        try appendRootRepositoryTrackedSizeComponent(&buf, allocator, repo);
+    } else if (std.mem.eql(u8, component, "repository-directory-size")) {
+        try appendRootRepositoryDirectorySizeComponent(&buf, allocator, repo);
     } else if (std.mem.eql(u8, component, "branch")) {
         try appendRootBranchComponent(&buf, allocator, repo, ref);
+    } else if (std.mem.eql(u8, component, "branch-sync")) {
+        try appendRootBranchSyncComponent(&buf, allocator, repo, ref);
+    } else if (std.mem.eql(u8, component, "branch-changes")) {
+        try appendRootBranchChangesComponent(&buf, allocator, repo);
+    } else if (std.mem.eql(u8, component, "branch-diff")) {
+        try appendRootBranchDiffComponent(&buf, allocator, repo);
+    } else if (std.mem.eql(u8, component, "branch-state")) {
+        try appendRootBranchStateComponent(&buf, allocator, repo);
     } else if (std.mem.eql(u8, component, "stats")) {
         try appendRootStatsComponent(&buf, allocator, repo);
     } else if (std.mem.eql(u8, component, "contributors")) {
@@ -448,7 +467,7 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
             if (sync_flash) |flash| try appendCodeSyncFlash(&buf, allocator, flash);
             try appendRootCodePanelStart(&buf, allocator);
             try appendRootCommitBar(&buf, allocator, ref, summary_opt, null);
-            try appendRootTreeListing(&buf, allocator, ref, entries);
+            try appendRootTreeListing(&buf, allocator, ref, entries, true);
             try appendCodePanelEnd(&buf, allocator);
         } else {
             try appendCodePanelStart(&buf, allocator, repo, ref, path);
@@ -1318,10 +1337,11 @@ fn appendRootTreeListing(
     allocator: Allocator,
     ref: []const u8,
     entries: []const TreeEntry,
+    commit_history_loaded: bool,
 ) !void {
     try appendTemplate(buf, allocator, "<div class=\"root-file-list\" data-root-file-list>", .{});
     for (entries) |entry| {
-        try appendRootTreeEntryRow(buf, allocator, ref, entry);
+        try appendRootTreeEntryRow(buf, allocator, ref, entry, commit_history_loaded);
     }
 
     if (entries.len == 0) {
@@ -1335,6 +1355,7 @@ fn appendRootTreeEntryRow(
     allocator: Allocator,
     ref: []const u8,
     entry: TreeEntry,
+    commit_history_loaded: bool,
 ) !void {
     const child_path = try childPath(allocator, "", entry.name);
     defer allocator.free(child_path);
@@ -1376,9 +1397,13 @@ fn appendRootTreeEntryRow(
                 .relative = commit.relative,
             });
         }
-    } else {
+    } else if (commit_history_loaded) {
         try appendTemplate(buf, allocator,
             \\<span class="root-file-commit empty">No commit</span><span class="root-file-time"></span>
+        , .{});
+    } else {
+        try appendTemplate(buf, allocator,
+            \\<span class="root-file-commit root-file-commit-deferred" aria-label="Commit history not loaded"></span><span class="root-file-time"></span>
         , .{});
     }
 
@@ -1845,7 +1870,7 @@ fn appendRootSidebar(
     try appendRootSidebarSlot(buf, allocator, ref, "repository", "Repository", "Loading repository details...", root_partial_priority_repository, root_partial_timeout_git_ms);
     try appendRootSidebarSlot(buf, allocator, ref, "branch", "Branch", "Loading branch details...", root_partial_priority_branch, root_partial_timeout_git_ms);
     try appendRootStatsSlot(buf, allocator, ref);
-    try appendRootSidebarSlot(buf, allocator, ref, "contributors", "Contributors", "Loading line authors...", root_partial_priority_contributors, root_partial_timeout_contributors_ms);
+    try appendRootContributorsDeferredSlot(buf, allocator, ref);
     try appendTemplate(buf, allocator, "</section></aside>", .{});
 }
 
@@ -1895,6 +1920,25 @@ fn appendRootStatsSlot(buf: *std.ArrayList(u8), allocator: Allocator, ref: []con
     , .{});
 }
 
+fn appendRootContributorsDeferredSlot(buf: *std.ArrayList(u8), allocator: Allocator, ref: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="root-partial-slot"
+    , .{});
+    try appendRootPartialDeferredAttrs(buf, allocator, ref, "contributors", "Contributors", root_partial_priority_contributors, root_partial_timeout_contributors_ms);
+    try appendTemplate(buf, allocator,
+        \\ data-root-contributors-slot data-root-contributors-auto-sloc-limit="{sloc_limit}"
+    , .{ .sloc_limit = root_contributor_large_sloc_threshold });
+    try appendTemplate(buf, allocator,
+        \\>
+        \\  <div class="root-sidebar-section">
+        \\    <h2>Contributors</h2>
+        \\    <p class="root-sidebar-empty">Line attribution uses Git blame. Repositories under 200k SLOC load automatically; larger repositories load on demand.</p>
+        \\    <button class="button secondary root-partial-retry" type="button" data-root-partial-trigger>Load contributors</button>
+        \\  </div>
+        \\</div>
+    , .{});
+}
+
 fn appendRootPartialAttrs(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -1913,6 +1957,61 @@ fn appendRootPartialAttrs(
     , .{ .label = label, .priority = priority, .timeout_ms = timeout_ms });
 }
 
+fn appendRootPartialDeferredAttrs(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    ref: []const u8,
+    component: []const u8,
+    label: []const u8,
+    priority: usize,
+    timeout_ms: usize,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\ data-root-partial-deferred="/code/root/{component}?ref=
+    , .{ .component = component });
+    try shared.appendUrlEncoded(buf, allocator, ref);
+    try appendTemplate(buf, allocator,
+        \\" data-root-partial-owner="gitomi" data-root-partial-label="{label}" data-root-partial-priority="{priority}" data-root-partial-timeout-ms="{timeout_ms}" aria-live="polite"
+    , .{ .label = label, .priority = priority, .timeout_ms = timeout_ms });
+}
+
+fn appendRootFieldSlot(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    ref: []const u8,
+    component: []const u8,
+    label: []const u8,
+    loading_text: []const u8,
+    priority: usize,
+    timeout_ms: usize,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<dd class="root-partial-field"
+    , .{});
+    try appendRootFieldPartialAttrs(buf, allocator, ref, component, label, priority, timeout_ms);
+    try appendTemplate(buf, allocator,
+        \\><span class="root-sidebar-empty">{loading_text}</span></dd>
+    , .{ .loading_text = loading_text });
+}
+
+fn appendRootFieldPartialAttrs(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    ref: []const u8,
+    component: []const u8,
+    label: []const u8,
+    priority: usize,
+    timeout_ms: usize,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\ data-root-partial="/code/root/{component}?ref=
+    , .{ .component = component });
+    try shared.appendUrlEncoded(buf, allocator, ref);
+    try appendTemplate(buf, allocator,
+        \\" data-root-partial-owner="gitomi" data-root-partial-label="{label}" data-root-partial-priority="{priority}" data-root-partial-timeout-ms="{timeout_ms}" data-root-partial-field aria-live="polite"
+    , .{ .label = label, .priority = priority, .timeout_ms = timeout_ms });
+}
+
 fn appendRootAboutComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8) !void {
     const readme_doc = try loadRootReadmeDoc(allocator, repo, ref, 64 * 1024);
     defer if (readme_doc) |doc| doc.deinit(allocator);
@@ -1921,17 +2020,74 @@ fn appendRootAboutComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo:
     try appendRootAboutSection(buf, allocator, about_summary orelse root_about_fallback);
 }
 
-fn appendRootRepositoryComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo) !void {
-    const git_status = loadRootGitStatus(allocator, repo) catch null;
-    try appendRootRepositorySection(buf, allocator, git_status);
+fn appendRootRepositoryComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8) !void {
+    const worktree_count = loadWorktreeCount(allocator, repo) catch null;
+    const operation_state = loadRepositoryOperationState(allocator, repo) catch null;
+    try appendRootRepositorySectionFast(buf, allocator, ref, worktree_count, operation_state);
+}
+
+fn appendRootRepositoryTrackedSizeComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo) !void {
+    const tracked_size = loadTrackedFileSizeBytes(allocator, repo) catch null;
+    try appendRootSizeField(buf, allocator, tracked_size);
+}
+
+fn appendRootRepositoryDirectorySizeComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo) !void {
+    const directory_size = loadDiskSizeBytes(allocator, repo) catch null;
+    try appendRootSizeField(buf, allocator, directory_size);
 }
 
 fn appendRootBranchComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8) !void {
     const counts = (try loadRootEntryCounts(allocator, repo, ref)) orelse RootEntryCounts{};
-    const git_status = loadRootGitStatus(allocator, repo) catch null;
+    try appendRootBranchSectionFast(buf, allocator, ref, counts);
+}
+
+fn appendRootBranchSyncComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8) !void {
     const branch_sync_status = loadBranchSyncStatus(allocator, repo, ref) catch null;
     defer if (branch_sync_status) |status| status.deinit(allocator);
-    try appendRootBranchSection(buf, allocator, ref, counts, branch_sync_status, git_status);
+    try appendTemplate(buf, allocator, "<dd>", .{});
+    if (branch_sync_status) |status| {
+        try appendRootBranchSyncValue(buf, allocator, status);
+    } else {
+        try appendTemplate(buf, allocator, "No upstream", .{});
+    }
+    try appendTemplate(buf, allocator, "</dd>", .{});
+}
+
+fn appendRootBranchChangesComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo) !void {
+    const status = loadRootStatusSummary(allocator, repo) catch null;
+    try appendTemplate(buf, allocator, "<dd>", .{});
+    if (status) |value| {
+        try appendRootBranchChangesValue(buf, allocator, value);
+    } else {
+        try appendTemplate(buf, allocator, "Unavailable", .{});
+    }
+    try appendTemplate(buf, allocator, "</dd>", .{});
+}
+
+fn appendRootBranchDiffComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo) !void {
+    var status = RootGitStatus{};
+    const loaded = blk: {
+        loadRootDiffStats(allocator, repo, &status) catch break :blk false;
+        break :blk true;
+    };
+    try appendTemplate(buf, allocator, "<dd>", .{});
+    if (loaded) {
+        try appendRootBranchDiffValue(buf, allocator, status);
+    } else {
+        try appendTemplate(buf, allocator, "Unavailable", .{});
+    }
+    try appendTemplate(buf, allocator, "</dd>", .{});
+}
+
+fn appendRootBranchStateComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo) !void {
+    const status = loadRootStatusSummary(allocator, repo) catch null;
+    try appendTemplate(buf, allocator, "<dd>", .{});
+    if (status) |value| {
+        try appendRootRepositoryState(buf, allocator, value);
+    } else {
+        try appendTemplate(buf, allocator, "Unavailable", .{});
+    }
+    try appendTemplate(buf, allocator, "</dd>", .{});
 }
 
 fn appendRootStatsComponent(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo) !void {
@@ -1982,6 +2138,46 @@ fn appendRootAboutSection(buf: *std.ArrayList(u8), allocator: Allocator, about_t
     , .{ .about = about_text });
 }
 
+fn appendRootRepositorySectionFast(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    ref: []const u8,
+    worktree_count_opt: ?usize,
+    operation_state_opt: ?RepositoryOperationState,
+) !void {
+    const worktree_count = if (worktree_count_opt) |count| @max(count, 1) else null;
+    try appendTemplate(buf, allocator,
+        \\<div class="root-sidebar-section">
+        \\  <h2>Repository</h2>
+        \\  <dl class="root-meta-list">
+        \\    <div><dt>Worktrees</dt><dd>
+    , .{});
+    if (worktree_count) |count| {
+        try appendTemplate(buf, allocator, "{count}", .{ .count = shared.groupedUnsigned(@intCast(count)) });
+    } else {
+        try appendTemplate(buf, allocator, "Unavailable", .{});
+    }
+    try appendTemplate(buf, allocator, "</dd></div><div><dt>State</dt><dd>", .{});
+    if (operation_state_opt) |state| {
+        try appendTemplate(buf, allocator, "{state}", .{ .state = repositoryOperationLabel(state) });
+    } else {
+        try appendTemplate(buf, allocator, "Unavailable", .{});
+    }
+    try appendTemplate(buf, allocator,
+        \\</dd></div><div><dt>Tracked files</dt>
+    , .{});
+    try appendRootFieldSlot(buf, allocator, ref, "repository-tracked-size", "Tracked files", "Loading size...", root_partial_priority_repository, root_partial_timeout_stats_ms);
+    try appendTemplate(buf, allocator,
+        \\</div><div><dt>Directory</dt>
+    , .{});
+    try appendRootFieldSlot(buf, allocator, ref, "repository-directory-size", "Directory", "Loading size...", root_partial_priority_repository, root_partial_timeout_stats_ms);
+    try appendTemplate(buf, allocator,
+        \\</div>
+        \\  </dl>
+        \\</div>
+    , .{});
+}
+
 fn appendRootRepositorySection(buf: *std.ArrayList(u8), allocator: Allocator, git_status: ?RootGitStatus) !void {
     try appendTemplate(buf, allocator,
         \\<div class="root-sidebar-section">
@@ -1996,6 +2192,48 @@ fn appendRootRepositorySection(buf: *std.ArrayList(u8), allocator: Allocator, gi
         , .{});
     }
     try appendTemplate(buf, allocator,
+        \\  </dl>
+        \\</div>
+    , .{});
+}
+
+fn appendRootBranchSectionFast(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    ref: []const u8,
+    counts: RootEntryCounts,
+) !void {
+    try appendTemplate(buf, allocator,
+        \\<div class="root-sidebar-section">
+        \\  <h2>Branch</h2>
+        \\  <dl class="root-meta-list">
+        \\    <div><dt>Ref</dt><dd><code>{ref}</code></dd></div>
+        \\    <div><dt>Root</dt><dd>{files} {files_label}, {directories} {directories_label}</dd></div>
+    , .{
+        .ref = ref,
+        .files = counts.files,
+        .files_label = if (counts.files == 1) "file" else "files",
+        .directories = counts.directories,
+        .directories_label = if (counts.directories == 1) "folder" else "folders",
+    });
+    try appendTemplate(buf, allocator,
+        \\    <div><dt>Sync</dt>
+    , .{});
+    try appendRootFieldSlot(buf, allocator, ref, "branch-sync", "Sync", "Loading sync status...", root_partial_priority_branch, root_partial_timeout_git_ms);
+    try appendTemplate(buf, allocator,
+        \\</div><div><dt>Changes</dt>
+    , .{});
+    try appendRootFieldSlot(buf, allocator, ref, "branch-changes", "Changes", "Loading checkout status...", root_partial_priority_branch, root_partial_timeout_git_ms);
+    try appendTemplate(buf, allocator,
+        \\</div><div><dt>Diff</dt>
+    , .{});
+    try appendRootFieldSlot(buf, allocator, ref, "branch-diff", "Diff", "Loading diff stats...", root_partial_priority_branch, root_partial_timeout_git_ms);
+    try appendTemplate(buf, allocator,
+        \\</div><div><dt>State</dt>
+    , .{});
+    try appendRootFieldSlot(buf, allocator, ref, "branch-state", "State", "Loading repository state...", root_partial_priority_branch, root_partial_timeout_git_ms);
+    try appendTemplate(buf, allocator,
+        \\</div>
         \\  </dl>
         \\</div>
     , .{});
@@ -2064,6 +2302,16 @@ fn appendRepositorySizeRow(buf: *std.ArrayList(u8), allocator: Allocator, label:
     try appendTemplate(buf, allocator, "</dd></div>", .{});
 }
 
+fn appendRootSizeField(buf: *std.ArrayList(u8), allocator: Allocator, size: ?usize) !void {
+    try appendTemplate(buf, allocator, "<dd>", .{});
+    if (size) |bytes| {
+        try appendRepositoryDiskSize(buf, allocator, bytes);
+    } else {
+        try appendTemplate(buf, allocator, "Unknown", .{});
+    }
+    try appendTemplate(buf, allocator, "</dd>", .{});
+}
+
 fn appendRepositoryDiskSize(buf: *std.ArrayList(u8), allocator: Allocator, size: usize) !void {
     const kib: u128 = 1024;
     const mib: u128 = 1024 * 1024;
@@ -2092,7 +2340,15 @@ fn appendRepositoryDiskSize(buf: *std.ArrayList(u8), allocator: Allocator, size:
 
 fn appendRootBranchSyncStatus(buf: *std.ArrayList(u8), allocator: Allocator, status: BranchSyncStatus) !void {
     try appendTemplate(buf, allocator,
-        \\        <div><dt>Sync</dt><dd>{ahead} ahead, {behind} behind <code>{upstream}</code></dd></div>
+        \\        <div><dt>Sync</dt><dd>
+    , .{});
+    try appendRootBranchSyncValue(buf, allocator, status);
+    try appendTemplate(buf, allocator, "</dd></div>", .{});
+}
+
+fn appendRootBranchSyncValue(buf: *std.ArrayList(u8), allocator: Allocator, status: BranchSyncStatus) !void {
+    try appendTemplate(buf, allocator,
+        \\{ahead} ahead, {behind} behind <code>{upstream}</code>
     , .{
         .ahead = shared.groupedUnsigned(@intCast(status.ahead)),
         .behind = shared.groupedUnsigned(@intCast(status.behind)),
@@ -2102,20 +2358,35 @@ fn appendRootBranchSyncStatus(buf: *std.ArrayList(u8), allocator: Allocator, sta
 
 fn appendRootBranchStats(buf: *std.ArrayList(u8), allocator: Allocator, status: RootGitStatus) !void {
     try appendTemplate(buf, allocator,
-        \\        <div><dt>Changes</dt><dd>{staged} staged, {modified} modified, {untracked} untracked</dd></div>
-        \\        <div><dt>Diff</dt><dd><span class="root-diffstat"><span class="root-diffstat-added">+{added}</span><span class="root-diffstat-removed">-{removed}</span></span></dd></div>
-        \\        <div><dt>State</dt><dd>
-    , .{
-        .staged = shared.groupedUnsigned(@intCast(status.staged_paths)),
-        .modified = shared.groupedUnsigned(@intCast(status.unstaged_paths)),
-        .untracked = shared.groupedUnsigned(@intCast(status.untracked_paths)),
-        .added = shared.groupedUnsigned(status.lines_added),
-        .removed = shared.groupedUnsigned(status.lines_removed),
-    });
+        \\        <div><dt>Changes</dt><dd>
+    , .{});
+    try appendRootBranchChangesValue(buf, allocator, status);
+    try appendTemplate(buf, allocator, "</dd></div><div><dt>Diff</dt><dd>", .{});
+    try appendRootBranchDiffValue(buf, allocator, status);
+    try appendTemplate(buf, allocator, "</dd></div><div><dt>State</dt><dd>", .{});
     try appendRootRepositoryState(buf, allocator, status);
     try appendTemplate(buf, allocator,
         \\</dd></div>
     , .{});
+}
+
+fn appendRootBranchChangesValue(buf: *std.ArrayList(u8), allocator: Allocator, status: RootGitStatus) !void {
+    try appendTemplate(buf, allocator,
+        \\{staged} staged, {modified} modified, {untracked} untracked
+    , .{
+        .staged = shared.groupedUnsigned(@intCast(status.staged_paths)),
+        .modified = shared.groupedUnsigned(@intCast(status.unstaged_paths)),
+        .untracked = shared.groupedUnsigned(@intCast(status.untracked_paths)),
+    });
+}
+
+fn appendRootBranchDiffValue(buf: *std.ArrayList(u8), allocator: Allocator, status: RootGitStatus) !void {
+    try appendTemplate(buf, allocator,
+        \\<span class="root-diffstat"><span class="root-diffstat-added">+{added}</span><span class="root-diffstat-removed">-{removed}</span></span>
+    , .{
+        .added = shared.groupedUnsigned(status.lines_added),
+        .removed = shared.groupedUnsigned(status.lines_removed),
+    });
 }
 
 fn appendRootRepositoryState(buf: *std.ArrayList(u8), allocator: Allocator, status: RootGitStatus) !void {
@@ -2207,14 +2478,15 @@ fn appendRootSloc(buf: *std.ArrayList(u8), allocator: Allocator, stats_opt: ?sou
     const total = stats.total();
     if (total == 0 or stats.rows.len == 0) {
         try appendTemplate(buf, allocator,
-            \\<h2>SLOC</h2><p class="root-sidebar-empty">No source files counted.</p></div>
-        , .{});
+            \\<h2>SLOC</h2><p class="root-sidebar-empty" data-root-sloc-total="{total}">No source files counted.</p></div>
+        , .{ .total = total });
         return;
     }
 
     try appendTemplate(buf, allocator,
-        \\<div class="root-sidebar-title-line"><h2>SLOC</h2><strong>{total} {lines_label}</strong></div><div class="root-sloc-breakdown" aria-label="Top source lines of code by language">
+        \\<div class="root-sidebar-title-line" data-root-sloc-total="{total_raw}"><h2>SLOC</h2><strong>{total} {lines_label}</strong></div><div class="root-sloc-breakdown" aria-label="Top source lines of code by language">
     , .{
+        .total_raw = total,
         .total = shared.groupedUnsigned(total),
         .lines_label = if (total == 1) "line" else "lines",
     });

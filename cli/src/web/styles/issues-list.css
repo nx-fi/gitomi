@@ -441,26 +441,44 @@
   box-shadow: var(--shadow-float);
 }
 .work-items-filter-popover {
-  grid-template-columns: minmax(0, 1fr);
-  min-width: 280px;
-  max-width: min(380px, calc(100vw - 24px));
-  padding: 8px 0;
+  grid-template-columns: repeat(auto-fit, minmax(188px, 1fr));
+  align-items: start;
+  gap: 8px;
+  width: min(920px, calc(100vw - 24px));
+  min-width: min(720px, calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
+  max-height: none;
+  padding: 12px;
+  overflow: visible;
 }
 .work-items-filter-section {
   display: grid;
-  padding: 7px 0;
-  border-bottom: 1px solid var(--border);
+  align-content: start;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px;
+  background: color-mix(in oklch, var(--panel-strong) 64%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
 }
 .work-items-filter-section:last-child {
-  border-bottom: 0;
+  border-bottom: 1px solid var(--border);
 }
 .work-items-filter-section-title {
-  padding: 0 12px 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0 4px 6px;
   color: var(--muted);
   font-size: 11px;
   font-weight: 800;
   letter-spacing: 0;
   text-transform: uppercase;
+}
+.work-items-filter-section-title .button-icon {
+  width: 13px;
+  height: 13px;
 }
 .issues-filter-option {
   display: grid;
@@ -497,6 +515,28 @@
 .issues-filter-option small {
   color: var(--muted);
   font-weight: 600;
+}
+.work-items-filter-option {
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 10px;
+  min-height: 32px;
+  padding: 0 8px;
+  border-radius: var(--radius-md);
+}
+.work-items-filter-option.selected {
+  grid-template-columns: 12px 18px minmax(0, 1fr) auto;
+}
+.issues-filter-option span.work-items-filter-option-icon {
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  overflow: visible;
+  white-space: normal;
+}
+.work-items-filter-option .issue-tab-icon.work-items-filter-option-icon {
+  width: 16px;
+  height: 16px;
+  border-width: 2px;
 }
 .issues-filter-empty {
   padding: 10px 12px;

@@ -943,7 +943,34 @@
     }));
   }
 
-  function partialErrorNode(slot) {
+  function partialErrorMessage(slot, error) {
+    if (error && error.name === "AbortError") {
+      const seconds = Math.max(1, Math.round(rootPartialTimeout(slot) / 1000));
+      return `This section took longer than ${seconds}s to load.`;
+    }
+    return "Could not load this section.";
+  }
+
+  function partialErrorNode(slot, error) {
+    if (slot.hasAttribute("data-root-partial-field")) {
+      const wrap = document.createElement("span");
+      wrap.className = "root-partial-field-error";
+
+      const message = document.createElement("span");
+      message.textContent = partialErrorMessage(slot, error);
+      wrap.appendChild(message);
+
+      const retry = document.createElement("button");
+      retry.className = "button secondary root-partial-retry root-partial-field-retry";
+      retry.type = "button";
+      retry.textContent = "Retry";
+      retry.addEventListener("click", function () {
+        scheduleRootPartial(slot, true);
+      });
+      wrap.appendChild(retry);
+      return wrap;
+    }
+
     const section = document.createElement("div");
     section.className = "root-sidebar-section root-sidebar-error";
 
@@ -953,7 +980,7 @@
 
     const message = document.createElement("p");
     message.className = "root-sidebar-empty";
-    message.textContent = "Could not load this section.";
+    message.textContent = partialErrorMessage(slot, error);
     section.appendChild(message);
 
     const retry = document.createElement("button");
@@ -970,6 +997,7 @@
 
   const rootPartialMaxConcurrent = 2;
   const rootPartialDefaultTimeoutMs = 15000;
+  const rootContributorLargeSlocThreshold = 200000;
   let rootPartialActive = 0;
   let rootPartialSequence = 0;
   let rootPartialDrainScheduled = false;
@@ -1010,7 +1038,7 @@
     try {
       const parsed = new URL(url, window.location.href);
       if (parsed.origin !== window.location.origin) return false;
-      return /^\/code\/root\/(?:about|repository|branch|stats|contributors|docs|search|commit-count)$/.test(parsed.pathname);
+      return /^\/code\/root\/(?:about|repository|repository-tracked-size|repository-directory-size|branch|branch-sync|branch-changes|branch-diff|branch-state|stats|contributors|docs|search|commit-count)$/.test(parsed.pathname);
     } catch (_) {
       return false;
     }
@@ -1089,19 +1117,51 @@
       template.innerHTML = html;
       slot.replaceWith(template.content);
       notifyPartialRefresh(parent);
-    } catch (_) {
+    } catch (error) {
       if (!slot.isConnected) return;
       slot.dataset.rootPartialState = "error";
       slot.removeAttribute("aria-busy");
       if (slot.hasAttribute("data-root-partial-silent")) return;
-      slot.replaceChildren(partialErrorNode(slot));
+      slot.replaceChildren(partialErrorNode(slot, error));
     } finally {
       window.clearTimeout(timeout);
     }
   }
 
+  function initRootPartialTriggers(root) {
+    const scope = root || document;
+    scope.querySelectorAll("[data-root-partial-trigger]").forEach(function (button) {
+      if (button.dataset.rootPartialTriggerReady === "yes") return;
+      button.dataset.rootPartialTriggerReady = "yes";
+      button.addEventListener("click", function () {
+        const slot = button.closest("[data-root-partial-owner=\"gitomi\"]");
+        if (slot) promoteDeferredRootPartial(slot);
+      });
+    });
+  }
+
+  function contributorAutoLoadLimit(slot) {
+    const value = Number(slot.dataset.rootContributorsAutoSlocLimit);
+    return Number.isFinite(value) && value >= 0 ? value : rootContributorLargeSlocThreshold;
+  }
+
+  function autoLoadContributorsForSmallRepo(root) {
+    const scope = root || document;
+    scope.querySelectorAll("[data-root-sloc-total]").forEach(function (marker) {
+      const total = Number(marker.dataset.rootSlocTotal);
+      if (!Number.isFinite(total) || total >= rootContributorLargeSlocThreshold) return;
+
+      const container = marker.closest(".root-sidebar") || document;
+      container.querySelectorAll("[data-root-contributors-slot][data-root-partial-deferred]").forEach(function (slot) {
+        if (total < contributorAutoLoadLimit(slot)) promoteDeferredRootPartial(slot);
+      });
+    });
+  }
+
   function initRootPartials(root) {
     const scope = root || document;
+    initRootPartialTriggers(scope);
+    autoLoadContributorsForSmallRepo(scope);
     scope.querySelectorAll("[data-root-partial-owner=\"gitomi\"][data-root-partial]").forEach(function (slot) {
       scheduleRootPartial(slot, false);
     });

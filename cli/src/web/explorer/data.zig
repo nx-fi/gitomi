@@ -48,10 +48,7 @@ const trimOwned = file_info.trimOwned;
 pub fn loadRootGitStatus(allocator: Allocator, repo: Repo) !RootGitStatus {
     var status = RootGitStatus{};
 
-    if (try gitMaybe(allocator, repo, &.{ "status", "--porcelain=v2" }, git.max_git_output)) |raw| {
-        defer allocator.free(raw);
-        parseRootGitStatusV2(&status, raw);
-    }
+    status = try loadRootStatusSummary(allocator, repo);
     try loadRootDiffStats(allocator, repo, &status);
     status.worktree_count = loadWorktreeCount(allocator, repo) catch 1;
     if (status.worktree_count == 0) status.worktree_count = 1;
@@ -62,18 +59,28 @@ pub fn loadRootGitStatus(allocator: Allocator, repo: Repo) !RootGitStatus {
     return status;
 }
 
+pub fn loadRootStatusSummary(allocator: Allocator, repo: Repo) !RootGitStatus {
+    var status = RootGitStatus{};
+
+    if (try gitMaybe(allocator, repo, &.{ "status", "--porcelain=v2" }, git.max_git_output)) |raw| {
+        defer allocator.free(raw);
+        parseRootGitStatusV2(&status, raw);
+    }
+    status.operation_state = loadRepositoryOperationState(allocator, repo) catch .clean;
+
+    return status;
+}
+
 pub fn loadBranchSyncStatus(allocator: Allocator, repo: Repo, ref: []const u8) !?BranchSyncStatus {
     const root = try worktreeRootOwned(allocator, repo, ref) orelse try allocator.dupe(u8, repo.root);
     defer allocator.free(root);
     const branchish = if (isFilesystemRef(ref)) "HEAD" else ref;
 
+    const upstream = try loadBranchUpstreamNameAt(allocator, root, branchish) orelse return null;
+    defer allocator.free(upstream);
+
     const upstream_ref = try std.fmt.allocPrint(allocator, "{s}@{{upstream}}", .{branchish});
     defer allocator.free(upstream_ref);
-
-    const upstream_raw = try gitMaybeAt(allocator, root, &.{ "rev-parse", "--verify", "--quiet", "--abbrev-ref", "--symbolic-full-name", "--end-of-options", upstream_ref }, 4096) orelse return null;
-    defer allocator.free(upstream_raw);
-    const upstream = std.mem.trim(u8, upstream_raw, " \t\r\n");
-    if (upstream.len == 0) return null;
 
     const range = try std.fmt.allocPrint(allocator, "{s}...{s}", .{ upstream_ref, branchish });
     defer allocator.free(range);
@@ -91,6 +98,24 @@ pub fn loadBranchSyncStatus(allocator: Allocator, repo: Repo, ref: []const u8) !
         .ahead = ahead,
         .behind = behind,
     };
+}
+
+pub fn loadBranchUpstreamName(allocator: Allocator, repo: Repo, ref: []const u8) !?[]u8 {
+    const root = try worktreeRootOwned(allocator, repo, ref) orelse try allocator.dupe(u8, repo.root);
+    defer allocator.free(root);
+    const branchish = if (isFilesystemRef(ref)) "HEAD" else ref;
+    return loadBranchUpstreamNameAt(allocator, root, branchish);
+}
+
+fn loadBranchUpstreamNameAt(allocator: Allocator, root: []const u8, branchish: []const u8) !?[]u8 {
+    const upstream_ref = try std.fmt.allocPrint(allocator, "{s}@{{upstream}}", .{branchish});
+    defer allocator.free(upstream_ref);
+
+    const upstream_raw = try gitMaybeAt(allocator, root, &.{ "rev-parse", "--verify", "--quiet", "--abbrev-ref", "--symbolic-full-name", "--end-of-options", upstream_ref }, 4096) orelse return null;
+    defer allocator.free(upstream_raw);
+    const upstream = std.mem.trim(u8, upstream_raw, " \t\r\n");
+    if (upstream.len == 0) return null;
+    return try allocator.dupe(u8, upstream);
 }
 
 pub fn parseRootGitStatusV2(status: *RootGitStatus, raw: []const u8) void {

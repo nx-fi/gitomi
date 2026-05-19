@@ -442,7 +442,7 @@ fn appendPullFiltersPopover(buf: *std.ArrayList(u8), allocator: Allocator, db: *
 }
 
 fn appendPullStateFilterSection(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters) !void {
-    try buf.appendSlice(allocator, "<section class=\"work-items-filter-section\"><span class=\"work-items-filter-section-title\">State</span>");
+    try buf.appendSlice(allocator, "<section class=\"work-items-filter-section\"><span class=\"work-items-filter-section-title\"><span class=\"button-icon icon-pull-request\" aria-hidden=\"true\"></span><span>State</span></span>");
     try appendPullStateMenuLink(buf, allocator, filters, .open);
     try appendPullStateMenuLink(buf, allocator, filters, .merged);
     try appendPullStateMenuLink(buf, allocator, filters, .closed);
@@ -453,11 +453,14 @@ fn appendPullStateFilterSection(buf: *std.ArrayList(u8), allocator: Allocator, f
 fn appendPullStateMenuLink(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters, state: PullStateFilter) !void {
     try appendTemplate(buf, allocator,
         \\<a class="{classes}" role="menuitem" href="
-    , .{ .classes = shared.classes("issues-filter-option", &.{shared.class("selected", filters.state == state)}) });
+    , .{ .classes = shared.classes("issues-filter-option work-items-filter-option", &.{shared.class("selected", filters.state == state)}) });
     try appendPullsHref(buf, allocator, filters, .{ .state = state });
     try appendTemplate(buf, allocator,
-        \\"><span>{label}</span></a>
-    , .{ .label = pullStateFilterLabel(state) });
+        \\"><span class="{icon_class}" aria-hidden="true"></span><span>{label}</span></a>
+    , .{
+        .icon_class = pullStateFilterIconClass(state),
+        .label = pullStateFilterLabel(state),
+    });
 }
 
 fn appendPullFilterSection(
@@ -469,8 +472,11 @@ fn appendPullFilterSection(
 ) !void {
     const active = pullFilterValue(filters, kind);
     try appendTemplate(buf, allocator,
-        \\<section class="work-items-filter-section"><span class="work-items-filter-section-title">{label}</span>
-    , .{ .label = pullFilterLabel(kind) });
+        \\<section class="work-items-filter-section"><span class="work-items-filter-section-title"><span class="button-icon {icon_class}" aria-hidden="true"></span><span>{label}</span></span>
+    , .{
+        .icon_class = pullFilterIconClass(kind),
+        .label = pullFilterLabel(kind),
+    });
     try appendPullFilterMenuLink(buf, allocator, filters, kind, null, pullFilterAllLabel(kind), null, active == null);
 
     var stmt = try db.prepare(pullFilterOptionsSql(kind));
@@ -501,7 +507,7 @@ fn appendPullFilterSection(
 }
 
 fn appendPullSortFilterSection(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters) !void {
-    try buf.appendSlice(allocator, "<section class=\"work-items-filter-section\"><span class=\"work-items-filter-section-title\">Sort</span>");
+    try buf.appendSlice(allocator, "<section class=\"work-items-filter-section\"><span class=\"work-items-filter-section-title\"><span class=\"button-icon icon-sort\" aria-hidden=\"true\"></span><span>Sort</span></span>");
     try appendPullSortMenuLink(buf, allocator, filters, .newest);
     try appendPullSortMenuLink(buf, allocator, filters, .oldest);
     try appendPullSortMenuLink(buf, allocator, filters, .updated);
@@ -549,6 +555,15 @@ fn pullStateIconClass(state: PullStateFilter) []const u8 {
     };
 }
 
+fn pullStateFilterIconClass(state: PullStateFilter) []const u8 {
+    return switch (state) {
+        .open => "issue-tab-icon work-items-filter-option-icon pull-open-icon",
+        .merged => "issue-tab-icon work-items-filter-option-icon pull-merged-icon",
+        .closed => "issue-tab-icon work-items-filter-option-icon pull-closed-icon",
+        .all => "button-icon work-items-filter-option-icon icon-pull-request",
+    };
+}
+
 fn appendPullFilterMenuLink(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -561,14 +576,17 @@ fn appendPullFilterMenuLink(
 ) !void {
     try appendTemplate(buf, allocator,
         \\<a class="{classes}" role="menuitem" href="
-    , .{ .classes = shared.classes("issues-filter-option", &.{shared.class("selected", selected)}) });
+    , .{ .classes = shared.classes("issues-filter-option work-items-filter-option", &.{shared.class("selected", selected)}) });
     try appendPullsHref(buf, allocator, filters, .{
         .param_name = pullFilterParamName(kind),
         .param_value = value,
     });
     try appendTemplate(buf, allocator,
-        \\"><span>{label}</span>
-    , .{ .label = label });
+        \\"><span class="button-icon work-items-filter-option-icon {icon_class}" aria-hidden="true"></span><span>{label}</span>
+    , .{
+        .icon_class = pullFilterIconClass(kind),
+        .label = label,
+    });
     if (count) |value_count| {
         try appendTemplate(buf, allocator,
             \\<small>{count}</small>
@@ -580,10 +598,10 @@ fn appendPullFilterMenuLink(
 fn appendPullSortMenuLink(buf: *std.ArrayList(u8), allocator: Allocator, filters: PullFilters, sort: PullSort) !void {
     try appendTemplate(buf, allocator,
         \\<a class="{classes}" role="menuitem" href="
-    , .{ .classes = shared.classes("issues-filter-option", &.{shared.class("selected", filters.sort == sort)}) });
+    , .{ .classes = shared.classes("issues-filter-option work-items-filter-option", &.{shared.class("selected", filters.sort == sort)}) });
     try appendPullsHref(buf, allocator, filters, .{ .sort = sort });
     try appendTemplate(buf, allocator,
-        \\"><span>{label}</span></a>
+        \\"><span class="button-icon work-items-filter-option-icon icon-sort" aria-hidden="true"></span><span>{label}</span></a>
     , .{ .label = pullSortLabel(sort) });
 }
 
@@ -620,6 +638,15 @@ fn pullFilterParamName(kind: PullFilterKind) []const u8 {
         .label => "label",
         .reviewer => "reviewer",
         .assignee => "assignee",
+    };
+}
+
+fn pullFilterIconClass(kind: PullFilterKind) []const u8 {
+    return switch (kind) {
+        .author => "icon-users",
+        .label => "icon-labels",
+        .reviewer => "icon-reviewers",
+        .assignee => "icon-users",
     };
 }
 
