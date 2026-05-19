@@ -1116,9 +1116,7 @@ fn resolveByteRange(range: ByteRange, len: usize) ?ResolvedRange {
 }
 
 pub fn isLoopbackHost(host: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(host, default_host) or
-        std.ascii.eqlIgnoreCase(host, "::1") or
-        std.ascii.eqlIgnoreCase(host, "localhost");
+    return zwf.server.isLoopbackHost(host);
 }
 
 const web_css = @embedFile("web/style.css");
@@ -1355,6 +1353,15 @@ test "web CSRF validation requires same-origin POST metadata" {
             "\r\n",
     );
     try std.testing.expect(isValidCsrfRequest(same_referer));
+
+    const gitomi_localhost = try parseHttpRequest(
+        "POST /issues HTTP/1.1\r\n" ++
+            "Host: gitomi.localhost:12655\r\n" ++
+            "Origin: http://gitomi.localhost:12655\r\n" ++
+            "Content-Length: 0\r\n" ++
+            "\r\n",
+    );
+    try std.testing.expect(isValidCsrfRequest(gitomi_localhost));
 
     const rebinding_attempt = try parseHttpRequest(
         "POST /issues HTTP/1.1\r\n" ++

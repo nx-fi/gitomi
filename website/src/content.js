@@ -466,28 +466,75 @@ export function renderSite() {
         <p>Use the familiar model: issues, pull requests, comments, labels, milestones, boards, pipeline runs, notifications, access control, and a local web UI. The difference is that your team owns the data and the history.</p>
       </div>
       <div class="workflow-pr-screen" aria-hidden="true">
-        <div class="pr-screen-head">
-          <span class="button-icon icon-pull-request"></span>
-          <div>
-            <strong>Resolve auth session conflict</strong>
-            <small>feature/session-cache into main</small>
+        <div class="shot-chrome pr-shot-chrome">
+          <span class="window-dot red"></span>
+          <span class="window-dot amber"></span>
+          <span class="window-dot green"></span>
+          <code>gitomi.localhost:12655/pulls/24</code>
+        </div>
+        <div class="pr-mock-shell">
+          <div class="pr-page-head">
+            <span class="pr-back-arrow">←</span>
+            <div>
+              <h3>resolve merge conflict before release <span>#24</span></h3>
+              <p><em>Open</em> maya wants to merge 1 commit into <code>main</code> from <code>fix/release-conflict</code></p>
+            </div>
+            <button type="button">Subscribed</button>
           </div>
-          <em>Ready to merge</em>
-        </div>
-        <div class="pr-status-band">
-          <span class="is-resolved">Conflicts resolved</span>
-          <span>3 checks passed</span>
-          <span>Approved</span>
-        </div>
-        <div class="pr-file-preview">
-          <div><b>src/auth/session.ts</b><small>conflict markers removed</small></div>
-          <code><span class="diff-remove">-</span> &lt;&lt;&lt;&lt;&lt;&lt;&lt; HEAD</code>
-          <code><span class="diff-add">+</span> return await loadSession({ cache: true });</code>
-          <code><span class="diff-remove">-</span> &gt;&gt;&gt;&gt;&gt;&gt;&gt; origin/main</code>
-        </div>
-        <div class="pr-merge-row">
-          <p>Branch is up to date. Merge commit can be created locally and synced through Git.</p>
-          <strong>Merge pull request</strong>
+          <div class="pr-tabs">
+            <span class="is-active">Conversation <b>0</b></span>
+            <span>Commits <b>1</b></span>
+            <span>Files changed <b>2</b></span>
+            <em><strong>+8</strong> <b>-3</b><i></i><i></i><i class="is-del"></i></em>
+          </div>
+          <div class="pr-mock-layout">
+            <div class="pr-mock-content">
+              <article class="pr-summary-card">
+                <div class="pr-card-head">
+                  <span class="pr-avatar"></span>
+                  <strong>maya</strong>
+                  <small>opened today</small>
+                </div>
+                <div class="pr-markdown">
+                  <h4>Summary</h4>
+                  <ul>
+                    <li>Resolved the release conflict.</li>
+                    <li>Kept both accepted changes and cleaned up the file.</li>
+                  </ul>
+                </div>
+              </article>
+              <article class="pr-reply-card">
+                <span class="pr-avatar reviewer">AR</span>
+                <div>
+                  <p><strong>ari</strong> Looks good. Thanks for resolving this.</p>
+                  <em>👍 2</em>
+                </div>
+              </article>
+              <section class="pr-workflow-panel">
+                <div class="pr-workflow-head">
+                  <strong>Workflow and checks</strong>
+                  <span>local runner</span>
+                </div>
+                <div class="pr-workflow-steps">
+                  <span class="is-done">checkout</span>
+                  <span class="is-done">agent resolution</span>
+                  <span class="is-done">publish result</span>
+                </div>
+                <ul class="pr-check-runs">
+                  <li><span></span><strong>build</strong><em>passed</em></li>
+                  <li><span></span><strong>tests</strong><em>passed</em></li>
+                  <li><span></span><strong>conflict check</strong><em>passed</em></li>
+                </ul>
+              </section>
+              <section class="pr-merge-panel">
+                <div>
+                  <strong>Ready to merge</strong>
+                  <p>All checks passed.</p>
+                </div>
+                <button type="button">Merge</button>
+              </section>
+            </div>
+          </div>
         </div>
       </div>
     </section>

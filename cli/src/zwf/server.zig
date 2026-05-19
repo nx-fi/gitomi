@@ -5,7 +5,8 @@ const Allocator = std.mem.Allocator;
 
 pub const default_worker_count = 8;
 pub const default_port_attempt_limit = 128;
-pub const default_host = "127.0.0.1";
+pub const default_bind_host = "127.0.0.1";
+pub const default_host = "gitomi.localhost";
 pub const default_port = 12655;
 pub const default_read_timeout_ms = 30_000;
 pub const default_write_timeout_ms = 30_000;
@@ -26,7 +27,7 @@ pub fn ConnectionHandler(comptime Context: type) type {
 }
 
 pub fn bindHost(options: Options) []const u8 {
-    return if (std.mem.eql(u8, options.host, "localhost")) default_host else options.host;
+    return if (isNamedLoopbackHost(options.host)) default_bind_host else options.host;
 }
 
 pub fn listen(bind_host: []const u8, options: Options) !std.net.Server {
@@ -165,9 +166,24 @@ pub fn isClientDisconnect(err: anyerror) bool {
 }
 
 pub fn isLoopbackHost(host: []const u8) bool {
-    return std.mem.eql(u8, host, default_host) or
-        std.mem.eql(u8, host, "::1") or
-        std.mem.eql(u8, host, "localhost");
+    return std.ascii.eqlIgnoreCase(host, default_bind_host) or
+        std.ascii.eqlIgnoreCase(host, "::1") or
+        isNamedLoopbackHost(host);
+}
+
+fn isNamedLoopbackHost(host: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(host, "localhost") or
+        std.ascii.eqlIgnoreCase(host, default_host);
+}
+
+test "server advertises gitomi localhost but binds named loopback to ip loopback" {
+    try std.testing.expectEqualStrings("gitomi.localhost", default_host);
+    try std.testing.expectEqualStrings(default_bind_host, bindHost(.{}));
+    try std.testing.expectEqualStrings(default_bind_host, bindHost(.{ .host = "localhost" }));
+    try std.testing.expectEqualStrings(default_bind_host, bindHost(.{ .host = "GITOMI.LOCALHOST" }));
+    try std.testing.expect(isLoopbackHost("gitomi.localhost"));
+    try std.testing.expect(isLoopbackHost("127.0.0.1"));
+    try std.testing.expect(!isLoopbackHost("attacker.test"));
 }
 
 pub fn configureStream(stream: std.net.Stream, options: Options) !void {
