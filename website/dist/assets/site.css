@@ -384,13 +384,6 @@ body.site-shell::after {
   line-height: 1.55;
 }
 
-.hero-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-top: 4px;
-}
-
 .hero-install {
   width: min(430px, 100%);
   min-width: 0;
@@ -422,6 +415,17 @@ body.site-shell::after {
 .hero-install .install-copy {
   top: 6px;
   right: 6px;
+  color: var(--site-green-ink);
+  background: var(--site-green);
+  border-color: color-mix(in oklch, var(--site-green) 70%, #ffffff);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--site-green) 14%, transparent);
+}
+
+.hero-install .install-copy:hover,
+.hero-install .install-copy.is-copied {
+  color: var(--site-green-ink);
+  background: color-mix(in oklch, var(--site-green) 88%, #ffffff);
+  border-color: color-mix(in oklch, var(--site-green) 82%, #ffffff);
 }
 
 .trust-line {
@@ -564,6 +568,18 @@ body.site-shell::after {
   margin: 0 8px 8px;
   color: var(--site-green);
   font: 850 13px/1.2 var(--mono);
+}
+
+.sim-sidebar .sim-sidebar-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.sim-sidebar .sim-sidebar-brand img {
+  flex: 0 0 auto;
+  width: 22px;
+  height: auto;
 }
 
 .sim-sidebar span {
@@ -2463,6 +2479,41 @@ body.site-shell::after {
     flex: 0 0 auto;
   }
 
+  .shot-chrome code,
+  .repo-card small,
+  .sim-toolbar p,
+  .kanban-lane small,
+  .repo-tree small,
+  .event-stack small,
+  .remote-stack small,
+  .device-head em,
+  .device-panel li small,
+  .console-title em,
+  .workflow-pane-head small,
+  .pr-shot-chrome,
+  .pr-page-head p,
+  .pr-page-head button,
+  .pr-card-head small,
+  .pr-reply-card,
+  .pr-workflow-head span,
+  .pr-merge-panel p {
+    display: none;
+  }
+
+  .repo-card {
+    grid-template-columns: auto minmax(0, 1fr);
+    padding: 10px;
+  }
+
+  .repo-card .button-icon,
+  .remote-stack .button-icon {
+    grid-row: auto;
+  }
+
+  .sim-sidebar span:not(.is-active) {
+    display: none;
+  }
+
   .kanban-grid,
   .repo-visual-grid,
   .sync-map,
@@ -2473,6 +2524,40 @@ body.site-shell::after {
 
   .kanban-lane {
     min-height: 0;
+  }
+
+  .kanban-lane article:nth-of-type(n + 2),
+  .repo-tree div:nth-child(n + 5),
+  .event-stack article:nth-of-type(n + 3),
+  .proof-chips span:nth-child(n + 5),
+  .remote-stack article:nth-child(n + 4),
+  .device-panel li:nth-child(n + 3),
+  .projection-bars span:nth-child(n + 3),
+  .workflow-steps li:nth-child(n + 3),
+  .agent-code-row:nth-of-type(1),
+  .agent-code-row:nth-of-type(3),
+  .agent-code-row:nth-of-type(5),
+  .pr-tabs span:not(.is-active),
+  .pr-tabs em,
+  .pr-markdown li:nth-child(n + 2),
+  .pr-workflow-steps,
+  .pr-check-runs li:nth-child(n + 3) {
+    display: none;
+  }
+
+  .terminal-shot pre,
+  .sync-terminal pre {
+    max-height: 126px;
+    overflow: hidden;
+  }
+
+  .repo-tree div {
+    grid-template-columns: 96px minmax(0, 1fr);
+  }
+
+  .remote-stack article {
+    min-height: 56px;
+    padding: 10px;
   }
 
   .sync-map {
@@ -2488,6 +2573,14 @@ body.site-shell::after {
 
   .packet-rail {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .sync-terminal {
+    grid-template-rows: auto auto;
+  }
+
+  .sync-feed {
+    display: none;
   }
 
   .proof-section,
@@ -2508,15 +2601,12 @@ body.site-shell::after {
   .agent-workflow-demo {
     grid-template-columns: 1fr;
     gap: 12px;
+    min-height: 0;
+    padding: 12px;
   }
 
   .agent-bridge {
-    min-height: 40px;
-  }
-
-  .agent-bridge svg {
-    width: 42px;
-    transform: rotate(90deg);
+    display: none;
   }
 
   .site-footer {
@@ -2547,15 +2637,6 @@ body.site-shell::after {
     white-space: normal;
   }
 
-  .hero-actions {
-    width: 100%;
-  }
-
-  .hero-actions .button {
-    flex: 1 1 180px;
-    justify-content: center;
-  }
-
   .repo-window-head {
     grid-template-columns: 10px 10px 10px minmax(0, 1fr);
   }
@@ -2571,6 +2652,29 @@ body.site-shell::after {
   .sim-toolbar {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .browser-shot {
+    display: none;
+  }
+
+  .terminal-shot pre,
+  .sync-terminal pre {
+    font-size: 11px;
+    line-height: 1.55;
+  }
+
+  .repo-proof,
+  .sync-map,
+  .offline-lab,
+  .agent-console,
+  .workflow-pr-screen {
+    min-height: 0;
+  }
+
+  .repo-proof,
+  .offline-lab {
+    padding: 10px;
   }
 
   .device-panel li {
@@ -2596,6 +2700,11 @@ body.site-shell::after {
   .pr-page-head,
   .pr-mock-layout {
     padding: 12px;
+  }
+
+  .pr-tabs {
+    gap: 10px;
+    padding: 0 12px;
   }
 
   .pr-page-head button {

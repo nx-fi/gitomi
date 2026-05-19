@@ -124,7 +124,7 @@ function renderHeroBoard() {
       </div>
       <div class="app-sim">
         <aside class="sim-sidebar">
-          <strong>Gitomi</strong>
+          <strong class="sim-sidebar-brand"><img src="./assets/logo.svg" alt="" width="26" height="15">Gitomi</strong>
           <span><span class="button-icon icon-code" aria-hidden="true"></span> Code</span>
           <span><span class="button-icon icon-issues" aria-hidden="true"></span> Issues</span>
           <span><span class="button-icon icon-pull-request" aria-hidden="true"></span> Pull Requests</span>
@@ -135,7 +135,7 @@ function renderHeroBoard() {
           <div class="sim-toolbar">
             <div>
               <p>Project</p>
-              <strong>Portable v1</strong>
+              <strong>Gitomi V1</strong>
             </div>
           </div>
           <div class="kanban-grid">
@@ -267,11 +267,6 @@ export function renderSite() {
           <button class="command-copy install-copy" type="button" data-copy-command title="Copy install command" aria-label="Copy install command">
             <span class="button-icon icon-copy" aria-hidden="true"></span>
           </button>
-        </div>
-        <div class="hero-actions">
-          <a class="button primary" href="#start">Start locally</a>
-          <a class="button secondary" href="./install.sh">install.sh</a>
-          <a class="button secondary" href="#how">See how it works</a>
         </div>
         <p class="trust-line">No central database. No required server. No custom transport.</p>
       </div>
