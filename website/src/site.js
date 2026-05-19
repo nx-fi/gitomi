@@ -38,6 +38,17 @@
     });
   }
 
+  function initInstallCommand() {
+    const installUrl = new URL("install.sh", window.location.href);
+    installUrl.hash = "";
+    installUrl.search = "";
+    const command = `curl -fsSL ${installUrl.href} | sh`;
+
+    document.querySelectorAll("[data-install-command]").forEach((target) => {
+      target.textContent = command;
+    });
+  }
+
   function initTypewriter() {
     document.querySelectorAll("[data-typewriter]").forEach((target) => {
       const words = (target.getAttribute("data-words") || "")
@@ -323,6 +334,7 @@
   }
 
   initCopyButtons();
+  initInstallCommand();
   initTypewriter();
   initTerminalDemos();
   initFloatingBrand();

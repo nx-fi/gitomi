@@ -2,6 +2,7 @@
  * @typedef {object} StartCommand
  * @property {string} label
  * @property {string} code
+ * @property {boolean} [install]
  */
 
 /**
@@ -12,10 +13,20 @@
  * @property {StartCommand[]} commands
  */
 
+const installCommand = "curl -fsSL https://raw.githubusercontent.com/nx-fi/gitomi/main/install.sh | sh";
+
 /** @type {StartStep[]} */
 const startSteps = [
   {
     step: "Step 1",
+    title: "Install",
+    body: "Install the latest released Gitomi CLI for your platform.",
+    commands: [
+      { label: "Install gt", code: installCommand, install: true }
+    ]
+  },
+  {
+    step: "Step 2",
     title: "Import",
     body: "Initialize Gitomi and import existing GitHub project state.",
     commands: [
@@ -24,7 +35,7 @@ const startSteps = [
     ]
   },
   {
-    step: "Step 2",
+    step: "Step 3",
     title: "Browse",
     body: "Open the local web UI.",
     commands: [
@@ -64,13 +75,14 @@ function html(value) {
  * @returns {string}
  */
 function renderStartCommand(command) {
+  const installAttribute = command.install ? " data-install-command" : "";
   return `
     <div class="notebook-command command-code">
       <div><span>${html(command.label)}</span></div>
       <button class="command-copy" type="button" data-copy-command title="Copy ${html(command.label)} command" aria-label="Copy ${html(command.label)} command">
         <span class="button-icon icon-copy" aria-hidden="true"></span>
       </button>
-      <pre><code>${html(command.code)}</code></pre>
+      <pre><code${installAttribute}>${html(command.code)}</code></pre>
     </div>
   `.trim();
 }
@@ -251,13 +263,14 @@ export function renderSite() {
         </h1>
         <p class="hero-lede">Gitomi keeps issues, pull requests, project boards, milestones, comments, pipeline run records, notifications, and access-control events inside your Git repository - so you can work offline, sync with any Git remote, or self-host without losing your collaboration history.</p>
         <div class="hero-install command-code">
-          <pre><code>cd cli && zig build</code></pre>
-          <button class="command-copy install-copy" type="button" data-copy-command title="Copy build command" aria-label="Copy build command">
+          <pre><code data-install-command>${html(installCommand)}</code></pre>
+          <button class="command-copy install-copy" type="button" data-copy-command title="Copy install command" aria-label="Copy install command">
             <span class="button-icon icon-copy" aria-hidden="true"></span>
           </button>
         </div>
         <div class="hero-actions">
           <a class="button primary" href="#start">Start locally</a>
+          <a class="button secondary" href="./install.sh">install.sh</a>
           <a class="button secondary" href="#how">See how it works</a>
         </div>
         <p class="trust-line">No central database. No required server. No custom transport.</p>
@@ -569,7 +582,7 @@ export function renderSite() {
       <div class="section-copy">
         <p class="eyebrow">Start locally</p>
         <h2>Bring Gitomi into an existing repository.</h2>
-        <p>Initialize Gitomi, import existing GitHub project state, and open the local web UI. No central database is required for the project record.</p>
+        <p>Install Gitomi, initialize the repository, import existing GitHub project state, and open the local web UI. No central database is required for the project record.</p>
       </div>
       <div class="start-notebook">
         ${startSteps.map(renderStartStep).join("\n")}
@@ -590,6 +603,7 @@ export function renderSite() {
           <a href="${githubDocsBase}/spec/02_REFS.md" target="_blank" rel="noreferrer"><span class="button-icon icon-branch" aria-hidden="true"></span> Ref spec</a>
           <a href="${githubDocsBase}/spec/04_WORKFLOWS.md" target="_blank" rel="noreferrer"><span class="button-icon icon-workflow" aria-hidden="true"></span> Workflow spec</a>
           <a href="${githubDocsBase}/spec/06_PULL_REQUEST_MERGE_SEMANTICS.md" target="_blank" rel="noreferrer"><span class="button-icon icon-pull-request" aria-hidden="true"></span> Merge semantics</a>
+          <a href="./install.sh"><span class="button-icon icon-file-code" aria-hidden="true"></span> install.sh</a>
         </div>
       </div>
     </section>

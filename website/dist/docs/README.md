@@ -41,7 +41,14 @@ the source of truth.
 
 ## Quick Start
 
-Build the CLI:
+Install the latest released CLI:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/nx-fi/gitomi/main/install.sh | sh
+gt --help
+```
+
+Or build from source:
 
 ```sh
 cd cli

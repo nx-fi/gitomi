@@ -9,6 +9,7 @@ const contentTypes = {
   ".html": "text/html; charset=utf-8",
   ".js": "application/javascript; charset=utf-8",
   ".md": "text/markdown; charset=utf-8",
+  ".sh": "text/x-shellscript; charset=utf-8",
   ".svg": "image/svg+xml; charset=utf-8"
 };
 
