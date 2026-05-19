@@ -353,8 +353,9 @@ used as `gl#123`, `gl:123`, `gitlab#123`, or `gitlab:123` references.
 
 `gt gitlab export` replays accepted Gitomi issue, pull, and comment transitions
 through the GitLab REST API and stores UUID-to-IID mappings in
-`.git/gitomi/gitlab/<project>/map.jsonl`. `--reuse-legacy` maps previously
-imported GitLab objects instead of recreating them.
+`.git/gitomi/gitlab/<project>/map.jsonl`. Exports only trust GitLab IIDs from
+that mapping file; legacy IID metadata in work-item events is not used to choose
+remote issues or merge requests.
 
 `gt gitlab sync` performs a two-way API sync: optional Gitomi `gt sync` pull,
 GitLab import, GitLab export of local accepted events since the last sync, and

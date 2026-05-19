@@ -98,7 +98,7 @@
   border: 1px solid color-mix(in oklch, var(--blue) 72%, var(--neutral-950));
   border-radius: var(--radius-md);
   box-shadow: var(--shadow);
-  font: 800 18px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font: 800 18px/1 var(--font-ui);
   cursor: pointer;
 }
 .diff-range-button:hover,
@@ -137,7 +137,7 @@
 .diff-review-form textarea {
   width: 100%;
   min-height: 96px;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-ui);
   resize: vertical;
 }
 .diff-review-actions {
@@ -161,7 +161,7 @@
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  font: 700 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font: 700 12px/1.4 var(--font-ui);
   opacity: 0;
   transition: opacity 120ms ease;
 }

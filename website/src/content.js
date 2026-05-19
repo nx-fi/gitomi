@@ -1,28 +1,39 @@
 /**
- * @typedef {object} CommandBlock
- * @property {string} title
- * @property {string} body
+ * @typedef {object} StartCommand
+ * @property {string} label
  * @property {string} code
  */
 
-/** @type {CommandBlock[]} */
-const commandBlocks = [
+/**
+ * @typedef {object} StartStep
+ * @property {string} step
+ * @property {string} title
+ * @property {string} body
+ * @property {StartCommand[]} commands
+ */
+
+/** @type {StartStep[]} */
+const startSteps = [
   {
-    title: "Build",
-    body: "Compile the Zig CLI from the repository checkout.",
-    code: "cd cli\nzig build\n./zig-out/bin/gt --help"
+    step: "Step 1",
+    title: "Import",
+    body: "Initialize Gitomi and import existing GitHub project state.",
+    commands: [
+      { label: "Initialize", code: "gt init" },
+      { label: "Import from GitHub", code: "gt github import" }
+    ]
   },
   {
-    title: "Initialize",
-    body: "Attach Gitomi to an existing Git repository with a signed local device.",
-    code: "gt init --principal alice --device laptop\ngt issue open --title \"Write the release notes\" --body \"Collect highlights for v1.\"\ngt issue list"
-  },
-  {
+    step: "Step 2",
     title: "Browse",
-    body: "Start the loopback web UI for code, issues, pull requests, projects, pipelines, events, and refs.",
-    code: "gt web"
+    body: "Open the local web UI.",
+    commands: [
+      { label: "Open web UI", code: "gt web" }
+    ]
   }
 ];
+
+const githubDocsBase = "https://github.com/nx-fi/gitomi/blob/main";
 
 const proofItems = [
   "Issues",
@@ -48,25 +59,42 @@ function html(value) {
 }
 
 /**
- * Render a command block with copy affordances.
- * @param {CommandBlock} block
+ * Render a compact copyable command snippet.
+ * @param {StartCommand} command
  * @returns {string}
  */
-function renderCommandBlock(block) {
+function renderStartCommand(command) {
   return `
-    <article class="command-card">
-      <div>
-        <p class="eyebrow">${html(block.title)}</p>
-        <p>${html(block.body)}</p>
-      </div>
-      <div class="command-code">
-        <button class="command-copy" type="button" data-copy-command title="Copy ${html(block.title)} command" aria-label="Copy ${html(block.title)} command">
-          <span class="button-icon icon-copy" aria-hidden="true"></span>
-        </button>
-        <pre><code>${html(block.code)}</code></pre>
+    <div class="notebook-command command-code">
+      <div><span>${html(command.label)}</span></div>
+      <button class="command-copy" type="button" data-copy-command title="Copy ${html(command.label)} command" aria-label="Copy ${html(command.label)} command">
+        <span class="button-icon icon-copy" aria-hidden="true"></span>
+      </button>
+      <pre><code>${html(command.code)}</code></pre>
+    </div>
+  `.trim();
+}
+
+/**
+ * Render a start tutorial step.
+ * @param {StartStep} step
+ * @returns {string}
+ */
+function renderStartStep(step) {
+  return `
+    <article class="notebook-step">
+      <div class="notebook-marker">${html(step.step)}</div>
+      <div class="notebook-step-main">
+        <div>
+          <h3>${html(step.title)}</h3>
+          <p>${html(step.body)}</p>
+        </div>
+        <div class="notebook-command-list">
+          ${step.commands.map(renderStartCommand).join("\n")}
+        </div>
       </div>
     </article>
-  `;
+  `.trim();
 }
 
 /**
@@ -541,10 +569,10 @@ export function renderSite() {
       <div class="section-copy">
         <p class="eyebrow">Start locally</p>
         <h2>Bring Gitomi into an existing repository.</h2>
-        <p>Build the CLI, initialize a local identity, and open the web UI. No central database is required for the project record.</p>
+        <p>Initialize Gitomi, import existing GitHub project state, and open the local web UI. No central database is required for the project record.</p>
       </div>
-      <div class="command-grid">
-        ${commandBlocks.map(renderCommandBlock).join("")}
+      <div class="start-notebook">
+        ${startSteps.map(renderStartStep).join("\n")}
       </div>
     </section>
 
@@ -552,15 +580,16 @@ export function renderSite() {
       <div class="docs-panel">
         <div>
           <p class="eyebrow">Reference</p>
-          <h2>Inspect the model before trusting it.</h2>
-          <p>The repository includes the product, ref layout, merge semantics, and CLI references behind the implementation.</p>
+          <h2>Reference documentation.</h2>
+          <p>Read the product, ref layout, workflow, merge, and CLI documentation directly in the GitHub repository.</p>
         </div>
         <div class="docs-links" aria-label="Documentation links">
-          <a href="./docs/README.md"><span class="button-icon icon-book" aria-hidden="true"></span> README</a>
-          <a href="./docs/CLI.md"><span class="button-icon icon-code" aria-hidden="true"></span> CLI reference</a>
-          <a href="./docs/01_PRODUCT.md"><span class="button-icon icon-file-code" aria-hidden="true"></span> Product spec</a>
-          <a href="./docs/02_REFS.md"><span class="button-icon icon-branch" aria-hidden="true"></span> Ref spec</a>
-          <a href="./docs/06_PULL_REQUEST_MERGE_SEMANTICS.md"><span class="button-icon icon-pull-request" aria-hidden="true"></span> Merge semantics</a>
+          <a href="${githubDocsBase}/README.md" target="_blank" rel="noreferrer"><span class="button-icon icon-book" aria-hidden="true"></span> README</a>
+          <a href="${githubDocsBase}/cli/README.md" target="_blank" rel="noreferrer"><span class="button-icon icon-code" aria-hidden="true"></span> CLI reference</a>
+          <a href="${githubDocsBase}/spec/01_PRODUCT.md" target="_blank" rel="noreferrer"><span class="button-icon icon-file-code" aria-hidden="true"></span> Product spec</a>
+          <a href="${githubDocsBase}/spec/02_REFS.md" target="_blank" rel="noreferrer"><span class="button-icon icon-branch" aria-hidden="true"></span> Ref spec</a>
+          <a href="${githubDocsBase}/spec/04_WORKFLOWS.md" target="_blank" rel="noreferrer"><span class="button-icon icon-workflow" aria-hidden="true"></span> Workflow spec</a>
+          <a href="${githubDocsBase}/spec/06_PULL_REQUEST_MERGE_SEMANTICS.md" target="_blank" rel="noreferrer"><span class="button-icon icon-pull-request" aria-hidden="true"></span> Merge semantics</a>
         </div>
       </div>
     </section>

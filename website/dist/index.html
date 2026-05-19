@@ -457,53 +457,52 @@
       <div class="section-copy">
         <p class="eyebrow">Start locally</p>
         <h2>Bring Gitomi into an existing repository.</h2>
-        <p>Build the CLI, initialize a local identity, and open the web UI. No central database is required for the project record.</p>
+        <p>Initialize Gitomi, import existing GitHub project state, and open the local web UI. No central database is required for the project record.</p>
       </div>
-      <div class="command-grid">
-        
-    <article class="command-card">
-      <div>
-        <p class="eyebrow">Build</p>
-        <p>Compile the Zig CLI from the repository checkout.</p>
-      </div>
-      <div class="command-code">
-        <button class="command-copy" type="button" data-copy-command title="Copy Build command" aria-label="Copy Build command">
-          <span class="button-icon icon-copy" aria-hidden="true"></span>
-        </button>
-        <pre><code>cd cli
-zig build
-./zig-out/bin/gt --help</code></pre>
-      </div>
-    </article>
-  
-    <article class="command-card">
-      <div>
-        <p class="eyebrow">Initialize</p>
-        <p>Attach Gitomi to an existing Git repository with a signed local device.</p>
-      </div>
-      <div class="command-code">
-        <button class="command-copy" type="button" data-copy-command title="Copy Initialize command" aria-label="Copy Initialize command">
-          <span class="button-icon icon-copy" aria-hidden="true"></span>
-        </button>
-        <pre><code>gt init --principal alice --device laptop
-gt issue open --title &quot;Write the release notes&quot; --body &quot;Collect highlights for v1.&quot;
-gt issue list</code></pre>
+      <div class="start-notebook">
+        <article class="notebook-step">
+      <div class="notebook-marker">Step 1</div>
+      <div class="notebook-step-main">
+        <div>
+          <h3>Import</h3>
+          <p>Initialize Gitomi and import existing GitHub project state.</p>
+        </div>
+        <div class="notebook-command-list">
+          <div class="notebook-command command-code">
+      <div><span>Initialize</span></div>
+      <button class="command-copy" type="button" data-copy-command title="Copy Initialize command" aria-label="Copy Initialize command">
+        <span class="button-icon icon-copy" aria-hidden="true"></span>
+      </button>
+      <pre><code>gt init</code></pre>
+    </div>
+<div class="notebook-command command-code">
+      <div><span>Import from GitHub</span></div>
+      <button class="command-copy" type="button" data-copy-command title="Copy Import from GitHub command" aria-label="Copy Import from GitHub command">
+        <span class="button-icon icon-copy" aria-hidden="true"></span>
+      </button>
+      <pre><code>gt github import</code></pre>
+    </div>
+        </div>
       </div>
     </article>
-  
-    <article class="command-card">
-      <div>
-        <p class="eyebrow">Browse</p>
-        <p>Start the loopback web UI for code, issues, pull requests, projects, pipelines, events, and refs.</p>
-      </div>
-      <div class="command-code">
-        <button class="command-copy" type="button" data-copy-command title="Copy Browse command" aria-label="Copy Browse command">
-          <span class="button-icon icon-copy" aria-hidden="true"></span>
-        </button>
-        <pre><code>gt web</code></pre>
+<article class="notebook-step">
+      <div class="notebook-marker">Step 2</div>
+      <div class="notebook-step-main">
+        <div>
+          <h3>Browse</h3>
+          <p>Open the local web UI.</p>
+        </div>
+        <div class="notebook-command-list">
+          <div class="notebook-command command-code">
+      <div><span>Open web UI</span></div>
+      <button class="command-copy" type="button" data-copy-command title="Copy Open web UI command" aria-label="Copy Open web UI command">
+        <span class="button-icon icon-copy" aria-hidden="true"></span>
+      </button>
+      <pre><code>gt web</code></pre>
+    </div>
+        </div>
       </div>
     </article>
-  
       </div>
     </section>
 
@@ -511,15 +510,16 @@ gt issue list</code></pre>
       <div class="docs-panel">
         <div>
           <p class="eyebrow">Reference</p>
-          <h2>Inspect the model before trusting it.</h2>
-          <p>The repository includes the product, ref layout, merge semantics, and CLI references behind the implementation.</p>
+          <h2>Reference documentation.</h2>
+          <p>Read the product, ref layout, workflow, merge, and CLI documentation directly in the GitHub repository.</p>
         </div>
         <div class="docs-links" aria-label="Documentation links">
-          <a href="./docs/README.md"><span class="button-icon icon-book" aria-hidden="true"></span> README</a>
-          <a href="./docs/CLI.md"><span class="button-icon icon-code" aria-hidden="true"></span> CLI reference</a>
-          <a href="./docs/01_PRODUCT.md"><span class="button-icon icon-file-code" aria-hidden="true"></span> Product spec</a>
-          <a href="./docs/02_REFS.md"><span class="button-icon icon-branch" aria-hidden="true"></span> Ref spec</a>
-          <a href="./docs/06_PULL_REQUEST_MERGE_SEMANTICS.md"><span class="button-icon icon-pull-request" aria-hidden="true"></span> Merge semantics</a>
+          <a href="https://github.com/nx-fi/gitomi/blob/main/README.md" target="_blank" rel="noreferrer"><span class="button-icon icon-book" aria-hidden="true"></span> README</a>
+          <a href="https://github.com/nx-fi/gitomi/blob/main/cli/README.md" target="_blank" rel="noreferrer"><span class="button-icon icon-code" aria-hidden="true"></span> CLI reference</a>
+          <a href="https://github.com/nx-fi/gitomi/blob/main/spec/01_PRODUCT.md" target="_blank" rel="noreferrer"><span class="button-icon icon-file-code" aria-hidden="true"></span> Product spec</a>
+          <a href="https://github.com/nx-fi/gitomi/blob/main/spec/02_REFS.md" target="_blank" rel="noreferrer"><span class="button-icon icon-branch" aria-hidden="true"></span> Ref spec</a>
+          <a href="https://github.com/nx-fi/gitomi/blob/main/spec/04_WORKFLOWS.md" target="_blank" rel="noreferrer"><span class="button-icon icon-workflow" aria-hidden="true"></span> Workflow spec</a>
+          <a href="https://github.com/nx-fi/gitomi/blob/main/spec/06_PULL_REQUEST_MERGE_SEMANTICS.md" target="_blank" rel="noreferrer"><span class="button-icon icon-pull-request" aria-hidden="true"></span> Merge semantics</a>
         </div>
       </div>
     </section>

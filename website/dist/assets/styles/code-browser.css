@@ -576,6 +576,14 @@ a.root-file-commit:hover,
   opacity: 0.7;
   text-align: left;
 }
+.root-file-commit-deferred {
+  font-weight: 500;
+  opacity: 0.72;
+}
+.root-file-commit-error {
+  color: var(--danger);
+  opacity: 1;
+}
 .root-file-time {
   justify-self: end;
   color: var(--muted);
@@ -583,6 +591,20 @@ a.root-file-commit:hover,
   font-weight: 500;
   line-height: 20px;
   white-space: nowrap;
+}
+.root-file-list-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 42px;
+  padding: 7px 16px;
+  color: var(--muted);
+  background: var(--panel-bg);
+  border-top: 1px solid var(--border);
+}
+.root-file-list-retry {
+  flex: 0 0 auto;
 }
 @media (min-width: 1200px) {
   .root-file-row {
@@ -931,6 +953,13 @@ a.root-file-commit:hover,
   color: var(--muted);
   font-size: 13px;
 }
+.root-partial-field-error {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  color: var(--muted);
+}
 .root-sidebar-loading,
 .root-docs-loading {
   color: var(--muted);
@@ -938,6 +967,10 @@ a.root-file-commit:hover,
 .root-partial-retry {
   justify-self: start;
   min-height: 32px;
+}
+.root-partial-field-retry {
+  min-height: 28px;
+  padding-inline: 10px;
 }
 .tree-sidebar,
 .symbols-sidebar,
@@ -986,7 +1019,7 @@ a.root-file-commit:hover,
   background: transparent;
   border: 0;
   border-radius: var(--radius-md);
-  font: 400 22px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font: 400 22px/1 var(--font-ui);
   cursor: pointer;
 }
 .code-side-panel-close:hover {
@@ -2072,7 +2105,7 @@ a.root-file-commit:hover,
   border: 0;
   border-radius: var(--radius-md);
   cursor: pointer;
-  font: 600 14px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font: 600 14px/1.2 var(--font-ui);
 }
 .line-actions-menu button:hover,
 .line-actions-menu button:focus-visible {
@@ -2152,6 +2185,18 @@ a.root-file-commit:hover,
 }
 .pdf-preview.failed .pdf-pages {
   display: none;
+}
+.pdf-preview-notice {
+  justify-self: center;
+  width: min(100%, 760px);
+  padding: 12px 14px;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
 }
 .pdf-pages {
   display: grid;
@@ -2391,7 +2436,7 @@ a.root-file-commit:hover,
   border: 0;
   border-bottom: 2px solid transparent;
   border-radius: var(--radius-md) var(--radius-md) 0 0;
-  font: 500 14px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font: 500 14px/1 var(--font-ui);
   white-space: nowrap;
   cursor: pointer;
 }

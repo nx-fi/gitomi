@@ -848,7 +848,7 @@ body.site-shell::after {
 .section-copy p:not(.eyebrow),
 .docs-panel p,
 .workflow-pr-screen p,
-.command-card p {
+.notebook-step p {
   margin: 0;
   color: var(--site-muted);
   font-size: 17px;
@@ -861,7 +861,7 @@ body.site-shell::after {
 .agent-console,
 .docs-panel,
 .workflow-pr-screen,
-.command-card {
+.start-notebook {
   background: var(--site-panel);
   border: 1px solid var(--site-border);
   border-radius: 8px;
@@ -2154,29 +2154,78 @@ body.site-shell::after {
   font: 850 12px/1 var(--site-sans);
 }
 
-.command-grid {
+.start-notebook {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 14px;
-}
-
-.command-card {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;
   overflow: hidden;
 }
 
-.command-card > div:first-child {
+.notebook-step {
   display: grid;
-  gap: 7px;
-  padding: 16px;
-  background: rgba(255, 255, 255, 0.035);
-  border-bottom: 1px solid var(--site-border);
+  grid-template-columns: 104px minmax(0, 1fr);
+  gap: 18px;
+  min-width: 0;
+  padding: 18px;
 }
 
-.command-card p {
+.notebook-step + .notebook-step {
+  border-top: 1px solid var(--site-border);
+}
+
+.notebook-marker {
+  align-self: start;
+  width: max-content;
+  padding: 5px 8px;
+  color: var(--site-green);
+  background: color-mix(in oklch, var(--site-green) 11%, transparent);
+  border: 1px solid color-mix(in oklch, var(--site-green) 34%, transparent);
+  border-radius: 999px;
+  font: 850 11px/1.2 var(--mono);
+  text-transform: uppercase;
+}
+
+.notebook-step-main {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.notebook-step-main > div:first-child {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.notebook-step h3 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.notebook-step p {
   font-size: 14px;
+}
+
+.notebook-command-list {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.notebook-command {
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid color-mix(in oklch, var(--site-green) 18%, var(--site-border));
+  border-radius: 7px;
+}
+
+.notebook-command > div:first-child {
+  min-height: 28px;
+  padding: 0 42px 0 12px;
+  color: var(--site-muted);
+  background: rgba(255, 255, 255, 0.035);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  font: 800 11px/28px var(--site-sans);
 }
 
 .command-code {
@@ -2185,13 +2234,13 @@ body.site-shell::after {
 }
 
 .command-code pre {
-  min-height: 166px;
+  min-height: 0;
   margin: 0;
-  padding: 18px 56px 18px 18px;
+  padding: 10px 48px 10px 12px;
   overflow-x: auto;
   color: #d8ffe2;
-  background: rgba(0, 0, 0, 0.34);
-  font: 13px/1.65 var(--mono);
+  background: transparent;
+  font: 12px/1.35 var(--mono);
 }
 
 .command-code code {
@@ -2342,9 +2391,6 @@ body.site-shell::after {
     grid-row: auto;
   }
 
-  .command-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 
 @media (max-width: 820px) {
@@ -2417,8 +2463,7 @@ body.site-shell::after {
   .repo-visual-grid,
   .sync-map,
   .offline-lab,
-  .docs-panel,
-  .command-grid {
+  .docs-panel {
     grid-template-columns: 1fr;
   }
 
@@ -2530,6 +2575,12 @@ body.site-shell::after {
 
   .device-panel li small {
     grid-column: 2;
+  }
+
+  .notebook-step {
+    grid-template-columns: 1fr;
+    gap: 10px;
+    padding: 14px;
   }
 
   .pr-page-head,
