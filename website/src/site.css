@@ -582,7 +582,7 @@ body.site-shell::after {
   height: auto;
 }
 
-.sim-sidebar span {
+.sim-sidebar > span {
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -2475,7 +2475,7 @@ body.site-shell::after {
     align-self: center;
   }
 
-  .sim-sidebar span {
+  .sim-sidebar > span {
     flex: 0 0 auto;
   }
 
@@ -2494,7 +2494,6 @@ body.site-shell::after {
   .pr-page-head p,
   .pr-page-head button,
   .pr-card-head small,
-  .pr-reply-card,
   .pr-workflow-head span,
   .pr-merge-panel p {
     display: none;
@@ -2510,8 +2509,21 @@ body.site-shell::after {
     grid-row: auto;
   }
 
-  .sim-sidebar span:not(.is-active) {
-    display: none;
+  .sim-sidebar > span:not(.is-active) {
+    justify-content: center;
+    width: 34px;
+    padding: 0;
+    font-size: 0;
+  }
+
+  .sim-sidebar > span:not(.is-active) .button-icon {
+    width: 17px;
+    height: 17px;
+  }
+
+  .sim-sidebar .is-active {
+    padding-right: 12px;
+    padding-left: 10px;
   }
 
   .kanban-grid,
@@ -2526,10 +2538,50 @@ body.site-shell::after {
     min-height: 0;
   }
 
+  .offline-lab {
+    min-height: 0;
+    padding: 12px;
+  }
+
+  .device-panel {
+    gap: 10px;
+    min-height: 0;
+    padding: 12px;
+  }
+
+  .projection-bars {
+    gap: 9px;
+    margin-top: 0;
+  }
+
+  .device-panel p {
+    margin-top: 0;
+  }
+
+  .pr-tabs {
+    gap: 12px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .pr-tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .pr-tabs span,
+  .pr-tabs em {
+    flex: 0 0 auto;
+  }
+
+  .pr-tabs em {
+    margin-left: 0;
+  }
+
   .kanban-lane article:nth-of-type(n + 2),
+  .repo-tree div:nth-child(2),
   .repo-tree div:nth-child(n + 5),
   .event-stack article:nth-of-type(n + 3),
-  .proof-chips span:nth-child(n + 5),
+  .proof-chips,
   .remote-stack article:nth-child(n + 4),
   .device-panel li:nth-child(n + 3),
   .projection-bars span:nth-child(n + 3),
@@ -2537,8 +2589,6 @@ body.site-shell::after {
   .agent-code-row:nth-of-type(1),
   .agent-code-row:nth-of-type(3),
   .agent-code-row:nth-of-type(5),
-  .pr-tabs span:not(.is-active),
-  .pr-tabs em,
   .pr-markdown li:nth-child(n + 2),
   .pr-workflow-steps,
   .pr-check-runs li:nth-child(n + 3) {
@@ -2652,10 +2702,6 @@ body.site-shell::after {
   .sim-toolbar {
     align-items: flex-start;
     flex-direction: column;
-  }
-
-  .browser-shot {
-    display: none;
   }
 
   .terminal-shot pre,
