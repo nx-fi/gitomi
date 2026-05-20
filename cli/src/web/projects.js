@@ -204,6 +204,8 @@
     form.set("column", toColumn);
     form.set("view", "board");
     form.set("request_mode", "async");
+    const csrfInput = board ? board.querySelector('input[name="_csrf"]') : null;
+    if (csrfInput && csrfInput.value) form.set("_csrf", csrfInput.value);
 
     setBoardBusy(card, true);
     fetch("/projects/items", {

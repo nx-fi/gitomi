@@ -13,10 +13,17 @@ pub fn Router(comptime Context: type) type {
             static_asset: middleware.StaticAsset,
         };
 
+        pub const SecurityPolicy = struct {
+            same_origin: bool = false,
+            csrf: bool = false,
+            trusted_origin: bool = false,
+        };
+
         pub const Route = struct {
             method: request.Method,
             path: []const u8,
             action: Action,
+            security: SecurityPolicy = .{},
 
             pub fn get(comptime path: []const u8, handler: Handler) Route {
                 return .{ .method = .GET, .path = path, .action = .{ .handler = handler } };
@@ -40,6 +47,12 @@ pub fn Router(comptime Context: type) type {
 
             pub fn options(comptime path: []const u8, handler: Handler) Route {
                 return .{ .method = .OPTIONS, .path = path, .action = .{ .handler = handler } };
+            }
+
+            pub fn withSecurity(route: Route, security: SecurityPolicy) Route {
+                var secure_route = route;
+                secure_route.security = security;
+                return secure_route;
             }
 
             pub fn static(comptime path: []const u8, comptime content_type: []const u8, comptime body: []const u8) Route {

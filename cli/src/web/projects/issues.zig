@@ -38,7 +38,8 @@ pub fn appendProjectIssues(
     current_principal: []const u8,
     csrf_token: []const u8,
 ) !void {
-    const context = projectRenderContextFromView(allocator, active_view, current_principal);
+    var context = projectRenderContextFromView(allocator, active_view, current_principal);
+    context.csrf_token = csrf_token;
     const issue_count = try projectIssueCount(db, project, context.filter);
     try appendProjectWorkspaceChromeStart(buf, allocator, db, project, issue_count, active_view, csrf_token);
     try buf.appendSlice(allocator, "<div class=\"project-issues-view\">");
@@ -65,10 +66,12 @@ fn appendProjectIssuesEmptyState(
         \\      <summary class="button primary" aria-expanded="false"><span class="project-link-icon" aria-hidden="true"></span>Add Issue</summary>
         \\      <div class="project-action-popover project-action-popover-narrow">
         \\        <form class="project-item-form" method="post" action="/projects/items">
+        \\          <input type="hidden" name="_csrf" value="{csrf_token}">
         \\          <input type="hidden" name="action" value="add-existing">
         \\          <input type="hidden" name="project" value="{project}">
         \\          <input type="hidden" name="view" value="{view}">
     , .{
+        .csrf_token = context.csrf_token,
         .project = project,
         .view = context.view_ref,
     });
@@ -83,6 +86,11 @@ fn appendProjectIssuesEmptyState(
         \\      <summary class="button secondary" aria-expanded="false"><span class="project-add-icon" aria-hidden="true"></span>New issue</summary>
         \\      <div class="project-action-popover">
         \\        <form class="project-item-form" method="post" action="/projects/items">
+        \\          <input type="hidden" name="_csrf" value="
+    );
+    try shared.appendHtml(buf, allocator, context.csrf_token);
+    try buf.appendSlice(allocator,
+        \\">
         \\          <input type="hidden" name="action" value="create-issue">
         \\          <input type="hidden" name="project" value="
     );

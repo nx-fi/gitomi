@@ -105,74 +105,93 @@ const routes = [_]Route{
     Route.get("/", handleCodePage),
     Route.get("/code/root/:component", handleCodeRootComponent),
     Route.get("/code", handleCodePage),
-    Route.post("/code/sync", handleCodeSyncPost),
-    Route.post("/live-mode", handleLiveModePost),
+    sameOriginPost("/code/sync", handleCodeSyncPost),
+    sameOriginPost("/live-mode", handleLiveModePost),
     Route.get("/blame", handleBlamePage),
     Route.get("/commits", handleCommitsPage),
     Route.get("/commit", handleCommitPage),
     Route.get("/inbox", handleInboxPage),
-    Route.post("/inbox/read", handleInboxReadPost),
+    csrfPost("/inbox/read", handleInboxReadPost),
     Route.get("/issues", handleIssuesPage),
     Route.get("/issues/:ref/edit", handleIssueEditPage),
     Route.get("/issues/:ref", handleIssueDetailPage),
-    Route.post("/issues", handleIssuePost),
-    Route.post("/issues/bulk", handleIssueBulkPost),
-    Route.post("/issues/:ref/:action", handleIssueActionPost),
+    csrfPost("/issues", handleIssuePost),
+    csrfPost("/issues/bulk", handleIssueBulkPost),
+    csrfPost("/issues/:ref/:action", handleIssueActionPost),
     Route.get("/pulls", handlePullsPage),
     Route.get("/prs", handlePullsPage),
     Route.get("/pulls/:ref/conflicts", handlePullConflictsPage),
     Route.get("/prs/:ref/conflicts", handlePullConflictsPage),
     Route.get("/pulls/:ref", handlePullDetailPage),
     Route.get("/prs/:ref", handlePullDetailPage),
-    Route.post("/pulls", handlePullPost),
-    Route.post("/pulls/bulk", handlePullBulkPost),
-    Route.post("/prs/bulk", handlePullBulkPost),
-    Route.post("/pulls/:ref/:action", handlePullActionPost),
-    Route.post("/prs/:ref/:action", handlePullActionPost),
+    csrfPost("/pulls", handlePullPost),
+    csrfPost("/pulls/bulk", handlePullBulkPost),
+    csrfPost("/prs/bulk", handlePullBulkPost),
+    trustedCsrfPost("/pulls/:ref/:action", handlePullActionPost),
+    trustedCsrfPost("/prs/:ref/:action", handlePullActionPost),
     Route.get("/projects", handleProjectsPage),
     Route.get("/new-project", handleNewProjectPage),
-    Route.post("/projects", handleProjectPost),
-    Route.post("/projects/default-view", handleProjectDefaultViewPost),
-    Route.post("/projects/comments", handleProjectCommentPost),
-    Route.post("/projects/properties", handleProjectPropertiesPost),
-    Route.post("/projects/items", handleProjectItemPost),
+    csrfPost("/projects", handleProjectPost),
+    csrfPost("/projects/default-view", handleProjectDefaultViewPost),
+    csrfPost("/projects/comments", handleProjectCommentPost),
+    csrfPost("/projects/properties", handleProjectPropertiesPost),
+    csrfPost("/projects/items", handleProjectItemPost),
     Route.get("/milestones", handleMilestonesPage),
     Route.get("/milestones/:ref/edit", handleMilestoneEditPage),
     Route.get("/milestones/:ref", handleMilestoneDetailPage),
     Route.get("/new-milestone", handleNewMilestonePage),
-    Route.post("/milestones", handleMilestonePost),
-    Route.post("/milestones/:ref", handleMilestoneRefPost),
+    csrfPost("/milestones", handleMilestonePost),
+    csrfPost("/milestones/:ref", handleMilestoneRefPost),
     Route.get("/access", handleAccessPage),
-    Route.post("/access/roles", handleAccessRolePost),
-    Route.post("/access/devices", handleAccessDevicePost),
-    Route.post("/access/teams", handleAccessTeamPost),
+    csrfPost("/access/roles", handleAccessRolePost),
+    csrfPost("/access/devices", handleAccessDevicePost),
+    csrfPost("/access/teams", handleAccessTeamPost),
     Route.get("/settings", handleSettingsPage),
     Route.get("/settings/theme", handleSettingsThemePage),
     Route.get("/settings/models", handleSettingsModelsPage),
-    Route.post("/settings/models", handleSettingsModelsPost),
+    csrfPost("/settings/models", handleSettingsModelsPost),
     Route.get("/settings/labels", handleLabelsSettingsRedirect),
-    Route.post("/settings/labels", handleLabelsPost),
+    csrfPost("/settings/labels", handleLabelsPost),
     Route.get("/labels", handleLabelsPage),
-    Route.post("/labels", handleLabelsPost),
+    csrfPost("/labels", handleLabelsPost),
     Route.get("/pipelines", handleActionsPage),
-    Route.post("/pipelines/request", handleActionsRequestPost),
-    Route.post("/pipelines/run-requested", handleRunRequestedPost),
+    csrfPost("/pipelines/request", handleActionsRequestPost),
+    csrfPost("/pipelines/run-requested", handleRunRequestedPost),
     Route.get("/workflows", handleWorkflowsRedirect),
-    Route.post("/workflows/request", handleWorkflowsRequestRedirect),
-    Route.post("/workflows/run-requested", handleWorkflowsRunRequestedRedirect),
+    sameOriginPost("/workflows/request", handleWorkflowsRequestRedirect),
+    sameOriginPost("/workflows/run-requested", handleWorkflowsRunRequestedRedirect),
     Route.get("/actions", handleActionsRedirect),
-    Route.post("/actions/request", handleActionsRequestRedirect),
-    Route.post("/actions/run-requested", handleRunRequestedRedirect),
+    sameOriginPost("/actions/request", handleActionsRequestRedirect),
+    sameOriginPost("/actions/run-requested", handleRunRequestedRedirect),
     Route.get("/events", handleEventsPage),
     Route.get("/refs", handleRefsPage),
-    Route.post("/refs/sync", handleRefsSyncPost),
-    Route.post("/refs/delete", handleRefsDeletePost),
+    csrfPost("/refs/sync", handleRefsSyncPost),
+    csrfPost("/refs/delete", handleRefsDeletePost),
     Route.get("/worktrees", handleWorktreesPage),
     Route.get("/new-issue", handleNewIssuePage),
     Route.get("/new-pull", handleNewPullPage),
     Route.get("/new-pr", handleNewPullPage),
     Route.get("/favicon.ico", handleFavicon),
 };
+
+fn sameOriginPost(comptime path: []const u8, handler: WebRouter.Handler) Route {
+    return Route.post(path, handler).withSecurity(.{ .same_origin = true });
+}
+
+fn csrfPost(comptime path: []const u8, handler: WebRouter.Handler) Route {
+    return Route.post(path, handler).withSecurity(.{
+        .same_origin = true,
+        .csrf = true,
+    });
+}
+
+fn trustedCsrfPost(comptime path: []const u8, handler: WebRouter.Handler) Route {
+    return Route.post(path, handler).withSecurity(.{
+        .same_origin = true,
+        .csrf = true,
+        .trusted_origin = true,
+    });
+}
 
 pub fn serve(allocator: Allocator, repo: Repo, options: Options) !void {
     const bind_host = zwf.server.bindHost(options);
@@ -235,6 +254,11 @@ fn handleWebConnectionWithContext(allocator: Allocator, app_context: WebAppConte
     };
     defer request.deinit(allocator);
 
+    if (!isTrustedHostRequest(request)) {
+        try shared.sendPlainResponse(allocator, stream, 403, "Forbidden", "Forbidden\n");
+        return;
+    }
+
     var ctx = WebContext{
         .allocator = allocator,
         .repo = app_context.repo,
@@ -244,15 +268,12 @@ fn handleWebConnectionWithContext(allocator: Allocator, app_context: WebAppConte
         .response = zwf.Response.initWithRequest(allocator, stream, request),
     };
 
-    if (!isValidCsrfRequest(request)) {
-        try shared.sendPlainResponse(allocator, stream, 403, "Forbidden", "Forbidden\n");
-        return;
-    }
     if (try zwf.middleware.sendStaticAssets(ctx.response, ctx.request, &vendor_assets)) return;
 
     const router = WebRouter.init(&routes);
     if (try router.match(request.method, request.path)) |route_match| {
         ctx.request = request.withParams(route_match.params);
+        if (!try authorizeRouteRequest(ctx, route_match.route)) return;
         switch (route_match.route.action) {
             .handler => |handler| handler(ctx) catch |err| {
                 if (err == CliError.LocalInboxChanged) {
@@ -267,6 +288,23 @@ fn handleWebConnectionWithContext(allocator: Allocator, app_context: WebAppConte
     }
 
     try sendNotFound(ctx);
+}
+
+fn authorizeRouteRequest(ctx: WebContext, route: Route) !bool {
+    const policy = route.security;
+    if (policy.same_origin and !isSameOriginPost(ctx.request)) {
+        try shared.sendPlainResponse(ctx.allocator, ctx.stream, 403, "Forbidden", "Forbidden: same-origin request required\n");
+        return false;
+    }
+    if (policy.trusted_origin and !requestHasTrustedOrigin(ctx.request)) {
+        try shared.sendPlainResponse(ctx.allocator, ctx.stream, 403, "Forbidden", "Forbidden\n");
+        return false;
+    }
+    if (policy.csrf and !requestHasValidCsrfToken(ctx.allocator, ctx.request, ctx.csrf_token)) {
+        try shared.sendPlainResponse(ctx.allocator, ctx.stream, 403, "Forbidden", "Invalid CSRF token\n");
+        return false;
+    }
+    return true;
 }
 
 fn requestHasTrustedOrigin(request: zwf.Request) bool {
@@ -395,6 +433,12 @@ fn isSameOriginPost(request: HttpRequest) bool {
     return false;
 }
 
+fn isTrustedHostRequest(request: HttpRequest) bool {
+    const host_header = request.headerValue("host") orelse return false;
+    const request_authority = parseAuthority(host_header) orelse return false;
+    return isLoopbackHost(request_authority.host);
+}
+
 const Authority = struct {
     host: []const u8,
     port: ?u16,
@@ -505,7 +549,7 @@ fn handleIssueEditPage(ctx: WebContext) !void {
         try sendPlainNotFound(ctx);
         return;
     };
-    try sendOwnedHtml(ctx, try issues_page.renderIssueEditPage(ctx.allocator, ctx.repo, issue_ref, ctx.request.target));
+    try sendOwnedHtml(ctx, try issues_page.renderIssueEditPage(ctx.allocator, ctx.repo, issue_ref, ctx.request.target, ctx.csrf_token));
 }
 
 fn handleIssueDetailPage(ctx: WebContext) !void {
@@ -527,7 +571,8 @@ fn handleIssueActionPost(ctx: WebContext) !void {
     };
 
     if (std.mem.eql(u8, action, "edit")) {
-        try issues_page.handleIssueEditPost(ctx.allocator, ctx.repo, ctx.stream, issue_ref, ctx.request.body);
+        if (!try requireCsrfToken(ctx)) return;
+        try issues_page.handleIssueEditPost(ctx.allocator, ctx.repo, ctx.stream, issue_ref, ctx.csrf_token, ctx.request.body);
     } else if (std.mem.eql(u8, action, "checklist")) {
         if (!try requireCsrfToken(ctx)) return;
         try issues_page.handleIssueChecklistPost(ctx.allocator, ctx.repo, ctx.stream, issue_ref, ctx.request.body);
@@ -538,7 +583,8 @@ fn handleIssueActionPost(ctx: WebContext) !void {
         if (!try requireCsrfToken(ctx)) return;
         try issues_page.handleIssueNotificationPost(ctx.allocator, ctx.repo, ctx.stream, issue_ref, ctx.request.body);
     } else if (std.mem.eql(u8, action, "sidebar")) {
-        try issues_page.handleIssueSidebarPost(ctx.allocator, ctx.repo, ctx.stream, issue_ref, ctx.request.body);
+        if (!try requireCsrfToken(ctx)) return;
+        try issues_page.handleIssueSidebarPost(ctx.allocator, ctx.repo, ctx.stream, issue_ref, ctx.csrf_token, ctx.request.body);
     } else {
         try sendPlainNotFound(ctx);
     }
@@ -595,6 +641,7 @@ fn handlePullActionPost(ctx: WebContext) !void {
         if (!try requireCsrfToken(ctx)) return;
         try pulls_page.handlePullChecklistPost(ctx.allocator, ctx.repo, ctx.stream, pull_ref, ctx.request.body);
     } else if (std.mem.eql(u8, action, "comments")) {
+        if (!try requireCsrfToken(ctx)) return;
         try pulls_page.handlePullCommentPost(ctx.allocator, ctx.repo, ctx.stream, pull_ref, ctx.request.body);
     } else if (std.mem.eql(u8, action, "notifications")) {
         if (!try requireCsrfToken(ctx)) return;
@@ -617,14 +664,16 @@ fn handleProjectsPage(ctx: WebContext) !void {
 }
 
 fn handleNewProjectPage(ctx: WebContext) !void {
-    try sendOwnedHtml(ctx, try projects_page.renderProjectFormFromTarget(ctx.allocator, ctx.repo, ctx.request.target));
+    try sendOwnedHtml(ctx, try projects_page.renderProjectFormFromTarget(ctx.allocator, ctx.repo, ctx.request.target, ctx.csrf_token));
 }
 
 fn handleProjectPost(ctx: WebContext) !void {
-    try projects_page.handleProjectPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
+    if (!try requireCsrfToken(ctx)) return;
+    try projects_page.handleProjectPost(ctx.allocator, ctx.repo, ctx.stream, ctx.csrf_token, ctx.request.body);
 }
 
 fn handleProjectItemPost(ctx: WebContext) !void {
+    if (!try requireCsrfToken(ctx)) return;
     try projects_page.handleProjectItemPost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
 }
 
@@ -790,11 +839,12 @@ fn handleWorktreesPage(ctx: WebContext) !void {
 }
 
 fn handleNewIssuePage(ctx: WebContext) !void {
-    try sendOwnedHtml(ctx, try issues_page.renderIssueFormFromTarget(ctx.allocator, ctx.repo, ctx.request.target));
+    try sendOwnedHtml(ctx, try issues_page.renderIssueFormFromTarget(ctx.allocator, ctx.repo, ctx.request.target, ctx.csrf_token));
 }
 
 fn handleIssuePost(ctx: WebContext) !void {
-    try issues_page.handleIssuePost(ctx.allocator, ctx.repo, ctx.stream, ctx.request.body);
+    if (!try requireCsrfToken(ctx)) return;
+    try issues_page.handleIssuePost(ctx.allocator, ctx.repo, ctx.stream, ctx.csrf_token, ctx.request.body);
 }
 
 fn handleNewPullPage(ctx: WebContext) !void {
@@ -968,6 +1018,23 @@ fn sourceUrlMatchesRequestHost(source: []const u8, request: HttpRequest) bool {
 
 pub fn parseContentLength(headers: []const u8) !usize {
     return zwf.request.parseContentLength(headers);
+}
+
+fn csrfOptionalPostRoute(path: []const u8) bool {
+    return std.mem.eql(u8, path, "/code/sync") or
+        std.mem.eql(u8, path, "/live-mode") or
+        std.mem.eql(u8, path, "/workflows/request") or
+        std.mem.eql(u8, path, "/workflows/run-requested") or
+        std.mem.eql(u8, path, "/actions/request") or
+        std.mem.eql(u8, path, "/actions/run-requested");
+}
+
+test "web post routes declare same-origin and csrf policy" {
+    for (routes) |route| {
+        if (route.method != .POST) continue;
+        try std.testing.expect(route.security.same_origin);
+        try std.testing.expect(route.security.csrf or csrfOptionalPostRoute(route.path));
+    }
 }
 
 test "merge origin guard accepts same-origin posts" {
@@ -1451,6 +1518,35 @@ test "actions csrf guard rejects dns-rebound non-loopback host" {
     try std.testing.expect(!isSameOriginBrowserRequest(dns_rebound_request));
 }
 
+test "web host guard only accepts loopback request hosts" {
+    const loopback = try parseHttpRequest(
+        "GET /issues HTTP/1.1\r\n" ++
+            "Host: 127.0.0.1:12655\r\n" ++
+            "\r\n",
+    );
+    try std.testing.expect(isTrustedHostRequest(loopback));
+
+    const localhost_subdomain = try parseHttpRequest(
+        "GET /issues HTTP/1.1\r\n" ++
+            "Host: gitomi.localhost:12655\r\n" ++
+            "\r\n",
+    );
+    try std.testing.expect(isTrustedHostRequest(localhost_subdomain));
+
+    const dns_rebound = try parseHttpRequest(
+        "GET /issues HTTP/1.1\r\n" ++
+            "Host: evil.example:12655\r\n" ++
+            "\r\n",
+    );
+    try std.testing.expect(!isTrustedHostRequest(dns_rebound));
+
+    const missing_host = try parseHttpRequest(
+        "GET /issues HTTP/1.0\r\n" ++
+            "\r\n",
+    );
+    try std.testing.expect(!isTrustedHostRequest(missing_host));
+}
+
 test "raw blob GET requires same-origin fetch metadata or source headers" {
     const same_origin_fetch = try parseHttpRequest(
         "GET /raw?path=movie.mp4 HTTP/1.1\r\n" ++
@@ -1581,6 +1677,40 @@ test "project property posts require explicit csrf token" {
     const missing_request = try parseHttpRequest(missing_raw);
     try std.testing.expect(isValidCsrfRequest(missing_request));
     try std.testing.expect(!requestHasValidCsrfToken(std.testing.allocator, missing_request, "local-token"));
+}
+
+test "issue project and pull forms require explicit csrf tokens" {
+    const protected_paths = [_][]const u8{
+        "/issues",
+        "/issues/abc/edit",
+        "/projects",
+        "/projects/items",
+        "/pulls/1/comments",
+    };
+    const valid_body = "_csrf=local-token&value=ok";
+    const missing_body = "value=ok";
+
+    for (protected_paths) |path| {
+        const valid_raw = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "POST {s} HTTP/1.1\r\nHost: 127.0.0.1:12655\r\nOrigin: http://127.0.0.1:12655\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {d}\r\n\r\n{s}",
+            .{ path, valid_body.len, valid_body },
+        );
+        defer std.testing.allocator.free(valid_raw);
+        const valid_request = try parseHttpRequest(valid_raw);
+        try std.testing.expect(isValidCsrfRequest(valid_request));
+        try std.testing.expect(requestHasValidCsrfToken(std.testing.allocator, valid_request, "local-token"));
+
+        const missing_raw = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "POST {s} HTTP/1.1\r\nHost: 127.0.0.1:12655\r\nOrigin: http://127.0.0.1:12655\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {d}\r\n\r\n{s}",
+            .{ path, missing_body.len, missing_body },
+        );
+        defer std.testing.allocator.free(missing_raw);
+        const missing_request = try parseHttpRequest(missing_raw);
+        try std.testing.expect(isValidCsrfRequest(missing_request));
+        try std.testing.expect(!requestHasValidCsrfToken(std.testing.allocator, missing_request, "local-token"));
+    }
 }
 
 test "milestone posts require explicit csrf token" {

@@ -123,7 +123,7 @@ pub fn renderProjectWorkspace(
         return buf.toOwnedSlice(allocator);
     }
     if (std.mem.eql(u8, effective_view_ref, "activity")) {
-        try appendProjectActivityView(&buf, allocator, repo, db, project, csrf_token);
+        try appendProjectActivityView(&buf, allocator, db, project, csrf_token);
         try appendShellEnd(&buf, allocator);
         return buf.toOwnedSlice(allocator);
     }

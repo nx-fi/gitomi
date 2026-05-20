@@ -8,6 +8,7 @@ pub const Options = struct {
     act_path: []const u8 = "act",
     agent_runner_path: ?[]const u8 = null,
     dry_run: bool = false,
+    allow_untrusted_local_execution: bool = false,
     extra_args: []const []const u8 = &.{},
 };
 
@@ -15,6 +16,7 @@ pub const DaemonOptions = struct {
     act_path: []const u8 = "act",
     agent_runner_path: ?[]const u8 = null,
     dry_run: bool = false,
+    allow_untrusted_local_execution: bool = false,
     extra_args: []const []const u8 = &.{},
     once: bool = false,
     replay: bool = false,

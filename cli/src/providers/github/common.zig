@@ -6,6 +6,7 @@ const git = @import("../../git.zig");
 const io = @import("../../io.zig");
 const json_writer = @import("../../json_writer.zig");
 const util = @import("../../util.zig");
+const provider_common = @import("../common.zig");
 const http_client = @import("../http_client.zig");
 
 const Allocator = std.mem.Allocator;
@@ -169,38 +170,8 @@ pub fn githubTokenFromEnv(allocator: Allocator) !?[]u8 {
     };
 }
 
-pub fn secretFromEnv(allocator: Allocator, command: []const u8, env_name: []const u8) ![]u8 {
-    const value = std.process.getEnvVarOwned(allocator, env_name) catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => {
-            try eprint("{s}: environment variable {s} is not set\n", .{ command, env_name });
-            return CliError.MissingArgument;
-        },
-        else => return err,
-    };
-    errdefer allocator.free(value);
-    if (std.mem.trim(u8, value, " \t\r\n").len == 0) {
-        try eprint("{s}: environment variable {s} must not be empty\n", .{ command, env_name });
-        return CliError.MissingArgument;
-    }
-    return value;
-}
-
-pub fn secretFromFile(allocator: Allocator, command: []const u8, path: []const u8) ![]u8 {
-    const bytes = std.fs.cwd().readFileAlloc(allocator, path, 64 * 1024) catch |err| switch (err) {
-        error.FileNotFound => {
-            try eprint("{s}: secret file {s} was not found\n", .{ command, path });
-            return CliError.MissingArgument;
-        },
-        else => return err,
-    };
-    defer allocator.free(bytes);
-    const trimmed = std.mem.trim(u8, bytes, " \t\r\n");
-    if (trimmed.len == 0) {
-        try eprint("{s}: secret file {s} must not be empty\n", .{ command, path });
-        return CliError.MissingArgument;
-    }
-    return try allocator.dupe(u8, trimmed);
-}
+pub const secretFromEnv = provider_common.secretFromEnv;
+pub const secretFromFile = provider_common.secretFromFile;
 
 pub fn githubRequestStderrIsNotFound(stderr: []const u8) bool {
     return http_client.requestStderrIsNotFound(stderr);
@@ -208,45 +179,11 @@ pub fn githubRequestStderrIsNotFound(stderr: []const u8) bool {
 
 pub fn githubSizedString(allocator: Allocator, value: ?[]const u8, fallback: []const u8, max_bytes: usize) ![]u8 {
     const raw = value orelse fallback;
-    return githubSizedStringWithMarker(allocator, raw, max_bytes, "\n\n[truncated by gitomi github import]");
-}
-
-fn githubSizedStringWithMarker(allocator: Allocator, raw: []const u8, max_bytes: usize, marker: []const u8) ![]u8 {
-    if (raw.len <= max_bytes) return allocator.dupe(u8, raw);
-
-    if (max_bytes <= marker.len) return allocator.dupe(u8, raw[0..utf8PrefixLen(raw, max_bytes)]);
-
-    const prefix_len = utf8PrefixLen(raw, max_bytes - marker.len);
-    var out_buf: std.ArrayList(u8) = .empty;
-    errdefer out_buf.deinit(allocator);
-    try out_buf.appendSlice(allocator, raw[0..prefix_len]);
-    try out_buf.appendSlice(allocator, marker);
-    return try out_buf.toOwnedSlice(allocator);
+    return provider_common.sizedStringWithMarker(allocator, raw, max_bytes, "\n\n[truncated by gitomi github import]");
 }
 
 pub fn githubSubject(allocator: Allocator, prefix: []const u8, title: []const u8) ![]u8 {
-    const title_limit = if (prefix.len >= git.max_event_subject_bytes) 0 else git.max_event_subject_bytes - prefix.len;
-    const title_line = try githubSubjectLine(allocator, title);
-    defer allocator.free(title_line);
-    const title_part = try githubSizedStringWithMarker(allocator, title_line, title_limit, " [truncated by gitomi github import]");
-    defer allocator.free(title_part);
-    return std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, title_part });
-}
-
-fn githubSubjectLine(allocator: Allocator, title: []const u8) ![]u8 {
-    const line = try allocator.dupe(u8, title);
-    for (line) |*byte| {
-        if (byte.* == '\r' or byte.* == '\n') byte.* = ' ';
-    }
-    return line;
-}
-
-pub fn utf8PrefixLen(value: []const u8, max_bytes: usize) usize {
-    var len = @min(value.len, max_bytes);
-    while (len > 0 and len < value.len and (value[len] & 0xc0) == 0x80) {
-        len -= 1;
-    }
-    return len;
+    return provider_common.subjectWithMarker(allocator, prefix, title, " [truncated by gitomi github import]");
 }
 
 pub fn singleArrayBody(allocator: Allocator, key: []const u8, value: []const u8) ![]u8 {

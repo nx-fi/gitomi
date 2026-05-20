@@ -12,6 +12,7 @@ const appendTemplate = shared.appendTemplate;
 const sendPlainResponse = shared.sendPlainResponse;
 const sendRedirect = shared.sendRedirect;
 const sendResponse = shared.sendResponse;
+const zwf = @import("../../zwf.zig");
 
 pub fn renderPullForm(
     allocator: Allocator,
@@ -35,10 +36,11 @@ pub fn renderPullForm(
     }
     try appendTemplate(&buf, allocator,
         \\  <form method="post" action="/pulls" class="issue-form">
-        \\    <input type="hidden" name="csrf_token" value="{csrf_token}">
+        \\    <input type="hidden" name="{csrf_field}" value="{csrf_token}">
         \\    <label>Title<input name="title" value="{title_value}" autofocus required></label>
         \\    <label>Body</label>
     , .{
+        .csrf_field = zwf.csrf.field_name,
         .csrf_token = csrf_token,
         .title_value = title_value,
     });
@@ -70,9 +72,9 @@ pub fn renderPullForm(
 }
 
 pub fn handlePullPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, csrf_token: []const u8, form_body: []const u8) !void {
-    const submitted_token = try shared.formValueOwned(allocator, form_body, "csrf_token");
+    const submitted_token = try shared.formValueOwned(allocator, form_body, zwf.csrf.field_name);
     defer if (submitted_token) |value| allocator.free(value);
-    if (submitted_token == null or !std.mem.eql(u8, submitted_token.?, csrf_token)) {
+    if (submitted_token == null or !zwf.csrf.verify(csrf_token, std.mem.trim(u8, submitted_token.?, " \t\r\n"))) {
         try sendPlainResponse(allocator, stream, 403, "Forbidden", "Invalid CSRF token\n");
         return;
     }

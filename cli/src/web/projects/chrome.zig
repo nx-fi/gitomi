@@ -94,8 +94,8 @@ pub fn appendProjectWorkspaceChromeStart(
         .project = project,
     });
     try buf.appendSlice(allocator, "</div>");
-    try appendProjectViewTabs(buf, allocator, db, project, active_view, issue_count, csrf_token);
-    try appendProjectItemActions(buf, allocator, db, project, active_view);
+    try appendProjectViewTabs(buf, allocator, db, project, active_view, csrf_token);
+    try appendProjectItemActions(buf, allocator, db, project, active_view, csrf_token);
     try appendProjectIssueSearchIndex(buf, allocator, db);
     try appendTemplate(buf, allocator,
         \\  <form class="project-filter-bar" method="get" action="/issues">
@@ -189,12 +189,8 @@ fn appendProjectIssueSearchIndex(buf: *std.ArrayList(u8), allocator: Allocator, 
 pub fn appendProjectColumnOptions(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
-    db: *SqliteDb,
-    project: []const u8,
     selected: ?[]const u8,
 ) !void {
-    _ = db;
-    _ = project;
     for (project_status_values) |status| {
         try appendTemplate(buf, allocator,
             \\<option value="{value}"{selected}>{label}</option>
@@ -327,7 +323,6 @@ fn appendProjectViewTabs(
     db: *SqliteDb,
     project: []const u8,
     active_view: *const ActiveProjectView,
-    issue_count: usize,
     csrf_token: []const u8,
 ) !void {
     const active_tab: project_overview.ProjectPageTab = switch (active_view.layout) {
@@ -338,7 +333,7 @@ fn appendProjectViewTabs(
     };
     const project_id = try projectIdOwned(allocator, db, project);
     defer if (project_id) |value| allocator.free(value);
-    try project_overview.appendProjectPageTabs(buf, allocator, project, project_id orelse "", active_tab, issue_count, csrf_token);
+    try project_overview.appendProjectPageTabs(buf, allocator, project, project_id orelse "", active_tab, csrf_token);
 }
 
 fn appendProjectItemActions(
@@ -347,6 +342,7 @@ fn appendProjectItemActions(
     db: *SqliteDb,
     project: []const u8,
     active_view: *const ActiveProjectView,
+    csrf_token: []const u8,
 ) !void {
     const defaults = projectViewDefaultsFromConfig(allocator, active_view.config_json);
     try buf.appendSlice(allocator,
@@ -357,10 +353,12 @@ fn appendProjectItemActions(
         \\    <summary class="button primary" aria-expanded="false"><span class="project-link-icon" aria-hidden="true"></span>Add issue</summary>
         \\    <div class="project-action-popover project-action-popover-narrow">
         \\      <form class="project-item-form" method="post" action="/projects/items">
+        \\        <input type="hidden" name="_csrf" value="{csrf_token}">
         \\        <input type="hidden" name="action" value="add-existing">
         \\        <input type="hidden" name="project" value="{project}">
         \\        <input type="hidden" name="view" value="{view}">
     , .{
+        .csrf_token = csrf_token,
         .project = project,
         .view = active_view.ref,
     });
@@ -375,11 +373,13 @@ fn appendProjectItemActions(
         \\    <summary class="button secondary" aria-expanded="false"><span class="project-add-icon" aria-hidden="true"></span>New issue</summary>
         \\    <div class="project-action-popover">
         \\      <form class="project-item-form" method="post" action="/projects/items">
+        \\        <input type="hidden" name="_csrf" value="{csrf_token}">
         \\        <input type="hidden" name="action" value="create-issue">
         \\        <input type="hidden" name="project" value="{project}">
         \\        <input type="hidden" name="view" value="{view}">
         \\        <label>Title<input name="title" required></label>
     , .{
+        .csrf_token = csrf_token,
         .project = project,
         .view = active_view.ref,
     });

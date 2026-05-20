@@ -1634,8 +1634,9 @@
 
   function projectMarkdownHashPayload(form) {
     const kind = form.dataset.projectContentKind || "";
-    const checkedStatus = form.querySelector("input[type='radio'][name='status']:checked");
-    const statusInput = checkedStatus || form.querySelector("[name='status']");
+    const markerName = kind === "project-update" ? "update_health" : "status";
+    const checkedStatus = form.querySelector("input[type='radio'][name='" + markerName + "']:checked");
+    const statusInput = checkedStatus || form.querySelector("[name='" + markerName + "']");
     const textarea = form.querySelector("[data-markdown-input]");
     const status = statusInput ? String(statusInput.value || "") : "";
     let body = textarea ? String(textarea.value || "") : "";
@@ -1670,6 +1671,8 @@
 
   function resetProjectMarkdownForm(form) {
     form.reset();
+    delete form.dataset.projectHashPending;
+    delete form.dataset.projectHashSubmitting;
     form.querySelectorAll("details[open]").forEach(function (details) {
       details.open = false;
     });
@@ -1688,16 +1691,28 @@
       form.dataset.projectMarkdownFormReady = "yes";
       form.addEventListener("submit", function (event) {
         if (form.dataset.projectHashSubmitting === "yes") return;
+        if (form.dataset.projectHashPending === "yes") {
+          event.preventDefault();
+          return;
+        }
         if (!form.querySelector("[data-project-current-hash]")) return;
         if (!window.crypto || !window.crypto.subtle || typeof TextEncoder === "undefined") return;
         event.preventDefault();
-        if (typeof window.gitomiLockSubmitControls === "function") {
-          window.gitomiLockSubmitControls(form, projectMarkdownSubmitter(event, form));
-        }
+        const submitter = projectMarkdownSubmitter(event, form);
+        form.dataset.projectHashPending = "yes";
         updateProjectMarkdownCurrentHash(form).finally(function () {
+          delete form.dataset.projectHashPending;
           form.dataset.projectHashSubmitting = "yes";
           if (typeof form.requestSubmit === "function") {
-            form.requestSubmit();
+            if (submitter && submitter.form === form && !submitter.disabled) {
+              try {
+                form.requestSubmit(submitter);
+              } catch (_) {
+                form.requestSubmit();
+              }
+            } else {
+              form.requestSubmit();
+            }
           } else {
             form.submit();
           }

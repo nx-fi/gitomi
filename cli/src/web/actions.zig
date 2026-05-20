@@ -339,7 +339,7 @@ fn appendActionsMain(
 
     try appendActionsStatus(buf, allocator, stats);
     try appendActionsManualRun(buf, allocator, workflows, filters, stats, csrf_token);
-    try appendWorkflowOverview(buf, allocator, workflows, runs, filters, stats);
+    try appendWorkflowOverview(buf, allocator, workflows, runs, filters);
 
     try appendTemplate(buf, allocator,
         \\<section class="actions-runs-panel">
@@ -614,9 +614,7 @@ fn appendWorkflowOverview(
     workflows: []const actions.Workflow,
     runs: []const RunRow,
     filters: ActionsFilters,
-    stats: ActionsStats,
 ) !void {
-    _ = stats;
     if (workflows.len == 0) return;
 
     if (filters.workflow) |selected| {

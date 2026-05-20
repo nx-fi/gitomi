@@ -131,7 +131,7 @@ fn appendProjectTableFieldCells(
     for (fields.items[0..fields.len]) |field| {
         const value = try projectFieldStringValue(allocator, db, project, issue_id, field.key);
         defer allocator.free(value);
-        try appendProjectTableFieldCell(buf, allocator, project, issue_id, context.view_ref, field, value);
+        try appendProjectTableFieldCell(buf, allocator, project, issue_id, context, field, value);
     }
 }
 
@@ -140,23 +140,25 @@ fn appendProjectTableFieldCell(
     allocator: Allocator,
     project: []const u8,
     issue_id: []const u8,
-    view_ref: []const u8,
+    context: *const ProjectRenderContext,
     field: ProjectTableField,
     value: []const u8,
 ) !void {
     try appendTemplate(buf, allocator,
         \\<td>
         \\  <form class="project-table-field-form" method="post" action="/projects/items">
+        \\    <input type="hidden" name="_csrf" value="{csrf_token}">
         \\    <input type="hidden" name="action" value="set-project-field">
         \\    <input type="hidden" name="project" value="{project}">
         \\    <input type="hidden" name="issue" value="{issue}">
         \\    <input type="hidden" name="field" value="{field_key}">
         \\    <input type="hidden" name="view" value="{view}">
     , .{
+        .csrf_token = context.csrf_token,
         .project = project,
         .issue = issue_id,
         .field_key = field.key,
-        .view = view_ref,
+        .view = context.view_ref,
     });
     if (std.mem.eql(u8, field.field_type, "boolean")) {
         try appendProjectBooleanFieldSelect(buf, allocator, field.name, value);
@@ -445,7 +447,8 @@ pub fn appendProjectTable(
     target: []const u8,
     csrf_token: []const u8,
 ) !void {
-    const context = projectRenderContextFromView(allocator, active_view, current_principal);
+    var context = projectRenderContextFromView(allocator, active_view, current_principal);
+    context.csrf_token = csrf_token;
     const issue_count = try projectIssueCount(db, project, context.filter);
     const options = try projectTableOptionsFromTarget(allocator, target, active_view);
     var table_fields = try projectTableFieldsFromConfig(allocator, db, project, active_view.config_json);
@@ -597,7 +600,6 @@ fn appendProjectTableRows(
         \\),
         \\issue_rows AS (
         \\  SELECT DISTINCT i.id, i.title, i.state,
-        \\         COALESCE(NULLIF(m.source_author, ''), NULLIF(si.display_name, ''), i.author_principal) AS author,
         \\         i.opened_at,
         \\         COALESCE(m.milestone, '') AS milestone,
         \\         COALESCE(m.priority, '') AS priority,
@@ -609,7 +611,6 @@ fn appendProjectTableRows(
         \\  FROM project_items p
         \\  JOIN issues i ON i.id = p.issue_id
         \\  LEFT JOIN issue_metadata m ON m.issue_id = i.id
-        \\  LEFT JOIN identities si ON si.id = m.source_identity
         \\  LEFT JOIN legacy_aliases a
         \\    ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
         \\  WHERE 1 = 1
@@ -617,7 +618,7 @@ fn appendProjectTableRows(
         \\)
         \\SELECT *
         \\FROM (
-        \\  SELECT id, title, state, author, opened_at, milestone, priority, status, legacy_number, comment_count, assignees, labels,
+        \\  SELECT id, title, state, opened_at, milestone, priority, status, legacy_number, comment_count, assignees, labels,
         \\         {s} AS group_label,
         \\         {s} AS group_order,
         \\         COUNT(*) OVER (PARTITION BY {s}) AS group_count
@@ -650,28 +651,26 @@ fn appendProjectTableRows(
         defer allocator.free(title_text);
         const state = try rows.columnTextDup(allocator, 2);
         defer allocator.free(state);
-        const author = try rows.columnTextDup(allocator, 3);
-        defer allocator.free(author);
-        const opened_at = try rows.columnTextDup(allocator, 4);
+        const opened_at = try rows.columnTextDup(allocator, 3);
         defer allocator.free(opened_at);
-        const milestone = try rows.columnTextDup(allocator, 5);
+        const milestone = try rows.columnTextDup(allocator, 4);
         defer allocator.free(milestone);
-        const priority = try rows.columnTextDup(allocator, 6);
+        const priority = try rows.columnTextDup(allocator, 5);
         defer allocator.free(priority);
-        const status = try rows.columnTextDup(allocator, 7);
+        const status = try rows.columnTextDup(allocator, 6);
         defer allocator.free(status);
-        const legacy_number = rows.columnInt64(8);
-        const comment_count = @as(usize, @intCast(rows.columnInt64(9)));
-        const group_label = try rows.columnTextDup(allocator, 12);
+        const legacy_number = rows.columnInt64(7);
+        const comment_count = @as(usize, @intCast(rows.columnInt64(8)));
+        const group_label = try rows.columnTextDup(allocator, 11);
         defer allocator.free(group_label);
-        const group_count = @as(usize, @intCast(rows.columnInt64(14)));
+        const group_count = @as(usize, @intCast(rows.columnInt64(13)));
 
         if (previous_group == null or !std.mem.eql(u8, previous_group.?, group_label)) {
             try replacePreviousProjectTableGroup(allocator, &previous_group, group_label);
             try appendProjectTableGroupHeader(buf, allocator, context, options.group, group_label, group_count);
         }
 
-        try appendProjectTableIssueRow(buf, allocator, db, project, context, id, title_text, state, author, opened_at, milestone, priority, status, legacy_number, comment_count);
+        try appendProjectTableIssueRow(buf, allocator, db, project, context, id, title_text, state, opened_at, milestone, priority, status, legacy_number, comment_count);
         shown = true;
     }
 
@@ -762,7 +761,6 @@ fn appendProjectTableGroup(
         \\  LEFT JOIN issue_metadata m ON m.issue_id = pi.issue_id
         \\)
         \\SELECT DISTINCT i.id, i.title, i.state,
-        \\       COALESCE(NULLIF(m.source_author, ''), NULLIF(si.display_name, ''), i.author_principal),
         \\       i.opened_at,
         \\       COALESCE(m.milestone, ''),
         \\       COALESCE(m.priority, ''),
@@ -772,7 +770,6 @@ fn appendProjectTableGroup(
         \\FROM project_items p
         \\JOIN issues i ON i.id = p.issue_id
         \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
-        \\LEFT JOIN identities si ON si.id = m.source_identity
         \\LEFT JOIN legacy_aliases a
         \\  ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
         \\WHERE p.effective_status = ?
@@ -793,19 +790,17 @@ fn appendProjectTableGroup(
         defer allocator.free(title_text);
         const state = try rows.columnTextDup(allocator, 2);
         defer allocator.free(state);
-        const author = try rows.columnTextDup(allocator, 3);
-        defer allocator.free(author);
-        const opened_at = try rows.columnTextDup(allocator, 4);
+        const opened_at = try rows.columnTextDup(allocator, 3);
         defer allocator.free(opened_at);
-        const milestone = try rows.columnTextDup(allocator, 5);
+        const milestone = try rows.columnTextDup(allocator, 4);
         defer allocator.free(milestone);
-        const priority = try rows.columnTextDup(allocator, 6);
+        const priority = try rows.columnTextDup(allocator, 5);
         defer allocator.free(priority);
-        const status = try rows.columnTextDup(allocator, 7);
+        const status = try rows.columnTextDup(allocator, 6);
         defer allocator.free(status);
-        const legacy_number = rows.columnInt64(8);
-        const comment_count = @as(usize, @intCast(rows.columnInt64(9)));
-        try appendProjectTableIssueRow(buf, allocator, db, project, context, id, title_text, state, author, opened_at, milestone, priority, effectiveStatusLabel(status, column), legacy_number, comment_count);
+        const legacy_number = rows.columnInt64(7);
+        const comment_count = @as(usize, @intCast(rows.columnInt64(8)));
+        try appendProjectTableIssueRow(buf, allocator, db, project, context, id, title_text, state, opened_at, milestone, priority, effectiveStatusLabel(status, column), legacy_number, comment_count);
         shown = true;
     }
     if (!shown) {
@@ -846,7 +841,6 @@ fn appendProjectPriorityTableGroup(
         \\  WHERE p.name = ?
         \\)
         \\SELECT DISTINCT i.id, i.title, i.state,
-        \\       COALESCE(NULLIF(m.source_author, ''), NULLIF(si.display_name, ''), i.author_principal),
         \\       i.opened_at,
         \\       COALESCE(m.milestone, ''),
         \\       COALESCE(m.priority, ''),
@@ -856,7 +850,6 @@ fn appendProjectPriorityTableGroup(
         \\FROM project_items p
         \\JOIN issues i ON i.id = p.issue_id
         \\LEFT JOIN issue_metadata m ON m.issue_id = i.id
-        \\LEFT JOIN identities si ON si.id = m.source_identity
         \\LEFT JOIN legacy_aliases a
         \\  ON a.provider = 'github' AND a.object_kind = 'issue' AND a.object_id = i.id
         \\WHERE COALESCE(m.priority, '') = ?
@@ -887,19 +880,17 @@ fn appendProjectPriorityTableGroup(
         defer allocator.free(title_text);
         const state = try rows.columnTextDup(allocator, 2);
         defer allocator.free(state);
-        const author = try rows.columnTextDup(allocator, 3);
-        defer allocator.free(author);
-        const opened_at = try rows.columnTextDup(allocator, 4);
+        const opened_at = try rows.columnTextDup(allocator, 3);
         defer allocator.free(opened_at);
-        const milestone = try rows.columnTextDup(allocator, 5);
+        const milestone = try rows.columnTextDup(allocator, 4);
         defer allocator.free(milestone);
-        const priority = try rows.columnTextDup(allocator, 6);
+        const priority = try rows.columnTextDup(allocator, 5);
         defer allocator.free(priority);
-        const status = try rows.columnTextDup(allocator, 7);
+        const status = try rows.columnTextDup(allocator, 6);
         defer allocator.free(status);
-        const legacy_number = rows.columnInt64(8);
-        const comment_count = @as(usize, @intCast(rows.columnInt64(9)));
-        try appendProjectTableIssueRow(buf, allocator, db, project, context, id, title_text, state, author, opened_at, milestone, priority, status, legacy_number, comment_count);
+        const legacy_number = rows.columnInt64(7);
+        const comment_count = @as(usize, @intCast(rows.columnInt64(8)));
+        try appendProjectTableIssueRow(buf, allocator, db, project, context, id, title_text, state, opened_at, milestone, priority, status, legacy_number, comment_count);
         shown = true;
     }
     if (!shown) {
@@ -918,7 +909,6 @@ fn appendProjectTableIssueRow(
     id: []const u8,
     title: []const u8,
     state: []const u8,
-    author: []const u8,
     opened_at: []const u8,
     milestone: []const u8,
     priority: []const u8,
@@ -954,7 +944,6 @@ fn appendProjectTableIssueRow(
     });
     try appendProjectTableFieldCells(buf, allocator, db, project, id, context);
     try appendTemplate(buf, allocator, "<td>{state}</td><td>", .{ .state = state });
-    _ = author;
     try appendProjectIssueAssignees(buf, allocator, db, id);
     try buf.appendSlice(allocator, "</td><td>");
     try appendKanbanCardLabels(buf, allocator, db, id);

@@ -159,7 +159,7 @@ fn scheduleEventWithContext(
     var pull_refs = try loadPullRefsForEvent(allocator, repo, event_type, object_id);
     defer if (pull_refs) |*refs| refs.deinit();
 
-    var workflow_target = try defaultWorkflowTargetForEvent(allocator, selected_target, pull_refs, event_type, target_ref != null or target_oid != null);
+    var workflow_target = try defaultWorkflowTargetForEvent(allocator, selected_target);
     defer workflow_target.deinit();
 
     const workflows = try loadWorkflows(allocator, workflow_target.target_oid);
@@ -362,7 +362,7 @@ fn runDaemonTick(allocator: Allocator, repo: repo_mod.Repo, options: DaemonOptio
         return;
     }
 
-    try scheduleAcceptedEventsAfter(allocator, repo, &db, state.last_event_ordinal, options);
+    try scheduleAcceptedEventsAfter(allocator, &db, state.last_event_ordinal, options);
     state.last_event_ordinal = max_ordinal;
 
     if (try currentHeadOid(allocator)) |head| {
@@ -398,12 +398,10 @@ fn runDaemonTick(allocator: Allocator, repo: repo_mod.Repo, options: DaemonOptio
 
 fn scheduleAcceptedEventsAfter(
     allocator: Allocator,
-    repo: repo_mod.Repo,
     db: *index.SqliteDb,
     last_ordinal: i64,
     options: DaemonOptions,
 ) !void {
-    _ = repo;
     var stmt = try db.prepare(
         \\SELECT ordinal, event_type, object_id, actor_principal, body
         \\FROM events
@@ -539,6 +537,7 @@ fn daemonRunOptions(options: DaemonOptions) Options {
         .act_path = options.act_path,
         .agent_runner_path = options.agent_runner_path,
         .dry_run = options.dry_run,
+        .allow_untrusted_local_execution = options.allow_untrusted_local_execution,
         .extra_args = options.extra_args,
     };
 }
@@ -701,14 +700,7 @@ fn applyEventDefaultSourcePolicy(workflow: *Workflow, event_type: []const u8) !v
 fn defaultWorkflowTargetForEvent(
     allocator: Allocator,
     selected: ResolvedTarget,
-    pull_refs: ?PullRefs,
-    event_type: []const u8,
-    explicit_target: bool,
 ) !ResolvedTarget {
-    _ = pull_refs;
-    _ = event_type;
-    _ = explicit_target;
-
     // Pull base/head refs come from PR metadata that the pull author can edit.
     // Workflow discovery must stay anchored to the runner-selected target.
     return duplicateTarget(allocator, selected);
@@ -1325,7 +1317,7 @@ test "pull base policy stays on selected target instead of mutable pull base ref
     };
     defer refs.deinit();
 
-    var workflow_target = try defaultWorkflowTargetForEvent(std.testing.allocator, selected, refs, "pull.opened", false);
+    var workflow_target = try defaultWorkflowTargetForEvent(std.testing.allocator, selected);
     defer workflow_target.deinit();
     try std.testing.expectEqualStrings("refs/heads/main", workflow_target.target_ref.?);
     try std.testing.expectEqualStrings("trusted-base-oid", workflow_target.target_oid);
@@ -1419,25 +1411,42 @@ test "permission grant trust is supplied by resolved run context" {
     try std.testing.expect(std.mem.indexOf(u8, trusted, "\"issues\":\"write\"") != null);
 }
 
-test "workflow runtime helpers are semantically checked" {
-    if (std.time.timestamp() == std.math.minInt(i64)) {
-        const repo: repo_mod.Repo = undefined;
-        const workflow: Workflow = undefined;
-        const targets: RunTargets = undefined;
-        var result = try executeWorkflow(
-            std.testing.allocator,
-            repo,
-            "018f0000-0000-7000-8000-000000000000",
-            workflow,
-            targets,
-            "workflow_dispatch",
-            "workflow.manual",
-            null,
-            null,
-            .{},
-        );
-        result.deinit();
+test "workflow runtime request selection filters pending runs" {
+    const allocator = std.testing.allocator;
+    var requests = [_]RunRequest{
+        .{
+            .allocator = allocator,
+            .run_id = try allocator.dupe(u8, "018f0000-0000-7000-8000-000000000001"),
+            .workflow = try allocator.dupe(u8, "ci"),
+            .target_ref = null,
+            .target_oid = null,
+            .event_name = try allocator.dupe(u8, "workflow_dispatch"),
+            .gitomi_event_type = try allocator.dupe(u8, "workflow.manual"),
+        },
+        .{
+            .allocator = allocator,
+            .run_id = try allocator.dupe(u8, "018f0000-0000-7000-8000-000000000002"),
+            .workflow = try allocator.dupe(u8, "release"),
+            .target_ref = null,
+            .target_oid = null,
+            .event_name = try allocator.dupe(u8, "workflow_dispatch"),
+            .gitomi_event_type = try allocator.dupe(u8, "workflow.manual"),
+        },
+    };
+    defer {
+        for (&requests) |*request| request.deinit();
     }
+
+    const all = try selectRequests(allocator, requests[0..], null);
+    defer allocator.free(all);
+    try std.testing.expectEqual(@as(usize, 2), all.len);
+    try std.testing.expectEqual(@as(usize, 0), all[0]);
+    try std.testing.expectEqual(@as(usize, 1), all[1]);
+
+    const selected = try selectRequests(allocator, requests[0..], "018f0000-0000-7000-8000-000000000002");
+    defer allocator.free(selected);
+    try std.testing.expectEqual(@as(usize, 1), selected.len);
+    try std.testing.expectEqual(@as(usize, 1), selected[0]);
 }
 
 test "cron matcher supports wildcards ranges lists and steps" {

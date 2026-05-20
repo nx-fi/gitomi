@@ -329,6 +329,7 @@ fn printUsage() !void {
         \\  gt milestone create --title TITLE [--description TEXT] [--due DATE]
         \\  gt milestone edit MILESTONE [--title TITLE] [--description TEXT] [--due DATE] [--state open|closed]
         \\  gt milestone close|reopen MILESTONE
+        \\  gt milestone delete MILESTONE
         \\  gt pr list [--json] [--view agent] [--state open|merged|closed|all] [--limit N]
         \\  gt pr view PR [--json] [--view agent] [--include-diff]
         \\  gt pr create --title TITLE --base BASE --head HEAD [--body BODY] [--draft]
@@ -371,9 +372,9 @@ fn printUsage() !void {
         \\  gt actions workflows [--json] [--ref REF|--oid OID]
         \\  gt actions request --workflow WORKFLOW [--ref REF|--oid OID] [--event EVENT]
         \\  gt actions complete RUN --conclusion CONCLUSION [--workflow WORKFLOW] [--ref REF|--oid OID] [--event EVENT]
-        \\  gt actions run --event EVENT [--ref REF|--oid OID] [--object-id ID] [--dry-run] [--act PATH] [--agent-runner PATH] [-- ACT_ARGS...]
-        \\  gt actions run-requested [RUN] [--dry-run] [--act PATH] [--agent-runner PATH] [-- ACT_ARGS...]
-        \\  gt actions daemon [--once] [--replay] [--interval-ms N] [--dry-run] [--act PATH] [--agent-runner PATH] [-- ACT_ARGS...]
+        \\  gt actions run --event EVENT [--ref REF|--oid OID] [--object-id ID] [--dry-run] [--allow-untrusted-local-execution] [--act PATH] [--agent-runner PATH] [-- ACT_ARGS...]
+        \\  gt actions run-requested [RUN] [--dry-run] [--allow-untrusted-local-execution] [--act PATH] [--agent-runner PATH] [-- ACT_ARGS...]
+        \\  gt actions daemon [--once] [--replay] [--interval-ms N] [--dry-run] [--allow-untrusted-local-execution] [--act PATH] [--agent-runner PATH] [-- ACT_ARGS...]
         \\  gt runs prune [--dry-run] [--max-age-days N] [--max-count N] [--max-bytes N]
         \\  gt sync [--remote REMOTE] [--pull-only|--push-only]
         \\  gt github import [--repo OWNER/REPO] [--token-env NAME|--token-file PATH] [--from-file PATH] [--no-comments] [--no-projects] [--rest|--graphql]
@@ -381,7 +382,7 @@ fn printUsage() !void {
         \\  gt github sync [--repo OWNER/REPO] [--token-env NAME|--token-file PATH|--use-gh] [--remote REMOTE] [--interval-ms N] [--max-pages N] [--dry-run] [--no-git-sync] [--import-only] [--rest|--graphql]
         \\  gt github live [--repo OWNER/REPO] --webhook-url URL (--secret-env NAME|--secret-file PATH) [--host 127.0.0.1] [--port 12656] [--path /github/webhook] [--remote REMOTE] [--interval-ms N] [--once] [--no-subscribe] [--dry-run] [--no-git-sync] [--rest|--graphql]
         \\  gt gitlab import [--project GROUP/PROJECT] [--token-env NAME|--token-file PATH] [--from-file PATH] [--no-comments]
-        \\  gt gitlab export --project GROUP/PROJECT [--token-env NAME|--token-file PATH] [--dry-run] [--map-file PATH] [--reuse-legacy]
+        \\  gt gitlab export --project GROUP/PROJECT [--token-env NAME|--token-file PATH] [--dry-run] [--map-file PATH]
         \\  gt gitlab sync --project GROUP/PROJECT [--token-env NAME|--token-file PATH] [--remote REMOTE] [--interval-ms N] [--max-pages N] [--dry-run] [--no-git-sync]
         \\  gt web [--local] [--host gitomi.localhost] [--port 12655] [--once]
         \\  gt web --live [--host gitomi.localhost] [--port 12655] [--repo OWNER/REPO] [--webhook-url URL] (--secret-env NAME|--secret-file PATH) [--live-host 127.0.0.1] [--live-port 12656] [--live-path /github/webhook] [--remote REMOTE] [--interval-ms N] [--no-subscribe] [--dry-run] [--no-git-sync] [--rest|--graphql]
@@ -1055,6 +1056,7 @@ fn cmdActions(allocator: Allocator, args: []const []const u8, command_name: []co
         var act_path: []const u8 = "act";
         var agent_runner_path: ?[]const u8 = null;
         var dry_run = false;
+        var allow_untrusted_local_execution = false;
         var extra_args: []const []const u8 = &.{};
         var i: usize = 1;
         while (i < args.len) : (i += 1) {
@@ -1076,6 +1078,8 @@ fn cmdActions(allocator: Allocator, args: []const []const u8, command_name: []co
                 agent_runner_path = try util.requireValue(args, &i, "--agent-runner");
             } else if (std.mem.eql(u8, arg, "--dry-run")) {
                 dry_run = true;
+            } else if (std.mem.eql(u8, arg, "--allow-untrusted-local-execution")) {
+                allow_untrusted_local_execution = true;
             } else {
                 try io.eprint("{s} run: unknown option '{s}'\n", .{ command_name, arg });
                 return CliError.UserError;
@@ -1089,6 +1093,7 @@ fn cmdActions(allocator: Allocator, args: []const []const u8, command_name: []co
             .act_path = act_path,
             .agent_runner_path = agent_runner_path,
             .dry_run = dry_run,
+            .allow_untrusted_local_execution = allow_untrusted_local_execution,
             .extra_args = extra_args,
         });
         return;
@@ -1099,6 +1104,7 @@ fn cmdActions(allocator: Allocator, args: []const []const u8, command_name: []co
         var act_path: []const u8 = "act";
         var agent_runner_path: ?[]const u8 = null;
         var dry_run = false;
+        var allow_untrusted_local_execution = false;
         var extra_args: []const []const u8 = &.{};
         var i: usize = 1;
         while (i < args.len) : (i += 1) {
@@ -1112,6 +1118,8 @@ fn cmdActions(allocator: Allocator, args: []const []const u8, command_name: []co
                 agent_runner_path = try util.requireValue(args, &i, "--agent-runner");
             } else if (std.mem.eql(u8, arg, "--dry-run")) {
                 dry_run = true;
+            } else if (std.mem.eql(u8, arg, "--allow-untrusted-local-execution")) {
+                allow_untrusted_local_execution = true;
             } else if (std.mem.startsWith(u8, arg, "-")) {
                 try io.eprint("{s} run-requested: unknown option '{s}'\n", .{ command_name, arg });
                 return CliError.UserError;
@@ -1126,6 +1134,7 @@ fn cmdActions(allocator: Allocator, args: []const []const u8, command_name: []co
             .act_path = act_path,
             .agent_runner_path = agent_runner_path,
             .dry_run = dry_run,
+            .allow_untrusted_local_execution = allow_untrusted_local_execution,
             .extra_args = extra_args,
         });
         return;
@@ -1145,6 +1154,8 @@ fn cmdActions(allocator: Allocator, args: []const []const u8, command_name: []co
                 options.agent_runner_path = try util.requireValue(args, &i, "--agent-runner");
             } else if (std.mem.eql(u8, arg, "--dry-run")) {
                 options.dry_run = true;
+            } else if (std.mem.eql(u8, arg, "--allow-untrusted-local-execution")) {
+                options.allow_untrusted_local_execution = true;
             } else if (std.mem.eql(u8, arg, "--once")) {
                 options.once = true;
             } else if (std.mem.eql(u8, arg, "--replay")) {

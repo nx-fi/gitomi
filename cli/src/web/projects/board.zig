@@ -91,7 +91,8 @@ pub fn appendProjectBoard(
     current_principal: []const u8,
     csrf_token: []const u8,
 ) !void {
-    const context = projectRenderContextFromView(allocator, active_view, current_principal);
+    var context = projectRenderContextFromView(allocator, active_view, current_principal);
+    context.csrf_token = csrf_token;
     const issue_count = try projectIssueCount(db, project, context.filter);
     try appendProjectWorkspaceChromeStart(buf, allocator, db, project, issue_count, active_view, csrf_token);
     try appendTemplate(buf, allocator,
@@ -129,12 +130,14 @@ fn appendProjectColumn(
         \\        <summary aria-label="Add issue to {title}" title="Add issue"><span class="kanban-column-add" aria-hidden="true"></span></summary>
         \\        <div class="kanban-column-popover">
         \\          <form class="project-item-form project-column-issue-form" method="post" action="/projects/items">
+        \\            <input type="hidden" name="_csrf" value="{csrf_token}">
         \\            <input type="hidden" name="action" value="add-existing">
         \\            <input type="hidden" name="project" value="{project}">
         \\            <input type="hidden" name="column" value="{column}">
         \\            <input type="hidden" name="view" value="{view}">
     , .{
         .tone = tone,
+        .csrf_token = context.csrf_token,
         .project = project,
         .column = column,
         .view = context.view_ref,
@@ -147,11 +150,13 @@ fn appendProjectColumn(
         \\            <div class="form-actions"><button class="button primary" type="submit">Add issue</button></div>
         \\          </form>
         \\          <form class="project-item-form project-column-existing-form" method="post" action="/projects/items">
+        \\            <input type="hidden" name="_csrf" value="{csrf_token}">
         \\            <input type="hidden" name="action" value="create-issue">
         \\            <input type="hidden" name="project" value="{project}">
         \\            <input type="hidden" name="view" value="{view}">
         \\            <label>Title<input name="title" required></label>
     , .{
+        .csrf_token = context.csrf_token,
         .project = project,
         .view = context.view_ref,
     });

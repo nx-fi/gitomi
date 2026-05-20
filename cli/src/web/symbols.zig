@@ -131,8 +131,7 @@ const zig_query =
     \\  [(identifier) (string)] @symbol.name) @symbol.test
 ;
 
-pub fn extract(allocator: Allocator, repo_root: []const u8, path: []const u8, content: []const u8) ![]Symbol {
-    _ = repo_root;
+pub fn extract(allocator: Allocator, path: []const u8, content: []const u8) ![]Symbol {
     return extractTreeSitter(allocator, path, content);
 }
 

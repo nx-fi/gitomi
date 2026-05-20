@@ -420,8 +420,10 @@
     document.addEventListener("click", function (event) {
       const button = event.target instanceof Element ? event.target.closest("[data-history-back]") : null;
       if (!button) return;
-      event.preventDefault();
-      window.history.back();
+      if (window.history.length > 1) {
+        event.preventDefault();
+        window.history.back();
+      }
     });
   }
 

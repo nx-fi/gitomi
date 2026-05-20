@@ -13,7 +13,9 @@ const appendSectionHead = shared.appendSectionHead;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
 const appendTemplate = shared.appendTemplate;
+const appendCsrfInput = shared.appendCsrfInput;
 const formValueOwned = shared.formValueOwned;
+const formHasValidCsrfToken = shared.formHasValidCsrfToken;
 const sendRedirect = shared.sendRedirect;
 const sendResponse = shared.sendResponse;
 const sqlite = index.sqlite;
@@ -28,8 +30,6 @@ const Flash = struct {
     message: []const u8,
 };
 
-const csrf_field_name = "csrf_token";
-
 const roles = [_][]const u8{
     "reader",
     "reporter",
@@ -43,7 +43,7 @@ pub fn renderAccessPage(allocator: Allocator, repo: Repo, csrf_token: []const u8
 }
 
 pub fn handleAccessRolePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8, csrf_token: []const u8) !void {
-    if (!try validateCsrfToken(allocator, form_body, csrf_token)) {
+    if (!try formHasValidCsrfToken(allocator, form_body, csrf_token)) {
         try sendAccessError(allocator, repo, stream, 403, "Forbidden", "Invalid access form token. Reload the page and try again.", csrf_token);
         return;
     }
@@ -85,7 +85,7 @@ pub fn handleAccessRolePost(allocator: Allocator, repo: Repo, stream: std.net.St
 }
 
 pub fn handleAccessDevicePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8, csrf_token: []const u8) !void {
-    if (!try validateCsrfToken(allocator, form_body, csrf_token)) {
+    if (!try formHasValidCsrfToken(allocator, form_body, csrf_token)) {
         try sendAccessError(allocator, repo, stream, 403, "Forbidden", "Invalid access form token. Reload the page and try again.", csrf_token);
         return;
     }
@@ -147,7 +147,7 @@ pub fn handleAccessDevicePost(allocator: Allocator, repo: Repo, stream: std.net.
 }
 
 pub fn handleAccessTeamPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8, csrf_token: []const u8) !void {
-    if (!try validateCsrfToken(allocator, form_body, csrf_token)) {
+    if (!try formHasValidCsrfToken(allocator, form_body, csrf_token)) {
         try sendAccessError(allocator, repo, stream, 403, "Forbidden", "Invalid access form token. Reload the page and try again.", csrf_token);
         return;
     }
@@ -210,21 +210,6 @@ pub fn handleAccessTeamPost(allocator: Allocator, repo: Repo, stream: std.net.St
     }
 
     try sendRedirect(allocator, stream, "/access");
-}
-
-fn validateCsrfToken(allocator: Allocator, form_body: []const u8, csrf_token: []const u8) !bool {
-    const submitted_owned = (try formValueOwned(allocator, form_body, csrf_field_name)) orelse return false;
-    defer allocator.free(submitted_owned);
-    const submitted = std.mem.trim(u8, submitted_owned, " \t\r\n");
-    return submitted.len == csrf_token.len and std.mem.eql(u8, submitted, csrf_token);
-}
-
-fn appendCsrfInput(buf: *std.ArrayList(u8), allocator: Allocator, csrf_token: []const u8) !void {
-    try buf.appendSlice(allocator, "<input type=\"hidden\" name=\"");
-    try shared.appendHtml(buf, allocator, csrf_field_name);
-    try buf.appendSlice(allocator, "\" value=\"");
-    try shared.appendHtml(buf, allocator, csrf_token);
-    try buf.appendSlice(allocator, "\">");
 }
 
 fn sendAccessError(allocator: Allocator, repo: Repo, stream: std.net.Stream, status: u16, reason: []const u8, message: []const u8, csrf_token: []const u8) !void {

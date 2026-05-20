@@ -26,6 +26,7 @@ const my_items_view_config = project_views.my_items_view_config;
 pub fn renderProjectForm(
     allocator: Allocator,
     repo: Repo,
+    csrf_token: []const u8,
     error_message: ?[]const u8,
     name_value: []const u8,
 ) ![]u8 {
@@ -49,7 +50,7 @@ pub fn renderProjectForm(
         , .{ .message = message });
     }
     try buf.appendSlice(allocator, "<div class=\"project-create-layout\">");
-    try appendProjectConfigForm(&buf, allocator, name_value);
+    try appendProjectConfigForm(&buf, allocator, csrf_token, name_value);
     try buf.appendSlice(allocator,
         \\</div>
         \\</section>
@@ -58,25 +59,26 @@ pub fn renderProjectForm(
     return buf.toOwnedSlice(allocator);
 }
 
-pub fn renderProjectFormFromTarget(allocator: Allocator, repo: Repo, target: []const u8) ![]u8 {
+pub fn renderProjectFormFromTarget(allocator: Allocator, repo: Repo, target: []const u8, csrf_token: []const u8) ![]u8 {
     const name = try queryValueOwned(allocator, target, "name");
     defer if (name) |value| allocator.free(value);
 
     return renderProjectForm(
         allocator,
         repo,
+        csrf_token,
         null,
         name orelse "",
     );
 }
 
-pub fn handleProjectPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
+pub fn handleProjectPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, csrf_token: []const u8, form_body: []const u8) !void {
     const name_owned = (try formValueOwned(allocator, form_body, "name")) orelse try allocator.dupe(u8, "");
     defer allocator.free(name_owned);
 
     const name = std.mem.trim(u8, name_owned, " \t\r\n");
     if (name.len == 0) {
-        const body = try renderProjectForm(allocator, repo, "Name is required.", name_owned);
+        const body = try renderProjectForm(allocator, repo, csrf_token, "Name is required.", name_owned);
         defer allocator.free(body);
         try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", body, null);
         return;
@@ -93,6 +95,7 @@ pub fn handleProjectPost(allocator: Allocator, repo: Repo, stream: std.net.Strea
             const body = try renderProjectForm(
                 allocator,
                 repo,
+                csrf_token,
                 message,
                 name_owned,
             );
@@ -151,6 +154,7 @@ fn seedProjectView(
 fn appendProjectConfigForm(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
+    csrf_token: []const u8,
     name_value: []const u8,
 ) !void {
     try appendTemplate(buf, allocator,
@@ -159,8 +163,10 @@ fn appendProjectConfigForm(
         \\    <h2>Project details</h2>
         \\  </div>
         \\  <form method="post" action="/projects" class="issue-form project-form">
+        \\    <input type="hidden" name="_csrf" value="{csrf_token}">
         \\    <label>Name<input name="name" value="{name_value}" autofocus required></label>
     , .{
+        .csrf_token = csrf_token,
         .name_value = name_value,
     });
     try buf.appendSlice(allocator,
@@ -177,8 +183,9 @@ test "project create form only asks for name" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
 
-    try appendProjectConfigForm(&buf, std.testing.allocator, "Release");
+    try appendProjectConfigForm(&buf, std.testing.allocator, "csrf-token", "Release");
 
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "name=\"_csrf\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "name=\"name\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "name=\"project_id\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "name=\"description\"") == null);

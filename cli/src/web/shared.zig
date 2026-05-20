@@ -10,6 +10,7 @@ const avatars = @import("shared/avatars.zig");
 const html = @import("shared/html.zig");
 const response = @import("shared/response.zig");
 const time = @import("shared/time.zig");
+const zwf = @import("../zwf.zig");
 
 const Allocator = std.mem.Allocator;
 const CliError = errors.CliError;
@@ -124,6 +125,12 @@ const appendUserAvatarFromGitIdentity = avatars.appendUserAvatarFromGitIdentity;
 
 pub const localWriteBlockedMessage =
     "Gitomi blocked this write because the local inbox changed while the action was running. Refresh the page and try again; duplicate submission was not written.";
+
+pub fn appendCsrfInput(buf: *std.ArrayList(u8), allocator: Allocator, csrf_token: []const u8) !void {
+    try appendTemplate(buf, allocator,
+        \\<input type="hidden" name="{csrf_field}" value="{csrf_token}">
+    , .{ .csrf_field = zwf.csrf.field_name, .csrf_token = csrf_token });
+}
 
 pub fn writeFailureStatus(err: anyerror) u16 {
     return if (err == CliError.LocalInboxChanged) 409 else 500;
@@ -1703,10 +1710,10 @@ pub fn appendButtonLink(buf: *std.ArrayList(u8), allocator: Allocator, button: B
 }
 
 pub fn appendDetailBackButton(buf: *std.ArrayList(u8), allocator: Allocator, href: Href, label: []const u8) !void {
-    _ = href;
     try appendTemplate(buf, allocator,
-        \\<nav class="detail-back-nav" aria-label="Detail navigation"><button class="detail-back-button" type="button" data-history-back aria-label="{label}" title="{label}"><span class="button-icon icon-arrow-left" aria-hidden="true"></span></button></nav>
+        \\<nav class="detail-back-nav" aria-label="Detail navigation"><a class="detail-back-button" href="{href}" data-history-back aria-label="{label}" title="{label}"><span class="button-icon icon-arrow-left" aria-hidden="true"></span></a></nav>
     , .{
+        .href = href,
         .label = label,
     });
 }
@@ -2016,6 +2023,13 @@ pub fn formValueOwned(allocator: Allocator, body: []const u8, wanted_key: []cons
     return null;
 }
 
+pub fn formHasValidCsrfToken(allocator: Allocator, body: []const u8, csrf_token: []const u8) !bool {
+    const submitted_owned = (try formValueOwned(allocator, body, zwf.csrf.field_name)) orelse return false;
+    defer allocator.free(submitted_owned);
+    const submitted = std.mem.trim(u8, submitted_owned, " \t\r\n");
+    return zwf.csrf.verify(csrf_token, submitted);
+}
+
 pub fn formValuesOwned(allocator: Allocator, body: []const u8, wanted_key: []const u8) !std.ArrayList([]u8) {
     var values: std.ArrayList([]u8) = .empty;
     errdefer freeOwnedStringList(allocator, &values);
@@ -2314,10 +2328,9 @@ test "web detail back button renders accessible history button" {
     try appendDetailBackButton(&buf, std.testing.allocator, literalHref("/issues"), "Back to issues");
 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "class=\"detail-back-button\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<button") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "type=\"button\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<a") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-history-back") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "aria-label=\"Back to issues\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "icon-arrow-left") != null);
 }

@@ -375,7 +375,7 @@ fn appendRelationshipRemoveForm(
     try buf.appendSlice(allocator, "<form class=\"issue-relationship-remove-form\" method=\"post\" action=\"/issues/");
     try shared.appendUrlEncoded(buf, allocator, options.raw_ref);
     try appendTemplate(buf, allocator,
-        \\/sidebar"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="action" value="{action}"><input type="hidden" name="{input_name}" value="{value}"><button type="submit" aria-label="{label}" title="{label}">x</button></form>
+        \\/sidebar"><input type="hidden" name="_csrf" value="{csrf_token}"><input type="hidden" name="action" value="{action}"><input type="hidden" name="{input_name}" value="{value}"><button type="submit" aria-label="{label}" title="{label}">x</button></form>
     , .{
         .csrf_token = options.csrf_token,
         .action = action,

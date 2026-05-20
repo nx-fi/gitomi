@@ -570,13 +570,13 @@ fn appendPullConversation(
         try shared.appendMarkdownSource(buf, allocator, detail.body, .{});
     }
     try buf.appendSlice(allocator, "</div>");
-    try pull_comments.appendReactionBar(buf, allocator, db, "pull", detail.id, raw_ref, "pull", current_actor);
+    try pull_comments.appendReactionBar(buf, allocator, db, "pull", detail.id, raw_ref, "pull", current_actor, csrf_token);
     try buf.appendSlice(allocator, "</article></div>");
-    try pull_comments.appendComments(buf, allocator, db, raw_ref, detail.id, current_actor);
+    try pull_comments.appendComments(buf, allocator, db, raw_ref, detail.id, current_actor, csrf_token);
     try appendPullMergeabilityTimeline(buf, allocator, detail, raw_ref, counts.commits, merge_status, csrf_token, merge_error);
     try appendPullResolutionTimeline(buf, allocator, detail);
-    try pull_comments.appendCommentForm(buf, allocator, raw_ref, current_actor);
-    try pull_comments.appendInlineReplyTemplate(buf, allocator, raw_ref);
+    try pull_comments.appendCommentForm(buf, allocator, raw_ref, current_actor, csrf_token);
+    try pull_comments.appendInlineReplyTemplate(buf, allocator, raw_ref, csrf_token);
     try buf.appendSlice(allocator, "</div>");
 }
 

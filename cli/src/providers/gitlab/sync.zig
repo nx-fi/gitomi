@@ -185,7 +185,6 @@ fn runSyncOnce(allocator: Allocator, options: Options) !void {
         .token_arg = options.token,
         .dry_run = options.dry_run,
         .map_file = map_path,
-        .reuse_legacy = true,
         .after_ordinal = state.last_export_ordinal,
         .skip_actor_principal = options.bot_principal,
         .skip_actor_device = options.bot_device,

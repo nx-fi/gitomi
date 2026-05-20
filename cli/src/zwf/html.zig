@@ -150,9 +150,9 @@ pub fn appendTemplate(
     }
 }
 
-fn appendTemplateValue(buf: *std.ArrayList(u8), allocator: Allocator, value: anytype) !void {
+pub fn appendTemplateValue(buf: *std.ArrayList(u8), allocator: Allocator, value: anytype) !void {
     const T = @TypeOf(value);
-    if (hasAppendHtmlValue(T)) {
+    if (comptime hasAppendHtmlValue(T)) {
         try T.appendHtmlValue(value, buf, allocator);
         return;
     }

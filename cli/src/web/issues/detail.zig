@@ -139,7 +139,7 @@ fn renderIssueDetailPageWithCommentForm(
     try appendIssueCommentForm(&buf, allocator, raw_ref, detail.state, current_actor, csrf_token, comment_error, comment_value);
     try appendIssueInlineReplyTemplate(&buf, allocator, raw_ref, csrf_token);
     try buf.appendSlice(allocator, "    </div><aside class=\"issue-meta-sidebar\">");
-    try issue_sidebar.append(&buf, allocator, &db, raw_ref, detail.id, display_author, detail.milestone, detail.issue_type, detail.priority, detail.status, detail.body);
+    try issue_sidebar.append(&buf, allocator, &db, raw_ref, detail.id, display_author, detail.milestone, detail.issue_type, detail.priority, detail.status, detail.body, csrf_token);
     try buf.appendSlice(allocator, "</aside></div></section>");
     try appendShellEnd(&buf, allocator);
     return buf.toOwnedSlice(allocator);
@@ -257,20 +257,21 @@ fn renderIssueNotFound(allocator: Allocator, repo: Repo, raw_ref: []const u8) ![
     return buf.toOwnedSlice(allocator);
 }
 
-pub fn renderIssueEditPage(allocator: Allocator, repo: Repo, raw_ref: []const u8, target: []const u8) ![]u8 {
+pub fn renderIssueEditPage(allocator: Allocator, repo: Repo, raw_ref: []const u8, target: []const u8, csrf_token: []const u8) ![]u8 {
     const target_ref_owned = try queryValueOwned(allocator, target, "target");
     defer if (target_ref_owned) |value| allocator.free(value);
     const target_ref = if (target_ref_owned) |value| std.mem.trim(u8, value, " \t\r\n") else "issue";
     if (target_ref.len == 0 or std.mem.eql(u8, target_ref, "issue")) {
-        return renderIssueEditIssuePage(allocator, repo, raw_ref, null, null, null);
+        return renderIssueEditIssuePage(allocator, repo, raw_ref, csrf_token, null, null, null);
     }
-    return renderIssueEditCommentPage(allocator, repo, raw_ref, target_ref, null, null);
+    return renderIssueEditCommentPage(allocator, repo, raw_ref, target_ref, csrf_token, null, null);
 }
 
 fn renderIssueEditIssuePage(
     allocator: Allocator,
     repo: Repo,
     raw_ref: []const u8,
+    csrf_token: []const u8,
     error_message: ?[]const u8,
     title_override: ?[]const u8,
     body_override: ?[]const u8,
@@ -303,6 +304,7 @@ fn renderIssueEditIssuePage(
         allocator,
         repo,
         raw_ref,
+        csrf_token,
         error_message,
         title_override orelse title,
         body_override orelse body,
@@ -313,6 +315,7 @@ fn renderIssueEditIssueForm(
     allocator: Allocator,
     repo: Repo,
     raw_ref: []const u8,
+    csrf_token: []const u8,
     error_message: ?[]const u8,
     title_value: []const u8,
     body_value: []const u8,
@@ -330,10 +333,11 @@ fn renderIssueEditIssueForm(
     try shared.appendUrlEncoded(&buf, allocator, raw_ref);
     try buf.appendSlice(allocator, "/edit\" class=\"issue-form\">");
     try appendTemplate(&buf, allocator,
+        \\<input type="hidden" name="_csrf" value="{csrf_token}">
         \\<input type="hidden" name="target_ref" value="issue">
         \\<label>Title<input name="title" value="{title_value}" autofocus required></label>
         \\<label>Body</label>
-    , .{ .title_value = title_value });
+    , .{ .csrf_token = csrf_token, .title_value = title_value });
     try shared.appendMarkdownEditor(&buf, allocator, .{
         .rows = 10,
         .placeholder = "Update issue description",
@@ -352,6 +356,7 @@ fn renderIssueEditCommentPage(
     repo: Repo,
     raw_ref: []const u8,
     target_ref: []const u8,
+    csrf_token: []const u8,
     error_message: ?[]const u8,
     body_override: ?[]const u8,
 ) ![]u8 {
@@ -398,6 +403,7 @@ fn renderIssueEditCommentPage(
         raw_ref,
         comment_ref_value,
         anchor,
+        csrf_token,
         error_message,
         body_override orelse body,
     );
@@ -409,6 +415,7 @@ fn renderIssueEditCommentForm(
     raw_ref: []const u8,
     target_ref: []const u8,
     anchor: []const u8,
+    csrf_token: []const u8,
     error_message: ?[]const u8,
     body_value: []const u8,
 ) ![]u8 {
@@ -425,9 +432,10 @@ fn renderIssueEditCommentForm(
     try shared.appendUrlEncoded(&buf, allocator, raw_ref);
     try buf.appendSlice(allocator, "/edit\" class=\"issue-form\">");
     try appendTemplate(&buf, allocator,
+        \\<input type="hidden" name="_csrf" value="{csrf_token}">
         \\<input type="hidden" name="target_ref" value="{target_ref}">
         \\<label>Comment</label>
-    , .{ .target_ref = target_ref });
+    , .{ .csrf_token = csrf_token, .target_ref = target_ref });
     try shared.appendMarkdownEditor(&buf, allocator, .{
         .rows = 10,
         .placeholder = "Update comment",
@@ -800,7 +808,7 @@ fn appendIssueInlineReplyTemplate(buf: *std.ArrayList(u8), allocator: Allocator,
     );
 }
 
-pub fn handleIssueEditPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
+pub fn handleIssueEditPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, csrf_token: []const u8, form_body: []const u8) !void {
     try ensureIndex(allocator, repo);
     const issue_id = index.resolveIssueId(allocator, repo, raw_ref) catch {
         const page = try renderIssueNotFound(allocator, repo, raw_ref);
@@ -814,10 +822,10 @@ pub fn handleIssueEditPost(allocator: Allocator, repo: Repo, stream: std.net.Str
     defer allocator.free(target_ref_owned);
     const target_ref = std.mem.trim(u8, target_ref_owned, " \t\r\n");
     if (target_ref.len == 0 or std.mem.eql(u8, target_ref, "issue")) {
-        try handleIssueBodyEditPost(allocator, repo, stream, raw_ref, issue_id, form_body);
+        try handleIssueBodyEditPost(allocator, repo, stream, raw_ref, issue_id, csrf_token, form_body);
         return;
     }
-    try handleCommentBodyEditPost(allocator, repo, stream, raw_ref, issue_id, target_ref, form_body);
+    try handleCommentBodyEditPost(allocator, repo, stream, raw_ref, issue_id, target_ref, csrf_token, form_body);
 }
 
 fn handleIssueBodyEditPost(
@@ -826,6 +834,7 @@ fn handleIssueBodyEditPost(
     stream: std.net.Stream,
     raw_ref: []const u8,
     issue_id: []const u8,
+    csrf_token: []const u8,
     form_body: []const u8,
 ) !void {
     const title_owned = (try formValueOwned(allocator, form_body, "title")) orelse try allocator.dupe(u8, "");
@@ -834,7 +843,7 @@ fn handleIssueBodyEditPost(
     defer allocator.free(body_owned);
     const title = std.mem.trim(u8, title_owned, " \t\r\n");
     if (title.len == 0) {
-        const page = try renderIssueEditIssuePage(allocator, repo, raw_ref, "Title is required.", title_owned, body_owned);
+        const page = try renderIssueEditIssuePage(allocator, repo, raw_ref, csrf_token, "Title is required.", title_owned, body_owned);
         defer allocator.free(page);
         try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", page, null);
         return;
@@ -875,7 +884,7 @@ fn handleIssueBodyEditPost(
     }
 
     createIssueUpdatedEvent(allocator, issue_id, update) catch {
-        const page = try renderIssueEditIssuePage(allocator, repo, raw_ref, "Could not save the issue. Check that Gitomi is initialized and Git commit signing is configured.", title, body_owned);
+        const page = try renderIssueEditIssuePage(allocator, repo, raw_ref, csrf_token, "Could not save the issue. Check that Gitomi is initialized and Git commit signing is configured.", title, body_owned);
         defer allocator.free(page);
         try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", page, null);
         return;
@@ -936,6 +945,7 @@ fn handleCommentBodyEditPost(
     raw_ref: []const u8,
     issue_id: []const u8,
     target_ref: []const u8,
+    csrf_token: []const u8,
     form_body: []const u8,
 ) !void {
     const body_owned = (try formValueOwned(allocator, form_body, "body")) orelse try allocator.dupe(u8, "");
@@ -989,7 +999,7 @@ fn handleCommentBodyEditPost(
     }
 
     createCommentBodySetEvent(allocator, comment_id, body_owned) catch {
-        const page = try renderIssueEditCommentPage(allocator, repo, raw_ref, target_ref, "Could not save the comment. Check that Gitomi is initialized and Git commit signing is configured.", body_owned);
+        const page = try renderIssueEditCommentPage(allocator, repo, raw_ref, target_ref, csrf_token, "Could not save the comment. Check that Gitomi is initialized and Git commit signing is configured.", body_owned);
         defer allocator.free(page);
         try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", page, null);
         return;

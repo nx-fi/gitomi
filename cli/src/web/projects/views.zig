@@ -71,6 +71,7 @@ pub const ProjectRenderContext = struct {
     defaults: ProjectViewDefaults,
     table_fields: ?*const ProjectTableFields = null,
     view_ref: []const u8,
+    csrf_token: []const u8 = "",
 
     pub fn tableFieldCount(self: ProjectRenderContext) usize {
         return if (self.table_fields) |fields| fields.len else 0;

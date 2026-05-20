@@ -382,7 +382,7 @@ pub fn renderBlamePage(allocator: Allocator, repo: Repo, target: []const u8) ![]
     defer reference_resolver.deinit();
 
     try appendShellStart(&buf, allocator, repo, "Blame", "code");
-    try appendRepoHeader(&buf, allocator, repo, ref);
+    try appendRepoHeader(&buf, allocator, repo);
     try appendCodeLayoutStart(&buf, allocator, repo, ref, path);
 
     try appendCodePanelStart(&buf, allocator, repo, ref, path);
@@ -449,7 +449,7 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     defer reference_resolver.deinit();
 
     try appendShellStart(&buf, allocator, repo, "Code", "code");
-    try appendRepoHeader(&buf, allocator, repo, ref);
+    try appendRepoHeader(&buf, allocator, repo);
     try appendCodeLayoutStart(&buf, allocator, repo, ref, path);
 
     const is_root = path.len == 0;
@@ -483,7 +483,7 @@ fn renderTreePage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
         if (is_root) {
             try appendRootDocsSlot(&buf, allocator, ref);
             try appendRootPageMainEnd(&buf, allocator);
-            try appendRootSidebar(&buf, allocator, repo, ref);
+            try appendRootSidebar(&buf, allocator, ref);
             try appendRootPageGridEnd(&buf, allocator);
         } else {
             try appendReadmePreview(&buf, allocator, repo, ref, path, entries);
@@ -504,7 +504,7 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     defer reference_resolver.deinit();
 
     try appendShellStart(&buf, allocator, repo, "Code", "code");
-    try appendRepoHeader(&buf, allocator, repo, ref);
+    try appendRepoHeader(&buf, allocator, repo);
     const size = try browseBlobSize(allocator, repo, ref, path);
     const media_kind = mediaKindForPath(path);
     const preview_kind = previewKindForPath(path);
@@ -529,7 +529,7 @@ fn renderBlobPage(allocator: Allocator, repo: Repo, ref: []const u8, path: []con
     const show_markdown_outline = render_markdown;
     const symbol_items = if (text_content) |bytes|
         if (show_symbols_panel)
-            try code_symbols.extract(allocator, repo.root, path, bytes)
+            try code_symbols.extract(allocator, path, bytes)
         else
             try allocator.alloc(code_symbols.Symbol, 0)
     else
@@ -739,7 +739,7 @@ fn renderMissingPathPage(allocator: Allocator, repo: Repo, ref: []const u8, path
     errdefer buf.deinit(allocator);
 
     try appendShellStart(&buf, allocator, repo, "Code", "code");
-    try appendRepoHeader(&buf, allocator, repo, ref);
+    try appendRepoHeader(&buf, allocator, repo);
     try appendCodeLayoutStart(&buf, allocator, repo, ref, path);
     try appendEmptyState(&buf, allocator, "Path not found.", path);
     try appendCodeLayoutEnd(&buf, allocator);
@@ -747,8 +747,7 @@ fn renderMissingPathPage(allocator: Allocator, repo: Repo, ref: []const u8, path
     return buf.toOwnedSlice(allocator);
 }
 
-fn appendRepoHeader(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo, ref: []const u8) !void {
-    _ = ref;
+fn appendRepoHeader(buf: *std.ArrayList(u8), allocator: Allocator, repo: Repo) !void {
     const repo_name = std.fs.path.basename(repo.root);
     const owner_name = if (std.fs.path.dirname(repo.root)) |parent| std.fs.path.basename(parent) else "local";
     try appendTemplate(buf, allocator,
@@ -1924,14 +1923,12 @@ fn appendRootPageGridEnd(buf: *std.ArrayList(u8), allocator: Allocator) !void {
 fn appendRootSidebar(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
-    repo: Repo,
     ref: []const u8,
 ) !void {
     try appendTemplate(buf, allocator,
         \\<aside class="root-sidebar" aria-label="Repository details">
         \\  <section class="panel root-sidebar-panel">
     , .{});
-    _ = repo;
     try appendRootSidebarSlot(buf, allocator, ref, "about", "About", "Loading repository summary...", root_partial_priority_about, root_partial_timeout_stats_ms);
     try appendRootSidebarSlot(buf, allocator, ref, "repository", "Repository", "Loading repository details...", root_partial_priority_repository, root_partial_timeout_git_ms);
     try appendRootSidebarSlot(buf, allocator, ref, "branch", "Branch", "Loading branch details...", root_partial_priority_branch, root_partial_timeout_git_ms);

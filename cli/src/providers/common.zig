@@ -210,7 +210,7 @@ pub fn sizedString(allocator: Allocator, value: ?[]const u8, fallback: []const u
     return sizedStringWithMarker(allocator, raw, max_bytes, "\n\n[truncated by gitomi import]");
 }
 
-fn sizedStringWithMarker(allocator: Allocator, raw: []const u8, max_bytes: usize, marker: []const u8) ![]u8 {
+pub fn sizedStringWithMarker(allocator: Allocator, raw: []const u8, max_bytes: usize, marker: []const u8) ![]u8 {
     if (raw.len <= max_bytes) return allocator.dupe(u8, raw);
 
     if (max_bytes <= marker.len) return allocator.dupe(u8, raw[0..utf8PrefixLen(raw, max_bytes)]);
@@ -224,10 +224,14 @@ fn sizedStringWithMarker(allocator: Allocator, raw: []const u8, max_bytes: usize
 }
 
 pub fn subject(allocator: Allocator, prefix: []const u8, title: []const u8) ![]u8 {
+    return subjectWithMarker(allocator, prefix, title, " [truncated by gitomi import]");
+}
+
+pub fn subjectWithMarker(allocator: Allocator, prefix: []const u8, title: []const u8, marker: []const u8) ![]u8 {
     const title_limit = if (prefix.len >= git.max_event_subject_bytes) 0 else git.max_event_subject_bytes - prefix.len;
     const title_line = try subjectLine(allocator, title);
     defer allocator.free(title_line);
-    const title_part = try sizedStringWithMarker(allocator, title_line, title_limit, " [truncated by gitomi import]");
+    const title_part = try sizedStringWithMarker(allocator, title_line, title_limit, marker);
     defer allocator.free(title_part);
     return std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, title_part });
 }

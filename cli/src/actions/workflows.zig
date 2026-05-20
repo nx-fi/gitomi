@@ -393,8 +393,7 @@ pub fn parseWorkflow(allocator: Allocator, source_oid: []const u8, path: []const
 
     const display_name = name orelse try allocator.dupe(u8, if (dialect == .gitomi) "" else std.fs.path.basename(path));
     name = null;
-    for (schedules.items) |schedule| {
-        _ = schedule;
+    for (schedules.items) |_| {
         try addTrigger(allocator, &triggers, "workflow.schedule");
     }
     try ensureTriggerDefsFromNames(allocator, &trigger_defs, triggers.items);

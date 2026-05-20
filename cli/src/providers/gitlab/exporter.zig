@@ -23,7 +23,6 @@ const parseProjectRef = common.parseProjectRef;
 const jsonArray = common.jsonArray;
 const jsonInteger = common.jsonInteger;
 const appendStringField = common.appendStringField;
-const appendBoolField = common.appendBoolField;
 
 pub const ExportOptions = struct {
     project: ProjectRef,
@@ -31,7 +30,6 @@ pub const ExportOptions = struct {
     token_arg: ?[]const u8 = null,
     dry_run: bool = false,
     map_file: ?[]const u8 = null,
-    reuse_legacy: bool = false,
     after_ordinal: i64 = 0,
     skip_actor_principal: ?[]const u8 = null,
     skip_actor_device: ?[]const u8 = null,
@@ -53,7 +51,6 @@ pub fn cmdExport(allocator: Allocator, args: []const []const u8) !void {
     defer if (token_source_owned) |value| allocator.free(value);
     var dry_run = false;
     var map_file_arg: ?[]const u8 = null;
-    var reuse_legacy = false;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -82,8 +79,6 @@ pub fn cmdExport(allocator: Allocator, args: []const []const u8) !void {
             dry_run = true;
         } else if (std.mem.eql(u8, arg, "--map-file")) {
             map_file_arg = try util.requireValue(args, &i, "--map-file");
-        } else if (std.mem.eql(u8, arg, "--reuse-legacy")) {
-            reuse_legacy = true;
         } else {
             try eprint("gt gitlab export: unknown option '{s}'\n", .{arg});
             return CliError.UserError;
@@ -112,7 +107,6 @@ pub fn cmdExport(allocator: Allocator, args: []const []const u8) !void {
         .token_arg = token,
         .dry_run = dry_run,
         .map_file = map_file_arg,
-        .reuse_legacy = reuse_legacy,
     });
 }
 
@@ -372,7 +366,7 @@ pub fn exportToGitlab(allocator: Allocator, options: ExportOptions) !ExportResul
             }
         }
 
-        if (try exportEvent(allocator, repo, client, &mappings, options, event_type, object_kind, object_id, body)) {
+        if (try exportEvent(allocator, repo, client, &mappings, event_type, object_kind, object_id, body)) {
             result.exported += 1;
             if (options.max_events != 0 and result.exported >= options.max_events) break;
         }
@@ -389,7 +383,6 @@ fn exportEvent(
     repo: repo_mod.Repo,
     client: GitLabClient,
     mappings: *MappingStore,
-    options: ExportOptions,
     event_type: []const u8,
     object_kind: []const u8,
     object_id: []const u8,
@@ -407,10 +400,10 @@ fn exportEvent(
     };
 
     if (std.mem.startsWith(u8, event_type, "issue.")) {
-        return try exportIssueEvent(allocator, client, mappings, options, event_type, object_id, root, payload);
+        return try exportIssueEvent(allocator, client, mappings, event_type, object_id, payload);
     }
     if (std.mem.startsWith(u8, event_type, "pull.")) {
-        return try exportPullEvent(allocator, client, mappings, options, event_type, object_id, root, payload);
+        return try exportPullEvent(allocator, client, mappings, event_type, object_id, payload);
     }
     if (std.mem.startsWith(u8, event_type, "comment.") and std.mem.eql(u8, object_kind, "comment")) {
         return try exportCommentEvent(allocator, repo, client, mappings, event_type, object_id, payload);
@@ -422,16 +415,12 @@ fn exportIssueEvent(
     allocator: Allocator,
     client: GitLabClient,
     mappings: *MappingStore,
-    options: ExportOptions,
     event_type: []const u8,
     issue_id: []const u8,
-    root: std.json.ObjectMap,
     payload: std.json.ObjectMap,
 ) !bool {
     // Remote identity comes from the map file or from objects created by this
     // exporter. Event legacy metadata is collaborator-controlled.
-    _ = options;
-    _ = root;
     if (std.mem.eql(u8, event_type, "issue.opened")) {
         if (try mappings.get("issue", issue_id) != null) return false;
         const assignee_ids = try resolveUserIdsFromPayload(allocator, client, payload.get("assignees"));
@@ -494,16 +483,12 @@ fn exportPullEvent(
     allocator: Allocator,
     client: GitLabClient,
     mappings: *MappingStore,
-    options: ExportOptions,
     event_type: []const u8,
     pull_id: []const u8,
-    root: std.json.ObjectMap,
     payload: std.json.ObjectMap,
 ) !bool {
     // Remote identity comes from the map file or from objects created by this
     // exporter. Event legacy metadata is collaborator-controlled.
-    _ = options;
-    _ = root;
     if (std.mem.eql(u8, event_type, "pull.opened")) {
         if (try mappings.get("pull", pull_id) != null) return false;
         const assignee_ids = try resolveUserIdsFromPayload(allocator, client, payload.get("assignees"));
@@ -917,11 +902,6 @@ test "gitlab export ignores forged legacy IIDs for object mappings" {
         .token = null,
         .dry_run = true,
     };
-    const options = ExportOptions{
-        .project = project,
-        .dry_run = true,
-        .reuse_legacy = true,
-    };
     var mappings = MappingStore{
         .allocator = allocator,
         .path = try allocator.dupe(u8, "gitlab-export-test-map.jsonl"),
@@ -939,7 +919,7 @@ test "gitlab export ignores forged legacy IIDs for object mappings" {
     defer issue_parsed.deinit();
     const issue_root = issue_parsed.value.object;
     const issue_payload = issue_root.get("payload").?.object;
-    try std.testing.expect(try exportIssueEvent(allocator, client, &mappings, options, "issue.opened", "issue-1", issue_root, issue_payload));
+    try std.testing.expect(try exportIssueEvent(allocator, client, &mappings, "issue.opened", "issue-1", issue_payload));
     try std.testing.expectEqual(@as(i64, 1), (try mappings.get("issue", "issue-1")).?);
 
     var pull_parsed = try std.json.parseFromSlice(std.json.Value, allocator,
@@ -951,10 +931,10 @@ test "gitlab export ignores forged legacy IIDs for object mappings" {
     defer pull_parsed.deinit();
     const pull_root = pull_parsed.value.object;
     const pull_payload = pull_root.get("payload").?.object;
-    try std.testing.expect(try exportPullEvent(allocator, client, &mappings, options, "pull.opened", "pull-1", pull_root, pull_payload));
+    try std.testing.expect(try exportPullEvent(allocator, client, &mappings, "pull.opened", "pull-1", pull_payload));
     try std.testing.expectEqual(@as(i64, 2), (try mappings.get("pull", "pull-1")).?);
 
     try mappings.putMemory("issue", "mapped-issue", 4242);
-    try std.testing.expect(!try exportIssueEvent(allocator, client, &mappings, options, "issue.opened", "mapped-issue", issue_root, issue_payload));
+    try std.testing.expect(!try exportIssueEvent(allocator, client, &mappings, "issue.opened", "mapped-issue", issue_payload));
     try std.testing.expectEqual(@as(i64, 4242), (try mappings.get("issue", "mapped-issue")).?);
 }

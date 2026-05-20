@@ -89,7 +89,8 @@ pub fn appendProjectRoadmap(
     current_principal: []const u8,
     csrf_token: []const u8,
 ) !void {
-    const context = projectRenderContextFromView(allocator, active_view, current_principal);
+    var context = projectRenderContextFromView(allocator, active_view, current_principal);
+    context.csrf_token = csrf_token;
     const issue_count = try projectIssueCount(db, project, context.filter);
     const group_field = projectGroupFieldFromConfig(allocator, active_view.config_json);
     try appendProjectWorkspaceChromeStart(buf, allocator, db, project, issue_count, active_view, csrf_token);
@@ -179,7 +180,7 @@ fn appendProjectRoadmapLane(
         const opened_at = try rows.columnTextDup(allocator, 4);
         defer allocator.free(opened_at);
         const legacy_number = rows.columnInt64(5);
-        try appendProjectRoadmapItem(buf, allocator, db, project, id, title_text, state, author, opened_at, legacy_number);
+        try appendProjectRoadmapItem(buf, allocator, db, project, id, title_text, state, author, opened_at, legacy_number, context.csrf_token);
         shown = true;
     }
     if (!shown) try buf.appendSlice(allocator, "<div class=\"kanban-empty-drop\">No issues</div>");
@@ -250,7 +251,7 @@ fn appendProjectPriorityRoadmapLane(
         const opened_at = try rows.columnTextDup(allocator, 4);
         defer allocator.free(opened_at);
         const legacy_number = rows.columnInt64(5);
-        try appendProjectRoadmapItem(buf, allocator, db, project, id, title_text, state, author, opened_at, legacy_number);
+        try appendProjectRoadmapItem(buf, allocator, db, project, id, title_text, state, author, opened_at, legacy_number, context.csrf_token);
         shown = true;
     }
     if (!shown) try buf.appendSlice(allocator, "<div class=\"kanban-empty-drop\">No issues</div>");
@@ -268,6 +269,7 @@ fn appendProjectRoadmapItem(
     author: []const u8,
     opened_at: []const u8,
     legacy_number: i64,
+    csrf_token: []const u8,
 ) !void {
     const has_start_field = try projectFieldKeyExists(db, project, "start_at");
     const has_end_field = try projectFieldKeyExists(db, project, "end_at");
@@ -302,11 +304,13 @@ fn appendProjectRoadmapItem(
     if (has_start_field or has_end_field or has_legacy_target_field) {
         try appendTemplate(buf, allocator,
             \\<form class="project-roadmap-date-form" method="post" action="/projects/items">
+            \\  <input type="hidden" name="_csrf" value="{csrf_token}">
             \\  <input type="hidden" name="action" value="set-roadmap-dates">
             \\  <input type="hidden" name="project" value="{project}">
             \\  <input type="hidden" name="issue" value="{issue}">
             \\  <input type="hidden" name="view" value="roadmap">
         , .{
+            .csrf_token = csrf_token,
             .project = project,
             .issue = id,
         });

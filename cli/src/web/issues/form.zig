@@ -54,6 +54,7 @@ pub const IssueFormPickerOptions = struct {
 pub fn renderIssueForm(
     allocator: Allocator,
     repo: Repo,
+    csrf_token: []const u8,
     error_message: ?[]const u8,
     title_value: []const u8,
     body_value: []const u8,
@@ -81,9 +82,11 @@ pub fn renderIssueForm(
     }
     try appendTemplate(&buf, allocator,
         \\  <form method="post" action="/issues" class="issue-form">
+        \\    <input type="hidden" name="_csrf" value="{csrf_token}">
         \\    <label>Title<input name="title" value="{title_value}" autofocus required></label>
         \\    <label>Body</label>
     , .{
+        .csrf_token = csrf_token,
         .title_value = title_value,
     });
     try shared.appendMarkdownEditor(&buf, allocator, .{
@@ -463,7 +466,7 @@ fn asciiEqlIgnoreCase(a: []const u8, b: []const u8) bool {
     return true;
 }
 
-pub fn renderIssueFormFromTarget(allocator: Allocator, repo: Repo, target: []const u8) ![]u8 {
+pub fn renderIssueFormFromTarget(allocator: Allocator, repo: Repo, target: []const u8, csrf_token: []const u8) ![]u8 {
     const title = try queryValueOwned(allocator, target, "title");
     defer if (title) |value| allocator.free(value);
     const body = try queryValueOwned(allocator, target, "body");
@@ -476,6 +479,7 @@ pub fn renderIssueFormFromTarget(allocator: Allocator, repo: Repo, target: []con
     return renderIssueForm(
         allocator,
         repo,
+        csrf_token,
         null,
         title orelse "",
         body orelse "",
@@ -484,7 +488,7 @@ pub fn renderIssueFormFromTarget(allocator: Allocator, repo: Repo, target: []con
     );
 }
 
-pub fn handleIssuePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
+pub fn handleIssuePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, csrf_token: []const u8, form_body: []const u8) !void {
     const title_owned = (try formValueOwned(allocator, form_body, "title")) orelse try allocator.dupe(u8, "");
     defer allocator.free(title_owned);
     const body_owned = (try formValueOwned(allocator, form_body, "body")) orelse try allocator.dupe(u8, "");
@@ -496,7 +500,7 @@ pub fn handleIssuePost(allocator: Allocator, repo: Repo, stream: std.net.Stream,
 
     const title = std.mem.trim(u8, title_owned, " \t\r\n");
     if (title.len == 0) {
-        const body = try renderIssueForm(allocator, repo, "Title is required.", title_owned, body_owned, labels_owned, assignees_owned);
+        const body = try renderIssueForm(allocator, repo, csrf_token, "Title is required.", title_owned, body_owned, labels_owned, assignees_owned);
         defer allocator.free(body);
         try sendResponse(allocator, stream, 422, "Unprocessable Entity", "text/html", body, null);
         return;
@@ -512,6 +516,7 @@ pub fn handleIssuePost(allocator: Allocator, repo: Repo, stream: std.net.Stream,
         const body = try renderIssueForm(
             allocator,
             repo,
+            csrf_token,
             message,
             title_owned,
             body_owned,

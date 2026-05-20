@@ -116,7 +116,7 @@ pub fn renderRefsPage(allocator: Allocator, repo: Repo, target: []const u8, csrf
 }
 
 pub fn handleRefsSyncPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8, csrf_token: []const u8) !void {
-    const csrf_ok = formValueEquals(allocator, form_body, "csrf_token", csrf_token) catch |err| switch (err) {
+    const csrf_ok = shared.formHasValidCsrfToken(allocator, form_body, csrf_token) catch |err| switch (err) {
         error.InvalidFormEncoding => false,
         else => return err,
     };
@@ -137,7 +137,7 @@ pub fn handleRefsSyncPost(allocator: Allocator, repo: Repo, stream: std.net.Stre
 }
 
 pub fn handleRefsDeletePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8, csrf_token: []const u8) !void {
-    const csrf_ok = formValueEquals(allocator, form_body, "csrf_token", csrf_token) catch |err| switch (err) {
+    const csrf_ok = shared.formHasValidCsrfToken(allocator, form_body, csrf_token) catch |err| switch (err) {
         error.InvalidFormEncoding => false,
         else => return err,
     };
@@ -374,11 +374,13 @@ fn appendRefsHeader(buf: *std.ArrayList(u8), allocator: Allocator, csrf_token: [
         \\    <h1>Branches, Tags, Remote Tracking, and Gitomi Refs</h1>
         \\  </div>
         \\  <form method="post" action="/refs/sync" class="refs-sync-form">
-        \\    <input type="hidden" name="csrf_token" value="{csrf_token}">
+    , .{});
+    try shared.appendCsrfInput(buf, allocator, csrf_token);
+    try appendTemplate(buf, allocator,
         \\    <button class="button primary refs-sync-button" type="submit" title="Sync Gitomi refs with origin"><span class="button-icon icon-sync" aria-hidden="true"></span><span>Sync</span></button>
         \\  </form>
         \\</div>
-    , .{ .csrf_token = csrf_token });
+    , .{});
 }
 
 fn appendRefRow(buf: *std.ArrayList(u8), allocator: Allocator, rows: []const RefRow, row: RefRow, csrf_token: []const u8) !void {
@@ -437,33 +439,17 @@ fn appendRefDeleteForm(
     label: []const u8,
     title: []const u8,
 ) !void {
+    try appendTemplate(buf, allocator, "<form method=\"post\" action=\"/refs/delete\" class=\"refs-delete-form\">", .{});
+    try shared.appendCsrfInput(buf, allocator, csrf_token);
     try appendTemplate(buf, allocator,
-        \\<form method="post" action="/refs/delete" class="refs-delete-form"><input type="hidden" name="csrf_token" value="{csrf_token}"><input type="hidden" name="action" value="{action}"><input type="hidden" name="ref" value="{ref}"><input type="hidden" name="oid" value="{oid}"><button class="button secondary refs-delete-button" type="submit" title="{title}">{label}</button></form>
+        \\<input type="hidden" name="action" value="{action}"><input type="hidden" name="ref" value="{ref}"><input type="hidden" name="oid" value="{oid}"><button class="button secondary refs-delete-button" type="submit" title="{title}">{label}</button></form>
     , .{
-        .csrf_token = csrf_token,
         .action = action,
         .ref = row.ref,
         .oid = row.oid,
         .title = title,
         .label = label,
     });
-}
-
-fn formValueEquals(allocator: Allocator, body: []const u8, wanted_key: []const u8, wanted_value: []const u8) !bool {
-    var pairs = std.mem.splitScalar(u8, body, '&');
-    while (pairs.next()) |pair| {
-        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
-        const raw_key = pair[0..eq];
-        const raw_value = if (eq < pair.len) pair[eq + 1 ..] else "";
-        const key = try shared.percentDecodeForm(allocator, raw_key);
-        defer allocator.free(key);
-        if (!std.mem.eql(u8, key, wanted_key)) continue;
-
-        const value = try shared.percentDecodeForm(allocator, raw_value);
-        defer allocator.free(value);
-        return std.mem.eql(u8, value, wanted_value);
-    }
-    return false;
 }
 
 fn appendLocationHeader(buf: *std.ArrayList(u8), allocator: Allocator, query: RefQuery, counts: RefLocationCounts) !void {
@@ -1043,10 +1029,10 @@ test "web refs href preserves filters and sort" {
 
 test "refs sync csrf form validation" {
     const allocator = std.testing.allocator;
-    try std.testing.expect(try formValueEquals(allocator, "csrf_token=abc123", "csrf_token", "abc123"));
-    try std.testing.expect(try formValueEquals(allocator, "other=1&csrf_token=abc%20123", "csrf_token", "abc 123"));
-    try std.testing.expect(!(try formValueEquals(allocator, "csrf_token=wrong", "csrf_token", "abc123")));
-    try std.testing.expect(!(try formValueEquals(allocator, "other=abc123", "csrf_token", "abc123")));
+    try std.testing.expect(try shared.formHasValidCsrfToken(allocator, "_csrf=abc123", "abc123"));
+    try std.testing.expect(try shared.formHasValidCsrfToken(allocator, "other=1&_csrf=abc%20123", "abc 123"));
+    try std.testing.expect(!(try shared.formHasValidCsrfToken(allocator, "_csrf=wrong", "abc123")));
+    try std.testing.expect(!(try shared.formHasValidCsrfToken(allocator, "other=abc123", "abc123")));
 }
 
 test "refs delete validates branch ref scopes" {

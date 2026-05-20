@@ -30,6 +30,7 @@ pub fn appendComments(
     raw_ref: []const u8,
     pull_id: []const u8,
     current_actor: ?[]const u8,
+    csrf_token: []const u8,
 ) !void {
     var stmt = try work_items.prepareCommentsStmt(db, "pull", pull_id);
     defer stmt.deinit();
@@ -51,17 +52,17 @@ pub fn appendComments(
 
     for (rows.items, 0..) |row, row_index| {
         if (repliesToThreadRoot(row, pull_id)) {
-            try appendCommentBranch(buf, allocator, db, rows.items, rendered, row_index, 1, pull_id, raw_ref, current_actor);
+            try appendCommentBranch(buf, allocator, db, rows.items, rendered, row_index, 1, pull_id, raw_ref, current_actor, csrf_token);
         }
     }
     for (rows.items, 0..) |row, row_index| {
         if (!rendered[row_index] and row.reply_parent_id.len == 0) {
-            try appendCommentBranch(buf, allocator, db, rows.items, rendered, row_index, 0, pull_id, raw_ref, current_actor);
+            try appendCommentBranch(buf, allocator, db, rows.items, rendered, row_index, 0, pull_id, raw_ref, current_actor, csrf_token);
         }
     }
     for (rows.items, 0..) |_, row_index| {
         if (!rendered[row_index]) {
-            try appendCommentBranch(buf, allocator, db, rows.items, rendered, row_index, 0, pull_id, raw_ref, current_actor);
+            try appendCommentBranch(buf, allocator, db, rows.items, rendered, row_index, 0, pull_id, raw_ref, current_actor, csrf_token);
         }
     }
 }
@@ -81,16 +82,17 @@ fn appendCommentBranch(
     thread_root_id: []const u8,
     raw_ref: []const u8,
     current_actor: ?[]const u8,
+    csrf_token: []const u8,
 ) !void {
     if (rendered[row_index]) return;
     rendered[row_index] = true;
 
     const row = rows[row_index];
-    try appendCommentRow(buf, allocator, db, row, depth, thread_root_id, raw_ref, current_actor);
+    try appendCommentRow(buf, allocator, db, row, depth, thread_root_id, raw_ref, current_actor, csrf_token);
 
     for (rows, 0..) |child, child_index| {
         if (!rendered[child_index] and child.reply_parent_id.len != 0 and std.mem.eql(u8, child.reply_parent_id, row.id)) {
-            try appendCommentBranch(buf, allocator, db, rows, rendered, child_index, depth + 1, thread_root_id, raw_ref, current_actor);
+            try appendCommentBranch(buf, allocator, db, rows, rendered, child_index, depth + 1, thread_root_id, raw_ref, current_actor, csrf_token);
         }
     }
 }
@@ -104,6 +106,7 @@ fn appendCommentRow(
     thread_root_id: []const u8,
     raw_ref: []const u8,
     current_actor: ?[]const u8,
+    csrf_token: []const u8,
 ) !void {
     const anchor = try std.fmt.allocPrint(allocator, "comment-{s}", .{row.id[0..@min(row.id.len, 7)]});
     defer allocator.free(anchor);
@@ -153,7 +156,7 @@ fn appendCommentRow(
         try shared.appendMarkdownSource(buf, allocator, row.body, .{});
     }
     try buf.appendSlice(allocator, "</div>");
-    try appendReactionBar(buf, allocator, db, "comment", row.id, raw_ref, comment_ref_value, current_actor);
+    try appendReactionBar(buf, allocator, db, "comment", row.id, raw_ref, comment_ref_value, current_actor, csrf_token);
     try buf.appendSlice(allocator, "</article></div>");
 }
 
@@ -175,6 +178,7 @@ pub fn appendReactionBar(
     raw_pull_ref: []const u8,
     target_ref: []const u8,
     current_actor: ?[]const u8,
+    csrf_token: []const u8,
 ) !void {
     var reactions: std.ArrayList(ReactionSummary) = .empty;
     defer {
@@ -209,9 +213,9 @@ pub fn appendReactionBar(
         });
     }
 
-    try appendReactionPicker(buf, allocator, raw_pull_ref, object_kind, target_ref, reactions.items);
+    try appendReactionPicker(buf, allocator, raw_pull_ref, object_kind, target_ref, reactions.items, csrf_token);
     for (reactions.items) |item| {
-        try appendReactionButton(buf, allocator, raw_pull_ref, object_kind, target_ref, item.emoji, item.emoji, item.count, item.reacted);
+        try appendReactionButton(buf, allocator, raw_pull_ref, object_kind, target_ref, item.emoji, item.emoji, item.count, item.reacted, csrf_token);
     }
     try buf.appendSlice(allocator, "</div>");
 }
@@ -229,6 +233,7 @@ fn appendReactionPicker(
     object_kind: []const u8,
     target_ref: []const u8,
     reactions: []const ReactionSummary,
+    csrf_token: []const u8,
 ) !void {
     try buf.appendSlice(allocator,
         \\<details class="reaction-picker" data-popover-menu>
@@ -236,7 +241,7 @@ fn appendReactionPicker(
         \\  <div class="reaction-popover" role="menu" aria-label="Add reaction">
     );
     for (reaction_choices.choices) |choice| {
-        try appendReactionChoiceButton(buf, allocator, raw_pull_ref, object_kind, target_ref, choice, reactionWasSelected(reactions, choice.value));
+        try appendReactionChoiceButton(buf, allocator, raw_pull_ref, object_kind, target_ref, choice, reactionWasSelected(reactions, choice.value), csrf_token);
     }
     try buf.appendSlice(allocator, "</div></details>");
 }
@@ -249,8 +254,9 @@ fn appendReactionChoiceButton(
     target_ref: []const u8,
     choice: ReactionChoice,
     reacted: bool,
+    csrf_token: []const u8,
 ) !void {
-    try appendReactionFormOpen(buf, allocator, raw_pull_ref, "reaction-choice-form", if (reacted) "remove-reaction" else "add-reaction", object_kind, target_ref, choice.value);
+    try appendReactionFormOpen(buf, allocator, raw_pull_ref, "reaction-choice-form", if (reacted) "remove-reaction" else "add-reaction", object_kind, target_ref, choice.value, csrf_token);
     try appendTemplate(buf, allocator,
         \\<button{class_attr} type="submit" role="menuitem" aria-pressed="{pressed}" title="{title}"><span class="reaction-emoji">
     , .{
@@ -275,8 +281,9 @@ fn appendReactionButton(
     emoji_label: []const u8,
     count: i64,
     reacted: bool,
+    csrf_token: []const u8,
 ) !void {
-    try appendReactionFormOpen(buf, allocator, raw_pull_ref, "reaction-form", if (reacted) "remove-reaction" else "add-reaction", object_kind, target_ref, emoji_value);
+    try appendReactionFormOpen(buf, allocator, raw_pull_ref, "reaction-form", if (reacted) "remove-reaction" else "add-reaction", object_kind, target_ref, emoji_value, csrf_token);
     try appendTemplate(buf, allocator,
         \\<button{class_attr} type="submit" aria-pressed="{pressed}" title="{title}"><span class="reaction-emoji">
     , .{
@@ -300,12 +307,14 @@ fn appendReactionFormOpen(
     object_kind: []const u8,
     target_ref: []const u8,
     emoji_value: []const u8,
+    csrf_token: []const u8,
 ) !void {
     try appendTemplate(buf, allocator, "<form class=\"{form_class}\" method=\"post\" action=\"/pulls/", .{ .form_class = form_class });
     try shared.appendUrlEncoded(buf, allocator, raw_pull_ref);
     try appendTemplate(buf, allocator,
-        \\/comments"><input type="hidden" name="action" value="{action}"><input type="hidden" name="target_kind" value="{object_kind}">
+        \\/comments"><input type="hidden" name="_csrf" value="{csrf_token}"><input type="hidden" name="action" value="{action}"><input type="hidden" name="target_kind" value="{object_kind}">
     , .{
+        .csrf_token = csrf_token,
         .action = action,
         .object_kind = object_kind,
     });
@@ -326,7 +335,7 @@ fn reactionWasSelected(reactions: []const ReactionSummary, emoji: []const u8) bo
     return false;
 }
 
-pub fn appendCommentForm(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8, current_actor: ?[]const u8) !void {
+pub fn appendCommentForm(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8, current_actor: ?[]const u8, csrf_token: []const u8) !void {
     try buf.appendSlice(allocator,
         \\<div class="issue-timeline-item issue-comment-form-item">
         \\  <div class="issue-timeline-avatar">
@@ -339,6 +348,11 @@ pub fn appendCommentForm(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref:
     try shared.appendUrlEncoded(buf, allocator, raw_ref);
     try buf.appendSlice(allocator,
         \\/comments">
+        \\  <input type="hidden" name="_csrf" value="
+    );
+    try shared.appendHtml(buf, allocator, csrf_token);
+    try buf.appendSlice(allocator,
+        \\">
         \\  <input type="hidden" name="reply_parent_ref" value="" data-reply-parent-ref>
     );
     try shared.appendMarkdownEditor(buf, allocator, .{});
@@ -351,12 +365,17 @@ pub fn appendCommentForm(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref:
     );
 }
 
-pub fn appendInlineReplyTemplate(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8) !void {
+pub fn appendInlineReplyTemplate(buf: *std.ArrayList(u8), allocator: Allocator, raw_ref: []const u8, csrf_token: []const u8) !void {
     try buf.appendSlice(allocator, "<template data-comment-reply-form-template>");
     try buf.appendSlice(allocator, "<form class=\"inline-comment-reply-form issue-comment-form\" method=\"post\" action=\"/pulls/");
     try shared.appendUrlEncoded(buf, allocator, raw_ref);
     try buf.appendSlice(allocator,
         \\/comments" data-inline-comment-reply-form>
+        \\  <input type="hidden" name="_csrf" value="
+    );
+    try shared.appendHtml(buf, allocator, csrf_token);
+    try buf.appendSlice(allocator,
+        \\">
         \\  <input type="hidden" name="reply_parent_ref" value="" data-reply-parent-ref>
     );
     try shared.appendMarkdownEditor(buf, allocator, .{ .rows = 4 });

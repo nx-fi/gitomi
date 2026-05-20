@@ -103,6 +103,16 @@ const ProjectUpdateNote = struct {
     }
 };
 
+const ProjectUpdatePayload = struct {
+    body: []u8,
+    health: []u8,
+
+    fn deinit(self: *ProjectUpdatePayload, allocator: Allocator) void {
+        allocator.free(self.body);
+        allocator.free(self.health);
+    }
+};
+
 const ReactionChoice = reaction_choices.Choice;
 
 const ReactionSummary = struct {
@@ -125,7 +135,7 @@ pub fn appendProjectOverview(
 ) !void {
     var summary = try loadProjectSummary(allocator, db, project, csrf_token);
     defer summary.deinit(allocator);
-    const metrics = try loadProjectMetrics(allocator, db, &summary);
+    const metrics = try loadProjectMetrics(db, &summary);
     var update_note = try loadLatestProjectUpdateNote(allocator, db, &summary);
     defer update_note.deinit(allocator);
     const current_actor = try shared.currentPrincipalOwned(allocator, repo);
@@ -133,7 +143,7 @@ pub fn appendProjectOverview(
 
     try buf.appendSlice(allocator, "<section class=\"panel project-overview-page\">");
     try appendProjectOverviewHeader(buf, allocator, &summary, &metrics);
-    try appendProjectPageTabs(buf, allocator, project, summary.id, .overview, metrics.issue_count, csrf_token);
+    try appendProjectPageTabs(buf, allocator, project, summary.id, .overview, csrf_token);
     try buf.appendSlice(allocator,
         \\<div class="project-overview-layout">
         \\  <div class="project-overview-main">
@@ -158,19 +168,17 @@ pub fn appendProjectOverview(
 pub fn appendProjectActivityView(
     buf: *std.ArrayList(u8),
     allocator: Allocator,
-    repo: Repo,
     db: *SqliteDb,
     project: []const u8,
     csrf_token: []const u8,
 ) !void {
-    _ = repo;
     var summary = try loadProjectSummary(allocator, db, project, csrf_token);
     defer summary.deinit(allocator);
-    const metrics = try loadProjectMetrics(allocator, db, &summary);
+    const metrics = try loadProjectMetrics(db, &summary);
 
     try buf.appendSlice(allocator, "<section class=\"panel project-overview-page project-activity-page\">");
     try appendProjectOverviewHeader(buf, allocator, &summary, &metrics);
-    try appendProjectPageTabs(buf, allocator, project, summary.id, .activity, metrics.issue_count, csrf_token);
+    try appendProjectPageTabs(buf, allocator, project, summary.id, .activity, csrf_token);
     try buf.appendSlice(allocator,
         \\<div class="project-overview-layout">
         \\  <div class="project-overview-main">
@@ -480,6 +488,10 @@ pub fn handleProjectCommentPost(allocator: Allocator, repo: Repo, stream: std.ne
         try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Unknown project comment action\n");
         return;
     }
+    if (!(try projectHasLatestUpdateNote(allocator, &db, project_id_owned))) {
+        try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", "Project update is required\n");
+        return;
+    }
 
     const body_owned = (try formValueOwned(allocator, form_body, "body")) orelse try allocator.dupe(u8, "");
     defer allocator.free(body_owned);
@@ -674,8 +686,7 @@ fn loadProjectSummary(allocator: Allocator, db: *SqliteDb, project: []const u8, 
     };
 }
 
-fn loadProjectMetrics(allocator: Allocator, db: *SqliteDb, summary: *const ProjectSummary) !ProjectMetrics {
-    _ = allocator;
+fn loadProjectMetrics(db: *SqliteDb, summary: *const ProjectSummary) !ProjectMetrics {
     var metrics = ProjectMetrics{};
     try loadProjectIssueCounts(db, summary.name, &metrics);
     try loadProjectMilestoneCounts(db, summary.id, &metrics);
@@ -772,28 +783,69 @@ fn loadLatestProjectUpdateNote(allocator: Allocator, db: *SqliteDb, summary: *co
         const occurred_at = try stmt.columnTextDup(allocator, 2);
         defer allocator.free(occurred_at);
 
-        var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch continue;
-        defer parsed.deinit();
-        const root = switch (parsed.value) {
-            .object => |object| object,
-            else => continue,
-        };
-        const payload = switch (root.get("payload") orelse continue) {
-            .object => |object| object,
-            else => continue,
-        };
-        const update_body = event_json.jsonString(payload.get("update_body"));
-        const health = projectUpdateHealthValue(event_json.jsonString(payload.get("update_health")) orelse "");
-        if (update_body == null and health.len == 0) continue;
+        var payload_note = (try parseProjectUpdatePayload(allocator, body)) orelse continue;
+        errdefer payload_note.deinit(allocator);
+        const note_occurred_at = try allocator.dupe(u8, occurred_at);
+        errdefer allocator.free(note_occurred_at);
+        const note_actor = try allocator.dupe(u8, actor);
+        errdefer allocator.free(note_actor);
         return .{
-            .body = try allocator.dupe(u8, update_body orelse ""),
-            .health = try allocator.dupe(u8, health),
-            .occurred_at = try allocator.dupe(u8, occurred_at),
-            .actor = try allocator.dupe(u8, actor),
+            .body = payload_note.body,
+            .health = payload_note.health,
+            .occurred_at = note_occurred_at,
+            .actor = note_actor,
         };
     }
 
     return emptyProjectUpdateNote(allocator);
+}
+
+fn projectHasLatestUpdateNote(allocator: Allocator, db: *SqliteDb, project_id: []const u8) !bool {
+    if (project_id.len == 0) return false;
+    var stmt = try db.prepare(
+        \\SELECT body
+        \\FROM events
+        \\WHERE valid_json != 0
+        \\  AND domain_status = 'accepted'
+        \\  AND event_type = 'project.updated'
+        \\  AND object_kind = 'project'
+        \\  AND object_id = ?
+        \\ORDER BY ordinal DESC
+        \\LIMIT 25
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, project_id);
+
+    while (try stmt.step()) {
+        const body = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(body);
+        var payload_note = (try parseProjectUpdatePayload(allocator, body)) orelse continue;
+        payload_note.deinit(allocator);
+        return true;
+    }
+    return false;
+}
+
+fn parseProjectUpdatePayload(allocator: Allocator, event_body: []const u8) !?ProjectUpdatePayload {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, event_body, .{}) catch return null;
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return null,
+    };
+    const payload = switch (root.get("payload") orelse return null) {
+        .object => |object| object,
+        else => return null,
+    };
+    const update_body = event_json.jsonString(payload.get("update_body"));
+    const health = projectUpdateHealthValue(event_json.jsonString(payload.get("update_health")) orelse "");
+    if (update_body == null and health.len == 0) return null;
+    const body = try allocator.dupe(u8, update_body orelse "");
+    errdefer allocator.free(body);
+    return .{
+        .body = body,
+        .health = try allocator.dupe(u8, health),
+    };
 }
 
 fn emptyProjectUpdateNote(allocator: Allocator) !ProjectUpdateNote {
@@ -861,7 +913,6 @@ pub fn appendProjectPageTabs(
     project: []const u8,
     project_id: []const u8,
     active: ProjectPageTab,
-    issue_count: usize,
     csrf_token: []const u8,
 ) !void {
     try buf.appendSlice(allocator,
@@ -869,7 +920,7 @@ pub fn appendProjectPageTabs(
         \\  <nav class="project-overview-primary-tabs" aria-label="Project tabs">
     );
     try appendProjectPageTab(buf, allocator, project, project_id, active, .overview, "Overview", "project-view-overview-icon", "overview", csrf_token);
-    try appendProjectViewSwitcher(buf, allocator, project, project_id, active, issue_count, csrf_token);
+    try appendProjectViewSwitcher(buf, allocator, project, project_id, active, csrf_token);
     try appendProjectPageTab(buf, allocator, project, project_id, active, .activity, "Activity", "button-icon icon-history", "activity", csrf_token);
     try buf.appendSlice(allocator,
         \\  </nav>
@@ -931,10 +982,8 @@ fn appendProjectViewSwitcher(
     project: []const u8,
     project_id: []const u8,
     active: ProjectPageTab,
-    issue_count: usize,
     csrf_token: []const u8,
 ) !void {
-    _ = issue_count;
     const active_label = projectSwitcherActiveLabel(active);
     const active_icon = projectSwitcherActiveIcon(active);
     try appendTemplate(buf, allocator,
@@ -1223,7 +1272,7 @@ fn appendProjectUpdateSection(
     const health_tone = projectUpdateHealthTone(selected_health);
     try buf.appendSlice(allocator,
         \\<section class="project-overview-section project-markdown-section project-update-section">
-        \\  <details class="project-markdown-edit project-update-edit">
+        \\  <details class="project-markdown-edit project-update-edit" data-popover-menu>
         \\    <summary class="button secondary project-update-button"><span class="button-icon project-update-button-icon" aria-hidden="true"></span><span>Update</span></summary>
         \\    <form class="project-markdown-form" method="post" action="/projects/properties" data-project-markdown-form data-project-content-kind="project-update">
     );
@@ -1276,12 +1325,16 @@ fn appendProjectUpdateSection(
         try shared.appendMarkdownSource(buf, allocator, note.body, .{});
     }
     try buf.appendSlice(allocator, "</div>");
-    if (db) |project_db| {
-        try appendProjectReactionBar(buf, allocator, project_db, "project", summary.id, summary, "", current_actor, "project-update-actions reaction-bar", true, "Reply to update");
+    if (note_has_update) {
+        if (db) |project_db| {
+            try appendProjectReactionBar(buf, allocator, project_db, "project", summary.id, summary, "", current_actor, "project-update-actions reaction-bar", true, "Reply to update");
+        }
     }
     try buf.appendSlice(allocator, "</article>");
-    if (db) |project_db| {
-        try appendProjectUpdateThread(buf, allocator, project_db, summary, current_actor);
+    if (note_has_update) {
+        if (db) |project_db| {
+            try appendProjectUpdateThread(buf, allocator, project_db, summary, current_actor);
+        }
     }
     try buf.appendSlice(allocator, "</section>");
 }
@@ -1658,7 +1711,7 @@ fn reactionWasSelected(reactions: []const ReactionSummary, emoji: []const u8) bo
 fn appendProjectDescription(buf: *std.ArrayList(u8), allocator: Allocator, summary: *const ProjectSummary) !void {
     try buf.appendSlice(allocator,
         \\<section class="project-overview-section project-markdown-section project-description-section">
-        \\  <details class="project-markdown-edit project-description-edit">
+        \\  <details class="project-markdown-edit project-description-edit" data-popover-menu>
         \\    <summary class="button secondary project-update-button" aria-label="Edit description" title="Edit description"><span class="button-icon project-update-button-icon" aria-hidden="true"></span><span>Edit</span></summary>
         \\    <form class="project-markdown-form" method="post" action="/projects/properties" data-project-markdown-form data-project-content-kind="project-description">
     );
@@ -3026,11 +3079,75 @@ test "project latest update renders update health instead of lifecycle status" {
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "Planned") == null);
 }
 
+test "project latest update hides reply thread until update exists" {
+    var db = try SqliteDb.open(std.testing.allocator, ":memory:", index.sqlite.SQLITE_OPEN_READWRITE | index.sqlite.SQLITE_OPEN_CREATE, true);
+    defer db.deinit();
+    try index.createIndexSchema(&db);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    var summary = ProjectSummary{
+        .id = try std.testing.allocator.dupe(u8, "p1"),
+        .name = try std.testing.allocator.dupe(u8, "Release"),
+        .description = try std.testing.allocator.dupe(u8, ""),
+        .state = try std.testing.allocator.dupe(u8, "open"),
+        .status = try std.testing.allocator.dupe(u8, cmd_common.default_project_status),
+        .status_occurred_at = try std.testing.allocator.dupe(u8, ""),
+        .priority = try std.testing.allocator.dupe(u8, ""),
+        .start_at = try std.testing.allocator.dupe(u8, ""),
+        .end_at = try std.testing.allocator.dupe(u8, ""),
+        .created_at = try std.testing.allocator.dupe(u8, ""),
+        .author_principal = try std.testing.allocator.dupe(u8, ""),
+        .csrf_token = "token-123",
+    };
+    defer summary.deinit(std.testing.allocator);
+    var empty_note = try emptyProjectUpdateNote(std.testing.allocator);
+    defer empty_note.deinit(std.testing.allocator);
+
+    try appendProjectUpdateSection(&buf, std.testing.allocator, &db, &summary, &empty_note, null);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "No update yet.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "project-update-thread") == null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Reply to update") == null);
+
+    buf.clearRetainingCapacity();
+    var note = ProjectUpdateNote{
+        .body = try std.testing.allocator.dupe(u8, "Shipped milestone one"),
+        .health = try std.testing.allocator.dupe(u8, "on_track"),
+        .occurred_at = try std.testing.allocator.dupe(u8, "2026-05-20T08:00:00Z"),
+        .actor = try std.testing.allocator.dupe(u8, "alice"),
+    };
+    defer note.deinit(std.testing.allocator);
+
+    try appendProjectUpdateSection(&buf, std.testing.allocator, &db, &summary, &note, null);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "project-update-thread") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Reply to update") != null);
+}
+
+test "project latest update detection ignores property-only updates" {
+    var db = try SqliteDb.open(std.testing.allocator, ":memory:", index.sqlite.SQLITE_OPEN_READWRITE | index.sqlite.SQLITE_OPEN_CREATE, true);
+    defer db.deinit();
+    try index.createIndexSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO events(ref, "commit", event_hash, tree, subject, body, empty_tree, valid_json, event_type, object_kind, object_id, actor_principal, actor_device, seq, occurred_at, domain_status, rejection_reason)
+        \\VALUES ('refs/gitomi/events/alice', 'commit-1', 'hash-1', 'tree', 'subject', '{"payload":{"status":"Planned"}}', 0, 1, 'project.updated', 'project', 'p1', 'alice', 'device', 1, '2026-05-20T08:00:00Z', 'accepted', '');
+    );
+    try std.testing.expect(!(try projectHasLatestUpdateNote(std.testing.allocator, &db, "p1")));
+
+    try db.exec(
+        \\INSERT INTO events(ref, "commit", event_hash, tree, subject, body, empty_tree, valid_json, event_type, object_kind, object_id, actor_principal, actor_device, seq, occurred_at, domain_status, rejection_reason)
+        \\VALUES ('refs/gitomi/events/alice', 'commit-2', 'hash-2', 'tree', 'subject', '{"payload":{"update_body":"Shipped milestone one","update_health":"on_track"}}', 0, 1, 'project.updated', 'project', 'p1', 'alice', 'device', 2, '2026-05-20T08:05:00Z', 'accepted', '');
+    );
+    try std.testing.expect(try projectHasLatestUpdateNote(std.testing.allocator, &db, "p1"));
+}
+
 test "project issues tab stays in project workspace" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
 
-    try appendProjectPageTabs(&buf, std.testing.allocator, "Release Plan", "", .overview, 3, "token-123");
+    try appendProjectPageTabs(&buf, std.testing.allocator, "Release Plan", "", .overview, "token-123");
 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/projects?project=Release%20Plan&amp;view=issues\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "href=\"/issues?project=") == null);

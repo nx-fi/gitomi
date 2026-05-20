@@ -115,7 +115,10 @@ pub fn executeWorkflow(
     };
 
     const conclusion = switch (workflow.dialect) {
-        .github_actions => try executeGithubActionsWorkflow(allocator, workflow, event_name, event_path, worktree_path, workflow_tree, options, &diagnostics),
+        .github_actions => if (try refuseUntrustedLocalExecution(workflow.path, "github-actions", targets.workflow_trusted, options))
+            "action_required"
+        else
+            try executeGithubActionsWorkflow(allocator, workflow, event_name, event_path, worktree_path, workflow_tree, options, &diagnostics),
         .gitomi => try executeGitomiWorkflow(allocator, repo, run_id, workflow, targets, event_name, gitomi_event_type, event_path, worktree_path, workflow_tree, output_root, permission_grant_json, options, &diagnostics),
     };
 
@@ -297,6 +300,7 @@ pub fn executeGitomiJob(
     diagnostics: *RunDiagnostics,
 ) ![]const u8 {
     const backend = if (job.backend.len == 0 and job.steps.len != 0) "shell" else job.backend;
+    if (try refuseUntrustedLocalExecution(workflow.path, backend, targets.workflow_trusted, options)) return "action_required";
     if (!try enforceJobPermissionGrant(allocator, repo, workflow, job, targets.workflow_trusted)) return "action_required";
 
     const safe_job = try sanitizePathSegment(allocator, job.id);
@@ -336,6 +340,25 @@ pub fn executeGitomiJob(
     }
     try collectBackendOutputs(allocator, diagnostics, job, job_output_dir);
     return conclusion;
+}
+
+pub fn shouldBlockUntrustedLocalExecution(workflow_trusted: bool, options: Options) bool {
+    return !workflow_trusted and !options.allow_untrusted_local_execution;
+}
+
+fn refuseUntrustedLocalExecution(workflow_path: []const u8, backend: []const u8, workflow_trusted: bool, options: Options) !bool {
+    if (!shouldBlockUntrustedLocalExecution(workflow_trusted, options)) return false;
+    try io.eprint(
+        "gt actions: refusing local {s} execution for untrusted workflow {s}; rerun with --allow-untrusted-local-execution only if you trust this workflow\n",
+        .{ backend, workflow_path },
+    );
+    return true;
+}
+
+test "untrusted workflow local execution defaults to blocked" {
+    try std.testing.expect(shouldBlockUntrustedLocalExecution(false, .{}));
+    try std.testing.expect(!shouldBlockUntrustedLocalExecution(false, .{ .allow_untrusted_local_execution = true }));
+    try std.testing.expect(!shouldBlockUntrustedLocalExecution(true, .{}));
 }
 
 pub fn executeShellJob(
@@ -380,8 +403,10 @@ pub fn executeContainerJob(
         return "failure";
     }
 
-    const volume = try std.fmt.allocPrint(allocator, "{s}:/workspace", .{worktree_path});
+    const volume = try std.fmt.allocPrint(allocator, "{s}:/workspace:rw", .{worktree_path});
     defer allocator.free(volume);
+    const user_arg = try std.fmt.allocPrint(allocator, "{d}", .{std.posix.getuid()});
+    defer allocator.free(user_arg);
 
     for (job.steps, 0..) |step, idx| {
         const command = step.run orelse continue;
@@ -394,7 +419,7 @@ pub fn executeContainerJob(
             for (env_args.items) |value| allocator.free(value);
             env_args.deinit(allocator);
         }
-        try argv.appendSlice(allocator, &.{ "docker", "run", "--rm", "-v", volume, "-w", "/workspace" });
+        try appendContainerSandboxArgs(&argv, allocator, volume, user_arg);
         for (env) |entry| {
             const env_arg = try std.fmt.allocPrint(allocator, "{s}={s}", .{ entry.key, entry.value });
             errdefer allocator.free(env_arg);
@@ -412,6 +437,53 @@ pub fn executeContainerJob(
         if (result.output.exitCode() != 0) return "failure";
     }
     return "success";
+}
+
+fn appendContainerSandboxArgs(argv: *std.ArrayList([]const u8), allocator: Allocator, volume: []const u8, user_arg: []const u8) !void {
+    try argv.appendSlice(allocator, &.{
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--pids-limit",
+        "256",
+        "--read-only",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,nodev,size=64m",
+        "--user",
+        user_arg,
+        "-v",
+        volume,
+        "-w",
+        "/workspace",
+    });
+}
+
+test "container backend includes Docker sandbox flags" {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(std.testing.allocator);
+
+    try appendContainerSandboxArgs(&argv, std.testing.allocator, "/tmp/work:/workspace:rw", "123:456");
+
+    try std.testing.expect(containsArg(argv.items, "--network"));
+    try std.testing.expect(containsArg(argv.items, "none"));
+    try std.testing.expect(containsArg(argv.items, "--cap-drop"));
+    try std.testing.expect(containsArg(argv.items, "ALL"));
+    try std.testing.expect(containsArg(argv.items, "--read-only"));
+    try std.testing.expect(containsArg(argv.items, "--user"));
+    try std.testing.expect(containsArg(argv.items, "123:456"));
+}
+
+fn containsArg(args: []const []const u8, needle: []const u8) bool {
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, needle)) return true;
+    }
+    return false;
 }
 
 pub fn executeGithubActionsJob(
@@ -1741,8 +1813,9 @@ pub fn runCommandInDirWithEnvTimed(
     var has_env_map = false;
     defer if (has_env_map) env_map.deinit();
     if (env.len != 0) {
-        env_map = try std.process.getEnvMap(allocator);
+        env_map = std.process.EnvMap.init(allocator);
         has_env_map = true;
+        try populateIsolatedChildEnv(&env_map);
         for (env) |entry| try env_map.put(entry.key, entry.value);
         child.env_map = &env_map;
     }
@@ -1782,6 +1855,35 @@ pub fn runCommandInDirWithEnvTimed(
         },
         .timed_out = timed_out,
     };
+}
+
+fn populateIsolatedChildEnv(env_map: *std.process.EnvMap) !void {
+    try env_map.put("PATH", "/run/current-system/sw/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+    try env_map.put("TMPDIR", "/tmp");
+    try env_map.put("LANG", "C.UTF-8");
+}
+
+test "explicit command env is isolated from parent environment" {
+    const allocator = std.testing.allocator;
+    var test_env = [_]KeyValuePair{.{
+        .key = try allocator.dupe(u8, "GITOMI_TEST_ENV"),
+        .value = try allocator.dupe(u8, "present"),
+    }};
+    defer {
+        allocator.free(test_env[0].key);
+        allocator.free(test_env[0].value);
+    }
+
+    var result = try runCommandInDirWithEnv(std.testing.allocator, &.{
+        "sh",
+        "-lc",
+        "printf '%s|%s|%s' \"$GITOMI_TEST_ENV\" \"${HOME-unset}\" \"$PATH\"",
+    }, ".", null, 1024, test_env[0..]);
+    defer result.deinit();
+
+    try std.testing.expectEqualStrings("", result.stderr);
+    try std.testing.expect(std.mem.startsWith(u8, result.stdout, "present|unset|"));
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "/run/current-system/sw/bin") != null);
 }
 
 fn timeoutNanos(minutes: u64) u64 {

@@ -11,7 +11,9 @@ const appendSectionHead = shared.appendSectionHead;
 const appendShellEnd = shared.appendShellEnd;
 const appendShellStart = shared.appendShellStart;
 const appendTemplate = shared.appendTemplate;
+const appendCsrfInput = shared.appendCsrfInput;
 const formValueOwned = shared.formValueOwned;
+const formHasValidCsrfToken = shared.formHasValidCsrfToken;
 const sendResponse = shared.sendResponse;
 
 const FlashKind = enum { success, failure };
@@ -33,12 +35,7 @@ pub fn renderModelsPage(allocator: Allocator, repo: Repo, target: []const u8, cs
 }
 
 pub fn handleModelsPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8, csrf_token: []const u8) !void {
-    const csrf_owned = (try formValueOwned(allocator, form_body, "csrf_token")) orelse {
-        try sendModelsError(allocator, repo, stream, 403, "Forbidden", "Invalid model settings form token.", csrf_token);
-        return;
-    };
-    defer allocator.free(csrf_owned);
-    if (!std.mem.eql(u8, csrf_owned, csrf_token)) {
+    if (!try formHasValidCsrfToken(allocator, form_body, csrf_token)) {
         try sendModelsError(allocator, repo, stream, 403, "Forbidden", "Invalid model settings form token.", csrf_token);
         return;
     }
@@ -143,11 +140,9 @@ fn appendOllamaCard(buf: *std.ArrayList(u8), allocator: Allocator, model_opt: ?*
     try buf.appendSlice(allocator,
         \\  </div>
         \\  <form class="issue-form ai-model-form" method="post" action="/settings/models">
-        \\    <input type="hidden" name="csrf_token" value="
     );
-    try appendHtml(buf, allocator, csrf_token);
+    try appendCsrfInput(buf, allocator, csrf_token);
     try buf.appendSlice(allocator,
-        \\">
         \\    <input type="hidden" name="action" value="update-ollama">
         \\    <div class="ai-model-form-grid">
         \\      <label>Endpoint<input name="endpoint_url" value="
