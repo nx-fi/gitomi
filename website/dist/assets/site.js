@@ -38,11 +38,29 @@
     });
   }
 
+  function shellSingleQuote(value) {
+    return `'${String(value).replace(/'/g, "'\\''")}'`;
+  }
+
+  function getInstallUrl() {
+    try {
+      const origin = window.location && window.location.origin;
+      const installUrl = new URL("/install.sh", origin === "null" ? undefined : origin);
+      if (installUrl.protocol !== "http:" && installUrl.protocol !== "https:") {
+        throw new Error("Unsupported install URL protocol");
+      }
+      installUrl.username = "";
+      installUrl.password = "";
+      installUrl.search = "";
+      installUrl.hash = "";
+      return installUrl.href;
+    } catch {
+      return "https://www.gitomi.com/install.sh";
+    }
+  }
+
   function initInstallCommand() {
-    const installUrl = new URL("install.sh", window.location.href);
-    installUrl.hash = "";
-    installUrl.search = "";
-    const command = `curl -fsSL ${installUrl.href} | sh`;
+    const command = `curl -fsSL ${shellSingleQuote(getInstallUrl())} | sh`;
 
     document.querySelectorAll("[data-install-command]").forEach((target) => {
       target.textContent = command;

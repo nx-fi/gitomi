@@ -1008,22 +1008,50 @@
   right: 0;
   z-index: 20;
 }
+.project-update-edit[open],
+.project-description-edit[open] {
+  z-index: 90;
+}
+.project-update-edit[open]::before,
+.project-description-edit[open]::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  background: color-mix(in oklch, var(--bg) 58%, transparent);
+}
 .project-update-edit > summary,
 .project-description-edit > summary {
+  position: relative;
+  z-index: 81;
   gap: 7px;
 }
 .project-update-edit .project-markdown-form,
 .project-description-edit .project-markdown-form {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
-  z-index: 25;
-  width: min(680px, calc(100vw - 56px));
-  padding: 12px;
+  position: fixed;
+  top: clamp(72px, 12dvh, 120px);
+  left: 50%;
+  right: auto;
+  z-index: 90;
+  width: min(980px, calc(100vw - 40px));
+  max-height: calc(100dvh - 144px);
+  margin-top: 0;
+  padding: 14px;
+  overflow: auto;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-elevated);
+  transform: translateX(-50%);
+}
+.project-update-edit .project-markdown-form {
+  width: min(1060px, calc(100vw - 40px));
+}
+.project-update-edit .markdown-editor textarea {
+  min-height: clamp(220px, 34dvh, 440px);
+}
+.project-description-edit .markdown-editor textarea {
+  min-height: clamp(220px, 36dvh, 480px);
 }
 .project-update-button-icon {
   --button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Cpath d='M12 20h9'/%3E%3Cpath d='M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z'/%3E%3C/g%3E%3C/svg%3E");

@@ -103,9 +103,9 @@ gt notification read EVENT|--all [--principal PRINCIPAL]
 gt actions workflows [--json] [--ref REF|--oid OID]
 gt actions request --workflow WORKFLOW [--ref REF|--oid OID] [--event EVENT]
 gt actions complete RUN --conclusion CONCLUSION [--workflow WORKFLOW] [--ref REF|--oid OID] [--event EVENT]
-gt actions run --event EVENT [--ref REF|--oid OID] [--object-id ID] [--dry-run] [--act PATH] [--agent-runner PATH] [-- ACT_ARGS...]
-gt actions run-requested [RUN] [--dry-run] [--act PATH] [--agent-runner PATH] [-- ACT_ARGS...]
-gt actions daemon [--once] [--replay] [--interval-ms N] [--dry-run] [--act PATH] [--agent-runner PATH] [-- ACT_ARGS...]
+gt actions run --event EVENT [--ref REF|--oid OID] [--object-id ID] [--dry-run] [--allow-untrusted-local-execution] [--act PATH] [--agent-runner PATH] [-- ACT_ARGS...]
+gt actions run-requested [RUN] [--dry-run] [--allow-untrusted-local-execution] [--act PATH] [--agent-runner PATH] [-- ACT_ARGS...]
+gt actions daemon [--once] [--replay] [--interval-ms N] [--dry-run] [--allow-untrusted-local-execution] [--act PATH] [--agent-runner PATH] [-- ACT_ARGS...]
 gt runs prune [--dry-run] [--max-age-days N] [--max-count N] [--max-bytes N]
 gt sync [--remote REMOTE] [--pull-only|--push-only]
 gt github import [--repo OWNER/REPO] [--token-env NAME|--token-file PATH] [--from-file PATH] [--no-comments] [--no-projects] [--rest|--graphql]
@@ -113,7 +113,7 @@ gt github export --repo OWNER/REPO [--token-env NAME|--token-file PATH|--use-gh]
 gt github sync [--repo OWNER/REPO] [--token-env NAME|--token-file PATH|--use-gh] [--remote REMOTE] [--interval-ms N] [--max-pages N] [--dry-run] [--no-git-sync] [--import-only] [--rest|--graphql]
 gt github live [--repo OWNER/REPO] --webhook-url URL (--secret-env NAME|--secret-file PATH) [--host 127.0.0.1] [--port 12656] [--path /github/webhook] [--remote REMOTE] [--interval-ms N] [--once] [--no-subscribe] [--dry-run] [--no-git-sync] [--rest|--graphql]
 gt gitlab import [--project GROUP/PROJECT] [--token-env NAME|--token-file PATH] [--from-file PATH] [--no-comments]
-gt gitlab export --project GROUP/PROJECT [--token-env NAME|--token-file PATH] [--dry-run] [--map-file PATH] [--reuse-legacy]
+gt gitlab export --project GROUP/PROJECT [--token-env NAME|--token-file PATH] [--dry-run] [--map-file PATH]
 gt gitlab sync --project GROUP/PROJECT [--token-env NAME|--token-file PATH] [--remote REMOTE] [--interval-ms N] [--max-pages N] [--dry-run] [--no-git-sync]
 gt web [--local] [--host gitomi.localhost] [--port 12655] [--once]
 gt web --live [--host gitomi.localhost] [--port 12655] [--repo OWNER/REPO] [--webhook-url URL] (--secret-env NAME|--secret-file PATH) [--live-host 127.0.0.1] [--live-port 12656] [--live-path /github/webhook] [--remote REMOTE] [--interval-ms N] [--no-subscribe] [--dry-run] [--no-git-sync] [--rest|--graphql]
@@ -222,7 +222,9 @@ source OID and the code target OID. `gt actions request` and
 `gt actions run-requested` executes accepted pending run requests from the local
 event projection. Extra act flags can be passed after `--`; `--act PATH`
 selects a non-default act binary, and `--agent-runner PATH` selects the external
-agent backend command for native `backend: agent` jobs.
+agent backend command for native `backend: agent` jobs. Local shell, container,
+agent, and GitHub-compatible workflow execution is refused for untrusted
+workflows unless `--allow-untrusted-local-execution` is set.
 
 `gt actions daemon` is the scheduler service. It polls the local repository,
 executes accepted pending run requests, schedules new accepted Gitomi events,

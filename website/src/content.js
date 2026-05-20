@@ -13,7 +13,7 @@
  * @property {StartCommand[]} commands
  */
 
-const installCommand = "curl -fsSL https://www.gitomi.com/install.sh | sh";
+const installCommand = "curl -fsSL 'https://www.gitomi.com/install.sh' | sh";
 
 /** @type {StartStep[]} */
 const startSteps = [
