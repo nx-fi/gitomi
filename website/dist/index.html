@@ -76,7 +76,7 @@
         </h1>
         <p class="hero-lede">Gitomi keeps issues, pull requests, project boards, milestones, comments, pipeline run records, notifications, and access-control events inside your Git repository - so you can work offline, sync with any Git remote, or self-host without losing your collaboration history.</p>
         <div class="hero-install command-code">
-          <pre><code data-install-command>curl -fsSL 'https://www.gitomi.com/install.sh' | sh</code></pre>
+          <pre><code data-install-command>sh -c 'set -eu; base=$1; tmp=&quot;$(mktemp -d /tmp/gitomi-install.XXXXXX)&quot;; trap &quot;rm -rf \&quot;$tmp\&quot;&quot; EXIT; curl -fsSL &quot;$base/install.sh&quot; -o &quot;$tmp/install.sh&quot;; curl -fsSL &quot;$base/install.sh.sha256&quot; -o &quot;$tmp/install.sh.sha256&quot;; cd &quot;$tmp&quot;; if command -v sha256sum &gt;/dev/null 2&gt;&amp;1; then sha256sum -c install.sh.sha256; else shasum -a 256 -c install.sh.sha256; fi; sh install.sh' sh 'https://www.gitomi.com'</code></pre>
           <button class="command-copy install-copy" type="button" data-copy-command title="Copy install command" aria-label="Copy install command">
             <span class="button-icon icon-copy" aria-hidden="true"></span>
           </button>
@@ -469,7 +469,7 @@
       <button class="command-copy" type="button" data-copy-command title="Copy Install gt command" aria-label="Copy Install gt command">
         <span class="button-icon icon-copy" aria-hidden="true"></span>
       </button>
-      <pre><code data-install-command>curl -fsSL 'https://www.gitomi.com/install.sh' | sh</code></pre>
+      <pre><code data-install-command>sh -c 'set -eu; base=$1; tmp=&quot;$(mktemp -d /tmp/gitomi-install.XXXXXX)&quot;; trap &quot;rm -rf \&quot;$tmp\&quot;&quot; EXIT; curl -fsSL &quot;$base/install.sh&quot; -o &quot;$tmp/install.sh&quot;; curl -fsSL &quot;$base/install.sh.sha256&quot; -o &quot;$tmp/install.sh.sha256&quot;; cd &quot;$tmp&quot;; if command -v sha256sum &gt;/dev/null 2&gt;&amp;1; then sha256sum -c install.sh.sha256; else shasum -a 256 -c install.sh.sha256; fi; sh install.sh' sh 'https://www.gitomi.com'</code></pre>
     </div>
         </div>
       </div>

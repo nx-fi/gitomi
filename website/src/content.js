@@ -13,7 +13,13 @@
  * @property {StartCommand[]} commands
  */
 
-const installCommand = "curl -fsSL 'https://www.gitomi.com/install.sh' | sh";
+const canonicalInstallBase = "https://www.gitomi.com";
+const installBootstrapScript = "set -eu; base=$1; tmp=\"$(mktemp -d /tmp/gitomi-install.XXXXXX)\"; trap \"rm -rf \\\"$tmp\\\"\" EXIT; curl -fsSL \"$base/install.sh\" -o \"$tmp/install.sh\"; curl -fsSL \"$base/install.sh.sha256\" -o \"$tmp/install.sh.sha256\"; cd \"$tmp\"; if command -v sha256sum >/dev/null 2>&1; then sha256sum -c install.sh.sha256; else shasum -a 256 -c install.sh.sha256; fi; sh install.sh";
+const installCommand = `sh -c ${shellSingleQuote(installBootstrapScript)} sh ${shellSingleQuote(canonicalInstallBase)}`;
+
+function shellSingleQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
 
 /** @type {StartStep[]} */
 const startSteps = [

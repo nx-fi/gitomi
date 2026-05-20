@@ -44,7 +44,21 @@ the source of truth.
 Install the latest released CLI:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/nx-fi/gitomi/main/install.sh | sh
+sh -c '
+set -eu
+base=$1
+tmp="$(mktemp -d /tmp/gitomi-install.XXXXXX)"
+trap "rm -rf \"$tmp\"" EXIT
+curl -fsSL "$base/install.sh" -o "$tmp/install.sh"
+curl -fsSL "$base/install.sh.sha256" -o "$tmp/install.sh.sha256"
+cd "$tmp"
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256sum -c install.sh.sha256
+else
+  shasum -a 256 -c install.sh.sha256
+fi
+sh install.sh
+' sh 'https://raw.githubusercontent.com/nx-fi/gitomi/main'
 gt --help
 ```
 

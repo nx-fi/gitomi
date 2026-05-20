@@ -1,4 +1,5 @@
-import { copyFile, cp, mkdir, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { copyFile, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { renderSite } from "./content.js";
@@ -39,6 +40,10 @@ async function build() {
       }
     })
   );
+
+  const installScript = await readFile(join(repoRoot, "install.sh"));
+  const checksum = createHash("sha256").update(installScript).digest("hex");
+  await writeFile(join(distDir, "install.sh.sha256"), `${checksum}  install.sh\n`);
 
   await Bun.write(join(distDir, "index.html"), renderSite());
 }

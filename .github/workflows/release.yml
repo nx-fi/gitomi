@@ -6,7 +6,7 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -17,27 +17,55 @@ env:
   GH_REPO: ${{ github.repository }}
 
 jobs:
-  create-release:
-    name: Create draft release
+  validate-release-tag:
+    name: Validate release tag
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - name: Create draft release
+      - name: Require protected signed tag
         env:
           GH_TOKEN: ${{ github.token }}
+          REF_PROTECTED: ${{ github.ref_protected }}
         run: |
           set -euo pipefail
-          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release create "$GITHUB_REF_NAME" \
-              --draft \
-              --verify-tag \
-              --title "$GITHUB_REF_NAME" \
-              --generate-notes
+
+          if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then
+            echo "::error::Release workflow must be triggered by a tag."
+            exit 1
+          fi
+
+          if [[ "$REF_PROTECTED" != "true" ]]; then
+            echo "::error::Release tags must be protected. Configure a GitHub repository ruleset for refs/tags/v* that restricts tag creation, updates, and deletion to trusted releasers."
+            exit 1
+          fi
+
+          IFS=$'\t' read -r object_type object_sha < <(
+            gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${GITHUB_REF_NAME}" \
+              --jq '[.object.type, .object.sha] | @tsv'
+          )
+
+          if [[ "$object_type" != "tag" ]]; then
+            echo "::error::Release tag must be an annotated signed tag; ${GITHUB_REF_NAME} points directly to a ${object_type}."
+            exit 1
+          fi
+
+          IFS=$'\t' read -r verified reason < <(
+            gh api "repos/${GITHUB_REPOSITORY}/git/tags/${object_sha}" \
+              --jq '[.verification.verified, .verification.reason] | @tsv'
+          )
+
+          if [[ "$verified" != "true" ]]; then
+            echo "::error::Release tag signature is not verified by GitHub: ${reason}."
+            exit 1
           fi
 
   build:
     name: Build ${{ matrix.target }}
-    needs: create-release
+    needs: validate-release-tag
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -59,10 +87,12 @@ jobs:
             archive_ext: zip
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
           cache-key: release-${{ matrix.target }}
@@ -101,24 +131,60 @@ jobs:
 
           checksum="${artifact}.sha256"
           (cd "$(dirname "$artifact")" && sha256sum "$(basename "$artifact")") > "$checksum"
-          echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
-          echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
+          {
+            echo "artifact=$artifact"
+            echo "checksum=$checksum"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-assets-${{ matrix.target }}
+          path: |
+            ${{ steps.package.outputs.artifact }}
+            ${{ steps.package.outputs.checksum }}
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: release-assets-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" \
+              --draft \
+              --verify-tag \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes
+          fi
 
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release upload "$GITHUB_REF_NAME" \
-            "${{ steps.package.outputs.artifact }}" \
-            "${{ steps.package.outputs.checksum }}" \
-            --clobber
+          shopt -s nullglob
+          assets=(dist/*)
+          if (( ${#assets[@]} == 0 )); then
+            echo "::error::No release assets were downloaded."
+            exit 1
+          fi
+          gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
 
-  publish-release:
-    name: Publish release
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
       - name: Publish draft release
         env:
           GH_TOKEN: ${{ github.token }}

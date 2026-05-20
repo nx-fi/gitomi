@@ -3,6 +3,8 @@
 
   const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   const typewriterObservers = [];
+  const canonicalInstallBase = "https://www.gitomi.com";
+  const installBootstrapScript = "set -eu; base=$1; tmp=\"$(mktemp -d /tmp/gitomi-install.XXXXXX)\"; trap \"rm -rf \\\"$tmp\\\"\" EXIT; curl -fsSL \"$base/install.sh\" -o \"$tmp/install.sh\"; curl -fsSL \"$base/install.sh.sha256\" -o \"$tmp/install.sh.sha256\"; cd \"$tmp\"; if command -v sha256sum >/dev/null 2>&1; then sha256sum -c install.sh.sha256; else shasum -a 256 -c install.sh.sha256; fi; sh install.sh";
 
   function getCopyText(code) {
     const clone = code.cloneNode(true);
@@ -42,25 +44,25 @@
     return `'${String(value).replace(/'/g, "'\\''")}'`;
   }
 
-  function getInstallUrl() {
+  function getInstallBaseUrl() {
     try {
       const origin = window.location && window.location.origin;
-      const installUrl = new URL("/install.sh", origin === "null" ? undefined : origin);
-      if (installUrl.protocol !== "http:" && installUrl.protocol !== "https:") {
+      const installBase = new URL("/", origin === "null" ? undefined : origin);
+      if (installBase.protocol !== "http:" && installBase.protocol !== "https:") {
         throw new Error("Unsupported install URL protocol");
       }
-      installUrl.username = "";
-      installUrl.password = "";
-      installUrl.search = "";
-      installUrl.hash = "";
-      return installUrl.href;
+      installBase.username = "";
+      installBase.password = "";
+      installBase.search = "";
+      installBase.hash = "";
+      return installBase.origin;
     } catch {
-      return "https://www.gitomi.com/install.sh";
+      return canonicalInstallBase;
     }
   }
 
   function initInstallCommand() {
-    const command = `curl -fsSL ${shellSingleQuote(getInstallUrl())} | sh`;
+    const command = `sh -c ${shellSingleQuote(installBootstrapScript)} sh ${shellSingleQuote(getInstallBaseUrl())}`;
 
     document.querySelectorAll("[data-install-command]").forEach((target) => {
       target.textContent = command;
