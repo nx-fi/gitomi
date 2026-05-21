@@ -56,7 +56,7 @@ pub const HttpApiClient = struct {
         while (true) : (attempt += 1) {
             const config_path = try self.writeCurlConfig(method, url, body != null);
             defer self.allocator.free(config_path);
-            defer std.fs.deleteFileAbsolute(config_path) catch {};
+            defer std.Io.Dir.deleteFileAbsolute(@import("compat").io(), config_path) catch {};
 
             var result = try git.runCommand(self.allocator, &.{
                 "curl",
@@ -143,11 +143,11 @@ pub const HttpApiClient = struct {
         }
         try appendCurlConfigOption(&buf, self.allocator, "url", url);
 
-        var file = try std.fs.createFileAbsolute(path, .{ .mode = 0o600 });
-        errdefer std.fs.deleteFileAbsolute(path) catch {};
-        defer file.close();
-        try file.writeAll(buf.items);
-        try file.sync();
+        var file = try std.Io.Dir.createFileAbsolute(@import("compat").io(), path, .{ .permissions = @enumFromInt(0o600) });
+        errdefer std.Io.Dir.deleteFileAbsolute(@import("compat").io(), path) catch {};
+        defer file.close(@import("compat").io());
+        try file.writeStreamingAll(@import("compat").io(), buf.items);
+        try file.sync(@import("compat").io());
         return path;
     }
 
@@ -205,7 +205,7 @@ fn isRetryableHttpStatus(status: u16) bool {
 
 pub fn sleepBeforeRetry(attempt: usize) void {
     const multiplier = @as(u64, 1) << @intCast(@min(attempt, 4));
-    std.Thread.sleep(retry_base_delay_ns * multiplier);
+    @import("compat").sleep(retry_base_delay_ns * multiplier);
 }
 
 pub fn requestStderrIsNotFound(stderr: []const u8) bool {

@@ -4,6 +4,7 @@ const actions = @import("actions.zig");
 const auth_binding = @import("auth_binding.zig");
 const build_options = @import("build_options");
 const comment = @import("comment.zig");
+const compat = @import("compat");
 const errors = @import("errors.zig");
 const fsck = @import("fsck.zig");
 const git = @import("git.zig");
@@ -73,8 +74,8 @@ const command_dispatch = std.StaticStringMap(Command).initComptime(.{
     .{ "web", Command{ .handler = runWeb, .command_name = "gt web" } },
 });
 
-pub fn main() void {
-    realMain() catch |err| {
+pub fn main(process_args: std.process.Args) void {
+    realMain(process_args) catch |err| {
         if (!errors.isReported(err)) {
             io.eprint("gt: {s}\n", .{@errorName(err)}) catch {};
         }
@@ -82,14 +83,17 @@ pub fn main() void {
     };
 }
 
-fn realMain() !void {
+fn realMain(process_args: std.process.Args) !void {
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
     defer _ = debug_allocator.deinit();
     const allocator = debug_allocator.allocator();
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
-    scrubSensitiveProcessArgs();
+    var args_arena = std.heap.ArenaAllocator.init(allocator);
+    defer args_arena.deinit();
+    const raw_args = try process_args.toSlice(args_arena.allocator());
+    const args = try args_arena.allocator().alloc([]const u8, raw_args.len);
+    for (raw_args, args) |raw_arg, *arg| arg.* = raw_arg;
+    scrubSensitiveProcessArgs(process_args);
 
     var repo = try repo_mod.discoverRepo(allocator);
     defer repo.deinit();
@@ -129,10 +133,10 @@ fn ensureTrustedRepo(allocator: Allocator, repo: repo_mod.Repo) !void {
         return CliError.UserError;
     }
 
-    try std.fs.cwd().makePath(repo.gitomi_dir);
-    const file = try std.fs.createFileAbsolute(trust_path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll("trusted\n");
+    try std.Io.Dir.cwd().createDirPath(compat.io(), repo.gitomi_dir);
+    const file = try std.Io.Dir.createFileAbsolute(compat.io(), trust_path, .{ .truncate = true });
+    defer file.close(compat.io());
+    try file.writeStreamingAll(compat.io(), "trusted\n");
 }
 
 fn answerIsYes(answer: []const u8) bool {
@@ -147,10 +151,10 @@ fn readStdinLine(allocator: Allocator, max_bytes: usize) ![]u8 {
     var line: std.ArrayList(u8) = .empty;
     errdefer line.deinit(allocator);
 
-    const stdin = std.fs.File.stdin();
+    const stdin = std.Io.File.stdin();
     var byte: [1]u8 = undefined;
     while (true) {
-        const read_len = try stdin.read(&byte);
+        const read_len = try compat.readFile(stdin, &byte);
         if (read_len == 0 or byte[0] == '\n') break;
         if (line.items.len >= max_bytes) {
             try io.eprint("input is too long\n", .{});
@@ -162,20 +166,24 @@ fn readStdinLine(allocator: Allocator, max_bytes: usize) ![]u8 {
     return try line.toOwnedSlice(allocator);
 }
 
-fn scrubSensitiveProcessArgs() void {
-    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return;
+fn scrubSensitiveProcessArgs(process_args: std.process.Args) void {
+    switch (builtin.os.tag) {
+        .windows, .wasi, .freestanding, .other => return,
+        else => {},
+    }
 
+    const argv = process_args.vector;
     var i: usize = 0;
-    while (i < std.os.argv.len) : (i += 1) {
-        const arg = std.mem.sliceTo(std.os.argv[i], 0);
+    while (i < argv.len) : (i += 1) {
+        const arg = std.mem.sliceTo(argv[i], 0);
         if (std.mem.eql(u8, arg, "--secret") or std.mem.eql(u8, arg, "--token")) {
-            if (i + 1 < std.os.argv.len) {
-                scrubArgvValue(std.os.argv[i + 1]);
+            if (i + 1 < argv.len) {
+                scrubArgvValue(@constCast(argv[i + 1]));
                 i += 1;
             }
         } else if (std.mem.startsWith(u8, arg, "--secret=") or std.mem.startsWith(u8, arg, "--token=")) {
             const eq = std.mem.indexOfScalar(u8, arg, '=') orelse continue;
-            @memset(arg[eq + 1 ..], 'x');
+            @memset(@constCast(arg[eq + 1 ..]), 'x');
         }
     }
 }
@@ -430,7 +438,7 @@ fn cmdInit(allocator: Allocator, args: []const []const u8) !void {
         return CliError.UserError;
     }
 
-    try std.fs.cwd().makePath(repo.gitomi_dir);
+    try std.Io.Dir.cwd().createDirPath(@import("compat").io(), repo.gitomi_dir);
 
     const repo_id = if (repo_id_arg) |id| try allocator.dupe(u8, id) else try util.newUuidV7(allocator);
     defer allocator.free(repo_id);

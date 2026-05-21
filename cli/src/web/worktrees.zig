@@ -148,7 +148,7 @@ fn parseWorktreeSummaries(allocator: Allocator, repo_root: []const u8, raw: []co
 
     var lines = std.mem.splitScalar(u8, raw, '\n');
     while (lines.next()) |raw_line| {
-        const line = std.mem.trimRight(u8, raw_line, "\r");
+        const line = std.mem.trimEnd(u8, raw_line, "\r");
         if (line.len == 0) {
             try appendParsedWorktreeSummary(allocator, &worktrees, repo_root, path, head, branch, detached, bare, locked, prunable);
             path = null;
@@ -264,7 +264,7 @@ fn gitPathExistsAt(allocator: Allocator, root: []const u8, git_path: []const u8)
     defer allocator.free(raw);
     const path = std.mem.trim(u8, raw, " \t\r\n");
     if (path.len == 0) return false;
-    std.fs.accessAbsolute(path, .{}) catch return false;
+    std.Io.Dir.accessAbsolute(@import("compat").io(), path, .{}) catch return false;
     return true;
 }
 

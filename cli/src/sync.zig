@@ -306,7 +306,7 @@ fn autoInitConfigFromGenesis(allocator: Allocator, genesis_oid: []const u8) !voi
     var manifest = repo_mod.loadGenesisManifest(allocator, genesis_oid) catch return;
     defer manifest.deinit();
 
-    try std.fs.cwd().makePath(repo.gitomi_dir);
+    try std.Io.Dir.cwd().createDirPath(@import("compat").io(), repo.gitomi_dir);
 
     const principal = try repo_mod.defaultPrincipal(allocator);
     defer allocator.free(principal);

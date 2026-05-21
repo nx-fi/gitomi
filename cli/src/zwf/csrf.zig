@@ -9,7 +9,7 @@ pub const header_name = "x-csrf-token";
 
 pub fn generateTokenOwned(allocator: Allocator) ![]u8 {
     var random_bytes: [token_bytes]u8 = undefined;
-    std.crypto.random.bytes(&random_bytes);
+    @import("compat").random.bytes(&random_bytes);
     const size = std.base64.url_safe_no_pad.Encoder.calcSize(random_bytes.len);
     const token = try allocator.alloc(u8, size);
     _ = std.base64.url_safe_no_pad.Encoder.encode(token, &random_bytes);

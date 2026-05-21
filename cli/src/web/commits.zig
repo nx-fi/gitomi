@@ -491,7 +491,7 @@ fn appendCommitDateLabel(buf: *std.ArrayList(u8), allocator: Allocator, date: []
         const month = std.fmt.parseUnsigned(u8, date[5..7], 10) catch null;
         const day = std.fmt.parseUnsigned(u8, date[8..10], 10) catch null;
         if (year != null and month != null and day != null and month.? >= 1 and month.? <= 12 and day.? >= 1) {
-            try std.fmt.format(buf.writer(allocator), "{s} {d}, {d}", .{ monthName(month.?), day.?, year.? });
+            try @import("compat").appendPrint(allocator, buf, "{s} {d}, {d}", .{ monthName(month.?), day.?, year.? });
             return;
         }
     }
@@ -523,7 +523,7 @@ fn monthName(month: u8) []const u8 {
 fn loadCommitDetail(allocator: Allocator, repo: Repo, sha: []const u8) !?CommitDetail {
     const raw = try gitMaybe(allocator, repo, &.{ "show", "-s", "--format=%H%x00%h%x00%an%x00%ae%x00%cr%x00%s%x00%b", "--end-of-options", sha }, 1024 * 1024) orelse return null;
     defer allocator.free(raw);
-    const record = std.mem.trimRight(u8, raw, "\r\n");
+    const record = std.mem.trimEnd(u8, raw, "\r\n");
     if (record.len == 0) return null;
     var cols = std.mem.splitScalar(u8, record, 0);
     return .{

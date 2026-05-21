@@ -29,7 +29,7 @@ const default_project_status = project_views.default_project_status;
 const isProjectPriorityValue = project_views.isProjectPriorityValue;
 const isProjectStatusValue = project_views.isProjectStatusValue;
 
-pub fn handleProjectItemPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
+pub fn handleProjectItemPost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, form_body: []const u8) !void {
     const action_owned = try formTrimmedOwned(allocator, form_body, "action");
     defer allocator.free(action_owned);
     const project_owned = try formTrimmedOwned(allocator, form_body, "project");
@@ -441,7 +441,7 @@ fn projectWorkspaceLocationOwned(allocator: Allocator, project: []const u8, view
 
 fn sendProjectItemError(
     allocator: Allocator,
-    stream: std.net.Stream,
+    stream: @import("compat").net.Stream,
     wants_async: bool,
     status: u16,
     reason: []const u8,

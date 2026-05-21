@@ -34,7 +34,7 @@ pub fn renderModelsPage(allocator: Allocator, repo: Repo, target: []const u8, cs
     return renderModelsPageWithFlash(allocator, repo, csrf_token, flash);
 }
 
-pub fn handleModelsPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8, csrf_token: []const u8) !void {
+pub fn handleModelsPost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, form_body: []const u8, csrf_token: []const u8) !void {
     if (!try formHasValidCsrfToken(allocator, form_body, csrf_token)) {
         try sendModelsError(allocator, repo, stream, 403, "Forbidden", "Invalid model settings form token.", csrf_token);
         return;
@@ -85,7 +85,7 @@ pub fn handleModelsPost(allocator: Allocator, repo: Repo, stream: std.net.Stream
     try shared.sendRedirect(allocator, stream, "/settings/models?saved=1");
 }
 
-fn sendModelsError(allocator: Allocator, repo: Repo, stream: std.net.Stream, status: u16, reason: []const u8, message: []const u8, csrf_token: []const u8) !void {
+fn sendModelsError(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, status: u16, reason: []const u8, message: []const u8, csrf_token: []const u8) !void {
     const body = try renderModelsPageWithFlash(allocator, repo, csrf_token, .{ .kind = .failure, .message = message });
     defer allocator.free(body);
     try sendResponse(allocator, stream, status, reason, "text/html", body, null);

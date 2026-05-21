@@ -3,7 +3,7 @@ const zwf_response = @import("../../zwf/response.zig");
 
 const Allocator = std.mem.Allocator;
 
-pub fn sendRedirect(allocator: Allocator, stream: std.net.Stream, location: []const u8) !void {
+pub fn sendRedirect(allocator: Allocator, stream: @import("compat").net.Stream, location: []const u8) !void {
     try zwf_response.validateHeaderValue(location);
     const extra = try std.fmt.allocPrint(allocator, "Location: {s}\r\n", .{location});
     defer allocator.free(extra);
@@ -12,7 +12,7 @@ pub fn sendRedirect(allocator: Allocator, stream: std.net.Stream, location: []co
 
 pub fn sendPlainResponse(
     allocator: Allocator,
-    stream: std.net.Stream,
+    stream: @import("compat").net.Stream,
     status: u16,
     reason: []const u8,
     body: []const u8,
@@ -22,7 +22,7 @@ pub fn sendPlainResponse(
 
 pub fn sendResponse(
     allocator: Allocator,
-    stream: std.net.Stream,
+    stream: @import("compat").net.Stream,
     status: u16,
     reason: []const u8,
     content_type: []const u8,
@@ -32,8 +32,9 @@ pub fn sendResponse(
     try validateRawExtraHeaders(extra_headers orelse "");
     var headers: std.ArrayList(u8) = .empty;
     defer headers.deinit(allocator);
-    try std.fmt.format(
-        headers.writer(allocator),
+    try @import("compat").appendPrint(
+        allocator,
+        &headers,
         "HTTP/1.1 {d} {s}\r\nContent-Type: {s}; charset=utf-8\r\n",
         .{ status, reason, content_type },
     );
@@ -47,7 +48,7 @@ pub fn sendResponse(
 
 pub fn sendBinaryResponse(
     allocator: Allocator,
-    stream: std.net.Stream,
+    stream: @import("compat").net.Stream,
     status: u16,
     reason: []const u8,
     content_type: []const u8,
@@ -57,8 +58,9 @@ pub fn sendBinaryResponse(
     try validateRawExtraHeaders(extra_headers orelse "");
     var headers: std.ArrayList(u8) = .empty;
     defer headers.deinit(allocator);
-    try std.fmt.format(
-        headers.writer(allocator),
+    try @import("compat").appendPrint(
+        allocator,
+        &headers,
         "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\n",
         .{ status, reason, content_type },
     );
@@ -75,7 +77,7 @@ fn statusAllowsBody(status: u16) bool {
 }
 
 fn appendContentLengthIfAllowed(buf: *std.ArrayList(u8), allocator: Allocator, status: u16, body_len: usize) !void {
-    if (statusAllowsBody(status)) try std.fmt.format(buf.writer(allocator), "Content-Length: {d}\r\n", .{body_len});
+    if (statusAllowsBody(status)) try @import("compat").appendPrint(allocator, buf, "Content-Length: {d}\r\n", .{body_len});
 }
 
 fn validateRawExtraHeaders(raw: []const u8) !void {

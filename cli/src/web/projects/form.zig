@@ -72,7 +72,7 @@ pub fn renderProjectFormFromTarget(allocator: Allocator, repo: Repo, target: []c
     );
 }
 
-pub fn handleProjectPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, csrf_token: []const u8, form_body: []const u8) !void {
+pub fn handleProjectPost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, csrf_token: []const u8, form_body: []const u8) !void {
     const name_owned = (try formValueOwned(allocator, form_body, "name")) orelse try allocator.dupe(u8, "");
     defer allocator.free(name_owned);
 

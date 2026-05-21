@@ -243,7 +243,7 @@ fn countConflictGroups(content: []const u8) usize {
     var count: usize = 0;
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |raw_line| {
-        const line = std.mem.trimRight(u8, raw_line, "\r");
+        const line = std.mem.trimEnd(u8, raw_line, "\r");
         if (std.mem.startsWith(u8, line, "<<<<<<<")) count += 1;
     }
     return count;
@@ -324,7 +324,7 @@ fn appendMergeConflictContent(buf: *std.ArrayList(u8), allocator: Allocator, lan
     var side: []const u8 = "";
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |raw_line| {
-        const line = std.mem.trimRight(u8, raw_line, "\r");
+        const line = std.mem.trimEnd(u8, raw_line, "\r");
         if (std.mem.startsWith(u8, line, "<<<<<<<")) {
             group_id += 1;
             side = "current";
@@ -574,8 +574,8 @@ fn mergeFileConflictContent(
 ) !?[]u8 {
     const tmp_dir = try tempPath(allocator, "gitomi-merge-file");
     defer allocator.free(tmp_dir);
-    try std.fs.cwd().makePath(tmp_dir);
-    defer std.fs.deleteTreeAbsolute(tmp_dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(@import("compat").io(), tmp_dir);
+    defer std.Io.Dir.cwd().deleteTree(@import("compat").io(), tmp_dir) catch {};
 
     const current_path = try std.fs.path.join(allocator, &.{ tmp_dir, "current" });
     defer allocator.free(current_path);
@@ -643,16 +643,16 @@ pub fn tempPath(allocator: Allocator, prefix: []const u8) ![]u8 {
 }
 
 pub fn writeFileBytes(path: []const u8, bytes: []const u8) !void {
-    if (std.fs.path.dirname(path)) |dir| try std.fs.cwd().makePath(dir);
-    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(bytes);
+    if (std.fs.path.dirname(path)) |dir| try std.Io.Dir.cwd().createDirPath(@import("compat").io(), dir);
+    var file = try std.Io.Dir.cwd().createFile(@import("compat").io(), path, .{ .truncate = true });
+    defer file.close(@import("compat").io());
+    try file.writeStreamingAll(@import("compat").io(), bytes);
 }
 
 pub fn contentHasConflictMarkers(content: []const u8) bool {
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |line| {
-        const trimmed = std.mem.trimRight(u8, line, "\r");
+        const trimmed = std.mem.trimEnd(u8, line, "\r");
         if (std.mem.startsWith(u8, trimmed, "<<<<<<<")) return true;
         if (std.mem.startsWith(u8, trimmed, "|||||||")) return true;
         if (std.mem.eql(u8, trimmed, "=======")) return true;
@@ -708,7 +708,7 @@ test "merge editor renders distant context folded" {
     var content: std.ArrayList(u8) = .empty;
     defer content.deinit(std.testing.allocator);
     for (0..20) |index_value| {
-        try std.fmt.format(content.writer(std.testing.allocator), "before {d}\n", .{index_value});
+        try @import("compat").appendPrint(std.testing.allocator, &content, "before {d}\n", .{index_value});
     }
     try content.appendSlice(std.testing.allocator,
         \\<<<<<<< ours
@@ -719,7 +719,7 @@ test "merge editor renders distant context folded" {
         \\
     );
     for (0..20) |index_value| {
-        try std.fmt.format(content.writer(std.testing.allocator), "after {d}\n", .{index_value});
+        try @import("compat").appendPrint(std.testing.allocator, &content, "after {d}\n", .{index_value});
     }
 
     var html: std.ArrayList(u8) = .empty;

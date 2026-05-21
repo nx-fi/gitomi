@@ -178,7 +178,7 @@ pub fn isProjectDefaultViewValue(value: []const u8) bool {
 }
 
 fn openSettingsDb(allocator: Allocator, repo: Repo) !SqliteDb {
-    try std.fs.cwd().makePath(repo.gitomi_dir);
+    try std.Io.Dir.cwd().createDirPath(@import("compat").io(), repo.gitomi_dir);
     return try SqliteDb.open(allocator, repo.settings_path, sqlite.SQLITE_OPEN_READWRITE | sqlite.SQLITE_OPEN_CREATE, false);
 }
 
@@ -340,7 +340,7 @@ test "settings database seeds and updates Ollama model settings" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    const root = try tmp.dir.realPathFileAlloc(@import("compat").io(), ".", allocator);
     defer allocator.free(root);
 
     var repo = Repo{

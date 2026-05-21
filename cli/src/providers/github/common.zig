@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("compat");
 const errors = @import("../../errors.zig");
 const event_model = @import("../../event/model.zig");
 const event_json = @import("../../event/json.zig");
@@ -88,7 +89,7 @@ pub const GitHubClient = struct {
     }
 
     fn requestGhInternal(self: GitHubClient, method: []const u8, path: []const u8, body: ?[]const u8, options: RequestOptions) !?[]u8 {
-        const endpoint = std.mem.trimLeft(u8, path, "/");
+        const endpoint = std.mem.trimStart(u8, path, "/");
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(self.allocator);
         try argv.appendSlice(self.allocator, &.{
@@ -161,8 +162,8 @@ fn isRetryableGithubError(stderr: []const u8) bool {
 }
 
 pub fn githubTokenFromEnv(allocator: Allocator) !?[]u8 {
-    return std.process.getEnvVarOwned(allocator, "GITHUB_TOKEN") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => std.process.getEnvVarOwned(allocator, "GH_TOKEN") catch |fallback_err| switch (fallback_err) {
+    return compat.getEnvVarOwned(allocator, "GITHUB_TOKEN") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => compat.getEnvVarOwned(allocator, "GH_TOKEN") catch |fallback_err| switch (fallback_err) {
             error.EnvironmentVariableNotFound => null,
             else => return fallback_err,
         },

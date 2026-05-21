@@ -141,7 +141,7 @@ pub fn cmdSync(allocator: Allocator, args: []const []const u8) !void {
     try out("GitLab sync polling project {s} every {d}ms.\n", .{ options.project.path, interval_ms });
     while (true) {
         try runSyncOnce(allocator, options);
-        std.Thread.sleep(interval_ms * std.time.ns_per_ms);
+        @import("compat").sleep(interval_ms * std.time.ns_per_ms);
     }
 }
 
@@ -214,7 +214,7 @@ fn runSyncOnce(allocator: Allocator, options: Options) !void {
 fn loadState(allocator: Allocator, repo: repo_mod.Repo, project: ProjectRef) !SyncState {
     const path = try statePath(allocator, repo, project);
     defer allocator.free(path);
-    const bytes = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch |err| switch (err) {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(@import("compat").io(), path, allocator, .limited(1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => return .{},
         else => return err,
     };
@@ -237,7 +237,7 @@ fn loadState(allocator: Allocator, repo: repo_mod.Repo, project: ProjectRef) !Sy
 fn saveState(allocator: Allocator, repo: repo_mod.Repo, project: ProjectRef, state: SyncState) !void {
     const path = try statePath(allocator, repo, project);
     defer allocator.free(path);
-    if (std.fs.path.dirname(path)) |dir| try std.fs.cwd().makePath(dir);
+    if (std.fs.path.dirname(path)) |dir| try std.Io.Dir.cwd().createDirPath(@import("compat").io(), dir);
     const bytes = try std.fmt.allocPrint(allocator, "{{\"last_export_ordinal\":{d}}}\n", .{state.last_export_ordinal});
     defer allocator.free(bytes);
     try writeFileAtomic(allocator, path, bytes);
@@ -248,15 +248,15 @@ fn writeFileAtomic(allocator: Allocator, path: []const u8, bytes: []const u8) !v
     defer allocator.free(id);
     const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp.{s}", .{ path, id });
     defer allocator.free(tmp_path);
-    errdefer std.fs.cwd().deleteFile(tmp_path) catch {};
-    var file = try std.fs.cwd().createFile(tmp_path, .{ .truncate = true, .mode = 0o600 });
+    errdefer std.Io.Dir.cwd().deleteFile(@import("compat").io(), tmp_path) catch {};
+    var file = try std.Io.Dir.cwd().createFile(@import("compat").io(), tmp_path, .{ .truncate = true, .permissions = @enumFromInt(0o600) });
     var closed = false;
-    defer if (!closed) file.close();
-    try file.writeAll(bytes);
-    try file.sync();
-    file.close();
+    defer if (!closed) file.close(@import("compat").io());
+    try file.writeStreamingAll(@import("compat").io(), bytes);
+    try file.sync(@import("compat").io());
+    file.close(@import("compat").io());
     closed = true;
-    try std.fs.cwd().rename(tmp_path, path);
+    try std.Io.Dir.cwd().rename(tmp_path, std.Io.Dir.cwd(), path, @import("compat").io());
 }
 
 pub fn gitlabMapPath(allocator: Allocator, repo: repo_mod.Repo, project: ProjectRef) ![]u8 {

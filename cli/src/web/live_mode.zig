@@ -6,7 +6,7 @@ const Allocator = std.mem.Allocator;
 
 pub fn handleLiveModePost(
     allocator: Allocator,
-    stream: std.net.Stream,
+    stream: @import("compat").net.Stream,
     form_body: []const u8,
     redirect_target: []const u8,
 ) !void {

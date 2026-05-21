@@ -399,7 +399,7 @@ fn appendRelationshipDisplayRef(buf: *std.ArrayList(u8), allocator: Allocator, t
     if (std.mem.eql(u8, target.object_kind, "pull")) try buf.appendSlice(allocator, "PR ");
     try buf.append(allocator, '#');
     if (target.legacy_number > 0) {
-        try std.fmt.format(buf.writer(allocator), "{d}", .{target.legacy_number});
+        try @import("compat").appendPrint(allocator, buf, "{d}", .{target.legacy_number});
     } else {
         try shared.appendHtml(buf, allocator, object_ref);
     }

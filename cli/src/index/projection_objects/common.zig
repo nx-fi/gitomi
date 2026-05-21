@@ -280,8 +280,8 @@ fn appendJsonValue(buf: *std.ArrayList(u8), allocator: Allocator, value: std.jso
     switch (value) {
         .null => try buf.appendSlice(allocator, "null"),
         .bool => |boolean| try buf.appendSlice(allocator, if (boolean) "true" else "false"),
-        .integer => |integer| try std.fmt.format(buf.writer(allocator), "{d}", .{integer}),
-        .float => |number| try std.fmt.format(buf.writer(allocator), "{d}", .{number}),
+        .integer => |integer| try @import("compat").appendPrint(allocator, buf, "{d}", .{integer}),
+        .float => |number| try @import("compat").appendPrint(allocator, buf, "{d}", .{number}),
         .number_string => |number| try buf.appendSlice(allocator, number),
         .string => |string| try json_writer.appendJsonString(buf, allocator, string),
         .array => |array| {

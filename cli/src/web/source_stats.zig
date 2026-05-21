@@ -822,7 +822,7 @@ fn pathRestInScope(path: []const u8, scope_path: []const u8) ?[]const u8 {
 
 fn openSourceStatsCache(allocator: Allocator, repo: Repo) !SqliteDb {
     if (repo.gitomi_dir.len == 0) return error.CacheUnavailable;
-    try std.fs.cwd().makePath(repo.gitomi_dir);
+    try std.Io.Dir.cwd().createDirPath(@import("compat").io(), repo.gitomi_dir);
     const cache_path = try std.fs.path.join(allocator, &.{ repo.gitomi_dir, source_stats_cache_file });
     defer allocator.free(cache_path);
 
@@ -1091,7 +1091,7 @@ fn upsertCachedScope(db: *SqliteDb, path: []const u8, commit_oid: []const u8, sl
     try stmt.bindText(2, commit_oid);
     try stmt.bindInt(3, if (sloc_complete) 1 else 0);
     try stmt.bindInt(4, if (contributors_complete) 1 else 0);
-    try stmt.bindInt64(5, std.time.timestamp());
+    try stmt.bindInt64(5, @import("compat").timestamp());
     try stmt.stepDone();
 }
 
@@ -1284,9 +1284,9 @@ fn readWorktreeFile(allocator: Allocator, repo: Repo, path: []const u8) ![]u8 {
     const absolute_path = try std.fs.path.join(allocator, &.{ repo.root, path });
     defer allocator.free(absolute_path);
 
-    var file = try std.fs.openFileAbsolute(absolute_path, .{});
-    defer file.close();
-    return try file.readToEndAlloc(allocator, max_source_file_bytes);
+    var file = try std.Io.Dir.openFileAbsolute(@import("compat").io(), absolute_path, .{});
+    defer file.close(@import("compat").io());
+    return try @import("compat").readFileAlloc(allocator, file, max_source_file_bytes);
 }
 
 fn gitMaybe(allocator: Allocator, repo: Repo, git_args: []const []const u8, max_output_bytes: usize) !?[]u8 {
@@ -1430,7 +1430,7 @@ test "source stats cached SLOC populates local sqlite cache" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("repo/src/web");
+    try tmp.dir.createDirPath(@import("compat").io(), "repo/src/web");
     try writeTestFile(tmp.dir, "repo/src/main.zig",
         \\const value = 1;
         \\// comment
@@ -1441,7 +1441,7 @@ test "source stats cached SLOC populates local sqlite cache" {
         \\
     );
 
-    const repo_root = try tmp.dir.realpathAlloc(allocator, "repo");
+    const repo_root = try tmp.dir.realPathFileAlloc(@import("compat").io(), "repo", allocator);
     defer allocator.free(repo_root);
 
     try expectGitOk(allocator, repo_root, &.{ "init", "-q" });
@@ -1517,10 +1517,10 @@ test "source stats aggregates contributor blame ranges by counted line kind" {
     try std.testing.expectEqual(@as(u64, 0), rows.items[1].comment);
 }
 
-fn writeTestFile(dir: std.fs.Dir, path: []const u8, bytes: []const u8) !void {
-    var file = try dir.createFile(path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(bytes);
+fn writeTestFile(dir: std.Io.Dir, path: []const u8, bytes: []const u8) !void {
+    var file = try dir.createFile(@import("compat").io(), path, .{ .truncate = true });
+    defer file.close(@import("compat").io());
+    try file.writeStreamingAll(@import("compat").io(), bytes);
 }
 
 fn expectGitOk(allocator: Allocator, root: []const u8, args: []const []const u8) !void {

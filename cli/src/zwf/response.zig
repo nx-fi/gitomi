@@ -39,19 +39,19 @@ pub const SentInfo = struct {
 
 pub const Response = struct {
     allocator: Allocator,
-    stream: std.net.Stream,
+    stream: @import("compat").net.Stream,
     options: Options = .{},
     sent: ?*SentInfo = null,
 
-    pub fn init(allocator: Allocator, stream: std.net.Stream) Response {
+    pub fn init(allocator: Allocator, stream: @import("compat").net.Stream) Response {
         return .{ .allocator = allocator, .stream = stream };
     }
 
-    pub fn initWithOptions(allocator: Allocator, stream: std.net.Stream, options: Options) Response {
+    pub fn initWithOptions(allocator: Allocator, stream: @import("compat").net.Stream, options: Options) Response {
         return .{ .allocator = allocator, .stream = stream, .options = options };
     }
 
-    pub fn initWithRequest(allocator: Allocator, stream: std.net.Stream, request: request_mod.Request) Response {
+    pub fn initWithRequest(allocator: Allocator, stream: @import("compat").net.Stream, request: request_mod.Request) Response {
         return initWithOptions(allocator, stream, .{
             .head = request.method == .HEAD,
         });
@@ -246,7 +246,7 @@ pub const Response = struct {
             try buf.appendSlice(self.allocator, "; Domain=");
             try buf.appendSlice(self.allocator, domain);
         }
-        if (options.max_age) |max_age| try std.fmt.format(buf.writer(self.allocator), "; Max-Age={d}", .{max_age});
+        if (options.max_age) |max_age| try @import("compat").appendPrint(self.allocator, &buf, "; Max-Age={d}", .{max_age});
         if (options.http_only) try buf.appendSlice(self.allocator, "; HttpOnly");
         if (options.secure) try buf.appendSlice(self.allocator, "; Secure");
         if (options.same_site) |same_site| {
@@ -299,7 +299,7 @@ fn contentTypeValueOwned(allocator: Allocator, content_type: []const u8, charset
 }
 
 fn appendStatusLine(buf: *std.ArrayList(u8), allocator: Allocator, status: u16, reason: []const u8) !void {
-    try std.fmt.format(buf.writer(allocator), "HTTP/1.1 {d} {s}\r\n", .{ status, reason });
+    try @import("compat").appendPrint(allocator, buf, "HTTP/1.1 {d} {s}\r\n", .{ status, reason });
 }
 
 fn appendCommonHeaders(buf: *std.ArrayList(u8), allocator: Allocator) !void {
@@ -319,7 +319,7 @@ fn appendHeader(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8,
 
 fn appendHeaderInt(buf: *std.ArrayList(u8), allocator: Allocator, name: []const u8, value: usize) !void {
     try validateHeaderName(name);
-    try std.fmt.format(buf.writer(allocator), "{s}: {d}\r\n", .{ name, value });
+    try @import("compat").appendPrint(allocator, buf, "{s}: {d}\r\n", .{ name, value });
 }
 
 fn appendContentLengthIfAllowed(buf: *std.ArrayList(u8), allocator: Allocator, status: u16, value: usize) !void {

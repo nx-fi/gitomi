@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("compat");
 const errors = @import("../errors.zig");
 const event_validation = @import("../event/validation.zig");
 const event_json = @import("../event/json.zig");
@@ -66,16 +67,16 @@ pub fn executeWorkflow(
 
     const output_root = try std.fmt.allocPrint(allocator, "/tmp/gitomi-run-outputs-{s}-{s}", .{ run_id, diagnostics.attempt_id });
     defer {
-        std.fs.deleteTreeAbsolute(output_root) catch {};
+        std.Io.Dir.cwd().deleteTree(@import("compat").io(), output_root) catch {};
         allocator.free(output_root);
     }
-    try std.fs.cwd().makePath(output_root);
+    try std.Io.Dir.cwd().createDirPath(@import("compat").io(), output_root);
 
     const permission_grant_json = try buildPermissionGrantJson(allocator, repo, workflow, targets.workflow_trusted);
     defer allocator.free(permission_grant_json);
     const event_path = try writeActEventPayload(allocator, repo, run_id, diagnostics.attempt_id, workflow, targets, event_name, gitomi_event_type, object_id, schedule_slot, permission_grant_json, output_root);
     defer {
-        std.fs.deleteFileAbsolute(event_path) catch {};
+        std.Io.Dir.deleteFileAbsolute(@import("compat").io(), event_path) catch {};
         allocator.free(event_path);
     }
 
@@ -145,7 +146,7 @@ fn cleanupTemporaryWorktree(allocator: Allocator, path: []const u8) void {
         return;
     } else |_| {}
 
-    std.fs.deleteTreeAbsolute(path) catch {};
+    std.Io.Dir.cwd().deleteTree(@import("compat").io(), path) catch {};
     if (git.gitChecked(allocator, &.{ "worktree", "prune" })) |pruned| {
         allocator.free(pruned);
     } else |_| {}
@@ -229,7 +230,6 @@ pub fn executeGitomiWorkflow(
                     try io.eprint("gt actions: native job {s} references an unknown dependency\n", .{job.id});
                     return "failure";
                 },
-                else => return err,
             };
             if (!needs_satisfied) continue;
             if (!conditionAllowsJob(job.condition)) {
@@ -307,16 +307,16 @@ pub fn executeGitomiJob(
     defer allocator.free(safe_job);
     const job_output_dir = try std.fs.path.join(allocator, &.{ output_root, safe_job });
     defer allocator.free(job_output_dir);
-    try std.fs.cwd().makePath(job_output_dir);
+    try std.Io.Dir.cwd().createDirPath(@import("compat").io(), job_output_dir);
 
     const backend_input_json = try buildBackendInputJson(allocator, run_id, diagnostics.attempt_id, workflow, targets, event_name, gitomi_event_type, job, permission_grant_json, job_output_dir);
     defer allocator.free(backend_input_json);
     const backend_input_path = try std.fs.path.join(allocator, &.{ job_output_dir, "backend-input.json" });
     defer allocator.free(backend_input_path);
     {
-        const file = try std.fs.createFileAbsolute(backend_input_path, .{ .truncate = true });
-        defer file.close();
-        try file.writeAll(backend_input_json);
+        const file = try std.Io.Dir.createFileAbsolute(@import("compat").io(), backend_input_path, .{ .truncate = true });
+        defer file.close(@import("compat").io());
+        try file.writeStreamingAll(@import("compat").io(), backend_input_json);
     }
     const backend_input_diag_path = try std.fmt.allocPrint(allocator, "attempts/{s}/backend/{s}-input.json", .{ diagnostics.attempt_id, safe_job });
     defer allocator.free(backend_input_diag_path);
@@ -405,7 +405,7 @@ pub fn executeContainerJob(
 
     const volume = try std.fmt.allocPrint(allocator, "{s}:/workspace:rw", .{worktree_path});
     defer allocator.free(volume);
-    const user_arg = try std.fmt.allocPrint(allocator, "{d}", .{std.posix.getuid()});
+    const user_arg = try std.fmt.allocPrint(allocator, "{d}", .{std.c.getuid()});
     defer allocator.free(user_arg);
 
     for (job.steps, 0..) |step, idx| {
@@ -625,9 +625,9 @@ pub fn validateAgentPipelinePackage(allocator: Allocator, worktree_path: []const
     defer allocator.free(manifest_yaml);
 
     var manifest_path: ?[]u8 = null;
-    const bytes = std.fs.cwd().readFileAlloc(allocator, manifest_yml, 256 * 1024) catch |err| switch (err) {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(@import("compat").io(), manifest_yml, allocator, .limited(256 * 1024)) catch |err| switch (err) {
         error.FileNotFound => blk: {
-            const alt = std.fs.cwd().readFileAlloc(allocator, manifest_yaml, 256 * 1024) catch |alt_err| switch (alt_err) {
+            const alt = std.Io.Dir.cwd().readFileAlloc(@import("compat").io(), manifest_yaml, allocator, .limited(256 * 1024)) catch |alt_err| switch (alt_err) {
                 error.FileNotFound => return error.PipelineManifestMissing,
                 else => return alt_err,
             };
@@ -891,7 +891,7 @@ pub fn collectResultJsonMetadata(allocator: Allocator, diagnostics: *RunDiagnost
 pub fn readOutputFile(allocator: Allocator, output_dir: []const u8, file_name: []const u8) !?[]u8 {
     const path = try std.fs.path.join(allocator, &.{ output_dir, file_name });
     defer allocator.free(path);
-    return std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch |err| switch (err) {
+    return std.Io.Dir.cwd().readFileAlloc(@import("compat").io(), path, allocator, .limited(1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => null,
         else => return err,
     };
@@ -919,23 +919,23 @@ test "job-controlled result conclusion does not override backend failure" {
     defer allocator.free(test_id);
     const base_path = try std.fmt.allocPrint(allocator, "/tmp/gitomi-output-forgery-test-{s}", .{test_id});
     defer allocator.free(base_path);
-    defer std.fs.deleteTreeAbsolute(base_path) catch {};
-    try std.fs.cwd().makePath(base_path);
+    defer std.Io.Dir.cwd().deleteTree(@import("compat").io(), base_path) catch {};
+    try std.Io.Dir.cwd().createDirPath(@import("compat").io(), base_path);
 
     const output_root = try std.fs.path.join(allocator, &.{ base_path, "outputs" });
     defer allocator.free(output_root);
-    try std.fs.cwd().makePath(output_root);
+    try std.Io.Dir.cwd().createDirPath(@import("compat").io(), output_root);
 
     const forged_output_dir = try std.fs.path.join(allocator, &.{ output_root, "forged" });
     defer allocator.free(forged_output_dir);
-    try std.fs.cwd().makePath(forged_output_dir);
+    try std.Io.Dir.cwd().createDirPath(@import("compat").io(), forged_output_dir);
 
     const result_path = try std.fs.path.join(allocator, &.{ forged_output_dir, "result.json" });
     defer allocator.free(result_path);
     {
-        const file = try std.fs.createFileAbsolute(result_path, .{ .truncate = true });
-        defer file.close();
-        try file.writeAll("{\"conclusion\":\"success\",\"payload\":true}");
+        const file = try std.Io.Dir.createFileAbsolute(@import("compat").io(), result_path, .{ .truncate = true });
+        defer file.close(@import("compat").io());
+        try file.writeStreamingAll(@import("compat").io(), "{\"conclusion\":\"success\",\"payload\":true}");
     }
 
     var repo = repo_mod.Repo{
@@ -1039,7 +1039,7 @@ pub fn writeRunDiagnostics(
 
     const index_path = try std.fmt.allocPrint(allocator, "/tmp/gitomi-run-index-{s}-{s}", .{ run_id, diagnostics.attempt_id });
     defer {
-        std.fs.deleteFileAbsolute(index_path) catch {};
+        std.Io.Dir.deleteFileAbsolute(@import("compat").io(), index_path) catch {};
         allocator.free(index_path);
     }
 
@@ -1542,11 +1542,11 @@ pub fn workflowPipelineSummary(workflow: Workflow) ?[]const u8 {
 pub fn localRunnerId(allocator: Allocator, repo: repo_mod.Repo) ![]u8 {
     const runner_dir = try std.fs.path.join(allocator, &.{ repo.gitomi_dir, "runner" });
     defer allocator.free(runner_dir);
-    try std.fs.cwd().makePath(runner_dir);
+    try std.Io.Dir.cwd().createDirPath(@import("compat").io(), runner_dir);
 
     const id_path = try std.fs.path.join(allocator, &.{ runner_dir, "id" });
     defer allocator.free(id_path);
-    if (std.fs.cwd().readFileAlloc(allocator, id_path, 4 * 1024)) |bytes| {
+    if (std.Io.Dir.cwd().readFileAlloc(@import("compat").io(), id_path, allocator, .limited(4 * 1024))) |bytes| {
         defer allocator.free(bytes);
         const trimmed = std.mem.trim(u8, bytes, " \t\r\n");
         if (trimmed.len != 0) return try allocator.dupe(u8, trimmed);
@@ -1569,22 +1569,22 @@ pub fn localRunnerId(allocator: Allocator, repo: repo_mod.Repo) ![]u8 {
 }
 
 pub fn writeRunnerId(id_path: []const u8, runner_id: []const u8) !void {
-    const file = try std.fs.createFileAbsolute(id_path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(runner_id);
-    try file.writeAll("\n");
+    const file = try std.Io.Dir.createFileAbsolute(@import("compat").io(), id_path, .{ .truncate = true });
+    defer file.close(@import("compat").io());
+    try file.writeStreamingAll(@import("compat").io(), runner_id);
+    try file.writeStreamingAll(@import("compat").io(), "\n");
 }
 
 pub fn acquireRunClaim(allocator: Allocator, repo: repo_mod.Repo, run_id: []const u8) !RunClaim {
     const runner_dir = try std.fs.path.join(allocator, &.{ repo.gitomi_dir, "runner", "claims" });
     defer allocator.free(runner_dir);
-    try std.fs.cwd().makePath(runner_dir);
+    try std.Io.Dir.cwd().createDirPath(@import("compat").io(), runner_dir);
     const file_name = try std.fmt.allocPrint(allocator, "{s}.claim", .{run_id});
     defer allocator.free(file_name);
     const path = try std.fs.path.join(allocator, &.{ runner_dir, file_name });
     errdefer allocator.free(path);
 
-    const file = std.fs.createFileAbsolute(path, .{
+    const file = std.Io.Dir.createFileAbsolute(@import("compat").io(), path, .{
         .read = true,
         .truncate = false,
         .exclusive = true,
@@ -1595,8 +1595,8 @@ pub fn acquireRunClaim(allocator: Allocator, repo: repo_mod.Repo, run_id: []cons
         },
         else => return err,
     };
-    try file.writeAll(run_id);
-    try file.writeAll("\n");
+    try file.writeStreamingAll(@import("compat").io(), run_id);
+    try file.writeStreamingAll(@import("compat").io(), "\n");
     return .{ .allocator = allocator, .path = path, .file = file };
 }
 
@@ -1668,7 +1668,7 @@ pub fn writeActEventPayload(
 ) ![]u8 {
     const events_dir = try std.fs.path.join(allocator, &.{ repo.gitomi_dir, "action-events" });
     defer allocator.free(events_dir);
-    try std.fs.cwd().makePath(events_dir);
+    try std.Io.Dir.cwd().createDirPath(@import("compat").io(), events_dir);
 
     const file_name = try std.fmt.allocPrint(allocator, "{s}.json", .{run_id});
     defer allocator.free(file_name);
@@ -1718,9 +1718,9 @@ pub fn writeActEventPayload(
     if (payload.items[payload.items.len - 1] == ',') payload.items.len -= 1;
     try payload.appendSlice(allocator, "}}");
 
-    const file = try std.fs.createFileAbsolute(event_path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(payload.items);
+    const file = try std.Io.Dir.createFileAbsolute(@import("compat").io(), event_path, .{ .truncate = true });
+    defer file.close(@import("compat").io());
+    try file.writeStreamingAll(@import("compat").io(), payload.items);
     return event_path;
 }
 
@@ -1803,30 +1803,18 @@ pub fn runCommandInDirWithEnvTimed(
     env: []const KeyValuePair,
     timeout_minutes: ?u64,
 ) !TimedRunOutput {
-    var child = std.process.Child.init(argv, allocator);
-    child.cwd = cwd;
-    child.stdin_behavior = if (input == null) .Ignore else .Pipe;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
-
-    var env_map: std.process.EnvMap = undefined;
+    var env_map: std.process.Environ.Map = undefined;
     var has_env_map = false;
     defer if (has_env_map) env_map.deinit();
     if (env.len != 0) {
-        env_map = std.process.EnvMap.init(allocator);
+        env_map = std.process.Environ.Map.init(allocator);
         has_env_map = true;
         try populateIsolatedChildEnv(&env_map);
         for (env) |entry| try env_map.put(entry.key, entry.value);
-        child.env_map = &env_map;
     }
 
-    var stdout: std.ArrayList(u8) = .empty;
-    errdefer stdout.deinit(allocator);
-    var stderr: std.ArrayList(u8) = .empty;
-    errdefer stderr.deinit(allocator);
-
-    try child.spawn();
-    errdefer _ = child.kill() catch {};
+    var child = try compat.spawnChild(argv, cwd, input, if (has_env_map) &env_map else null);
+    defer child.kill(compat.io());
 
     var timeout_state = TimeoutState{ .child = &child };
     var timeout_thread: ?std.Thread = null;
@@ -1835,13 +1823,15 @@ pub fn runCommandInDirWithEnvTimed(
     }
 
     if (input) |bytes| {
-        try child.stdin.?.writeAll(bytes);
-        child.stdin.?.close();
-        child.stdin = null;
+        try compat.writeChildInput(&child, bytes);
     }
 
-    try child.collectOutput(allocator, &stdout, &stderr, max_output_bytes);
-    const term = try child.wait();
+    const output = try compat.collectChildOutput(allocator, &child, max_output_bytes);
+    errdefer {
+        allocator.free(output.stdout);
+        allocator.free(output.stderr);
+    }
+    const term = try child.wait(compat.io());
     timeout_state.done.store(true, .release);
     if (timeout_thread) |thread| thread.join();
     const timed_out = timeout_state.timed_out.load(.acquire);
@@ -1849,15 +1839,15 @@ pub fn runCommandInDirWithEnvTimed(
     return .{
         .output = .{
             .allocator = allocator,
-            .stdout = try stdout.toOwnedSlice(allocator),
-            .stderr = try stderr.toOwnedSlice(allocator),
+            .stdout = output.stdout,
+            .stderr = output.stderr,
             .term = term,
         },
         .timed_out = timed_out,
     };
 }
 
-fn populateIsolatedChildEnv(env_map: *std.process.EnvMap) !void {
+fn populateIsolatedChildEnv(env_map: *std.process.Environ.Map) !void {
     try env_map.put("PATH", "/run/current-system/sw/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
     try env_map.put("TMPDIR", "/tmp");
     try env_map.put("LANG", "C.UTF-8");
@@ -1897,12 +1887,12 @@ fn timeoutKillerThread(state: *TimeoutState, timeout_ns: u64) void {
     var remaining = timeout_ns;
     while (remaining != 0 and !state.done.load(.acquire)) {
         const sleep_ns = @min(remaining, quantum);
-        std.Thread.sleep(sleep_ns);
+        @import("compat").sleep(sleep_ns);
         remaining -= sleep_ns;
     }
     if (!state.done.load(.acquire)) {
         state.timed_out.store(true, .release);
-        _ = state.child.kill() catch {};
+        compat.terminateChildNoWait(state.child);
     }
 }
 

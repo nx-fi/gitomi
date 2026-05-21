@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("compat");
 const errors = @import("errors.zig");
 const io = @import("io.zig");
 const util = @import("util.zig");
@@ -74,7 +75,7 @@ pub const RunOutput = struct {
 
     pub fn exitCode(self: RunOutput) ?u8 {
         return switch (self.term) {
-            .Exited => |code| code,
+            .exited => |code| code,
             else => null,
         };
     }
@@ -343,33 +344,12 @@ pub fn runCommand(
     input: ?[]const u8,
     max_output_bytes: usize,
 ) !RunOutput {
-    var child = std.process.Child.init(argv, allocator);
-    child.stdin_behavior = if (input == null) .Ignore else .Pipe;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
-
-    var stdout: std.ArrayList(u8) = .empty;
-    errdefer stdout.deinit(allocator);
-    var stderr: std.ArrayList(u8) = .empty;
-    errdefer stderr.deinit(allocator);
-
-    try child.spawn();
-    errdefer _ = child.kill() catch {};
-
-    if (input) |bytes| {
-        try child.stdin.?.writeAll(bytes);
-        child.stdin.?.close();
-        child.stdin = null;
-    }
-
-    try child.collectOutput(allocator, &stdout, &stderr, max_output_bytes);
-    const term = try child.wait();
-
+    const result = try compat.runProcess(allocator, argv, null, input, max_output_bytes, null);
     return .{
         .allocator = allocator,
-        .stdout = try stdout.toOwnedSlice(allocator),
-        .stderr = try stderr.toOwnedSlice(allocator),
-        .term = term,
+        .stdout = result.stdout,
+        .stderr = result.stderr,
+        .term = result.term,
     };
 }
 

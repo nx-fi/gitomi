@@ -325,7 +325,7 @@ pub fn runDaemon(allocator: Allocator, options: DaemonOptions) !void {
         try runDaemonTick(allocator, repo, tick_options);
         if (options.once) return;
         tick_options.replay = false;
-        std.Thread.sleep(options.interval_ms * std.time.ns_per_ms);
+        @import("compat").sleep(options.interval_ms * std.time.ns_per_ms);
     }
 }
 
@@ -349,7 +349,7 @@ fn runDaemonTick(allocator: Allocator, repo: repo_mod.Repo, options: DaemonOptio
     defer db.deinit();
 
     const max_ordinal = try maxAcceptedOrdinal(&db);
-    const current_schedule_minute = @divTrunc(std.time.timestamp(), 60);
+    const current_schedule_minute = @divTrunc(@import("compat").timestamp(), 60);
     if (!state.exists and !options.replay) {
         state.last_event_ordinal = max_ordinal;
         state.last_schedule_minute = current_schedule_minute;
@@ -858,7 +858,7 @@ fn loadSchedulerState(allocator: Allocator, repo: repo_mod.Repo, replay: bool) !
 
     const path = try schedulerStatePath(allocator, repo);
     defer allocator.free(path);
-    const bytes = std.fs.cwd().readFileAlloc(allocator, path, 16 * 1024) catch |err| switch (err) {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(@import("compat").io(), path, allocator, .limited(16 * 1024)) catch |err| switch (err) {
         error.FileNotFound => return state,
         else => return err,
     };
@@ -884,7 +884,7 @@ fn loadSchedulerState(allocator: Allocator, repo: repo_mod.Repo, replay: bool) !
 }
 
 fn saveSchedulerState(allocator: Allocator, repo: repo_mod.Repo, state: SchedulerState) !void {
-    try std.fs.cwd().makePath(repo.gitomi_dir);
+    try std.Io.Dir.cwd().createDirPath(@import("compat").io(), repo.gitomi_dir);
     const path = try schedulerStatePath(allocator, repo);
     defer allocator.free(path);
     const contents = try std.fmt.allocPrint(
@@ -893,9 +893,9 @@ fn saveSchedulerState(allocator: Allocator, repo: repo_mod.Repo, state: Schedule
         .{ state.last_event_ordinal, state.last_head_oid, state.last_schedule_minute },
     );
     defer allocator.free(contents);
-    const file = try std.fs.createFileAbsolute(path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(contents);
+    const file = try std.Io.Dir.createFileAbsolute(@import("compat").io(), path, .{ .truncate = true });
+    defer file.close(@import("compat").io());
+    try file.writeStreamingAll(@import("compat").io(), contents);
 }
 
 pub fn createRunRequestedEvent(

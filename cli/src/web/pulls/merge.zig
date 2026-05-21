@@ -521,7 +521,7 @@ fn cleanupTempWorktree(allocator: Allocator, repo_root: []const u8, tmp_worktree
         var remove_result = gitRunAt(allocator, repo_root, &.{ "worktree", "remove", tmp_worktree }, 1024 * 1024) catch null;
         if (remove_result) |*result| result.deinit();
     }
-    std.fs.deleteTreeAbsolute(tmp_worktree) catch {};
+    std.Io.Dir.cwd().deleteTree(@import("compat").io(), tmp_worktree) catch {};
     if (worktree_created.*) {
         var prune_result = gitRunAt(allocator, repo_root, &.{ "worktree", "prune" }, 1024 * 1024) catch null;
         if (prune_result) |*result| result.deinit();
@@ -562,7 +562,7 @@ pub fn commitConflictResolution(
             var remove_result = gitRunAt(allocator, repo.root, &.{ "worktree", "remove", tmp_worktree }, 1024 * 1024) catch null;
             if (remove_result) |*result| result.deinit();
         }
-        std.fs.deleteTreeAbsolute(tmp_worktree) catch {};
+        std.Io.Dir.cwd().deleteTree(@import("compat").io(), tmp_worktree) catch {};
         if (worktree_created) {
             var prune_result = gitRunAt(allocator, repo.root, &.{ "worktree", "prune" }, 1024 * 1024) catch null;
             if (prune_result) |*result| result.deinit();
@@ -764,15 +764,15 @@ test "legacy GitHub pull refs are not treated as writable branch targets" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir("seed");
-    try tmp.dir.makeDir("client");
-    try tmp.dir.makeDir("remote.git");
+    try tmp.dir.createDir(@import("compat").io(), "seed", .default_dir);
+    try tmp.dir.createDir(@import("compat").io(), "client", .default_dir);
+    try tmp.dir.createDir(@import("compat").io(), "remote.git", .default_dir);
 
-    const seed_root = try tmp.dir.realpathAlloc(allocator, "seed");
+    const seed_root = try tmp.dir.realPathFileAlloc(@import("compat").io(), "seed", allocator);
     defer allocator.free(seed_root);
-    const client_root = try tmp.dir.realpathAlloc(allocator, "client");
+    const client_root = try tmp.dir.realPathFileAlloc(@import("compat").io(), "client", allocator);
     defer allocator.free(client_root);
-    const remote_root = try tmp.dir.realpathAlloc(allocator, "remote.git");
+    const remote_root = try tmp.dir.realPathFileAlloc(@import("compat").io(), "remote.git", allocator);
     defer allocator.free(remote_root);
 
     try expectGitOkAt(allocator, seed_root, &.{ "init", "-q" });
@@ -852,10 +852,10 @@ fn testPullDetail(allocator: Allocator, base_ref: []const u8, head_ref: []const 
     };
 }
 
-fn writeTmpFile(dir: std.fs.Dir, path: []const u8, content: []const u8) !void {
-    var file = try dir.createFile(path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(content);
+fn writeTmpFile(dir: std.Io.Dir, path: []const u8, content: []const u8) !void {
+    var file = try dir.createFile(@import("compat").io(), path, .{ .truncate = true });
+    defer file.close(@import("compat").io());
+    try file.writeStreamingAll(@import("compat").io(), content);
 }
 
 fn expectGitOkAt(allocator: Allocator, root: []const u8, args: []const []const u8) !void {

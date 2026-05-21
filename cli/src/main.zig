@@ -1,7 +1,8 @@
+const std = @import("std");
 const cli = @import("cli.zig");
 
-pub fn main() void {
-    cli.main();
+pub fn main(init: std.process.Init.Minimal) void {
+    cli.main(init.args);
 }
 
 test {

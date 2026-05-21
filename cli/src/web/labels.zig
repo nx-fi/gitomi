@@ -120,7 +120,7 @@ pub fn renderLabelsPage(allocator: Allocator, repo: Repo, csrf_token: []const u8
     return buf.toOwnedSlice(allocator);
 }
 
-pub fn handleLabelsPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
+pub fn handleLabelsPost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, form_body: []const u8) !void {
     try index.ensureIndex(allocator, repo);
 
     const action_owned = (try formValueOwned(allocator, form_body, "action")) orelse try allocator.dupe(u8, "");

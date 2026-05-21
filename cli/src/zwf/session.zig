@@ -54,7 +54,7 @@ pub fn encodedIdSize() usize {
 
 pub fn generateIdOwned(allocator: Allocator) ![]u8 {
     var random_bytes: [id_bytes]u8 = undefined;
-    std.crypto.random.bytes(&random_bytes);
+    @import("compat").random.bytes(&random_bytes);
     const size = encodedIdSize();
     const id = try allocator.alloc(u8, size);
     _ = std.base64.url_safe_no_pad.Encoder.encode(id, &random_bytes);
@@ -85,7 +85,7 @@ test "cookie sessions ignore malformed existing ids" {
         "\r\n";
     const request = try request_mod.Request.parse(raw);
 
-    const stream: std.net.Stream = undefined;
+    const stream: @import("compat").net.Stream = undefined;
     var session = try (CookieSession{}).loadOrCreate(
         std.testing.allocator,
         request,

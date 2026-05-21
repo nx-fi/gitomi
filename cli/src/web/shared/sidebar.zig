@@ -282,7 +282,7 @@ pub fn validHexColor(value: []const u8) bool {
     return true;
 }
 
-pub fn requiredValue(allocator: Allocator, stream: std.net.Stream, form_body: []const u8, name: []const u8, message: []const u8) !?[]u8 {
+pub fn requiredValue(allocator: Allocator, stream: @import("compat").net.Stream, form_body: []const u8, name: []const u8, message: []const u8) !?[]u8 {
     const owned = (try web_shared.formValueOwned(allocator, form_body, name)) orelse {
         try response.sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", message);
         return null;

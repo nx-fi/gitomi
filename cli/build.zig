@@ -4,8 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const sqlite_dep = b.dependency("sqlite", .{});
-    const tree_sitter_dep = b.dependency("tree_sitter", .{});
-    const tree_sitter_zig_dep = b.dependency("tree_sitter_zig", .{});
+    const tree_sitter = treeSitterConfig(b);
     const package_version = packageVersion(b);
     const executable_version = std.SemanticVersion.parse(package_version) catch |err| {
         std.debug.panic("invalid build.zig.zon version '{s}': {s}", .{ package_version, @errorName(err) });
@@ -13,14 +12,13 @@ pub fn build(b: *std.Build) void {
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", package_version);
 
-    const mod = createMainModule(b, target, optimize, build_options, sqlite_dep, tree_sitter_dep, tree_sitter_zig_dep);
+    const mod = createMainModule(b, target, optimize, build_options, sqlite_dep, tree_sitter);
 
     const exe = b.addExecutable(.{
         .name = "gt",
         .root_module = mod,
         .version = executable_version,
     });
-    exe.linkLibC();
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -30,9 +28,8 @@ pub fn build(b: *std.Build) void {
     }
     b.step("run", "Run gt").dependOn(&run_cmd.step);
 
-    const test_mod = createMainModule(b, target, optimize, build_options, sqlite_dep, tree_sitter_dep, tree_sitter_zig_dep);
+    const test_mod = createMainModule(b, target, optimize, build_options, sqlite_dep, tree_sitter);
     const tests = b.addTest(.{ .root_module = test_mod });
-    tests.linkLibC();
     const run_tests = b.addRunArtifact(tests);
     const unit_test_step = b.step("unit-test", "Run unit tests");
     unit_test_step.dependOn(&run_tests.step);
@@ -55,17 +52,23 @@ fn createMainModule(
     optimize: std.builtin.OptimizeMode,
     build_options: *std.Build.Step.Options,
     sqlite_dep: *std.Build.Dependency,
-    tree_sitter_dep: *std.Build.Dependency,
-    tree_sitter_zig_dep: *std.Build.Dependency,
+    tree_sitter: TreeSitterConfig,
 ) *std.Build.Module {
+    const compat_mod = b.createModule(.{
+        .root_source_file = b.path("src/compat.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
+    mod.addImport("compat", compat_mod);
     mod.addOptions("build_options", build_options);
     addSqlite(mod, sqlite_dep);
-    addTreeSitter(mod, tree_sitter_dep, tree_sitter_zig_dep);
+    addTreeSitter(mod, tree_sitter);
     return mod;
 }
 
@@ -87,35 +90,40 @@ fn addSqlite(module: *std.Build.Module, sqlite_dep: *std.Build.Dependency) void 
     });
 }
 
-fn addTreeSitter(
-    module: *std.Build.Module,
-    tree_sitter_dep: *std.Build.Dependency,
-    tree_sitter_zig_dep: *std.Build.Dependency,
-) void {
-    module.addCSourceFile(.{
-        .file = tree_sitter_dep.path("lib/src/lib.c"),
-        .flags = &.{ "-std=c11", "-D_POSIX_C_SOURCE=200112L", "-D_DEFAULT_SOURCE", "-D_BSD_SOURCE", "-D_DARWIN_C_SOURCE" },
-    });
-    module.addCSourceFile(.{
-        .file = tree_sitter_zig_dep.path("src/parser.c"),
-        .flags = &.{"-std=c11"},
-    });
-
-    module.addIncludePath(tree_sitter_dep.path("lib/include"));
-    module.addIncludePath(tree_sitter_dep.path("lib/src"));
-    module.addIncludePath(tree_sitter_dep.path("lib/src/wasm"));
-    module.addIncludePath(tree_sitter_zig_dep.path("src"));
-}
-
-const PackageManifest = struct {
-    version: []const u8,
+const TreeSitterConfig = struct {
+    prefix: []const u8,
+    zig_src: []const u8,
 };
 
+fn treeSitterConfig(b: *std.Build) TreeSitterConfig {
+    const prefix = b.option([]const u8, "tree-sitter-prefix", "Path to the Tree-sitter package prefix") orelse
+        b.graph.environ_map.get("TREE_SITTER_PREFIX") orelse
+        @panic("missing Tree-sitter prefix; enter the flake dev shell or pass -Dtree-sitter-prefix=/path/to/tree-sitter");
+    const zig_src = b.option([]const u8, "tree-sitter-zig-src", "Path to the tree-sitter-zig source checkout") orelse
+        b.graph.environ_map.get("TREE_SITTER_ZIG_SRC") orelse
+        @panic("missing tree-sitter-zig source; enter the flake dev shell or pass -Dtree-sitter-zig-src=/path/to/tree-sitter-zig");
+    return .{ .prefix = prefix, .zig_src = zig_src };
+}
+
+fn addTreeSitter(module: *std.Build.Module, config: TreeSitterConfig) void {
+    const b = module.owner;
+    const tree_sitter_include = b.pathJoin(&.{ config.prefix, "include" });
+    const tree_sitter_lib = b.pathJoin(&.{ config.prefix, "lib" });
+    const tree_sitter_zig_src = b.pathJoin(&.{ config.zig_src, "src" });
+
+    module.linkSystemLibrary("tree-sitter", .{});
+    module.addIncludePath(.{ .cwd_relative = tree_sitter_include });
+    module.addLibraryPath(.{ .cwd_relative = tree_sitter_lib });
+    module.addRPath(.{ .cwd_relative = tree_sitter_lib });
+    module.addCSourceFile(.{
+        .file = .{ .cwd_relative = b.pathJoin(&.{ tree_sitter_zig_src, "parser.c" }) },
+        .flags = &.{"-std=c11"},
+    });
+    module.addIncludePath(.{ .cwd_relative = tree_sitter_zig_src });
+}
+
 fn packageVersion(b: *std.Build) []const u8 {
-    const manifest = std.zon.parse.fromSlice(PackageManifest, b.allocator, @embedFile("build.zig.zon"), null, .{
-        .ignore_unknown_fields = true,
-    }) catch |err| {
-        std.debug.panic("failed to parse build.zig.zon version: {s}", .{@errorName(err)});
-    };
+    _ = b;
+    const manifest = @import("build.zig.zon");
     return manifest.version;
 }

@@ -45,7 +45,7 @@ pub fn prune(allocator: Allocator, options: PruneOptions) !void {
         return;
     }
 
-    const now = std.time.timestamp();
+    const now = @import("compat").timestamp();
     const max_age_seconds = options.max_age_days * 24 * 60 * 60;
     var retained_bytes: u64 = 0;
 

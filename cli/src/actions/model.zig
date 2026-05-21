@@ -345,11 +345,11 @@ pub const RunTargets = struct {
 pub const RunClaim = struct {
     allocator: Allocator,
     path: []u8,
-    file: std.fs.File,
+    file: std.Io.File,
 
     pub fn deinit(self: *RunClaim) void {
-        self.file.close();
-        std.fs.deleteFileAbsolute(self.path) catch {};
+        self.file.close(@import("compat").io());
+        std.Io.Dir.deleteFileAbsolute(@import("compat").io(), self.path) catch {};
         self.allocator.free(self.path);
     }
 };

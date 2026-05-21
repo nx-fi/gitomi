@@ -1093,7 +1093,7 @@ fn asciiEqlIgnoreCase(a: []const u8, b: []const u8) bool {
     return true;
 }
 
-pub fn handleIssueBulkPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
+pub fn handleIssueBulkPost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, form_body: []const u8) !void {
     try index.ensureIndex(allocator, repo);
 
     const action_owned = (try formValueOwned(allocator, form_body, "action")) orelse {
@@ -1135,7 +1135,7 @@ pub fn handleIssueBulkPost(allocator: Allocator, repo: Repo, stream: std.net.Str
     try sendRedirect(allocator, stream, location);
 }
 
-fn applyIssueBulkAction(allocator: Allocator, repo: Repo, stream: std.net.Stream, issue_id: []const u8, action: []const u8) !bool {
+fn applyIssueBulkAction(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, issue_id: []const u8, action: []const u8) !bool {
     if (std.mem.eql(u8, action, "state:open")) {
         return writeBulkStringEventOrFail(allocator, stream, issue_id, "issue.state_set", "state", "open");
     }
@@ -1178,14 +1178,14 @@ fn bulkActionValue(action: []const u8, prefix: []const u8) ?[]const u8 {
     return std.mem.trim(u8, action[prefix.len..], " \t\r\n");
 }
 
-fn sendBulkValidationError(allocator: Allocator, stream: std.net.Stream, message: []const u8) !bool {
+fn sendBulkValidationError(allocator: Allocator, stream: @import("compat").net.Stream, message: []const u8) !bool {
     try sendPlainResponse(allocator, stream, 422, "Unprocessable Entity", message);
     return false;
 }
 
 fn writeBulkStringEventOrFail(
     allocator: Allocator,
-    stream: std.net.Stream,
+    stream: @import("compat").net.Stream,
     issue_id: []const u8,
     event_type: []const u8,
     payload_key: []const u8,

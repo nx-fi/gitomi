@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("compat");
 const errors = @import("../errors.zig");
 const event_model = @import("../event/model.zig");
 const event_builders = @import("../event/builders.zig");
@@ -173,7 +174,7 @@ fn roleAtLeastMaintainer(role: []const u8) bool {
 }
 
 pub fn secretFromEnv(allocator: Allocator, command: []const u8, env_name: []const u8) ![]u8 {
-    const value = std.process.getEnvVarOwned(allocator, env_name) catch |err| switch (err) {
+    const value = compat.getEnvVarOwned(allocator, env_name) catch |err| switch (err) {
         error.EnvironmentVariableNotFound => {
             try eprint("{s}: environment variable {s} is not set\n", .{ command, env_name });
             return CliError.MissingArgument;
@@ -189,7 +190,7 @@ pub fn secretFromEnv(allocator: Allocator, command: []const u8, env_name: []cons
 }
 
 pub fn secretFromFile(allocator: Allocator, command: []const u8, path: []const u8) ![]u8 {
-    const bytes = std.fs.cwd().readFileAlloc(allocator, path, 64 * 1024) catch |err| switch (err) {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(@import("compat").io(), path, allocator, .limited(64 * 1024)) catch |err| switch (err) {
         error.FileNotFound => {
             try eprint("{s}: secret file {s} was not found\n", .{ command, path });
             return CliError.MissingArgument;

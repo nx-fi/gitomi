@@ -39,7 +39,7 @@ pub fn append(buf: *std.ArrayList(u8), allocator: Allocator, diff: []const u8, o
     var new_line: ?usize = null;
     var lines = std.mem.splitScalar(u8, diff, '\n');
     while (lines.next()) |raw_line| {
-        const line = std.mem.trimRight(u8, raw_line, "\r");
+        const line = std.mem.trimEnd(u8, raw_line, "\r");
         if (std.mem.startsWith(u8, line, "diff --git ")) {
             if (in_file) try buf.appendSlice(allocator, "</div></section>");
             in_file = true;
@@ -121,9 +121,9 @@ fn appendDiffExpandRow(buf: *std.ArrayList(u8), allocator: Allocator, expand: Ex
 fn appendCommitHrefWithContext(buf: *std.ArrayList(u8), allocator: Allocator, hash: []const u8, context: usize, file_index: usize) !void {
     try appendHref(buf, allocator, commitHref(hash));
     try buf.appendSlice(allocator, "&amp;context=");
-    try std.fmt.format(buf.writer(allocator), "{d}", .{context});
+    try @import("compat").appendPrint(allocator, buf, "{d}", .{context});
     try buf.appendSlice(allocator, "#diff-file-");
-    try std.fmt.format(buf.writer(allocator), "{d}", .{file_index});
+    try @import("compat").appendPrint(allocator, buf, "{d}", .{file_index});
 }
 
 fn appendDiffLine(buf: *std.ArrayList(u8), allocator: Allocator, line: []const u8, class: []const u8, old_line: ?usize, new_line: ?usize) !void {
@@ -143,7 +143,7 @@ fn appendDiffLine(buf: *std.ArrayList(u8), allocator: Allocator, line: []const u
 
 fn appendLineNumber(buf: *std.ArrayList(u8), allocator: Allocator, line_number: ?usize) !void {
     if (line_number) |value| {
-        if (value != 0) try std.fmt.format(buf.writer(allocator), "{d}", .{value});
+        if (value != 0) try @import("compat").appendPrint(allocator, buf, "{d}", .{value});
     }
 }
 

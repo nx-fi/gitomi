@@ -163,7 +163,7 @@ fn loadCommits(allocator: Allocator, repo: Repo, detail: PullDetail) !?[]PullCom
     }
     var lines = std.mem.splitScalar(u8, raw, '\n');
     while (lines.next()) |raw_line| {
-        const line = std.mem.trimRight(u8, raw_line, "\r");
+        const line = std.mem.trimEnd(u8, raw_line, "\r");
         if (line.len == 0) continue;
         var cols = std.mem.splitScalar(u8, line, 0);
         try commits.append(allocator, .{

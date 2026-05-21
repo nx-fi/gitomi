@@ -1,18 +1,11 @@
 .{
     .name = .cli,
     .version = "0.15.2",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .sqlite = .{
             .url = "https://sqlite.org/2026/sqlite-amalgamation-3510200.zip",
             .hash = "N-V-__8AALNmqgBz73I7J8GlQS_kCPTRgxS0rm8gXcEM8Evk",
-        },
-        .tree_sitter = .{
-            .url = "https://github.com/tree-sitter/tree-sitter/archive/refs/tags/v0.26.7.tar.gz",
-            .hash = "tree_sitter-0.26.7-Tw2sR9S2CwCSBy6UtwPyp13J-P2VC_4hC1VxL8DSC6Jf",
-        },
-        .tree_sitter_zig = .{
-            .url = "git+https://github.com/tree-sitter-grammars/tree-sitter-zig#6479aa13f32f701c383083d8b28360ebd682fb7d",
-            .hash = "tree_sitter_zig-1.1.2-AAAAAJ57XACsD_XBHC4i6G6rnCsZ1dZj7CLRTC09toEB",
         },
     },
     .paths = .{""},

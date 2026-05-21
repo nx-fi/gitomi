@@ -112,9 +112,9 @@ pub fn looksLikeUuid(value: []const u8) bool {
 
 pub fn newUuidV7(allocator: Allocator) ![]u8 {
     var bytes: [16]u8 = undefined;
-    std.crypto.random.bytes(&bytes);
+    @import("compat").random.bytes(&bytes);
 
-    const ts: u64 = @intCast(std.time.milliTimestamp());
+    const ts: u64 = @intCast(@import("compat").milliTimestamp());
     inline for (.{ 40, 32, 24, 16, 8, 0 }, 0..) |shift, idx| {
         bytes[idx] = @truncate(ts >> shift);
     }
@@ -141,7 +141,7 @@ pub fn formatUuid(bytes: [16]u8, out_buf: []u8) void {
 }
 
 pub fn rfc3339Now(allocator: Allocator) ![]u8 {
-    const timestamp = std.time.timestamp();
+    const timestamp = @import("compat").timestamp();
     if (timestamp < 0) return error.InvalidTimestamp;
 
     const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = @as(u64, @intCast(timestamp)) };
@@ -227,7 +227,7 @@ pub fn trimDup(allocator: Allocator, bytes: []const u8) ![]u8 {
 }
 
 pub fn fileExists(path: []const u8) bool {
-    std.fs.accessAbsolute(path, .{}) catch return false;
+    std.Io.Dir.accessAbsolute(@import("compat").io(), path, .{}) catch return false;
     return true;
 }
 

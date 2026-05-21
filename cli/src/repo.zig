@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("compat");
 const errors = @import("errors.zig");
 const git = @import("git.zig");
 const io = @import("io.zig");
@@ -153,7 +154,7 @@ pub fn discoverRepo(allocator: Allocator) !Repo {
 }
 
 pub fn loadConfig(allocator: Allocator, path: []const u8) !Config {
-    const bytes = std.fs.cwd().readFileAlloc(allocator, path, config_max_size) catch |err| switch (err) {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(@import("compat").io(), path, allocator, .limited(config_max_size)) catch |err| switch (err) {
         error.FileNotFound => return CliError.ConfigNotFound,
         else => return err,
     };
@@ -470,7 +471,7 @@ pub fn writeConfig(path: []const u8, cfg: Config) !void {
     try appendTomlStringField(&content, cfg.allocator, "repo_id", cfg.repo_id);
     try appendTomlStringField(&content, cfg.allocator, "principal", cfg.principal);
     try appendTomlStringField(&content, cfg.allocator, "device", cfg.device);
-    try content.writer(cfg.allocator).print("seq = {d}\n", .{cfg.seq});
+    try @import("compat").appendPrint(cfg.allocator, &content, "seq = {d}\n", .{cfg.seq});
 
     if (cfg.web_shortcut_leader != null or cfg.web_shortcut_keys != null or cfg.web_shortcut_timeout_ms != null) {
         try content.append(cfg.allocator, '\n');
@@ -481,13 +482,13 @@ pub fn writeConfig(path: []const u8, cfg: Config) !void {
             try appendTomlStringField(&content, cfg.allocator, "web.shortcut_keys", value);
         }
         if (cfg.web_shortcut_timeout_ms) |value| {
-            try content.writer(cfg.allocator).print("web.shortcut_timeout_ms = {d}\n", .{value});
+            try @import("compat").appendPrint(cfg.allocator, &content, "web.shortcut_timeout_ms = {d}\n", .{value});
         }
     }
 
-    const file = try std.fs.createFileAbsolute(path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(content.items);
+    const file = try std.Io.Dir.createFileAbsolute(@import("compat").io(), path, .{ .truncate = true });
+    defer file.close(@import("compat").io());
+    try file.writeStreamingAll(@import("compat").io(), content.items);
 }
 
 fn appendTomlStringField(buf: *std.ArrayList(u8), allocator: Allocator, key: []const u8, value: []const u8) !void {
@@ -654,7 +655,7 @@ pub fn configuredSigningKey(allocator: Allocator) !SigningKey {
         try std.fmt.allocPrint(allocator, "{s}.pub", .{trimmed});
     defer allocator.free(pub_path);
 
-    const bytes = std.fs.cwd().readFileAlloc(allocator, pub_path, 1024 * 1024) catch return emptySigningKey(allocator, "ssh");
+    const bytes = std.Io.Dir.cwd().readFileAlloc(@import("compat").io(), pub_path, allocator, .limited(1024 * 1024)) catch return emptySigningKey(allocator, "ssh");
     const public_key = try trimOwned(allocator, bytes);
     errdefer allocator.free(public_key);
     return .{
@@ -948,7 +949,7 @@ pub fn defaultPrincipal(allocator: Allocator) ![]u8 {
 }
 
 pub fn defaultDevice(allocator: Allocator) ![]u8 {
-    if (std.process.getEnvVarOwned(allocator, "HOSTNAME")) |value| {
+    if (compat.getEnvVarOwned(allocator, "HOSTNAME")) |value| {
         defer allocator.free(value);
         const sanitized = try sanitizeRefSegment(allocator, value);
         if (sanitized.len != 0) return sanitized;

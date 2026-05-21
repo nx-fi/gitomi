@@ -182,7 +182,7 @@ pub fn cmdSync(allocator: Allocator, args: []const []const u8) !void {
     try out("GitHub sync polling repository {s} every {d}ms using {s}.\n", .{ options.repo.slug, interval_ms, modeName(options.mode) });
     while (true) {
         try runSyncOnce(allocator, options);
-        std.Thread.sleep(interval_ms * std.time.ns_per_ms);
+        @import("compat").sleep(interval_ms * std.time.ns_per_ms);
     }
 }
 
@@ -475,7 +475,7 @@ const MapFileSnapshot = struct {
     bytes: ?[]u8 = null,
 
     fn capture(allocator: Allocator, path: []const u8) !MapFileSnapshot {
-        const bytes = std.fs.cwd().readFileAlloc(allocator, path, 8 * 1024 * 1024) catch |err| switch (err) {
+        const bytes = std.Io.Dir.cwd().readFileAlloc(@import("compat").io(), path, allocator, .limited(8 * 1024 * 1024)) catch |err| switch (err) {
             error.FileNotFound => return .{},
             else => return err,
         };
@@ -489,11 +489,11 @@ const MapFileSnapshot = struct {
 
     fn restore(self: MapFileSnapshot, allocator: Allocator, path: []const u8) !void {
         if (self.bytes) |bytes| {
-            if (std.fs.path.dirname(path)) |dir| try std.fs.cwd().makePath(dir);
+            if (std.fs.path.dirname(path)) |dir| try std.Io.Dir.cwd().createDirPath(@import("compat").io(), dir);
             try writeFileAtomic(allocator, path, bytes);
             return;
         }
-        std.fs.cwd().deleteFile(path) catch |err| switch (err) {
+        std.Io.Dir.cwd().deleteFile(@import("compat").io(), path) catch |err| switch (err) {
             error.FileNotFound => {},
             else => return err,
         };
@@ -503,7 +503,7 @@ const MapFileSnapshot = struct {
 fn loadState(allocator: Allocator, repo: repo_mod.Repo, slug: RepoSlug) !SyncState {
     const path = try statePath(allocator, repo, slug);
     defer allocator.free(path);
-    const bytes = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch |err| switch (err) {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(@import("compat").io(), path, allocator, .limited(1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => return .{},
         else => return err,
     };
@@ -526,7 +526,7 @@ fn loadState(allocator: Allocator, repo: repo_mod.Repo, slug: RepoSlug) !SyncSta
 fn saveState(allocator: Allocator, repo: repo_mod.Repo, slug: RepoSlug, state: SyncState) !void {
     const path = try statePath(allocator, repo, slug);
     defer allocator.free(path);
-    if (std.fs.path.dirname(path)) |dir| try std.fs.cwd().makePath(dir);
+    if (std.fs.path.dirname(path)) |dir| try std.Io.Dir.cwd().createDirPath(@import("compat").io(), dir);
     const bytes = try std.fmt.allocPrint(allocator, "{{\"last_export_ordinal\":{d}}}\n", .{state.last_export_ordinal});
     defer allocator.free(bytes);
     try writeFileAtomic(allocator, path, bytes);
@@ -537,15 +537,15 @@ fn writeFileAtomic(allocator: Allocator, path: []const u8, bytes: []const u8) !v
     defer allocator.free(id);
     const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp.{s}", .{ path, id });
     defer allocator.free(tmp_path);
-    errdefer std.fs.cwd().deleteFile(tmp_path) catch {};
-    var file = try std.fs.cwd().createFile(tmp_path, .{ .truncate = true, .mode = 0o600 });
+    errdefer std.Io.Dir.cwd().deleteFile(@import("compat").io(), tmp_path) catch {};
+    var file = try std.Io.Dir.cwd().createFile(@import("compat").io(), tmp_path, .{ .truncate = true, .permissions = @enumFromInt(0o600) });
     var closed = false;
-    defer if (!closed) file.close();
-    try file.writeAll(bytes);
-    try file.sync();
-    file.close();
+    defer if (!closed) file.close(@import("compat").io());
+    try file.writeStreamingAll(@import("compat").io(), bytes);
+    try file.sync(@import("compat").io());
+    file.close(@import("compat").io());
     closed = true;
-    try std.fs.cwd().rename(tmp_path, path);
+    try std.Io.Dir.cwd().rename(tmp_path, std.Io.Dir.cwd(), path, @import("compat").io());
 }
 
 pub fn githubMapPath(allocator: Allocator, repo: repo_mod.Repo, slug: RepoSlug) ![]u8 {

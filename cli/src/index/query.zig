@@ -2082,7 +2082,7 @@ fn reactionsText(allocator: Allocator, db: *SqliteDb, object_kind: []const u8, o
         if (!first) try buf.appendSlice(allocator, ", ");
         first = false;
         try buf.appendSlice(allocator, emoji);
-        try std.fmt.format(buf.writer(allocator), " {d}", .{count});
+        try @import("compat").appendPrint(allocator, &buf, " {d}", .{count});
     }
     if (first) try buf.appendSlice(allocator, "(none)");
     return buf.toOwnedSlice(allocator);
@@ -2490,7 +2490,7 @@ test "write preflight enforces current RBAC" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    const root = try tmp.dir.realPathFileAlloc(@import("compat").io(), ".", allocator);
     defer allocator.free(root);
     const index_path = try std.fs.path.join(allocator, &.{ root, "index.sqlite" });
     defer allocator.free(index_path);

@@ -741,7 +741,7 @@ fn updateInlineTestStateAfterLine(
 }
 
 fn startsWithZigTestDecl(line: []const u8) bool {
-    const trimmed = std.mem.trimLeft(u8, line, " \t\r");
+    const trimmed = std.mem.trimStart(u8, line, " \t\r");
     if (!std.mem.startsWith(u8, trimmed, "test")) return false;
     if (trimmed.len == 4) return true;
     const next = trimmed[4];
@@ -749,7 +749,7 @@ fn startsWithZigTestDecl(line: []const u8) bool {
 }
 
 fn updateZigTestDepthFromLine(line: []const u8, state: *CountState) void {
-    const trimmed = std.mem.trimLeft(u8, line, " \t\r");
+    const trimmed = std.mem.trimStart(u8, line, " \t\r");
     if (std.mem.startsWith(u8, trimmed, "\\\\")) return;
 
     var in_string = false;
@@ -795,7 +795,7 @@ fn updateZigTestDepthFromLine(line: []const u8, state: *CountState) void {
 }
 
 fn isCfgContinuation(line: []const u8) bool {
-    const trimmed = std.mem.trimLeft(u8, line, " \t\r");
+    const trimmed = std.mem.trimStart(u8, line, " \t\r");
     if (trimmed.len == 0) return true;
     if (std.mem.startsWith(u8, trimmed, "#[")) return true;
     if (std.mem.startsWith(u8, trimmed, "mod")) {

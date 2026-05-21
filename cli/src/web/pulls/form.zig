@@ -71,7 +71,7 @@ pub fn renderPullForm(
     return buf.toOwnedSlice(allocator);
 }
 
-pub fn handlePullPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, csrf_token: []const u8, form_body: []const u8) !void {
+pub fn handlePullPost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, csrf_token: []const u8, form_body: []const u8) !void {
     const submitted_token = try shared.formValueOwned(allocator, form_body, zwf.csrf.field_name);
     defer if (submitted_token) |value| allocator.free(value);
     if (submitted_token == null or !zwf.csrf.verify(csrf_token, std.mem.trim(u8, submitted_token.?, " \t\r\n"))) {

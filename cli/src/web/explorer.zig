@@ -247,7 +247,7 @@ pub fn renderCodeRootComponent(allocator: Allocator, repo: Repo, target: []const
     return try buf.toOwnedSlice(allocator);
 }
 
-pub fn handleCodeSyncPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
+pub fn handleCodeSyncPost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, form_body: []const u8) !void {
     const action_owned = (try formValueOwned(allocator, form_body, "action")) orelse try allocator.dupe(u8, "exchange");
     defer allocator.free(action_owned);
     const ref_owned = (try formValueOwned(allocator, form_body, "ref")) orelse try defaultRef(allocator, repo);
@@ -287,7 +287,7 @@ fn runCodeSync(allocator: Allocator, mode: CodeSyncMode) !void {
 fn sendCodeSyncFailure(
     allocator: Allocator,
     repo: Repo,
-    stream: std.net.Stream,
+    stream: @import("compat").net.Stream,
     ref: []const u8,
     mode: CodeSyncMode,
     err: anyerror,
@@ -1696,7 +1696,7 @@ fn appendPdfPreview(
 
 fn appendBlameLines(buf: *std.ArrayList(u8), allocator: Allocator, path: []const u8, lines: []const BlameLine) !void {
     const language = languageForPath(path);
-    const now = std.time.timestamp();
+    const now = @import("compat").timestamp();
     try appendTemplate(buf, allocator, "<ol class=\"blame-lines\">", .{});
     for (lines) |line| {
         try appendBlameLine(buf, allocator, language, now, line);

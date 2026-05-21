@@ -188,7 +188,7 @@ const MappingStore = struct {
     allocator: Allocator,
     path: []u8,
     dry_run: bool,
-    lock_file: ?std.fs.File = null,
+    lock_file: ?std.Io.File = null,
     next_synthetic: i64 = 1,
     map: std.StringHashMap(MappingValue),
 
@@ -205,7 +205,7 @@ const MappingStore = struct {
         errdefer allocator.free(path);
 
         const lock_file = if (!dry_run) try acquireMapLock(allocator, path) else null;
-        errdefer if (lock_file) |file| file.close();
+        errdefer if (lock_file) |file| file.close(@import("compat").io());
 
         return .{
             .allocator = allocator,
@@ -217,7 +217,7 @@ const MappingStore = struct {
     }
 
     fn deinit(self: *MappingStore) void {
-        if (self.lock_file) |file| file.close();
+        if (self.lock_file) |file| file.close(@import("compat").io());
         var keys = self.map.keyIterator();
         while (keys.next()) |key| self.allocator.free(key.*);
         self.map.deinit();
@@ -225,7 +225,7 @@ const MappingStore = struct {
     }
 
     fn load(self: *MappingStore) !void {
-        const bytes = std.fs.cwd().readFileAlloc(self.allocator, self.path, 8 * 1024 * 1024) catch |err| switch (err) {
+        const bytes = std.Io.Dir.cwd().readFileAlloc(@import("compat").io(), self.path, self.allocator, .limited(8 * 1024 * 1024)) catch |err| switch (err) {
             error.FileNotFound => return,
             else => return err,
         };
@@ -311,13 +311,13 @@ const MappingStore = struct {
     }
 
     fn append(self: *MappingStore, kind: []const u8, id: []const u8, number: i64, api_id: ?i64) !void {
-        if (std.fs.path.dirname(self.path)) |dir| try std.fs.cwd().makePath(dir);
-        var file = std.fs.cwd().openFile(self.path, .{ .mode = .write_only }) catch |err| switch (err) {
-            error.FileNotFound => try std.fs.cwd().createFile(self.path, .{ .mode = 0o600 }),
+        if (std.fs.path.dirname(self.path)) |dir| try std.Io.Dir.cwd().createDirPath(@import("compat").io(), dir);
+        var file = std.Io.Dir.cwd().openFile(@import("compat").io(), self.path, .{ .mode = .write_only }) catch |err| switch (err) {
+            error.FileNotFound => try std.Io.Dir.cwd().createFile(@import("compat").io(), self.path, .{ .permissions = @enumFromInt(0o600) }),
             else => return err,
         };
-        defer file.close();
-        try file.seekFromEnd(0);
+        defer file.close(@import("compat").io());
+        try @import("compat").seekFileToEnd(file);
 
         var line: std.ArrayList(u8) = .empty;
         defer line.deinit(self.allocator);
@@ -327,8 +327,8 @@ const MappingStore = struct {
         try json_writer.appendJsonFieldInteger(&line, self.allocator, "number", number, positiveId(api_id) != null);
         if (positiveId(api_id)) |value| try json_writer.appendJsonFieldInteger(&line, self.allocator, "api_id", value, false);
         try line.appendSlice(self.allocator, "}\n");
-        try file.writeAll(line.items);
-        try file.sync();
+        try file.writeStreamingAll(@import("compat").io(), line.items);
+        try file.sync(@import("compat").io());
     }
 };
 
@@ -341,35 +341,35 @@ fn positiveId(value: ?i64) ?i64 {
     return if (actual > 0) actual else null;
 }
 
-fn acquireMapLock(allocator: Allocator, map_path: []const u8) !std.fs.File {
-    if (std.fs.path.dirname(map_path)) |dir| try std.fs.cwd().makePath(dir);
+fn acquireMapLock(allocator: Allocator, map_path: []const u8) !std.Io.File {
+    if (std.fs.path.dirname(map_path)) |dir| try std.Io.Dir.cwd().createDirPath(@import("compat").io(), dir);
     const lock_path = try std.fmt.allocPrint(allocator, "{s}.lock", .{map_path});
     defer allocator.free(lock_path);
-    return try std.fs.cwd().createFile(lock_path, .{
+    return try std.Io.Dir.cwd().createFile(@import("compat").io(), lock_path, .{
         .read = true,
         .truncate = false,
         .lock = .exclusive,
-        .mode = 0o600,
+        .permissions = @enumFromInt(0o600),
     });
 }
 
 pub fn lookupMappedObjectId(allocator: Allocator, map_file: []const u8, kind: []const u8, number: i64) !?[]u8 {
     const lock_file = try acquireMapLock(allocator, map_file);
-    defer lock_file.close();
+    defer lock_file.close(@import("compat").io());
 
     return try lookupMappedObjectIdUnlocked(allocator, map_file, kind, number);
 }
 
 pub fn recordMappedObjectId(allocator: Allocator, map_file: []const u8, kind: []const u8, id: []const u8, number: i64) !void {
     const lock_file = try acquireMapLock(allocator, map_file);
-    defer lock_file.close();
+    defer lock_file.close(@import("compat").io());
 
     if (try mappingExistsUnlocked(allocator, map_file, kind, id, number)) return;
     try appendMappingLine(allocator, map_file, kind, id, number);
 }
 
 fn lookupMappedObjectIdUnlocked(allocator: Allocator, map_file: []const u8, kind: []const u8, number: i64) !?[]u8 {
-    const bytes = std.fs.cwd().readFileAlloc(allocator, map_file, 8 * 1024 * 1024) catch |err| switch (err) {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(@import("compat").io(), map_file, allocator, .limited(8 * 1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return err,
     };
@@ -413,7 +413,7 @@ fn lookupMappedObjectIdUnlocked(allocator: Allocator, map_file: []const u8, kind
 }
 
 fn mappingExistsUnlocked(allocator: Allocator, map_file: []const u8, kind: []const u8, id: []const u8, number: i64) !bool {
-    const bytes = std.fs.cwd().readFileAlloc(allocator, map_file, 8 * 1024 * 1024) catch |err| switch (err) {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(@import("compat").io(), map_file, allocator, .limited(8 * 1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => return err,
     };
@@ -456,13 +456,13 @@ fn mappingExistsUnlocked(allocator: Allocator, map_file: []const u8, kind: []con
 }
 
 fn appendMappingLine(allocator: Allocator, map_file: []const u8, kind: []const u8, id: []const u8, number: i64) !void {
-    if (std.fs.path.dirname(map_file)) |dir| try std.fs.cwd().makePath(dir);
-    var file = std.fs.cwd().openFile(map_file, .{ .mode = .write_only }) catch |err| switch (err) {
-        error.FileNotFound => try std.fs.cwd().createFile(map_file, .{ .mode = 0o600 }),
+    if (std.fs.path.dirname(map_file)) |dir| try std.Io.Dir.cwd().createDirPath(@import("compat").io(), dir);
+    var file = std.Io.Dir.cwd().openFile(@import("compat").io(), map_file, .{ .mode = .write_only }) catch |err| switch (err) {
+        error.FileNotFound => try std.Io.Dir.cwd().createFile(@import("compat").io(), map_file, .{ .permissions = @enumFromInt(0o600) }),
         else => return err,
     };
-    defer file.close();
-    try file.seekFromEnd(0);
+    defer file.close(@import("compat").io());
+    try @import("compat").seekFileToEnd(file);
 
     var line: std.ArrayList(u8) = .empty;
     defer line.deinit(allocator);
@@ -471,8 +471,8 @@ fn appendMappingLine(allocator: Allocator, map_file: []const u8, kind: []const u
     try appendJsonFieldString(&line, allocator, "id", id, true);
     try json_writer.appendJsonFieldInteger(&line, allocator, "number", number, false);
     try line.appendSlice(allocator, "}\n");
-    try file.writeAll(line.items);
-    try file.sync();
+    try file.writeStreamingAll(@import("compat").io(), line.items);
+    try file.sync(@import("compat").io());
 }
 
 pub fn exportToGithub(allocator: Allocator, options: ExportOptions) !ExportResult {

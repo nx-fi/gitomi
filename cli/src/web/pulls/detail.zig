@@ -270,7 +270,7 @@ fn appendPullPageHeader(
 fn appendPullDisplayRef(buf: *std.ArrayList(u8), allocator: Allocator, detail: PullDetail, pull_ref: []const u8) !void {
     try buf.append(allocator, '#');
     if (detail.legacy_number > 0) {
-        try std.fmt.format(buf.writer(allocator), "{d}", .{detail.legacy_number});
+        try @import("compat").appendPrint(allocator, buf, "{d}", .{detail.legacy_number});
     } else {
         try shared.appendHtml(buf, allocator, pull_ref);
     }
@@ -799,7 +799,7 @@ fn mergeMethodCommitPhrase(allocator: Allocator, count: ?usize) ![]u8 {
     return allocator.dupe(u8, "The commits");
 }
 
-pub fn handlePullConflictPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, csrf_token: []const u8, form_body: []const u8) !void {
+pub fn handlePullConflictPost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, raw_ref: []const u8, csrf_token: []const u8, form_body: []const u8) !void {
     const fields = try parseFormFieldsOwned(allocator, form_body);
     defer freeFormFields(allocator, fields);
     const submitted_csrf = findFormField(fields, zwf.csrf.field_name) orelse "";
@@ -889,7 +889,7 @@ pub fn handlePullConflictPost(allocator: Allocator, repo: Repo, stream: std.net.
     try sendRedirect(allocator, stream, location);
 }
 
-pub fn handlePullMergePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, csrf_token: []const u8, form_body: []const u8) !void {
+pub fn handlePullMergePost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, raw_ref: []const u8, csrf_token: []const u8, form_body: []const u8) !void {
     const fields = try parseFormFieldsOwned(allocator, form_body);
     defer freeFormFields(allocator, fields);
     const submitted_csrf = findFormField(fields, zwf.csrf.field_name) orelse "";
@@ -973,7 +973,7 @@ pub fn handlePullMergePost(allocator: Allocator, repo: Repo, stream: std.net.Str
     try sendRedirect(allocator, stream, location);
 }
 
-pub fn handlePullChecklistPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
+pub fn handlePullChecklistPost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
     try index.ensureIndex(allocator, repo);
     const pull_id = index.resolvePullId(allocator, repo, raw_ref) catch {
         try sendPlainResponse(allocator, stream, 404, "Not Found", "Pull request not found\n");
@@ -1019,7 +1019,7 @@ pub fn handlePullChecklistPost(allocator: Allocator, repo: Repo, stream: std.net
 fn sendMergeEditorError(
     allocator: Allocator,
     repo: Repo,
-    stream: std.net.Stream,
+    stream: @import("compat").net.Stream,
     raw_ref: []const u8,
     csrf_token: []const u8,
     status: u16,
@@ -1036,7 +1036,7 @@ fn sendMergeEditorError(
 fn sendPullMergeError(
     allocator: Allocator,
     repo: Repo,
-    stream: std.net.Stream,
+    stream: @import("compat").net.Stream,
     raw_ref: []const u8,
     csrf_token: []const u8,
     status: u16,
@@ -1050,7 +1050,7 @@ fn sendPullMergeError(
     try sendResponse(allocator, stream, status, reason, "text/html", body, null);
 }
 
-pub fn handlePullCommentPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
+pub fn handlePullCommentPost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
     const fields = try parseFormFieldsOwned(allocator, form_body);
     defer freeFormFields(allocator, fields);
 
@@ -1188,11 +1188,11 @@ fn isPullDescriptionReplyRef(reply_ref: []const u8) bool {
     return std.mem.eql(u8, reply_ref, "pull") or std.mem.eql(u8, reply_ref, "pull-description");
 }
 
-pub fn handlePullNotificationPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
+pub fn handlePullNotificationPost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
     try notifications.handleNotificationPost("pull", index.resolvePullId, "/pulls", allocator, repo, stream, raw_ref, form_body);
 }
 
-pub fn handlePullSidebarPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, csrf_token: []const u8, form_body: []const u8) !void {
+pub fn handlePullSidebarPost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, raw_ref: []const u8, csrf_token: []const u8, form_body: []const u8) !void {
     try pull_sidebar.handlePullSidebarPost(allocator, repo, stream, raw_ref, csrf_token, form_body);
 }
 

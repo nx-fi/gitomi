@@ -213,7 +213,7 @@ fn appendIssuePageHeader(
 fn appendIssueDisplayRef(buf: *std.ArrayList(u8), allocator: Allocator, issue_id: []const u8, legacy_number: i64) !void {
     try buf.append(allocator, '#');
     if (legacy_number > 0) {
-        try std.fmt.format(buf.writer(allocator), "{d}", .{legacy_number});
+        try @import("compat").appendPrint(allocator, buf, "{d}", .{legacy_number});
         return;
     }
 
@@ -808,7 +808,7 @@ fn appendIssueInlineReplyTemplate(buf: *std.ArrayList(u8), allocator: Allocator,
     );
 }
 
-pub fn handleIssueEditPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, csrf_token: []const u8, form_body: []const u8) !void {
+pub fn handleIssueEditPost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, raw_ref: []const u8, csrf_token: []const u8, form_body: []const u8) !void {
     try ensureIndex(allocator, repo);
     const issue_id = index.resolveIssueId(allocator, repo, raw_ref) catch {
         const page = try renderIssueNotFound(allocator, repo, raw_ref);
@@ -831,7 +831,7 @@ pub fn handleIssueEditPost(allocator: Allocator, repo: Repo, stream: std.net.Str
 fn handleIssueBodyEditPost(
     allocator: Allocator,
     repo: Repo,
-    stream: std.net.Stream,
+    stream: @import("compat").net.Stream,
     raw_ref: []const u8,
     issue_id: []const u8,
     csrf_token: []const u8,
@@ -895,7 +895,7 @@ fn handleIssueBodyEditPost(
     try sendRedirect(allocator, stream, location);
 }
 
-pub fn handleIssueChecklistPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
+pub fn handleIssueChecklistPost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
     try ensureIndex(allocator, repo);
     const issue_id = index.resolveIssueId(allocator, repo, raw_ref) catch {
         try sendPlainResponse(allocator, stream, 404, "Not Found", "Issue not found\n");
@@ -941,7 +941,7 @@ pub fn handleIssueChecklistPost(allocator: Allocator, repo: Repo, stream: std.ne
 fn handleCommentBodyEditPost(
     allocator: Allocator,
     repo: Repo,
-    stream: std.net.Stream,
+    stream: @import("compat").net.Stream,
     raw_ref: []const u8,
     issue_id: []const u8,
     target_ref: []const u8,
@@ -1010,7 +1010,7 @@ fn handleCommentBodyEditPost(
     try sendRedirect(allocator, stream, location);
 }
 
-pub fn handleIssueCommentPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, csrf_token: []const u8, form_body: []const u8) !void {
+pub fn handleIssueCommentPost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, raw_ref: []const u8, csrf_token: []const u8, form_body: []const u8) !void {
     const action_owned = try formValueOwned(allocator, form_body, "action");
     defer if (action_owned) |value| allocator.free(value);
     if (action_owned) |raw_action| {
@@ -1206,6 +1206,6 @@ fn isIssueDescriptionReplyRef(reply_ref: []const u8) bool {
     return std.mem.eql(u8, reply_ref, "issue") or std.mem.eql(u8, reply_ref, "issue-description");
 }
 
-pub fn handleIssueNotificationPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
+pub fn handleIssueNotificationPost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, raw_ref: []const u8, form_body: []const u8) !void {
     try notifications.handleNotificationPost("issue", index.resolveIssueId, "/issues", allocator, repo, stream, raw_ref, form_body);
 }

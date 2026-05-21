@@ -42,7 +42,7 @@ pub fn renderAccessPage(allocator: Allocator, repo: Repo, csrf_token: []const u8
     return renderAccessPageWithFlash(allocator, repo, csrf_token, null);
 }
 
-pub fn handleAccessRolePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8, csrf_token: []const u8) !void {
+pub fn handleAccessRolePost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, form_body: []const u8, csrf_token: []const u8) !void {
     if (!try formHasValidCsrfToken(allocator, form_body, csrf_token)) {
         try sendAccessError(allocator, repo, stream, 403, "Forbidden", "Invalid access form token. Reload the page and try again.", csrf_token);
         return;
@@ -84,7 +84,7 @@ pub fn handleAccessRolePost(allocator: Allocator, repo: Repo, stream: std.net.St
     try sendRedirect(allocator, stream, "/access");
 }
 
-pub fn handleAccessDevicePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8, csrf_token: []const u8) !void {
+pub fn handleAccessDevicePost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, form_body: []const u8, csrf_token: []const u8) !void {
     if (!try formHasValidCsrfToken(allocator, form_body, csrf_token)) {
         try sendAccessError(allocator, repo, stream, 403, "Forbidden", "Invalid access form token. Reload the page and try again.", csrf_token);
         return;
@@ -146,7 +146,7 @@ pub fn handleAccessDevicePost(allocator: Allocator, repo: Repo, stream: std.net.
     try sendRedirect(allocator, stream, "/access");
 }
 
-pub fn handleAccessTeamPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8, csrf_token: []const u8) !void {
+pub fn handleAccessTeamPost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, form_body: []const u8, csrf_token: []const u8) !void {
     if (!try formHasValidCsrfToken(allocator, form_body, csrf_token)) {
         try sendAccessError(allocator, repo, stream, 403, "Forbidden", "Invalid access form token. Reload the page and try again.", csrf_token);
         return;
@@ -212,7 +212,7 @@ pub fn handleAccessTeamPost(allocator: Allocator, repo: Repo, stream: std.net.St
     try sendRedirect(allocator, stream, "/access");
 }
 
-fn sendAccessError(allocator: Allocator, repo: Repo, stream: std.net.Stream, status: u16, reason: []const u8, message: []const u8, csrf_token: []const u8) !void {
+fn sendAccessError(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, status: u16, reason: []const u8, message: []const u8, csrf_token: []const u8) !void {
     const body = try renderAccessPageWithFlash(allocator, repo, csrf_token, .{ .kind = .failure, .message = message });
     defer allocator.free(body);
     try sendResponse(allocator, stream, status, reason, "text/html", body, null);

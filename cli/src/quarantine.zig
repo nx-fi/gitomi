@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const auth_binding = @import("auth_binding.zig");
+const compat = @import("compat");
 const errors = @import("errors.zig");
 const git = @import("git.zig");
 const inbox_commit = @import("inbox_commit.zig");
@@ -493,10 +494,10 @@ fn readStdinLine(allocator: Allocator, max_bytes: usize) ![]u8 {
     var line: std.ArrayList(u8) = .empty;
     errdefer line.deinit(allocator);
 
-    const stdin = std.fs.File.stdin();
+    const stdin = std.Io.File.stdin();
     var byte: [1]u8 = undefined;
     while (true) {
-        const read_len = try stdin.read(&byte);
+        const read_len = try compat.readFile(stdin, &byte);
         if (read_len == 0 or byte[0] == '\n') break;
         if (line.items.len >= max_bytes) {
             try io.eprint("confirmation input is too long\n", .{});

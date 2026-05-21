@@ -32,7 +32,7 @@ const max_delivery_id_bytes = 128;
 const max_export_events_per_tick = 50;
 const min_error_backoff_ms: u64 = 1000;
 const max_error_backoff_ms: u64 = 60_000;
-var live_mutex = std.Thread.Mutex{};
+var live_mutex = @import("compat").Mutex{};
 var runtime_available = std.atomic.Value(bool).init(false);
 var runtime_active = std.atomic.Value(bool).init(false);
 
@@ -78,10 +78,10 @@ const LiveAppContext = struct {
 };
 
 const LiveLock = struct {
-    file: std.fs.File,
+    file: std.Io.File,
 
     fn deinit(self: *LiveLock) void {
-        self.file.close();
+        self.file.close(@import("compat").io());
         live_mutex.unlock();
     }
 };
@@ -273,7 +273,7 @@ pub fn startDaemon(allocator: Allocator, options: Options) !void {
         .once = false,
         .worker_count = 4,
     };
-    const server_ptr = try allocator.create(std.net.Server);
+    const server_ptr = try allocator.create(@import("compat").net.Server);
     errdefer allocator.destroy(server_ptr);
     server_ptr.* = try listenLiveServer(options, server_options);
     errdefer server_ptr.deinit();
@@ -290,7 +290,7 @@ fn prepareLive(allocator: Allocator, options: Options) !void {
     try runLiveTick(allocator, options);
 }
 
-fn listenLiveServer(options: Options, server_options: zwf.ServerOptions) !std.net.Server {
+fn listenLiveServer(options: Options, server_options: zwf.ServerOptions) !@import("compat").net.Server {
     const bind_host = zwf.server.bindHost(server_options);
     return zwf.server.listen(bind_host, server_options) catch |err| switch (err) {
         error.InvalidHost => {
@@ -311,12 +311,12 @@ fn startTickLoop(allocator: Allocator, options: Options) !void {
     try out("GitHub live sync exporting local events every {d}ms.\n", .{options.interval_ms});
 }
 
-fn serveLiveServerThread(allocator: Allocator, options: Options, server: *std.net.Server, server_options: zwf.ServerOptions) void {
-    var next_server: ?*std.net.Server = server;
+fn serveLiveServerThread(allocator: Allocator, options: Options, server: *@import("compat").net.Server, server_options: zwf.ServerOptions) void {
+    var next_server: ?*@import("compat").net.Server = server;
     var backoff_ms: u64 = min_error_backoff_ms;
     while (true) {
         const server_ptr = next_server orelse blk: {
-            const fresh = allocator.create(std.net.Server) catch |err| {
+            const fresh = allocator.create(@import("compat").net.Server) catch |err| {
                 eprint("gt github live: webhook server restart allocation failed: {s}\n", .{@errorName(err)}) catch {};
                 sleepMs(backoff_ms);
                 backoff_ms = nextBackoffMs(backoff_ms);
@@ -380,7 +380,7 @@ fn nextBackoffMs(current_ms: u64) u64 {
 
 fn sleepMs(ms: u64) void {
     const ns = std.math.mul(u64, ms, std.time.ns_per_ms) catch std.math.maxInt(u64);
-    std.Thread.sleep(ns);
+    @import("compat").sleep(ns);
 }
 
 fn runLiveTick(allocator: Allocator, options: Options) !void {
@@ -432,14 +432,14 @@ fn runLiveTick(allocator: Allocator, options: Options) !void {
     }
 }
 
-fn handleConnectionLogged(allocator: Allocator, app_context: LiveAppContext, stream: std.net.Stream) !void {
+fn handleConnectionLogged(allocator: Allocator, app_context: LiveAppContext, stream: @import("compat").net.Stream) !void {
     handleConnection(allocator, app_context, stream) catch |err| {
         if (zwf.server.isClientDisconnect(err)) return;
         try eprint("gt github live: request failed: {s}\n", .{@errorName(err)});
     };
 }
 
-fn handleConnection(allocator: Allocator, app_context: LiveAppContext, stream: std.net.Stream) !void {
+fn handleConnection(allocator: Allocator, app_context: LiveAppContext, stream: @import("compat").net.Stream) !void {
     const raw = zwf.server.readHttpRequest(allocator, stream) catch {
         try sendPlain(allocator, stream, 400, "Bad Request", "Bad request\n");
         return;
@@ -524,7 +524,7 @@ fn handleConnection(allocator: Allocator, app_context: LiveAppContext, stream: s
 
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(allocator);
-    try std.fmt.format(body.writer(allocator), "ok issues={d} pulls={d} comments={d}\n", .{ stats.issues, stats.pulls, stats.comments });
+    try @import("compat").appendPrint(allocator, &body, "ok issues={d} pulls={d} comments={d}\n", .{ stats.issues, stats.pulls, stats.comments });
     try sendPlain(allocator, stream, 200, "OK", body.items);
 }
 
@@ -732,7 +732,7 @@ fn webhookUpdateBody(allocator: Allocator, options: Options, redact_secret: bool
 fn loadState(allocator: Allocator, repo: repo_mod.Repo, slug: RepoSlug) !LiveState {
     const path = try statePath(allocator, repo, slug);
     defer allocator.free(path);
-    const bytes = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch |err| switch (err) {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(@import("compat").io(), path, allocator, .limited(1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => return .{},
         else => return err,
     };
@@ -758,7 +758,7 @@ fn loadState(allocator: Allocator, repo: repo_mod.Repo, slug: RepoSlug) !LiveSta
 fn saveState(allocator: Allocator, repo: repo_mod.Repo, slug: RepoSlug, state: LiveState) !void {
     const path = try statePath(allocator, repo, slug);
     defer allocator.free(path);
-    if (std.fs.path.dirname(path)) |dir| try std.fs.cwd().makePath(dir);
+    if (std.fs.path.dirname(path)) |dir| try std.Io.Dir.cwd().createDirPath(@import("compat").io(), dir);
     var bytes: []u8 = undefined;
     if (state.webhook_id) |hook_id| {
         bytes = try std.fmt.allocPrint(allocator, "{{\"last_export_ordinal\":{d},\"webhook_id\":{d}}}\n", .{ state.last_export_ordinal, hook_id });
@@ -774,16 +774,16 @@ fn writeFileAtomic(allocator: Allocator, path: []const u8, bytes: []const u8) !v
     defer allocator.free(id);
     const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp.{s}", .{ path, id });
     defer allocator.free(tmp_path);
-    errdefer std.fs.cwd().deleteFile(tmp_path) catch {};
+    errdefer std.Io.Dir.cwd().deleteFile(@import("compat").io(), tmp_path) catch {};
 
-    var file = try std.fs.cwd().createFile(tmp_path, .{ .truncate = true, .mode = 0o600 });
+    var file = try std.Io.Dir.cwd().createFile(@import("compat").io(), tmp_path, .{ .truncate = true, .permissions = @enumFromInt(0o600) });
     var closed = false;
-    defer if (!closed) file.close();
-    try file.writeAll(bytes);
-    try file.sync();
-    file.close();
+    defer if (!closed) file.close(@import("compat").io());
+    try file.writeStreamingAll(@import("compat").io(), bytes);
+    try file.sync(@import("compat").io());
+    file.close(@import("compat").io());
     closed = true;
-    try std.fs.cwd().rename(tmp_path, path);
+    try std.Io.Dir.cwd().rename(tmp_path, std.Io.Dir.cwd(), path, @import("compat").io());
 }
 
 fn acquireLiveLock(allocator: Allocator, repo: repo_mod.Repo, slug: RepoSlug) !LiveLock {
@@ -792,11 +792,11 @@ fn acquireLiveLock(allocator: Allocator, repo: repo_mod.Repo, slug: RepoSlug) !L
 
     const dir = try githubLiveDir(allocator, repo, slug);
     defer allocator.free(dir);
-    try std.fs.cwd().makePath(dir);
+    try std.Io.Dir.cwd().createDirPath(@import("compat").io(), dir);
     const path = try std.fs.path.join(allocator, &.{ dir, "live.lock" });
     defer allocator.free(path);
     return .{
-        .file = try std.fs.cwd().createFile(path, .{
+        .file = try std.Io.Dir.cwd().createFile(@import("compat").io(), path, .{
             .read = true,
             .truncate = false,
             .lock = .exclusive,
@@ -806,7 +806,7 @@ fn acquireLiveLock(allocator: Allocator, repo: repo_mod.Repo, slug: RepoSlug) !L
 
 fn validateWebhookHookId(
     allocator: Allocator,
-    stream: std.net.Stream,
+    stream: @import("compat").net.Stream,
     state: LiveState,
     request: zwf.Request,
 ) !bool {
@@ -826,7 +826,7 @@ fn validateWebhookHookId(
     return true;
 }
 
-fn checkedWebhookDeliveryId(allocator: Allocator, stream: std.net.Stream, request: zwf.Request) !?[]const u8 {
+fn checkedWebhookDeliveryId(allocator: Allocator, stream: @import("compat").net.Stream, request: zwf.Request) !?[]const u8 {
     const delivery_id = request.headerValue("x-github-delivery") orelse {
         try sendPlain(allocator, stream, 400, "Bad Request", "Missing X-GitHub-Delivery\n");
         return null;
@@ -850,7 +850,7 @@ fn isValidDeliveryId(delivery_id: []const u8) bool {
 fn deliveryAlreadyProcessed(allocator: Allocator, repo: repo_mod.Repo, slug: RepoSlug, delivery_id: []const u8) !bool {
     const path = try deliveryLogPath(allocator, repo, slug);
     defer allocator.free(path);
-    const bytes = std.fs.cwd().readFileAlloc(allocator, path, max_delivery_log_bytes) catch |err| switch (err) {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(@import("compat").io(), path, allocator, .limited(max_delivery_log_bytes)) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => return err,
     };
@@ -867,15 +867,15 @@ fn deliveryAlreadyProcessed(allocator: Allocator, repo: repo_mod.Repo, slug: Rep
 fn recordWebhookDelivery(allocator: Allocator, repo: repo_mod.Repo, slug: RepoSlug, delivery_id: []const u8) !void {
     const path = try deliveryLogPath(allocator, repo, slug);
     defer allocator.free(path);
-    if (std.fs.path.dirname(path)) |dir| try std.fs.cwd().makePath(dir);
-    var file = std.fs.cwd().openFile(path, .{ .mode = .write_only }) catch |err| switch (err) {
-        error.FileNotFound => try std.fs.cwd().createFile(path, .{}),
+    if (std.fs.path.dirname(path)) |dir| try std.Io.Dir.cwd().createDirPath(@import("compat").io(), dir);
+    var file = std.Io.Dir.cwd().openFile(@import("compat").io(), path, .{ .mode = .write_only }) catch |err| switch (err) {
+        error.FileNotFound => try std.Io.Dir.cwd().createFile(@import("compat").io(), path, .{}),
         else => return err,
     };
-    defer file.close();
-    try file.seekFromEnd(0);
-    try file.writeAll(delivery_id);
-    try file.writeAll("\n");
+    defer file.close(@import("compat").io());
+    try @import("compat").seekFileToEnd(file);
+    try file.writeStreamingAll(@import("compat").io(), delivery_id);
+    try file.writeStreamingAll(@import("compat").io(), "\n");
 }
 
 fn statePath(allocator: Allocator, repo: repo_mod.Repo, slug: RepoSlug) ![]u8 {
@@ -961,7 +961,7 @@ fn nonEmptySecret(secret: ?[]const u8) ?[]const u8 {
 
 fn authenticateWebhookRequest(
     allocator: Allocator,
-    stream: std.net.Stream,
+    stream: @import("compat").net.Stream,
     options: Options,
     request: zwf.Request,
 ) !bool {
@@ -990,7 +990,7 @@ const WebhookRepositoryCheck = enum {
 
 fn validateWebhookRepository(
     allocator: Allocator,
-    stream: std.net.Stream,
+    stream: @import("compat").net.Stream,
     expected: RepoSlug,
     body: []const u8,
 ) !bool {
@@ -1033,7 +1033,7 @@ fn verifyWebhookSignature(secret: []const u8, body: []const u8, signature: []con
     return std.crypto.timing_safe.eql([expected.len]u8, expected, actual[0..expected.len].*);
 }
 
-fn sendPlain(allocator: Allocator, stream: std.net.Stream, status: u16, reason: []const u8, body: []const u8) !void {
+fn sendPlain(allocator: Allocator, stream: @import("compat").net.Stream, status: u16, reason: []const u8, body: []const u8) !void {
     var response = zwf.Response.init(allocator, stream);
     try response.plain(status, reason, body);
 }

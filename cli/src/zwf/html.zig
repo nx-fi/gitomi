@@ -197,8 +197,8 @@ pub fn appendTemplateValue(buf: *std.ArrayList(u8), allocator: Allocator, value:
             try appendHtml(buf, allocator, slice);
         },
         .bool => try buf.appendSlice(allocator, if (value) "true" else "false"),
-        .int, .comptime_int => try std.fmt.format(buf.writer(allocator), "{d}", .{value}),
-        .float, .comptime_float => try std.fmt.format(buf.writer(allocator), "{d}", .{value}),
+        .int, .comptime_int => try @import("compat").appendPrint(allocator, buf, "{d}", .{value}),
+        .float, .comptime_float => try @import("compat").appendPrint(allocator, buf, "{d}", .{value}),
         .@"enum", .enum_literal => try appendHtml(buf, allocator, @tagName(value)),
         .optional => if (value) |payload| try appendTemplateValue(buf, allocator, payload),
         else => @compileError("unsupported HTML template value type: " ++ @typeName(T)),
@@ -252,7 +252,7 @@ fn appendGroupedUnsigned(buf: *std.ArrayList(u8), allocator: Allocator, value: u
 
 fn appendPercent(buf: *std.ArrayList(u8), allocator: Allocator, value: u64, total: u64) !void {
     const tenths = percentTenths(value, total);
-    try std.fmt.format(buf.writer(allocator), "{d}.{d}%", .{ tenths / 10, tenths % 10 });
+    try @import("compat").appendPrint(allocator, buf, "{d}.{d}%", .{ tenths / 10, tenths % 10 });
 }
 
 fn percentTenths(value: u64, total: u64) u64 {

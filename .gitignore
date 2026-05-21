@@ -1,11 +1,13 @@
 # Zig build artifacts
 .zig-cache/
 zig-out/
+zig-pkg/
 
 # Local environment
 .env
 .env.*
 !.env.example
+.direnv/
 
 # Local agent state
 /.claude

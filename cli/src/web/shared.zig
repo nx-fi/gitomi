@@ -447,7 +447,7 @@ fn remoteRepositoryPath(raw_url: []const u8) ?[]const u8 {
 
     path = std.mem.trim(u8, path, " /\t\r\n");
     if (std.mem.endsWith(u8, path, ".git")) path = path[0 .. path.len - ".git".len];
-    path = std.mem.trimRight(u8, path, "/");
+    path = std.mem.trimEnd(u8, path, "/");
     return if (path.len == 0) null else path;
 }
 
@@ -637,10 +637,10 @@ fn appendLegacyReference(buf: *std.ArrayList(u8), allocator: Allocator, remote_l
         try buf.appendSlice(allocator, "\" target=\"_blank\" rel=\"noopener noreferrer\" aria-label=\"Open ");
         try appendHtml(buf, allocator, label);
         try buf.append(allocator, ' ');
-        try std.fmt.format(buf.writer(allocator), "#{d}", .{number});
+        try @import("compat").appendPrint(allocator, buf, "#{d}", .{number});
         try buf.appendSlice(allocator, " externally\">");
         try appendHtml(buf, allocator, label);
-        try std.fmt.format(buf.writer(allocator), "<span class=\"legacy-provider-number\">#{d}</span>", .{number});
+        try @import("compat").appendPrint(allocator, buf, "<span class=\"legacy-provider-number\">#{d}</span>", .{number});
         try buf.appendSlice(allocator, "<span class=\"legacy-external-icon\" aria-hidden=\"true\"></span></a>");
         return;
     } else {
@@ -737,7 +737,7 @@ fn remoteWebBaseFromHostPathOwned(allocator: Allocator, scheme: []const u8, raw_
     const provider = legacyProviderKindForHost(host) orelse return null;
     var path = std.mem.trim(u8, raw_path, " /\t\r\n");
     if (std.mem.endsWith(u8, path, ".git")) path = path[0 .. path.len - ".git".len];
-    path = std.mem.trimRight(u8, path, "/");
+    path = std.mem.trimEnd(u8, path, "/");
     if (path.len == 0) return null;
     if (provider == .github) {
         if (!looksLikeGithubOwnerRepo(path)) return null;
@@ -1295,7 +1295,7 @@ fn appendShortcutConfigScript(buf: *std.ArrayList(u8), allocator: Allocator, cfg
     try appendJsonString(buf, allocator, leader);
     try buf.appendSlice(allocator, ", keys: ");
     try appendJsonString(buf, allocator, keys);
-    try std.fmt.format(buf.writer(allocator), ", sequenceTimeoutMs: {d}", .{timeout_ms});
+    try @import("compat").appendPrint(allocator, buf, ", sequenceTimeoutMs: {d}", .{timeout_ms});
     try buf.appendSlice(allocator, " };\n</script>\n");
 }
 
@@ -1517,7 +1517,7 @@ pub fn markdownTaskSummary(markdown: []const u8) MarkdownTaskSummary {
 
     var lines = std.mem.splitScalar(u8, markdown, '\n');
     while (lines.next()) |raw_line| {
-        const line = std.mem.trimRight(u8, raw_line, "\r");
+        const line = std.mem.trimEnd(u8, raw_line, "\r");
         if (markdownFenceMarker(line)) |marker| {
             if (!in_fence) {
                 in_fence = true;

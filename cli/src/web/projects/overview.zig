@@ -198,7 +198,7 @@ pub fn appendProjectActivityView(
     );
 }
 
-pub fn handleProjectPropertiesPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
+pub fn handleProjectPropertiesPost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, form_body: []const u8) !void {
     try index.ensureIndex(allocator, repo);
 
     const action_owned = try formTrimmedOwned(allocator, form_body, "action");
@@ -377,7 +377,7 @@ pub fn handleProjectPropertiesPost(allocator: Allocator, repo: Repo, stream: std
     try redirectProjectOverview(allocator, stream, project_name_owned, project_ref);
 }
 
-pub fn handleProjectDefaultViewPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
+pub fn handleProjectDefaultViewPost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, form_body: []const u8) !void {
     try index.ensureIndex(allocator, repo);
 
     const project_id_owned = try formTrimmedOwned(allocator, form_body, "project_id");
@@ -413,7 +413,7 @@ pub fn handleProjectDefaultViewPost(allocator: Allocator, repo: Repo, stream: st
     try sendRedirect(allocator, stream, location);
 }
 
-pub fn handleProjectCommentPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8) !void {
+pub fn handleProjectCommentPost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, form_body: []const u8) !void {
     try index.ensureIndex(allocator, repo);
 
     const project_id_owned = try formTrimmedOwned(allocator, form_body, "project_id");
@@ -555,7 +555,7 @@ fn containsConstString(values: []const []const u8, needle: []const u8) bool {
     return false;
 }
 
-fn requiredProjectFormValue(allocator: Allocator, stream: std.net.Stream, form_body: []const u8, name: []const u8, message: []const u8) !?[]u8 {
+fn requiredProjectFormValue(allocator: Allocator, stream: @import("compat").net.Stream, form_body: []const u8, name: []const u8, message: []const u8) !?[]u8 {
     const value_owned = try formTrimmedOwned(allocator, form_body, name);
     errdefer allocator.free(value_owned);
     if (value_owned.len == 0) {
@@ -566,7 +566,7 @@ fn requiredProjectFormValue(allocator: Allocator, stream: std.net.Stream, form_b
     return value_owned;
 }
 
-fn writeProjectUpdateOrFail(allocator: Allocator, stream: std.net.Stream, project_id: []const u8, update: event_model.ProjectUpdate) !bool {
+fn writeProjectUpdateOrFail(allocator: Allocator, stream: @import("compat").net.Stream, project_id: []const u8, update: event_model.ProjectUpdate) !bool {
     createProjectUpdatedEvent(allocator, project_id, update) catch {
         try sendPlainResponse(allocator, stream, 500, "Internal Server Error", "Could not update project properties\n");
         return false;
@@ -574,7 +574,7 @@ fn writeProjectUpdateOrFail(allocator: Allocator, stream: std.net.Stream, projec
     return true;
 }
 
-fn redirectProjectOverview(allocator: Allocator, stream: std.net.Stream, project_name: []const u8, fallback_ref: []const u8) !void {
+fn redirectProjectOverview(allocator: Allocator, stream: @import("compat").net.Stream, project_name: []const u8, fallback_ref: []const u8) !void {
     const location = try projectOverviewLocationOwned(allocator, project_name, fallback_ref);
     defer allocator.free(location);
     try sendRedirect(allocator, stream, location);

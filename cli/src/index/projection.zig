@@ -170,14 +170,14 @@ fn orderEventHashesFromRevListParents(
     defer allocator.free(emitted);
     @memset(emitted, false);
 
-    var ready = std.PriorityQueue(usize, ProjectionOrderQueueContext, compareProjectionOrderNodes).init(allocator, .{ .nodes = nodes.items });
-    defer ready.deinit();
+    var ready = std.PriorityQueue(usize, ProjectionOrderQueueContext, compareProjectionOrderNodes).initContext(.{ .nodes = nodes.items });
+    defer ready.deinit(allocator);
     for (nodes.items, 0..) |node, index| {
-        if (node.indegree == 0) try ready.add(index);
+        if (node.indegree == 0) try ready.push(allocator, index);
     }
 
     var count: usize = 0;
-    while (ready.removeOrNull()) |node_index| {
+    while (ready.pop()) |node_index| {
         const node = nodes.items[node_index];
         if (node.input_index) |input_index| {
             if (!emitted[input_index]) {
@@ -189,7 +189,7 @@ fn orderEventHashesFromRevListParents(
 
         for (node.children.items) |child_index| {
             nodes.items[child_index].indegree -= 1;
-            if (nodes.items[child_index].indegree == 0) try ready.add(child_index);
+            if (nodes.items[child_index].indegree == 0) try ready.push(allocator, child_index);
         }
     }
 

@@ -40,7 +40,7 @@ const WebContext = struct {
     allocator: Allocator,
     repo: Repo,
     csrf_token: []const u8,
-    stream: std.net.Stream,
+    stream: @import("compat").net.Stream,
     request: zwf.Request,
     response: zwf.Response,
 };
@@ -224,14 +224,14 @@ pub fn serve(allocator: Allocator, repo: Repo, options: Options) !void {
     try zwf.server.serveConnections(WebAppContext, allocator, app_context, &server, options, handleWebConnectionLogged);
 }
 
-fn handleWebConnectionLogged(allocator: Allocator, app_context: WebAppContext, stream: std.net.Stream) !void {
+fn handleWebConnectionLogged(allocator: Allocator, app_context: WebAppContext, stream: @import("compat").net.Stream) !void {
     handleWebConnectionWithContext(allocator, app_context, stream) catch |err| {
         if (zwf.server.isClientDisconnect(err)) return;
         try eprint("gt web: request failed: {s}\n", .{@errorName(err)});
     };
 }
 
-pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Stream) !void {
+pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream) !void {
     const csrf_token = try zwf.csrf.generateTokenOwned(allocator);
     defer allocator.free(csrf_token);
     try handleWebConnectionWithContext(allocator, .{
@@ -240,7 +240,7 @@ pub fn handleWebConnection(allocator: Allocator, repo: Repo, stream: std.net.Str
     }, stream);
 }
 
-fn handleWebConnectionWithContext(allocator: Allocator, app_context: WebAppContext, stream: std.net.Stream) !void {
+fn handleWebConnectionWithContext(allocator: Allocator, app_context: WebAppContext, stream: @import("compat").net.Stream) !void {
     const raw = readHttpRequest(allocator, stream) catch |err| {
         if (err == error.EndOfStream) return;
         try shared.sendPlainResponse(allocator, stream, 400, "Bad Request", "Bad request\n");
@@ -878,7 +878,7 @@ fn redirectLocationReplacingPathOwned(allocator: Allocator, target: []const u8, 
     return std.fmt.allocPrint(allocator, "{s}{s}", .{ new_path, tail });
 }
 
-pub fn readHttpRequest(allocator: Allocator, stream: std.net.Stream) ![]u8 {
+pub fn readHttpRequest(allocator: Allocator, stream: @import("compat").net.Stream) ![]u8 {
     return zwf.server.readHttpRequest(allocator, stream);
 }
 
@@ -1128,7 +1128,7 @@ const VendorAsset = zwf.StaticAsset;
 
 fn sendRawBlobResponse(
     allocator: Allocator,
-    stream: std.net.Stream,
+    stream: @import("compat").net.Stream,
     blob: explorer.RawBlob,
     range: ?ByteRange,
 ) !void {

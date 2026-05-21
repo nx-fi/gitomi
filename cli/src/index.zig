@@ -97,10 +97,10 @@ pub const SnapshotPruneOptions = struct {
 const IndexBuildLock = struct {
     allocator: Allocator,
     path: []u8,
-    file: std.fs.File,
+    file: std.Io.File,
 
     fn deinit(self: *IndexBuildLock) void {
-        self.file.close();
+        self.file.close(@import("compat").io());
         self.allocator.free(self.path);
     }
 };
@@ -318,11 +318,11 @@ pub fn rebuildIndex(allocator: Allocator, repo: Repo) !IndexStats {
 }
 
 fn acquireIndexBuildLock(allocator: Allocator, repo: Repo) !IndexBuildLock {
-    try std.fs.cwd().makePath(repo.gitomi_dir);
+    try std.Io.Dir.cwd().createDirPath(@import("compat").io(), repo.gitomi_dir);
     const lock_path = try std.fs.path.join(allocator, &.{ repo.gitomi_dir, "index.lock" });
     errdefer allocator.free(lock_path);
 
-    const file = try std.fs.createFileAbsolute(lock_path, .{
+    const file = try std.Io.Dir.createFileAbsolute(@import("compat").io(), lock_path, .{
         .read = true,
         .truncate = false,
         .lock = .exclusive,
@@ -336,7 +336,7 @@ fn acquireIndexBuildLock(allocator: Allocator, repo: Repo) !IndexBuildLock {
 }
 
 fn rebuildIndexUnlocked(allocator: Allocator, repo: Repo) !IndexStats {
-    try std.fs.cwd().makePath(repo.gitomi_dir);
+    try std.Io.Dir.cwd().createDirPath(@import("compat").io(), repo.gitomi_dir);
 
     const refs_raw = try currentIndexRefsRaw(allocator);
     defer allocator.free(refs_raw);
@@ -371,7 +371,7 @@ fn rebuildIndexUnlocked(allocator: Allocator, repo: Repo) !IndexStats {
         stats.new_events = countEventsSinceSnapshot(allocator, snapshot_meta.covered_refs_raw, refs_raw) catch stats.events;
     }
 
-    if (shouldCreateSnapshot(if (maybe_snapshot_meta) |*m| m else null, stats, SnapshotPolicy{}, std.time.timestamp())) {
+    if (shouldCreateSnapshot(if (maybe_snapshot_meta) |*m| m else null, stats, SnapshotPolicy{}, @import("compat").timestamp())) {
         createIndexSnapshot(allocator, repo, refs_raw, limits) catch {};
         enforceSnapshotRetention(allocator, limits) catch {};
     }
@@ -400,7 +400,7 @@ fn expectedRepoIdForIndex(allocator: Allocator, repo: Repo) !?[]u8 {
 
 pub fn ensureCursors(allocator: Allocator, repo: Repo) !void {
     if (fileExists(repo.cursors_path)) return;
-    try std.fs.cwd().makePath(repo.gitomi_dir);
+    try std.Io.Dir.cwd().createDirPath(@import("compat").io(), repo.gitomi_dir);
     try createCursorsDb(allocator, repo);
 }
 
@@ -974,12 +974,12 @@ fn testEnvelope(
 fn createIndexSnapshot(allocator: Allocator, repo: Repo, refs_raw: []const u8, limits: SnapshotLimits) !void {
     if (std.mem.trim(u8, refs_raw, " \t\r\n").len == 0) return;
 
-    const stat = std.fs.cwd().statFile(repo.index_path) catch return;
+    const stat = std.Io.Dir.cwd().statFile(@import("compat").io(), repo.index_path, .{}) catch return;
     if (stat.size == 0) return;
     if (limits.max_tree_bytes != 0 and stat.size > limits.max_tree_bytes) return;
 
     const max_bytes = snapshotMaxOutputBytes(limits);
-    const index_bytes = std.fs.cwd().readFileAlloc(allocator, repo.index_path, max_bytes) catch return;
+    const index_bytes = std.Io.Dir.cwd().readFileAlloc(@import("compat").io(), repo.index_path, allocator, .limited(max_bytes)) catch return;
     defer allocator.free(index_bytes);
 
     const manifest = try buildSnapshotManifest(allocator, refs_raw);
@@ -1029,7 +1029,7 @@ fn buildSnapshotManifest(allocator: Allocator, refs_raw: []const u8) ![]u8 {
     try appendJsonFieldString(&buf, allocator, "$schema", snapshot_schema, true);
     try appendJsonFieldUnsigned(&buf, allocator, "schema_version", snapshot_schema_version, true);
     try appendJsonFieldString(&buf, allocator, "index_schema_version", index_schema_version, true);
-    try appendJsonFieldInteger(&buf, allocator, "created_at_unix", std.time.timestamp(), true);
+    try appendJsonFieldInteger(&buf, allocator, "created_at_unix", @import("compat").timestamp(), true);
     try appendJsonFieldString(&buf, allocator, "covered_refs_raw", refs_raw, true);
 
     try appendJsonString(&buf, allocator, "covered_refs");

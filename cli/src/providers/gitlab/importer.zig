@@ -131,7 +131,7 @@ fn ensureImportDelegation(allocator: Allocator, principal: []const u8, device: [
 }
 
 fn importFromFile(allocator: Allocator, path: []const u8, options: ImportOptions, stats: *ImportStats) !void {
-    const bytes = try std.fs.cwd().readFileAlloc(allocator, path, max_gitlab_json);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(@import("compat").io(), path, allocator, .limited(max_gitlab_json));
     defer allocator.free(bytes);
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch {
         try eprint("gt gitlab import: --from-file must contain JSON\n", .{});

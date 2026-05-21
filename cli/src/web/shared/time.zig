@@ -16,7 +16,7 @@ pub fn appendRelativeTime(buf: *std.ArrayList(u8), allocator: Allocator, timesta
 
 fn relativeTimeLabelOwned(allocator: Allocator, timestamp: []const u8) ![]u8 {
     const parsed = parseRfc3339Timestamp(timestamp) orelse return allocator.dupe(u8, timestamp);
-    return relativeDurationOwned(allocator, std.time.timestamp() - parsed);
+    return relativeDurationOwned(allocator, @import("compat").timestamp() - parsed);
 }
 
 fn relativeDurationOwned(allocator: Allocator, delta_seconds: i64) ![]u8 {

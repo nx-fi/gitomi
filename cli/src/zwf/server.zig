@@ -23,25 +23,25 @@ pub const Options = struct {
 };
 
 pub fn ConnectionHandler(comptime Context: type) type {
-    return *const fn (Allocator, Context, std.net.Stream) anyerror!void;
+    return *const fn (Allocator, Context, @import("compat").net.Stream) anyerror!void;
 }
 
 pub fn bindHost(options: Options) []const u8 {
     return if (isNamedLoopbackHost(options.host)) default_bind_host else options.host;
 }
 
-pub fn listen(bind_host: []const u8, options: Options) !std.net.Server {
+pub fn listen(bind_host: []const u8, options: Options) !@import("compat").net.Server {
     var port = options.port;
     var attempts: usize = 0;
     while (true) {
-        const address = std.net.Address.parseIp(bind_host, port) catch return error.InvalidHost;
+        const address = @import("compat").net.Address.parseIp(bind_host, port) catch return error.InvalidHost;
 
         return address.listen(.{ .reuse_address = false, .kernel_backlog = 32 }) catch |err| {
             if (options.port_supplied or err != error.AddressInUse) return err;
             attempts += 1;
             if (attempts >= options.port_attempt_limit) return error.NoAvailablePort;
 
-            const increment = std.crypto.random.intRangeAtMost(u16, 1, 10);
+            const increment = @import("compat").random.intRangeAtMost(u16, 1, 10);
             if (port > std.math.maxInt(u16) - increment) return error.NoAvailablePort;
             port += increment;
             continue;
@@ -53,7 +53,7 @@ pub fn serveConnections(
     comptime Context: type,
     allocator: Allocator,
     app_context: Context,
-    server: *std.net.Server,
+    server: *@import("compat").net.Server,
     options: Options,
     handler: ConnectionHandler(Context),
 ) !void {
@@ -65,52 +65,46 @@ pub fn serveConnections(
         return;
     }
 
-    var pool: std.Thread.Pool = undefined;
-    try pool.init(.{
-        .allocator = allocator,
-        .n_jobs = @max(options.worker_count, 1),
-    });
-    defer pool.deinit();
-
     const Runner = struct {
         fn run(
             task_allocator: Allocator,
             task_context: Context,
-            connection: std.net.Server.Connection,
-            permits: *std.Thread.Semaphore,
+            connection: @import("compat").net.Server.Connection,
+            permits: *std.Io.Semaphore,
             task_handler: ConnectionHandler(Context),
         ) void {
-            defer permits.post();
+            defer permits.post(@import("compat").io());
             defer connection.stream.close();
             task_handler(task_allocator, task_context, connection.stream) catch {};
         }
     };
 
-    var permits = std.Thread.Semaphore{ .permits = @max(options.worker_count, 1) };
+    var permits = std.Io.Semaphore{ .permits = @max(options.worker_count, 1) };
     while (true) {
-        permits.wait();
+        permits.waitUncancelable(@import("compat").io());
         const connection = server.accept() catch |err| {
-            permits.post();
+            permits.post(@import("compat").io());
             return err;
         };
         configureStream(connection.stream, options) catch |err| {
             connection.stream.close();
-            permits.post();
+            permits.post(@import("compat").io());
             return err;
         };
-        pool.spawn(Runner.run, .{ allocator, app_context, connection, &permits, handler }) catch |err| {
+        const thread = std.Thread.spawn(.{ .allocator = allocator }, Runner.run, .{ allocator, app_context, connection, &permits, handler }) catch |err| {
             connection.stream.close();
-            permits.post();
+            permits.post(@import("compat").io());
             return err;
         };
+        thread.detach();
     }
 }
 
-pub fn readHttpRequest(allocator: Allocator, stream: std.net.Stream) ![]u8 {
+pub fn readHttpRequest(allocator: Allocator, stream: @import("compat").net.Stream) ![]u8 {
     return readHttpRequestLimit(allocator, stream, request.max_http_request);
 }
 
-pub fn readHttpRequestLimit(allocator: Allocator, stream: std.net.Stream, max_len: usize) ![]u8 {
+pub fn readHttpRequestLimit(allocator: Allocator, stream: @import("compat").net.Stream, max_len: usize) ![]u8 {
     var raw: std.ArrayList(u8) = .empty;
     errdefer raw.deinit(allocator);
 
@@ -186,12 +180,12 @@ test "server advertises gitomi localhost but binds named loopback to ip loopback
     try std.testing.expect(!isLoopbackHost("attacker.test"));
 }
 
-pub fn configureStream(stream: std.net.Stream, options: Options) !void {
+pub fn configureStream(stream: @import("compat").net.Stream, options: Options) !void {
     if (options.read_timeout_ms) |timeout_ms| try setSocketTimeout(stream, std.posix.SO.RCVTIMEO, timeout_ms);
     if (options.write_timeout_ms) |timeout_ms| try setSocketTimeout(stream, std.posix.SO.SNDTIMEO, timeout_ms);
 }
 
-fn setSocketTimeout(stream: std.net.Stream, optname: u32, timeout_ms: u32) !void {
+fn setSocketTimeout(stream: @import("compat").net.Stream, optname: u32, timeout_ms: u32) !void {
     if (@import("builtin").os.tag == .windows) {
         try std.posix.setsockopt(
             stream.handle,

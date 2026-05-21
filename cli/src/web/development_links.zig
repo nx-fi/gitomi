@@ -616,7 +616,7 @@ fn appendLinkHref(buf: *std.ArrayList(u8), allocator: Allocator, link: Developme
 fn appendDisplayRef(buf: *std.ArrayList(u8), allocator: Allocator, link: DevelopmentLink, short_ref: []const u8) !void {
     try buf.append(allocator, '#');
     if (link.legacy_number > 0) {
-        try std.fmt.format(buf.writer(allocator), "{d}", .{link.legacy_number});
+        try @import("compat").appendPrint(allocator, buf, "{d}", .{link.legacy_number});
     } else {
         try shared.appendHtml(buf, allocator, short_ref);
     }
@@ -714,7 +714,7 @@ test "development link text scan caps directive tokens" {
     defer body.deinit(allocator);
     try body.appendSlice(allocator, "Refs:");
     for (0..max_directive_tokens_per_text) |idx| {
-        try std.fmt.format(body.writer(allocator), " issue:{d}", .{1000 + idx});
+        try @import("compat").appendPrint(allocator, &body, " issue:{d}", .{1000 + idx});
     }
     try body.appendSlice(allocator, " pr:20");
 

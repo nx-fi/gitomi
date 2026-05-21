@@ -1322,7 +1322,7 @@ fn payloadStringOwned(allocator: Allocator, body: []const u8, field: []const u8,
     return allocator.dupe(u8, value);
 }
 
-pub fn handleActionsRequestPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, csrf_token: []const u8, form_body: []const u8) !void {
+pub fn handleActionsRequestPost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, csrf_token: []const u8, form_body: []const u8) !void {
     const workflow_owned = (try shared.formValueOwned(allocator, form_body, "workflow")) orelse try allocator.dupe(u8, "");
     defer allocator.free(workflow_owned);
     const event_owned = (try shared.formValueOwned(allocator, form_body, "event")) orelse try allocator.dupe(u8, "workflow_dispatch");
@@ -1361,7 +1361,7 @@ pub fn handleActionsRequestPost(allocator: Allocator, repo: Repo, stream: std.ne
     try sendRedirect(allocator, stream, "/pipelines?requested=1");
 }
 
-pub fn handleRunRequestedPost(allocator: Allocator, stream: std.net.Stream, form_body: []const u8) !void {
+pub fn handleRunRequestedPost(allocator: Allocator, stream: @import("compat").net.Stream, form_body: []const u8) !void {
     const run_owned = try shared.formValueOwned(allocator, form_body, "run");
     defer if (run_owned) |value| allocator.free(value);
     const run_filter: ?[]const u8 = if (run_owned) |value| blk: {

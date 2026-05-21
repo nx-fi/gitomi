@@ -249,7 +249,7 @@ fn subscribeMentionedPrincipals(
             if (std.ascii.isAlphanumeric(body[end])) has_alnum = true;
         }
         if (!has_alnum) continue;
-        const principal = std.mem.trimRight(u8, body[start..end], ".");
+        const principal = std.mem.trimEnd(u8, body[start..end], ".");
         if (principal.len == 0) continue;
         if (!seen.contains(principal)) {
             try seen.put(principal, {});

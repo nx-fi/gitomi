@@ -29,7 +29,7 @@ pub fn appendJsonFieldUnsigned(
 ) !void {
     try appendJsonString(buf, allocator, key);
     try buf.append(allocator, ':');
-    try buf.writer(allocator).print("{d}", .{value});
+    try @import("compat").appendPrint(allocator, buf, "{d}", .{value});
     if (comma) try buf.append(allocator, ',');
 }
 
@@ -88,7 +88,7 @@ pub fn requireCanonicalJsonValue(allocator: Allocator, bytes: []const u8, root_k
 }
 
 pub fn stringifyJsonValue(allocator: Allocator, value: std.json.Value) ![]u8 {
-    var out: std.io.Writer.Allocating = .init(allocator);
+    var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
     try std.json.Stringify.value(value, .{}, &out.writer);
     return try out.toOwnedSlice();
@@ -130,7 +130,7 @@ pub fn appendJsonFieldInteger(
 ) !void {
     try appendJsonString(buf, allocator, key);
     try buf.append(allocator, ':');
-    try buf.writer(allocator).print("{d}", .{value});
+    try @import("compat").appendPrint(allocator, buf, "{d}", .{value});
     if (comma) try buf.append(allocator, ',');
 }
 

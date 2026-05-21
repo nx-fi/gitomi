@@ -488,7 +488,7 @@ pub fn renderIssueFormFromTarget(allocator: Allocator, repo: Repo, target: []con
     );
 }
 
-pub fn handleIssuePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, csrf_token: []const u8, form_body: []const u8) !void {
+pub fn handleIssuePost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, csrf_token: []const u8, form_body: []const u8) !void {
     const title_owned = (try formValueOwned(allocator, form_body, "title")) orelse try allocator.dupe(u8, "");
     defer allocator.free(title_owned);
     const body_owned = (try formValueOwned(allocator, form_body, "body")) orelse try allocator.dupe(u8, "");

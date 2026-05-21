@@ -69,7 +69,7 @@ pub fn handleNotificationPost(
     comptime redirect_prefix: []const u8,
     allocator: Allocator,
     repo: Repo,
-    stream: std.net.Stream,
+    stream: @import("compat").net.Stream,
     raw_ref: []const u8,
     form_body: []const u8,
 ) !void {
@@ -121,7 +121,7 @@ pub fn handleNotificationPost(
 pub fn handleInboxReadPost(
     allocator: Allocator,
     repo: Repo,
-    stream: std.net.Stream,
+    stream: @import("compat").net.Stream,
     form_body: []const u8,
     redirect_target: []const u8,
 ) !void {
@@ -155,7 +155,7 @@ pub fn handleInboxReadPost(
     try shared.sendRedirect(allocator, stream, redirect_target);
 }
 
-fn sendNotificationWriteFailure(allocator: Allocator, stream: std.net.Stream, err: anyerror) !void {
+fn sendNotificationWriteFailure(allocator: Allocator, stream: @import("compat").net.Stream, err: anyerror) !void {
     try shared.sendPlainResponse(
         allocator,
         stream,

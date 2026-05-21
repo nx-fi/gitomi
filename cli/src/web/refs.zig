@@ -115,7 +115,7 @@ pub fn renderRefsPage(allocator: Allocator, repo: Repo, target: []const u8, csrf
     return renderRefsPageWithFlash(allocator, repo, flash, refQueryFromTarget(target), pagination, csrf_token);
 }
 
-pub fn handleRefsSyncPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8, csrf_token: []const u8) !void {
+pub fn handleRefsSyncPost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, form_body: []const u8, csrf_token: []const u8) !void {
     const csrf_ok = shared.formHasValidCsrfToken(allocator, form_body, csrf_token) catch |err| switch (err) {
         error.InvalidFormEncoding => false,
         else => return err,
@@ -136,7 +136,7 @@ pub fn handleRefsSyncPost(allocator: Allocator, repo: Repo, stream: std.net.Stre
     try sendRedirect(allocator, stream, "/refs?sync=ok");
 }
 
-pub fn handleRefsDeletePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, form_body: []const u8, csrf_token: []const u8) !void {
+pub fn handleRefsDeletePost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, form_body: []const u8, csrf_token: []const u8) !void {
     const csrf_ok = shared.formHasValidCsrfToken(allocator, form_body, csrf_token) catch |err| switch (err) {
         error.InvalidFormEncoding => false,
         else => return err,
@@ -163,7 +163,7 @@ pub fn handleRefsDeletePost(allocator: Allocator, repo: Repo, stream: std.net.St
     try sendRedirect(allocator, stream, location);
 }
 
-fn sendSyncFailure(allocator: Allocator, repo: Repo, stream: std.net.Stream, err: anyerror, csrf_token: []const u8) !void {
+fn sendSyncFailure(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, err: anyerror, csrf_token: []const u8) !void {
     const message = try std.fmt.allocPrint(allocator, "Sync failed: {s}. Check that origin is reachable and the Gitomi refs are valid.", .{@errorName(err)});
     defer allocator.free(message);
     const body = try renderRefsPageWithFlash(allocator, repo, .{ .kind = .failure, .message = message }, .{}, .{ .per_page = refs_default_page_size }, csrf_token);
@@ -171,7 +171,7 @@ fn sendSyncFailure(allocator: Allocator, repo: Repo, stream: std.net.Stream, err
     try sendResponse(allocator, stream, 500, "Internal Server Error", "text/html", body, null);
 }
 
-fn sendRefsDeleteFailure(allocator: Allocator, repo: Repo, stream: std.net.Stream, err: anyerror, csrf_token: []const u8) !void {
+fn sendRefsDeleteFailure(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, err: anyerror, csrf_token: []const u8) !void {
     const message = try std.fmt.allocPrint(allocator, "Branch delete failed: {s}. Refresh refs and check that the branch still exists.", .{@errorName(err)});
     defer allocator.free(message);
     const body = try renderRefsPageWithFlash(allocator, repo, .{ .kind = .failure, .message = message }, .{ .kind = .branches }, .{ .per_page = refs_default_page_size }, csrf_token);

@@ -126,7 +126,7 @@ pub fn parseRootGitStatusV2(status: *RootGitStatus, raw: []const u8) void {
 
     var lines = std.mem.splitScalar(u8, raw, '\n');
     while (lines.next()) |raw_line| {
-        const line = std.mem.trimRight(u8, raw_line, "\r");
+        const line = std.mem.trimEnd(u8, raw_line, "\r");
         if (line.len == 0) continue;
         switch (line[0]) {
             '1', '2' => parseOrdinaryStatusRecord(status, line),
@@ -200,7 +200,7 @@ pub fn loadWorktreeRefs(allocator: Allocator, repo: Repo) ![]WorktreeRef {
 
     var lines = std.mem.splitScalar(u8, raw, '\n');
     while (lines.next()) |raw_line| {
-        const line = std.mem.trimRight(u8, raw_line, "\r");
+        const line = std.mem.trimEnd(u8, raw_line, "\r");
         if (line.len == 0) {
             try appendParsedWorktreeRef(allocator, &worktrees, path, branch, detached, bare);
             path = null;
@@ -315,7 +315,7 @@ pub fn gitPathExists(allocator: Allocator, repo: Repo, git_path: []const u8) !bo
     defer allocator.free(raw);
     const path = std.mem.trim(u8, raw, " \t\r\n");
     if (path.len == 0) return false;
-    std.fs.accessAbsolute(path, .{}) catch return false;
+    std.Io.Dir.accessAbsolute(@import("compat").io(), path, .{}) catch return false;
     return true;
 }
 
@@ -426,7 +426,7 @@ pub fn markdownSummaryOwned(allocator: Allocator, content: []const u8) !?[]u8 {
     const trimmed = std.mem.trim(u8, paragraph.items, " \t\r\n");
     if (trimmed.len == 0) return null;
     const max_len = @min(trimmed.len, 220);
-    return try allocator.dupe(u8, std.mem.trimRight(u8, trimmed[0..max_len], " \t\r\n.,;:"));
+    return try allocator.dupe(u8, std.mem.trimEnd(u8, trimmed[0..max_len], " \t\r\n.,;:"));
 }
 
 pub fn shouldSkipSummaryLine(line: []const u8) bool {
@@ -811,7 +811,7 @@ pub fn parseLogCommitHeader(record: []const u8) ?LogCommit {
 }
 
 pub fn normalizeLogPathRecord(record: []const u8) []const u8 {
-    return std.mem.trimLeft(u8, record, "\r\n");
+    return std.mem.trimStart(u8, record, "\r\n");
 }
 
 pub fn directChildName(parent: []const u8, changed_path: []const u8) ?[]const u8 {
@@ -857,7 +857,7 @@ pub fn parseBlamePorcelain(allocator: Allocator, raw: []const u8) ![]BlameLine {
 
     var raw_lines = std.mem.splitScalar(u8, raw, '\n');
     while (raw_lines.next()) |raw_line| {
-        const line = std.mem.trimRight(u8, raw_line, "\r");
+        const line = std.mem.trimEnd(u8, raw_line, "\r");
         if (line.len != 0 and line[0] == '\t') {
             if (header) |value| {
                 try appendBlameRecord(&lines, allocator, value, author, author_time, author_tz, summary, line[1..]);
@@ -1283,7 +1283,7 @@ fn listedSafeWorktreeBlobSize(allocator: Allocator, root: []const u8, path: []co
 pub fn readWorktreeFile(allocator: Allocator, root: []const u8, path: []const u8, max_bytes: usize) !?[]u8 {
     const absolute_path = try safeWorktreeFilePath(allocator, root, path) orelse return null;
     defer allocator.free(absolute_path);
-    return std.fs.cwd().readFileAlloc(allocator, absolute_path, max_bytes) catch |err| switch (err) {
+    return std.Io.Dir.cwd().readFileAlloc(@import("compat").io(), absolute_path, allocator, .limited(max_bytes)) catch |err| switch (err) {
         error.FileNotFound, error.NotDir, error.IsDir => return null,
         else => return err,
     };
@@ -1303,7 +1303,7 @@ fn safeWorktreeFilePath(allocator: Allocator, root: []const u8, path: []const u8
 
 fn pathIsSymlink(path: []const u8) !bool {
     var link_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    _ = std.fs.cwd().readLink(path, &link_buffer) catch |err| switch (err) {
+    _ = std.Io.Dir.cwd().readLink(@import("compat").io(), path, &link_buffer) catch |err| switch (err) {
         error.FileNotFound, error.NotDir, error.NotLink => return false,
         else => return err,
     };
@@ -1321,8 +1321,8 @@ fn safeRelativeWorktreePath(path: []const u8) bool {
     return true;
 }
 
-fn safeWorktreePathStat(allocator: Allocator, root: []const u8, path: []const u8) !?std.fs.File.Stat {
-    if (path.len == 0) return std.fs.cwd().statFile(root) catch |err| switch (err) {
+fn safeWorktreePathStat(allocator: Allocator, root: []const u8, path: []const u8) !?std.Io.File.Stat {
+    if (path.len == 0) return std.Io.Dir.cwd().statFile(@import("compat").io(), root, .{}) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return null,
         else => return err,
     };
@@ -1337,7 +1337,7 @@ fn safeWorktreePathStat(allocator: Allocator, root: []const u8, path: []const u8
         defer allocator.free(absolute_path);
 
         if (try pathIsSymlink(absolute_path)) return null;
-        const stat = std.fs.cwd().statFile(absolute_path) catch |err| switch (err) {
+        const stat = std.Io.Dir.cwd().statFile(@import("compat").io(), absolute_path, .{}) catch |err| switch (err) {
             error.FileNotFound, error.NotDir => return null,
             else => return err,
         };
@@ -1999,14 +1999,14 @@ test "web explorer working tree direct reads are confined to listed safe files" 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir("repo");
+    try tmp.dir.createDir(@import("compat").io(), "repo", .default_dir);
     try writeTestFile(tmp.dir, "outside.secret", "outside");
     try writeTestFile(tmp.dir, "repo/.gitignore", "ignored.secret\n");
     try writeTestFile(tmp.dir, "repo/tracked.txt", "tracked");
     try writeTestFile(tmp.dir, "repo/visible.txt", "visible");
     try writeTestFile(tmp.dir, "repo/ignored.secret", "ignored");
 
-    const repo_root = try tmp.dir.realpathAlloc(allocator, "repo");
+    const repo_root = try tmp.dir.realPathFileAlloc(@import("compat").io(), "repo", allocator);
     defer allocator.free(repo_root);
 
     try expectGitOk(allocator, repo_root, &.{ "init", "-q" });
@@ -2045,11 +2045,11 @@ test "web explorer working tree direct reads reject symlinks" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir("repo");
+    try tmp.dir.createDir(@import("compat").io(), "repo", .default_dir);
     try writeTestFile(tmp.dir, "outside.secret", "outside");
-    try tmp.dir.symLink("../outside.secret", "repo/leak", .{});
+    try tmp.dir.symLink(@import("compat").io(), "../outside.secret", "repo/leak", .{});
 
-    const repo_root = try tmp.dir.realpathAlloc(allocator, "repo");
+    const repo_root = try tmp.dir.realPathFileAlloc(@import("compat").io(), "repo", allocator);
     defer allocator.free(repo_root);
 
     try expectGitOk(allocator, repo_root, &.{ "init", "-q" });
@@ -2077,13 +2077,13 @@ test "web explorer sums tracked file sizes separately from untracked files" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir("repo");
-    try tmp.dir.makeDir("repo/src");
+    try tmp.dir.createDir(@import("compat").io(), "repo", .default_dir);
+    try tmp.dir.createDir(@import("compat").io(), "repo/src", .default_dir);
     try writeTestFile(tmp.dir, "repo/tracked.txt", "abcd");
     try writeTestFile(tmp.dir, "repo/src/lib.zig", "xyz");
     try writeTestFile(tmp.dir, "repo/untracked.log", "ignored");
 
-    const repo_root = try tmp.dir.realpathAlloc(allocator, "repo");
+    const repo_root = try tmp.dir.realPathFileAlloc(@import("compat").io(), "repo", allocator);
     defer allocator.free(repo_root);
 
     try expectGitOk(allocator, repo_root, &.{ "init", "-q" });
@@ -2139,10 +2139,10 @@ test "web explorer fills old tree entry commits outside recent history window" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir("repo");
+    try tmp.dir.createDir(@import("compat").io(), "repo", .default_dir);
     try writeTestFile(tmp.dir, "repo/.gitignore", "zig-cache/\n");
 
-    const repo_root = try tmp.dir.realpathAlloc(allocator, "repo");
+    const repo_root = try tmp.dir.realPathFileAlloc(@import("compat").io(), "repo", allocator);
     defer allocator.free(repo_root);
 
     try expectGitOk(allocator, repo_root, &.{ "init", "-q" });
@@ -2257,16 +2257,16 @@ test "web explorer blob loading treats option-like refs as revisions" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir("repo");
+    try tmp.dir.createDir(@import("compat").io(), "repo", .default_dir);
     {
-        var readme = try tmp.dir.createFile("repo/README.md", .{});
-        defer readme.close();
-        try readme.writeAll("hello\n");
+        var readme = try tmp.dir.createFile(@import("compat").io(), "repo/README.md", .{});
+        defer readme.close(@import("compat").io());
+        try readme.writeStreamingAll(@import("compat").io(), "hello\n");
     }
 
-    const repo_root = try tmp.dir.realpathAlloc(allocator, "repo");
+    const repo_root = try tmp.dir.realPathFileAlloc(@import("compat").io(), "repo", allocator);
     defer allocator.free(repo_root);
-    const tmp_root = try tmp.dir.realpathAlloc(allocator, ".");
+    const tmp_root = try tmp.dir.realPathFileAlloc(@import("compat").io(), ".", allocator);
     defer allocator.free(tmp_root);
 
     try expectGitOk(allocator, repo_root, &.{ "init", "-q" });
@@ -2305,11 +2305,11 @@ test "web explorer blob loading treats option-like refs as revisions" {
     defer if (content) |bytes| allocator.free(bytes);
 
     try std.testing.expect(content == null);
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("gitomi-poc:README.md", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(@import("compat").io(), "gitomi-poc:README.md", .{}));
 
     const summary = try loadCommitSummary(allocator, repo, option_ref, "");
     try std.testing.expect(summary == null);
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("gitomi-poc", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(@import("compat").io(), "gitomi-poc", .{}));
 
     const target = try std.fmt.allocPrint(allocator, "/code?ref={s}", .{option_ref});
     defer allocator.free(target);
@@ -2319,10 +2319,10 @@ test "web explorer blob loading treats option-like refs as revisions" {
     try std.testing.expect(target_ref.len != 0 and target_ref[0] != '-');
 }
 
-fn writeTestFile(dir: std.fs.Dir, path: []const u8, bytes: []const u8) !void {
-    var file = try dir.createFile(path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(bytes);
+fn writeTestFile(dir: std.Io.Dir, path: []const u8, bytes: []const u8) !void {
+    var file = try dir.createFile(@import("compat").io(), path, .{ .truncate = true });
+    defer file.close(@import("compat").io());
+    try file.writeStreamingAll(@import("compat").io(), bytes);
 }
 
 fn testBranchRef(allocator: Allocator, name: []const u8, scope: BranchScope) !BranchRef {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("compat");
 const errors = @import("../../errors.zig");
 const event_json = @import("../../event/json.zig");
 const git = @import("../../git.zig");
@@ -72,8 +73,8 @@ pub const GitLabClient = struct {
 };
 
 pub fn tokenFromEnv(allocator: Allocator) !?[]u8 {
-    return std.process.getEnvVarOwned(allocator, "GITLAB_TOKEN") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => std.process.getEnvVarOwned(allocator, "GL_TOKEN") catch |fallback_err| switch (fallback_err) {
+    return compat.getEnvVarOwned(allocator, "GITLAB_TOKEN") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => compat.getEnvVarOwned(allocator, "GL_TOKEN") catch |fallback_err| switch (fallback_err) {
             error.EnvironmentVariableNotFound => null,
             else => return fallback_err,
         },

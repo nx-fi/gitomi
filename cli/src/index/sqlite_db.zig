@@ -138,7 +138,7 @@ pub const SqliteDb = struct {
                 sqlite.SQLITE_DONE => break,
                 sqlite.SQLITE_BUSY, sqlite.SQLITE_LOCKED => {
                     if (waited_ms >= busy_timeout_ms) return sqliteFail(dest, self.quiet, "backup step");
-                    std.Thread.sleep(backup_retry_sleep_ms * std.time.ns_per_ms);
+                    @import("compat").sleep(backup_retry_sleep_ms * std.time.ns_per_ms);
                     waited_ms += backup_retry_sleep_ms;
                 },
                 else => return sqliteFail(dest, self.quiet, "backup step"),
@@ -191,9 +191,9 @@ fn deletePath(allocator: Allocator, path: []const u8, suffix: []const u8) void {
     const sidecar = std.fmt.allocPrint(allocator, "{s}{s}", .{ path, suffix }) catch return;
     defer allocator.free(sidecar);
     if (std.fs.path.isAbsolute(sidecar)) {
-        std.fs.deleteFileAbsolute(sidecar) catch {};
+        std.Io.Dir.deleteFileAbsolute(@import("compat").io(), sidecar) catch {};
     } else {
-        std.fs.cwd().deleteFile(sidecar) catch {};
+        std.Io.Dir.cwd().deleteFile(@import("compat").io(), sidecar) catch {};
     }
 }
 

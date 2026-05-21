@@ -73,7 +73,7 @@ const selected_issue_sidebar_projects_sql =
     \\ORDER BY lower(sp.project), sp.project
 ;
 
-fn validateIssueSidebarCsrf(allocator: Allocator, stream: std.net.Stream, csrf_token: []const u8, form_body: []const u8) !bool {
+fn validateIssueSidebarCsrf(allocator: Allocator, stream: @import("compat").net.Stream, csrf_token: []const u8, form_body: []const u8) !bool {
     const token_owned = (try formValueOwned(allocator, form_body, zwf.csrf.field_name)) orelse {
         try sendPlainResponse(allocator, stream, 403, "Forbidden", "Invalid sidebar form token\n");
         return false;
@@ -1037,7 +1037,7 @@ fn freeColumnList(allocator: Allocator, columns: *std.ArrayList([]u8)) void {
     columns.deinit(allocator);
 }
 
-pub fn handleIssueSidebarPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, csrf_token: []const u8, form_body: []const u8) !void {
+pub fn handleIssueSidebarPost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, raw_ref: []const u8, csrf_token: []const u8, form_body: []const u8) !void {
     if (!(try validateIssueSidebarCsrf(allocator, stream, csrf_token, form_body))) return;
 
     try ensureIndex(allocator, repo);
@@ -1188,7 +1188,7 @@ pub fn handleIssueSidebarPost(allocator: Allocator, repo: Repo, stream: std.net.
 
 fn writeSidebarStringEventOrFail(
     allocator: Allocator,
-    stream: std.net.Stream,
+    stream: @import("compat").net.Stream,
     issue_id: []const u8,
     event_type: []const u8,
     payload_key: []const u8,

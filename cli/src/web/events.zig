@@ -471,7 +471,7 @@ fn appendActivityFilterOption(
     try buf.appendSlice(allocator, "\" role=\"menuitem\"><span>");
     try appendHtml(buf, allocator, label);
     try buf.appendSlice(allocator, "</span><small>");
-    try std.fmt.format(buf.writer(allocator), "{d}", .{count});
+    try @import("compat").appendPrint(allocator, buf, "{d}", .{count});
     try buf.appendSlice(allocator, "</small></a>");
 }
 
@@ -642,7 +642,7 @@ fn eventPayloadJsonOwned(allocator: Allocator, event: IndexedEvent) ![]u8 {
     };
     const payload = root.get("payload") orelse return try allocator.dupe(u8, "{}");
 
-    var out: std.io.Writer.Allocating = .init(allocator);
+    var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
     try std.json.Stringify.value(payload, .{ .whitespace = .indent_2 }, &out.writer);
     return try out.toOwnedSlice();

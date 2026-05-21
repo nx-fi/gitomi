@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("compat");
 const errors = @import("errors.zig");
 const git = @import("git.zig");
 const io = @import("io.zig");
@@ -139,10 +140,7 @@ fn resetLocalState(allocator: Allocator, repo: repo_mod.Repo, command_name: []co
     }
 
     if (has_state_dir) {
-        std.fs.deleteTreeAbsolute(repo.gitomi_dir) catch |err| switch (err) {
-            error.FileNotFound => {},
-            else => return err,
-        };
+        try std.Io.Dir.cwd().deleteTree(@import("compat").io(), repo.gitomi_dir);
         try io.out("deleted {s}\n", .{repo.gitomi_dir});
     }
 
@@ -259,10 +257,10 @@ fn readStdinLine(allocator: Allocator, max_bytes: usize) ![]u8 {
     var line: std.ArrayList(u8) = .empty;
     errdefer line.deinit(allocator);
 
-    const stdin = std.fs.File.stdin();
+    const stdin = std.Io.File.stdin();
     var byte: [1]u8 = undefined;
     while (true) {
-        const read_len = try stdin.read(&byte);
+        const read_len = try compat.readFile(stdin, &byte);
         if (read_len == 0 or byte[0] == '\n') break;
         if (line.items.len >= max_bytes) {
             try io.eprint("confirmation input is too long\n", .{});

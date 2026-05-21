@@ -1256,7 +1256,7 @@ fn appendStateOption(buf: *std.ArrayList(u8), allocator: Allocator, value: []con
     try appendTemplate(buf, allocator, ">{value}</option>", .{ .value = value });
 }
 
-pub fn handleMilestonePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: ?[]const u8, csrf_token: []const u8, form_body: []const u8) !void {
+pub fn handleMilestonePost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, raw_ref: ?[]const u8, csrf_token: []const u8, form_body: []const u8) !void {
     if (raw_ref) |milestone_ref| {
         try handleMilestoneUpdatePost(allocator, repo, stream, milestone_ref, csrf_token, form_body);
         return;
@@ -1264,7 +1264,7 @@ pub fn handleMilestonePost(allocator: Allocator, repo: Repo, stream: std.net.Str
     try handleMilestoneCreatePost(allocator, repo, stream, csrf_token, form_body);
 }
 
-fn handleMilestoneCreatePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, csrf_token: []const u8, form_body: []const u8) !void {
+fn handleMilestoneCreatePost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, csrf_token: []const u8, form_body: []const u8) !void {
     const title_owned = (try formValueOwned(allocator, form_body, "title")) orelse try allocator.dupe(u8, "");
     defer allocator.free(title_owned);
     const description_owned = (try formValueOwned(allocator, form_body, "description")) orelse try allocator.dupe(u8, "");
@@ -1291,7 +1291,7 @@ fn handleMilestoneCreatePost(allocator: Allocator, repo: Repo, stream: std.net.S
     try sendRedirect(allocator, stream, "/milestones");
 }
 
-fn handleMilestoneUpdatePost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, csrf_token: []const u8, form_body: []const u8) !void {
+fn handleMilestoneUpdatePost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, raw_ref: []const u8, csrf_token: []const u8, form_body: []const u8) !void {
     try index.ensureIndex(allocator, repo);
     const milestone_id = index.resolveMilestoneId(allocator, repo, raw_ref) catch {
         try sendPlainResponse(allocator, stream, 404, "Not Found", "Milestone not found\n");
@@ -1369,7 +1369,7 @@ fn handleMilestoneUpdatePost(allocator: Allocator, repo: Repo, stream: std.net.S
 fn handleMilestoneAddIssuesPost(
     allocator: Allocator,
     repo: Repo,
-    stream: std.net.Stream,
+    stream: @import("compat").net.Stream,
     milestone_id: []const u8,
     return_to: []const u8,
     form_body: []const u8,

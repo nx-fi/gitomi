@@ -38,7 +38,7 @@ pub const Verifier = struct {
         var source_db = try index.SqliteDb.open(allocator, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
         defer source_db.deinit();
         try source_db.backupToFile(temp_path);
-        errdefer std.fs.cwd().deleteFile(temp_path) catch {};
+        errdefer std.Io.Dir.cwd().deleteFile(@import("compat").io(), temp_path) catch {};
 
         var db = try index.SqliteDb.openWithOptions(allocator, temp_path, index.sqlite.SQLITE_OPEN_READWRITE, false, .{ .enable_wal = false });
         errdefer db.deinit();
@@ -70,7 +70,7 @@ pub const Verifier = struct {
 
         const temp_path = try std.fmt.allocPrint(allocator, "{s}/auth-binding-{s}.sqlite", .{ repo.gitomi_dir, temp_id });
         errdefer allocator.free(temp_path);
-        errdefer std.fs.cwd().deleteFile(temp_path) catch {};
+        errdefer std.Io.Dir.cwd().deleteFile(@import("compat").io(), temp_path) catch {};
 
         const refs_raw = try index.currentIndexRefsRaw(allocator);
         defer allocator.free(refs_raw);
@@ -103,7 +103,7 @@ pub const Verifier = struct {
     pub fn deinit(self: *Verifier) void {
         self.insert_stmt.deinit();
         self.db.deinit();
-        std.fs.cwd().deleteFile(self.temp_path) catch {};
+        std.Io.Dir.cwd().deleteFile(@import("compat").io(), self.temp_path) catch {};
         self.allocator.free(self.temp_path);
         self.repo.deinit();
     }

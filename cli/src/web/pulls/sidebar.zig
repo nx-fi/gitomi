@@ -451,7 +451,7 @@ fn localContainsOid(allocator: Allocator, repo: Repo, oid: []const u8, base_ref:
     return null;
 }
 
-pub fn handlePullSidebarPost(allocator: Allocator, repo: Repo, stream: std.net.Stream, raw_ref: []const u8, csrf_token: []const u8, form_body: []const u8) !void {
+pub fn handlePullSidebarPost(allocator: Allocator, repo: Repo, stream: @import("compat").net.Stream, raw_ref: []const u8, csrf_token: []const u8, form_body: []const u8) !void {
     const submitted_csrf = (try shared.formValueOwned(allocator, form_body, zwf.csrf.field_name)) orelse {
         try sendPlainResponse(allocator, stream, 403, "Forbidden", "Invalid CSRF token\n");
         return;
@@ -506,7 +506,7 @@ pub fn handlePullSidebarPost(allocator: Allocator, repo: Repo, stream: std.net.S
 
 fn writePullSidebarStringEventOrFail(
     allocator: Allocator,
-    stream: std.net.Stream,
+    stream: @import("compat").net.Stream,
     pull_id: []const u8,
     event_type: []const u8,
     payload_key: []const u8,

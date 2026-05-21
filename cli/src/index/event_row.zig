@@ -198,7 +198,7 @@ fn appendMetadataIntegerField(
     if (wrote_any.*) try buf.append(allocator, ',');
     try appendJsonString(buf, allocator, key);
     try buf.append(allocator, ':');
-    try buf.writer(allocator).print("{d}", .{actual});
+    try @import("compat").appendPrint(allocator, buf, "{d}", .{actual});
     wrote_any.* = true;
 }
 
