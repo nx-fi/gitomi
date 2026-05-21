@@ -2,14 +2,26 @@
 
 ## 1. Introduction
 
-Gitomi is a local-first, Git-native forge that layers issues, pull requests,
-projects, milestones, notifications, ACLs, and workflow execution over a
-standard Git repository.
+Gitomi is a Git-native collaboration and provenance layer for software teams
+composed of humans and autonomous coding agents. It layers issues, pull
+requests, projects, milestones, comments, reviews, labels, notifications,
+ACLs, delegated agent identities, an agent-pipeline runner, and an approval
+gate for proposed effects over a standard Git repository.
 
 Gitomi separates:
 
 *   the **Data Plane** for ordinary source code refs; and
-*   the **Control Plane** for signed social and automation events.
+*   the **Control Plane** for signed social and automation events, each
+    attributable to a specific principal (human or agent) on a specific
+    device through delegated signing keys.
+
+The Control Plane is designed so that concurrent activity by multiple actors —
+including semi-trusted agents running offline in isolated worktrees — merges
+deterministically through plain `git fetch` / `git push`, with no central
+service and no shared write token. This explicit support for multi-actor,
+offline, signed, auditable collaboration is the primary purpose of the
+specification; "local forge" features such as the loopback web control panel
+or the GitHub import bridge are secondary surfaces built on the same engine.
 
 This document defines the normative rules required for a compliant Gitomi client, daemon, or runner.
 

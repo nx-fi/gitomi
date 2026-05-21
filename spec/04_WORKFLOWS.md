@@ -2,15 +2,23 @@
 
 ## 1. Introduction
 
-This document defines Gitomi's workflow automation model. It separates the
-Gitomi-native workflow orchestration layer from backend-specific execution
-pipelines so that ordinary command automation, container jobs, and agentic
-workflows can share the same local-first event, permission, run, and output
-model.
+This document defines Gitomi's workflow automation model. The workflow system
+is the substrate that runs agent pipelines (see
+[`07_AGENT_PIPELINES.md`](07_AGENT_PIPELINES.md)) and the proposed-effects
+approval gate: it is what lets an agent's work be deterministically executed,
+gated, signed, and admitted into the Control Plane event log. Ordinary
+command automation and container jobs reuse the same engine.
 
-Gitomi workflows are not required to be bug-compatible with GitHub Actions.
-GitHub Actions-style workflow files MAY be supported as an adapter, but Gitomi
-MUST NOT make GitHub runner quirks the semantic center of the workflow system.
+It separates the Gitomi-native workflow orchestration layer from
+backend-specific execution pipelines so that agentic workflows, command
+automation, and container jobs share the same local-first event, permission,
+run, and output model.
+
+Gitomi workflows are not a GitHub Actions clone. The primary backend class is
+`agent`; the `shell` and `container` backends are general-purpose execution.
+GitHub Actions-style workflow files MAY be supported as an adapter for teams
+whose existing CI happens to be expressible that way, but Gitomi MUST NOT
+make GitHub runner quirks the semantic center of the workflow system.
 
 ### 1.1. Conformance Keywords
 
