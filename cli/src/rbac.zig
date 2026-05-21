@@ -64,7 +64,7 @@ pub fn createAclRevokeEvent(allocator: Allocator, raw_principal: []const u8) !vo
         return CliError.NotFound;
     };
     defer allocator.free(role);
-    if (std.mem.eql(u8, principal, writer.cfg.principal) and std.mem.eql(u8, role, "owner") and try index.countOwners(allocator, writer.repo) <= 1) {
+    if (std.mem.eql(u8, role, "owner") and (try index.aclRoleRevocationWouldRemoveLastOwner(allocator, writer.repo, principal))) {
         try eprint("gt acl revoke: refusing to revoke the last owner\n", .{});
         return CliError.Unauthorized;
     }

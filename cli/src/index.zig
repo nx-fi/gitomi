@@ -1465,6 +1465,11 @@ pub fn countOwners(allocator: Allocator, repo: Repo) !usize {
     return try index_query.countOwners(allocator, repo);
 }
 
+pub fn aclRoleRevocationWouldRemoveLastOwner(allocator: Allocator, repo: Repo, principal: []const u8) !bool {
+    try ensureIndex(allocator, repo);
+    return try index_query.aclRoleRevocationWouldRemoveLastOwner(allocator, repo, principal);
+}
+
 pub fn effectiveWriteRoleForPrincipal(allocator: Allocator, repo: Repo, principal: []const u8) !?[]u8 {
     try ensureIndex(allocator, repo);
     return try index_query.effectiveWriteRoleForPrincipal(allocator, repo, principal);

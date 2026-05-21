@@ -1462,11 +1462,18 @@ pub fn currentRole(allocator: Allocator, db: *SqliteDb, principal: []const u8) !
 }
 
 pub fn effectiveCurrentRole(allocator: Allocator, db: *SqliteDb, principal: []const u8) !?[]u8 {
-    var best_role = try currentRole(allocator, db, principal);
+    return try effectiveCurrentRoleExcludingAclPrincipal(allocator, db, principal, null);
+}
+
+fn effectiveCurrentRoleExcludingAclPrincipal(allocator: Allocator, db: *SqliteDb, principal: []const u8, excluded_acl_principal: ?[]const u8) !?[]u8 {
+    var best_role: ?[]u8 = null;
+    if (excluded_acl_principal == null or !std.mem.eql(u8, principal, excluded_acl_principal.?)) {
+        best_role = try currentRole(allocator, db, principal);
+    }
     errdefer if (best_role) |role| allocator.free(role);
 
     var stmt = try db.prepare(
-        \\SELECT r.role
+        \\SELECT r.principal, r.role
         \\FROM team_members tm
         \\JOIN acl_roles r ON r.principal = '@' || tm.slug
         \\WHERE tm.principal = ?
@@ -1474,7 +1481,11 @@ pub fn effectiveCurrentRole(allocator: Allocator, db: *SqliteDb, principal: []co
     defer stmt.deinit();
     try stmt.bindText(1, principal);
     while (try stmt.step()) {
-        const role = try stmt.columnTextDup(allocator, 0);
+        const team_principal = try stmt.columnTextDup(allocator, 0);
+        defer allocator.free(team_principal);
+        if (excluded_acl_principal != null and std.mem.eql(u8, team_principal, excluded_acl_principal.?)) continue;
+
+        const role = try stmt.columnTextDup(allocator, 1);
         defer allocator.free(role);
         try keepHigherRole(allocator, &best_role, role);
     }
@@ -1864,10 +1875,7 @@ fn applyAclProjection(allocator: Allocator, db: *SqliteDb, event_hash: []const u
         const existing_role = (try aclRoleAtFrontier(allocator, db, principal, event_hash)) orelse return "role_not_granted";
         defer allocator.free(existing_role);
         if (!std.mem.eql(u8, existing_role, role)) return "role_mismatch";
-        if (std.mem.eql(u8, principal, envelope.actor_principal) and std.mem.eql(u8, role, "owner")) {
-            const owners = try countOwnersAtFrontier(allocator, db, event_hash);
-            if (owners <= 1) return "last_owner";
-        }
+        if (std.mem.eql(u8, role, "owner") and (try aclRoleRevocationWouldRemoveLastOwnerAtFrontier(allocator, db, principal, event_hash))) return "last_owner";
         try insertAclHistory(db, principal, role, event_hash, envelope.event_type);
         try reconcileAclRole(allocator, db, principal);
         return null;
@@ -2118,6 +2126,10 @@ fn aclRoleGrantDisabledByRevocation(allocator: Allocator, events: []const AclRol
 }
 
 pub fn countCurrentOwners(allocator: Allocator, db: *SqliteDb) !usize {
+    return try countCurrentOwnersExcludingAclPrincipal(allocator, db, null);
+}
+
+fn countCurrentOwnersExcludingAclPrincipal(allocator: Allocator, db: *SqliteDb, excluded_acl_principal: ?[]const u8) !usize {
     var principals = std.StringHashMap(void).init(allocator);
     defer freePrincipalSet(allocator, &principals);
     try collectCurrentRolePrincipals(allocator, db, &principals);
@@ -2126,7 +2138,7 @@ pub fn countCurrentOwners(allocator: Allocator, db: *SqliteDb) !usize {
     var count: usize = 0;
     var it = principals.keyIterator();
     while (it.next()) |principal| {
-        const role = try effectiveCurrentRole(allocator, db, principal.*);
+        const role = try effectiveCurrentRoleExcludingAclPrincipal(allocator, db, principal.*, excluded_acl_principal);
         defer if (role) |value| allocator.free(value);
         if (role != null and std.mem.eql(u8, role.?, "owner")) count += 1;
     }
@@ -2156,6 +2168,10 @@ fn collectCurrentTeamMemberPrincipals(allocator: Allocator, db: *SqliteDb, princ
 }
 
 fn countOwnersAtFrontier(allocator: Allocator, db: *SqliteDb, event_hash: []const u8) !usize {
+    return try countOwnersAtFrontierExcludingAclPrincipal(allocator, db, event_hash, null);
+}
+
+fn countOwnersAtFrontierExcludingAclPrincipal(allocator: Allocator, db: *SqliteDb, event_hash: []const u8, excluded_acl_principal: ?[]const u8) !usize {
     var principals = std.StringHashMap(void).init(allocator);
     defer freePrincipalSet(allocator, &principals);
 
@@ -2180,7 +2196,7 @@ fn countOwnersAtFrontier(allocator: Allocator, db: *SqliteDb, event_hash: []cons
     var count: usize = 0;
     var it = principals.keyIterator();
     while (it.next()) |principal| {
-        const role = try effectiveRoleAtFrontierCausal(allocator, db, principal.*, event_hash);
+        const role = try effectiveRoleAtFrontierCausalExcludingAclPrincipal(allocator, db, principal.*, event_hash, excluded_acl_principal);
         defer if (role) |value| allocator.free(value);
         if (role != null and std.mem.eql(u8, role.?, "owner")) count += 1;
     }
@@ -2194,7 +2210,14 @@ fn freePrincipalSet(allocator: Allocator, principals: *std.StringHashMap(void)) 
 }
 
 fn effectiveRoleAtFrontierCausal(allocator: Allocator, db: *SqliteDb, principal: []const u8, event_hash: []const u8) !?[]u8 {
-    var best_role = try aclRoleAtFrontier(allocator, db, principal, event_hash);
+    return try effectiveRoleAtFrontierCausalExcludingAclPrincipal(allocator, db, principal, event_hash, null);
+}
+
+fn effectiveRoleAtFrontierCausalExcludingAclPrincipal(allocator: Allocator, db: *SqliteDb, principal: []const u8, event_hash: []const u8, excluded_acl_principal: ?[]const u8) !?[]u8 {
+    var best_role: ?[]u8 = null;
+    if (excluded_acl_principal == null or !std.mem.eql(u8, principal, excluded_acl_principal.?)) {
+        best_role = try aclRoleAtFrontier(allocator, db, principal, event_hash);
+    }
     errdefer if (best_role) |role| allocator.free(role);
 
     var stmt = try db.prepare("SELECT DISTINCT slug FROM team_member_events WHERE principal = ? ORDER BY slug");
@@ -2207,12 +2230,32 @@ fn effectiveRoleAtFrontierCausal(allocator: Allocator, db: *SqliteDb, principal:
 
         const team_principal = try std.fmt.allocPrint(allocator, "@{s}", .{slug});
         defer allocator.free(team_principal);
+        if (excluded_acl_principal != null and std.mem.eql(u8, team_principal, excluded_acl_principal.?)) continue;
+
         const team_role = try aclRoleAtFrontier(allocator, db, team_principal, event_hash);
         defer if (team_role) |role| allocator.free(role);
         if (team_role) |role| try keepHigherRole(allocator, &best_role, role);
     }
 
     return best_role;
+}
+
+pub fn aclRoleRevocationWouldRemoveLastOwner(allocator: Allocator, db: *SqliteDb, principal: []const u8) !bool {
+    const role = (try currentRole(allocator, db, principal)) orelse return false;
+    defer allocator.free(role);
+    if (!std.mem.eql(u8, role, "owner")) return false;
+
+    if ((try countCurrentOwners(allocator, db)) == 0) return false;
+    return (try countCurrentOwnersExcludingAclPrincipal(allocator, db, principal)) == 0;
+}
+
+fn aclRoleRevocationWouldRemoveLastOwnerAtFrontier(allocator: Allocator, db: *SqliteDb, principal: []const u8, event_hash: []const u8) !bool {
+    const role = (try aclRoleAtFrontier(allocator, db, principal, event_hash)) orelse return false;
+    defer allocator.free(role);
+    if (!std.mem.eql(u8, role, "owner")) return false;
+
+    if ((try countOwnersAtFrontier(allocator, db, event_hash)) == 0) return false;
+    return (try countOwnersAtFrontierExcludingAclPrincipal(allocator, db, event_hash, principal)) == 0;
 }
 
 fn removingTeamMemberWouldRemoveLastOwner(allocator: Allocator, db: *SqliteDb, slug: []const u8, principal: []const u8, event_hash: []const u8) !bool {
@@ -2973,6 +3016,86 @@ test "open access self-registration fingerprint requires matching actor" {
         \\}
     ;
     try std.testing.expect((try selfRegistrationFingerprint(allocator, envelope, mismatched_body)) == null);
+}
+
+test "acl owner revocation rejects removing team-derived effective owners" {
+    const allocator = std.testing.allocator;
+    var db = try SqliteDb.open(allocator, ":memory:", sqlite_db.sqlite.SQLITE_OPEN_READWRITE | sqlite_db.sqlite.SQLITE_OPEN_CREATE, true);
+    defer db.deinit();
+    try index_schema.createIndexSchema(&db);
+    try insertAclRoleForTest(&db, "@core", "owner", "");
+    try insertTeamMemberForTest(&db, "core", "bob", "");
+    try insertTeamMemberForTest(&db, "core", "carol", "");
+
+    try std.testing.expectEqual(@as(usize, 2), try countOwnersAtFrontier(allocator, &db, "revoke-team-owner"));
+    try std.testing.expect(try aclRoleRevocationWouldRemoveLastOwner(allocator, &db, "@core"));
+
+    var envelope = try testEnvelopeForObjectEventType(allocator, "acl.role_revoked", "acl", "acl:@core");
+    defer envelope.deinit();
+    allocator.free(envelope.actor_principal);
+    envelope.actor_principal = try allocator.dupe(u8, "bob");
+
+    const rejection = try applyAclProjection(allocator, &db, "revoke-team-owner", envelope,
+        \\{"payload":{"principal":"@core","role":"owner"}}
+    );
+    try std.testing.expect(rejection != null);
+    try std.testing.expectEqualStrings("last_owner", rejection.?);
+}
+
+test "acl owner revocation allows team grant when another effective owner remains" {
+    const allocator = std.testing.allocator;
+    var db = try SqliteDb.open(allocator, ":memory:", sqlite_db.sqlite.SQLITE_OPEN_READWRITE | sqlite_db.sqlite.SQLITE_OPEN_CREATE, true);
+    defer db.deinit();
+    try index_schema.createIndexSchema(&db);
+    try insertAclRoleForTest(&db, "alice", "owner", "");
+    try insertAclRoleForTest(&db, "@core", "owner", "");
+    try insertTeamMemberForTest(&db, "core", "bob", "");
+
+    try std.testing.expectEqual(@as(usize, 2), try countCurrentOwners(allocator, &db));
+    try std.testing.expect(!(try aclRoleRevocationWouldRemoveLastOwner(allocator, &db, "@core")));
+
+    var envelope = try testEnvelopeForObjectEventType(allocator, "acl.role_revoked", "acl", "acl:@core");
+    defer envelope.deinit();
+    allocator.free(envelope.actor_principal);
+    envelope.actor_principal = try allocator.dupe(u8, "bob");
+
+    const rejection = try applyAclProjection(allocator, &db, "revoke-team-owner", envelope,
+        \\{"payload":{"principal":"@core","role":"owner"}}
+    );
+    try std.testing.expect(rejection == null);
+    try std.testing.expectEqual(@as(usize, 1), try countCurrentOwners(allocator, &db));
+}
+
+fn insertAclRoleForTest(db: *SqliteDb, principal: []const u8, role: []const u8, event_hash: []const u8) !void {
+    var role_stmt = try db.prepare("INSERT INTO acl_roles(principal, role, grant_event_hash) VALUES (?, ?, ?)");
+    defer role_stmt.deinit();
+    try role_stmt.bindText(1, principal);
+    try role_stmt.bindText(2, role);
+    try role_stmt.bindText(3, event_hash);
+    try role_stmt.stepDone();
+
+    var event_stmt = try db.prepare("INSERT INTO acl_role_events(principal, role, event_hash, event_type) VALUES (?, ?, ?, 'acl.role_granted')");
+    defer event_stmt.deinit();
+    try event_stmt.bindText(1, principal);
+    try event_stmt.bindText(2, role);
+    try event_stmt.bindText(3, event_hash);
+    try event_stmt.stepDone();
+}
+
+fn insertTeamMemberForTest(db: *SqliteDb, slug: []const u8, principal: []const u8, event_hash: []const u8) !void {
+    var member_stmt = try db.prepare("INSERT INTO team_members(slug, principal, add_hash, created_at, actor_principal) VALUES (?, ?, ?, '2026-05-16T00:00:00Z', 'alice')");
+    defer member_stmt.deinit();
+    try member_stmt.bindText(1, slug);
+    try member_stmt.bindText(2, principal);
+    try member_stmt.bindText(3, event_hash);
+    try member_stmt.stepDone();
+
+    var event_stmt = try db.prepare("INSERT INTO team_member_events(slug, principal, event_hash, event_type, created_at, actor_principal) VALUES (?, ?, ?, 'team.member_added', '2026-05-16T00:00:00Z', 'alice')");
+    defer event_stmt.deinit();
+    try event_stmt.bindText(1, slug);
+    try event_stmt.bindText(2, principal);
+    try event_stmt.bindText(3, event_hash);
+    try event_stmt.stepDone();
 }
 
 test "project field key collision is domain rejected" {

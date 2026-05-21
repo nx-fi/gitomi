@@ -8,6 +8,7 @@ zig-pkg/
 .env.*
 !.env.example
 .direnv/
+node_modules/
 
 # Local agent state
 /.claude

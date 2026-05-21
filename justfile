@@ -1,2 +1,3 @@
 deploy-website:
-	cd website && npx wrangler pages deploy dist --project-name gitomi --branch main
+	cd website && bun install --frozen-lockfile
+	cd website && bun run deploy

@@ -334,6 +334,12 @@ pub fn countOwners(allocator: Allocator, repo: Repo) !usize {
     return try projection.countCurrentOwners(allocator, &db);
 }
 
+pub fn aclRoleRevocationWouldRemoveLastOwner(allocator: Allocator, repo: Repo, principal: []const u8) !bool {
+    var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
+    defer db.deinit();
+    return try projection.aclRoleRevocationWouldRemoveLastOwner(allocator, &db, principal);
+}
+
 pub fn effectiveWriteRoleForPrincipal(allocator: Allocator, repo: Repo, principal: []const u8) !?[]u8 {
     var db = try SqliteDb.open(allocator, repo.index_path, sqlite.SQLITE_OPEN_READONLY, false);
     defer db.deinit();

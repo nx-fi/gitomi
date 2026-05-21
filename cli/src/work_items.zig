@@ -902,8 +902,9 @@ pub fn workItemFtsQueryOwned(allocator: Allocator, value: []const u8) ![]u8 {
         while (cursor < value.len and isFtsTokenByte(value[cursor])) : (cursor += 1) {}
         if (start == cursor) continue;
         if (query.items.len != 0) try query.append(allocator, ' ');
+        try query.append(allocator, '"');
         try query.appendSlice(allocator, value[start..cursor]);
-        try query.append(allocator, '*');
+        try query.appendSlice(allocator, "\"*");
     }
 
     if (query.items.len == 0) try query.appendSlice(allocator, work_item_no_match_token);
@@ -2221,11 +2222,44 @@ test "work item search query formatter emits canonical filters" {
 test "work item FTS query tokenizes punctuation as prefix terms" {
     const query = try workItemFtsQueryOwned(std.testing.allocator, "feature/foo #123 \"quoted value\" !!!");
     defer std.testing.allocator.free(query);
-    try std.testing.expectEqualStrings("feature* foo* 123* quoted* value*", query);
+    try std.testing.expectEqualStrings("\"feature\"* \"foo\"* \"123\"* \"quoted\"* \"value\"*", query);
 
     const empty = try workItemFtsQueryOwned(std.testing.allocator, "!!!");
     defer std.testing.allocator.free(empty);
     try std.testing.expectEqualStrings(work_item_no_match_token, empty);
+}
+
+test "work item FTS query quotes reserved words as literal prefix terms" {
+    const query = try workItemFtsQueryOwned(std.testing.allocator, "foo AND OR NOT bar");
+    defer std.testing.allocator.free(query);
+    try std.testing.expectEqualStrings("\"foo\"* \"AND\"* \"OR\"* \"NOT\"* \"bar\"*", query);
+}
+
+test "work item FTS query for reserved words executes against SQLite FTS5" {
+    var db = try SqliteDb.openWithOptions(std.testing.allocator, ":memory:", sqlite_db.sqlite.SQLITE_OPEN_READWRITE | sqlite_db.sqlite.SQLITE_OPEN_CREATE, true, .{ .enable_wal = false });
+    defer db.deinit();
+    try index_schema.createIndexSchema(&db);
+    try db.exec(
+        \\INSERT INTO work_item_search_docs(object_kind, object_id, title, body, comments, labels, metadata)
+        \\VALUES ('issue', 'issue-1', 'foo and or not bar', '', '', '', '');
+        \\INSERT INTO work_item_search(work_item_search) VALUES('rebuild');
+    );
+
+    const query = try workItemFtsQueryOwned(std.testing.allocator, "foo AND OR NOT bar");
+    defer std.testing.allocator.free(query);
+    var stmt = try db.prepare(
+        \\SELECT object_id
+        \\FROM work_item_search
+        \\WHERE work_item_search MATCH ?
+        \\  AND object_kind = 'issue'
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, query);
+
+    try std.testing.expect(try stmt.step());
+    const object_id = try stmt.columnTextDup(std.testing.allocator, 0);
+    defer std.testing.allocator.free(object_id);
+    try std.testing.expectEqualStrings("issue-1", object_id);
 }
 
 test "work item filter JSON emits valid defaults" {
