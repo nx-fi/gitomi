@@ -3,6 +3,10 @@ const std = @import("std");
 
 const Allocator = std.mem.Allocator;
 
+pub fn setGlobalIoAllocator(allocator: Allocator) void {
+    std.Io.Threaded.global_single_threaded.allocator = allocator;
+}
+
 pub fn io() std.Io {
     if (comptime builtin.is_test) return std.testing.io;
     return std.Io.Threaded.global_single_threaded.io();

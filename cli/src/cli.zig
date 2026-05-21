@@ -84,9 +84,8 @@ pub fn main(process_args: std.process.Args) void {
 }
 
 fn realMain(process_args: std.process.Args) !void {
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = debug_allocator.deinit();
-    const allocator = debug_allocator.allocator();
+    const allocator = std.heap.smp_allocator;
+    compat.setGlobalIoAllocator(allocator);
 
     var args_arena = std.heap.ArenaAllocator.init(allocator);
     defer args_arena.deinit();
