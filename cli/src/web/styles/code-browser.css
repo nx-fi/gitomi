@@ -2504,25 +2504,28 @@ a.root-file-commit:hover,
   border-top: 1px solid var(--border);
 }
 .markdown-preview[data-markdown-line-numbers] {
-  --markdown-source-gutter-line-height: 20px;
   position: relative;
-  padding-left: 72px;
+  padding: 28px clamp(32px, 7vw, 96px) 40px clamp(108px, 9vw, 152px);
+}
+.markdown-preview[data-markdown-line-numbers] > :where(h1, h2, h3, h4, h5, h6, p, ul, ol, blockquote) {
+  max-width: 120ch;
 }
 .markdown-preview[data-markdown-line-numbers] > .markdown-source-line {
   position: relative;
-  min-height: var(--markdown-source-lines-height, var(--markdown-source-gutter-line-height));
 }
 .markdown-preview[data-markdown-line-numbers] > .markdown-source-line::before {
-  content: attr(data-markdown-source-lines);
+  content: attr(data-markdown-source-line);
   position: absolute;
-  top: var(--markdown-source-leading-offset, 0);
-  right: calc(100% + 18px);
+  top: 0.22em;
+  right: calc(100% + 32px);
   width: 42px;
-  color: var(--muted);
-  font: 12px/var(--markdown-source-gutter-line-height) var(--mono);
+  color: color-mix(in oklch, var(--text) 46%, var(--panel));
+  font: 12px/1.65 var(--mono);
   text-align: right;
-  white-space: pre;
   user-select: none;
+}
+.markdown-preview[data-markdown-line-numbers] > blockquote.markdown-source-line::before {
+  top: 0.38em;
 }
 .markdown-preview[data-markdown-line-numbers] > .markdown-source-line:target {
   background: var(--code-line-highlight);

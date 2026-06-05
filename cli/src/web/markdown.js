@@ -4,7 +4,6 @@
   const markdownOutlineWidthKey = "gitomi.markdownOutlinePanelWidth";
   const minMarkdownOutlineWidth = 260;
   const maxMarkdownOutlineWidth = 560;
-  const markdownSourceLineHeight = 20;
 
   function clamp(value, min, max) {
     return Math.min(max, Math.max(min, value));
@@ -587,78 +586,40 @@
     return count;
   }
 
-  function sourceLineCount(value) {
-    const text = String(value || "");
-    if (!text) return 0;
-    const count = newlineCount(text);
-    return text.endsWith("\n") ? count : count + 1;
-  }
-
-  function lineNumberList(start, end) {
-    const lines = [];
-    for (let line = start; line <= end; line += 1) {
-      lines.push(String(line));
-    }
-    return lines;
-  }
-
-  function markdownSourceLineRanges(source) {
+  function markdownSourceLineStarts(source) {
     const lexer = markdownLexer();
     if (!lexer) return [];
 
-    const text = String(source || "");
-    const totalLines = sourceLineCount(text);
-    if (totalLines === 0) return [];
-
     let tokens = [];
     try {
-      tokens = lexer(text, markdownOptions()) || [];
+      tokens = lexer(String(source || ""), markdownOptions()) || [];
     } catch (_) {
       return [];
     }
 
     let line = 1;
-    let nextNumber = 1;
-    const ranges = [];
+    const starts = [];
     tokens.forEach(function (token) {
       const raw = String(token && token.raw || "");
-      if (token && token.type !== "space") {
-        const tokenLines = Math.max(1, sourceLineCount(raw));
-        const end = Math.min(totalLines, line + tokenLines - 1);
-        if (nextNumber <= end) {
-          ranges.push({
-            start: nextNumber,
-            end: end,
-            anchor: Math.min(totalLines, line),
-          });
-          nextNumber = end + 1;
-        }
-      }
+      if (token && token.type !== "space") starts.push(line);
       line += newlineCount(raw);
     });
-
-    if (ranges.length && nextNumber <= totalLines) {
-      ranges[ranges.length - 1].end = totalLines;
-    }
-    return ranges;
+    return starts;
   }
 
   function annotateMarkdownSourceLines(root, source) {
     if (!root.hasAttribute("data-markdown-line-numbers")) return;
-    const ranges = markdownSourceLineRanges(source);
-    if (!ranges.length) return;
+    const lines = markdownSourceLineStarts(source);
+    if (!lines.length) return;
 
     let index = 0;
     Array.prototype.slice.call(root.children).forEach(function (child) {
-      const range = ranges[index];
+      const line = lines[index];
       index += 1;
-      if (!range) return;
+      if (!line) return;
       child.classList.add("markdown-source-line");
-      child.dataset.markdownSourceLine = String(range.anchor);
-      child.dataset.markdownSourceLines = lineNumberList(range.start, range.end).join("\n");
-      child.style.setProperty("--markdown-source-lines-height", String((range.end - range.start + 1) * markdownSourceLineHeight) + "px");
-      child.style.setProperty("--markdown-source-leading-offset", String(-Math.max(0, range.anchor - range.start) * markdownSourceLineHeight) + "px");
-      if (!child.id && !/^H[1-6]$/.test(child.tagName)) child.id = "L" + range.anchor;
+      child.dataset.markdownSourceLine = String(line);
+      if (!child.id && !/^H[1-6]$/.test(child.tagName)) child.id = "L" + line;
     });
   }
 
