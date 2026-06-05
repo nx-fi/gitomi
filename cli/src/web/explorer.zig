@@ -615,7 +615,7 @@ fn appendBlobContent(
         try appendEmptyState(buf, allocator, "Binary file not displayed.", "This blob contains NUL bytes.");
     } else if (render_markdown) {
         try appendTemplate(buf, allocator,
-            \\<div id="markdown-document" class="readme-body markdown-body markdown-preview" data-markdown-document data-markdown-outline="panel">
+            \\<div id="markdown-document" class="readme-body markdown-body markdown-preview" data-markdown-document data-markdown-outline="panel" data-markdown-line-numbers>
         , .{});
         try appendRepositoryMarkdown(buf, allocator, ref, path, bytes);
         try appendTemplate(buf, allocator, "</div>", .{});

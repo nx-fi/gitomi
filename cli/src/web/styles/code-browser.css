@@ -2503,6 +2503,34 @@ a.root-file-commit:hover,
 .markdown-preview {
   border-top: 1px solid var(--border);
 }
+.markdown-preview[data-markdown-line-numbers] {
+  --markdown-source-gutter-line-height: 20px;
+  position: relative;
+  padding-left: 72px;
+}
+.markdown-preview[data-markdown-line-numbers] > .markdown-source-line {
+  position: relative;
+  min-height: var(--markdown-source-lines-height, var(--markdown-source-gutter-line-height));
+}
+.markdown-preview[data-markdown-line-numbers] > .markdown-source-line::before {
+  content: attr(data-markdown-source-lines);
+  position: absolute;
+  top: var(--markdown-source-leading-offset, 0);
+  right: calc(100% + 18px);
+  width: 42px;
+  color: var(--muted);
+  font: 12px/var(--markdown-source-gutter-line-height) var(--mono);
+  text-align: right;
+  white-space: pre;
+  user-select: none;
+}
+.markdown-preview[data-markdown-line-numbers] > .markdown-source-line:target {
+  background: var(--code-line-highlight);
+  box-shadow: inset 3px 0 0 var(--code-line-highlight-border);
+}
+.markdown-preview[data-markdown-line-numbers] > .markdown-source-line:target::before {
+  color: var(--text);
+}
 .view-tabs {
   display: inline-flex;
   align-items: center;

@@ -4,6 +4,7 @@
   const markdownOutlineWidthKey = "gitomi.markdownOutlinePanelWidth";
   const minMarkdownOutlineWidth = 260;
   const maxMarkdownOutlineWidth = 560;
+  const markdownSourceLineHeight = 20;
 
   function clamp(value, min, max) {
     return Math.min(max, Math.max(min, value));
@@ -556,14 +557,109 @@
   function markdownHtml(source) {
     const parser = markdownParser();
     if (!parser) return "<pre>" + escapeHtml(source) + "</pre>";
-    const html = parser.parse(String(source || ""), {
+    const html = parser.parse(String(source || ""), markdownOptions());
+    return sanitizeMarkdownHtml(html);
+  }
+
+  function markdownOptions() {
+    return {
       async: false,
       breaks: false,
       gfm: true,
       pedantic: false,
       silent: true,
+    };
+  }
+
+  function markdownLexer() {
+    if (window.marked && typeof window.marked.lexer === "function") return window.marked.lexer.bind(window.marked);
+    const parser = markdownParser();
+    if (parser && typeof parser.lexer === "function") return parser.lexer.bind(parser);
+    return null;
+  }
+
+  function newlineCount(value) {
+    const text = String(value || "");
+    let count = 0;
+    for (let index = 0; index < text.length; index += 1) {
+      if (text.charCodeAt(index) === 10) count += 1;
+    }
+    return count;
+  }
+
+  function sourceLineCount(value) {
+    const text = String(value || "");
+    if (!text) return 0;
+    const count = newlineCount(text);
+    return text.endsWith("\n") ? count : count + 1;
+  }
+
+  function lineNumberList(start, end) {
+    const lines = [];
+    for (let line = start; line <= end; line += 1) {
+      lines.push(String(line));
+    }
+    return lines;
+  }
+
+  function markdownSourceLineRanges(source) {
+    const lexer = markdownLexer();
+    if (!lexer) return [];
+
+    const text = String(source || "");
+    const totalLines = sourceLineCount(text);
+    if (totalLines === 0) return [];
+
+    let tokens = [];
+    try {
+      tokens = lexer(text, markdownOptions()) || [];
+    } catch (_) {
+      return [];
+    }
+
+    let line = 1;
+    let nextNumber = 1;
+    const ranges = [];
+    tokens.forEach(function (token) {
+      const raw = String(token && token.raw || "");
+      if (token && token.type !== "space") {
+        const tokenLines = Math.max(1, sourceLineCount(raw));
+        const end = Math.min(totalLines, line + tokenLines - 1);
+        if (nextNumber <= end) {
+          ranges.push({
+            start: nextNumber,
+            end: end,
+            anchor: Math.min(totalLines, line),
+          });
+          nextNumber = end + 1;
+        }
+      }
+      line += newlineCount(raw);
     });
-    return sanitizeMarkdownHtml(html);
+
+    if (ranges.length && nextNumber <= totalLines) {
+      ranges[ranges.length - 1].end = totalLines;
+    }
+    return ranges;
+  }
+
+  function annotateMarkdownSourceLines(root, source) {
+    if (!root.hasAttribute("data-markdown-line-numbers")) return;
+    const ranges = markdownSourceLineRanges(source);
+    if (!ranges.length) return;
+
+    let index = 0;
+    Array.prototype.slice.call(root.children).forEach(function (child) {
+      const range = ranges[index];
+      index += 1;
+      if (!range) return;
+      child.classList.add("markdown-source-line");
+      child.dataset.markdownSourceLine = String(range.anchor);
+      child.dataset.markdownSourceLines = lineNumberList(range.start, range.end).join("\n");
+      child.style.setProperty("--markdown-source-lines-height", String((range.end - range.start + 1) * markdownSourceLineHeight) + "px");
+      child.style.setProperty("--markdown-source-leading-offset", String(-Math.max(0, range.anchor - range.start) * markdownSourceLineHeight) + "px");
+      if (!child.id && !/^H[1-6]$/.test(child.tagName)) child.id = "L" + range.anchor;
+    });
   }
 
   function isSafeHref(href) {
@@ -1144,6 +1240,7 @@
     autolinkIssueReferences(root);
     renderMermaid(root);
     renderCodeCopyButtons(root);
+    annotateMarkdownSourceLines(root, source);
     updateIssueMenuMarkdown(root, source);
     if (window.gitomiHighlightAll) window.gitomiHighlightAll();
   }
@@ -1293,12 +1390,85 @@
     }, 6);
     return headings.map(function (heading) {
       const level = Number(heading.tagName.slice(1)) || 1;
+      const sourceLine = heading.closest("[data-markdown-source-line]");
       return {
         id: heading.id,
         text: (heading.textContent || "").trim(),
         depth: Math.max(0, level - minLevel),
+        line: sourceLine ? sourceLine.dataset.markdownSourceLine || "" : "",
       };
     });
+  }
+
+  function stickyBottom(element) {
+    if (!element) return 0;
+    const position = window.getComputedStyle(element).position;
+    if (position !== "sticky" && position !== "fixed") return 0;
+    const rect = element.getBoundingClientRect();
+    if (rect.bottom <= 0 || rect.top >= window.innerHeight) return 0;
+    return Math.max(0, Math.min(window.innerHeight, rect.bottom));
+  }
+
+  function markdownViewportTop(target) {
+    const panel = target && target.closest ? target.closest(".code-panel") : null;
+    const panelHead = panel ? panel.querySelector(".code-panel-head") : null;
+    return Math.max(
+      stickyBottom(document.querySelector(".topbar")),
+      stickyBottom(panelHead),
+    );
+  }
+
+  function scrollMarkdownTargetIntoView(target) {
+    if (!target) return;
+    const scrollTarget = target.closest && target.closest("[data-markdown-source-line]") || target;
+    const gap = 8;
+    const top = Math.min(window.innerHeight, markdownViewportTop(scrollTarget) + gap);
+    const rect = scrollTarget.getBoundingClientRect();
+    const nextTop = window.scrollY + rect.top - top;
+    if (Math.abs(rect.top - top) > 1) {
+      window.scrollTo({ top: Math.max(0, nextTop), left: window.scrollX, behavior: "auto" });
+    }
+  }
+
+  function scrollMarkdownTargetIntoViewSoon(target) {
+    window.requestAnimationFrame(function () {
+      scrollMarkdownTargetIntoView(target);
+      window.requestAnimationFrame(function () {
+        scrollMarkdownTargetIntoView(target);
+      });
+    });
+  }
+
+  function setLocationHash(id, replace) {
+    const url = new URL(window.location.href);
+    url.hash = id;
+    if (url.href === window.location.href) return;
+    try {
+      if (replace) {
+        window.history.replaceState(null, "", url);
+      } else {
+        window.history.pushState(null, "", url);
+      }
+    } catch (_) {
+      window.location.hash = id;
+    }
+  }
+
+  function scrollMarkdownHashTarget(id, replace) {
+    const target = document.getElementById(id);
+    if (!target) return false;
+    setLocationHash(id, replace);
+    scrollMarkdownTargetIntoViewSoon(target);
+    return true;
+  }
+
+  function handleMarkdownOutlineClick(event, link) {
+    const hash = link.getAttribute("href") || "";
+    if (!hash || hash.charAt(0) !== "#") return;
+    const id = decodeUrlHash(hash);
+    if (id === null || !document.getElementById(id)) return;
+    event.preventDefault();
+    scrollMarkdownHashTarget(id, false);
   }
 
   function fillOutlineLinks(container, headings) {
@@ -1311,6 +1481,10 @@
       link.textContent = heading.text;
       link.style.setProperty("--depth", String(heading.depth));
       link.dataset.depth = String(Math.min(heading.depth, 5));
+      if (heading.line) link.dataset.markdownSourceLine = heading.line;
+      link.addEventListener("click", function (event) {
+        handleMarkdownOutlineClick(event, link);
+      });
       container.appendChild(link);
     });
   }
@@ -1482,7 +1656,7 @@
       const target = document.getElementById(id);
       if (target && !renderMarkdownOutlines.scrolledHash) {
         renderMarkdownOutlines.scrolledHash = true;
-        target.scrollIntoView();
+        scrollMarkdownTargetIntoViewSoon(target);
       }
     }
   }
