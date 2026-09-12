@@ -4,6 +4,7 @@ const actions = @import("actions.zig");
 const auth_binding = @import("auth_binding.zig");
 const build_options = @import("build_options");
 const comment = @import("comment.zig");
+const claim = @import("claim.zig");
 const compat = @import("compat");
 const errors = @import("errors.zig");
 const fsck = @import("fsck.zig");
@@ -38,6 +39,7 @@ const Command = struct {
 };
 
 const command_dispatch = std.StaticStringMap(Command).initComptime(.{
+    .{ "claim", Command{ .handler = claim.run, .command_name = "gt claim" } },
     .{ "-h", Command{ .handler = runHelp, .command_name = "gt -h" } },
     .{ "--help", Command{ .handler = runHelp, .command_name = "gt --help" } },
     .{ "help", Command{ .handler = runHelp, .command_name = "gt help" } },
@@ -79,7 +81,13 @@ pub fn main(process_args: std.process.Args) void {
         if (!errors.isReported(err)) {
             io.eprint("gt: {s}\n", .{@errorName(err)}) catch {};
         }
-        std.process.exit(1);
+        std.process.exit(switch (err) {
+            error.ClaimConflict => 3,
+            error.ClaimStale => 4,
+            error.ClaimContention => 5,
+            error.ClaimUnestablished => 6,
+            else => 1,
+        });
     };
 }
 
@@ -291,6 +299,7 @@ fn runWeb(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
 fn printUsage() !void {
     try io.out(
         \\Usage:
+        \\  gt claim acquire|release|check|ls ... (gt claim --help)
         \\  gt init [--principal ID] [--device ID] [--repo-id UUID] [--access open|closed] [--force]
         \\  gt status
         \\  gt fsck

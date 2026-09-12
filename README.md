@@ -63,6 +63,9 @@ be attributable, replayable, and able to happen offline.
 
 ## Two-Agent Quick Demo
 
+For agents sharing a checkout or linked worktrees, [`gt claim`](docs/claims.md)
+provides local signed path leases with atomic acquisition and conflict checks.
+
 The fastest way to see the point: drive two different agent CLIs against the
 same repository and watch them open, review, and merge a PR without a network
 round-trip, then sync and observe the deterministic merge.

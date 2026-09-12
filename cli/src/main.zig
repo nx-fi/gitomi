@@ -6,6 +6,7 @@ pub fn main(init: std.process.Init.Minimal) void {
 }
 
 test {
+    _ = @import("claim.zig");
     _ = @import("json_writer.zig");
     _ = @import("util.zig");
     _ = @import("repo.zig");

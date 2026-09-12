@@ -34,6 +34,7 @@ pub fn isUserError(err: anyerror) bool {
 
 pub fn isReported(err: anyerror) bool {
     return isUserError(err) or switch (err) {
+        error.ClaimConflict, error.ClaimStale, error.ClaimContention, error.ClaimUnestablished => true,
         CliError.GitFailed,
         CliError.SqliteFailed,
         => true,
