@@ -144,12 +144,14 @@ later phases. `check` is a point-in-time advisory conflict query, not a fenced
 operation or permission to continue beyond a lease deadline. Stop work before
 your lease expires; this version does not supervise a running editor or command.
 
-Two protocol questions need resolution before administrative writes: §6 names
-`claims.admin`, but `03_RBAC.md` does not define its role mapping or delegation
-scope; §10.3 permits a parentless compaction root with other holders' records,
-but §5.2/§6 do not define the delta encoding or evidence that authenticates that
-root against its replaced tree. No protocol text or formal model has been changed
-to invent those rules.
+The product decisions for the remaining work are recorded in
+[ADR 002: Claims With Optional Orchestration](../spec/ADR/002_CLAIMS_WITH_OPTIONAL_ORCHESTRATION.md).
+Coordination works without an orchestrator. Claim administration will belong to
+maintainers and owners, with explicit repository or worker-run delegations.
+Initial compaction will re-root only an empty, verified ledger through CAS;
+active claims keep their authenticated history. Local watchdog supervision comes
+next. These are accepted implementation directions; the normative amendments,
+authorization-evidence format, and corresponding CLI features are still pending.
 
 Tests include signed acquire/conflict/release, readers, separate signers/runs,
 waiting, malformed and unauthorized ledger changes, and races forced to prepare
