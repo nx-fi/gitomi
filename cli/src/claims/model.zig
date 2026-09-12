@@ -53,6 +53,11 @@ pub const Delta = struct {
     wrote_at: []const u8,
 };
 
+pub fn compareTime(left: []const u8, right: []const u8) !std.math.Order {
+    const seconds = std.math.order(try timestamp(left), try timestamp(right));
+    return if (seconds == .eq) fractionsOrder(left, right) else seconds;
+}
+
 pub fn uuid(value: []const u8) bool {
     if (!util.looksLikeUuid(value) or value[14] != '7') return false;
     if (std.mem.indexOfScalar(u8, "89ab", value[19]) == null) return false;

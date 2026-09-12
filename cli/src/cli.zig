@@ -300,7 +300,7 @@ fn runWeb(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
 fn printUsage() !void {
     try io.out(
         \\Usage:
-        \\  gt claim acquire|release|check|ls ... (gt claim --help)
+        \\  gt claim acquire|renew|release|check|ls ... (gt claim --help)
         \\  gt peers [<paths>...] [--run-id UUID]
         \\  gt init [--principal ID] [--device ID] [--repo-id UUID] [--access open|closed] [--force]
         \\  gt status

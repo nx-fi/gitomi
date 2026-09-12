@@ -93,9 +93,19 @@ pub fn validateDelta(before: []const Entry, after: []const Entry, delta: m.Delta
                 if (try m.timestamp(old.?.record.expires_at) >= wrote - m.skew_allow or
                     !m.eq(u8, action.expired_at orelse return error.InvalidClaimDelta, old.?.record.expires_at)) return error.UnauthorizedClaimDelta;
             } else return error.ClaimDeltaDiffMismatch;
+        } else if (old != null and next != null and !m.eq(u8, old.?.oid, next.?.oid)) {
+            const previous = old.?.record;
+            const renewed = next.?.record;
+            if (!m.eq(u8, action.op, "renew")) return error.UnsupportedClaimLifecycleDelta;
+            if (action.expired_at != null or action.authorized_by != null or
+                !previous.holder.sameDevice(signer) or !renewed.holder.sameDevice(signer) or
+                !m.eq(u8, previous.claim_id, renewed.claim_id) or
+                !m.eq(u8, previous.repo_id, renewed.repo_id) or
+                !m.eq(u8, previous.acquired_at, renewed.acquired_at) or
+                renewed.lease_seq <= previous.lease_seq or previous.revoked or
+                try m.compareTime(previous.expires_at, delta.wrote_at) != .gt or
+                try m.compareTime(renewed.expires_at, previous.expires_at) != .gt) return error.UnauthorizedClaimDelta;
         } else {
-            // Lifecycle and administrative writes are deliberately unavailable
-            // in phase 1. Fail closed rather than weaken their admission rules.
             return error.UnsupportedClaimLifecycleDelta;
         }
     }
@@ -181,6 +191,13 @@ pub fn write(a: A, db: *index.SqliteDb, before: State, after: []const Entry, del
     if (before.head) |parent| try args.appendSlice(a, &.{ "-p", parent });
     const commit = std.mem.trim(u8, try git.gitCheckedInput(a, args.items, message), "\r\n");
     try verifySigner(a, db, commit, delta.writer, true);
+    // Signing (including an interactive signer) can outlast the old lease.
+    // Recheck immediately before CAS; a new deadline cannot revive an old one.
+    for (delta.actions) |action| {
+        if (!m.eq(u8, action.op, "renew")) continue;
+        const old = (find(before.entries, action.claim_id) orelse return error.InvalidClaimDelta).record;
+        if (try old.expired(old.holder, @import("compat").timestamp())) return error.ClaimRenewalDeadlineElapsed;
+    }
     // An empty old OID requires absence (also works with SHA-256 repositories).
     var result = try git.runCommand(a, &.{ "git", "update-ref", "--no-deref", ref, commit, before.head orelse "" }, null, git.max_git_output);
     defer result.deinit();
@@ -265,4 +282,44 @@ test "declared actions must match diff exactly, and acquisitions cannot create c
     try std.testing.expectError(error.ConflictingClaimLedger, validateDelta(&.{entry}, &.{ entry, added }, delta));
     delta.actions = &.{action};
     try std.testing.expectError(error.UnauthorizedClaimDelta, validateDelta(&.{}, &.{entry}, delta));
+}
+
+test "renewal diff rejects foreign holders, stale sequences, expiry, and revocation" {
+    var old = m.exampleRecord();
+    var next = old;
+    next.lease_seq = 2;
+    next.expires_at = "2026-09-12T12:29:00Z";
+    var delta: m.Delta = .{
+        .@"$schema" = "urn:gitomi:claim-delta:v1",
+        .repo_id = old.repo_id,
+        .writer = .{ .principal = "alice", .device = "laptop" },
+        .actions = &.{.{ .op = "renew", .claim_id = old.claim_id }},
+        .wrote_at = "2026-09-12T12:14:00Z",
+    };
+    try validateDelta(&.{.{ .oid = "old", .record = old }}, &.{.{ .oid = "new", .record = next }}, delta);
+    for (0..10) |scenario| {
+        var invalid = next;
+        var previous = old;
+        var d = delta;
+        switch (scenario) {
+            0 => invalid.lease_seq = old.lease_seq,
+            1 => invalid.holder.principal = "bob",
+            2 => previous.holder.principal = "bob",
+            3 => invalid.acquired_at = "2026-09-12T12:01:00Z",
+            4 => invalid.repo_id = "018f0000-0000-7000-8000-000000000099",
+            5 => previous.revoked = true,
+            6 => invalid.expires_at = old.expires_at,
+            7 => d.wrote_at = old.expires_at,
+            8 => d.actions = &.{.{ .op = "renew", .claim_id = old.claim_id, .authorized_by = "alice" }},
+            9 => d.actions = &.{.{ .op = "renew", .claim_id = old.claim_id, .expired_at = old.expires_at }},
+            else => unreachable,
+        }
+        try std.testing.expectError(error.UnauthorizedClaimDelta, validateDelta(&.{.{ .oid = "old", .record = previous }}, &.{.{ .oid = "new", .record = invalid }}, d));
+    }
+    // Timestamp comparisons retain sub-second precision at admission. Holder
+    // execution still rounds its own deadline down and stops conservatively.
+    old.expires_at = "2026-09-12T12:15:00.1Z";
+    next.expires_at = "2026-09-12T12:15:00.2Z";
+    delta.wrote_at = "2026-09-12T12:15:00.01Z";
+    try validateDelta(&.{.{ .oid = "old", .record = old }}, &.{.{ .oid = "new", .record = next }}, delta);
 }

@@ -1,6 +1,6 @@
-# Local path claims and commit checks (phases 1–2)
+# Local path claims, renewal, and commit checks
 
-`gt claim` implements local acquisition and the pre-commit conflict check from
+`gt claim` implements local acquisition, renewal, reaping, and the pre-commit conflict check from
 [`spec/08_CLAIMS.md`](../spec/08_CLAIMS.md). Initialize Gitomi with `gt init`
 and configure commit signing and verification as for other signed Gitomi writes.
 The signing key must belong to an accepted device binding.
@@ -8,6 +8,7 @@ The signing key must belong to an accepted device binding.
 ```sh
 git config gitomi.claims.mode single-store
 gt claim acquire 'src/auth/**' --ttl 15m --reason 'refactoring token validation' --json
+gt claim renew <claim-id> --ttl 15m --lease-seq <captured-sequence> --json
 gt claim check 'src/auth/**'
 gt claim ls --all
 gt peers 'src/auth/**'
@@ -39,6 +40,37 @@ Durations use `s`, `m`, or `h`. Check supports `--mode` and `--advisory-only`.
 JSON acquire output includes `deployment_mode`, `established`, and the `claim`
 record with its `claim_id`, `lease_seq`, and deadline. List output contains a
 `claims` array. Displayed peer text is quoted/escaped, capped, and marked as data.
+
+## Renewal and expiry collection
+
+`gt claim renew <claim-id> [--ttl 15m] [--lease-seq N] [--run-id UUID] [--json]`
+extends a live claim belonging to the current holder/run. `--ttl` measures the
+new deadline from now and must extend the existing deadline. Renew when less
+than one third of the lease remains; avoid renewing more often than every 30s.
+The command preserves claim metadata and advances `lease_seq` by one. Capture
+the returned sequence and deadline for subsequent operations. `--lease-seq N`
+optionally requires your previously captured sequence, including after a CAS
+retry; concurrent renewals using the same sequence cannot both succeed.
+
+An absent, expired, revoked, differently held, or sequence-mismatched lease
+returns **4**, with recovery instructions. Revocation keeps excluding peers
+until expiry. Signing is followed by another old-deadline check before the CAS;
+expiry during a slow signer refuses renewal. A deadline crossed during the ref
+update also returns 4, even if the new record was published: stop work and
+inspect the ledger before acquiring a fresh claim.
+
+`acquired_at` never changes. Under the current record limit, no renewal may
+extend a claim beyond four hours after its original acquisition. Choose a
+shorter TTL or stop work, release, and acquire a new claim. Renewal does not
+supervise an editor or command, arm a watchdog, or authorize work past a deadline.
+
+Successful acquire, renew, and release writes also collect expired records when
+there is room in the 512-action delta limit. Every collected record is strictly
+past its deadline **plus 30s**, even for the writer's own claims and revoked
+claims. Each deletion carries a `reap` action with the original `expired_at`.
+Live claims retain their blob bytes; reads, conflicts, and other refusals do not
+trigger a sweep. Additional expired records wait for a later write when the
+action budget is full.
 
 `gt peers [paths...]` shows one line per relevant live claim held by another
 holder/run, including shared readers. It displays at most 50 claims, summarizes
@@ -86,7 +118,7 @@ configuration, I/O, and invalid-ledger errors still fail closed.
 ## Protocol and implementation status
 
 Exit codes: **0** success, **1** usage/configuration/IO/invalid ledger,
-**3** conflict (do not proceed), **4** lease expired before confirmation,
+**3** conflict (do not proceed), **4** stale, revoked, or expired lease,
 **5** CAS contention (retry). Code **6** is reserved for future federated
 operations held locally but not established. Refusals explain recovery.
 
@@ -100,14 +132,24 @@ clock skew. Revocation never makes a claim expire sooner.
 Current state comes directly from the tip tree. This initial implementation also
 authenticates the chain's signatures and diffs on every invocation; validation
 cost therefore grows with history. A verified-head cache remains future work.
-The local writer supports acquisition and release, and the validator understands
-expiry-based reap deltas. Other lifecycle deltas fail closed in this phase.
+The local writer and validator support acquisition, renewal, release, and
+expiry-based reaping. The validator checks renewal against both the previous and
+new holder, immutable identity/acquisition fields, a strictly advancing sequence
+and deadline, and the previous lease's expiry and revocation. Administrative
+modifications still fail closed.
 
-Renewal, watchdog-backed gated operations, automatic reaping,
-compaction, federation, AGENTS template installation, and MCP exposure remain
+Watchdog-backed gated operations, administrative revocation, compaction,
+federation, AGENTS template installation, and MCP exposure remain
 later phases. `check` is a point-in-time advisory conflict query, not a fenced
 operation or permission to continue beyond a lease deadline. Stop work before
-your lease expires; this phase does not supervise a running editor or command.
+your lease expires; this version does not supervise a running editor or command.
+
+Two protocol questions need resolution before administrative writes: §6 names
+`claims.admin`, but `03_RBAC.md` does not define its role mapping or delegation
+scope; §10.3 permits a parentless compaction root with other holders' records,
+but §5.2/§6 do not define the delta encoding or evidence that authenticates that
+root against its replaced tree. No protocol text or formal model has been changed
+to invent those rules.
 
 Tests include signed acquire/conflict/release, readers, separate signers/runs,
 waiting, malformed and unauthorized ledger changes, and races forced to prepare
@@ -118,3 +160,9 @@ Phase 2 tests additionally cover bounded peer summaries, safe recovery commands,
 staged versus unstaged changes, rename sources and destinations, deletions,
 unusual filenames, more than 64 staged files, partial commits, initial commits,
 linked worktrees, hook preservation, and explicit bypass.
+
+Lifecycle tests cover signed renewal and forged renewal rejection, stale tokens
+and runs, the immutable acquisition time and lifetime bound, expiry during
+signing, live revocations retaining exclusion, foreign expiry collection, the
+skew boundary and action budget, and simultaneous renewal with one captured
+token (exactly one success and one stale refusal).
