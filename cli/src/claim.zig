@@ -7,26 +7,44 @@ const io = @import("io.zig");
 const util = @import("util.zig");
 const m = @import("claims/model.zig");
 const ledger = @import("claims/ledger.zig");
+const display = @import("claims/display.zig");
+const hooks = @import("claims/hooks.zig");
 const A = std.mem.Allocator;
 
 pub const usage =
     "gt claim acquire <paths>... [--mode write|read] [--ttl 15m] [--reason TEXT] [--wait [5m]] [--run-id UUID] [--json]\n" ++
     "gt claim check <paths>... [--mode write|read] [--run-id UUID] [--advisory-only]\n" ++
+    "gt claim check --staged [--run-id UUID] [--advisory-only]\n" ++
     "gt claim release <claim-id> | --all | --run UUID\n" ++
-    "gt claim ls [--all] [--mine] [--json]\n";
+    "gt claim ls [--all] [--mine] [--json]\n" ++
+    "gt claim hook install|print\n" ++
+    "gt peers [<paths>...] [--run-id UUID]\n";
 
 pub fn run(allocator: A, args: []const []const u8, _: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     execute(arena.allocator(), allocator, args) catch |err| {
         switch (err) {
+            error.UserError => return err,
             error.ClaimConflict, error.ClaimContention, error.ClaimStale => return err,
             else => {
-                try io.eprint("gt claim: {s}. No claim operation was confirmed.\n  Run `gt claim --help` to correct arguments, `gt status` to check initialization, or `git config --get-regexp '^(user|gpg)\\.'` to check signing.\n  If the ledger is invalid, ask its maintainer to inspect `git log refs/gitomi/claims/ledger`; do not edit through a conflict.\n", .{@errorName(err)});
+                try io.eprint("gt claim: {s}. No claim operation was confirmed.\n  Run `gt claim --help` to correct arguments, `gt status` to check initialization (`gt init` if uninitialized), or `git config --get-regexp '^(user|gpg)\\.'` to check signing.\n  If the ledger is invalid, ask its maintainer to inspect `git log refs/gitomi/claims/ledger`; do not edit through a conflict.\n", .{@errorName(err)});
                 return error.UserError;
             },
         }
     };
+}
+
+pub fn runPeers(allocator: A, args: []const []const u8, _: []const u8) !void {
+    const forwarded = try allocator.alloc([]const u8, args.len + 1);
+    defer allocator.free(forwarded);
+    forwarded[0] = "peers";
+    @memcpy(forwarded[1..], args);
+    if (args.len == 1 and (m.eq(u8, args[0], "--help") or m.eq(u8, args[0], "-h"))) {
+        try io.out("gt peers [<paths>...] [--run-id UUID]\nShows up to 50 live peer claims, excluding the current holder/run. Paths are repository-relative; quote globs.\n", .{});
+        return;
+    }
+    try run(allocator, forwarded, "gt peers");
 }
 
 const Options = struct {
@@ -43,6 +61,7 @@ const Options = struct {
     mine: bool = false,
     json: bool = false,
     advisory: bool = false,
+    staged: bool = false,
 };
 
 fn duration(s: []const u8) !i64 {
@@ -66,7 +85,8 @@ fn parse(a: A, args: []const []const u8) !Options {
     const check = m.eq(u8, o.command, "check");
     const release = m.eq(u8, o.command, "release");
     const ls = m.eq(u8, o.command, "ls");
-    if (!acquire and !check and !release and !ls) return error.UnknownClaimCommand;
+    const peers = m.eq(u8, o.command, "peers");
+    if (!acquire and !check and !release and !ls and !peers) return error.UnknownClaimCommand;
     o.run_id = compat.getEnvVarOwned(a, "GT_CLAIM_RUN_ID") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => "",
         else => return err,
@@ -80,7 +100,11 @@ fn parse(a: A, args: []const []const u8) !Options {
             positional = true;
             continue;
         }
-        if (!positional and std.mem.startsWith(u8, arg, "--")) {
+        if (!positional and check and m.eq(u8, arg, "--staged")) {
+            o.staged = true;
+        } else if (!positional and peers and m.eq(u8, arg, "--run-id")) {
+            o.run_id = try util.requireValue(args, &i, arg);
+        } else if (!positional and std.mem.startsWith(u8, arg, "--")) {
             if (m.eq(u8, arg, "--json") and (acquire or ls)) o.json = true else if (m.eq(u8, arg, "--all") and (release or ls)) o.all = true else if (m.eq(u8, arg, "--mine") and ls) o.mine = true else if (m.eq(u8, arg, "--advisory-only") and check) o.advisory = true else if (m.eq(u8, arg, "--mode") and (acquire or check)) o.mode = try util.requireValue(args, &i, arg) else if (m.eq(u8, arg, "--ttl") and acquire) o.ttl = try duration(try util.requireValue(args, &i, arg)) else if (m.eq(u8, arg, "--reason") and acquire) o.reason = try util.requireValue(args, &i, arg) else if (m.eq(u8, arg, "--run-id") and (acquire or check or ls)) o.run_id = try util.requireValue(args, &i, arg) else if (m.eq(u8, arg, "--run") and release) o.release_run = try util.requireValue(args, &i, arg) else if (m.eq(u8, arg, "--wait") and acquire) {
                 o.wait_seconds = 300;
                 if (i + 1 < args.len) {
@@ -90,14 +114,15 @@ fn parse(a: A, args: []const []const u8) !Options {
                     } else |_| {}
                 }
             } else return error.InvalidClaimOption;
-        } else if (acquire or check) {
+        } else if (acquire or check or peers) {
             if (paths.items.len >= 64) return error.ClaimLimitExceeded;
             try paths.append(a, try m.normalize(a, arg));
         } else if (release and o.id == null) {
             o.id = arg;
         } else return error.InvalidClaimArgument;
     }
-    if ((acquire or check) and paths.items.len == 0) return error.MissingClaimPaths;
+    if ((acquire or (check and !o.staged)) and paths.items.len == 0) return error.MissingClaimPaths;
+    if (o.staged and (paths.items.len != 0 or !m.eq(u8, o.mode, "write"))) return error.StagedCheckRequiresWriteModeAndNoPaths;
     if (!m.eq(u8, o.mode, "write") and !m.eq(u8, o.mode, "read")) return error.InvalidClaimMode;
     if (o.ttl < 30 or o.ttl > 14400) return error.ClaimTtlMustBe30SecondsTo4Hours;
     if (!m.validText(o.reason, 1024)) return error.InvalidClaimReason;
@@ -128,13 +153,30 @@ fn execute(a: A, scratch_allocator: A, args: []const []const u8) !void {
         try io.out("{s}\nDeployment: git config gitomi.claims.mode single-store (default).\nPaths are repository-relative; quote globs. Use a distinct --run-id UUID or GT_CLAIM_RUN_ID for each concurrent agent sharing a signing device.\n", .{usage});
         return;
     }
-    const o = try parse(a, args);
+    if (args.len != 0 and m.eq(u8, args[0], "hook")) {
+        if (args.len != 2) return error.ExpectedHookInstallOrPrint;
+        if (m.eq(u8, args[1], "print")) {
+            try io.out("{s}", .{hooks.script});
+            return;
+        }
+        if (!m.eq(u8, args[1], "install")) return error.ExpectedHookInstallOrPrint;
+        var repo = try repo_mod.discoverRepo(a);
+        defer repo.deinit();
+        var cfg = try repo_mod.loadConfig(a, repo.config_path);
+        defer cfg.deinit();
+        try repo_mod.validateConfigRepoId(a, cfg);
+        try deployment(a);
+        try hooks.install(a);
+        return;
+    }
+    var o = try parse(a, args);
     try deployment(a);
     var repo = try repo_mod.discoverRepo(a);
     defer repo.deinit();
     var cfg = try repo_mod.loadConfig(a, repo.config_path);
     defer cfg.deinit();
     try repo_mod.validateConfigRepoId(a, cfg);
+    if (o.staged) o.paths = try hooks.stagedPaths(a, repo.root);
     const actor: m.Holder = .{ .principal = cfg.principal, .device = cfg.device, .run_id = o.run_id };
     try index.ensureIndex(a, repo);
     var db = try index.SqliteDb.open(a, repo.index_path, index.sqlite.SQLITE_OPEN_READONLY, false);
@@ -152,6 +194,10 @@ fn execute(a: A, scratch_allocator: A, args: []const []const u8) !void {
         const now = compat.timestamp();
         if (m.eq(u8, o.command, "ls")) {
             try list(aa, state, actor, o, now);
+            return;
+        }
+        if (m.eq(u8, o.command, "peers")) {
+            try io.out("{s}", .{try display.peers(aa, state.entries, actor, o.paths, now)});
             return;
         }
         const candidate: m.Record = .{
@@ -182,12 +228,18 @@ fn execute(a: A, scratch_allocator: A, args: []const []const u8) !void {
                     compat.sleep(@intCast(@min(@as(i64, 500), o.wait_seconds.? * 1000 - elapsed) * 1_000_000));
                     continue;
                 }
-                try conflict(aa, peer, now);
+                for (o.paths) |path| {
+                    if (display.relevant(peer, &.{path})) {
+                        try io.eprint("{s}", .{try display.conflict(aa, peer, path, now)});
+                        break;
+                    }
+                }
                 if (o.advisory) return;
+                if (o.staged) try io.eprint("\n  Resolve the staged-path conflict, then retry git commit.\n  To intentionally bypass the advisory hook: git commit --no-verify\n", .{});
                 return error.ClaimConflict;
             }
             if (m.eq(u8, o.command, "check")) {
-                try io.out("No conflicting claims (single-store).\n", .{});
+                if (!o.staged) try io.out("No conflicting claims (single-store).\n", .{});
                 return;
             }
             try m.validate(aa, candidate, id, cfg.repo_id);
@@ -238,13 +290,6 @@ fn execute(a: A, scratch_allocator: A, args: []const []const u8) !void {
     return error.ClaimContention;
 }
 
-fn conflict(a: A, peer: m.Record, now: i64) !void {
-    try io.eprint("BLOCKED  {s}\n  held by {s} (device {s}), {s}, expires in {d}s (peer skew allowance may retain exclusion for 30s longer)\n  reason {s} [peer-supplied text]\n\n  gt claim ls --all    inspect the full ledger\n  Retry your acquire command with --wait 5m, or choose different paths.\n  This repository coordinates parallel agents with leases. Claim paths before editing; exit 3 means do not proceed.\n", .{
-        try m.json(a, try displayPaths(a, peer.paths)),       try m.quoted(a, peer.holder.principal),                    try m.quoted(a, peer.holder.device),
-        if (m.eq(u8, peer.mode, "read")) "read" else "write", @max(@as(i64, 0), try m.timestamp(peer.expires_at) - now), try m.quoted(a, peer.reason),
-    });
-}
-
 fn displayPaths(a: A, paths: []const []const u8) ![]const []const u8 {
     const safe = try a.alloc([]const u8, paths.len);
     for (paths, safe) |p, *s| s.* = try m.displayText(a, p);
@@ -291,4 +336,5 @@ fn stripUnicodeControls(a: A, raw: []const u8) ![]const u8 {
 test {
     _ = @import("claims/model.zig");
     _ = @import("claims/ledger.zig");
+    _ = @import("claims/display.zig");
 }

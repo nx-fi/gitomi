@@ -40,6 +40,7 @@ const Command = struct {
 
 const command_dispatch = std.StaticStringMap(Command).initComptime(.{
     .{ "claim", Command{ .handler = claim.run, .command_name = "gt claim" } },
+    .{ "peers", Command{ .handler = claim.runPeers, .command_name = "gt peers" } },
     .{ "-h", Command{ .handler = runHelp, .command_name = "gt -h" } },
     .{ "--help", Command{ .handler = runHelp, .command_name = "gt --help" } },
     .{ "help", Command{ .handler = runHelp, .command_name = "gt help" } },
@@ -300,6 +301,7 @@ fn printUsage() !void {
     try io.out(
         \\Usage:
         \\  gt claim acquire|release|check|ls ... (gt claim --help)
+        \\  gt peers [<paths>...] [--run-id UUID]
         \\  gt init [--principal ID] [--device ID] [--repo-id UUID] [--access open|closed] [--force]
         \\  gt status
         \\  gt fsck
