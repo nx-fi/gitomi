@@ -16,6 +16,9 @@ node_modules/
 .wrangler/
 website/.wrangler/
 
+# Apalache model-checker output
+_apalache-out/
+
 # Editor and OS files
 .DS_Store
 Thumbs.db

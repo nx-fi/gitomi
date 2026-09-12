@@ -1,5 +1,9 @@
 # Formal Model: GitHub Live Sync
 
+> This directory contains three models. For the claim/lease protocol
+> (`spec/08_CLAIMS.md`) see [CLAIM_LEDGER.md](CLAIM_LEDGER.md) (single-store
+> mode) and [CLAIM_FEDERATED.md](CLAIM_FEDERATED.md) (federated mode).
+
 This directory models the Gitomi <-> GitHub live-sync identity protocol with
 Apalache/TLA+.
 
