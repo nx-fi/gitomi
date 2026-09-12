@@ -10,11 +10,15 @@ const ledger = @import("claims/ledger.zig");
 const display = @import("claims/display.zig");
 const hooks = @import("claims/hooks.zig");
 const lifecycle = @import("claims/lifecycle.zig");
+const exec = @import("claims/exec.zig");
 const A = std.mem.Allocator;
+
+pub const prepareExec = exec.prepare;
 
 pub const usage =
     "gt claim acquire <paths>... [--mode write|read] [--ttl 15m] [--reason TEXT] [--wait [5m]] [--run-id UUID] [--json]\n" ++
     "gt claim renew <claim-id> [--ttl 15m] [--lease-seq N] [--run-id UUID] [--json]\n" ++
+    "gt claim exec <claim-id> --lease-seq N --expires-at TIMESTAMP [--run-id UUID] [--abort-margin 5s] [--mode write|read] -- <command> [args...]\n" ++
     "gt claim check <paths>... [--mode write|read] [--run-id UUID] [--advisory-only]\n" ++
     "gt claim check --staged [--run-id UUID] [--advisory-only]\n" ++
     "gt claim release <claim-id> | --all | --run UUID\n" ++
@@ -31,6 +35,18 @@ pub fn run(allocator: A, args: []const []const u8, _: []const u8) !void {
             error.ClaimConflict, error.ClaimContention, error.ClaimStale => return err,
             error.ClaimHolderChanged, error.ClaimSequenceChanged, error.ClaimRevoked, error.ClaimRenewalDeadlineElapsed, error.ClaimSequenceExhausted, error.ClaimLeaseNotFound => {
                 try io.eprint("gt claim: {s}; this lease cannot authorize further work. Stop work under the old token.\n  Run `gt claim ls --all` to inspect the holder/run and current lease. Acquire a fresh claim before resuming; do not renew a revoked or expired lease.\n", .{@errorName(err)});
+                return error.ClaimStale;
+            },
+            error.ClaimExecRequiresWriteLease => {
+                try io.eprint("gt claim exec: a read lease cannot authorize a write command. No command was started.\n  Acquire a write claim for this operation, or use --mode read for a command that only reads the claimed paths.\n", .{});
+                return error.UserError;
+            },
+            error.ClaimCapturedDeadlineChanged => {
+                try io.eprint("gt claim exec: the captured deadline does not match the ledger record. No command was started.\n  Use the sequence and expires_at returned together by acquisition or renewal; run `gt claim ls --mine --json` to inspect your leases.\n", .{});
+                return error.ClaimStale;
+            },
+            error.ClaimExecutionDeadlineElapsed => {
+                try io.eprint("gt claim exec: the captured lease reached its abort margin, expired, or the wall clock changed. Do not proceed under this token.\n  The command was either refused before starting or its process group was stopped. Inspect any partial work. Renew a still-live lease or acquire a fresh claim, then retry with the returned sequence and deadline.\n", .{});
                 return error.ClaimStale;
             },
             error.ClaimRenewalMustExtendDeadline => {
@@ -77,6 +93,9 @@ const Options = struct {
     advisory: bool = false,
     staged: bool = false,
     lease_seq: ?u64 = null,
+    expires_at: ?[]const u8 = null,
+    argv: []const []const u8 = &.{},
+    abort_margin: i64 = 5,
 };
 
 fn duration(s: []const u8) !i64 {
@@ -102,7 +121,8 @@ fn parse(a: A, args: []const []const u8) !Options {
     const renew = m.eq(u8, o.command, "renew");
     const ls = m.eq(u8, o.command, "ls");
     const peers = m.eq(u8, o.command, "peers");
-    if (!acquire and !check and !release and !renew and !ls and !peers) return error.UnknownClaimCommand;
+    const execute_command = m.eq(u8, o.command, "exec");
+    if (!acquire and !check and !release and !renew and !ls and !peers and !execute_command) return error.UnknownClaimCommand;
     o.run_id = compat.getEnvVarOwned(a, "GT_CLAIM_RUN_ID") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => "",
         else => return err,
@@ -113,6 +133,10 @@ fn parse(a: A, args: []const []const u8) !Options {
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (!positional and m.eq(u8, arg, "--")) {
+            if (execute_command) {
+                o.argv = args[i + 1 ..];
+                break;
+            }
             positional = true;
             continue;
         }
@@ -120,13 +144,19 @@ fn parse(a: A, args: []const []const u8) !Options {
             o.staged = true;
         } else if (!positional and peers and m.eq(u8, arg, "--run-id")) {
             o.run_id = try util.requireValue(args, &i, arg);
-        } else if (!positional and renew and m.eq(u8, arg, "--lease-seq")) {
+        } else if (!positional and (renew or execute_command) and m.eq(u8, arg, "--lease-seq")) {
             const value = try util.requireValue(args, &i, arg);
             for (value) |c| if (!std.ascii.isDigit(c)) return error.InvalidClaimSequence;
             o.lease_seq = std.fmt.parseInt(u64, value, 10) catch return error.InvalidClaimSequence;
             if (o.lease_seq.? == 0) return error.InvalidClaimSequence;
+        } else if (!positional and execute_command and m.eq(u8, arg, "--expires-at")) {
+            o.expires_at = try util.requireValue(args, &i, arg);
+            _ = try m.timestamp(o.expires_at.?);
+        } else if (!positional and execute_command and m.eq(u8, arg, "--abort-margin")) {
+            o.abort_margin = try duration(try util.requireValue(args, &i, arg));
+            if (o.abort_margin > 3600) return error.ClaimAbortMarginMustBe1SecondTo1Hour;
         } else if (!positional and std.mem.startsWith(u8, arg, "--")) {
-            if (m.eq(u8, arg, "--json") and (acquire or renew or ls)) o.json = true else if (m.eq(u8, arg, "--all") and (release or ls)) o.all = true else if (m.eq(u8, arg, "--mine") and ls) o.mine = true else if (m.eq(u8, arg, "--advisory-only") and check) o.advisory = true else if (m.eq(u8, arg, "--mode") and (acquire or check)) o.mode = try util.requireValue(args, &i, arg) else if (m.eq(u8, arg, "--ttl") and (acquire or renew)) o.ttl = try duration(try util.requireValue(args, &i, arg)) else if (m.eq(u8, arg, "--reason") and acquire) o.reason = try util.requireValue(args, &i, arg) else if (m.eq(u8, arg, "--run-id") and (acquire or renew or check or ls)) o.run_id = try util.requireValue(args, &i, arg) else if (m.eq(u8, arg, "--run") and release) o.release_run = try util.requireValue(args, &i, arg) else if (m.eq(u8, arg, "--wait") and acquire) {
+            if (m.eq(u8, arg, "--json") and (acquire or renew or ls)) o.json = true else if (m.eq(u8, arg, "--all") and (release or ls)) o.all = true else if (m.eq(u8, arg, "--mine") and ls) o.mine = true else if (m.eq(u8, arg, "--advisory-only") and check) o.advisory = true else if (m.eq(u8, arg, "--mode") and (acquire or check or execute_command)) o.mode = try util.requireValue(args, &i, arg) else if (m.eq(u8, arg, "--ttl") and (acquire or renew)) o.ttl = try duration(try util.requireValue(args, &i, arg)) else if (m.eq(u8, arg, "--reason") and acquire) o.reason = try util.requireValue(args, &i, arg) else if (m.eq(u8, arg, "--run-id") and (acquire or renew or check or ls or execute_command)) o.run_id = try util.requireValue(args, &i, arg) else if (m.eq(u8, arg, "--run") and release) o.release_run = try util.requireValue(args, &i, arg) else if (m.eq(u8, arg, "--wait") and acquire) {
                 o.wait_seconds = 300;
                 if (i + 1 < args.len) {
                     if (duration(args[i + 1])) |seconds| {
@@ -138,7 +168,7 @@ fn parse(a: A, args: []const []const u8) !Options {
         } else if (acquire or check or peers) {
             if (paths.items.len >= 64) return error.ClaimLimitExceeded;
             try paths.append(a, try m.normalize(a, arg));
-        } else if ((release or renew) and o.id == null) {
+        } else if ((release or renew or execute_command) and o.id == null) {
             o.id = arg;
         } else return error.InvalidClaimArgument;
     }
@@ -151,6 +181,7 @@ fn parse(a: A, args: []const []const u8) !Options {
     if (o.id) |id| if (!m.uuid(id)) return error.InvalidClaimId;
     if (o.release_run) |id| if (!m.uuid(id)) return error.InvalidClaimRunId;
     if (release and @as(u8, @intFromBool(o.id != null)) + @as(u8, @intFromBool(o.all)) + @as(u8, @intFromBool(o.release_run != null)) != 1) return error.ChooseClaimIdAllOrRun;
+    if (execute_command and (o.id == null or o.lease_seq == null or o.expires_at == null or o.argv.len == 0)) return error.ExecRequiresClaimIdSequenceDeadlineAndCommand;
     if (renew and o.id == null) return error.MissingClaimId;
     o.paths = paths.items;
     return o;
@@ -220,6 +251,10 @@ fn execute(a: A, scratch_allocator: A, args: []const []const u8) !void {
         }
         if (m.eq(u8, o.command, "peers")) {
             try io.out("{s}", .{try display.peers(aa, state.entries, actor, o.paths, now)});
+            return;
+        }
+        if (m.eq(u8, o.command, "exec")) {
+            try exec.run(aa, state.entries, actor, .{ .claim_id = o.id.?, .lease_seq = o.lease_seq.?, .expires_at = o.expires_at.? }, o.argv, o.abort_margin, o.mode);
             return;
         }
         const release = m.eq(u8, o.command, "release");
@@ -366,4 +401,5 @@ test {
     _ = @import("claims/ledger.zig");
     _ = @import("claims/display.zig");
     _ = @import("claims/lifecycle.zig");
+    _ = @import("claims/exec.zig");
 }

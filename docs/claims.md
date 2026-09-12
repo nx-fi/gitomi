@@ -1,6 +1,7 @@
-# Local path claims, renewal, and commit checks
+# Local path claims, supervised execution, and commit checks
 
-`gt claim` implements local acquisition, renewal, reaping, and the pre-commit conflict check from
+`gt claim` implements local acquisition, renewal, reaping, supervised execution,
+and the pre-commit conflict check from
 [`spec/08_CLAIMS.md`](../spec/08_CLAIMS.md). Initialize Gitomi with `gt init`
 and configure commit signing and verification as for other signed Gitomi writes.
 The signing key must belong to an accepted device binding.
@@ -77,6 +78,73 @@ holder/run, including shared readers. It displays at most 50 claims, summarizes
 paths and reasons, and reports omitted claims. It displays claim metadata, never
 session transcripts. `--run-id UUID` or `GT_CLAIM_RUN_ID` identifies your run.
 
+## Fenced execution and deadline supervision
+
+Use the claim ID, sequence, and deadline returned together by acquisition or
+renewal to run an abortable local command:
+
+```sh
+gt claim exec "$claim_id" --lease-seq "$lease_seq" --expires-at "$expires_at" \
+  --run-id "$worker_id" -- git commit -m 'Update authentication'
+```
+
+The gate authenticates the local ledger and checks the exact holder/run,
+sequence, and captured deadline before starting the command. A forged later
+deadline, stale sequence, missing record, or wrong holder returns 4 without
+starting it. There is no fetch, signing, or ledger write on this path. The
+current implementation still requires single-store deployment.
+
+Execution defaults to `--mode write`, which requires a write lease. Use
+`--mode read` only for commands that read the claimed paths; either a read or
+write lease can authorize those operations. Claims remain advisory: the command
+must confine its repository mutations to its claimed paths. This wrapper does
+not infer touched paths or enforce filesystem read-only access.
+
+A separate Linux watchdog process is armed before the command may run. It aborts
+at `expires_at - abort_margin`; `--abort-margin` defaults to 5s and accepts 1s to
+1h. A lease already within that margin refuses execution. The watchdog uses an
+absolute wall-clock timer and an elapsed-time timer that includes machine
+suspension. A wall-clock step also cancels execution. Pausing the worker or the
+invoking CLI does not pause the watchdog. Killing the invoking CLI closes its
+control pipe, causing the watchdog to abort the worker.
+
+The watchdog sends SIGKILL to the command's process group and waits for its
+processes to exit. This includes background descendants, even when the
+foreground command exits successfully. Linux seccomp prevents descendants from
+escaping the group through session/group changes or a new PID/user namespace;
+privilege-gaining exec is disabled. Commands that require these operations fail
+inside the wrapper. This is process containment for cancellation, not a general
+security sandbox. The initial implementation supports Linux x86_64 and aarch64;
+other platforms refuse before starting the command. Tests currently run on
+Linux x86_64.
+
+Choose a margin that exceeds the operating environment's scheduling and abort
+latency. Use this for local commands with abortable effects. Remote jobs,
+external services, and operations whose effects cannot be stopped by terminating
+the local process need an adapter with its own cancellation and completion
+checks. The protocol's bounded watchdog/abort assumption still applies; a
+suspended or failed watchdog itself cannot enforce a deadline.
+
+This version chooses abort instead of automatic renewal. A separate renewal
+does not update the token or extend the deadline of an already running command.
+Run the next command with the newly captured sequence and deadline. Revocation
+preserves the old exclusion window and blocks renewal; it does not shorten an
+already captured deadline. Do not release a claim while its supervised command
+is still running.
+
+The command inherits its working directory, stdin, stdout, stderr, and existing
+environment. Arguments after `--` are forwarded literally, without shell
+interpolation. The wrapper supplies `GT_CLAIM_RUN_ID`, `GT_CLAIM_ID`,
+`GT_CLAIM_LEASE_SEQ`, and `GT_CLAIM_EXPIRES_AT`, replacing stale inherited values.
+In particular, `--run-id` reaches the existing pre-commit conflict hook.
+
+A successful command returns 0. Deadline abort or a stale fence returns 4.
+Cancellation, setup failures, and nonzero command exits return 1, with the
+command's status reported on stderr; a child exit 3 cannot masquerade as a claim
+conflict. The claim is retained after success or failure. Inspect partial work
+before retrying, and release the claim when finished. Process termination does
+not roll back files or completed effects.
+
 ## Pre-commit conflict check
 
 ```sh
@@ -107,9 +175,9 @@ the hook's environment. An actor with the same configured device and an empty
 run ID is indistinguishable from other callers using that same empty triple.
 
 Passing this check does not reserve paths, validate a captured fencing token, or
-supervise the duration of `git commit`. Token fencing and watchdog-backed
-execution remain part of lifecycle support. In particular, it does not grant
-permission to keep working beyond a lease deadline.
+supervise the duration of `git commit`. Use `gt claim exec` around an abortable
+commit command to add token fencing and deadline supervision. The hook alone
+does not grant permission to keep working beyond a lease deadline.
 
 To explicitly bypass the advisory hook, use `git commit --no-verify`.
 `gt claim check --staged --advisory-only` reports conflicts while returning 0;
@@ -138,20 +206,20 @@ new holder, immutable identity/acquisition fields, a strictly advancing sequence
 and deadline, and the previous lease's expiry and revocation. Administrative
 modifications still fail closed.
 
-Watchdog-backed gated operations, administrative revocation, compaction,
-federation, AGENTS template installation, and MCP exposure remain
-later phases. `check` is a point-in-time advisory conflict query, not a fenced
+Administrative revocation, compaction, federation, AGENTS template installation,
+and MCP exposure remain later phases. `check` is a point-in-time advisory conflict query, not a fenced
 operation or permission to continue beyond a lease deadline. Stop work before
-your lease expires; this version does not supervise a running editor or command.
+your lease expires; only commands explicitly launched through `exec` receive its
+supervision.
 
 The product decisions for the remaining work are recorded in
 [ADR 002: Claims With Optional Orchestration](../spec/ADR/002_CLAIMS_WITH_OPTIONAL_ORCHESTRATION.md).
 Coordination works without an orchestrator. Claim administration will belong to
 maintainers and owners, with explicit repository or worker-run delegations.
 Initial compaction will re-root only an empty, verified ledger through CAS;
-active claims keep their authenticated history. Local watchdog supervision comes
-next. These are accepted implementation directions; the normative amendments,
-authorization-evidence format, and corresponding CLI features are still pending.
+active claims keep their authenticated history. Local watchdog supervision is
+implemented. The administrative/compaction normative amendments, authorization
+evidence, and corresponding CLI features are still pending.
 
 Tests include signed acquire/conflict/release, readers, separate signers/runs,
 waiting, malformed and unauthorized ledger changes, and races forced to prepare
@@ -168,3 +236,10 @@ and runs, the immutable acquisition time and lifetime bound, expiry during
 signing, live revocations retaining exclusion, foreign expiry collection, the
 skew boundary and action budget, and simultaneous renewal with one captured
 token (exactly one success and one stale refusal).
+
+Execution tests cover captured-token refusals, read/write mode checks, literal
+arguments and environment propagation, a real signed commit with the hook,
+paused workers and callers, killed callers, cancellation, background cleanup,
+session escape refusal, and an external renewal that cannot extend an old
+operation's captured deadline. They check that workers and descendants are
+reaped before the holder deadline and that the ledger remains unchanged.

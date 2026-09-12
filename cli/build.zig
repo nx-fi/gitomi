@@ -67,6 +67,10 @@ fn createMainModule(
     });
     mod.addImport("compat", compat_mod);
     mod.addOptions("build_options", build_options);
+    if (target.result.os.tag == .linux) mod.addCSourceFile(.{
+        .file = b.path("src/claims/watchdog.c"),
+        .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" },
+    });
     addSqlite(mod, sqlite_dep);
     addTreeSitter(mod, tree_sitter);
     return mod;

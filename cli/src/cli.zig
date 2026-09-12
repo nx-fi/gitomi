@@ -100,8 +100,12 @@ fn realMain(process_args: std.process.Args) !void {
     defer args_arena.deinit();
     const raw_args = try process_args.toSlice(args_arena.allocator());
     const args = try args_arena.allocator().alloc([]const u8, raw_args.len);
-    for (raw_args, args) |raw_arg, *arg| arg.* = raw_arg;
+    // Keep the command's actual arguments independent of the public argv
+    // buffer scrubbed below, including literal arguments forwarded by exec.
+    for (raw_args, args) |raw_arg, *arg| arg.* = try args_arena.allocator().dupe(u8, raw_arg);
     scrubSensitiveProcessArgs(process_args);
+
+    if (args.len >= 3 and std.mem.eql(u8, args[1], "claim") and std.mem.eql(u8, args[2], "exec")) try claim.prepareExec();
 
     var repo = try repo_mod.discoverRepo(allocator);
     defer repo.deinit();
@@ -300,7 +304,7 @@ fn runWeb(allocator: Allocator, args: []const []const u8, _: []const u8) !void {
 fn printUsage() !void {
     try io.out(
         \\Usage:
-        \\  gt claim acquire|renew|release|check|ls ... (gt claim --help)
+        \\  gt claim acquire|renew|exec|release|check|ls ... (gt claim --help)
         \\  gt peers [<paths>...] [--run-id UUID]
         \\  gt init [--principal ID] [--device ID] [--repo-id UUID] [--access open|closed] [--force]
         \\  gt status

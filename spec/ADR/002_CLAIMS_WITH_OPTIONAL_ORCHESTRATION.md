@@ -1,7 +1,7 @@
 # ADR 002: Claims With Optional Orchestration
 
-Status: Accepted product and implementation direction; the corresponding CLI
-features and normative protocol amendments are not yet implemented.
+Status: Accepted product and implementation direction. Local supervised execution
+is implemented; administration and compaction amendments remain pending.
 
 Date: 2026-09-12
 
@@ -41,7 +41,7 @@ holder/run triple would exempt them from one another's conflict checks.
 Run IDs provide cooperative isolation; separate signing identities are needed
 when workers must have different signing authority.
 
-The next enforcement feature is local supervised execution with a fencing token
+The enforcement path is local supervised execution with a fencing token
 and a deadline watchdog. The CLI provides this for standalone use; a pipeline
 adapter may supply equivalent supervision. The supervisor must remain effective
 while the worker is blocked or paused. Unsupported cancellation must refuse a
@@ -145,8 +145,9 @@ remaining disposable. Cache loss must fall back to validation from refs.
 Delivery order is supervised execution, claim administration with explicit
 authorization evidence, then empty-ledger compaction and verification caching.
 The decisions above resolve the product questions; wire-format and code changes
-must be implemented and tested together. The existing CLI does not yet implement
-these new features.
+must be implemented and tested together. The CLI now implements local supervised
+execution on Linux. Administration, compaction, and their normative amendments
+remain pending.
 
 Before changing the normative authorization or transition rules, update
 `03_RBAC.md` and `08_CLAIMS.md` and the relevant formal models. Run
