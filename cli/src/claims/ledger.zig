@@ -62,10 +62,14 @@ fn verifySigner(a: A, db: *index.SqliteDb, commit: []const u8, writer: m.Writer,
     if (!(try stmt.step())) return error.UnboundClaimSigner;
 }
 
-pub fn validateDelta(before: []const Entry, after: []const Entry, delta: m.Delta) !void {
+fn validateDeltaAt(before: []const Entry, after: []const Entry, delta: m.Delta, verifier_now: i64) !void {
     if (!m.eq(u8, delta.@"$schema", "urn:gitomi:claim-delta:v1") or
         delta.actions.len == 0 or delta.actions.len > 512) return error.InvalidClaimDelta;
     const wrote = try m.timestamp(delta.wrote_at);
+    // A signature authenticates wrote_at but cannot make it a trustworthy
+    // clock. Bound every commit, including intermediate fetched commits, to the
+    // verifier's clock before using wrote_at for expiry authorization.
+    if (wrote > verifier_now + m.max_skew) return error.FutureClaimDelta;
     const signer: m.Holder = .{ .principal = delta.writer.principal, .device = delta.writer.device };
     var changed: usize = 0;
     for (before) |old| {
@@ -117,6 +121,10 @@ pub fn validateDelta(before: []const Entry, after: []const Entry, delta: m.Delta
     }
 }
 
+pub fn validateDelta(before: []const Entry, after: []const Entry, delta: m.Delta) !void {
+    return validateDeltaAt(before, after, delta, @import("compat").timestamp());
+}
+
 fn commitDelta(a: A, head: []const u8) !m.Delta {
     const raw = try git.gitCheckedInputMax(a, &.{ "cat-file", "commit", head }, null, 300 * 1024);
     const start = (std.mem.indexOf(u8, raw, "\n\n") orelse return error.InvalidClaimCommit) + 2;
@@ -128,11 +136,11 @@ fn commitDelta(a: A, head: []const u8) !m.Delta {
     return (try std.json.parseFromSlice(m.Delta, a, body, .{ .allocate = .alloc_always })).value;
 }
 
-pub fn verifyCommit(a: A, db: *index.SqliteDb, head: []const u8, before: []const Entry, after: []const Entry, repo_id: []const u8) !void {
+pub fn verifyCommit(a: A, db: *index.SqliteDb, head: []const u8, before: []const Entry, after: []const Entry, repo_id: []const u8, verifier_now: i64) !void {
     const delta = try commitDelta(a, head);
     if (!m.eq(u8, delta.repo_id, repo_id)) return error.InvalidClaimRepository;
     try verifySigner(a, db, head, delta.writer, false);
-    try validateDelta(before, after, delta);
+    try validateDeltaAt(before, after, delta, verifier_now);
 }
 
 // Read current state directly from the tip tree. Independently authenticate the
@@ -140,6 +148,7 @@ pub fn verifyCommit(a: A, db: *index.SqliteDb, head: []const u8, before: []const
 // A future verified-head cache can avoid rechecking history across invocations.
 pub fn load(a: A, scratch_allocator: A, db: *index.SqliteDb, repo_id: []const u8) !State {
     const head = (try resolve(a)) orelse return .{};
+    const verifier_now = @import("compat").timestamp();
     const chain = try git.gitChecked(a, &.{ "rev-list", "--first-parent", "--reverse", "--parents", head });
     var lines = std.mem.tokenizeScalar(u8, chain, '\n');
     var previous: ?[]const u8 = null;
@@ -156,7 +165,7 @@ pub fn load(a: A, scratch_allocator: A, db: *index.SqliteDb, repo_id: []const u8
         errdefer current_arena.deinit();
         const ca = current_arena.allocator();
         const after = try readTree(ca, commit, repo_id);
-        try verifyCommit(ca, db, commit, before, after, repo_id);
+        try verifyCommit(ca, db, commit, before, after, repo_id, verifier_now);
         previous_arena.deinit();
         previous_arena = current_arena;
         before = after;
@@ -256,6 +265,15 @@ test "delta authority applies only to changed claims; peer deletion waits out sk
     try std.testing.expectError(error.UnauthorizedClaimDelta, validateDelta(&.{alice}, &.{}, delta));
     delta.wrote_at = "2026-09-12T12:15:31Z";
     try validateDelta(&.{alice}, &.{}, delta);
+    try validateDeltaAt(&.{alice}, &.{}, delta, try m.timestamp("2026-09-12T12:15:16Z"));
+    delta.wrote_at = "2026-09-13T12:15:31Z";
+    try std.testing.expectError(error.FutureClaimDelta, validateDeltaAt(
+        &.{alice},
+        &.{},
+        delta,
+        try m.timestamp("2026-09-12T12:15:16Z"),
+    ));
+    delta.wrote_at = "2026-09-12T12:15:31Z";
     delta.actions = &.{.{ .op = "steal", .claim_id = c.claim_id, .authorized_by = "bob" }};
     try std.testing.expectError(error.UnauthorizedClaimDelta, validateDelta(&.{alice}, &.{}, delta));
 }
