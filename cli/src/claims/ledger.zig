@@ -62,10 +62,13 @@ fn verifySigner(a: A, db: *index.SqliteDb, commit: []const u8, writer: m.Writer,
     if (!(try stmt.step())) return error.UnboundClaimSigner;
 }
 
-pub fn validateDelta(before: []const Entry, after: []const Entry, delta: m.Delta) !void {
+pub fn validateDelta(before: []const Entry, after: []const Entry, delta: m.Delta, observed_now: i64) !void {
     if (!m.eq(u8, delta.@"$schema", "urn:gitomi:claim-delta:v1") or
         delta.actions.len == 0 or delta.actions.len > 512) return error.InvalidClaimDelta;
     const wrote = try m.timestamp(delta.wrote_at);
+    // A signer controls wrote_at. Do not let it advance the effective ledger
+    // clock far enough to reap or ignore leases that are still live locally.
+    if (wrote > observed_now and wrote - observed_now > m.skew_allow) return error.InvalidClaimDelta;
     const signer: m.Holder = .{ .principal = delta.writer.principal, .device = delta.writer.device };
     var changed: usize = 0;
     for (before) |old| {
@@ -128,11 +131,11 @@ fn commitDelta(a: A, head: []const u8) !m.Delta {
     return (try std.json.parseFromSlice(m.Delta, a, body, .{ .allocate = .alloc_always })).value;
 }
 
-pub fn verifyCommit(a: A, db: *index.SqliteDb, head: []const u8, before: []const Entry, after: []const Entry, repo_id: []const u8) !void {
+pub fn verifyCommit(a: A, db: *index.SqliteDb, head: []const u8, before: []const Entry, after: []const Entry, repo_id: []const u8, observed_now: i64) !void {
     const delta = try commitDelta(a, head);
     if (!m.eq(u8, delta.repo_id, repo_id)) return error.InvalidClaimRepository;
     try verifySigner(a, db, head, delta.writer, false);
-    try validateDelta(before, after, delta);
+    try validateDelta(before, after, delta, observed_now);
 }
 
 // Read current state directly from the tip tree. Independently authenticate the
@@ -140,6 +143,7 @@ pub fn verifyCommit(a: A, db: *index.SqliteDb, head: []const u8, before: []const
 // A future verified-head cache can avoid rechecking history across invocations.
 pub fn load(a: A, scratch_allocator: A, db: *index.SqliteDb, repo_id: []const u8) !State {
     const head = (try resolve(a)) orelse return .{};
+    const observed_now = @import("compat").timestamp();
     const chain = try git.gitChecked(a, &.{ "rev-list", "--first-parent", "--reverse", "--parents", head });
     var lines = std.mem.tokenizeScalar(u8, chain, '\n');
     var previous: ?[]const u8 = null;
@@ -156,7 +160,7 @@ pub fn load(a: A, scratch_allocator: A, db: *index.SqliteDb, repo_id: []const u8
         errdefer current_arena.deinit();
         const ca = current_arena.allocator();
         const after = try readTree(ca, commit, repo_id);
-        try verifyCommit(ca, db, commit, before, after, repo_id);
+        try verifyCommit(ca, db, commit, before, after, repo_id, observed_now);
         previous_arena.deinit();
         previous_arena = current_arena;
         before = after;
@@ -174,7 +178,7 @@ pub fn storeRecord(a: A, record: m.Record) !Entry {
 }
 
 pub fn write(a: A, db: *index.SqliteDb, before: State, after: []const Entry, delta: m.Delta) !bool {
-    try validateDelta(before.entries, after, delta);
+    try validateDelta(before.entries, after, delta, @import("compat").timestamp());
     var listing: std.ArrayList(u8) = .empty;
     for (after) |entry| {
         try @import("compat").appendPrint(a, &listing, "100644 blob {s}\t{s}.json\x00", .{ entry.oid, entry.record.claim_id });
@@ -248,16 +252,17 @@ test "delta authority applies only to changed claims; peer deletion waits out sk
         .actions = &.{.{ .op = "acquire", .claim_id = b.claim_id }},
         .wrote_at = "2026-09-12T12:00:00Z",
     };
-    try validateDelta(&.{alice}, &.{ alice, bob }, delta);
+    try validateDelta(&.{alice}, &.{ alice, bob }, delta, try m.timestamp(delta.wrote_at));
     delta.actions = &.{.{ .op = "release", .claim_id = c.claim_id }};
-    try std.testing.expectError(error.UnauthorizedClaimDelta, validateDelta(&.{alice}, &.{}, delta));
+    try std.testing.expectError(error.UnauthorizedClaimDelta, validateDelta(&.{alice}, &.{}, delta, try m.timestamp(delta.wrote_at)));
     delta.actions = &.{.{ .op = "reap", .claim_id = c.claim_id, .expired_at = c.expires_at }};
     delta.wrote_at = "2026-09-12T12:15:30Z";
-    try std.testing.expectError(error.UnauthorizedClaimDelta, validateDelta(&.{alice}, &.{}, delta));
+    try std.testing.expectError(error.UnauthorizedClaimDelta, validateDelta(&.{alice}, &.{}, delta, try m.timestamp(delta.wrote_at)));
     delta.wrote_at = "2026-09-12T12:15:31Z";
-    try validateDelta(&.{alice}, &.{}, delta);
+    try std.testing.expectError(error.InvalidClaimDelta, validateDelta(&.{alice}, &.{}, delta, try m.timestamp("2026-09-12T12:00:00Z")));
+    try validateDelta(&.{alice}, &.{}, delta, try m.timestamp(delta.wrote_at));
     delta.actions = &.{.{ .op = "steal", .claim_id = c.claim_id, .authorized_by = "bob" }};
-    try std.testing.expectError(error.UnauthorizedClaimDelta, validateDelta(&.{alice}, &.{}, delta));
+    try std.testing.expectError(error.UnauthorizedClaimDelta, validateDelta(&.{alice}, &.{}, delta, try m.timestamp(delta.wrote_at)));
 }
 
 test "declared actions must match diff exactly, and acquisitions cannot create conflicts" {
@@ -271,17 +276,17 @@ test "declared actions must match diff exactly, and acquisitions cannot create c
         .actions = &.{action},
         .wrote_at = c.acquired_at,
     };
-    try validateDelta(&.{}, &.{entry}, delta);
-    try std.testing.expectError(error.ClaimDeltaDiffMismatch, validateDelta(&.{entry}, &.{entry}, delta));
+    try validateDelta(&.{}, &.{entry}, delta, try m.timestamp(delta.wrote_at));
+    try std.testing.expectError(error.ClaimDeltaDiffMismatch, validateDelta(&.{entry}, &.{entry}, delta, try m.timestamp(delta.wrote_at)));
     var other = c;
     other.claim_id = "018f0000-0000-7000-8000-000000000003";
     other.holder = .{ .principal = "bob", .device = "desktop" };
     const added: Entry = .{ .oid = "two", .record = other };
     delta.writer = .{ .principal = "bob", .device = "desktop" };
     delta.actions = &.{.{ .op = "acquire", .claim_id = other.claim_id }};
-    try std.testing.expectError(error.ConflictingClaimLedger, validateDelta(&.{entry}, &.{ entry, added }, delta));
+    try std.testing.expectError(error.ConflictingClaimLedger, validateDelta(&.{entry}, &.{ entry, added }, delta, try m.timestamp(delta.wrote_at)));
     delta.actions = &.{action};
-    try std.testing.expectError(error.UnauthorizedClaimDelta, validateDelta(&.{}, &.{entry}, delta));
+    try std.testing.expectError(error.UnauthorizedClaimDelta, validateDelta(&.{}, &.{entry}, delta, try m.timestamp(delta.wrote_at)));
 }
 
 test "renewal diff rejects foreign holders, stale sequences, expiry, and revocation" {
@@ -296,7 +301,7 @@ test "renewal diff rejects foreign holders, stale sequences, expiry, and revocat
         .actions = &.{.{ .op = "renew", .claim_id = old.claim_id }},
         .wrote_at = "2026-09-12T12:14:00Z",
     };
-    try validateDelta(&.{.{ .oid = "old", .record = old }}, &.{.{ .oid = "new", .record = next }}, delta);
+    try validateDelta(&.{.{ .oid = "old", .record = old }}, &.{.{ .oid = "new", .record = next }}, delta, try m.timestamp(delta.wrote_at));
     for (0..10) |scenario| {
         var invalid = next;
         var previous = old;
@@ -314,12 +319,12 @@ test "renewal diff rejects foreign holders, stale sequences, expiry, and revocat
             9 => d.actions = &.{.{ .op = "renew", .claim_id = old.claim_id, .expired_at = old.expires_at }},
             else => unreachable,
         }
-        try std.testing.expectError(error.UnauthorizedClaimDelta, validateDelta(&.{.{ .oid = "old", .record = previous }}, &.{.{ .oid = "new", .record = invalid }}, d));
+        try std.testing.expectError(error.UnauthorizedClaimDelta, validateDelta(&.{.{ .oid = "old", .record = previous }}, &.{.{ .oid = "new", .record = invalid }}, d, try m.timestamp(d.wrote_at)));
     }
     // Timestamp comparisons retain sub-second precision at admission. Holder
     // execution still rounds its own deadline down and stops conservatively.
     old.expires_at = "2026-09-12T12:15:00.1Z";
     next.expires_at = "2026-09-12T12:15:00.2Z";
     delta.wrote_at = "2026-09-12T12:15:00.01Z";
-    try validateDelta(&.{.{ .oid = "old", .record = old }}, &.{.{ .oid = "new", .record = next }}, delta);
+    try validateDelta(&.{.{ .oid = "old", .record = old }}, &.{.{ .oid = "new", .record = next }}, delta, try m.timestamp(delta.wrote_at));
 }
