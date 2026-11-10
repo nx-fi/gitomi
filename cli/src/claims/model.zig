@@ -2,6 +2,7 @@ const std = @import("std");
 const util = @import("../util.zig");
 const A = std.mem.Allocator;
 pub const eq = std.mem.eql;
+pub const max_skew: i64 = 15;
 pub const skew_allow: i64 = 30;
 
 pub const Holder = struct {

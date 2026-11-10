@@ -368,9 +368,10 @@ mitigates rather than solves this:
 *   Implementations MUST NOT apply the skew allowance when deciding that *their
     own* claim has expired; an actor MUST consider its own lease dead early
     rather than late.
-*   Implementations SHOULD warn when the ledger tip's `wrote_at` is more than
-    `SkewAllow` ahead of local time, and SHOULD refuse to operate when observed
-    skew exceeds `MaxSkew`.
+*   Every ledger commit's `wrote_at` MUST be no more than `MaxSkew` ahead of the
+    verifying implementation's current UTC time. This check MUST be applied to
+    every commit during admission, not only to the ledger tip. A signature
+    authenticates `wrote_at`; it does not make the signer's clock authoritative.
 
 The `2 * MaxSkew` bound is forced. A peer reaps when
 `expires_at + SkewAllow <= now + offset_peer`. For that to imply the holder also
@@ -558,10 +559,10 @@ cost does not scale with the repository's total ref count.
 ### 11.2. Admission
 
 A fetched ledger head MUST be validated commit-by-commit in first-parent order
-from the common base to the staged head, applying §3, §5, §6, and §7 to each
-commit. A staged ledger that is not a fast-forward of the local ledger MUST NOT
-be admitted; the local implementation MUST re-derive its own pending claims onto
-the fetched tip and retry.
+from the common base to the staged head, applying §3, §5, §6, §7, and the
+per-commit `wrote_at` bound in §8.3 to each commit. A staged ledger that is not
+a fast-forward of the local ledger MUST NOT be admitted; the local implementation
+MUST re-derive its own pending claims onto the fetched tip and retry.
 
 Unlike inbox divergence, ledger divergence is not quarantined. It is an expected
 outcome of concurrent acquisition and is resolved by retry.
