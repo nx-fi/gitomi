@@ -71,7 +71,7 @@ static int arm_timer(clockid_t clock, int64_t when, int cancel_on_set) {
 // prevents exec from gaining credentials that would defeat group cancellation.
 // clone3 returns ENOSYS so libc can use clone; namespace creation and changing
 // sessions/groups are unavailable inside this supervised command.
-static int contain_group(void) {
+static int contain_group(pid_t guardian_pid) {
 #if defined(__x86_64__) && !defined(__ILP32__)
 #define CLAIM_ARCH AUDIT_ARCH_X86_64
 #elif defined(__aarch64__)
@@ -82,6 +82,12 @@ static int contain_group(void) {
 #endif
 #ifdef CLAIM_ARCH
 #define DENY (SECCOMP_RET_ERRNO | EPERM)
+#define DENY_PID(syscall, argument) \
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, syscall, 0, 3), \
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[argument])), \
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)guardian_pid, 0, 1), \
+        BPF_STMT(BPF_RET | BPF_K, DENY), \
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr))
     struct sock_filter code[] = {
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, CLAIM_ARCH, 1, 0),
@@ -89,6 +95,29 @@ static int contain_group(void) {
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
 #if defined(__x86_64__)
         BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, 0x40000000U, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, DENY),
+#endif
+        // The guardian shares credentials with the command, so prevent the
+        // command from stopping or killing the process that enforces its
+        // deadline. kill(-1, ...) can target the guardian too.
+        DENY_PID(__NR_kill, 0),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_kill, 0, 3),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, UINT32_MAX, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, DENY),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+        DENY_PID(__NR_tkill, 0),
+        DENY_PID(__NR_tgkill, 0),
+        DENY_PID(__NR_tgkill, 1),
+        DENY_PID(__NR_rt_sigqueueinfo, 0),
+        DENY_PID(__NR_rt_tgsigqueueinfo, 0),
+        DENY_PID(__NR_rt_tgsigqueueinfo, 1),
+#ifdef __NR_pidfd_open
+        DENY_PID(__NR_pidfd_open, 0),
+#endif
+#ifdef __NR_pidfd_send_signal
+        // A seccomp filter cannot determine which process an fd denotes.
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_pidfd_send_signal, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, DENY),
 #endif
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_setsid, 0, 1),
@@ -110,6 +139,7 @@ static int contain_group(void) {
     struct sock_fprog filter = { .len = sizeof(code) / sizeof(code[0]), .filter = code };
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) return -1;
     return prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &filter);
+#undef DENY_PID
 #endif
 }
 
@@ -163,7 +193,7 @@ static void guardian(int control, int output, int64_t deadline, int64_t margin,
         struct sigaction normal = { .sa_handler = SIG_DFL };
         sigemptyset(&normal.sa_mask);
         if (sigaction(SIGPIPE, &normal, NULL) || sigaction(SIGCHLD, &normal, NULL) ||
-            sigprocmask(SIG_SETMASK, original_mask, NULL) || contain_group()) child_error(errors[1]);
+            sigprocmask(SIG_SETMASK, original_mask, NULL) || contain_group(guardian_pid)) child_error(errors[1]);
         char permit;
         ssize_t n;
         do { n = read(start[0], &permit, 1); } while (n < 0 && errno == EINTR);

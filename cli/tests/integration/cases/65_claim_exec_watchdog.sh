@@ -4,6 +4,14 @@ TEST_NAME="claim exec watchdog stops paused workers and survives a paused or kil
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 [[ "$(uname -s)" == Linux && "$(uname -m)" =~ ^(x86_64|aarch64)$ ]] || exit 0
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/claim_fixtures.sh"
+# A supervised command shares credentials with its guardian, but must not be
+# able to signal that guardian and disable deadline enforcement.
+seed_short_claim guardian_signal 120
+gt claim exec "$CLAIM_ID" --lease-seq 1 --expires-at "$CLAIM_EXPIRES" -- bash -c '
+  if kill -STOP "$PPID" 2>/dev/null; then exit 97; fi
+  touch guardian-remained-active
+'
+[[ -e guardian-remained-active ]] || fail 'worker did not continue after its guardian signal was denied'
 # Workers ignore TERM, fork a descendant, and try a delayed effect. The watchdog
 # must kill and reap the whole group before expiry, including stopped processes.
 for scenario in deadline worker_paused caller_paused caller_killed canceled; do
